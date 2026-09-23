@@ -104,6 +104,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.binary",
     "host.plans:read",
     "host.storage",
+    "host.clipboard:read",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -121,6 +122,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
 - `host.plans:read` allows reading estimated execution plans for DBX's own connections (see [Estimated Execution Plans](#estimated-execution-plans)). It is read-only: it never grants SQL execution, writes, DDL, or actual plans, and it is the only plan scope that exists.
 - `host.storage` gives the workbench UI a persistent key-value store scoped to this plugin (see [Persistent UI State](#persistent-ui-state)). Values never leave the plugin's own data directory.
+- `host.clipboard:read` allows reading the system clipboard from the workbench UI (see [System Clipboard](#system-clipboard)). Clipboard writes need no permission; reads hand user data (passwords, tokens) to plugin code, so they are gated.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -297,10 +299,11 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
-| `capabilities` | `{ downloadFile, planApi, storage }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `capabilities` | `{ downloadFile, planApi, storage, clipboardWrite, clipboardRead }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
 | `fileTransfer` | Streams local files and OS drops (desktop only); see below. |
+| `clipboard` | System clipboard access from the sandbox; see below. |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
 
@@ -349,6 +352,31 @@ The plan API is bounded by design:
 Gate on capability rather than probing: read `dbxPlugin.capabilities.planApi` from the init message (an older host omits it), then confirm per-connection support with `getPlanCapabilities` before calling `explainPlan`. Submitting `EXPLAIN` text of your own is neither necessary nor accepted.
 
 The plan API is Host API 1.2. A plugin that cannot work without it declares the floor in its manifest with `"engines": { "host_api": "^1.2" }`. The manifest range is a compatibility floor and `capabilities.planApi` is the runtime check; keep both.
+
+### System Clipboard
+
+The plugin sandbox has an opaque origin and no clipboard permission, so `navigator.clipboard` is unavailable there. The host bridges the system clipboard instead:
+
+- `window.dbxPlugin.copy(text)` / `window.dbxPlugin.clipboard.writeText(text)` write to the system clipboard. Both ride the same ungated bridge method: a write has the user's data as its input and is the low-risk half of the surface.
+- `window.dbxPlugin.clipboard.readText()` reads the system clipboard. It requires the `host.clipboard:read` permission — a read hands user data (passwords, tokens) to plugin code with no further user interaction — and is Host API 1.3: declare `"engines": { "host_api": "^1.3" }` if your workbench cannot function without it.
+
+Gate reads on the init capability rather than probing: `capabilities.clipboardRead` (and `capabilities.clipboardWrite` for writes) are absent on older hosts, which makes them falsy. A rejected read (missing permission, web host without native clipboard access) rejects its Promise — degrade gracefully, e.g. fall back to a keyboard-paste path instead of failing the interaction.
+
+```js
+await window.dbxPlugin.ready;
+const canRead = !!window.dbxPlugin.capabilities.clipboardRead;
+const canWrite = !!window.dbxPlugin.capabilities.clipboardWrite;
+
+async function pasteFromClipboard() {
+  if (!canRead) return null;
+  try {
+    return await window.dbxPlugin.clipboard.readText();
+  } catch {
+    // Permission missing or the clipboard read failed: keep the keyboard path.
+    return null;
+  }
+}
+```
 
 ### File Transfer and OS Drops
 

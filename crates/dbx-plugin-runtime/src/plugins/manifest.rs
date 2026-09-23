@@ -9,11 +9,13 @@ pub const SUPPORTED_PLUGIN_MANIFEST_VERSION: u32 = 1;
 ///
 /// 1.1 adds the plugin-initiated `host/requestUserInput` method (see
 /// `plugins/runtime.rs`). 1.2 adds the plugin-initiated plan Host API
-/// (`host.getPlanCapabilities` / `host.explainPlan`). Both are additive: older
-/// plugins keep working, and a plugin that wants either capability must check
-/// the advertised version (or the matching `capabilities` / `host.features`
-/// entry) before calling it.
-pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.2.0";
+/// (`host.getPlanCapabilities` / `host.explainPlan`). 1.3 adds the
+/// plugin-initiated clipboard Host API (`host.clipboardRead` behind the
+/// `host.clipboard:read` permission; clipboard writes reuse the existing
+/// ungated `host.copy`). All are additive: older plugins keep working, and a
+/// plugin that wants a capability must check the advertised version (or the
+/// matching `capabilities` / `host.features` entry) before calling it.
+pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.3.0";
 /// Capabilities the host advertises to a plugin backend at `plugin/initialize`.
 pub const SUPPORTED_PLUGIN_HOST_FEATURES: &[&str] = &["host.requestUserInput"];
 pub const SUPPORTED_PLUGIN_PROTOCOL_VERSION: u32 = 1;
@@ -21,8 +23,15 @@ pub const PLUGIN_CONNECTION_TEST_METHOD: &str = "connection/test";
 pub const PLUGIN_CONNECTION_CONNECT_METHOD: &str = "connection/connect";
 pub const PLUGIN_CONNECTION_DISCONNECT_METHOD: &str = "connection/disconnect";
 pub const PLUGIN_CONNECTION_ACTION_METHOD: &str = "connection/action";
-pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] =
-    &["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.storage"];
+pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
+    "host.events",
+    "host.binary",
+    "host.workbench",
+    "host.filesystem",
+    "host.plans:read",
+    "host.storage",
+    "host.clipboard:read",
+];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
 /// the sandbox CSP or enumerate large origin lists.
@@ -1613,7 +1622,8 @@ mod tests {
 
     /// The reason for the 1.2.0 bump: `engines.host_api` is how a plugin states
     /// "I need the plan API", so the advertised version has to satisfy `^1.2`
-    /// while a floor this host cannot meet stays rejected.
+    /// while a floor this host cannot meet stays rejected. The 1.3.0 bump keeps
+    /// the same contract for the clipboard-read permission.
     #[test]
     fn host_api_advertises_the_floor_a_plan_api_plugin_declares() {
         let advertised = semver::Version::parse(SUPPORTED_PLUGIN_HOST_API_VERSION)
@@ -1622,11 +1632,15 @@ mod tests {
             semver::VersionReq::parse("^1.2").unwrap().matches(&advertised),
             "the host must satisfy the plan API floor it asks plugins to declare"
         );
+        assert!(
+            semver::VersionReq::parse("^1.3").unwrap().matches(&advertised),
+            "the host must satisfy the clipboard-read floor it asks plugins to declare"
+        );
 
-        for requirement in ["^1.0", "^1.1", "^1.2", ">=1.1.0, <2.0.0"] {
+        for requirement in ["^1.0", "^1.1", "^1.2", "^1.3", ">=1.1.0, <2.0.0"] {
             assert!(host_api_requirement_errors(requirement).is_empty(), "{requirement} must be satisfiable");
         }
-        for requirement in [">=1.3.0", "^2.0"] {
+        for requirement in [">=1.4.0", "^2.0"] {
             assert!(!host_api_requirement_errors(requirement).is_empty(), "{requirement} must be rejected");
         }
     }

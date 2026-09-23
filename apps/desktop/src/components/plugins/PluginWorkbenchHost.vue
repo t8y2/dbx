@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import {
   PluginHostBridge,
   pluginSandboxDocument,
@@ -383,6 +383,9 @@ function createBridge() {
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
       copyText: (_pluginId, text) => copyToClipboard(text),
+      // Permission-gated in the bridge (host.clipboard:read); the helper
+      // prefers the Tauri clipboard plugin and falls back to the Web Clipboard.
+      clipboardRead: (_pluginId) => readTextFromClipboard(),
       pickFiles: (pluginId, options) => pickPluginFiles(pluginId, options),
       readFileChunk: (pluginId, handleId, offset, length) => readPluginFileChunkById(pluginId, handleId, offset, length),
       beginFileSave: (pluginId, request) => beginPluginFileSave(pluginId, request),

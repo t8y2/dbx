@@ -104,6 +104,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
     "host.binary",
     "host.plans:read",
     "host.storage",
+    "host.clipboard:read",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -121,6 +122,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `host.workbench` 允许打开另一个工作台，`host.events` 接收宿主事件，`host.binary` 使用二进制通道，`host.filesystem` 使用文件系统入口。
 - `host.plans:read` 允许针对 DBX 自己的连接读取估算执行计划（见 [估算执行计划](#估算执行计划)）。它是只读权限：不授予普通 SQL 执行、写操作、DDL 或真实执行计划，且这是唯一存在的计划类权限。
 - `host.storage` 为工作台 UI 提供本插件独享的持久化键值存储（见 [持久化 UI 状态](#持久化-ui-状态)）；数据只落在插件自己的数据目录里。
+- `host.clipboard:read` 允许工作台 UI 读取系统剪贴板（见 [系统剪贴板](#系统剪贴板)）。写剪贴板不需要权限；读取会把用户数据（密码、令牌）交给插件代码，因此需要门控。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
 - `backend.executable`、`ui.root` 和 `ui.entry` 必须指向包内文件；带原生后端的包必须为每个目标平台提供对应可执行文件。
@@ -297,10 +299,11 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `openFilesystem(id, context)` | 打开本插件的文件系统入口；需要 `host.filesystem`。 |
 | `getPlanCapabilities(connectionId)` | 读取宿主与该连接能提供什么计划能力；需要 `host.plans:read`。 |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | 返回 `sql` 的估算执行计划；需要 `host.plans:read`。 |
-| `capabilities` | 来自 init 消息的 `{ downloadFile, planApi, storage }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
+| `capabilities` | 来自 init 消息的 `{ downloadFile, planApi, storage, clipboardWrite, clipboardRead }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
 | `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
 | `storage` | 本插件独享的持久化键值状态；需要 `host.storage`；见下文。 |
 | `fileTransfer` | 本地文件流式传输与系统拖放（仅桌面端）；见下文。 |
+| `clipboard` | 沙箱内的系统剪贴板访问；见下文。 |
 
 调用失败会以 Promise rejection 返回，处理时应展示可理解的错误并允许重试。通过 `request` 调用的宿主方法、参数和返回值以当前 Host API 版本为准，不要调用未在协议中声明的 DBX 内部函数。
 
@@ -349,6 +352,31 @@ if (window.dbxPlugin.capabilities.planApi) {
 判断能力时请读 `dbxPlugin.capabilities.planApi`（旧宿主不会带这个字段），再用 `getPlanCapabilities` 确认这条连接是否支持，最后才调用 `explainPlan`。自行拼 `EXPLAIN` 文本既没必要，也不会被接受。
 
 计划 API 属于 Host API 1.2。无法离开它工作的插件应在 manifest 里声明下限：`"engines": { "host_api": "^1.2" }`。manifest 里的版本范围是兼容下限，`capabilities.planApi` 是运行期探测，两者都保留。
+
+### 系统剪贴板
+
+插件沙箱是 opaque origin 且没有剪贴板权限，`navigator.clipboard` 在里面不可用。宿主代为桥接系统剪贴板：
+
+- `window.dbxPlugin.copy(text)` / `window.dbxPlugin.clipboard.writeText(text)` 写系统剪贴板。两者走同一条无权限门控的桥接方法：写操作的输入就是用户数据本身，是低风险的一半。
+- `window.dbxPlugin.clipboard.readText()` 读系统剪贴板。它需要 `host.clipboard:read` 权限——读取会把用户数据（密码、令牌）交给插件代码，且没有后续用户交互兜底——属于 Host API 1.3：离开它无法工作的插件应声明 `"engines": { "host_api": "^1.3" }`。
+
+读剪贴板请看 init 能力而不是试探：`capabilities.clipboardRead`（写对应 `capabilities.clipboardWrite`）在旧宿主上缺失即为 falsy。读被拒绝（缺权限、Web 宿主没有原生剪贴板访问）时 Promise 会 reject——请优雅降级，例如回落到键盘粘贴路径，而不是让交互直接失败。
+
+```js
+await window.dbxPlugin.ready;
+const canRead = !!window.dbxPlugin.capabilities.clipboardRead;
+const canWrite = !!window.dbxPlugin.capabilities.clipboardWrite;
+
+async function pasteFromClipboard() {
+  if (!canRead) return null;
+  try {
+    return await window.dbxPlugin.clipboard.readText();
+  } catch {
+    // 缺权限或读取失败：保留键盘粘贴路径。
+    return null;
+  }
+}
+```
 
 ### 文件传输与系统拖放
 

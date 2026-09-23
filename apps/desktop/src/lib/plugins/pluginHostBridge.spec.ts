@@ -883,6 +883,85 @@ describe("PluginHostBridge", () => {
     expect(messages[0]).toMatchObject({ id: "nocopy", error: "Host clipboard is unavailable" });
   });
 
+  it("serves host.clipboardRead only with the declared host.clipboard:read permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const clipboardRead = vi.fn().mockResolvedValue("pasted text");
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Without the permission the read is refused before the host clipboard is touched.
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+    });
+    denied.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "read-denied", method: "host.clipboardRead" },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(clipboardRead).not.toHaveBeenCalled();
+    expect(messages[0]).toMatchObject({ id: "read-denied", error: "Plugin has not declared permission 'host.clipboard:read'" });
+
+    // With the permission the call is scoped to the owning plugin and unwraps to { text }.
+    const allowed = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+    });
+    allowed.sendInit();
+    expect((messages[1] as { capabilities?: { clipboardRead?: boolean } }).capabilities?.clipboardRead).toBe(true);
+    send(allowed, "read-ok", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "read-ok")).toBe(true));
+    expect(clipboardRead).toHaveBeenCalledWith("sample");
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(byId.get("read-ok")).toMatchObject({ id: "read-ok", result: { text: "pasted text" } });
+  });
+
+  it("rejects host.clipboardRead when the host cannot read the clipboard and caps oversized reads", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Legacy or web host: no clipboardRead in the API surface.
+    const noRead = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+    send(noRead, "read-missing", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "read-missing", error: "Host clipboard read is unavailable" });
+
+    // An oversized clipboard read is clamped to the bridge payload bound.
+    const clipboardRead = vi.fn().mockResolvedValue("x".repeat(2 * 1024 * 1024 + 1));
+    const clamping = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+    });
+    send(clamping, "read-huge", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "read-huge")).toBe(true));
+    expect(clipboardRead).toHaveBeenCalled();
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    const result = (byId.get("read-huge") as { result?: { text?: string } }).result;
+    expect(result?.text).toHaveLength(2 * 1024 * 1024);
+  });
+
+  it("exposes the sandbox clipboard namespace mapping writeText to host.copy and readText to host.clipboardRead", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("clipboard: Object.freeze({");
+    expect(source).toContain("writeText: (text) => request('host.copy', { text })");
+    expect(source).toContain("request('host.clipboardRead')");
+  });
+
   it("routes host.storage through the owning plugin, caps values, and needs the declared permission", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

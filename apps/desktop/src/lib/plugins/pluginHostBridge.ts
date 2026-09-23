@@ -114,6 +114,13 @@ export interface PluginHostBridgeApi {
   cancelDownload?(pluginId: string, downloadId: string): Promise<void>;
   /** Write text to the system clipboard on behalf of the sandboxed plugin iframe. */
   copyText?(pluginId: string, text: string): Promise<void>;
+  /**
+   * Read the system clipboard on behalf of the sandboxed plugin iframe.
+   * Requires the plugin to declare `host.clipboard:read`: unlike writes, a
+   * read hands arbitrary user data (passwords, tokens) to plugin code with no
+   * further user interaction, so it is permission-gated.
+   */
+  clipboardRead?(pluginId: string): Promise<string>;
   /** Native open dialog; resolves opened read handles (null selection → empty list). */
   pickFiles?(pluginId: string, options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]>;
   /** Stream a chunk from an opened read handle. */
@@ -248,6 +255,10 @@ export class PluginHostBridge {
         downloadFile: !!this.api.downloadFile,
         planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
         storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
+        // Additive with the same "absence means unsupported" contract: an older
+        // host omits these, and a web host has neither.
+        clipboardWrite: !!this.api.copyText,
+        clipboardRead: !!this.api.clipboardRead,
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });
@@ -412,6 +423,16 @@ export class PluginHostBridge {
       if (!this.api.copyText) throw new Error("Host clipboard is unavailable");
       await this.api.copyText(this.plugin.manifest.id, input.text);
       return { success: true };
+    }
+    if (method === "host.clipboardRead") {
+      // Reads are the sensitive half of the clipboard surface: the payload is
+      // user data heading into plugin code, so the manifest must declare
+      // `host.clipboard:read` (writes stay on ungated host.copy).
+      this.requirePermission("host.clipboard:read");
+      if (!this.api.clipboardRead) throw new Error("Host clipboard read is unavailable");
+      const text = await this.api.clipboardRead(this.plugin.manifest.id);
+      if (typeof text !== "string") throw new Error("Host clipboard read returned a non-string value");
+      return { text: text.length > MAX_BRIDGE_PAYLOAD_BYTES ? text.slice(0, MAX_BRIDGE_PAYLOAD_BYTES) : text };
     }
     if (method === "host.pickFiles") {
       // Same trust level as host.saveFile: the bytes only flow after the user
@@ -813,6 +834,17 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('host.saveFile', options, { transfer: bytes });
       },
       copy: (text) => request('host.copy', { text }),
+      // System clipboard surface: writeText rides the ungated host.copy path,
+      // readText is served by host.clipboardRead and requires the plugin to
+      // declare the host.clipboard:read permission (the bridge rejects
+      // otherwise, and capabilities.clipboardRead advertises support).
+      clipboard: Object.freeze({
+        writeText: (text) => request('host.copy', { text }),
+        readText: async () => {
+          const result = await request('host.clipboardRead');
+          return (result && typeof result === 'object' && typeof result.text === 'string') ? result.text : '';
+        },
+      }),
       // Persistent per-plugin key-value state; gate on capabilities.storage
       // (older hosts omit it) and declare the host.storage permission.
       storage: Object.freeze({

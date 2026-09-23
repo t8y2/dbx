@@ -304,36 +304,12 @@ pub async fn check_mcp_server_status(app: AppHandle) -> Result<McpServerStatus, 
         .as_deref()
         .zip(latest_version.as_deref())
         .is_some_and(|(current, latest)| dbx_core::update::is_newer_version(latest, current));
-    let error = match (runtime.as_ref(), installation) {
-        (None, _) => {
-            Some(format!("Unable to resolve a compatible Node.js ({}) and npm runtime.", MCP_MIN_NODE_VERSION_REQUIREMENT))
-        }
-        (
-            Some(_),
-            Some(McpInstallation {
-                package_manager: McpPackageManager::PnpmUnavailable { pnpm_home, global_dir },
-                ..
-            }),
-        ) => {
-            Some(format!(
-                "{} is installed in {}, but automatic update and uninstall are disabled because pnpm was not found in {}.",
-                MCP_PACKAGE_NAME,
-                global_dir.display(),
-                pnpm_home.display()
-            ))
-        }
-        (
-            Some(_),
-            Some(McpInstallation {
-                package_manager: McpPackageManager::Unmanaged { launcher_dir },
-                ..
-            }),
-        ) => Some(format!(
-            "{} is installed, but automatic update and uninstall are disabled because the package manager for {} could not be verified.",
-            MCP_PACKAGE_NAME,
-            launcher_dir.display()
+    let error = match runtime.as_ref() {
+        None => Some(format!(
+            "Unable to resolve a compatible Node.js ({}) and npm runtime.",
+            MCP_MIN_NODE_VERSION_REQUIREMENT
         )),
-        _ => None,
+        Some(_) => mcp_status_installation_error(installation),
     };
 
     Ok(McpServerStatus {
@@ -842,6 +818,32 @@ fn mcp_installation_status_fields(runtime: Option<&NodeRuntime>) -> McpInstallat
     }
 }
 
+/// Status-level companion of the update/uninstall guards: explains why automatic
+/// management is disabled for a detected installation.
+fn mcp_status_installation_error(installation: Option<&McpInstallation>) -> Option<String> {
+    let package_manager = installation.map(|installation| &installation.package_manager)?;
+    match package_manager {
+        McpPackageManager::PnpmUnavailable { pnpm_home, global_dir } => Some(format!(
+            "{} is installed in {}, but automatic update and uninstall are disabled because pnpm was not found in {}.",
+            MCP_PACKAGE_NAME,
+            global_dir.display(),
+            pnpm_home.display()
+        )),
+        McpPackageManager::Bun { command_path: None, bun_install, global_modules_root } => Some(format!(
+            "{} is installed in {}, but automatic update and uninstall are disabled because bun was not found in {}.",
+            MCP_PACKAGE_NAME,
+            global_modules_root.display(),
+            bun_install.join("bin").display()
+        )),
+        McpPackageManager::Unmanaged { launcher_dir } => Some(format!(
+            "{} is installed, but automatic update and uninstall are disabled because the package manager for {} could not be verified.",
+            MCP_PACKAGE_NAME,
+            launcher_dir.display()
+        )),
+        _ => None,
+    }
+}
+
 fn quoted_values(line: &str) -> Vec<&str> {
     line.split('"').skip(1).step_by(2).collect()
 }
@@ -1002,7 +1004,9 @@ fn mcp_package_from_command_dir(dir: &Path) -> Option<LocatedMcpPackage> {
 
 fn mcp_package_from_command_path(command_path: &Path) -> Option<LocatedMcpPackage> {
     let bin_path = canonical_runtime_path(command_path)?;
-    let script_path = node_script_from_launcher(&bin_path)?;
+    let Some(script_path) = node_script_from_launcher(&bin_path) else {
+        return bun_exe_shim_package(&bin_path);
+    };
     let (package_root, package) = mcp_package_from_script(&script_path)?;
     let launcher_dir = bin_path.parent()?.to_path_buf();
     let package_manager = pnpm_global_dir(&package_root, &launcher_dir)
@@ -1093,6 +1097,42 @@ fn bun_global_modules_root(package_root: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(node_modules.to_path_buf())
+}
+
+/// bun's global `node_modules` root: `<bun_install>/install/global/node_modules`
+/// (the layout `bun_global_modules_root` recognises from a resolved package).
+fn bun_global_node_modules(bun_install: &Path) -> PathBuf {
+    bun_install.join("install").join("global").join("node_modules")
+}
+
+/// Windows bun bins are native `.exe` shims (`<bun_install>/bin/dbx-mcp-server.exe`)
+/// that cannot be resolved back to a node script, so `mcp_package_from_command_path`
+/// would otherwise drop the whole detection before reaching bun attribution. Probe
+/// bun's global `node_modules` layout directly so such an `.exe` launcher still
+/// resolves to the bun-installed package.
+fn bun_exe_shim_package(bin_path: &Path) -> Option<LocatedMcpPackage> {
+    if !bin_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        return None;
+    }
+    let launcher_dir = bin_path.parent()?;
+    let bun_install = bun_install_from_bin_dir(launcher_dir)?;
+    let package_root = canonical_runtime_path(&bun_global_node_modules(&bun_install).join(MCP_PACKAGE_NAME))?;
+    let package = mcp_package(&package_root)?;
+    let package_manager = bun_package_manager(&package_root, launcher_dir)?;
+    Some(LocatedMcpPackage { package_root, package, bin_path: Some(bin_path.to_path_buf()), package_manager })
+}
+
+/// bun links global bins into `<bun_install>/bin`, so a launcher directly inside a
+/// `bin` directory resolves back to the enclosing bun installation root.
+fn bun_install_from_bin_dir(bin_dir: &Path) -> Option<PathBuf> {
+    if !bin_dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("bin")) {
+        return None;
+    }
+    bin_dir.parent().map(Path::to_path_buf)
 }
 
 fn bun_command_near(dir: &Path) -> Option<PathBuf> {
@@ -1513,11 +1553,11 @@ mod tests {
     use super::{
         bind_mcp_installation, bun_package_manager, canonical_runtime_path, is_mcp_compatible_node_version,
         mcp_command_for_runtime, mcp_installation_status_fields, mcp_native_binary_path_for, mcp_package,
-        mcp_package_from_command_path, node_script_from_launcher, normalized_reported_path, npm_cli_candidates,
-        parse_minimum_node_version, parse_node_version, prefer_runtime, require_managed_mcp_command,
-        resolve_managed_mcp_command, resolve_mise_mcp_command, stdout_after_shell_marker, McpInstallation,
-        McpPackageManager, NodeRuntime, NodeVersion, MCP_MIN_NODE_VERSION_REQUIREMENT, MCP_PACKAGE_NAME,
-        SHELL_COMMAND_MARKER,
+        mcp_package_from_command_path, mcp_status_installation_error, node_script_from_launcher,
+        normalized_reported_path, npm_cli_candidates, parse_minimum_node_version, parse_node_version, prefer_runtime,
+        require_managed_mcp_command, resolve_managed_mcp_command, resolve_mise_mcp_command, stdout_after_shell_marker,
+        McpInstallation, McpPackageManager, NodeRuntime, NodeVersion, MCP_MIN_NODE_VERSION_REQUIREMENT,
+        MCP_PACKAGE_NAME, SHELL_COMMAND_MARKER,
     };
     #[cfg(not(windows))]
     use super::{shell_command_script, shell_quote};
@@ -1906,6 +1946,46 @@ mod tests {
     }
 
     #[test]
+    fn bun_windows_exe_shim_resolves_through_the_global_layout() {
+        let fixture = bun_fixture("dbx-mcp-server.exe");
+        std::fs::write(&fixture.launcher_path, "native exe shim fixture\n").unwrap();
+
+        assert!(node_script_from_launcher(&fixture.launcher_path).is_none());
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+        assert_eq!(located.package_root, canonical_runtime_path(&fixture.package_root).unwrap());
+        assert_eq!(located.package.version, "0.4.71");
+        assert_eq!(located.bin_path.as_deref(), canonical_runtime_path(&fixture.launcher_path).as_deref());
+        assert!(matches!(
+            located.package_manager,
+            McpPackageManager::Bun {
+                ref command_path,
+                ref bun_install,
+                ref global_modules_root,
+            } if command_path.as_deref() == canonical_runtime_path(&fixture.bun_path).as_deref()
+                && bun_install == &canonical_runtime_path(&fixture.bun_install).unwrap()
+                && global_modules_root == &canonical_runtime_path(&fixture.global_modules_root).unwrap()
+        ));
+
+        let installation = bind_mcp_installation(
+            located,
+            PathBuf::from("/runtime/node-24").as_path(),
+            "v24.16.0",
+            PathBuf::from("/npm-root").as_path(),
+        )
+        .unwrap();
+        assert_eq!(installation.launcher_path.as_deref(), canonical_runtime_path(&fixture.launcher_path).as_deref());
+    }
+
+    #[test]
+    fn bun_exe_shim_outside_a_bun_bin_directory_is_ignored() {
+        let fixture = bun_fixture("dbx-mcp-server.exe");
+        let stray = fixture.root.join("dbx-mcp-server.exe");
+        std::fs::write(&stray, "native exe shim fixture\n").unwrap();
+
+        assert!(mcp_package_from_command_path(&stray).is_none());
+    }
+
+    #[test]
     fn bun_installation_reports_bun_update_and_uninstall_commands() {
         let installation = McpInstallation {
             package_root: PathBuf::from("/bun/install/global/node_modules/@dbx-app/mcp-server"),
@@ -1947,6 +2027,42 @@ mod tests {
         assert!(runtime.uninstall().is_err());
         // The UI still shows the bun command so the user can act manually.
         assert_eq!(runtime.update_command(), super::MCP_BUN_UPDATE_COMMAND);
+    }
+
+    #[test]
+    fn bun_without_an_executable_reports_a_status_error() {
+        let bun_install = PathBuf::from("/bun");
+        let global_modules_root = bun_install.join("install").join("global").join("node_modules");
+        let installation = McpInstallation {
+            package_root: global_modules_root.join(MCP_PACKAGE_NAME),
+            launcher_path: None,
+            script_path: global_modules_root.join(MCP_PACKAGE_NAME).join("bin").join("dbx-mcp-server.js"),
+            node_path: PathBuf::from("/node"),
+            node_version: "v24.16.0".to_string(),
+            package_version: "0.4.71".to_string(),
+            package_manager: McpPackageManager::Bun {
+                command_path: None,
+                bun_install: bun_install.clone(),
+                global_modules_root: global_modules_root.clone(),
+            },
+            native_bin_path: None,
+        };
+
+        let error = mcp_status_installation_error(Some(&installation)).unwrap();
+        assert!(error.contains("bun was not found"));
+        assert!(error.contains(global_modules_root.to_string_lossy().as_ref()));
+        assert!(error.contains(bun_install.join("bin").to_string_lossy().as_ref()));
+
+        let managed = McpInstallation {
+            package_manager: McpPackageManager::Bun {
+                command_path: Some(bun_install.join("bin").join("bun")),
+                bun_install: bun_install.clone(),
+                global_modules_root,
+            },
+            ..installation
+        };
+        assert!(mcp_status_installation_error(Some(&managed)).is_none());
+        assert!(mcp_status_installation_error(None).is_none());
     }
 
     #[test]

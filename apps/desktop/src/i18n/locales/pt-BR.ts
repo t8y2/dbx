@@ -7719,7 +7719,7 @@ export default withEnglishFallback({
     mcpPolicySaveFailed: "Falha ao salvar a política de acesso MCP: {error}",
     mcpPolicyLoadFailed: "Falha ao carregar a política de acesso MCP: {error}",
     mcpDetectionTiming: "O DBX verifica automaticamente quando esta página é aberta; use Verificar novamente para atualizar.",
-    mcpNpmBoundary: "O DBX apenas verifica e explica o status do MCP; a instalação e as atualizações ainda são feitas pelo npm.",
+    mcpNpmBoundary: "O DBX apenas verifica e explica o status do MCP; a instalação e as atualizações ainda são feitas pelo npm, pnpm ou bun.",
     mcpRefresh: "Verificar novamente",
     mcpGuide: "Guia do MCP",
     mcpAuthTitle: "Autorização do MCP",

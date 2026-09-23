@@ -7721,7 +7721,7 @@ export default withEnglishFallback({
     mcpPolicySaveFailed: "MCPアクセスポリシーを保存できませんでした: {error}",
     mcpPolicyLoadFailed: "MCPアクセスポリシーを読み込めませんでした: {error}",
     mcpDetectionTiming: "このページを開くとDBXが自動的に確認します。更新するには再確認を使用してください。",
-    mcpNpmBoundary: "DBXはMCPステータスの確認と説明のみを行います。インストールとアップグレードはnpmを通じて実行されます。",
+    mcpNpmBoundary: "DBXはMCPステータスの確認と説明のみを行います。インストールとアップグレードはnpm、pnpm、またはbunを通じて実行されます。",
     mcpRefresh: "再確認",
     mcpGuide: "MCPガイド",
     mcpAuthTitle: "MCP 権限設定",

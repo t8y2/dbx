@@ -7718,7 +7718,7 @@ export default withEnglishFallback({
     mcpPolicySaveFailed: "No se pudo guardar la política de acceso MCP: {error}",
     mcpPolicyLoadFailed: "No se pudo cargar la política de acceso MCP: {error}",
     mcpDetectionTiming: "DBX comprueba automáticamente al abrir esta página; usa Comprobar de nuevo para actualizar.",
-    mcpNpmBoundary: "DBX solo comprueba y explica el estado de MCP; la instalación y actualización siguen usando npm.",
+    mcpNpmBoundary: "DBX solo comprueba y explica el estado de MCP; la instalación y actualización siguen usando npm, pnpm o bun.",
     mcpRefresh: "Comprobar de nuevo",
     mcpGuide: "Guía MCP",
     mcpAuthTitle: "Autorización de MCP",

@@ -32,7 +32,7 @@ import { useToast } from "@/composables/useToast";
 import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
-import { applyDdlDatabaseQualifier, formatGeneratedDdlIdentifierQuotes, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { alignDdlColumnDefinitions, applyDdlDatabaseQualifier, formatGeneratedDdlIdentifierQuotes, omitDdlIdentifierQuotes, uppercaseDdlColumnTypes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
@@ -263,6 +263,11 @@ function ddlEditorDocument(): string {
   return ddlDraft.value ?? (ddlContent.value || t("structureEditor.emptyReadonly"));
 }
 
+function formatStructureDdlForDisplay(formatted: string, dialect: ReturnType<typeof sqlFormatDialectForDbType>): string {
+  const ddl = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, dialect);
+  return alignDdlColumnDefinitions(uppercaseDdlColumnTypes(ddl, dialect), dialect);
+}
+
 function resetDdlDraft() {
   ddlDraft.value = null;
   updateDdlEditorContent(ddlEditorDocument());
@@ -423,7 +428,7 @@ async function fetchDdl(force = false) {
     const { ddl } = await loadObjectDdl(ddlRequest(), { force });
     const dialect = sqlFormatDialectForDbType(databaseType.value);
     const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
-    rawDdlContent.value = formatDdlForDisplay(formatted, dialect);
+    rawDdlContent.value = formatStructureDdlForDisplay(formatDdlForDisplay(formatted, dialect), dialect);
     ddlFetched.value = true;
   } catch (e: any) {
     rawDdlContent.value = `-- Error: ${e?.message || e}`;
@@ -2018,7 +2023,7 @@ async function hydrateRestoredDraftFromDatabase() {
         const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog });
         const dialect = sqlFormatDialectForDbType(databaseType.value);
         const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
-        rawDdlContent.value = formatDdlForDisplay(formatted, dialect);
+        rawDdlContent.value = formatStructureDdlForDisplay(formatDdlForDisplay(formatted, dialect), dialect);
         ddlFetched.value = true;
         nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
       } catch {
@@ -2734,7 +2739,7 @@ async function loadStructure(
           const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog }, { force: options.forceDdl });
           const dialect = sqlFormatDialectForDbType(databaseType.value);
           const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
-          rawDdlContent.value = formatDdlForDisplay(formatted, dialect);
+          rawDdlContent.value = formatStructureDdlForDisplay(formatDdlForDisplay(formatted, dialect), dialect);
           ddlFetched.value = true;
           nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
         } catch {

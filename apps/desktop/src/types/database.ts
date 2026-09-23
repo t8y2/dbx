@@ -1977,6 +1977,12 @@ export interface QueryTab {
   };
   /** Opened to view object source, including objects without editable source metadata. */
   sourceView?: boolean;
+  ddlViewer?: {
+    schema?: string;
+    tableName: string;
+    objectType?: ObjectSourceKind;
+    formatDialect?: "mysql" | "postgres" | "sqlite" | "sqlserver" | "oracle" | "clickhouse" | "dameng" | "duckdb" | "generic";
+  };
   objectSource?: {
     schema?: string;
     name: string;

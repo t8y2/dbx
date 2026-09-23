@@ -180,6 +180,11 @@ import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import { alignDdlColumnDefinitions, applyDdlDatabaseQualifier, omitDdlIdentifierQuotes, uppercaseDdlColumnTypes } from "@/lib/sql/ddlDisplay";
+import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { formatSqlForDisplay } from "@/lib/sql/sqlFormatter";
+import { sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import type { QueryMessage, QueryTab, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
@@ -279,6 +284,7 @@ const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.co
 const setColorizeDataGridCellTypes = (value: boolean) => settingsStore.updateEditorSettings({ colorizeDataGridCellTypes: value });
 const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
+const ddlRefreshInProgress = ref(false);
 
 onMounted(() => {
   // The watcher below warms the grid for query/data tabs. Keep source-only
@@ -970,6 +976,51 @@ function onHandleStructureViewData() {
   });
 }
 
+async function refreshDdlViewer() {
+  const tab = props.activeTab;
+  const ddlViewer = tab.ddlViewer;
+  if (!ddlViewer || ddlRefreshInProgress.value) return;
+  ddlRefreshInProgress.value = true;
+  try {
+    const { ddl } = await loadObjectDdl(
+      {
+        connectionId: tab.connectionId,
+        database: tab.database,
+        schema: ddlViewer.schema || tab.database,
+        tableName: ddlViewer.tableName,
+        objectType: ddlViewer.objectType,
+        catalog: tab.catalog,
+      },
+      { force: true },
+    );
+    const dialect = ddlViewer.formatDialect ?? activeSqlFormatDialect.value;
+    const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId) ?? props.activeConnection);
+    const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
+    const withDatabasePreference = applyDdlDatabaseQualifier(formatted, dialect, databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, tab.database, tab.catalog);
+    const withIdentifierPreference = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? withDatabasePreference : omitDdlIdentifierQuotes(withDatabasePreference, dialect);
+    const aligned = alignDdlColumnDefinitions(uppercaseDdlColumnTypes(withIdentifierPreference, dialect), dialect);
+    const displayed = applyDdlStoragePreference(aligned, databaseType, settingsStore.editorSettings.excludeDdlStorage);
+    queryStore.updateSql(tab.id, displayed);
+    tab.originalSql = displayed;
+  } catch (error: any) {
+    toast(t("connection.connectFailed", { message: error?.message || String(error) }), 5000);
+  } finally {
+    ddlRefreshInProgress.value = false;
+  }
+}
+
+function viewDdlTableData() {
+  const tab = props.activeTab;
+  const ddlViewer = tab.ddlViewer;
+  if (!ddlViewer) return;
+  emit("viewTableData", tab.id, {
+    name: ddlViewer.tableName,
+    database: tab.database,
+    schema: ddlViewer.schema,
+    type: ddlViewer.objectType ? sqlObjectNavigationTypeFromTableType(ddlViewer.objectType) : "table",
+  });
+}
+
 function onHandleViewTableDdl(target: SqlObjectNavigationTarget) {
   emit("viewTableDdl", props.activeTab.id, target);
 }
@@ -1497,6 +1548,16 @@ defineExpose({
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resize="onResultsSplitResize" @resized="onResultsResized">
         <Pane v-if="!resultOnly" class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
+            <div v-if="activeTab.ddlViewer" class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
+              <Button variant="outline" size="sm" :disabled="ddlRefreshInProgress" @click="refreshDdlViewer">
+                <RefreshCcw class="h-4 w-4" :class="ddlRefreshInProgress ? 'animate-spin' : ''" />
+                {{ t("structureEditor.refresh") }}
+              </Button>
+              <Button variant="outline" size="sm" @click="viewDdlTableData">
+                <TableProperties class="h-4 w-4" />
+                {{ t("contextMenu.viewData") }}
+              </Button>
+            </div>
             <div v-if="activeProductionContext.active" class="production-watermark pointer-events-none absolute inset-0 z-10 grid select-none" aria-hidden="true">
               <span v-for="index in 4" :key="index" class="production-watermark__label whitespace-nowrap font-mono text-6xl font-extrabold text-red-700/[0.12] dark:text-red-200/[0.1]">{{ productionWatermarkText }}</span>
             </div>
@@ -1540,6 +1601,8 @@ defineExpose({
               :initial-selection="activeTab.editorSelection"
               :reveal-request="activeTab.editorRevealRequest"
               :force-word-wrap="activeTab.forceWordWrap"
+              :read-only="!!activeTab.ddlViewer"
+              :hide-execution-controls="!!activeTab.ddlViewer"
               enable-explain-shortcut
               :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
               @update:model-value="emit('editorUpdate', activeTab.id, $event)"

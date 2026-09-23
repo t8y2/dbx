@@ -2,22 +2,26 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 /**
- * QueryEditor.vue 的 CTE 接线（hover 溯源、Ctrl+点击跳转、语义模型缓存）都写在
- * `<script setup>` 内部，无法直接 import，因此沿用仓库既有做法
- * （queryEditorExtendSelection.spec.ts 对 queryEditorSource 的结构断言）。
+ * CTE 接线（hover 溯源、Ctrl+点击跳转、语义模型缓存）分布在独立模块中。
+ * 此处保留结构断言，模块行为另由 useQueryEditorHover 和
+ * useQueryEditorObjectNavigation 的直接测试覆盖。
  *
  * 这里锁定回归成本最高的两类契约：分支先后顺序、关键调用参数。算法本身由
  * cteNavigation.spec.ts / model.spec.ts / sqlNavigation.spec.ts 覆盖。
  */
-const source = readFileSync(new URL("../QueryEditor.vue", import.meta.url), "utf8");
+const componentSource = readFileSync(new URL("../QueryEditor.vue", import.meta.url), "utf8");
+const source = [readFileSync(new URL("../useQueryEditorHover.ts", import.meta.url), "utf8"), readFileSync(new URL("../useQueryEditorObjectNavigation.ts", import.meta.url), "utf8")].join("\n");
 
-/** 截取 `<script setup>` 顶层函数体，避免跨函数误匹配。 */
+/** 截取模块中的函数体，避免跨函数误匹配。 */
+const metadataSource = readFileSync(new URL("../useQueryEditorCompletionMetadata.ts", import.meta.url), "utf8");
+
 function functionBody(name: string): string {
-  const start = source.indexOf(`function ${name}(`);
+  const functionSource = name === "getEditorSemanticModel" ? metadataSource : source;
+  const start = functionSource.indexOf(`function ${name}(`);
   expect(start, `QueryEditor.vue 缺少函数 ${name}`).toBeGreaterThanOrEqual(0);
-  const end = source.indexOf("\n}", start);
+  const end = functionSource.indexOf("\n  }", start);
   expect(end, `${name} 函数体未闭合`).toBeGreaterThan(start);
-  return source.slice(start, end);
+  return functionSource.slice(start, end);
 }
 
 function positionOf(fragment: string): number {
@@ -43,6 +47,12 @@ function expectSourceToContain(fragment: string): void {
 }
 
 describe("QueryEditor hover 的语义模型缓存接线", () => {
+  it("连接独立的 hover 和对象导航入口及监听器生命周期", () => {
+    expect(componentSource).toContain("hoverTooltip((currentView, pos) => resolveSqlHoverTooltip(currentView, pos))");
+    expect(componentSource).toContain("mousedown: onEditorMouseDown");
+    expect(componentSource).toContain("objectNavigation.attach();");
+    expect(componentSource).toContain("objectNavigation.dispose();");
+  });
   it("hover 复用 getEditorSemanticModel，而不是每次重新解析", () => {
     expect(source).toContain("semanticModel = getEditorSemanticModel(sql, pos, currentView.state);");
     // 换回逐次解析会让 hover 在每次移动时重复建模型（原实现即为此形态）。
@@ -158,7 +168,7 @@ describe("jumpToCteRange 的跳转范围处理", () => {
   const body = functionBody("jumpToCteRange");
 
   it("缺少视图或 CodeMirror 模块时直接返回", () => {
-    expect(body).toContain("if (!currentView || !editorViewModule || !setResultSourceRangeEffect) return;");
+    expect(body).toContain("if (!currentView || !codeMirrorRuntime.editorViewModule || !codeMirrorRuntime.setResultSourceRangeEffect) return;");
   });
 
   it("把目标与高亮范围都收敛到文档长度内", () => {
@@ -172,8 +182,8 @@ describe("jumpToCteRange 的跳转范围处理", () => {
   it("空目标不动光标，命中时选中目标 token 并高亮整个定义块", () => {
     expect(body).toContain("if (targetFrom >= targetTo) return;");
     expect(normalizeCode(body)).toContain(normalizeCode("selection: { anchor: targetFrom, head: targetTo }"));
-    expectSourceToContain("setResultSourceRangeEffect.of({ from: highlightFrom, to: highlightTo })");
-    expectSourceToContain('editorViewModule.EditorView.scrollIntoView(targetFrom, { y: "center" })');
+    expectSourceToContain("codeMirrorRuntime.setResultSourceRangeEffect.of({ from: highlightFrom, to: highlightTo })");
+    expectSourceToContain('codeMirrorRuntime.editorViewModule.EditorView.scrollIntoView(targetFrom, { y: "center" })');
     expect(body).toContain("currentView.focus();");
   });
 });

@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const editorSource = readFileSync(new URL("../QueryEditor.vue", import.meta.url), "utf8");
+const editorSource = readFileSync(new URL("../useQueryEditorCompletionKeys.ts", import.meta.url), "utf8");
 
-function functionSource(name: string, nextName: string) {
+function functionSource(name: string) {
   const start = editorSource.indexOf(`function ${name}(`);
-  const end = editorSource.indexOf(`function ${nextName}(`, start);
+  const end = editorSource.indexOf("\n  }", start);
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
   return editorSource.slice(start, end);
@@ -18,7 +18,7 @@ function functionSource(name: string, nextName: string) {
 // a composition starts instead of accepting over (or after) it.
 describe("QueryEditor IME-safe completion acceptance", () => {
   it("gates the Enter handler on IME composition before any acceptance", () => {
-    const source = functionSource("handleEnter", "clearPendingCompletionEnter");
+    const source = functionSource("handleEnter");
     const composingGuard = source.indexOf("if (isEditorComposing(view)) return false;");
     const acceptCall = source.indexOf("codeMirrorAcceptCompletion?.(view)");
 
@@ -27,7 +27,7 @@ describe("QueryEditor IME-safe completion acceptance", () => {
   });
 
   it("gates the Tab completion-accept handler on IME composition", () => {
-    const source = functionSource("acceptCompletionOrNextSnippetField", "clearPendingCompletionTab");
+    const source = functionSource("acceptCompletionOrNextSnippetField");
     const composingGuard = source.indexOf("if (isEditorComposing(view)) return false;");
     const selectionCheck = source.indexOf("view.state.selection.ranges.every");
 
@@ -36,7 +36,7 @@ describe("QueryEditor IME-safe completion acceptance", () => {
   });
 
   it("drops the pending Tab acceptance retry when an IME composition starts", () => {
-    const source = functionSource("waitForCompletionTab", "wordWrapExtension");
+    const source = functionSource("waitForCompletionTab");
     const retry = source.indexOf("const retry = () => {");
     const composingGuard = source.indexOf("if (isEditorComposing(view)) return;", retry);
 
@@ -45,7 +45,7 @@ describe("QueryEditor IME-safe completion acceptance", () => {
   });
 
   it("passes an IME guard to the Enter acceptance retry helper", () => {
-    const source = functionSource("handleEnter", "clearPendingCompletionEnter");
+    const source = functionSource("handleEnter");
     expect(source.includes("isComposing: () => isEditorComposing(view)")).toBe(true);
   });
 });

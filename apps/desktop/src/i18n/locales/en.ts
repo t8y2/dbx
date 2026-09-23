@@ -8448,7 +8448,7 @@ export default {
     mcpPolicySaveFailed: "Failed to save the MCP access policy: {error}",
     mcpPolicyLoadFailed: "Failed to load the MCP access policy: {error}",
     mcpDetectionTiming: "DBX checks automatically when this page opens; use Check again to refresh.",
-    mcpNpmBoundary: "DBX checks MCP status; installation, upgrades, and uninstallation run through the detected npm or pnpm runtime.",
+    mcpNpmBoundary: "DBX checks MCP status; installation, upgrades, and uninstallation run through the detected npm, pnpm, or bun runtime.",
     mcpRefresh: "Check again",
     mcpGuide: "MCP guide",
     mcpAuthTitle: "MCP authorization",

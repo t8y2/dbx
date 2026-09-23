@@ -123,8 +123,8 @@ test("keeps completed diagnostics while the cursor is in an unfinished command",
   const unfinished = underlined(source, 0).find((diagnostic) => diagnostic.severity === "error");
   assert.match(unfinished!.message, /unclosed/i);
 
-  const queryEditorSource = readFileSync("apps/desktop/src/components/editor/QueryEditor.vue", "utf8");
-  const mongoBranch = queryEditorSource.slice(queryEditorSource.indexOf('if (props.databaseType === "mongodb")'), queryEditorSource.indexOf('if (props.databaseType === "redis")'));
+  const diagnosticsSource = readFileSync("apps/desktop/src/components/editor/useQueryEditorDiagnostics.ts", "utf8");
+  const mongoBranch = diagnosticsSource.slice(diagnosticsSource.indexOf('if (props.databaseType === "mongodb")'), diagnosticsSource.indexOf('if (props.databaseType === "redis")'));
   assert.doesNotMatch(mongoBranch, /shouldRunMongoDiagnostics/);
   assert.match(mongoBranch, /setSemanticDiagnostics\(buildMongoSyntaxDiagnostics\(sql, cursor\)\)/);
 });

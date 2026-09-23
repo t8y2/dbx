@@ -7905,7 +7905,7 @@ export default withEnglishFallback({
     mcpPolicySaveFailed: "MCP giriş siyasətini yadda saxlamaq mümkün olmadı: {error}",
     mcpPolicyLoadFailed: "MCP giriş siyasətini yükləmək mümkün olmadı: {error}",
     mcpDetectionTiming: "Bu səhifə açıldıqda DBX avtomatik yoxlayır; yeniləmək üçün Yenidən yoxla düyməsindən istifadə edin.",
-    mcpNpmBoundary: "DBX MCP-nin vəziyyətini yoxlayır; quraşdırma, yeniləmə və quraşdırmanın silinməsi aşkarlanmış npm və ya pnpm icra mühiti vasitəsilə həyata keçirilir.",
+    mcpNpmBoundary: "DBX MCP-nin vəziyyətini yoxlayır; quraşdırma, yeniləmə və quraşdırmanın silinməsi aşkarlanmış npm, pnpm və ya bun icra mühiti vasitəsilə həyata keçirilir.",
     mcpRefresh: "Yenidən yoxla",
     mcpGuide: "MCP təlimatı",
     mcpAuthTitle: "MCP səlahiyyətləndirməsi",

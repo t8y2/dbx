@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "../../editor/queryEditorExecutionViewport";
 
-const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
+const queryEditorSource = ["QueryEditor.vue", "useQueryEditorExecution.ts"].map((file) => readFileSync(new URL(`../../../components/editor/${file}`, import.meta.url), "utf8")).join("\n");
 const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
 const editorToolbarSource = readFileSync(new URL("../../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
 const editorGroupSource = readFileSync(new URL("../../../components/layout/EditorGroup.vue", import.meta.url), "utf8");
@@ -148,7 +148,7 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain("shouldBlockExecutionShortcut(event, currentView)");
     expect(queryEditorSource).toContain("if (props.readOnly) return true;");
     expect(queryEditorSource).toContain("settingsStore.editorSettings.sqlShortcuts");
-    expect(queryEditorSource).toContain("runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap))");
+    expect(queryEditorSource).toContain("runKeymapComp.reconfigure(runKeymapExtension(codeMirrorRuntime.editorViewModule.keymap))");
   });
 });
 

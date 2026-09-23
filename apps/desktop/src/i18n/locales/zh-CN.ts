@@ -8421,7 +8421,7 @@ export default withEnglishFallback({
     mcpPolicySaveFailed: "保存 MCP 访问策略失败：{error}",
     mcpPolicyLoadFailed: "加载 MCP 访问策略失败：{error}",
     mcpDetectionTiming: "打开此页时会自动检测，点击重新检查可刷新。",
-    mcpNpmBoundary: "DBX 负责检查 MCP 状态；安装、升级和卸载由检测到的 npm 或 pnpm 运行环境执行。",
+    mcpNpmBoundary: "DBX 负责检查 MCP 状态；安装、升级和卸载由检测到的 npm、pnpm 或 bun 运行环境执行。",
     mcpRefresh: "重新检查",
     mcpGuide: "MCP 指南",
     mcpAuthTitle: "MCP 授权设置",

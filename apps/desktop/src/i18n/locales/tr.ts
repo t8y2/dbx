@@ -7803,7 +7803,7 @@ export default withEnglishFallback({
     mcpPolicySaveFailed: "MCP erişim politikası kaydedilemedi: {error}",
     mcpPolicyLoadFailed: "MCP erişim politikası yüklenemedi: {error}",
     mcpDetectionTiming: "DBX bu sayfa açıldığında otomatik denetim yapar; yenilemek için Yeniden denetle'yi kullanın.",
-    mcpNpmBoundary: "DBX, MCP durumunu denetler; kurulum, yükseltme ve kaldırma işlemleri algılanan npm ya da pnpm çalışma zamanı üzerinden yürür.",
+    mcpNpmBoundary: "DBX, MCP durumunu denetler; kurulum, yükseltme ve kaldırma işlemleri algılanan npm, pnpm ya da bun çalışma zamanı üzerinden yürür.",
     mcpRefresh: "Yeniden denetle",
     mcpGuide: "MCP kılavuzu",
     mcpAuthTitle: "MCP yetkilendirmesi",

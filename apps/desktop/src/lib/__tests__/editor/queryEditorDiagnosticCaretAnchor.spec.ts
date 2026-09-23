@@ -49,7 +49,7 @@ describe("needsDiagnosticCaretReanchor", () => {
 });
 
 describe("QueryEditor diagnostic caret re-anchor wiring", () => {
-  const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
+  const queryEditorSource = readFileSync(new URL("../../../components/editor/useQueryEditorDiagnostics.ts", import.meta.url), "utf8");
 
   it("re-anchors the browser caret after applying diagnostics, outside a transaction", () => {
     expect(queryEditorSource).toMatch(/function reconfigureDiagnostics\(\)[\s\S]*?reanchorCaretAfterDiagnostics\(currentView\)/);

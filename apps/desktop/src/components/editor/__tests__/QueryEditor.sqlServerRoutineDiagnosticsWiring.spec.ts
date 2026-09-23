@@ -2,12 +2,12 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 /**
- * SQL Server 例程批次的语法诊断接线（#9315）写在 `<script setup>` 内部，
+ * SQL Server 例程批次的语法诊断接线（#9315）写在诊断 composable 内部，
  * 无法直接 import，因此沿用仓库既有做法（QueryEditor.cteNavigationWiring.spec.ts）
  * 对源码做结构断言。规则本身由 sqlServerRoutineSyntaxDiagnostics.test.ts 覆盖，
  * 批次/视口裁剪由 sqlSemanticDiagnostics.test.ts 覆盖，这里只锁定接线契约。
  */
-const source = readFileSync(new URL("../QueryEditor.vue", import.meta.url), "utf8");
+const source = readFileSync(new URL("../useQueryEditorDiagnostics.ts", import.meta.url), "utf8");
 
 function normalizeCode(text: string): string {
   return text.replace(/\s+/g, "").replace(/,(?=[)\]}])/g, "");

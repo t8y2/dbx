@@ -1489,6 +1489,11 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
         && compact.contains(&format!(
             "strconv.parseint:parsing\"cast(greatest(@@session.group_concat_max_len,{MYSQL_GROUP_CONCAT_MAX_LEN})asunsigned)\":invalidsyntax"
         ));
+    // StarRocks 3.1 can fail expression folding without echoing the SET statement.
+    let starrocks_setup_expression_rejected = lower.contains("error 1064 (hy000)")
+        && lower.contains(
+            "class com.starrocks.analysis.castexpr cannot be cast to class com.starrocks.analysis.literalexpr",
+        );
     // SphinxQL / Manticore reject the built-in `group_concat_max_len` setup with a
     // boolean-typed 1064 error. The quoted token after `near` depends on the exact
     // statement text, so accept any boolean rejection from SphinxQL that mentions
@@ -1507,6 +1512,7 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
         || compact.contains(&format!("..._len,{MYSQL_GROUP_CONCAT_MAX_LEN})asunsigned)"));
     if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected))
         || gaea_setup_expression_rejected
+        || starrocks_setup_expression_rejected
         || sphinxql_setup_query_rejected
         || gateway_session_variable_rejected
     {
@@ -8407,6 +8413,31 @@ mod tests {
             "Server error: `ERROR 1105 (HY000): strconv.ParseInt: parsing \"cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)\": invalid value'",
             "Server error: `ERROR 1105 (HY000): strconv.ParseInt: parsing \"1048576\": invalid syntax'",
             "Server error: `ERROR 1231 (HY000): strconv.ParseInt: parsing \"cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)\": invalid syntax'",
+        ] {
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None, "{error}");
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_starrocks_cast_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR 1064 (HY000): class com.starrocks.analysis.CastExpr cannot be cast to class com.starrocks.analysis.LiteralExpr (com.starrocks.analysis.CastExpr and com.starrocks.analysis.LiteralExpr are in unnamed module of loader 'app')'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+        assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None);
+    }
+
+    #[test]
+    fn mysql_group_concat_starrocks_cast_retry_requires_exact_error() {
+        for error in [
+            "Server error: `ERROR 1105 (HY000): class com.starrocks.analysis.CastExpr cannot be cast to class com.starrocks.analysis.LiteralExpr'",
+            "Server error: `ERROR 1064 (42000): class com.starrocks.analysis.CastExpr cannot be cast to class com.starrocks.analysis.LiteralExpr'",
+            "Server error: `ERROR 1064 (HY000): class com.starrocks.analysis.SlotRef cannot be cast to class com.starrocks.analysis.LiteralExpr'",
+            "Server error: `ERROR 1064 (HY000): class com.starrocks.analysis.CastExpr cannot be cast to class com.starrocks.analysis.SlotRef'",
+            "Server error: `ERROR 1064 (HY000): class com.example.CastExpr cannot be cast to class com.example.LiteralExpr'",
+            "Server error: `ERROR 1064 (HY000): You have an error in your SQL syntax'",
         ] {
             assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None, "{error}");
         }

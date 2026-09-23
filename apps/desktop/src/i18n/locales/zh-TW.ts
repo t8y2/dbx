@@ -7143,7 +7143,7 @@ export default withEnglishFallback({
     mcpPolicySaveFailed: "儲存 MCP 存取策略失敗：{error}",
     mcpPolicyLoadFailed: "載入 MCP 存取策略失敗：{error}",
     mcpDetectionTiming: "打開此頁時會自動檢測，點擊重新檢查可刷新。",
-    mcpNpmBoundary: "DBX 只檢測和提示 MCP 狀態；安裝與升級仍由 npm 完成。",
+    mcpNpmBoundary: "DBX 只檢測和提示 MCP 狀態；安裝與升級仍由 npm、pnpm 或 bun 完成。",
     mcpRefresh: "重新檢查",
     mcpGuide: "MCP 指南",
     mcpAuthTitle: "MCP 授權設定",

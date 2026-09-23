@@ -5,9 +5,10 @@ import { EditorState, Prec, type Transaction } from "@codemirror/state";
 import { describe, expect, it, vi } from "vitest";
 import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 
-const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 const editorThemesSource = readFileSync(new URL("../../editor/editorThemes.ts", import.meta.url), "utf8");
 const shellHighlightSource = readFileSync(new URL("../../editor/codemirrorShellLineCommentHighlight.ts", import.meta.url), "utf8");
+
+const extensionsSource = readFileSync(new URL("../../../components/editor/queryEditorSqlExtensions.ts", import.meta.url), "utf8");
 
 function runToggleLineComment(doc: string, commentToken: string) {
   let state = EditorState.create({
@@ -72,13 +73,13 @@ describe("QueryEditor word selection", () => {
 
 describe("QueryEditor line comment", () => {
   it("overrides the language comment tokens in the SQL language compartment", () => {
-    expect(queryEditorSource).toContain("Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(props.databaseType) }]))");
+    expect(extensionsSource).toContain("Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(props.databaseType) }]))");
   });
 
   it("highlights // comments with the theme's comment style", () => {
-    expect(queryEditorSource).toContain('queryEditorLineCommentToken(props.databaseType) === "//" ? shellLineCommentHighlightPlugin : []');
-    expect(queryEditorSource).toContain("const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });");
-    expect(queryEditorSource).toContain("shellLineCommentTheme(EditorView),");
+    expect(extensionsSource).toContain('queryEditorLineCommentToken(props.databaseType) === "//" ? shellLineCommentHighlightPlugin : []');
+    expect(extensionsSource).toContain("const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });");
+    expect(extensionsSource).toContain("shellLineCommentTheme(EditorView),");
     expect(editorThemesSource).toContain('".cm-shell-line-comment *"');
     expect(editorThemesSource).toContain('color: "inherit !important"');
   });

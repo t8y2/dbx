@@ -7559,7 +7559,7 @@ export default withEnglishFallback({
     mcpPolicySaveFailed: "MCP 접근 정책 저장 실패: {error}",
     mcpPolicyLoadFailed: "MCP 접근 정책 불러오기 실패: {error}",
     mcpDetectionTiming: "DBX는 이 페이지를 열 때 자동으로 확인합니다. 새로고침하려면 다시 확인을 사용하세요.",
-    mcpNpmBoundary: "DBX는 MCP 상태를 확인하고 설명만 합니다. 설치와 업그레이드는 여전히 npm을 통해 실행됩니다.",
+    mcpNpmBoundary: "DBX는 MCP 상태를 확인하고 설명만 합니다. 설치와 업그레이드는 여전히 npm, pnpm 또는 bun을 통해 실행됩니다.",
     mcpRefresh: "다시 확인",
     mcpGuide: "MCP 가이드",
     mcpAuthTitle: "MCP 권한 설정",

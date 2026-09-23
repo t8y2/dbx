@@ -159,6 +159,11 @@ describe("DataGrid go-to-column shortcut", () => {
     await settle();
 
     const topbar = host.querySelector<HTMLElement>("[data-grid-toolbar-layout]");
+    expect(topbar?.dataset.gridToolbarLayout).toBe("single");
+
+    settingsStore.updateEditorSettings({ dataGridToolbarLayout: "split" });
+    await settle();
+
     expect(topbar?.dataset.gridToolbarLayout).toBe("split");
     expect(topbar?.classList.contains("grid")).toBe(true);
 

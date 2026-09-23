@@ -192,14 +192,14 @@ pub fn build_query_pagination_execution_plan(
     }
 
     let can_use_first_page_cursor = options.use_agent_cursor && options.pagination.offset == 0;
-    // HighGo and OceanBase Oracle can spend substantially more time executing
-    // an unbounded query before the Agent exposes its first cursor page. Prefer
-    // a bounded SQL query whenever it can be rewritten safely. Independent
-    // pages of an unordered query do not have a stable row order; callers
-    // should add ORDER BY when that matters.
+    // HighGo, OceanBase Oracle, and Xugu can spend substantially more time
+    // executing an unbounded query before the Agent exposes its first cursor
+    // page. Prefer a bounded SQL query whenever it can be rewritten safely.
+    // Independent pages of an unordered query do not have a stable row order;
+    // callers should add ORDER BY when that matters.
     // Kingbase keeps the cursor for unordered queries to preserve its behavior.
     let prefer_server_pagination = match options.database_type {
-        Some(DatabaseType::Highgo | DatabaseType::OceanbaseOracle) => true,
+        Some(DatabaseType::Highgo | DatabaseType::OceanbaseOracle | DatabaseType::Xugu) => true,
         Some(DatabaseType::Kingbase) => kingbase_server_pagination_is_stable(&options.query_base_sql),
         _ => false,
     };
@@ -261,11 +261,11 @@ pub fn build_query_pagination_execution_plan(
         plan.page_limit = Some(options.pagination.limit);
         plan.page_offset = Some(options.pagination.offset);
         plan.use_agent_result_session = true;
-    } else if options.database_type == Some(DatabaseType::Kingbase)
+    } else if matches!(options.database_type, Some(DatabaseType::Kingbase | DatabaseType::Xugu))
         && single_selectable_statement(&options.sql, options.database_type).is_ok()
         && has_top_level_top(&options.sql)
     {
-        // Kingbase SQL Server compatibility mode rejects a statement that mixes a
+        // Kingbase SQL Server compatibility mode and Xugu reject statements mixing a
         // top-level TOP with a sibling LIMIT/OFFSET. Without an Agent cursor the
         // query-result export executes the statement once and streams the whole
         // result; the TOP clause already bounds the row count.
@@ -313,11 +313,13 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
         TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded => ok(format!("{statement};")),
         TablePaginationStrategy::IrisTop => ok(add_iris_top_limit(&statement, safe_limit)),
         TablePaginationStrategy::LimitOffset => {
-            // Kingbase SQL Server compatibility mode accepts TOP as a real clause.
+            // Kingbase SQL Server compatibility mode and Xugu accept TOP as a real clause.
             // Appending LIMIT/OFFSET alongside a top-level TOP would be rejected by
             // the server ("multiple TOP/LIMIT clauses not allowed"), so fall back to
             // the Agent cursor / client-side row cap for such statements.
-            if options.database_type == Some(DatabaseType::Kingbase) && has_top_level_top(&statement) {
+            if matches!(options.database_type, Some(DatabaseType::Kingbase | DatabaseType::Xugu))
+                && has_top_level_top(&statement)
+            {
                 return err("unsupported");
             }
             let dedup_order_by = dedup_projection_count_without_order_by(&options.original_sql);
@@ -449,10 +451,20 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         return err("not_select");
     }
 
+    let uses_hive_subquery_syntax =
+        matches!(options.database_type, Some(DatabaseType::Argo | DatabaseType::Hive | DatabaseType::Impala));
+    if uses_hive_subquery_syntax {
+        let mut column_names = HashSet::new();
+        if options.result_columns.iter().any(|column| !column_names.insert(column.to_lowercase())) {
+            return err("unsupported");
+        }
+    }
+
     let aliases = build_derived_column_aliases(&options.result_columns);
     // Caché/IRIS rejects derived-table column alias lists (`t(col, col)`)
     // outright (SQLCODE -25), regardless of delimited-identifier support.
-    let use_derived_column_aliases = options.database_type != Some(DatabaseType::Mysql)
+    let use_derived_column_aliases = !uses_hive_subquery_syntax
+        && options.database_type != Some(DatabaseType::Mysql)
         && options.database_type != Some(DatabaseType::ClickHouse)
         // Doris accepts the derived-table alias but not its column-name list.
         && options.database_type != Some(DatabaseType::Doris)
@@ -4813,6 +4825,117 @@ WHERE u.id = picked.id;
     }
 
     #[test]
+    fn xugu_prefers_server_pagination_over_agent_cursor() {
+        let first_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Xugu),
+            pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(first_page.sql_to_execute, "SELECT * FROM events LIMIT 100;");
+        assert_eq!(first_page.page_sql, Some(first_page.sql_to_execute.clone()));
+        assert_eq!(first_page.page_limit, Some(100));
+        assert_eq!(first_page.page_offset, Some(0));
+        assert!(!first_page.use_agent_result_session);
+
+        let second_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Xugu),
+            pagination: QueryPagination { limit: 100, offset: 100, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(second_page.sql_to_execute, "SELECT * FROM events LIMIT 100 OFFSET 100;");
+        assert_eq!(second_page.page_sql, Some(second_page.sql_to_execute.clone()));
+        assert_eq!(second_page.page_limit, Some(100));
+        assert_eq!(second_page.page_offset, Some(100));
+        assert!(!second_page.use_agent_result_session);
+    }
+
+    #[test]
+    fn xugu_keeps_agent_fallback_for_unrewritable_query() {
+        let sql = "SELECT * FROM events; SELECT 1";
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Xugu),
+            pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, sql);
+        assert!(plan.page_sql.is_none());
+        assert!(plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn xugu_top_clause_keeps_first_page_agent_cursor() {
+        for sql in [
+            "SELECT TOP 10 * FROM events",
+            "select top 10 * from events",
+            "/* first page */ SELECT /* bounded */ TOP 10 * FROM events",
+        ] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Xugu),
+                pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+                use_agent_cursor: true,
+                first_page_uses_actual_sql: false,
+            });
+
+            assert_eq!(plan.sql_to_execute, sql);
+            assert!(plan.page_sql.is_none());
+            assert_eq!(plan.page_limit, Some(100));
+            assert_eq!(plan.page_offset, Some(0));
+            assert!(plan.use_agent_result_session);
+            assert!(!plan.single_execution);
+        }
+    }
+
+    #[test]
+    fn xugu_top_clause_without_agent_uses_single_execution() {
+        let sql = "SELECT TOP 10 * FROM events";
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Xugu),
+            pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+            use_agent_cursor: false,
+            first_page_uses_actual_sql: true,
+        });
+
+        assert_eq!(plan.sql_to_execute, sql);
+        assert!(plan.page_sql.is_none());
+        assert_eq!(plan.page_limit, Some(100));
+        assert_eq!(plan.page_offset, Some(0));
+        assert!(!plan.use_agent_result_session);
+        assert!(plan.single_execution);
+    }
+
+    #[test]
+    fn xugu_top_clause_rejects_sibling_limit_on_every_page() {
+        for offset in [0, 100] {
+            let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql: "SELECT TOP 10 * FROM events".to_string(),
+                database_type: Some(DatabaseType::Xugu),
+                limit: 100,
+                offset,
+            });
+
+            assert!(!result.ok);
+            assert!(result.sql.is_none());
+            assert_eq!(result.reason.as_deref(), Some("unsupported"));
+        }
+    }
+
+    #[test]
     fn oceanbase_oracle_prefers_bounded_first_page_and_keeps_cursor_fallback() {
         let sql = "SELECT * FROM events";
         let first_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
@@ -5233,6 +5356,175 @@ WHERE u.id = picked.id;
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT * FROM admin LIMIT 100) t ORDER BY `login_name` ASC;");
+    }
+
+    #[test]
+    fn hive_family_sort_uses_derived_table_alias_without_column_list() {
+        for database_type in [DatabaseType::Argo, DatabaseType::Hive, DatabaseType::Impala] {
+            for direction in [QuerySortDirection::Asc, QuerySortDirection::Desc] {
+                let result = build_sorted_query_sql(SortedQuerySqlOptions {
+                    original_sql: "SELECT id, name FROM users;".to_string(),
+                    database_type: Some(database_type),
+                    result_columns: vec!["id".to_string(), "name".to_string()],
+                    column_index: 1,
+                    column: "name".to_string(),
+                    direction,
+                });
+
+                assert_eq!(
+                    result,
+                    ok(format!("SELECT * FROM (SELECT id, name FROM users) t ORDER BY `name` {};", direction.as_sql())),
+                    "{database_type:?} {direction:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hive_family_sort_preserves_star_queries_and_existing_ordering() {
+        for database_type in [DatabaseType::Argo, DatabaseType::Hive, DatabaseType::Impala] {
+            let result = build_sorted_query_sql(SortedQuerySqlOptions {
+                original_sql: " SELECT * FROM users WHERE active = 1 ORDER BY name DESC LIMIT 100; ".to_string(),
+                database_type: Some(database_type),
+                result_columns: vec!["id".to_string(), "name".to_string()],
+                column_index: 0,
+                column: "id".to_string(),
+                direction: QuerySortDirection::Asc,
+            });
+
+            assert_eq!(
+                result,
+                ok("SELECT * FROM (SELECT * FROM users WHERE active = 1 ORDER BY name DESC LIMIT 100) t ORDER BY `id` ASC;".to_string()),
+                "{database_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hive_family_sort_quotes_result_aliases_without_renaming_them() {
+        for database_type in [DatabaseType::Argo, DatabaseType::Hive, DatabaseType::Impala] {
+            for (column, quoted_column) in [
+                ("display_name", "`display_name`"),
+                ("order", "`order`"),
+                ("display name", "`display name`"),
+                ("a.b", "`a.b`"),
+                ("姓名", "`姓名`"),
+                ("user`name", "`user``name`"),
+                ("\"name\"", "`\"name\"`"),
+            ] {
+                let original_sql = format!("SELECT id, name AS {quoted_column} FROM users");
+                let result = build_sorted_query_sql(SortedQuerySqlOptions {
+                    original_sql: original_sql.clone(),
+                    database_type: Some(database_type),
+                    result_columns: vec!["id".to_string(), column.to_string()],
+                    column_index: 1,
+                    column: "name".to_string(),
+                    direction: QuerySortDirection::Desc,
+                });
+
+                assert_eq!(
+                    result,
+                    ok(format!("SELECT * FROM ({original_sql}) t ORDER BY {quoted_column} DESC;")),
+                    "{database_type:?} {column:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hive_family_sort_falls_back_to_requested_column_for_out_of_range_index() {
+        for database_type in [DatabaseType::Argo, DatabaseType::Hive, DatabaseType::Impala] {
+            for result_columns in [vec!["id".to_string(), "display name".to_string()], Vec::new()] {
+                let result = build_sorted_query_sql(SortedQuerySqlOptions {
+                    original_sql: "SELECT id, name AS `display name` FROM users".to_string(),
+                    database_type: Some(database_type),
+                    result_columns,
+                    column_index: usize::MAX,
+                    column: "display name".to_string(),
+                    direction: QuerySortDirection::Asc,
+                });
+
+                assert_eq!(
+                    result,
+                    ok("SELECT * FROM (SELECT id, name AS `display name` FROM users) t ORDER BY `display name` ASC;"
+                        .to_string()),
+                    "{database_type:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hive_family_sort_rejects_duplicate_derived_column_names_without_using_ordinals() {
+        for database_type in [DatabaseType::Argo, DatabaseType::Hive, DatabaseType::Impala] {
+            for result_columns in [["id", "id", "name"], ["ID", "id", "name"], ["姓名", "姓名", "name"]] {
+                for column_index in [0, 1, 2, usize::MAX] {
+                    let result = build_sorted_query_sql(SortedQuerySqlOptions {
+                        original_sql: "SELECT a.id, b.id, a.name FROM a JOIN b ON a.id = b.id".to_string(),
+                        database_type: Some(database_type),
+                        result_columns: result_columns.iter().map(|column| column.to_string()).collect(),
+                        column_index,
+                        column: "name".to_string(),
+                        direction: QuerySortDirection::Desc,
+                    });
+
+                    assert_eq!(result, err("unsupported"), "{database_type:?} {result_columns:?} {column_index}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hive_family_sort_preserves_statement_rejection_boundaries() {
+        for database_type in [DatabaseType::Argo, DatabaseType::Hive, DatabaseType::Impala] {
+            for (original_sql, reason) in [
+                ("", "empty"),
+                (" \n\t", "empty"),
+                (";", "empty"),
+                ("SELECT 1; SELECT 2;", "multi"),
+                ("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte", "with"),
+                ("SHOW TABLES", "not_select"),
+                ("UPDATE users SET id = 2", "not_select"),
+            ] {
+                let result = build_sorted_query_sql(SortedQuerySqlOptions {
+                    original_sql: original_sql.to_string(),
+                    database_type: Some(database_type),
+                    result_columns: vec!["id".to_string()],
+                    column_index: 0,
+                    column: "id".to_string(),
+                    direction: QuerySortDirection::Asc,
+                });
+
+                assert_eq!(result, err(reason), "{database_type:?} {original_sql:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hive_family_sort_fix_preserves_other_dialects_column_alias_lists() {
+        for (database_type, expected_suffix) in [
+            (None, "t(\"id\", \"id_2\") ORDER BY \"id_2\" DESC;"),
+            (Some(DatabaseType::Jdbc), "t(id, id_2) ORDER BY id_2 DESC;"),
+            (Some(DatabaseType::Postgres), "t(\"id\", \"id_2\") ORDER BY \"id_2\" DESC;"),
+            (Some(DatabaseType::Spark), "t(`id`, `id_2`) ORDER BY `id_2` DESC;"),
+            (Some(DatabaseType::Kyuubi), "t(`id`, `id_2`) ORDER BY `id_2` DESC;"),
+            (Some(DatabaseType::Databricks), "t(`id`, `id_2`) ORDER BY `id_2` DESC;"),
+        ] {
+            let result = build_sorted_query_sql(SortedQuerySqlOptions {
+                original_sql: "SELECT a.id, b.id FROM a JOIN b ON a.id = b.id".to_string(),
+                database_type,
+                result_columns: vec!["id".to_string(), "id".to_string()],
+                column_index: 1,
+                column: "id".to_string(),
+                direction: QuerySortDirection::Desc,
+            });
+
+            assert_eq!(
+                result,
+                ok(format!("SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON a.id = b.id) {expected_suffix}")),
+                "{database_type:?}"
+            );
+        }
     }
 
     #[test]

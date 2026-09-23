@@ -3,6 +3,17 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 const DETACHED_WINDOW_LABEL_PREFIX = "detached-tab-";
 
 export const WINDOW_ALWAYS_ON_TOP_CHANGED_EVENT = "dbx:window-always-on-top-changed";
+export const ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT = "dbx:always-on-top-toolbar-visibility-changed";
+
+export async function emitAlwaysOnTopToolbarVisibilityChanged(visible: boolean): Promise<void> {
+  if (!isTauriRuntime()) return;
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit(ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT, visible);
+  } catch (error) {
+    console.error("[DBX][window:always-on-top-toolbar-visibility-event]", error);
+  }
+}
 
 export type WindowAlwaysOnTopChangedPayload = {
   windowLabel: string;

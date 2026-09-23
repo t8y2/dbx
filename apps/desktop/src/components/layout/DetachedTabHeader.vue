@@ -1,7 +1,11 @@
 <script setup lang="ts">
+import { computed, onMounted, onUnmounted } from "vue";
 import { ArrowLeft, Minus, Square, Copy, X, Grip, Pin, PinOff } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { useWindowControls } from "@/composables/useWindowControls";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT } from "@/lib/app/windowAlwaysOnTop";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 defineProps<{
   title: string;
@@ -18,6 +22,33 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { isMac, isMaximized, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop } = useWindowControls();
+const settingsStore = useSettingsStore();
+// Mirrors the main toolbar: the pin control is opt-in, and it keeps showing
+// whenever this window is pinned so the user can always unpin it again.
+const showAlwaysOnTopButton = computed(() => settingsStore.editorSettings.toolbarItems.alwaysOnTop || isAlwaysOnTop.value);
+
+let unlistenToolbarVisibility: (() => void) | null = null;
+let unmounted = false;
+
+onMounted(async () => {
+  if (!isTauriRuntime()) return;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    if (unmounted) return;
+    const unlisten = await listen<boolean>(ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT, ({ payload }) => {
+      if (!unmounted && typeof payload === "boolean") settingsStore.syncAlwaysOnTopToolbarVisibility(payload);
+    });
+    if (unmounted) unlisten();
+    else unlistenToolbarVisibility = unlisten;
+  } catch (error) {
+    console.error("[DBX][window:always-on-top-toolbar-visibility-listen]", error);
+  }
+});
+
+onUnmounted(() => {
+  unmounted = true;
+  unlistenToolbarVisibility?.();
+});
 
 let dragging = false;
 
@@ -74,6 +105,7 @@ async function handleDragEnd(event: PointerEvent) {
       <span>{{ t("tabs.returnToMainWindow") }}</span>
     </button>
     <button
+      v-if="showAlwaysOnTopButton"
       type="button"
       class="mr-1 inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
       :class="{ 'bg-accent text-foreground': isAlwaysOnTop }"

@@ -66,7 +66,9 @@ export function databaseDisplayNameForTab(connectionId: string, database: string
 export function isPreviewTab(tab: QueryTab): boolean {
   const connectionStore = useConnectionStore();
   const config = connectionStore.getConfig(tab.connectionId);
-  return !!config?.name.startsWith("[Preview]");
+  // Tolerant of a config that has no name yet (partially loaded or migrated
+  // connection): such a tab is simply not a preview tab.
+  return Boolean(config?.name?.startsWith("[Preview]"));
 }
 
 function queryTitle(tab: QueryTab): string | undefined {
@@ -76,6 +78,81 @@ function queryTitle(tab: QueryTab): string | undefined {
 
 export function isEventObjectBrowserTab(tab: QueryTab): boolean {
   return tab.mode === "objects" && (tab.objectBrowser?.initialObjectFilter === "events" || tab.objectBrowser?.eventName !== undefined || tab.objectBrowser?.eventCreateRequestId !== undefined);
+}
+
+/**
+ * Display titles for a whole tab list.
+ *
+ * Tabs whose plain title collides (most obviously several query tabs on the
+ * same connection and database, which all render `connection@database`) get a
+ * 1-based numeric suffix so the strip stays readable. The first tab keeps no
+ * suffix when its title is unique, so single-tab windows look exactly as
+ * before.
+ *
+ * 编号不在这里计算，而是由 `syncTabTitleNumbers` 一次性写进标签（见该函数）：渲染
+ * 函数只看标签上已有的编号，这样关闭一个重名标签不会让后面的标签被重新编号
+ * （#9938）。未分配编号的标签按原样显示。
+ */
+export function tabDisplayTitles(tabs: QueryTab[], t: Translate): Map<string, string> {
+  const titles = new Map<string, string>();
+  for (const tab of tabs) {
+    const title = tabDisplayTitle(tab, t);
+    titles.set(tab.id, tabTitleNumber(tab, title) !== undefined ? `${title} ${tabTitleNumber(tab, title)}` : title);
+  }
+  return titles;
+}
+
+function tabTitleNumber(tab: QueryTab, title: string): number | undefined {
+  if (isPreviewTab(tab)) return undefined;
+  return tab.titleNumber !== undefined && tab.titleNumberKey === title ? tab.titleNumber : undefined;
+}
+
+/**
+ * Assigns the stable numeric suffix used by `tabDisplayTitles` to every tab
+ * whose plain title collides with another tab's.
+ *
+ * The number is minted once — when the collision first appears — and is never
+ * recycled afterwards: closing the middle tab of `x 1 / x 2 / x 3` leaves
+ * `x 1 / x 3` instead of renumbering the survivor to `x 2` (#9938), and a newly
+ * created tab continues after the highest number still in use (so the next tab
+ * there becomes `x 4`). A tab that no longer collides and was never numbered
+ * stays unsuffixed, which keeps single-tab windows unchanged, while a tab that
+ * carries a number keeps it until it is closed.
+ *
+ * Callers own the tab list, so this runs from the store whenever the list or
+ * any contributing title changes — never from a render/computed path.
+ */
+export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
+  const groups = new Map<string, QueryTab[]>();
+  for (const tab of tabs) {
+    if (isPreviewTab(tab)) continue;
+    const title = tabDisplayTitle(tab, t);
+    const group = groups.get(title);
+    if (group) group.push(tab);
+    else groups.set(title, [tab]);
+  }
+
+  for (const [title, group] of groups) {
+    const numbered = group.filter((tab) => tabTitleNumber(tab, title) !== undefined);
+    if (group.length < 2 && numbered.length === 0) {
+      // A lone, never-numbered tab shows its plain title; drop a number that a
+      // previous title left behind so state does not accumulate stale suffixes.
+      for (const tab of group) {
+        if (tab.titleNumber !== undefined) {
+          tab.titleNumber = undefined;
+          tab.titleNumberKey = undefined;
+        }
+      }
+      continue;
+    }
+    let next = numbered.reduce((highest, tab) => Math.max(highest, tab.titleNumber ?? 0), 0) + 1;
+    for (const tab of group) {
+      if (tabTitleNumber(tab, title) !== undefined) continue;
+      tab.titleNumber = next;
+      tab.titleNumberKey = title;
+      next += 1;
+    }
+  }
 }
 
 export function tabDisplayTitle(tab: QueryTab, t: Translate): string {

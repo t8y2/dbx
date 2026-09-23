@@ -7,7 +7,11 @@ const source = readFileSync(new URL("../ConnectionTree.vue", import.meta.url), "
 describe("ConnectionTree global search loading", () => {
   it("discovers collapsed database and schema containers before searching object groups", () => {
     expect(source).toContain("function isSidebarSearchContainer(node: TreeNode)");
-    expect(source).toMatch(/isSidebarSearchContainer\(node\) && !node\.children\?\.length/);
+    // A collapsed database already holds the saved-SQL root, so it has children
+    // even when its object groups were never fetched; the search has to look for
+    // a searchable group instead of an empty child list.
+    expect(source).toMatch(/isSidebarSearchContainer\(node\) && needsSidebarObjectGroupDiscovery\(node, searchableObjectGroupTypes\)/);
+    expect(source).not.toMatch(/isSidebarSearchContainer\(node\) && !node\.children\?\.length/);
     expect(source).toContain("store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery })");
     expect(source).toContain("searchExpansionState.markFiltered(node.id, wasCollapsed)");
     expect(source).toMatch(/if \(refreshedNodeIds && node\.children\) \{[\s\S]*?searchableObjectGroupTypes\.has\(child\.type\)/);

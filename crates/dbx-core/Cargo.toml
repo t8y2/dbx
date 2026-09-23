@@ -62,6 +62,7 @@ aes-gcm = "0.10"
 aes = "0.8"
 cbc = "0.1"
 argon2 = "0.5"
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 sha2 = "0.10"
 async-trait = "0.1"
 bytes = "1"

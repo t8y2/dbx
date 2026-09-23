@@ -214,15 +214,21 @@ describe("FrontendPluginRegistry", () => {
     const registry = createFrontendPluginRegistry([
       installedPlugin("com.example.plugin", [
         { type: "context-menu", id: "example.inspect", label: "Inspect endpoint", menu: "connection" },
-        { type: "context-menu", id: "example.other", label: "Wrong surface", menu: "tree" },
+        { type: "context-menu", id: "example.inspect-table", label: "Inspect table", menu: "table" },
       ]),
     ]);
 
-    const items = registry.listContextMenuItems("connection");
-    expect(items).toHaveLength(1);
-    expect(items[0]?.contribution.id).toBe("example.inspect");
-    expect(items[0]?.plugin.manifest.id).toBe("com.example.plugin");
-    expect(registry.listContextMenuItems("tree")).toHaveLength(1);
+    const connectionItems = registry.listContextMenuItems("connection");
+    expect(connectionItems).toHaveLength(1);
+    expect(connectionItems[0]?.contribution.id).toBe("example.inspect");
+    expect(connectionItems[0]?.plugin.manifest.id).toBe("com.example.plugin");
+
+    const tableItems = registry.listContextMenuItems("table");
+    expect(tableItems).toHaveLength(1);
+    expect(tableItems[0]?.contribution.id).toBe("example.inspect-table");
+
+    const emptyRegistry = createFrontendPluginRegistry([installedPlugin("com.example.empty")]);
+    expect(emptyRegistry.listContextMenuItems("table")).toHaveLength(0);
     expect(registry.listContextMenuItems("missing")).toHaveLength(0);
   });
 

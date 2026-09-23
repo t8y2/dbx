@@ -622,6 +622,9 @@ pub struct AiChatMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiConversation {
+    /// Immutable plugin data retained independently of sent and pending messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_context: Option<serde_json::Value>,
     pub id: String,
     pub title: String,
     pub connection_name: String,

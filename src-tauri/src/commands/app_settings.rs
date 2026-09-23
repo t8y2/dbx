@@ -95,6 +95,16 @@ pub async fn save_max_agent_turns(state: State<'_, Arc<AppState>>, max_agent_tur
 }
 
 #[tauri::command]
+pub async fn load_history_retention_limit(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
+    state.storage.load_history_retention_limit().await
+}
+
+#[tauri::command]
+pub async fn save_history_retention_limit(state: State<'_, Arc<AppState>>, limit: u32) -> Result<(), String> {
+    state.storage.save_history_retention_limit(limit).await
+}
+
+#[tauri::command]
 pub async fn load_max_retries(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
     state.storage.load_max_retries().await
 }

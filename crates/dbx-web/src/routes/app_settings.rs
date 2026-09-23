@@ -121,6 +121,24 @@ pub async fn save_max_agent_turns(
 }
 
 #[derive(Deserialize)]
+pub struct SaveHistoryRetentionLimitRequest {
+    pub limit: u32,
+}
+
+pub async fn load_history_retention_limit(State(state): State<Arc<WebState>>) -> Result<Json<u32>, AppError> {
+    state.app.storage.load_history_retention_limit().await.map(Json).map_err(AppError::from)
+}
+
+pub async fn save_history_retention_limit(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveHistoryRetentionLimitRequest>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::history::validate_history_retention_limit(body.limit).map_err(AppError::bad_request)?;
+    state.app.storage.save_history_retention_limit(body.limit).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveMaxRetriesRequest {
     pub max_retries: u32,

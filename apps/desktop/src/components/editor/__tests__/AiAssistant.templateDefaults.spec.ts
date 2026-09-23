@@ -47,7 +47,7 @@ describe("AI assistant applies per-db_type prompt template defaults", () => {
     // Same axis aiDatabaseTypeForConnection established for schema selection:
     // gbase → mysql, doris-over-mysql protocol → doris, jdbc → inferred
     // dialect. Raw db_type keying would never match for those connections.
-    expect(source).toContain("const templateDbType = computed(() => (props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));");
+    expect(source).toContain("const templateDbType = computed(() => (!pluginContext.value && props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));");
     expect(source).toContain("aiDatabaseTypeForConnection");
   });
 
@@ -63,8 +63,9 @@ describe("AI assistant applies per-db_type prompt template defaults", () => {
   });
 
   it("send records the sent templates as the db_type's last-used selection", () => {
-    const sendIdx = source.indexOf("activeTemplates: [...activeTemplates.value],");
+    const sendIdx = source.indexOf("activeTemplates: runPluginContext ? [] : [...activeTemplates.value],");
     const recordIdx = source.indexOf("settings.recordLastUsedTemplates(templateDbType.value, [...activeTemplateIds.value]);");
+    expect(sendIdx).toBeGreaterThan(-1);
     expect(recordIdx).toBeGreaterThan(sendIdx);
     // No length guard: an empty selection must also reach the store so the
     // remembered entry is cleared instead of resurrecting old templates.

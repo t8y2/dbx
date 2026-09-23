@@ -8414,6 +8414,55 @@ mod tests {
     }
 
     #[test]
+    fn saves_json_null_bigint_cell_as_unquoted_sql_null() {
+        // Regression for #9970: bulk-editing a bigint column to NULL must emit
+        // `= NULL`, never `= 'NULL'` / `= ''` (ERROR 1366 on MySQL/OceanBase).
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "orders".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "bigint", false, None), column("detail_id", "bigint", true, None)]),
+            },
+            columns: vec!["id".to_string(), "detail_id".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(7), json!(42)]],
+            dirty_rows: vec![(0, vec![(1, Value::Null)])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `orders` SET `detail_id` = NULL WHERE `id` = 7;"]);
+    }
+
+    #[test]
+    fn mysql_conditional_update_null_bigint_is_unquoted_sql_null() {
+        let statement = build_data_grid_conditional_update_sql(DataGridConditionalUpdateSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "orders".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "bigint", false, None), column("detail_id", "bigint", true, None)]),
+            },
+            column_name: "detail_id".to_string(),
+            value: Value::Null,
+            where_input: "tenant_id = 1".to_string(),
+        });
+
+        assert_eq!(statement, Some("UPDATE `orders` SET `detail_id` = NULL WHERE (tenant_id = 1);".to_string()));
+    }
+
+    #[test]
     fn keeps_empty_nullable_mysql_text_cell_as_empty_string() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Mysql),

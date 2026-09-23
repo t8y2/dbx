@@ -848,7 +848,7 @@ describe("connectionStore metadata loading", () => {
   });
 
   it("keeps concurrent table-tree and local-index refreshes in separate cache entries", async () => {
-    const treeCacheKey = "pg-1:app:public:group-tables:objects-v8";
+    const treeCacheKey = "pg-1:app:public:group-tables:objects-v9";
     const indexCacheKey = `${treeCacheKey}:table-search-index-v1`;
     const cachedPayloads = new Map<string, unknown>([
       [
@@ -1031,7 +1031,7 @@ describe("connectionStore metadata loading", () => {
     expect(storedViewGroup?.type).toBe("group-views");
     await store.loadObjectGroupChildren(storedViewGroup!);
 
-    expect(loadSchemaCache).toHaveBeenCalledWith("oracle-1:XE:DIP:group-views:objects-v7");
+    expect(loadSchemaCache).toHaveBeenCalledWith("oracle-1:XE:DIP:group-views:objects-v8");
     expect(listTables).toHaveBeenCalledWith(connection.id, "XE", "DIP", undefined, 201, 0, ["VIEW"]);
     expect(storedViewGroup?.children?.map((node) => node.label)).toEqual(["V_ONE", "V_THREE", "V_TWO"]);
   });
@@ -2999,7 +2999,7 @@ describe("connectionStore metadata loading", () => {
 
     const loadPromise = store.loadTables(connection.id, "prulife", "xtdpcky", { force: true });
     await vi.waitFor(() => expect(saveSchemaCache).toHaveBeenCalledTimes(1));
-    expect(saveSchemaCache.mock.calls[0]?.[0]).toBe(`${connection.id}:prulife:xtdpcky:objects-grouped-v8-informix-owner-v2`);
+    expect(saveSchemaCache.mock.calls[0]?.[0]).toBe(`${connection.id}:prulife:xtdpcky:objects-grouped-v9-informix-owner-v2`);
     expect(schemaNode.isLoading).toBe(true);
 
     schemaNode.isExpanded = false;

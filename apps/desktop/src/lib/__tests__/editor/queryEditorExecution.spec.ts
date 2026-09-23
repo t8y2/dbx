@@ -32,7 +32,10 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain("function executeFromContextMenu()");
     expect(queryEditorSource).toContain("requestExecute();\n  focusEditor();");
     expect(queryEditorSource).toContain("function executeSqlStatementFromGutter");
-    expect(queryEditorSource).toContain("emitExecutionRequest({ ...sqlExecutionSnapshotForRange(currentView, statementRange), editorViewportRequestId })");
+    expect(queryEditorSource).toContain("const hasSelectedSql = !selection.empty && currentView.state.sliceDoc(selection.from, selection.to).trim().length > 0;");
+    expect(queryEditorSource).toContain("const selectionOverlapsStatement = hasSelectedSql && selection.from < statementRange.to && statementRange.from < selection.to;");
+    expect(queryEditorSource).toContain("const executionSnapshot = selectionOverlapsStatement ? sqlExecutionSnapshotFromView(currentView) : sqlExecutionSnapshotForRange(currentView, statementRange);");
+    expect(queryEditorSource).toContain("emitExecutionRequest({ ...executionSnapshot, editorViewportRequestId })");
   });
 
   it("routes the new-result-tab shortcut through the same target selection contract", () => {
@@ -97,7 +100,9 @@ describe("QueryEditor execution routing", () => {
 
   it("preserves the source range when executing from the statement gutter", () => {
     expect(queryEditorSource).toContain("const editorViewportRequestId = executionViewportOwnership.beginRequest()");
-    expect(queryEditorSource).toContain("emitExecutionRequest({ ...sqlExecutionSnapshotForRange(currentView, statementRange), editorViewportRequestId })");
+    expect(queryEditorSource).toContain("sqlExecutionSnapshotFromView(currentView)");
+    expect(queryEditorSource).toContain("sqlExecutionSnapshotForRange(currentView, statementRange)");
+    expect(queryEditorSource).toContain("emitExecutionRequest({ ...executionSnapshot, editorViewportRequestId })");
     expect(queryEditorSource).not.toContain('emit("execute", statementRange.sql)');
   });
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2, Layers, MoreHorizontal, BetweenVerticalStart, Eye } from "@lucide/vue";
+import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2, Layers, MoreHorizontal, BetweenVerticalStart, Eye, WrapText, RefreshCw } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -12,6 +12,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
@@ -48,6 +49,16 @@ const props = defineProps<{
   /** Oracle manual mode derived from the resolved database type (not raw
    *  db_type, which can be the agent transport). */
   stickyProvenReadOnlyState?: boolean;
+  /** Auto-commit tabs (`Tx:A`): the tab's own connection holds a transaction
+   *  the user opened explicitly (`BEGIN` / `START TRANSACTION`) that DBX kept
+   *  open. Commit/Rollback act on that transaction. */
+  autoCommitOpenTransaction?: boolean;
+  /** Auto-commit tab: the backend rolled back an explicit transaction this tab
+   *  left open (the tab did not opt into keeping them). */
+  autoCommitTxnRolledBack?: boolean;
+  /** Auto-commit tab: the backend rolled back an implicitly opened transaction
+   *  (`SET autocommit = 0`), reported once per connection. */
+  autoCommitSessionTxnRolledBack?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -76,10 +87,13 @@ const emit = defineEmits<{
   commit: [];
   rollback: [];
   dismissTxnRolledBack: [];
+  dismissAutoCommitTxnRolledBack: [];
+  dismissAutoCommitSessionTxnRolledBack: [];
 }>();
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas, isSchemaAware } = useSchemaOptions();
@@ -232,6 +246,14 @@ const saveTooltip = computed(() => {
   if (props.activeTab.externalSqlPath) return t("toolbar.saveSqlFile");
   return t("toolbar.saveSql");
 });
+const isObjectSourceTab = computed(() => !!props.activeTab.objectSource || !!props.activeTab.sourceLoad);
+const objectSourceRefreshing = computed(() => !!props.activeTab.sourceLoad && !props.activeTab.sourceLoad.error);
+
+function refreshObjectSource() {
+  if (!isObjectSourceTab.value) return;
+  if (queryStore.isTabDirty(props.activeTab) && !window.confirm(t("objects.refreshDiscardConfirm"))) return;
+  queryStore.refreshObjectSourceTab(props.activeTab.id);
+}
 const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql));
 const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
 // executableSql 在无选区时可能是整篇文档；只要有 DML 语句出现就显示预览按钮，
@@ -254,6 +276,11 @@ const explainAnalyzeTooltip = computed(() => {
 const canSaveSql = computed(() => canSaveSqlTab(props.activeTab));
 const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
 const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
+const wordWrapEnabled = computed(() => props.activeTab.forceWordWrap === true || settingsStore.editorSettings.wordWrap);
+function toggleWordWrap() {
+  if (props.activeTab.forceWordWrap) return;
+  settingsStore.updateEditorSettings({ wordWrap: !wordWrapEnabled.value });
+}
 const sqlSemanticDiagnosticsEnabled = computed(() => settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 const sqlSemanticDiagnosticsToggleTooltip = computed(() => (sqlSemanticDiagnosticsEnabled.value ? t("toolbar.sqlSemanticDiagnosticsToggleOn") : t("toolbar.sqlSemanticDiagnosticsToggleOff")));
 const supportsSqlSemanticDiagnosticsToggle = computed(() => {
@@ -272,16 +299,23 @@ function toggleInsertValueHints() {
   settingsStore.updateEditorSettings({ showInsertValueHints: !insertValueHintsEnabled.value });
 }
 const isTransactionActive = computed(() => !!props.txnSessionId);
+/** Auto-commit tab whose connection holds a transaction the user opened with
+ *  `BEGIN` / `START TRANSACTION` and that DBX kept open (`Tx:A`). */
+const hasOpenAutoCommitTransaction = computed(() => props.autoCommitOpenTransaction === true);
 const isManualTransactionMode = computed(() => props.autoCommit === false || isTransactionActive.value);
 const transactionModeBadge = computed(() => (isManualTransactionMode.value ? "M" : "A"));
 // Sticky proven-read-only dialects (Oracle/OceanBase-Oracle/MySQL/PostgreSQL)
 // hide Commit/Rollback while the session is clean (no unproven statement
-// executed). Every other database keeps the existing rule.
+// executed). Every other database keeps the existing rule. An auto-commit tab
+// that kept the user's explicit transaction always offers both actions: that
+// transaction exists only because the user asked for it.
 const showTxnActions = computed(() => {
+  if (hasOpenAutoCommitTransaction.value) return true;
   if (props.stickyProvenReadOnlyState) return isTransactionActive.value && props.txnPossiblyDirty === true;
   return isTransactionActive.value;
 });
 const transactionTooltip = computed(() => {
+  if (hasOpenAutoCommitTransaction.value) return t("settings.keepExplicitTransactionInAutoCommitDescription");
   const isAgent = (props.activeConnection?.db_type as string) === "agent";
   const isManual = isManualTransactionMode.value;
   if (isAgent && isManual) return t("toolbar.manualTransactionAgent");
@@ -359,6 +393,7 @@ const showFormatButton = computed(() => canFormatSql.value && toolbarTier.value 
 const showExplainAnalyzeToggle = computed(() => toolbarTier.value < 3);
 const showCompressButton = computed(() => toolbarTier.value < 1);
 const showKeywordCaseButton = computed(() => toolbarTier.value < 1);
+const showWordWrapButton = computed(() => toolbarTier.value < 1);
 const showSemanticDiagnosticsButton = computed(() => supportsSqlSemanticDiagnosticsToggle.value && toolbarTier.value < 1);
 const showPreviewButton = computed(() => previewButtonVisible.value && toolbarTier.value < 1);
 const showInsertValueHintsButton = computed(() => supportsInsertValueHintsToggle.value && toolbarTier.value < 1);
@@ -509,6 +544,23 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ keywordCaseToggleTooltip }}</TooltipContent>
       </Tooltip>
+      <Tooltip v-if="showWordWrapButton">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6"
+            :class="wordWrapEnabled ? 'bg-sky-500/10 text-sky-700 hover:bg-sky-500/20 hover:text-sky-800 dark:text-sky-300 dark:hover:text-sky-200' : 'text-muted-foreground/50 hover:bg-muted hover:text-muted-foreground'"
+            :disabled="activeTab.forceWordWrap === true"
+            :aria-label="t('settings.wordWrap')"
+            :aria-pressed="wordWrapEnabled"
+            @click="toggleWordWrap"
+          >
+            <WrapText class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("settings.wordWrap") }}</TooltipContent>
+      </Tooltip>
       <Tooltip v-if="showSemanticDiagnosticsButton">
         <TooltipTrigger as-child>
           <Button
@@ -564,6 +616,22 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ saveTooltip }}</TooltipContent>
       </Tooltip>
+      <Tooltip v-if="isObjectSourceTab">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-300 dark:hover:text-emerald-200"
+            :disabled="objectSourceRefreshing || activeTab.isExecuting"
+            :aria-label="t('structureEditor.refresh')"
+            @click="refreshObjectSource"
+          >
+            <Loader2 v-if="objectSourceRefreshing" class="h-3.5 w-3.5 animate-spin" />
+            <RefreshCw v-else class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("structureEditor.refresh") }}</TooltipContent>
+      </Tooltip>
       <Tooltip v-if="showOpenSqlButton">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200" @click="emit('openSql')">
@@ -613,6 +681,10 @@ async function changeCatalog(selectedCatalog: string) {
             </span>
             {{ keywordCaseToggleTooltip }}
           </DropdownMenuItem>
+          <DropdownMenuCheckboxItem :model-value="wordWrapEnabled" :disabled="activeTab.forceWordWrap === true" @select.prevent="toggleWordWrap">
+            <WrapText class="h-3.5 w-3.5" />
+            {{ t("settings.wordWrap") }}
+          </DropdownMenuCheckboxItem>
           <DropdownMenuCheckboxItem v-if="supportsSqlSemanticDiagnosticsToggle" :model-value="sqlSemanticDiagnosticsEnabled" @select.prevent="toggleSqlSemanticDiagnostics">
             <SpellCheck2 class="h-3.5 w-3.5" />
             {{ t("settings.sqlSemanticDiagnosticsEnabled") }}
@@ -672,12 +744,15 @@ async function changeCatalog(selectedCatalog: string) {
               :class="isManualTransactionMode ? 'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-300' : 'text-orange-600/70 hover:bg-orange-500/10 hover:text-orange-700 dark:text-orange-300/70 dark:hover:text-orange-200'"
               :disabled="activeTab.isExecuting || activeTab.isExplaining"
               :aria-label="transactionTooltip"
-              :aria-pressed="isManualTransactionMode"
+              :aria-pressed="isManualTransactionMode || hasOpenAutoCommitTransaction"
               @click="emit('update:autoCommit', autoCommit === false)"
             >
               <span class="inline-flex items-center gap-px leading-none" aria-hidden="true">
                 <span class="text-[11px] font-bold">Tx:</span>
                 <span class="inline-flex h-3 min-w-3 items-center justify-center rounded-[3px] border border-current px-px text-[8px] font-extrabold leading-none">{{ transactionModeBadge }}</span>
+                <!-- Auto-commit tab with an uncommitted explicit transaction:
+                     the commit/rollback actions next to the badge act on it. -->
+                <span v-if="hasOpenAutoCommitTransaction" data-toolbar-open-transaction-dot class="ml-px h-1.5 w-1.5 rounded-full bg-current" />
               </span>
             </Button>
           </TooltipTrigger>
@@ -851,6 +926,20 @@ async function changeCatalog(selectedCatalog: string) {
       <Table2 class="h-3.5 w-3.5 shrink-0" />
       <span class="truncate">{{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }}</span>
     </div>
+  </div>
+  <div v-if="autoCommitTxnRolledBack" data-auto-commit-txn-rolled-back class="flex items-center gap-2 px-3 py-1 text-xs bg-amber-500/10 text-amber-700 dark:text-amber-300 border-b border-amber-500/20">
+    <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
+    <span>{{ t("toolbar.autoCommitTxnRolledBack") }}</span>
+    <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="emit('dismissAutoCommitTxnRolledBack')">
+      <X class="h-3 w-3" />
+    </Button>
+  </div>
+  <div v-else-if="autoCommitSessionTxnRolledBack" data-auto-commit-session-txn-rolled-back class="flex items-center gap-2 px-3 py-1 text-xs bg-amber-500/10 text-amber-700 dark:text-amber-300 border-b border-amber-500/20">
+    <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
+    <span>{{ t("toolbar.autoCommitSessionTxnRolledBack") }}</span>
+    <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="emit('dismissAutoCommitSessionTxnRolledBack')">
+      <X class="h-3 w-3" />
+    </Button>
   </div>
   <div v-if="txnAutoRolledBack" class="flex items-center gap-2 px-3 py-1 text-xs bg-amber-500/10 text-amber-700 dark:text-amber-300 border-b border-amber-500/20">
     <AlertTriangle class="h-3.5 w-3.5 shrink-0" />

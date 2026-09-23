@@ -73,6 +73,50 @@ describe("PluginHostBridge", () => {
     bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: "open", method: "host.downloadFile", params: {} } } as MessageEvent);
     await vi.waitFor(() => expect(messages[1].error).toContain("desktop host"));
   });
+  it("opens the built-in AI conversation only with the declared permission and host-owned identity", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const openAiConversation = vi.fn().mockResolvedValue(undefined);
+    const api = { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), openAiConversation };
+    const request = { source: "dbx-plugin", version: 1, type: "request", id: "ai", method: "host.ai.openConversation", params: { title: "自选分析", prompt: "分析", context: { snapshotId: "s1" }, send: true, pluginId: "forged" } };
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, api);
+    denied.handleWindowMessage({ source: target, data: request } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ error: "Plugin has not declared permission 'host.ai'" });
+    expect(openAiConversation).not.toHaveBeenCalled();
+
+    const allowed = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, api);
+    allowed.handleWindowMessage({ source: target, data: request } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(openAiConversation).toHaveBeenCalledWith({ context: { pluginId: "sample", pluginName: "Sample", title: "自选分析", capturedAt: expect.any(String), data: { snapshotId: "s1" } }, prompt: "分析", send: true });
+    expect(messages[1]).toMatchObject({ id: "ai", result: null });
+    expect(api.invoke).not.toHaveBeenCalled();
+  });
+
+  it("advertises the ai capability group in the init message", () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const withAi = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      openAiConversation: vi.fn().mockResolvedValue(undefined),
+    });
+    withAi.sendInit();
+    expect(messages[0].capabilities.ai).toBe(true);
+
+    messages.length = 0;
+    const withoutAdapter = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+    withoutAdapter.sendInit();
+    expect(messages[0].capabilities.ai).toBe(false);
+  });
+
   it("binds backend calls to the owning plugin identity", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

@@ -15,9 +15,17 @@ services:
       # - DBX_WEB_MCP_ALLOWED_ORIGINS=https://mcp-client.example.com
       # Uncomment when publishing DBX under a reverse-proxy subpath, e.g. https://example.com/dbx/
       # - DBX_PUBLIC_BASE_PATH=/dbx
+      # Optional production override. The default key is /app/data/.dbx/secret.key.
+      # - DBX_SECRET_KEY_FILE=/run/secrets/dbx_secret_key
+    # secrets:
+    #   - dbx_secret_key
     volumes:
       - dbx-data:/app/data
     restart: unless-stopped
 
 volumes:
   dbx-data:
+
+# secrets:
+#   dbx_secret_key:
+#     file: ./dbx_secret_key

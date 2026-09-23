@@ -27,7 +27,7 @@ import type { TransferTask, TransferTaskConfig } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { transferDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
-import { decodeTransferDatabaseOption, encodeTransferDatabaseOptions, isSameTransferDatabase, isTransferDatabaseSelected, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
+import { decodeTransferDatabaseOption, encodeTransferDatabaseOptions, formatTransferEndpointLabel, isSameTransferDatabase, isTransferDatabaseSelected, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
 import { formatDatabaseLabel } from "@/lib/database/defaultDatabase";
 import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
@@ -1046,8 +1046,8 @@ function transferStrategyLabel(request: api.TransferRequest): string {
 const confirmationSummary = computed(() => {
   const request = confirmationRequest.value;
   if (!request) return "";
-  const source = `${getConnectionName(request.sourceConnectionId)}.${request.sourceDatabase}.${request.sourceSchema}`;
-  const target = `${getConnectionName(request.targetConnectionId)}.${request.targetDatabase}.${request.targetSchema}`;
+  const source = formatTransferEndpointLabel(getConnectionName(request.sourceConnectionId), request.sourceDatabase, request.sourceSchema, request.sourceCatalog);
+  const target = formatTransferEndpointLabel(getConnectionName(request.targetConnectionId), request.targetDatabase, request.targetSchema, request.targetCatalog);
   const count = request.tables.length + request.objects.reduce((total, selection) => total + selection.names.length, 0);
   return t("transfer.startConfirmMessage", { source, target, count });
 });

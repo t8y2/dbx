@@ -1385,6 +1385,10 @@ async function fetchTableConstraints(force = false) {
 }
 
 async function refreshActiveTableInfo() {
+  if (sidePanelMode.value === "source") {
+    await refreshActiveSource();
+    return;
+  }
   if (sidePanelMode.value !== "table-info" || !sidePanelRow.value) return;
   sidePanelGuard.bump();
 
@@ -1502,9 +1506,14 @@ async function openSource(row: ObjectBrowserRow) {
     closeSidePanel();
     return;
   }
+  await loadSourcePanel(row);
+}
+
+async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditing?: boolean }) {
   // Starting a different object must invalidate slower source requests before
   // any state is reset, otherwise an old response can populate the new row.
   const epoch = sidePanelGuard.start();
+  const preserveEditing = options?.preserveEditing === true && sourceEditing.value;
   sidePanelRow.value = row;
   sidePanelMode.value = "source";
   sourceRow.value = row;
@@ -1538,7 +1547,9 @@ async function openSource(row: ObjectBrowserRow) {
     sourceEditableText.value = editable;
     sourceContent.value = row.type === "SEQUENCE" ? result.source : editable;
     sourceDraft.value = editable;
-    sourceEditing.value = sourceCanEdit.value && row.type !== "SEQUENCE";
+    // Fresh open always enters edit when allowed; refresh preserves prior edit mode.
+    const enterEditing = sourceCanEdit.value && row.type !== "SEQUENCE" && (options?.preserveEditing ? preserveEditing : true);
+    sourceEditing.value = enterEditing;
     if (!sourceCanEdit.value && row.type !== "SEQUENCE") {
       toast(t("objects.sourceReadOnly"), 3000);
     }
@@ -1548,6 +1559,13 @@ async function openSource(row: ObjectBrowserRow) {
   } finally {
     if (sidePanelGuard.isFresh(epoch)) sourceLoading.value = false;
   }
+}
+
+async function refreshActiveSource() {
+  const row = sourceRow.value || (sidePanelMode.value === "source" ? sidePanelRow.value : null);
+  if (!row || sidePanelMode.value !== "source") return;
+  if (sourceEditing.value && !window.confirm(t("objects.refreshDiscardConfirm"))) return;
+  await loadSourcePanel(row, { preserveEditing: true });
 }
 
 function openEventEditor(row: ObjectBrowserRow) {
@@ -4038,6 +4056,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </Button>
             <Button v-if="!sourceEditing && sourceCanEdit" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
               <PencilLine class="h-3 w-3" />
+            </Button>
+            <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="sourceLoading || sourceSaving" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="refreshActiveSource">
+              <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': sourceLoading }" />
             </Button>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSource">
               <X class="h-3 w-3" />

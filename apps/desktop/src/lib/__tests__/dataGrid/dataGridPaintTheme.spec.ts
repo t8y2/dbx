@@ -162,8 +162,8 @@ describe("data grid paint theme", () => {
       isDark: true,
     });
 
-    expect(light.cellSelected).toBe("rgb(239, 246, 255)");
-    expect(light.cellSelectedBorder).toBe("rgb(59, 130, 246)");
+    expect(light.cellSelected).toBe("rgb(179, 208, 254)");
+    expect(light.cellSelectedBorder).toBe("rgb(37, 99, 235)");
     expect(light.cellSelectedSingle).toBe("rgb(191, 219, 254)");
     expect(light.cellSelectedDirty).toBe("rgb(235, 224, 184)");
     expect(light.cellDirty).toBe("rgb(255, 248, 230)");
@@ -171,7 +171,7 @@ describe("data grid paint theme", () => {
     expect(light.rowNumberTextEdited).toBe("rgb(187, 77, 0)");
     expect(contrastRatio(light.cellSelectedBorder, light.cellSelected)).toBeGreaterThanOrEqual(3);
 
-    expect(dark.cellSelected).toBe("rgb(20, 40, 60)");
+    expect(dark.cellSelected).toBe("rgb(30, 64, 100)");
     expect(dark.cellSelectedBorder).toBe("rgb(96, 165, 250)");
     expect(dark.cellSelectedSingle).toBe("rgb(30, 64, 96)");
     expect(dark.cellSelectedDirty).toBe("rgb(76, 66, 38)");

@@ -107,7 +107,7 @@ fn sort_mongo_collection_specs(
 
 /// Decode both generations of the Legacy Agent response. Existing installed
 /// Agents return names, while current Agents opt into `name` + `kind` specs.
-fn mongo_collection_specs_from_agent_response(
+pub(crate) fn mongo_collection_specs_from_agent_response(
     value: serde_json::Value,
 ) -> Result<Vec<mongo_driver::MongoCollectionSpec>, String> {
     let values =

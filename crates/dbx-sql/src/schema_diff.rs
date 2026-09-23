@@ -3995,16 +3995,38 @@ fn is_postgres_family_ddl(db_type: DatabaseType) -> bool {
     )
 }
 
-fn postgres_index_column_sql(column: &str, is_expression: Option<bool>, db_type: DatabaseType) -> String {
-    // Expression/functional index key parts (e.g. from pg_get_indexdef) arrive as raw
-    // expression text, not a plain column name; quoting the whole expression as an
-    // identifier turns it into a literal column reference that doesn't exist (#6295).
+/// One PostgreSQL index key part for DDL: the key text plus its operator class
+/// and, for B-tree keys, the explicit ordering.
+///
+/// Expression/functional index key parts (e.g. from pg_get_indexdef) arrive as raw
+/// expression text, not a plain column name; quoting the whole expression as an
+/// identifier turns it into a literal column reference that doesn't exist (#6295).
+///
+/// `pg_index.indoption` carries bit 0 = DESC and bit 1 = NULLS FIRST per key.
+/// Dropping it silently rebuilt `col DESC NULLS LAST` as a plain ASC key (#8559
+/// fixed exactly this for data transfer; the sync DDL kept losing it, #9988).
+/// Only B-tree keys carry meaningful flags, so other access methods keep the
+/// bare key text - same rule as the transfer path.
+fn postgres_index_column_sql(
+    column: &str,
+    is_expression: Option<bool>,
+    opclass: Option<&str>,
+    key_options: Option<i16>,
+    db_type: DatabaseType,
+) -> String {
     let trimmed = column.trim();
-    let is_expression = is_expression.unwrap_or(false);
-    if is_expression {
-        trimmed.to_string()
-    } else {
-        quote_id(column, db_type)
+    let base = if is_expression.unwrap_or(false) { trimmed.to_string() } else { quote_id(column, db_type) };
+    let with_opclass = match opclass.filter(|opclass| !opclass.is_empty()) {
+        Some(opclass) => format!("{base} {opclass}"),
+        None => base,
+    };
+    match key_options {
+        Some(options) => format!(
+            "{with_opclass} {} NULLS {}",
+            if options & 1 != 0 { "DESC" } else { "ASC" },
+            if options & 2 != 0 { "FIRST" } else { "LAST" }
+        ),
+        None => with_opclass,
     }
 }
 
@@ -4030,7 +4052,19 @@ pub fn create_index_sql(table_name: &str, index: &IndexInfo, db_type: DatabaseTy
             if db_type == DatabaseType::Mysql {
                 mysql_index_column_sql(column)
             } else if is_postgres_family_ddl(db_type) {
-                postgres_index_column_sql(column, index.key_is_expression.get(i).copied(), db_type)
+                let opclass = index.column_opclasses.get(i).and_then(|opclass| opclass.as_deref());
+                let key_options = index
+                    .index_type
+                    .as_deref()
+                    .filter(|index_type| index_type.trim().eq_ignore_ascii_case("btree"))
+                    .and_then(|_| index.key_options.get(i).copied());
+                postgres_index_column_sql(
+                    column,
+                    index.key_is_expression.get(i).copied(),
+                    opclass,
+                    key_options,
+                    db_type,
+                )
             } else {
                 quote_id(column, db_type)
             }
@@ -8497,6 +8531,139 @@ mod tests {
             "CREATE UNIQUE INDEX \"uq_tankong_sta_type_time\" ON \"public\".\"tankong_data\" (\"sta_id\", \"data_type\", \"data_time\", {expression_key_part})"
         )));
         assert!(!sql.contains(&format!("\"{expression_key_part}\"")));
+    }
+
+    #[test]
+    fn postgres_sync_index_ddl_keeps_key_order_opclass_and_full_expression() {
+        // Regression for #9988: `pg_index.indoption` (bit 0 = DESC, bit 1 = NULLS FIRST)
+        // and `pg_index.indclass` were dropped by the sync DDL, so a published index came
+        // back as plain ASC keys with default null ordering. The expression key part is
+        // also asserted verbatim - the driver used to return it truncated to 63 bytes
+        // because `COALESCE(name, text)` resolves to `name` (see postgres.rs).
+        let expression_key_part =
+            "(((category)::text = ANY ((ARRAY['industrial'::character varying, 'macro'::character varying])::text[])))";
+        let new_index = index(IndexInfo {
+            name: "index_repro_rank".to_string(),
+            columns: vec![
+                "((has_current_analysis AND (NOT dirty) AND researchable))".to_string(),
+                "researchable".to_string(),
+                expression_key_part.to_string(),
+                "((new_events_24h > 0))".to_string(),
+                "evidence_count".to_string(),
+                "material_at".to_string(),
+                "topic_id".to_string(),
+            ],
+            is_unique: false,
+            is_primary: false,
+            filter: Some("(NOT suppressed)".to_string()),
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![true, false, true, true, false, false, false],
+            column_opclasses: vec![None, None, None, None, None, None, Some("pg_catalog.text_pattern_ops".to_string())],
+            key_options: vec![3, 3, 3, 3, 3, 3, 3],
+            constraint_backed: false,
+        });
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "index_repro".to_string(),
+                target_name: None,
+                columns: None,
+                indexes: Some(vec![IndexDiff {
+                    diff_type: "added".to_string(),
+                    name: new_index.name.clone(),
+                    source: Some(new_index),
+                    target: None,
+                    changes: vec![],
+                }]),
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            None,
+            &[],
+        );
+
+        assert!(
+            sql.contains(
+                "CREATE INDEX \"index_repro_rank\" ON \"public\".\"index_repro\" USING btree (((has_current_analysis AND (NOT dirty) AND researchable)) DESC NULLS FIRST, \"researchable\" DESC NULLS FIRST"
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(&format!("{expression_key_part} DESC NULLS FIRST")), "{sql}");
+        assert!(sql.contains("\"topic_id\" pg_catalog.text_pattern_ops DESC NULLS FIRST"), "{sql}");
+        assert!(sql.contains("WHERE (NOT suppressed);"), "{sql}");
+    }
+
+    #[test]
+    fn postgres_sync_index_ddl_keeps_non_btree_keys_bare() {
+        // `indoption` is only meaningful for B-tree keys, so a GIN index must not gain
+        // `ASC NULLS LAST` suffixes even when the introspection reports the flags.
+        let new_index = index(IndexInfo {
+            name: "idx_payload_gin".to_string(),
+            columns: vec!["payload".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![Some("public.gin_trgm_ops".to_string())],
+            key_options: vec![0],
+            constraint_backed: false,
+        });
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "events".to_string(),
+                target_name: None,
+                columns: None,
+                indexes: Some(vec![IndexDiff {
+                    diff_type: "added".to_string(),
+                    name: new_index.name.clone(),
+                    source: Some(new_index),
+                    target: None,
+                    changes: vec![],
+                }]),
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            None,
+            &[],
+        );
+
+        assert!(sql.contains("USING gin (\"payload\" public.gin_trgm_ops)"), "{sql}");
+        assert!(!sql.contains("NULLS LAST"), "{sql}");
+        assert!(!sql.contains("NULLS FIRST"), "{sql}");
     }
 
     #[test]

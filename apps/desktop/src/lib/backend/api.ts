@@ -70,6 +70,7 @@ export const sessionCredentialStatus = forward("sessionCredentialStatus");
 export const forgetSessionCredential = forward("forgetSessionCredential");
 export const replaceNacosSessionCredential = forward("replaceNacosSessionCredential");
 export const checkConnectionHealth = forward("checkConnectionHealth");
+export const prewarmConnection = forward("prewarmConnection");
 export const connectionIdentifierQuote = forward("connectionIdentifierQuote");
 export const closeDatabaseConnection = forward("closeDatabaseConnection");
 export const refreshConnections = forward("refreshConnections");
@@ -354,6 +355,8 @@ export const loadMaxAgentTurns = forward("loadMaxAgentTurns");
 export const loadSqlFileUploadMaxBytes = forward("loadSqlFileUploadMaxBytes");
 export const saveSqlFileUploadMaxMb = forward("saveSqlFileUploadMaxMb");
 export const saveMaxAgentTurns = forward("saveMaxAgentTurns");
+export const loadHistoryRetentionLimit = forward("loadHistoryRetentionLimit");
+export const saveHistoryRetentionLimit = forward("saveHistoryRetentionLimit");
 export const loadMaxRetries = forward("loadMaxRetries");
 export const saveMaxRetries = forward("saveMaxRetries");
 export const completeAppClose = forward("completeAppClose");
@@ -382,6 +385,10 @@ export const saveSavedSqlEditorPositions = forward("saveSavedSqlEditorPositions"
 export const loadTransferTaskLibrary = forward("loadTransferTaskLibrary");
 export const saveTransferTaskLibrary = forward("saveTransferTaskLibrary");
 export const webdavSyncTest = forward("webdavSyncTest");
+export const migrationStatus = forward("migrationStatus");
+export const migrationStart = forward("migrationStart");
+export const migrationRetry = forward("migrationRetry");
+export const migrationCleanupBackups = forward("migrationCleanupBackups");
 export const webdavPasswordStatus = forward("webdavPasswordStatus");
 export const saveWebdavSavedPassword = forward("saveWebdavSavedPassword");
 export const forgetWebdavSavedPassword = forward("forgetWebdavSavedPassword");
@@ -412,6 +419,10 @@ export const savePromptTemplate = forward("savePromptTemplate");
 export const deletePromptTemplate = forward("deletePromptTemplate");
 export const getAiGlobalCustomInstructions = forward("getAiGlobalCustomInstructions");
 export const setAiGlobalCustomInstructions = forward("setAiGlobalCustomInstructions");
+
+// User Skills (read-only Codex-compatible SKILL.md library)
+export const listUserSkills = forward("listUserSkills");
+export const readUserSkills = forward("readUserSkills");
 
 // System
 export const listSystemFonts = forward("listSystemFonts");

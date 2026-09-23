@@ -8,7 +8,15 @@ services:
       - "4224:4224"
     volumes:
       - dbx-data:/app/data
+    # environment:
+    #   DBX_SECRET_KEY_FILE: /run/secrets/dbx_secret_key
+    # secrets:
+    #   - dbx_secret_key
     restart: unless-stopped
 
 volumes:
   dbx-data:
+
+# secrets:
+#   dbx_secret_key:
+#     file: ./dbx_secret_key

@@ -1,6 +1,7 @@
 use dbx_core::connection::AppState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -43,6 +44,7 @@ pub struct WebState {
     /// Completed Web export temp files waiting for the browser download.
     pub export_files: RwLock<HashMap<String, WebExportFile>>,
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
+    pub migration_ready: Arc<AtomicBool>,
 }
 
 impl WebState {
@@ -68,6 +70,7 @@ impl WebState {
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
+            migration_ready: Arc::new(AtomicBool::new(true)),
         }
     }
 }

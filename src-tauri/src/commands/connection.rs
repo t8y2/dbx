@@ -2268,6 +2268,27 @@ pub async fn check_connection_health(state: State<'_, Arc<AppState>>, connection
     state.check_connection_health(&connection_id).await
 }
 
+/// Warm the driver and connection pool for a connection a tab is opening, so the
+/// first Run does not pay pool creation, tunnel setup, or external-driver (JDBC
+/// agent) startup while the user waits. Never removes an existing pool.
+#[tauri::command]
+pub async fn prewarm_connection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+    catalog: Option<String>,
+    client_session_id: Option<String>,
+) -> Result<(), String> {
+    state
+        .prewarm_connection_pool(
+            &connection_id,
+            database.as_deref().filter(|value| !value.is_empty()),
+            catalog.as_deref().filter(|value| !value.is_empty()),
+            client_session_id.as_deref().filter(|value| !value.is_empty()),
+        )
+        .await
+}
+
 #[tauri::command]
 pub async fn connection_identifier_quote(
     state: State<'_, Arc<AppState>>,

@@ -4782,9 +4782,13 @@ fn postgres_indexes_for_relations_query_tiers() -> [&'static str; 2] {
 // (schema, table) pair. Not merged into a shared fragment for the same
 // reason as the columns queries above — an alias would need renaming to
 // line up, and result columns are read positionally.
+// `COALESCE(a.attname::text, pg_get_indexdef(...))` keeps the cast: a bare
+// `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
+// expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
+// becomes invalid SQL (#9988).
 fn postgres_indexes_for_relations_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
-             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
+             array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
              array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
@@ -4814,7 +4818,7 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
 fn postgres_indexes_for_relations_compat_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
              ARRAY( \
-               SELECT COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
+               SELECT COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
                  ON a.attrelid = t.oid \
@@ -8844,8 +8848,12 @@ async fn execute_query_with_max_rows_inner(
 
 // Sibling of `postgres_indexes_for_relations_sql` (~line 3288), for a single
 // (schema, table) instead of a batch of oids — see the note there.
+// `COALESCE(a.attname::text, pg_get_indexdef(...))` keeps the cast: a bare
+// `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
+// expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
+// becomes invalid SQL (#9988).
 const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
-             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
+             array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
              array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
@@ -8874,7 +8882,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
 // 3312) — see the note on `POSTGRES_INDEXES_SQL` above.
 const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              ARRAY( \
-               SELECT COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
+               SELECT COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
                  ON a.attrelid = t.oid \
@@ -13204,6 +13212,23 @@ mod tests {
         }
         for sql in [POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL] {
             assert!(sql.contains("t.oid = (CASE WHEN $1 = '' THEN quote_ident($2)"));
+        }
+    }
+
+    #[test]
+    fn postgres_index_queries_cast_attname_to_text() {
+        // Regression for #9988: `COALESCE(a.attname, pg_get_indexdef(...))` resolves to the
+        // `name` type, so PostgreSQL silently truncated an expression key part to 63 bytes
+        // (NAMEDATALEN - 1). The rebuilt CREATE INDEX then failed with a syntax error and the
+        // whole publish transaction rolled back.
+        for sql in [
+            POSTGRES_INDEXES_SQL,
+            POSTGRES_INDEXES_COMPAT_SQL,
+            postgres_indexes_for_relations_sql(),
+            postgres_indexes_for_relations_compat_sql(),
+        ] {
+            assert!(sql.contains("COALESCE(a.attname::text, pg_get_indexdef("), "{sql}");
+            assert!(!sql.contains("COALESCE(a.attname, pg_get_indexdef("), "{sql}");
         }
     }
 

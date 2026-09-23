@@ -8,6 +8,7 @@ import {
   resolveSettingsCategory,
   resolveSettingsSearchEntries,
   searchSettings,
+  visibleToolbarVisibilityItems,
   type SettingsCategory,
   type SettingsSearchDefinition,
 } from "@/lib/settings/settingsSearch";
@@ -233,6 +234,20 @@ describe("settings search", () => {
     expect(definitions.map((definition) => definition.id)).toEqual(TOOLBAR_VISIBILITY_ITEMS.map((item) => `appearance-toolbar-${item.key}`));
     expect(definitions).toContainEqual({ id: "appearance-toolbar-dataTransfer", category: "appearance", titleKey: "transfer.dataTransfer", targetId: "appearance" });
     expect(definitions).toContainEqual({ id: "appearance-toolbar-ai", category: "appearance", title: "AI", targetId: "appearance" });
+    expect(definitions).toContainEqual({ id: "appearance-toolbar-alwaysOnTop", category: "appearance", titleKey: "toolbar.alwaysOnTop", targetId: "appearance", visible: expect.any(Function) });
+  });
+
+  it("keeps the desktop-only toolbar switch and its search entry out of the Web build", () => {
+    const desktopKeys = visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, false).map((item) => item.key);
+    const webKeys = visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, true).map((item) => item.key);
+    expect(desktopKeys).toEqual(TOOLBAR_VISIBILITY_ITEMS.map((item) => item.key));
+    expect(webKeys).not.toContain("alwaysOnTop");
+    expect(webKeys).toContain("theme");
+
+    const definitions = createToolbarVisibilitySettingsSearchDefinitions();
+    const entryIds = (isWeb: boolean) => resolveSettingsSearchEntries(definitions, { isWeb, visibleCategories: new Set<SettingsCategory>(["appearance"]) }, (key) => key, categoryLabels).map((entry) => entry.id);
+    expect(entryIds(false)).toContain("appearance-toolbar-alwaysOnTop");
+    expect(entryIds(true)).not.toContain("appearance-toolbar-alwaysOnTop");
   });
 
   it("indexes the existing descriptions for fixed appearance controls", () => {

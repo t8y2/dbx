@@ -255,11 +255,65 @@ fn is_safe_oracle_explain_dml_source(sql: &str) -> bool {
     ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|keyword| starts_with_keyword(&source, keyword))
 }
 
+/// Write verbs that mark a read-leading statement as a write, for example a
+/// data-modifying CTE (`WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x`).
+const DANGEROUS_SQL_KEYWORDS: &[&str] =
+    &["drop", "delete", "truncate", "alter", "update", "merge", "replace", "insert", "create"];
+
+/// Write verbs that are also scalar function names, so `REPLACE(col, 'a', 'b')`
+/// and `INSERT(str, pos, len, new)` are ordinary parts of a read-only query.
+///
+/// Only these two verbs are exempted when they are called with parentheses.
+/// `update` stays dangerous even then: MySQL accepts a parenthesized table
+/// reference (`UPDATE (t) SET c = 1`, verified on MySQL 8.4), while
+/// `REPLACE (`/`INSERT (` are rejected there as statements, so a parenthesized
+/// call can never hide a write for the exempted verbs.
+const WRITE_VERBS_WITH_SCALAR_FUNCTION_FORMS: &[&str] = &["replace", "insert"];
+
 pub fn contains_dangerous_sql_keyword(sql: &str) -> bool {
     let source = strip_sql_comments_and_literals(sql).to_lowercase();
-    ["drop", "delete", "truncate", "alter", "update", "merge", "replace", "insert", "create"]
-        .iter()
-        .any(|keyword| contains_word(&source, keyword))
+    DANGEROUS_SQL_KEYWORDS.iter().any(|keyword| contains_dangerous_sql_verb(&source, keyword))
+}
+
+/// Match a write verb as a whole word. A verb called with parentheses is a
+/// scalar function for [`WRITE_VERBS_WITH_SCALAR_FUNCTION_FORMS`] (`SELECT
+/// REPLACE(name, 'a', 'b') FROM users` must stay read-only), including when the
+/// dialect allows whitespace before the parenthesis.
+fn contains_dangerous_sql_verb(source: &str, keyword: &str) -> bool {
+    let bytes = source.as_bytes();
+    let keyword_bytes = keyword.as_bytes();
+    if keyword_bytes.is_empty() || bytes.len() < keyword_bytes.len() {
+        return false;
+    }
+    let allows_function_form = WRITE_VERBS_WITH_SCALAR_FUNCTION_FORMS.contains(&keyword);
+
+    for idx in 0..=bytes.len() - keyword_bytes.len() {
+        if &bytes[idx..idx + keyword_bytes.len()] != keyword_bytes {
+            continue;
+        }
+        if is_identifier_byte(idx.checked_sub(1).and_then(|i| bytes.get(i)).copied()) {
+            continue;
+        }
+        let rest = &bytes[idx + keyword_bytes.len()..];
+        match rest.first().copied() {
+            None => return true,
+            Some(b'(') if allows_function_form => continue,
+            Some(byte) if is_identifier_byte(Some(byte)) => continue,
+            Some(byte) => {
+                if allows_function_form && byte.is_ascii_whitespace() && starts_with_parenthesis(rest) {
+                    continue;
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when the first non-whitespace byte is `(` (SQL Server style `REPLACE (a, b, c)`).
+fn starts_with_parenthesis(rest: &[u8]) -> bool {
+    let offset = rest.iter().take_while(|byte| byte.is_ascii_whitespace()).count();
+    rest.get(offset) == Some(&b'(')
 }
 
 /// Keywords that start a read-only SQL statement.
@@ -742,6 +796,35 @@ fn is_safe_read_pragma(upper_stripped: &str) -> bool {
 fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
     upper.starts_with(keyword)
         && (upper.len() == keyword.len() || !upper.as_bytes()[keyword.len()].is_ascii_alphanumeric())
+}
+
+/// Whether one MySQL statement is an explicit transaction opener that a
+/// tab-scoped auto-commit session may keep alive across executions: a bare
+/// `BEGIN` / `BEGIN WORK` / `START TRANSACTION [modifiers]`.
+///
+/// `COMMIT` / `ROLLBACK` close a transaction instead of opening one, and
+/// compound statements (`BEGIN ... END`, only valid inside stored programs)
+/// never open a transaction at the top level, so neither is matched. Anything
+/// ambiguous — extra statements in the same text, other `BEGIN` continuations —
+/// is reported as "not an opener" so the caller falls back to the historical
+/// cleanup instead of keeping a transaction open by accident.
+pub fn mysql_statement_opens_explicit_transaction(sql: &str) -> bool {
+    let cleaned = strip_sql_comments(sql);
+    let mut parts = cleaned.split(';');
+    let statement = parts.next().unwrap_or_default().trim();
+    if statement.is_empty() || parts.any(|part| !part.trim().is_empty()) {
+        return false;
+    }
+    let upper = statement.to_ascii_uppercase();
+    let mut tokens = upper.split_whitespace();
+    match tokens.next() {
+        Some("BEGIN") => matches!(tokens.next(), None | Some("WORK")),
+        // Modifiers (`READ ONLY`, `READ WRITE`, `WITH CONSISTENT SNAPSHOT`) are
+        // optional and are verified by the server; a malformed one fails the
+        // statement, so no transaction is left open for this execution.
+        Some("START") => tokens.next() == Some("TRANSACTION"),
+        _ => false,
+    }
 }
 
 /// Check whether a SQL statement is allowed under read-only mode.
@@ -1716,6 +1799,55 @@ mod tests {
     }
 
     #[test]
+    fn contains_dangerous_sql_keyword_ignores_scalar_functions_named_like_writes() {
+        // #9978: REPLACE()/INSERT() are scalar functions, not statements.
+        assert!(!contains_dangerous_sql_keyword("SELECT REPLACE(name, 'a', 'b') FROM users"));
+        assert!(!contains_dangerous_sql_keyword("SELECT REPLACE (name, 'a', 'b') FROM users"));
+        assert!(!contains_dangerous_sql_keyword("SELECT INSERT('Quadratic', 3, 4, 'What')"));
+        assert!(!contains_dangerous_sql_keyword("SELECT dropped, inserted FROM t"));
+        assert!(contains_dangerous_sql_keyword("REPLACE INTO users VALUES (1)"));
+        assert!(contains_dangerous_sql_keyword("REPLACE users SET name = 'x'"));
+        assert!(contains_dangerous_sql_keyword("INSERT INTO users VALUES (1)"));
+        // `UPDATE (t)` is a real write: MySQL accepts a parenthesized table reference.
+        assert!(contains_dangerous_sql_keyword("UPDATE (users) SET name = 'x'"));
+    }
+
+    #[test]
+    fn is_write_sql_allows_mysql_json_table_query_with_replace_function() {
+        // #9978: a JSON_TABLE query using REPLACE() must not be treated as a write,
+        // otherwise read-only connections ask for write permission before running it.
+        let sql = "with tmp as (\n  select '张三,李四,王五' as `names`\n)\nSELECT jt.name\nFROM tmp t\nJOIN JSON_TABLE(\n    CONCAT('[\"',REPLACE(t.`names`,',','\",\"'),'\"]'),\n    '$[*]' COLUMNS(name VARCHAR(50) PATH '$')\n) jt";
+        assert!(!is_write_sql_for_database(sql, DatabaseType::Mysql), "JSON_TABLE + REPLACE() must stay read-only");
+        assert!(!is_write_sql_for_database("SELECT REPLACE(name, 'a', 'b') FROM users", DatabaseType::Mysql));
+        assert!(!is_write_sql_for_database("SELECT INSERT('Quadratic', 3, 4, 'What')", DatabaseType::Mysql));
+        assert!(!is_write_sql_for_database("SELECT REPLACE (name, 'a', 'b') FROM users", DatabaseType::SqlServer));
+        assert!(!is_write_sql_for_database("SELECT replace(name, 'a', 'b') FROM users", DatabaseType::Postgres));
+        assert!(!is_write_sql(sql));
+    }
+
+    #[test]
+    fn is_write_sql_still_blocks_writes_using_function_like_verbs() {
+        assert!(is_write_sql_for_database("REPLACE INTO users VALUES (1)", DatabaseType::Mysql));
+        assert!(is_write_sql_for_database("REPLACE users SET name = 'x'", DatabaseType::Mysql));
+        assert!(is_write_sql_for_database("INSERT INTO users VALUES (1)", DatabaseType::Mysql));
+        // MySQL accepts a parenthesized table reference, so `UPDATE (` is a write.
+        assert!(is_write_sql_for_database("UPDATE (users) SET name = 'x'", DatabaseType::Mysql));
+        assert!(is_write_sql_for_database(
+            "WITH x AS (SELECT 1 AS n) UPDATE (users) SET name = 'x'",
+            DatabaseType::Mysql
+        ));
+        // Data-modifying CTEs keep being detected.
+        assert!(is_write_sql_for_database(
+            "WITH x AS (INSERT INTO users VALUES (1) RETURNING *) SELECT * FROM x",
+            DatabaseType::Postgres
+        ));
+        assert!(is_write_sql_for_database(
+            "WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x",
+            DatabaseType::Postgres
+        ));
+    }
+
+    #[test]
     fn contains_dangerous_sql_keyword_ignores_in_string_literals() {
         assert!(!contains_dangerous_sql_keyword("SELECT 'DROP TABLE users' FROM t"));
         assert!(!contains_dangerous_sql_keyword("SELECT 'delete' FROM t"));
@@ -2218,5 +2350,46 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn mysql_explicit_transaction_openers_are_recognized() {
+        for sql in [
+            "BEGIN",
+            "begin",
+            "BEGIN;",
+            "  BEGIN  ",
+            "BEGIN WORK",
+            "BEGIN WORK;",
+            "-- open a transaction\nBEGIN",
+            "/* keep */ START TRANSACTION",
+            "START TRANSACTION",
+            "start transaction;",
+            "START TRANSACTION READ ONLY",
+            "START TRANSACTION READ WRITE",
+            "START TRANSACTION WITH CONSISTENT SNAPSHOT",
+        ] {
+            assert!(mysql_statement_opens_explicit_transaction(sql), "expected opener: {sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_non_openers_are_not_treated_as_explicit_transactions() {
+        for sql in [
+            "",
+            "   ",
+            ";",
+            "SELECT 1",
+            "COMMIT",
+            "ROLLBACK",
+            "BEGIN;\nUPDATE t SET a = 1;",
+            "BEGIN\nDECLARE x INT;\nEND",
+            "BEGIN END",
+            "START REPLICA",
+            "SET autocommit = 0",
+            "SELECT 'BEGIN' FROM t",
+        ] {
+            assert!(!mysql_statement_opens_explicit_transaction(sql), "expected non-opener: {sql}");
+        }
     }
 }

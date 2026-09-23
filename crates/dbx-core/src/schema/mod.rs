@@ -6318,6 +6318,9 @@ async fn list_object_statistics_once(
         }
     }
     if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
+            return crate::mongo_ops::mongo_agent_list_object_statistics(&client, database).await;
+        }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
             return oracle_agent_list_object_statistics(
                 client,
@@ -11111,6 +11114,23 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_metadata_batch_runs_serially_on_single_connection_pools() {
+        let postgres_pool = |max_size: usize| {
+            let manager = deadpool_postgres::Manager::new(tokio_postgres::Config::new(), tokio_postgres::NoTls);
+            deadpool_postgres::Pool::builder(manager)
+                .runtime(deadpool_postgres::Runtime::Tokio1)
+                .max_size(max_size)
+                .build()
+                .expect("build PostgreSQL test pool")
+        };
+        // 会话级池（导出元数据池）只有一条连接：批量元数据必须顺序执行，
+        // 否则队尾 checkout 会排在同一个连接后面并超时（issue #10018）。
+        assert!(postgres_pool_serves_one_request_at_a_time(&postgres_pool(1)));
+        // 基础池是多连接池，保留并发批量取元数据的既有行为。
+        assert!(!postgres_pool_serves_one_request_at_a_time(&postgres_pool(10)));
+    }
+
+    #[test]
     fn table_structure_export_includes_partition_tree() {
         assert_table_ddl_options(TableDdlOptions::EXPORT, true, true, false);
         assert_table_ddl_options(TableDdlOptions::RELATION_EXPORT, false, true, false);
@@ -12536,6 +12556,30 @@ fn ensure_display_ddl_terminated(sql: String) -> String {
     }
 }
 
+/// 该 PostgreSQL 池一次只服务一条请求（会话级池只有一个物理连接）。
+///
+/// 这类池上并发 checkout 不会带来任何并行度，只会把请求排到同一条连接后面；
+/// 队尾等待时间随并发数线性增长，超过 checkout 超时后整批元数据都会以
+/// "DBX metadata pool is busy; please retry" 失败（issue #10018）。
+fn postgres_pool_serves_one_request_at_a_time(pool: &deadpool_postgres::Pool) -> bool {
+    pool.status().max_size <= 1
+}
+
+/// 在一个 PostgreSQL 池上批量取元数据：多连接池并发、单连接池顺序执行。
+///
+/// 两个分支返回同一组结果的元组，调用方无需关心池的形状。单连接池上顺序执行
+/// 与并发执行的端到端耗时相同（一条连接本来也只能串行处理），但不会产生排队
+/// 导致的 checkout 超时。
+macro_rules! postgres_metadata_batch {
+    ($pool:expr, $($call:expr),+ $(,)?) => {{
+        if postgres_pool_serves_one_request_at_a_time($pool) {
+            Ok(($($call.await?,)+))
+        } else {
+            tokio::try_join!($($call),+)
+        }
+    }};
+}
+
 /// DDL for a single relation. Callers that already iterate a relation set
 /// themselves (database export, table transfer) must use this rather than
 /// `pg_ddl_with_partitions` — recursing into partition children here would
@@ -12543,12 +12587,13 @@ fn ensure_display_ddl_terminated(sql: String) -> String {
 /// once from the caller's own loop over that same child relation).
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
     let (columns, indexes, fkeys, constraints, table_comment, partition_info, trigger_definitions, check_constraints) =
-        tokio::try_join!(
+        postgres_metadata_batch!(
+            pool,
             db::postgres::get_columns(pool, schema, table),
             db::postgres::list_indexes(pool, schema, table),
             db::postgres::list_foreign_keys(pool, schema, table),
             db::postgres::list_constraints(pool, schema, table),
-            async { db::postgres::get_table_comment(pool, schema, table).await },
+            db::postgres::get_table_comment(pool, schema, table),
             db::postgres::get_table_partition_info(pool, schema, table),
             db::postgres::list_trigger_definitions(pool, schema, table),
             db::postgres::list_check_constraints(pool, schema, table),
@@ -12625,7 +12670,8 @@ pub async fn pg_ddl_with_partitions(
         triggers_by_oid,
         checks_by_oid,
         local_objects_by_oid,
-    ) = tokio::try_join!(
+    ) = postgres_metadata_batch!(
+        pool,
         db::postgres::get_columns_for_relations(pool, &relations),
         db::postgres::list_indexes_for_relations(pool, &relations),
         db::postgres::list_foreign_keys_for_relations(pool, &relation_pairs),

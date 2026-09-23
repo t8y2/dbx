@@ -3,6 +3,7 @@ import type { AiAssistantMode } from "@/types/ai";
 import { uuid } from "@/lib/common/utils";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, ForeignKeyInfo, IndexInfo, QueryResult, QueryTab } from "@/types/database";
 import type { PromptTemplate } from "@/types/promptTemplate";
+import type { ReadUserSkill } from "@/types/userSkills";
 import * as api from "@/lib/backend/api";
 import { currentLocale, type Locale } from "@/i18n";
 import { aiTableMentionKey, type AiTableMention } from "@/lib/ai/aiTableMentions";
@@ -161,16 +162,27 @@ export interface AiNamespaceSelection {
 export interface CustomPromptContext {
   globalInstructions?: string;
   activeTemplates?: PromptTemplate[];
+  /** Selected read-only SKILL.md snapshots resolved at send time (09-21-public-skill-loader). */
+  selectedSkills?: ReadUserSkill[];
 }
 
 function buildCustomInstructionLines(custom: CustomPromptContext | undefined, isZh: boolean): string[] {
   const global = custom?.globalInstructions?.trim() ?? "";
   const templates = (custom?.activeTemplates ?? []).filter((t) => t.content.trim());
-  if (!global && templates.length === 0) return [];
+  const skills = (custom?.selectedSkills ?? []).filter((skill) => skill.content.trim());
+  if (!global && templates.length === 0 && skills.length === 0) return [];
 
   const parts: string[] = [];
   if (global) parts.push(global);
   parts.push(...templates.map((t) => `### ${t.name}\n${t.content}`));
+  if (skills.length > 0) {
+    parts.push(
+      isZh
+        ? "## 用户选择的 Skills（补充性）\n以下为用户显式选择的外部 SKILL.md 规则文件，按原样注入；上方核心安全及方言规则优先级更高。"
+        : "## Selected Skills (supplementary)\nThe following external SKILL.md rule files were explicitly selected by the user and are injected as-is. Core safety and dialect rules above take precedence.",
+    );
+    parts.push(...skills.map((skill) => `### Skill: ${skill.name}\n<ai-skill id="${skill.id}">\n${skill.content}\n</ai-skill>`));
+  }
 
   return [
     isZh

@@ -1972,9 +1972,7 @@ fn sqlserver_cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
         return super::safe_i64_to_json(v);
     }
     if let Ok(Some(v)) = <f32 as FromSql>::from_sql(cell) {
-        return serde_json::Number::from_f64(v as f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null);
+        return serde_json::Value::from(v);
     }
     if let Ok(Some(v)) = <f64 as FromSql>::from_sql(cell) {
         return serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null);
@@ -5300,6 +5298,105 @@ mod tests {
     #[test]
     fn sqlserver_tinyint_cells_are_json_numbers() {
         assert_eq!(sqlserver_cell_to_json(&ColumnData::U8(Some(7))), serde_json::json!(7));
+    }
+
+    #[test]
+    fn sqlserver_real_cells_use_shortest_round_trip_numbers() {
+        for (value, expected) in [
+            (18.2_f32, "18.2"),
+            (18.3, "18.3"),
+            (59.3, "59.3"),
+            (4.6, "4.6"),
+            (-18.2, "-18.2"),
+            (-59.3, "-59.3"),
+            (18.5, "18.5"),
+            (1.2345678, "1.2345678"),
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0e-20, "1e-20"),
+            (1.0e20, "1e+20"),
+        ] {
+            let converted = sqlserver_cell_to_json(&ColumnData::F32(Some(value)));
+            assert!(converted.is_number(), "{value}: {converted:?}");
+            assert_eq!(converted.to_string(), expected, "{value}");
+            assert_eq!(serde_json::from_value::<f32>(converted).unwrap().to_bits(), value.to_bits());
+        }
+    }
+
+    #[test]
+    fn sqlserver_real_cells_preserve_extremes_and_subnormals() {
+        for value in [
+            f32::MIN,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            f32::from_bits(0x007f_ffff),
+            f32::from_bits(0x3f80_0001),
+        ] {
+            let converted = sqlserver_cell_to_json(&ColumnData::F32(Some(value)));
+            assert!(converted.is_number(), "{value}: {converted:?}");
+            let serialized = converted.to_string();
+            assert_eq!(serialized.parse::<f32>().unwrap().to_bits(), value.to_bits());
+            assert_eq!((converted.as_f64().unwrap() as f32).to_bits(), value.to_bits());
+            assert_eq!(serde_json::from_str::<f32>(&serialized).unwrap().to_bits(), value.to_bits());
+        }
+    }
+
+    #[test]
+    fn sqlserver_real_and_float_null_and_non_finite_cells_remain_null() {
+        assert_eq!(sqlserver_cell_to_json(&ColumnData::F32(None)), serde_json::Value::Null);
+        assert_eq!(sqlserver_cell_to_json(&ColumnData::F64(None)), serde_json::Value::Null);
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(sqlserver_cell_to_json(&ColumnData::F32(Some(value))), serde_json::Value::Null);
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(sqlserver_cell_to_json(&ColumnData::F64(Some(value))), serde_json::Value::Null);
+        }
+    }
+
+    #[test]
+    fn sqlserver_float_cells_keep_double_precision() {
+        for value in [
+            18.200000762939453_f64,
+            18.299999237060547,
+            59.29999923706055,
+            4.599999904632568,
+            1.2345678901234567,
+            -1.2345678901234567,
+            0.0,
+            -0.0,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::from_bits(1),
+        ] {
+            let converted = sqlserver_cell_to_json(&ColumnData::F64(Some(value)));
+            assert_eq!(converted, serde_json::json!(value));
+            assert_eq!(converted.as_f64().unwrap().to_bits(), value.to_bits());
+        }
+    }
+
+    #[test]
+    fn sqlserver_real_conversion_keeps_other_cell_types_unchanged() {
+        for (cell, expected) in [
+            (ColumnData::I16(Some(-18)), serde_json::json!(-18)),
+            (ColumnData::I32(Some(59)), serde_json::json!(59)),
+            (ColumnData::I64(Some(9_007_199_254_740_991)), serde_json::json!(9_007_199_254_740_991_i64)),
+            (ColumnData::I64(Some(i64::MAX)), serde_json::json!(i64::MAX.to_string())),
+            (ColumnData::I32(None), serde_json::Value::Null),
+            (ColumnData::String(Some(Cow::Borrowed("18.200000762939453"))), serde_json::json!("18.200000762939453")),
+            (ColumnData::String(None), serde_json::Value::Null),
+            (ColumnData::Bit(Some(true)), serde_json::json!(true)),
+            (ColumnData::Bit(None), serde_json::Value::Null),
+            (
+                ColumnData::Numeric(Some(tiberius::numeric::Numeric::new_with_scale(18200, 3))),
+                serde_json::json!("18.200"),
+            ),
+            (ColumnData::Numeric(None), serde_json::Value::Null),
+        ] {
+            assert_eq!(sqlserver_cell_to_json(&cell), expected, "{cell:?}");
+        }
     }
 
     #[test]

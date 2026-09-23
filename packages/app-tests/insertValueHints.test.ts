@@ -583,6 +583,81 @@ test("documents a known limitation of the pure-string fallback (no live EditorSt
   assert.notEqual(window.from, 0, "known-imperfect (pure-string fallback only): a correct implementation would return 0 here (the whole CREATE FUNCTION is one statement)");
 });
 
+test("parses every INSERT inside a semicolon-less statement group", () => {
+  // T-SQL scripts routinely omit statement terminators; the reported case is one query window
+  // holding BEGIN TRANSACTION + two INSERT ... SELECT statements (#9966).
+  const sql = ["BEGIN TRANSACTION", "INSERT INTO u_msfx_a (id, billno) SELECT src_id, src_billno FROM staging_a", "INSERT INTO u_msfx_b (id, billno) SELECT src_id, src_billno FROM staging_b", "COMMIT TRANSACTION"].join("\n");
+  const clauses = parseInsertValuesClauses(sql, "sqlserver");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["u_msfx_a", "u_msfx_b"],
+  );
+  const hints = buildInsertValueHints(clauses);
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["id", "billno", "id", "billno"],
+  );
+  assert.deepEqual(
+    hints.map((hint) => hint.from),
+    [sql.indexOf("src_id"), sql.indexOf("src_billno"), sql.lastIndexOf("src_id"), sql.lastIndexOf("src_billno")],
+  );
+});
+
+test("parses every INSERT ... VALUES inside a semicolon-less statement group", () => {
+  const sql = "INSERT INTO t1 (id, name) VALUES (1, 'a')\nINSERT INTO t2 (id, name) VALUES (2, 'b')";
+  const clauses = parseInsertValuesClauses(sql, "sqlserver");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["t1", "t2"],
+  );
+  assert.deepEqual(
+    buildInsertValueHints(clauses).map((hint) => hint.column),
+    ["id", "name", "id", "name"],
+  );
+});
+
+test("does not split a statement at the INSERT() string function", () => {
+  // MySQL/MariaDB expose INSERT(str, pos, len, newstr); an `insert` word without a following
+  // INTO is a function call, not a statement start.
+  const sql = "INSERT INTO t1 (id, name) SELECT id, INSERT('ab', 1, 2, 'xy') FROM src\nINSERT INTO t2 (id, name) VALUES (1, INSERT('ab', 1, 2, 'xy'))";
+  const clauses = parseInsertValuesClauses(sql, "mysql");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["t1", "t2"],
+  );
+});
+
+test("parses each batch of a GO-separated SQL Server script", () => {
+  const sql = ["INSERT INTO t1 (id, name) SELECT src_id, src_name FROM staging1", "GO", "INSERT INTO t2 (id, name) SELECT src_id, src_name FROM staging2", "GO"].join("\n");
+  const clauses = parseInsertValuesClauses(sql, "sqlserver");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["t1", "t2"],
+  );
+  assert.deepEqual(
+    buildInsertValueHints(clauses).map((hint) => hint.column),
+    ["id", "name", "id", "name"],
+  );
+});
+
+test("still parses INSERT statements separated by semicolons", () => {
+  const sql = "INSERT INTO t1 (id, name) SELECT src_id, src_name FROM staging1; INSERT INTO t2 (id, name) SELECT src_id, src_name FROM staging2;";
+  const clauses = parseInsertValuesClauses(sql, "sqlserver");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["t1", "t2"],
+  );
+  assert.deepEqual(
+    buildInsertValueHints(clauses).map((hint) => hint.column),
+    ["id", "name", "id", "name"],
+  );
+});
+
+test("does not read a MERGE INSERT branch as an INSERT statement", () => {
+  const sql = "MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)";
+  assert.deepEqual(parseInsertValuesClauses(sql, "sqlserver"), []);
+});
+
 test("ignores statements that are not INSERT VALUES", () => {
   const sql = "SELECT 1; UPDATE users SET name = 'a' WHERE id = 1;";
   assert.deepEqual(parseInsertValueHints(sql), []);

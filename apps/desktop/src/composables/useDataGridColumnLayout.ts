@@ -99,6 +99,11 @@ export function dataGridHorizontalColumnWindow(options: { widths: readonly numbe
   return { start, end, beforeWidth: offsets[start] ?? 0, afterWidth: Math.max(0, columnsWidth - visibleWidth) };
 }
 
+export function stableDataGridHorizontalColumnWindow(previous: DataGridHorizontalColumnWindow | undefined, next: DataGridHorizontalColumnWindow): DataGridHorizontalColumnWindow {
+  if (previous && previous.start === next.start && previous.end === next.end && previous.beforeWidth === next.beforeWidth && previous.afterWidth === next.afterWidth) return previous;
+  return next;
+}
+
 export function useDataGridColumnLayoutState(options: {
   columns: MaybeRefOrGetter<readonly string[]>;
   sourceColumns?: MaybeRefOrGetter<readonly (string | undefined)[] | undefined>;
@@ -503,16 +508,19 @@ export function useDataGridColumnLayout(options: {
 }) {
   const renderedColumnOffsets = computed(() => dataGridColumnOffsets(toValue(options.renderedColumnWidths)));
   const frozenColumnCount = computed(() => toValue(options.frozenColumnCount ?? 0));
-  const horizontalColumnWindow = computed(() =>
-    dataGridHorizontalColumnWindow({
-      widths: toValue(options.renderedColumnWidths),
-      offsets: renderedColumnOffsets.value,
-      columnCount: toValue(options.visibleColumnIndexes).length,
-      scrollLeft: toValue(options.scrollLeft),
-      viewportWidth: toValue(options.viewportWidth),
-      rowNumberWidth: toValue(options.rowNumberWidth),
-      bufferPx: options.bufferPx ?? 900,
-    }),
+  const horizontalColumnWindow = computed<DataGridHorizontalColumnWindow>((previous) =>
+    stableDataGridHorizontalColumnWindow(
+      previous,
+      dataGridHorizontalColumnWindow({
+        widths: toValue(options.renderedColumnWidths),
+        offsets: renderedColumnOffsets.value,
+        columnCount: toValue(options.visibleColumnIndexes).length,
+        scrollLeft: toValue(options.scrollLeft),
+        viewportWidth: toValue(options.viewportWidth),
+        rowNumberWidth: toValue(options.rowNumberWidth),
+        bufferPx: options.bufferPx ?? 900,
+      }),
+    ),
   );
   const renderedGridColumns = computed<RenderedDataGridColumn[]>(() => {
     const columnNames = toValue(options.columnNames);

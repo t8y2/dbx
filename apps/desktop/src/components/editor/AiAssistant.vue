@@ -63,6 +63,9 @@ import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
+import { useUserSkillStore } from "@/stores/userSkillStore";
+import { buildSelectedSkillChips, capSkillsToCharLimit, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
+import { ACTIVE_SKILLS_TOTAL_MAX, type ReadUserSkill, type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillRootSettings } from "@/types/userSkills";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
@@ -153,7 +156,7 @@ import { buildAiAgentStepItems, formatToolDurationMs, toolCallStepKey, upsertAge
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiCancelStream, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import { aiStream, aiCancelStream, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
@@ -180,6 +183,7 @@ import { buildAiConversationExport, type AiConversationExportFormat } from "@/li
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
+import { buildPluginAiRequest, pluginContextFromMessages, pluginContextText, streamPluginAiConversation, type AiPluginContext, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 
 const { t } = useI18n();
 const AiChartRenderer = defineAsyncComponent({
@@ -245,6 +249,7 @@ type AiReferenceMessageMention = Extract<AiMessageMention, { kind: "table" | "sq
 type AiAttachmentMessageMention = Extract<AiMessageMention, { kind: "csvFile" | "file" | "image" }>;
 
 interface ChatMessage {
+  pluginContext?: AiPluginContext;
   role: "user" | "assistant";
   content: string;
   /** Connection that produced this assistant response; ephemeral export metadata. */
@@ -292,10 +297,13 @@ const emit = defineEmits<{
   openExplainPlan: [sql: string];
   toggleMaximize: [];
   close: [];
+  openSettings: [];
 }>();
 
 const prompt = ref("");
 const messages = ref<ChatMessage[]>([]);
+const draftPluginContext = ref<AiPluginContext>();
+const pluginContext = computed(() => pluginContextFromMessages(messages.value) ?? draftPluginContext.value);
 const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
 // Stays a concrete action until the AI config loads: whether new conversations
@@ -374,7 +382,7 @@ const queuedInputs = reactive(new Map<string, QueuedConversationInput>());
  * one background run can settle in the same event turn; this must be FIFO, not
  * a single "next send" slot, or the later completion silently drops the first
  * conversation's queued input. */
-type PendingAutoSend = { conversationId: string; text: string; messages: ChatMessage[]; mode: AiAssistantMode; action: AiActionSelection };
+type PendingAutoSend = { conversationId: string; text: string; messages: ChatMessage[]; mode: AiAssistantMode; action: AiActionSelection; pluginContext?: AiPluginContext };
 const pendingAutoSends: PendingAutoSend[] = [];
 
 /** Highest event `seq` the user has read per conversation (parent PRD §8). Set
@@ -498,6 +506,81 @@ watch(
   },
 );
 
+// User skills (read-only SKILL.md files). Selection is panel-session
+// scope like activeTemplateIds above: closing the panel or restarting clears it,
+// conversation switches keep it (prd.md:30).
+const userSkillStore = useUserSkillStore();
+const selectedSkillIds = ref<string[]>([]);
+const showSkillSelector = ref(false);
+const skillFailures = ref<ReadUserSkillFailure[]>([]);
+// Chips derive from the selection truth, not from the catalog: a skill that
+// vanished from discovery must keep a removable chip (prd.md:37) instead of
+// silently becoming an id the user can no longer drop.
+const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id)));
+// Selector retry-on-open mirrors the template selector above.
+watch(showSkillSelector, (open) => {
+  if (open) void userSkillStore.refresh(skillRootSettings());
+});
+watch(
+  () => [settings.desktopSettings?.custom_ai_skill_root_enabled, settings.desktopSettings?.custom_ai_skill_root] as const,
+  () => {
+    if (showSkillSelector.value) void userSkillStore.refresh(skillRootSettings());
+  },
+);
+
+function skillRootSettings(): UserSkillRootSettings {
+  return {
+    customRootEnabled: settings.desktopSettings?.custom_ai_skill_root_enabled === true,
+    customRoot: settings.desktopSettings?.custom_ai_skill_root?.trim() || null,
+  };
+}
+
+function toggleSkillSelected(id: string) {
+  skillFailures.value = [];
+  selectedSkillIds.value = selectedSkillIds.value.includes(id) ? selectedSkillIds.value.filter((skillId) => skillId !== id) : [...selectedSkillIds.value, id];
+}
+
+function removeSelectedSkill(id: string) {
+  selectedSkillIds.value = removeSkillIds(selectedSkillIds.value, [id]);
+  skillFailures.value = [];
+}
+
+/** Banner Remove: drops every failed skill from the selection, so the next send is not blocked by a stale id. */
+function removeFailedSkills() {
+  selectedSkillIds.value = removeSkillIds(
+    selectedSkillIds.value,
+    skillFailures.value.map((failure) => failure.id),
+  );
+  skillFailures.value = [];
+}
+
+function refreshSkills() {
+  void userSkillStore.refresh(skillRootSettings());
+}
+
+const skillFailureReasonKeys: Record<UserSkillFailureReason, string> = {
+  not_found: "ai.skillsReasonNotFound",
+  root_unavailable: "ai.skillsReasonRootUnavailable",
+  oversized: "ai.skillsReasonOversized",
+  not_utf8: "ai.skillsReasonNotUtf8",
+  invalid_frontmatter: "ai.skillsReasonInvalidFrontmatter",
+  unreadable: "ai.skillsReasonUnreadable",
+};
+
+function skillFailureReasonKey(reason: UserSkillFailureReason): string {
+  return skillFailureReasonKeys[reason];
+}
+
+function openSkillRootSettings() {
+  skillFailures.value = [];
+  emit("openSettings");
+}
+
+function selectedSkillsAgentStep(skills: ReadUserSkill[]): AiAgentStepItem {
+  const details = skills.map((skill) => `${skill.name} (${t(userSkillSourceOfId(skill.id) === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault")})`).join(" · ");
+  return { key: "selected-skills", labelKey: "ai.agentSteps.skillsLoaded", tone: "success", toolName: skills.map((skill) => skill.name).join(", "), toolResult: details };
+}
+
 // Retry store load on selector open if prior init failed (e.g. backend not yet ready at mount)
 watch(showTemplateSelector, (open) => {
   // Retry load on selector open if prior init failed, then apply pending
@@ -514,7 +597,7 @@ watch(showTemplateSelector, (open) => {
 // inferred dialect) so resolution matches the dialect the AI pipeline and
 // prompt selection actually use — the same axis aiDatabaseTypeForConnection
 // established for schema selection.
-const templateDbType = computed(() => (props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));
+const templateDbType = computed(() => (!pluginContext.value && props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));
 const aiTemplateNamespaceKey = computed(() => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}::${props.tab?.schema ?? ""}`);
 let autoTemplatesInitialized = false;
 function applyResolvedTemplateIds(ids: string[]) {
@@ -769,7 +852,7 @@ function submitEdit(visibleIndex: number) {
   if (!content && !editingMentions.value.length && !editingCsvAttachments.value.length && !editingImageAttachments.value.length) return;
   const actualIndex = visibleToActualIndex(messages.value, visibleIndex);
   if (actualIndex < 0) return;
-  if (!props.connection || !props.tab) return;
+  if (!pluginContext.value && (!props.connection || !props.tab)) return;
   if (!activeFullConfig.value) {
     toast(t("ai.noConfig"));
     return;
@@ -779,6 +862,7 @@ function submitEdit(visibleIndex: number) {
     toast(imageAttachmentSupportErrorMessage(imageError), 5000);
     return;
   }
+  draftPluginContext.value = pluginContext.value;
   messages.value = messages.value.slice(0, actualIndex);
   editingMessageIndex.value = null;
   editingContent.value = "";
@@ -1101,8 +1185,8 @@ const canSubmitPrompt = computed(() =>
     prompt: prompt.value,
     contextItemCount: selectedMentions.value.length + selectedSqlFileMentions.value.length + selectedCsvAttachments.value.length + selectedImageAttachments.value.length,
     isAttachmentProcessing: isAttachmentProcessing.value,
-    hasTab: !!props.tab,
-    hasConnection: !!props.connection,
+    hasTab: !!pluginContext.value || !!props.tab,
+    hasConnection: !!pluginContext.value || !!props.connection,
   }),
 );
 let browserAttachmentDragDepth = 0;
@@ -1116,9 +1200,19 @@ const commandOpen = ref(false);
 const commandSelectedIndex = ref(0);
 const commandStart = ref(0);
 
-const filteredCommands = computed(() => {
+/**
+ * `/skill` is a selector shortcut, not an action: it rides a separate command
+ * source and never touches `activeAction` or the mode+action picker (prd.md:31).
+ */
+type AiSlashEntry = { type: "action"; button: AiActionButton } | { type: "skills" };
+
+const filteredCommands = computed<AiSlashEntry[]>(() => {
   const query = prompt.value.slice(commandStart.value + 1).toLowerCase();
-  return actionButtons.value.filter((cmd) => cmd.action.toLowerCase().includes(query) || t(cmd.key).toLowerCase().includes(query));
+  const entries: AiSlashEntry[] = [...actionButtons.value.map((button): AiSlashEntry => ({ type: "action", button })), { type: "skills" }];
+  return entries.filter((entry) => {
+    const haystack = entry.type === "action" ? `${entry.button.action} ${t(entry.button.key)}` : `skill ${t("ai.skillsEntry")}`;
+    return haystack.toLowerCase().includes(query);
+  });
 });
 
 const AI_SQL_FILE_MENTION_CANDIDATE_LIMIT = 50;
@@ -1304,8 +1398,17 @@ function messagesForAgentHistory(historyMessages: ChatMessage[]): AiMessage[] {
 }
 
 const chatTitle = computed(() => {
+  // Same precedence as buildConversationSnapshot(): the user's rename wins,
+  // then the stored title, so renaming a conversation from the history list
+  // updates this header immediately instead of leaving the first-message
+  // excerpt stuck (issue #9904). Saved chats follow the stored title exactly
+  // like the history row (even if the first message is edited later); only
+  // unsaved/new chats derive from messages.
+  const activeConversation = conversations.value.find((conversation) => conversation.id === conversationId.value);
+  const conversationTitle = renamedConversationTitles.get(conversationId.value) || activeConversation?.title;
+  if (conversationTitle) return conversationTitle;
   const first = messages.value.find((m) => m.role === "user" && m.kind !== "contextSummary");
-  return first ? messageTitle(first).slice(0, 30) : t("ai.newChat");
+  return pluginContext.value?.title || (first ? messageTitle(first).slice(0, 30) : t("ai.newChat"));
 });
 
 const promptMentionChips = computed<AiPromptMentionChip[]>(() => [...selectedMentions.value.map((mention) => ({ ...mention, kind: "table" as const })), ...selectedSqlFileMentions.value]);
@@ -1355,7 +1458,7 @@ function messageTitle(message: ChatMessage): string {
  * still generating or when no such message exists.
  */
 const proposalConfirmMessage = computed<ChatMessage | null>(() => {
-  if (isGenerating.value) return null;
+  if (pluginContext.value || isGenerating.value) return null;
   for (let i = messages.value.length - 1; i >= 0; i--) {
     const msg = messages.value[i];
     if (msg.kind === "contextSummary") continue;
@@ -1440,7 +1543,7 @@ function sendProposalReply(positive: boolean) {
 }
 
 // `auto` has no per-action placeholder of its own, so it reuses the general one.
-const activePlaceholder = computed(() => `${t(`ai.placeholders.${isAutoActionSelection(activeAction.value) ? "general" : activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
+const activePlaceholder = computed(() => (pluginContext.value ? t("ai.pluginFollowUp") : `${t(`ai.placeholders.${isAutoActionSelection(activeAction.value) ? "general" : activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`));
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
 
 const codeSnapshotOpen = ref(false);
@@ -2097,7 +2200,7 @@ function mentionTargetDatabase(): string {
 
 async function loadMentionCandidates(query: string) {
   const mentionDatabase = mentionTargetDatabase();
-  if (!props.connection || !props.tab?.connectionId || !mentionDatabase) return;
+  if (pluginContext.value || !props.connection || !props.tab?.connectionId || !mentionDatabase) return;
 
   const key = mentionCacheKey(props.tab.connectionId, mentionDatabase, query);
   if (mentionCache.value[key]) {
@@ -2486,12 +2589,18 @@ function onPromptKeyup(event: KeyboardEvent) {
   refreshMentionState();
 }
 
-function selectCommand(command: AiActionButton) {
+function selectCommand(command: AiSlashEntry) {
   const before = prompt.value.slice(0, commandStart.value);
   const after = prompt.value.slice(promptTextareaRef.value?.selectionStart ?? prompt.value.length);
   prompt.value = `${before}${after}`.replace(/\s{2,}/g, " ").trim();
   commandOpen.value = false;
-  activeAction.value = command.action;
+  if (command.type === "skills") {
+    skillFailures.value = [];
+    showSkillSelector.value = true;
+    nextTick(() => promptTextareaRef.value?.focus());
+    return;
+  }
+  activeAction.value = command.button.action;
   nextTick(() => {
     const textarea = promptTextareaRef.value;
     if (textarea) {
@@ -2898,6 +3007,7 @@ function onTauriFileDrop(event: Event) {
 }
 
 function onTableReferenceDropEvent(event: Event) {
+  if (pluginContext.value) return;
   handleAiTableReferenceDropEvent(event, {
     context: {
       connectionId: props.tab?.connectionId || props.connection?.id,
@@ -2932,19 +3042,25 @@ async function send() {
 
   // Snapshot the target connection/database before any async work so that
   // suspension points during context loading cannot cause a TOCTOU target switch.
-  const connection = props.connection;
-  const tab = props.tab;
-  if (!connection || !tab) {
+  const runPluginContext = auto ? (pluginContextFromMessages(auto.messages) ?? auto.pluginContext) : pluginContext.value;
+  const connection = runPluginContext ? undefined : props.connection;
+  const tab = runPluginContext ? undefined : props.tab;
+  const runSourceName = runPluginContext?.pluginName ?? connection?.name ?? "";
+  if (!runPluginContext && (!connection || !tab)) {
     clearPendingWriteGrant();
     return;
   }
   // Capture the selection before context loading or queued run scheduling can
   // yield to another conversation. Dameng's top-level selector is a schema.
-  const runDatabases = resolveAiNamespaceSelection(tab, connection).kind === "database" ? [...selectedDatabases.value] : [];
+  const runDatabases = connection && tab && resolveAiNamespaceSelection(tab, connection).kind === "database" ? [...selectedDatabases.value] : [];
   const activeConfig = activeFullConfig.value;
   if (!activeConfig) {
     clearPendingWriteGrant();
     toast(t("ai.noConfig"));
+    return;
+  }
+  if (runPluginContext && activeConfig.provider.endsWith("-cli")) {
+    toast(t("ai.pluginHttpModelOnly"));
     return;
   }
   const imageError = imageAttachmentSupportError(activeConfig.provider, auto ? [] : selectedImageAttachments.value.map((attachment) => attachment.mediaType));
@@ -3002,10 +3118,10 @@ async function send() {
       status: "preparing",
       messages: runMessages,
       assistantMessageIndex: -1,
-      connectionId: connection.id,
-      connectionName: connection.name,
-      database: tab.database || "",
-      schema: resolveAiDatabaseTarget(tab, connection).schema,
+      connectionId: connection?.id ?? "",
+      connectionName: runSourceName,
+      database: tab?.database || "",
+      schema: connection && tab ? resolveAiDatabaseTarget(tab, connection).schema : undefined,
       createdAt: resumingConfirmedWrite ? resumableRun!.createdAt : runCreatedAt,
       updatedAt: runCreatedAt,
       // Carry the proposal snapshot across a confirmed-write resume so a queued
@@ -3030,6 +3146,38 @@ async function send() {
   }
   const generationCanContinue = () => (detachedRun ? !detachedRun.cancelRequested : aiGenerationGuard.isCurrent(myGeneration));
   const runIsVisible = () => !detachedRun || (assistantViewMounted && conversationId.value === runConversationId);
+  // Selected skills are read and validated through the backend registry right
+  // before the request pipeline starts (after the generation guard: no awaits
+  // above this point). On any failure no AI request is sent: the failure banner
+  // appears above the composer while the draft and selection stay untouched
+  // (prd send-time loading contract).
+  let sendSkillSnapshot: ReadUserSkill[] | undefined;
+  if (selectedSkillIds.value.length > 0) {
+    skillFailures.value = [];
+    const skillRead = await readUserSkills([...selectedSkillIds.value], skillRootSettings());
+    if (skillRead.failures.length > 0) {
+      skillFailures.value = skillRead.failures;
+      clearPendingWriteGrant();
+      if (generationCanContinue()) {
+        if (detachedRun) finishDesktopAiRun(detachedRun, "failed");
+        if (runIsVisible()) {
+          isGenerating.value = false;
+          stopStatusTimer();
+          generationStatus.value = createGenerationStatus(Date.now());
+        }
+      }
+      resolveDetachedRunSettled();
+      return;
+    }
+    // Skill bodies are only known here, so the combined budget is enforced on
+    // the read snapshots: overflowing skills are skipped for this send while
+    // the selection itself stays untouched.
+    const cappedSkills = capSkillsToCharLimit(skillRead.skills, ACTIVE_SKILLS_TOTAL_MAX);
+    if (cappedSkills.length < skillRead.skills.length) {
+      toast(t("ai.skillsTotalTrimmed", { max: ACTIVE_SKILLS_TOTAL_MAX }), 4000);
+    }
+    sendSkillSnapshot = cappedSkills;
+  }
   if (!(await promptTemplateStore.ensureLoaded())) {
     clearPendingWriteGrant();
     if (generationCanContinue()) {
@@ -3067,7 +3215,8 @@ async function send() {
   // cannot change the instructions for an already-submitted request.
   const customPromptContext: CustomPromptContext = {
     globalInstructions: promptTemplateStore.globalInstructions,
-    activeTemplates: [...activeTemplates.value],
+    activeTemplates: runPluginContext ? [] : [...activeTemplates.value],
+    ...(sendSkillSnapshot?.length ? { selectedSkills: sendSkillSnapshot } : {}),
   };
   // Remember what was actually sent for this db_type so panels opened later can
   // restore it when no explicit per-db_type defaults are configured. This runs
@@ -3077,8 +3226,8 @@ async function send() {
     settings.recordLastUsedTemplates(templateDbType.value, [...activeTemplateIds.value]);
   }
 
-  const selectedTableMentions = auto ? [] : [...selectedMentions.value];
-  const selectedSqlFiles = auto ? [] : [...selectedSqlFileMentions.value];
+  const selectedTableMentions = auto || runPluginContext ? [] : [...selectedMentions.value];
+  const selectedSqlFiles = auto || runPluginContext ? [] : [...selectedSqlFileMentions.value];
   const csvAttachments = auto ? [] : [...selectedCsvAttachments.value];
   const imageAttachments = auto ? [] : [...selectedImageAttachments.value];
   const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text)];
@@ -3088,7 +3237,14 @@ async function send() {
     userText: text,
   });
 
-  const userMessage: ChatMessage = { role: "user", content: text, mentions: selectedMessageMentions(selectedTableMentions, selectedSqlFiles, csvAttachments, imageAttachments), csvAttachments, imageAttachments };
+  const userMessage: ChatMessage = {
+    role: "user",
+    content: text,
+    ...(runPluginContext && !pluginContextFromMessages(runMessages) ? { pluginContext: runPluginContext } : {}),
+    mentions: selectedMessageMentions(selectedTableMentions, selectedSqlFiles, csvAttachments, imageAttachments),
+    csvAttachments,
+    imageAttachments,
+  };
   runMessages.push(userMessage);
   if (!auto) {
     // Save to prompt history (deduplicate consecutive duplicates)
@@ -3107,7 +3263,7 @@ async function send() {
   if (autoSendVisible) scrollToBottom({ force: true });
 
   const requestedSelection: AiActionSelection = auto ? auto.action : activeAction.value;
-  const requestedMode = auto ? auto.mode : assistantMode.value;
+  const requestedMode: AiAssistantMode = runPluginContext ? "ask" : auto ? auto.mode : assistantMode.value;
   // A confirmed-write turn (the ✅ reply, or the segment that resumes an
   // `awaiting_write_confirmation` run) is a continuation of the pending proposal,
   // not a new user request: its reply text is component copy, so the Auto router
@@ -3121,7 +3277,11 @@ async function send() {
   // `aiSkillForAction` throws on unknown actions. Explicit selections skip the
   // router entirely, so their behavior is unchanged (#9118).
   let requestedAction: AiAction;
-  if (!isAutoActionSelection(requestedSelection)) {
+  if (runPluginContext) {
+    // A plugin conversation carries its own data snapshot: the Auto router must
+    // not classify the prompt, and the task contract stays host-owned.
+    requestedAction = "general";
+  } else if (!isAutoActionSelection(requestedSelection)) {
     requestedAction = requestedSelection;
   } else if (confirmationContinuation) {
     // Nothing was routed here, so no "Auto · …" chip either (the proposal card
@@ -3144,7 +3304,7 @@ async function send() {
   // Detect user-typed short confirmation (e.g. "可以"/"go ahead") as an alternative
   // path to the proposal ✅ button. Delegates to the shared pure function so the
   // component and its unit tests share the same gating logic.
-  if (!allowWriteSqlForNextRun) {
+  if (!runPluginContext && connection && tab && !allowWriteSqlForNextRun) {
     allowWriteSqlForNextRun = shouldGrantWriteSqlOnShortAffirmative({
       mode: requestedMode,
       alreadyGranted: false,
@@ -3178,7 +3338,7 @@ async function send() {
   // Verify the connection/database/schema haven't changed since the user confirmed
   // the write operation. If the user switched connections or namespaces between
   // confirmation and execution, the grant is void.
-  if (allowWriteSqlForNextRun && confirmedWriteSqlText) {
+  if (connection && tab && allowWriteSqlForNextRun && confirmedWriteSqlText) {
     const target = resolveAiDatabaseTarget(tab, connection);
     if (confirmedConnectionId !== connection.id || confirmedDatabase !== target.database || confirmedSchema !== target.schema) {
       allowWriteSqlForNextRun = false;
@@ -3227,8 +3387,11 @@ async function send() {
       return;
     }
   }
-  runMessages.push({ role: "assistant", content: "", sourceConnectionName: connection.name });
+  runMessages.push({ role: "assistant", content: "", sourceConnectionName: runSourceName });
   const assistantIdx = runMessages.length - 1;
+  if (requestedMode === "agent" && sendSkillSnapshot?.length) {
+    runMessages[assistantIdx].agentSteps = [selectedSkillsAgentStep(sendSkillSnapshot)];
+  }
   const sessionId = uuid();
   if (runIsVisible()) {
     currentAssistantMessageIndex = assistantIdx;
@@ -3260,151 +3423,163 @@ async function send() {
     // must not be undone by this snapshot either.
     if (!detachedRun.discardOnFinish) void runSnapshotScheduler.save(detachedRun);
   } else {
-    void persistConversationSnapshot(runConversationId, runMessages, connection.name, tab.database || "", runCreatedAt);
+    void persistConversationSnapshot(runConversationId, runMessages, runSourceName, tab?.database || "", runCreatedAt);
   }
   try {
-    const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
-    // Superseded while awaiting loadReferencedSqlFiles() above — bail before
-    // paying for buildAiContext() too; it can do real backend/schema work that
-    // would be entirely wasted on an already-abandoned request.
-    if (!generationCanContinue()) return;
-    const requestDatabase = runDatabases[0] ?? tab.database;
-    const context = await buildAiContext(
-      {
-        ...tab,
-        database: requestDatabase,
-        schema: runDatabases.length > 1 || requestDatabase !== tab.database ? undefined : tab.schema,
-      },
-      connection,
-      {
-        mentionedTables,
-        sqlFiles,
-        csvFiles: csvAttachments,
-      },
-    );
-    context.selectedDatabases = runDatabases;
-    // Superseded while awaiting buildAiContext() above — must bail before ever
-    // calling runAgentStream(), not just before writing its results. Without
-    // this recheck, a clear/switch/unmount that fires during context
-    // preparation invalidates the generation but the request still gets sent to
-    // the backend and starts executing tools/SQL; the best-effort cancel RPC
-    // fired by abandonInFlightRequest() is a no-op here since no session has
-    // been registered with the backend yet (registration happens inside
-    // runAgentStream() itself).
-    if (!generationCanContinue()) return;
-    // The stream is about to reach the backend — transition the status line from
-    // `preparing` to `waiting_model` so it reads "等待模型响应" while no events have
-    // arrived yet (slow CLI first token included).
-    if (runIsVisible()) generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
     const history: AiMessage[] = messagesForAgentHistory(runMessages.slice(0, -2));
-    await runAgentStream(
-      {
-        config: activeConfig,
-        action: requestedAction,
-        mode: requestedMode,
-        instruction: modelInstruction,
-        taskContractUserRequest: text,
-        context,
-        inlineImages: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })),
-        allowWriteSql,
-        confirmedWriteSql,
-        confirmedConnectionId: confirmedTargetConnId,
-        confirmedDatabase: confirmedTargetDb,
-        confirmedSchema: confirmedTargetSchema,
-        promptCacheKey: conversationId.value || undefined,
-      },
-      history,
-      (event: AgentEvent) => {
-        // Superseded by a clear/switch/new-chat (or a newer send()) — the backend
-        // stream may still be running, but this generation no longer owns any
-        // shared state to write into.
-        if (!generationCanContinue()) return;
-        agentEvents.push(event);
-        // Every desktop agent event takes the next seq for its run (parent PRD
-        // §8: strictly increasing from 1, across all sessions). Mark the
-        // conversation unread when a new event arrives beyond the user's read
-        // baseline while they are looking elsewhere.
+    const onEvent = (event: AgentEvent) => {
+      // Superseded by a clear/switch/new-chat (or a newer send()) — the backend
+      // stream may still be running, but this generation no longer owns any
+      // shared state to write into.
+      if (!generationCanContinue()) return;
+      agentEvents.push(event);
+      // Every desktop agent event takes the next seq for its run (parent PRD
+      // §8: strictly increasing from 1, across all sessions). Mark the
+      // conversation unread when a new event arrives beyond the user's read
+      // baseline while they are looking elsewhere.
+      if (detachedRun) {
+        const seq = bumpDesktopAiRunSeq(detachedRun);
+        if (!runIsVisible() && seq > (conversationReadSeq.get(runConversationId) ?? 0)) unreadConversations.add(runConversationId);
+      }
+      // Feed every agent event into the generation-status state machine (Issue
+      // #6743 feature 1). `applyStatusEvent` refreshes lastEventAt, tracks the
+      // active tool / turn, and derives the phase purely from the event stream.
+      if (runIsVisible()) generationStatus.value = applyStatusEvent(generationStatus.value, event, Date.now());
+      // Terminal event (agent_end / error) hides the status line immediately —
+      // the backend promise may still be settling (CLI teardown / SSE close), so
+      // stop the ticker now instead of letting it idle through that gap. The
+      // non-terminal `response_complete` (phase=finalizing) hides the line the
+      // same way, but the listener stays alive for the real agent_end/error.
+      if (runIsVisible() && (generationStatus.value.phase === "finished" || generationStatus.value.phase === "finalizing")) {
+        stopStatusTimer();
+      }
+      if (event.type === "text_delta" && event.delta) {
+        if (detachedDeltaBuffer) detachedDeltaBuffer.appendText(assistantIdx, event.delta);
+        else appendAssistantDelta(assistantIdx, event.delta);
+      }
+      if (event.type === "write_sql_confirmation_required") {
+        writeConfirmationRequired = true;
         if (detachedRun) {
-          const seq = bumpDesktopAiRunSeq(detachedRun);
-          if (!runIsVisible() && seq > (conversationReadSeq.get(runConversationId) ?? 0)) unreadConversations.add(runConversationId);
+          updateDesktopAiRun(detachedRun, {
+            pendingConfirmation: {
+              sql: event.sql,
+              connectionId: detachedRun.connectionId,
+              database: detachedRun.database,
+              schema: detachedRun.schema,
+            },
+          });
         }
-        // Feed every agent event into the generation-status state machine (Issue
-        // #6743 feature 1). `applyStatusEvent` refreshes lastEventAt, tracks the
-        // active tool / turn, and derives the phase purely from the event stream.
-        if (runIsVisible()) generationStatus.value = applyStatusEvent(generationStatus.value, event, Date.now());
-        // Terminal event (agent_end / error) hides the status line immediately —
-        // the backend promise may still be settling (CLI teardown / SSE close), so
-        // stop the ticker now instead of letting it idle through that gap. The
-        // non-terminal `response_complete` (phase=finalizing) hides the line the
-        // same way, but the listener stays alive for the real agent_end/error.
-        if (runIsVisible() && (generationStatus.value.phase === "finished" || generationStatus.value.phase === "finalizing")) {
-          stopStatusTimer();
+        if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, writeSqlConfirmationText(event.sql));
+        else replaceAssistantText(assistantIdx, writeSqlConfirmationText(event.sql));
+        const msg = runMessages[assistantIdx];
+        if (msg) msg.kind = "writeSqlConfirmation";
+      }
+      if (event.type === "production_write_blocked") {
+        if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, productionWriteBlockedText(event.sql));
+        else replaceAssistantText(assistantIdx, productionWriteBlockedText(event.sql));
+        const msg = runMessages[assistantIdx];
+        if (msg) msg.kind = "productionWriteBlocked";
+      }
+      if (event.type === "reasoning_delta" && event.delta) {
+        if (detachedDeltaBuffer) detachedDeltaBuffer.appendReasoning(assistantIdx, event.delta);
+        else appendAssistantReasoning(assistantIdx, event.delta);
+      }
+      if (event.type === "agent_end") {
+        // End the card's "思考过程" spinner at the terminal event rather than
+        // waiting for send()'s finally (which can lag behind CLI teardown).
+        const msg = runMessages[assistantIdx];
+        if (msg) msg.isThinking = false;
+        if (event.input_tokens || event.output_tokens) {
+          if (msg) msg.tokens = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
         }
-        if (event.type === "text_delta" && event.delta) {
-          if (detachedDeltaBuffer) detachedDeltaBuffer.appendText(assistantIdx, event.delta);
-          else appendAssistantDelta(assistantIdx, event.delta);
+      }
+      if (event.type === "context_compacted") {
+        const msg = runMessages[assistantIdx];
+        if (msg) {
+          if (!msg.agentSteps) msg.agentSteps = [];
+          const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
+          if (step) upsertAgentStep(msg.agentSteps, step);
         }
-        if (event.type === "write_sql_confirmation_required") {
-          writeConfirmationRequired = true;
-          if (detachedRun) {
-            updateDesktopAiRun(detachedRun, {
-              pendingConfirmation: {
-                sql: event.sql,
-                connectionId: detachedRun.connectionId,
-                database: detachedRun.database,
-                schema: detachedRun.schema,
-              },
-            });
-          }
-          if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, writeSqlConfirmationText(event.sql));
-          else replaceAssistantText(assistantIdx, writeSqlConfirmationText(event.sql));
-          const msg = runMessages[assistantIdx];
-          if (msg) msg.kind = "writeSqlConfirmation";
+        const compaction = { summary: event.summary, compactedMessages: event.compacted_messages };
+        if (detachedRun) detachedCompaction = compaction;
+        else pendingCompaction.value = compaction;
+      }
+      // Real-time agent step rendering
+      if (event.type === "tool_call_start" || event.type === "tool_call_end") {
+        const msg = runMessages[assistantIdx];
+        if (msg) {
+          if (!msg.agentSteps) msg.agentSteps = [];
+          const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
+          if (step) upsertAgentStep(msg.agentSteps, step);
         }
-        if (event.type === "production_write_blocked") {
-          if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, productionWriteBlockedText(event.sql));
-          else replaceAssistantText(assistantIdx, productionWriteBlockedText(event.sql));
-          const msg = runMessages[assistantIdx];
-          if (msg) msg.kind = "productionWriteBlocked";
-        }
-        if (event.type === "reasoning_delta" && event.delta) {
-          if (detachedDeltaBuffer) detachedDeltaBuffer.appendReasoning(assistantIdx, event.delta);
-          else appendAssistantReasoning(assistantIdx, event.delta);
-        }
-        if (event.type === "agent_end") {
-          // End the card's "思考过程" spinner at the terminal event rather than
-          // waiting for send()'s finally (which can lag behind CLI teardown).
-          const msg = runMessages[assistantIdx];
-          if (msg) msg.isThinking = false;
-          if (event.input_tokens || event.output_tokens) {
-            if (msg) msg.tokens = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
-          }
-        }
-        if (event.type === "context_compacted") {
-          const msg = runMessages[assistantIdx];
-          if (msg) {
-            if (!msg.agentSteps) msg.agentSteps = [];
-            const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
-            if (step) upsertAgentStep(msg.agentSteps, step);
-          }
-          const compaction = { summary: event.summary, compactedMessages: event.compacted_messages };
-          if (detachedRun) detachedCompaction = compaction;
-          else pendingCompaction.value = compaction;
-        }
-        // Real-time agent step rendering
-        if (event.type === "tool_call_start" || event.type === "tool_call_end") {
-          const msg = runMessages[assistantIdx];
-          if (msg) {
-            if (!msg.agentSteps) msg.agentSteps = [];
-            const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
-            if (step) upsertAgentStep(msg.agentSteps, step);
-          }
-        }
-        if (runIsVisible()) scrollToBottom();
-      },
-      sessionId,
-      customPromptContext,
-    );
+      }
+      if (runIsVisible()) scrollToBottom();
+    };
+    if (runPluginContext) {
+      if (!generationCanContinue()) return;
+      if (runIsVisible()) generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
+      const request = buildPluginAiRequest(
+        activeConfig,
+        runPluginContext,
+        [...history, { role: "user", content: [text, ...csvAttachments.map((file) => `${file.name}\n${file.content}`)].join("\n\n"), images: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })) }],
+        [customPromptContext.globalInstructions || "", ...(customPromptContext.activeTemplates || []).map((template) => template.content)],
+      );
+      await streamPluginAiConversation(aiStream, sessionId, request, onEvent);
+    } else if (connection && tab) {
+      const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
+      // Superseded while awaiting loadReferencedSqlFiles() above — bail before
+      // paying for buildAiContext() too; it can do real backend/schema work that
+      // would be entirely wasted on an already-abandoned request.
+      if (!generationCanContinue()) return;
+      const requestDatabase = runDatabases[0] ?? tab.database;
+      const context = await buildAiContext(
+        {
+          ...tab,
+          database: requestDatabase,
+          schema: runDatabases.length > 1 || requestDatabase !== tab.database ? undefined : tab.schema,
+        },
+        connection,
+        {
+          mentionedTables,
+          sqlFiles,
+          csvFiles: csvAttachments,
+        },
+      );
+      context.selectedDatabases = runDatabases;
+      // Superseded while awaiting buildAiContext() above — must bail before ever
+      // calling runAgentStream(), not just before writing its results. Without
+      // this recheck, a clear/switch/unmount that fires during context
+      // preparation invalidates the generation but the request still gets sent to
+      // the backend and starts executing tools/SQL; the best-effort cancel RPC
+      // fired by abandonInFlightRequest() is a no-op here since no session has
+      // been registered with the backend yet (registration happens inside
+      // runAgentStream() itself).
+      if (!generationCanContinue()) return;
+      // The stream is about to reach the backend — transition the status line from
+      // `preparing` to `waiting_model` so it reads "等待模型响应" while no events have
+      // arrived yet (slow CLI first token included).
+      if (runIsVisible()) generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
+      await runAgentStream(
+        {
+          config: activeConfig,
+          action: requestedAction,
+          mode: requestedMode,
+          instruction: modelInstruction,
+          taskContractUserRequest: text,
+          context,
+          inlineImages: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })),
+          allowWriteSql,
+          confirmedWriteSql,
+          confirmedConnectionId: confirmedTargetConnId,
+          confirmedDatabase: confirmedTargetDb,
+          confirmedSchema: confirmedTargetSchema,
+        },
+        history,
+        onEvent,
+        sessionId,
+        customPromptContext,
+      );
+    }
   } catch (e: unknown) {
     // A superseded generation's error (including one caused by an
     // abandonInFlightRequest()-triggered cancellation) must not overwrite a
@@ -3448,8 +3623,9 @@ async function send() {
         statusNow.value = Date.now();
       }
       // Render agent tool call steps from agent events (fallback when no real-time steps)
-      if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
-        const steps: AiAgentStepItem[] = [];
+      const hasRuntimeSteps = msg?.agentSteps?.some((step) => step.key !== "selected-skills") ?? false;
+      if (msg && agentEvents.length > 0 && !hasRuntimeSteps) {
+        const steps: AiAgentStepItem[] = [...(msg.agentSteps ?? [])];
         agentEvents.forEach((e, index) => {
           const step = agentEventToStep(e, index, Date.now());
           if (step) upsertAgentStep(steps, step);
@@ -3457,7 +3633,7 @@ async function send() {
         if (steps.length) msg.agentSteps = steps;
       }
       // Fallback: use aiAgentPlan for backward compatibility
-      if (msg && !msg.agentSteps?.length) {
+      if (msg && !hasRuntimeSteps && connection && tab) {
         const agentPlan = buildAiAgentPlan({
           mode: requestedMode,
           action: requestedAction,
@@ -3466,7 +3642,7 @@ async function send() {
           connection: connection,
           database: tab.database,
         });
-        if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
+        if (msg && requestedMode === "agent") msg.agentSteps = [...(msg.agentSteps ?? []), ...buildAiAgentStepItems(agentPlan)];
         if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
       }
       if (runIsVisible()) {
@@ -3547,7 +3723,7 @@ async function send() {
           });
         }
       } else if (!detachedRun) {
-        void persistConversationSnapshot(runConversationId, runMessages, connection.name, tab.database || "", runCreatedAt);
+        void persistConversationSnapshot(runConversationId, runMessages, runSourceName, tab?.database || "", runCreatedAt);
       }
       if (runIsVisible()) scrollToBottom();
       // Wake any stop request waiting for this pipeline's real terminal state.
@@ -3560,8 +3736,8 @@ async function send() {
  *  in the background when the conversation is not the visible one. The queued
  *  input is consumed by the send pipeline once it actually starts, so a failed
  *  early bail (no config, superseded) does not silently drop it. */
-function scheduleAutoSend(convId: string, queued: QueuedConversationInput, messages: ChatMessage[]) {
-  pendingAutoSends.push({ conversationId: convId, text: queued.text, messages, mode: queued.mode, action: queued.action });
+function scheduleAutoSend(convId: string, queued: QueuedConversationInput, messages: ChatMessage[], context = pluginContextFromMessages(messages)) {
+  pendingAutoSends.push({ conversationId: convId, text: queued.text, messages, mode: queued.mode, action: queued.action, pluginContext: context });
   void send();
 }
 
@@ -3939,11 +4115,11 @@ async function exportConversationAs(format: AiConversationExportFormat) {
       }
     }
     const result = buildAiConversationExport({
-      connectionName: props.connection?.name,
+      connectionName: pluginContext.value?.pluginName ?? props.connection?.name,
       dateLabel: new Date().toLocaleString(),
       messages: visibleMessages.value.map((msg) => ({
         role: msg.role,
-        content: msg.content,
+        content: msg.pluginContext ? `${msg.content}\n\n${pluginContextText(msg.pluginContext)}` : msg.content,
         kind: msg.kind,
         failed: msg.failed === true || (runFailed && msg === failedTurnAssistant),
       })),
@@ -3983,6 +4159,9 @@ function clearMessages() {
   // the transcript, so returning to this conversation shows what changed.
   if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
   messages.value = [];
+  draftPluginContext.value = undefined;
+  clearContextReferences();
+  clearPendingWriteGrant();
   cancelEdit();
   clearAttachmentDraftState();
   conversationId.value = "";
@@ -4014,7 +4193,8 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
   const existingConversation = conversations.value.find((conversation) => conversation.id === targetConversationId);
   return {
     id: targetConversationId,
-    title: renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
+    title: first?.pluginContext?.title || renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
+    pluginContext: pluginContextFromMessages(targetMessages),
     connectionName,
     database,
     messages: targetMessages.map((m) => ({
@@ -4131,7 +4311,11 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
   const first = messages.find((m) => m.role === "user" && m.kind !== "contextSummary");
   const snapshot: AiConversation = {
     id: conversation.id,
-    title: first ? messageTitle(first).slice(0, 50) : conversation.title || "Untitled",
+    // Same title precedence as buildConversationSnapshot(): a recovered run
+    // must not overwrite a title the user renamed; plugin-scoped chats keep
+    // the plugin-provided title.
+    title: conversation.pluginContext?.title || renamedConversationTitles.get(conversation.id) || conversation.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
+    pluginContext: conversation.pluginContext,
     connectionName: conversation.connectionName,
     database: conversation.database,
     messages: messages.map((m) => ({
@@ -4154,9 +4338,9 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
 }
 
 async function persistConversation() {
-  if (!messages.value.length || !props.connection) return;
+  if (!messages.value.length || (!pluginContext.value && !props.connection)) return;
   if (!conversationId.value) conversationId.value = uuid();
-  await persistConversationSnapshot(conversationId.value, messages.value, props.connection.name, props.tab?.database || "");
+  await persistConversationSnapshot(conversationId.value, messages.value, pluginContext.value?.pluginName ?? props.connection?.name ?? "", pluginContext.value ? "" : props.tab?.database || "");
 }
 
 async function setConversationListOpen(open: boolean) {
@@ -4195,6 +4379,9 @@ async function commitRenameConversation(conv: AiConversation) {
     const i = conversations.value.findIndex((item) => item.id === conv.id);
     if (i >= 0) conversations.value[i] = updated;
   } catch {
+    // Save failed: retract the claim so the header, the history row and the
+    // persisted record all stay on the old title until a rename succeeds.
+    renamedConversationTitles.delete(conv.id);
     toast(t("ai.conversationRenameFailed"), 5000);
   } finally {
     cancelRenameConversation();
@@ -4202,10 +4389,11 @@ async function commitRenameConversation(conv: AiConversation) {
 }
 
 function chatMessagesFromConversation(conv: AiConversation): ChatMessage[] {
-  return conv.messages.map((m) => ({
+  return conv.messages.map((m, index) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
     sourceConnectionName: m.role === "assistant" ? conv.connectionName : undefined,
+    pluginContext: index === 0 ? conv.pluginContext : undefined,
     mentions: Array.isArray(m.mentions) ? (m.mentions as AiMessageMention[]) : undefined,
     reasoning: m.reasoning,
     kind: m.kind,
@@ -4225,12 +4413,19 @@ function selectConversation(conv: AiConversation) {
   // summaries are filtered out of rendering) so the anchor matches row indices.
   if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
   conversationId.value = conv.id;
+  draftPluginContext.value = conv.pluginContext;
+  clearContextReferences();
+  clearPendingWriteGrant();
   cancelEdit();
   clearAttachmentDraftState();
   // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
   messageRenderer.value.clear();
   const activeRun = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conv.id) : undefined;
   messages.value = activeRun?.messages ?? chatMessagesFromConversation(conv);
+  if (pluginContext.value) {
+    assistantMode.value = "ask";
+    activeAction.value = "general";
+  }
   unreadConversations.delete(conv.id);
   isGenerating.value = activeRun?.status === "preparing" || activeRun?.status === "queued" || activeRun?.status === "running";
   currentSessionId.value = activeRun?.currentSessionId ?? "";
@@ -4452,7 +4647,7 @@ function retryConversationRun(convId: string) {
     run.cancelRequested = true;
     finishDesktopAiRun(run, "cancelled");
   }
-  scheduleAutoSend(convId, { text, mode: assistantMode.value, action: activeAction.value }, history.slice(0, lastUserIdx));
+  scheduleAutoSend(convId, { text, mode: assistantMode.value, action: activeAction.value }, history.slice(0, lastUserIdx), pluginContextFromMessages(history));
 }
 
 /** Dismisses the "updates while you were away" separator and jumps to the end. */
@@ -4659,6 +4854,7 @@ onUnmounted(() => {
 });
 
 function triggerAction(action: AiAction, instruction?: string) {
+  if (pluginContext.value) startNewChat();
   // External Ask-style entry points (Fix with AI, Explain history) produce/analyze SQL text.
   // If the assistant is currently in Agent mode where those actions aren't offered, switch to
   // Ask mode so the action is valid and the menu reflects what actually runs.
@@ -4673,12 +4869,25 @@ function triggerAction(action: AiAction, instruction?: string) {
   send();
 }
 
-function setPrompt(text: string) {
+function openPluginConversation(request: AiPluginConversationRequest) {
+  initialConversationRestored = true;
+  defaultModeInitialized = true;
+  startNewChat();
+  draftPluginContext.value = request.context;
+  assistantMode.value = "ask";
+  activeAction.value = "general";
+  setPrompt(request.prompt, true);
+  if (request.send) void send();
+}
+
+function setPrompt(text: string, fromPlugin = false) {
+  if (!fromPlugin && pluginContext.value) startNewChat();
   prompt.value = text;
   nextTick(() => promptTextareaRef.value?.focus());
 }
 
 function addTableMention(target: { schema?: string; table: string }) {
+  if (pluginContext.value) startNewChat();
   const table = target.table.trim();
   if (!table) return;
   addSelectedMention({ kind: "table", schema: target.schema, name: table, tableType: "TABLE" });
@@ -4699,7 +4908,7 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ triggerAction, setPrompt, addTableMention, clearContextReferences, selectConversationById, focusSearch });
+defineExpose({ openPluginConversation, triggerAction, setPrompt, addTableMention, clearContextReferences, selectConversationById, focusSearch });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
@@ -4738,7 +4947,7 @@ async function openExternalUrl(url: string) {
       <span class="flex flex-1 self-stretch items-center truncate text-xs font-medium" data-tauri-drag-region>
         {{ chatTitle }}
       </span>
-      <ProductionContextBadge v-if="productionContext.active" compact />
+      <ProductionContextBadge v-if="!pluginContext && productionContext.active" compact />
       <DropdownMenu>
         <DropdownMenuTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('ai.exportConversation')" :aria-label="t('ai.exportConversation')">
@@ -4866,7 +5075,7 @@ async function openExternalUrl(url: string) {
 
     <div v-if="messages.length === 0" class="flex-1 min-h-0 flex flex-col items-center justify-center text-center text-muted-foreground">
       <Bot class="h-10 w-10 mb-3 opacity-30" />
-      <p class="text-sm">{{ t("ai.welcome") }}</p>
+      <p class="text-sm">{{ t(pluginContext ? "ai.pluginWelcome" : "ai.welcome") }}</p>
     </div>
     <div v-else class="relative min-h-0 flex-1">
       <ScrollArea ref="scrollRef" class="ai-message-scroll h-full overflow-hidden">
@@ -5106,13 +5315,28 @@ async function openExternalUrl(url: string) {
                       <!-- `pending` means the closing fence is still missing, so the code is truncated: never offer to run or apply it. -->
                       <Loader2 v-if="seg.pending && isGenerating" class="h-3 w-3 animate-spin text-zinc-400" />
                       <div class="flex items-center gap-1.5">
-                        <button v-if="!seg.pending && seg.isSql && !isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
+                        <button
+                          v-if="!pluginContext && !seg.pending && seg.isSql && !isRedisConnection"
+                          class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                          :title="t('ai.tempRunSql')"
+                          @click="tempRunSql(seg.content)"
+                        >
                           <FlaskConical class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
+                        <button
+                          v-if="!pluginContext && !seg.pending && (seg.isSql || isRedisConnection)"
+                          class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                          :title="t('ai.executeSql')"
+                          @click="executeSql(seg.content)"
+                        >
                           <Play class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
+                        <button
+                          v-if="!pluginContext && !seg.pending && (seg.isSql || isRedisConnection)"
+                          class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                          :title="t('ai.apply')"
+                          @click="applySql(seg.content)"
+                        >
                           <ArrowDownToLine class="h-3.5 w-3.5" />
                         </button>
                         <button
@@ -5243,7 +5467,11 @@ async function openExternalUrl(url: string) {
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
           <div data-ai-composer-context-row :class="['ai-prompt-context-row mb-1 flex items-center gap-x-1 text-xs text-foreground/80', showAiSchemaSelector && 'ai-prompt-context-row--schema']">
-            <template v-if="connectionStore.connections.length">
+            <details v-if="pluginContext" class="min-w-0 flex-1" data-ai-plugin-context>
+              <summary class="cursor-pointer truncate">{{ pluginContext.pluginName }} · {{ pluginContext.title }}</summary>
+              <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-all p-2 text-[11px]">{{ pluginContextText(pluginContext) }}</pre>
+            </details>
+            <template v-else-if="connectionStore.connections.length">
               <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
               <ConnectionTreeSelect
@@ -5313,7 +5541,7 @@ async function openExternalUrl(url: string) {
             </template>
             <span class="ai-prompt-context-spacer min-w-0 flex-1" />
             <!-- Template selector -->
-            <Popover v-model:open="showTemplateSelector">
+            <Popover v-if="!pluginContext" v-model:open="showTemplateSelector">
               <PopoverTrigger as-child>
                 <button
                   type="button"
@@ -5358,6 +5586,56 @@ async function openExternalUrl(url: string) {
                 </div>
               </PopoverContent>
             </Popover>
+            <!-- Skill selector (read-only user SKILL.md library) -->
+            <Popover v-model:open="showSkillSelector">
+              <PopoverTrigger as-child>
+                <button type="button" class="flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('ai.skillsEntry')" :title="t('ai.skillsEntry')">
+                  <Layers class="h-3 w-3" />
+                  <span class="truncate">{{ t("ai.skillsEntry") }}</span>
+                  <span v-if="selectedSkillIds.length" class="rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ selectedSkillIds.length }}</span>
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="end" class="w-72 gap-0 p-1.5">
+                <div class="max-h-64 overflow-auto">
+                  <div v-if="userSkillStore.isLoading && !userSkillStore.hasLoadedOnce" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                    {{ t("ai.skillsLoading") }}
+                  </div>
+                  <div v-else-if="userSkillStore.lastError" class="space-y-1 px-3 py-4 text-center text-xs text-muted-foreground">
+                    <div>{{ t("ai.skillsLoadError") }}</div>
+                    <button type="button" class="text-[11px] text-primary hover:underline" @click="refreshSkills">
+                      {{ t("ai.skillsRetry") }}
+                    </button>
+                  </div>
+                  <div v-else-if="userSkillStore.totalCount === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                    {{ t("ai.skillsEmpty") }}
+                  </div>
+                  <template v-else>
+                    <template v-for="group in userSkillStore.groupedSkills" :key="group.source">
+                      <div class="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        {{ t(group.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}
+                      </div>
+                      <template v-for="skill in group.skills" :key="skill.id">
+                        <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="toggleSkillSelected(skill.id)">
+                          <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="selectedSkillIds.includes(skill.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                            <Check v-if="selectedSkillIds.includes(skill.id)" class="h-3 w-3" />
+                          </div>
+                          <div class="min-w-0 flex-1 text-left">
+                            <div class="truncate font-medium">{{ skill.name }}</div>
+                            <div class="truncate text-[10px] text-muted-foreground">{{ skill.description }}</div>
+                          </div>
+                        </button>
+                      </template>
+                    </template>
+                  </template>
+                </div>
+                <div class="border-t mt-1 px-1 pt-1">
+                  <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="userSkillStore.isLoading" @click="refreshSkills">
+                    <Loader2 v-if="userSkillStore.isLoading" class="h-3 w-3 animate-spin" />
+                    {{ t("ai.skillsRefresh") }}
+                  </button>
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
           <div v-if="mentionOpen" class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
             <div v-if="mentionLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
@@ -5394,16 +5672,16 @@ async function openExternalUrl(url: string) {
             <div class="max-h-56 overflow-auto p-1">
               <button
                 v-for="(cmd, index) in filteredCommands"
-                :key="cmd.action"
+                :key="cmd.type === 'action' ? `action:${cmd.button.action}` : 'skills'"
                 type="button"
                 class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
                 :class="{ 'bg-muted': index === commandSelectedIndex }"
                 @mousedown.prevent="selectCommand(cmd)"
                 @mouseenter="commandSelectedIndex = index"
               >
-                <component :is="cmd.icon" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <span class="font-medium">/{{ cmd.action }}</span>
-                <span class="ml-auto text-[11px] text-muted-foreground">{{ t(cmd.key) }}</span>
+                <component :is="cmd.type === 'action' ? cmd.button.icon : Layers" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span class="font-medium">/{{ cmd.type === "action" ? cmd.button.action : "skill" }}</span>
+                <span class="ml-auto text-[11px] text-muted-foreground">{{ t(cmd.type === "action" ? cmd.button.key : "ai.skillsEntry") }}</span>
               </button>
             </div>
           </div>
@@ -5419,6 +5697,23 @@ async function openExternalUrl(url: string) {
               <FileCode v-if="mention.kind === 'sqlFile'" class="h-3 w-3 shrink-0 text-primary" />
               <Table2 v-else class="h-3 w-3 shrink-0 text-primary" />
               <span class="truncate">{{ mentionDisplayName(mention) }}</span>
+              <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
+            </button>
+          </div>
+          <div v-if="selectedSkillChips.length" class="mb-1.5 flex flex-wrap gap-1">
+            <button
+              v-for="chip in selectedSkillChips"
+              :key="chip.id"
+              type="button"
+              class="group inline-flex max-w-full items-center gap-1 rounded border bg-muted/60 px-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-muted"
+              :class="chip.unavailable ? 'border-destructive/50 text-destructive' : 'border-border/80'"
+              :title="chip.description || chip.name"
+              @click="removeSelectedSkill(chip.id)"
+            >
+              <AlertTriangle v-if="chip.unavailable" class="h-3 w-3 shrink-0" />
+              <Layers v-else class="h-3 w-3 shrink-0 text-primary" />
+              <span class="truncate">{{ chip.name }}</span>
+              <span class="shrink-0 text-[9px] text-muted-foreground">{{ t(chip.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}</span>
               <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
             </button>
           </div>
@@ -5454,6 +5749,25 @@ async function openExternalUrl(url: string) {
               @preview="showImageAttachmentPreview(attachment)"
               @remove="removeImageAttachment(index)"
             />
+          </div>
+          <div v-if="skillFailures.length" class="mb-1.5 flex items-start gap-1.5 rounded-[7px] border border-destructive/40 bg-destructive/10 px-[9px] py-[5px] text-[11px] text-destructive" role="alert">
+            <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <div class="min-w-0 flex-1">
+              <div class="font-medium">{{ t("ai.skillsSendBlocked") }}</div>
+              <div v-for="failure in skillFailures" :key="failure.id" class="truncate">{{ userSkillStore.metaFor(failure.id)?.name ?? failure.id }} — {{ t(skillFailureReasonKey(failure.reason)) }}</div>
+            </div>
+            <button type="button" class="shrink-0 rounded border border-destructive/40 px-1.5 py-0.5 text-[10px] font-medium hover:bg-destructive/20" @click="send()">
+              {{ t("ai.skillsRetry") }}
+            </button>
+            <button type="button" class="shrink-0 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" :disabled="userSkillStore.isLoading" @click="refreshSkills">
+              {{ t("ai.skillsRefresh") }}
+            </button>
+            <button v-if="skillFailures.some((failure) => failure.reason === 'root_unavailable')" type="button" class="shrink-0 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" @click="openSkillRootSettings">
+              {{ t("ai.skillsOpenSettings") }}
+            </button>
+            <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive" :aria-label="t('common.remove')" @click="removeFailedSkills()">
+              <X class="h-3 w-3" />
+            </button>
           </div>
           <div v-if="recoveredDraftActive" class="mb-1.5 flex items-center gap-1.5 rounded-[7px] border border-primary/30 bg-primary/10 px-[9px] py-[5px] text-[11px] text-primary" role="status">
             <Clock class="h-3.5 w-3.5 shrink-0" />
@@ -5519,7 +5833,8 @@ async function openExternalUrl(url: string) {
               </TooltipContent>
             </Tooltip>
             <!-- Combined mode + action selector -->
-            <Popover v-model:open="modeActionOpen">
+            <span v-if="pluginContext" class="shrink-0 text-xs text-muted-foreground">{{ t("ai.modes.ask") }}</span>
+            <Popover v-else v-model:open="modeActionOpen">
               <PopoverTrigger as-child>
                 <button type="button" class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="modeActionTriggerLabel">
                   <component :is="modeIcon" class="h-3 w-3" />
@@ -5767,11 +6082,11 @@ async function openExternalUrl(url: string) {
             <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
               <Square class="h-3.5 w-3.5" />
             </button>
-            <button v-else-if="hasActiveRunForCurrentConversation" class="h-7 shrink-0 items-center gap-1 rounded-full bg-foreground px-2.5 text-[11px] font-medium text-background disabled:opacity-30 flex" :disabled="!canSubmitPrompt" :title="t('ai.queueSendHint')" @click="onSendClick">
+            <button v-else-if="hasActiveRunForCurrentConversation" class="h-7 shrink-0 items-center gap-1 rounded-full bg-foreground px-2.5 text-[11px] font-medium text-background-solid disabled:opacity-30 flex" :disabled="!canSubmitPrompt" :title="t('ai.queueSendHint')" @click="onSendClick">
               <Hourglass class="h-3.5 w-3.5" />
               <span>{{ t("ai.queueSend") }}</span>
             </button>
-            <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30" :disabled="!canSubmitPrompt" @click="send">
+            <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background-solid flex items-center justify-center disabled:opacity-30" :disabled="!canSubmitPrompt" @click="send">
               <ArrowUp class="h-4 w-4" />
             </button>
           </div>

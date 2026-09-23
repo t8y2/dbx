@@ -193,6 +193,7 @@ pub async fn execute_multi(
     use_transaction: Option<bool>,
     continue_on_error: Option<bool>,
     execution_mode: Option<dbx_core::query::QueryExecutionMode>,
+    preserve_explicit_transaction: Option<bool>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, BackendError> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -256,6 +257,7 @@ pub async fn execute_multi(
             use_transaction,
             continue_on_error: continue_on_error.unwrap_or(false),
             execution_mode: execution_mode.unwrap_or_default(),
+            preserve_explicit_transaction: preserve_explicit_transaction.unwrap_or(false),
         },
         progress,
     )

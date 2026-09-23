@@ -30,6 +30,7 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
     "host.filesystem",
     "host.plans:read",
     "host.storage",
+    "host.ai",
     "host.clipboard:read",
 ];
 
@@ -657,8 +658,8 @@ pub struct PluginWorkbenchContribution {
 }
 
 /// Native context-menu entry contributed to DBX surfaces. v1 targets the
-/// saved-connection sidebar menu; clicks are dispatched to the plugin backend
-/// as `contextMenu/<id>` requests.
+/// saved-connection and table sidebar menus; clicks are dispatched to the
+/// plugin backend as `contextMenu/<id>` requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginContextMenuContribution {
@@ -668,7 +669,7 @@ pub struct PluginContextMenuContribution {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// Menu surface the item belongs to; currently only `connection`.
+    /// Menu surface the item belongs to: `connection` or `table`.
     #[serde(default)]
     pub menu: String,
 }
@@ -1139,9 +1140,9 @@ fn validate_contributions(
             PluginContribution::ContextMenu(menu) => {
                 validate_required_text(&menu.label, &format!("Context menu '{id}' label"), errors);
                 validate_declared_icon(plugin_dir, &format!("Context menu '{id}' icon"), menu.icon.as_deref(), errors);
-                if menu.menu != "connection" {
+                if menu.menu != "connection" && menu.menu != "table" {
                     errors.push(format!(
-                        "Context menu '{id}' declares unsupported menu '{}'; only 'connection' is available",
+                        "Context menu '{id}' declares unsupported menu '{}'; only 'connection' and 'table' are available",
                         menu.menu
                     ));
                 }
@@ -1497,6 +1498,30 @@ mod tests {
         PluginManifest, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
+    fn context_menu_manifest(menu: &str) -> (tempfile::TempDir, PluginManifest) {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("bin").join("example");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"example").unwrap();
+        let manifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "backend": { "executable": "bin/example" } },
+            "contributions": [{
+                "type": "context-menu",
+                "id": "io.dbx.example.inspect",
+                "label": "Inspect",
+                "menu": menu
+            }]
+        }))
+        .unwrap();
+        (dir, manifest)
+    }
+
     #[test]
     fn connection_provider_proxy_route_defaults_false_and_parses() {
         let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
@@ -1663,6 +1688,43 @@ mod tests {
         }))
         .unwrap();
         manifest.compatibility(dir.path(), "0.1.0").errors
+    }
+
+    #[test]
+    fn accepts_connection_and_table_context_menu_targets() {
+        for menu in ["connection", "table"] {
+            let (dir, manifest) = context_menu_manifest(menu);
+            let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+            assert!(compatibility.compatible, "{menu}: {:?}", compatibility.errors);
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_context_menu_targets() {
+        let (dir, manifest) = context_menu_manifest("schema");
+        let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(!compatibility.compatible);
+        assert!(compatibility.errors.iter().any(|error| {
+            error == "Context menu 'io.dbx.example.inspect' declares unsupported menu 'schema'; only 'connection' and 'table' are available"
+        }));
+    }
+
+    #[test]
+    fn manifest_schema_context_menu_enum_matches_runtime_targets() {
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("plugins")
+            .join("manifest.schema.json");
+        let schema: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&schema_path).unwrap()).unwrap();
+        let declared = schema["$defs"]["contextMenuContribution"]["properties"]["menu"]["enum"]
+            .as_array()
+            .expect("contextMenuContribution.menu.enum must be an array")
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(declared, ["connection", "table"]);
     }
 
     #[test]

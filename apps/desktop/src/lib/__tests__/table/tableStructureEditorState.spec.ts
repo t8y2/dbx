@@ -34,6 +34,173 @@ import {
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  describe("DuckDB type parameters", () => {
+    it.each([
+      "TINYINT",
+      "INT1",
+      "SMALLINT",
+      "INT2",
+      "SHORT",
+      "INT16",
+      "INTEGER",
+      "INT",
+      "INT4",
+      "SIGNED",
+      "INTEGRAL",
+      "INT32",
+      "BIGINT",
+      "INT8",
+      "LONG",
+      "OID",
+      "INT64",
+      "HUGEINT",
+      "INT128",
+      "UTINYINT",
+      "UINT8",
+      "USMALLINT",
+      "UINT16",
+      "UINTEGER",
+      "UINT32",
+      "UBIGINT",
+      "UINT64",
+      "UHUGEINT",
+      "UINT128",
+      "REAL",
+      "FLOAT4",
+      "DOUBLE",
+      "DOUBLE PRECISION",
+      "FLOAT8",
+      "BOOLEAN",
+      "BOOL",
+      "LOGICAL",
+      "BLOB",
+      "BYTEA",
+      "BINARY",
+      "VARBINARY",
+      "BIT",
+      "BITSTRING",
+      "VARINT",
+      "BIGNUM",
+      "DATE",
+      "TIME",
+      "TIME WITHOUT TIME ZONE",
+      "TIME WITH TIME ZONE",
+      "TIMETZ",
+      "TIMESTAMPTZ",
+      "TIMESTAMP WITH TIME ZONE",
+      "TIMESTAMP_S",
+      "TIMESTAMP_MS",
+      "TIMESTAMP_NS",
+      "UUID",
+      "GUID",
+      "JSON",
+      "INTERVAL",
+    ])("does not populate, expose, or save modifiers for %s", (baseType) => {
+      expect(getDefaultLengthForType("duckdb", baseType)).toBe("");
+      expect(isDataTypeLengthDisabled("duckdb", baseType)).toBe(true);
+      expect(dataTypeLengthInputValue("duckdb", `${baseType}(11)`)).toBe("");
+      expect(combineDataTypeForDatabase("duckdb", baseType, "11")).toBe(baseType);
+      expect(combineDataTypeForDatabase("duckdb", baseType.toLowerCase(), "10,2")).toBe(baseType.toLowerCase());
+    });
+
+    it("uses FLOAT mantissa precision instead of MySQL precision and scale", () => {
+      expect(getDefaultLengthForType("duckdb", "FLOAT")).toBe("");
+      expect(isDataTypeLengthDisabled("duckdb", "FLOAT")).toBe(false);
+      for (const precision of ["1", "24", "25", "53"]) {
+        expect(combineDataTypeForDatabase("duckdb", "FLOAT", precision)).toBe(`FLOAT(${precision})`);
+        expect(dataTypeLengthInputValue("duckdb", `FLOAT(${precision})`)).toBe(precision);
+      }
+      for (const invalid of ["0", "54", "-1", "1.5", "10,2", "abc", "999999999999999999999999"]) {
+        expect(combineDataTypeForDatabase("duckdb", "FLOAT", invalid)).toBe("FLOAT");
+        expect(dataTypeLengthInputValue("duckdb", `FLOAT(${invalid})`)).toBe("");
+      }
+    });
+
+    it.each([
+      ["DECIMAL", "10,2"],
+      ["NUMERIC", "38,0"],
+      ["DEC", "12,3"],
+      ["VARCHAR", "255"],
+      ["CHAR", "1"],
+      ["CHARACTER", "20"],
+      ["CHARACTER VARYING", "20"],
+      ["BPCHAR", "20"],
+      ["STRING", "20"],
+      ["TEXT", "20"],
+      ["NVARCHAR", "20"],
+      ["TIMESTAMP", "9"],
+      ["DATETIME", "3"],
+      ["TIMESTAMP_US", "3"],
+    ])("preserves supported %s parameters", (baseType, params) => {
+      expect(isDataTypeLengthDisabled("duckdb", baseType)).toBe(false);
+      expect(combineDataTypeForDatabase("duckdb", baseType, params)).toBe(`${baseType}(${params})`);
+      expect(dataTypeLengthInputValue("duckdb", `${baseType}(${params})`)).toBe(params);
+    });
+
+    it("normalizes stale scalar metadata without rewriting compound or user-defined types", () => {
+      const cases = [
+        ["INTEGER(11)", "INTEGER"],
+        ["FLOAT(10,2)", "FLOAT"],
+        ["FLOAT(53)", "FLOAT(53)"],
+        ["DECIMAL(12,3)", "DECIMAL(12,3)"],
+        ["VARCHAR(42)", "VARCHAR(42)"],
+        ["DECIMAL(10,2)[]", "DECIMAL(10,2)[]"],
+        ["INTEGER[3]", "INTEGER[3]"],
+        ["STRUCT(id INTEGER, price DECIMAL(10,2))", "STRUCT(id INTEGER, price DECIMAL(10,2))"],
+        ["MAP(VARCHAR, DECIMAL(10,2))", "MAP(VARCHAR, DECIMAL(10,2))"],
+        ["UNION(id INTEGER, name VARCHAR)", "UNION(id INTEGER, name VARCHAR)"],
+        ["ENUM('a', 'b')", "ENUM('a', 'b')"],
+        ["custom_type(10)", "custom_type(10)"],
+        ["main.INTEGER(11)", "main.INTEGER(11)"],
+        ['"INTEGER"(11)', '"INTEGER"(11)'],
+      ];
+      for (const [dataType, expected] of cases) {
+        const [draft] = createColumnDrafts([{ name: "value", data_type: dataType!, is_nullable: true, column_default: null, is_primary_key: false }], "duckdb");
+        expect(draft?.dataType).toBe(expected);
+        expect(draft?.original?.data_type).toBe(expected);
+        expect(combineDataTypeForDatabase("duckdb", dataType!, "")).toBe(expected);
+      }
+    });
+
+    it("retains temporal qualifiers instead of confusing them with length", () => {
+      expect(dataTypeBaseInputValue("duckdb", "TIMESTAMP(6) WITH TIME ZONE")).toBe("TIMESTAMP WITH TIME ZONE");
+      expect(dataTypeLengthInputValue("duckdb", "TIMESTAMP(6) WITH TIME ZONE")).toBe("");
+      expect(combineDataTypeForDatabase("duckdb", "TIMESTAMP(6) WITH TIME ZONE", "")).toBe("TIMESTAMP WITH TIME ZONE");
+      expect(combineDataTypeForDatabase("duckdb", "TIME(6) WITHOUT TIME ZONE", "")).toBe("TIME WITHOUT TIME ZONE");
+      expect(dataTypeBaseInputValue("duckdb", "TIMESTAMP(3) WITHOUT TIME ZONE")).toBe("TIMESTAMP WITHOUT TIME ZONE");
+      expect(dataTypeLengthInputValue("duckdb", "TIMESTAMP(3) WITHOUT TIME ZONE")).toBe("3");
+      expect(combineDataTypeForDatabase("duckdb", "TIMESTAMP WITHOUT TIME ZONE", "3")).toBe("TIMESTAMP(3) WITHOUT TIME ZONE");
+    });
+
+    it("hydrates supported metadata precision without restoring fixed-type lengths", () => {
+      const columns = [
+        { data_type: "INTEGER", numeric_precision: 32 },
+        { data_type: "BINARY", character_maximum_length: 255 },
+        { data_type: "DECIMAL", numeric_precision: 12, numeric_scale: 3 },
+        { data_type: "VARCHAR", character_maximum_length: 64 },
+      ].map((column, index) => ({ name: `value_${index}`, is_nullable: true, column_default: null, is_primary_key: false, ...column }));
+      expect(createColumnDrafts(columns, "duckdb").map((column) => column.dataType)).toEqual(["INTEGER", "BINARY", "DECIMAL(12,3)", "VARCHAR(64)"]);
+    });
+
+    it("keeps defaults and other dialects unchanged", () => {
+      expect(defaultNewColumnDataType("duckdb")).toBe("TEXT");
+      expect(getDefaultLengthForType("duckdb", "DECIMAL")).toBe("10,0");
+      expect(getDefaultLengthForType("duckdb", "VARCHAR")).toBe("255");
+      expect(getDefaultLengthForType("mysql", "INTEGER")).toBe("11");
+      expect(getDefaultLengthForType("mysql", "FLOAT")).toBe("10,2");
+      expect(combineDataTypeForDatabase("mysql", "INTEGER", "11")).toBe("INTEGER(11)");
+      expect(combineDataTypeForDatabase("mysql", "FLOAT", "10,2")).toBe("FLOAT(10,2)");
+      expect(combineDataTypeForDatabase("postgres", "INTEGER", "11")).toBe("INTEGER");
+      expect(getDefaultLengthForType("postgres", "INTEGER")).toBe("11");
+      expect(getDefaultLengthForType("sqlite", "INTEGER")).toBe("");
+      expect(combineDataTypeForDatabase("sqlite", "INTEGER", "11")).toBe("INTEGER(11)");
+      expect(isDataTypeLengthDisabled("duckdb", "custom_type")).toBe(false);
+      expect(combineDataTypeForDatabase("duckdb", "custom_type", "10")).toBe("custom_type(10)");
+      expect(combineDataTypeForDatabase("duckdb", "DECIMAL", "39,0")).toBe("DECIMAL(39,0)");
+      expect(combineDataTypeForDatabase("duckdb", "VARCHAR", "-1")).toBe("VARCHAR(-1)");
+    });
+  });
+
   it("keeps quoted mixed-case identifiers distinct when detecting copied-column duplicates", () => {
     const postgresNames = new Set([tableStructureIdentifierComparisonKey("Foo", "postgres")]);
     expect(postgresNames.has(tableStructureIdentifierComparisonKey("foo", "postgres"))).toBe(false);

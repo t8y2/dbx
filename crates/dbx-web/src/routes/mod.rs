@@ -16,6 +16,7 @@ pub mod history;
 pub mod jdbc;
 pub mod layout;
 pub mod mcp_policy;
+pub mod migration;
 pub mod mongo;
 pub mod mongodb_dump;
 pub mod mongodb_import_export;

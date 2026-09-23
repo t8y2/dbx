@@ -87,6 +87,13 @@ pub struct HistoryConnectionOption {
 
 pub const MAX_HISTORY: usize = 1000;
 
+pub fn validate_history_retention_limit(limit: u32) -> Result<(), String> {
+    match limit {
+        0 | 200 | 1000 | 5000 | 10000 => Ok(()),
+        _ => Err("History retention limit must be 200, 1000, 5000, 10000, or 0 (unlimited)".to_string()),
+    }
+}
+
 fn default_activity_kind() -> String {
     "query".to_string()
 }

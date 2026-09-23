@@ -22,6 +22,23 @@
     opacity 0.22s ease;
 }
 
+/* 文档页右下角赞助悬浮卡片入场动画 */
+
+@keyframes sponsor-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sponsor-card-in {
+  animation: sponsor-card-in 0.3s ease-out both;
+}
+
 @theme {
   --color-landing-bg: #161616;
   --color-landing-ink: #ededf0;

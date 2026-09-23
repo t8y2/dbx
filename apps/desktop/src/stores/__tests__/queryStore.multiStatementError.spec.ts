@@ -883,6 +883,54 @@ describe("queryStore multi-statement errors", () => {
     expect(store.tabs.find((item) => item.id === tabId)?.results?.map((result) => result.sourceLabel)).toEqual(["Orders", "Users"]);
   });
 
+  it("does not repeatedly scan the full document when naming a selected large batch", async () => {
+    const statementCount = 500;
+    const statements = Array.from({ length: statementCount }, (_, index) => `-- Name: Result ${index}\nSELECT ${index};`);
+    const sql = statements.join("\n");
+    mocks.executeMulti.mockResolvedValue(Array.from({ length: statementCount }, (_, index) => ({ columns: ["value"], rows: [[index]], affected_rows: 0, execution_time_ms: 1, statement_index: index })));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    store.updateSql(tabId, sql);
+    const originalFind = Array.prototype.find;
+    let statementVisits = 0;
+    const findSpy = vi.spyOn(Array.prototype, "find").mockImplementation(function (this: any[], predicate, thisArg) {
+      const isStatementList = this.length === statementCount && typeof this[0]?.hitFrom === "number";
+      return originalFind.call(this, (value, index, values) => {
+        if (isStatementList) statementVisits += 1;
+        return predicate.call(thisArg, value, index, values);
+      });
+    });
+    try {
+      await store.executeTabSql(tabId, sql, { sourceOffset: 0 });
+    } finally {
+      findSpy.mockRestore();
+    }
+
+    expect(statementVisits).toBeLessThan(statementCount * 20);
+    expect(store.tabs.find((tab) => tab.id === tabId)?.results?.map((result) => result.sourceLabel)).toEqual(statements.map((_, index) => `Result ${index}`));
+  });
+
+  it("preserves document names for out-of-order results and a selection starting inside a statement", async () => {
+    mocks.executeMulti.mockResolvedValue([
+      { columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, statement_index: 1 },
+      { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, statement_index: 0 },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const sql = "-- Name: Users\nEXPLAIN SELECT * FROM users;\n-- Name: Orders\nSELECT * FROM orders;";
+    const sourceOffset = sql.indexOf("SELECT");
+    store.updateSql(tabId, sql);
+
+    await store.executeTabSql(tabId, sql.slice(sourceOffset), { sourceOffset });
+
+    expect(store.tabs.find((tab) => tab.id === tabId)?.results).toMatchObject([
+      { sourceLabel: "Orders", sourceStatement: "SELECT * FROM orders", sourceFrom: sql.lastIndexOf("SELECT") },
+      { sourceLabel: "Users", sourceStatement: "SELECT * FROM users", sourceFrom: sourceOffset },
+    ]);
+  });
+
   it("does not promote an unmarked Error alias without type metadata as a batch failure", async () => {
     mocks.executeMulti.mockResolvedValue([
       { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },

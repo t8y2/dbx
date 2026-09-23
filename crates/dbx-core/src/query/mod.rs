@@ -253,6 +253,31 @@ pub struct ExecuteMultiResult {
     /// treat it as a no-op rather than an unproven statement.
     #[serde(skip_serializing_if = "is_false")]
     pub manual_transaction_no_statement: bool,
+    /// MySQL auto-commit tab: set on every result of the batch when the tab's
+    /// connection was settled. `Some(true)` means the connection still holds a
+    /// transaction the user opened explicitly and DBX kept it open
+    /// (`preserve_explicit_transaction`); `Some(false)` means the settlement ran
+    /// and no such transaction is open. `None` means this execution never
+    /// observed a tab-scoped MySQL connection, so it says nothing about the
+    /// tab's state. The frontend mirrors `Some(..)` into the tab's transaction
+    /// badge/actions so the state is never silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_commit_open_transaction: Option<bool>,
+    /// MySQL auto-commit tab: set on every result of the batch when DBX rolled
+    /// back a transaction the user opened explicitly (`BEGIN` /
+    /// `START TRANSACTION`) and left open. Lets the UI report the cleanup
+    /// instead of discarding the transaction silently.
+    #[serde(skip_serializing_if = "is_false")]
+    pub auto_commit_explicit_transaction_rolled_back: bool,
+    /// MySQL auto-commit tab: set on every result of the batch when DBX rolled
+    /// back a transaction nobody opened explicitly — the session turned
+    /// auto-commit off (`SET autocommit = 0`), so its transactions are implicit.
+    /// Reported separately from the explicit case: the user never asked for a
+    /// transaction, so the tab shows a distinct notice that is raised once per
+    /// connection instead of repeating "your explicit transaction was rolled
+    /// back" after every execution.
+    #[serde(skip_serializing_if = "is_false")]
+    pub auto_commit_session_autocommit_rolled_back: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -301,6 +326,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -316,6 +344,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -333,6 +364,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -346,6 +380,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -370,6 +407,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -393,6 +433,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -694,6 +737,9 @@ impl From<db::QueryResult> for ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 }
@@ -709,6 +755,9 @@ impl From<db::sqlserver::SqlServerBatchResult> for ExecuteMultiResult {
             server_message: result.server_message,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 }
@@ -1143,6 +1192,13 @@ pub struct QueryExecutionOptions {
     /// `PostgresReadOnlyTransaction` executes on an isolated client session and
     /// always rolls the transaction back after the result is collected.
     pub execution_mode: QueryExecutionMode,
+    /// MySQL auto-commit tabs only: keep a transaction the user opened
+    /// explicitly (`BEGIN` / `START TRANSACTION`, or a batch that disabled
+    /// auto-commit) open across executions instead of rolling it back when the
+    /// batch finishes. Opt-in per execution (driven by the editor setting);
+    /// `false` keeps the historical cleanup that stops a leftover transaction
+    /// from pinning the tab's read view (#9479).
+    pub preserve_explicit_transaction: bool,
 }
 
 fn validate_query_execution_mode(
@@ -1646,6 +1702,7 @@ async fn do_execute_typed(
     schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
+    transaction_outcome: &mut Option<MysqlAutoCommitTransaction>,
 ) -> Result<db::QueryResult, QueryExecutionError> {
     crate::sql_diagnostics::debug_sql("do_execute", sql);
     if let Some(execution_id) = options.execution_id.as_deref() {
@@ -1663,6 +1720,13 @@ async fn do_execute_typed(
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let pool = state.pool_handle(pool_key).await.ok_or("Connection not found")?;
+    // Everything the driver dispatch does for this statement — pool checkout,
+    // schema/search_path setup, the statement, and the post-statement cleanup —
+    // is what the user actually waited for. Report that span instead of the
+    // driver-internal timer, which starts only after a client is in hand and
+    // therefore hides connection-pool stalls from the summary (#6097 fixed the
+    // same mismatch for SQL Server's shared-connection lock).
+    let dispatch_start = std::time::Instant::now();
 
     let mut typed_agent_error = None;
     #[cfg(feature = "duckdb-sidecar")]
@@ -1769,19 +1833,31 @@ async fn do_execute_typed(
             // would therefore leave its transaction open and pin the
             // connection's REPEATABLE READ read view, so every later
             // auto-commit query in the tab would keep reading the same stale
-            // snapshot until the connection was closed. Clear it here, exactly
-            // like the multi-statement MySQL path does, so each execution
-            // restores the auto-commit contract (ROLLBACK is a server no-op
-            // when no transaction is open).
+            // snapshot until the connection was closed. Settle it here, exactly
+            // like the multi-statement MySQL path does: roll the transaction
+            // back, unless the tab keeps explicit user transactions open
+            // (`preserve_explicit_transaction`) or a later execution already
+            // decided to keep this one.
             if p.is_client_session_pool() {
-                if let Err(error) = db::mysql::rollback_open_transaction(&mut conn).await {
-                    log::warn!(
-                        "[query][mysql] trace_id={} open_txn_rollback_failed error={}",
-                        options.execution_id.as_deref().unwrap_or_default(),
-                        error
-                    );
-                    let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
-                    state.remove_pool_by_key(pool_key).await;
+                let transaction = settle_mysql_auto_commit_transaction_boxed(
+                    state,
+                    pool_key,
+                    &mut conn,
+                    options.preserve_explicit_transaction,
+                    crate::query_execution_sql::mysql_statement_opens_explicit_transaction(sql),
+                )
+                .await;
+                match transaction {
+                    Ok(transaction) => *transaction_outcome = Some(transaction),
+                    Err(error) => {
+                        log::warn!(
+                            "[query][mysql] trace_id={} open_txn_rollback_failed error={}",
+                            options.execution_id.as_deref().unwrap_or_default(),
+                            error
+                        );
+                        let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
+                        state.remove_pool_by_key(pool_key).await;
+                    }
                 }
             }
             statement_result
@@ -2163,6 +2239,10 @@ async fn do_execute_typed(
         PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
+        .map(|mut result| {
+            result.execution_time_ms = result.execution_time_ms.max(dispatch_start.elapsed().as_millis());
+            result
+        })
         .map_err(|error| {
             #[cfg(feature = "duckdb-sidecar")]
             if let Some(duckdb_error) = typed_duckdb_error {
@@ -2221,7 +2301,7 @@ pub async fn do_execute(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<db::QueryResult, String> {
-    do_execute_typed(state, pool_key, mysql_dialect, database, sql, schema, cancel_token, options)
+    do_execute_typed(state, pool_key, mysql_dialect, database, sql, schema, cancel_token, options, &mut None)
         .await
         .map_err(QueryExecutionError::into_legacy_string)
 }
@@ -2610,8 +2690,52 @@ pub async fn execute_sql_statement_with_options_typed(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<db::QueryResult, QueryExecutionError> {
+    // `_with_outcome` is a second async layer in front of
+    // `execute_sql_statement_with_options_typed_inner`. Awaiting it inline nests
+    // one more concrete future type into every caller's generator, which pushed
+    // Rust targets of this workspace past rustc's query depth limit on Linux
+    // (`error: queries overflow the depth limit!`). Erasing the type keeps this
+    // wrapper as shallow as it was before the outcome was added.
+    let executed: ExecutedSqlStatement<'_> = Box::pin(execute_sql_statement_with_options_typed_with_outcome(
+        state,
+        connection_id,
+        database,
+        sql,
+        schema,
+        cancel_token,
+        options,
+    ));
+    executed.await.map(|(result, _)| result)
+}
+
+/// Boxed, type-erased run of one SQL statement, awaiting it without nesting
+/// another concrete future type into the caller's generator.
+type ExecutedSqlStatement<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ExecutedSqlStatementOutcome> + Send + 'a>>;
+
+/// Result of [`ExecutedSqlStatement`].
+type ExecutedSqlStatementOutcome = Result<(db::QueryResult, Option<MysqlAutoCommitTransaction>), QueryExecutionError>;
+
+/// Same as [`execute_sql_statement_with_options_typed`], but also returns how
+/// the MySQL auto-commit settlement left the tab-scoped connection (see
+/// [`MysqlAutoCommitTransaction`]). `None` means the statement did not run on a
+/// tab-scoped MySQL connection, so there is no such state to report.
+pub(crate) async fn execute_sql_statement_with_options_typed_with_outcome(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+) -> Result<(db::QueryResult, Option<MysqlAutoCommitTransaction>), QueryExecutionError> {
     let db_type = connection_database_type(state, connection_id).await;
     let invalidate = crate::object_cache::sql_may_change_object_metadata(sql, db_type);
+    let mut transaction = None;
+    // Same contract as the multi-statement entry point: a single statement is
+    // reported with the duration of the whole request, including creating or
+    // reconnecting the pool, so the summary matches the loading indicator.
+    let request_start = std::time::Instant::now();
     let result = execute_sql_statement_with_options_typed_inner(
         state,
         connection_id,
@@ -2620,12 +2744,16 @@ pub async fn execute_sql_statement_with_options_typed(
         schema,
         cancel_token,
         options,
+        &mut transaction,
     )
     .await;
     if invalidate {
         crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
     }
-    result
+    result.map(|mut result| {
+        result.execution_time_ms = result.execution_time_ms.max(request_start.elapsed().as_millis());
+        (result, transaction)
+    })
 }
 
 async fn recover_postgres_create_table_after_connection_error(
@@ -2665,6 +2793,7 @@ async fn recover_postgres_create_table_after_connection_error(
         schema,
         cancel_token.clone(),
         options.clone(),
+        &mut None,
     )
     .await
     {
@@ -2699,6 +2828,7 @@ async fn recover_postgres_create_table_after_connection_error(
         None,
         cancel_token,
         verify_options,
+        &mut None,
     )
     .await
     .ok()
@@ -2715,6 +2845,7 @@ async fn execute_sql_statement_with_options_typed_inner(
     schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
+    transaction_outcome: &mut Option<MysqlAutoCommitTransaction>,
 ) -> Result<db::QueryResult, QueryExecutionError> {
     // MongoDB connections use shell-style commands dispatched through the
     // frontend parser. Queries that fall through to the generic SQL executor
@@ -2763,6 +2894,7 @@ async fn execute_sql_statement_with_options_typed_inner(
         schema,
         cancel_token.clone(),
         options.clone(),
+        transaction_outcome,
     )
     .await;
 
@@ -2796,8 +2928,18 @@ async fn execute_sql_statement_with_options_typed_inner(
                 .await
                 .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
             with_sql_context(
-                do_execute_typed(state, &new_key, mysql_dialect, Some(database), sql, schema, cancel_token, options)
-                    .await,
+                do_execute_typed(
+                    state,
+                    &new_key,
+                    mysql_dialect,
+                    Some(database),
+                    sql,
+                    schema,
+                    cancel_token,
+                    options,
+                    &mut None,
+                )
+                .await,
             )
         }
         Some(PoolErrorAction::Discard) => {
@@ -3059,6 +3201,11 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
 ) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
     let db_type = connection_database_type(state, connection_id).await;
     let invalidate = crate::object_cache::sql_may_change_object_metadata(sql, db_type);
+    // A run that produced a single statement result is reported back as one
+    // duration, so make it the duration of the whole request: pool creation or
+    // reconnection for a cold pool happens outside the statement dispatcher and
+    // would otherwise be invisible while the loading indicator counts it.
+    let request_start = std::time::Instant::now();
     let result = execute_multi_core_with_options_for_client_and_progress_typed_inner(
         state,
         connection_id,
@@ -3073,7 +3220,14 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     if invalidate {
         crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
     }
-    result
+    result.map(|mut results| {
+        if results.len() == 1 {
+            if let Some(item) = results.first_mut() {
+                item.result.execution_time_ms = item.result.execution_time_ms.max(request_start.elapsed().as_millis());
+            }
+        }
+        results
+    })
 }
 
 async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
@@ -3184,6 +3338,7 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
             )
             .await,
             table_data_preview,
+            None,
         );
     }
 
@@ -3205,19 +3360,21 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     {
         let single_sql = statements.into_iter().next().unwrap_or_default();
         let table_data_preview = options.table_data_preview;
-        return single_statement_multi_result(
-            execute_sql_statement_with_options_typed(
-                state,
-                connection_id,
-                database,
-                &single_sql,
-                schema,
-                cancel_token,
-                options,
-            )
-            .await,
-            table_data_preview,
-        );
+        let executed = execute_sql_statement_with_options_typed_with_outcome(
+            state,
+            connection_id,
+            database,
+            &single_sql,
+            schema,
+            cancel_token,
+            options,
+        )
+        .await;
+        let (result, transaction) = match executed {
+            Ok((result, transaction)) => (Ok(result), transaction),
+            Err(error) => (Err(error), None),
+        };
+        return single_statement_multi_result(result, table_data_preview, transaction);
     }
 
     if let Some((pool, mode)) = mysql_pool {
@@ -3372,8 +3529,15 @@ pub async fn connection_pool_is_sqlserver_agent(state: &AppState, connection_id:
 fn single_statement_multi_result(
     result: Result<db::QueryResult, QueryExecutionError>,
     table_data_preview: bool,
+    transaction: Option<MysqlAutoCommitTransaction>,
 ) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
-    result.map(|result| vec![ExecuteMultiResult::success_with_optional_server_large_values(result, table_data_preview)])
+    result.map(|result| {
+        let mut result = ExecuteMultiResult::success_with_optional_server_large_values(result, table_data_preview);
+        if let Some(transaction) = transaction {
+            transaction.mark(&mut result);
+        }
+        vec![result]
+    })
 }
 
 fn mysql_single_statement_uses_batch_route(
@@ -3658,6 +3822,146 @@ where
     (results, None)
 }
 
+/// Settled transaction state of a tab-scoped MySQL connection after one
+/// execution finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MysqlAutoCommitTransaction {
+    /// No transaction is open on the connection.
+    None,
+    /// A transaction the user opened explicitly is still open and was kept.
+    Preserved,
+    /// DBX rolled back a transaction the user opened explicitly.
+    RolledBackExplicit,
+    /// DBX rolled back a transaction the session opened implicitly because
+    /// auto-commit was turned off (`SET autocommit = 0`).
+    RolledBackSessionAutocommit,
+}
+
+impl MysqlAutoCommitTransaction {
+    fn mark(self, result: &mut ExecuteMultiResult) {
+        result.auto_commit_open_transaction = Some(self == Self::Preserved);
+        result.auto_commit_explicit_transaction_rolled_back = self == Self::RolledBackExplicit;
+        result.auto_commit_session_autocommit_rolled_back = self == Self::RolledBackSessionAutocommit;
+    }
+}
+
+/// What the settlement did with the transaction that was still open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MysqlAutoCommitRollback {
+    /// Nothing was rolled back.
+    None,
+    /// A transaction the batch opened explicitly (`BEGIN` / `START TRANSACTION`).
+    Explicit,
+    /// A transaction the session opened implicitly: auto-commit was off
+    /// (`SET autocommit = 0`), so every statement starts one.
+    SessionAutocommit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MysqlAutoCommitDecision {
+    preserve: bool,
+    rollback: MysqlAutoCommitRollback,
+}
+
+/// Decides what to do with a transaction that is still open when an
+/// auto-commit tab finished executing.
+///
+/// A `BEGIN` / `START TRANSACTION` the user typed (or a batch that turned
+/// auto-commit off) is an explicit request to hold the changes until `COMMIT` /
+/// `ROLLBACK`, so `preserve_explicit_transaction` keeps it — including the
+/// later executions that never mention a transaction, which is what
+/// `already_preserved` carries. Everything else keeps the historical cleanup
+/// that stops a leftover transaction from pinning the tab's read view (#9479),
+/// and is reported so the cleanup is never silent.
+fn decide_mysql_auto_commit_transaction(
+    allow_preserve: bool,
+    already_preserved: bool,
+    explicit_start_in_batch: bool,
+    status: Option<db::mysql::MySqlSessionStatus>,
+) -> MysqlAutoCommitDecision {
+    // A session or batch that turned auto-commit off opens its transactions
+    // implicitly, so the server status is the only signal for those.
+    let explicit_transaction = explicit_start_in_batch || status.is_some_and(|status| !status.autocommit);
+    let transaction_open = match status {
+        Some(status) => status.in_transaction,
+        // No usable status packet (the last statement ended with an ERR packet
+        // and the refresh failed): an explicit opener is the only evidence left.
+        None => explicit_start_in_batch || already_preserved,
+    };
+    if !transaction_open {
+        return MysqlAutoCommitDecision { preserve: false, rollback: MysqlAutoCommitRollback::None };
+    }
+    if already_preserved || (allow_preserve && explicit_transaction) {
+        return MysqlAutoCommitDecision { preserve: true, rollback: MysqlAutoCommitRollback::None };
+    }
+    // Distinguish who opened it: only a batch with its own `BEGIN` /
+    // `START TRANSACTION` is a user transaction; `autocommit = 0` opens
+    // transactions implicitly for every statement.
+    let rollback = if explicit_start_in_batch {
+        MysqlAutoCommitRollback::Explicit
+    } else if status.is_some_and(|status| !status.autocommit) {
+        MysqlAutoCommitRollback::SessionAutocommit
+    } else {
+        MysqlAutoCommitRollback::None
+    };
+    MysqlAutoCommitDecision { preserve: false, rollback }
+}
+
+/// Type-erased entry point for [`settle_mysql_auto_commit_transaction`].
+///
+/// `do_execute_typed` is one of the largest async fns in the crate and is
+/// reached transitively by the workspace's live tests and examples. Awaiting the
+/// settle future inline nests its concrete future type inside that generator,
+/// which pushed `dbx-core` targets past rustc's query depth limit on Linux
+/// (`error: queries overflow the depth limit!`). Erasing the type keeps the
+/// enclosing generators as shallow as they were before the settlement moved in.
+fn settle_mysql_auto_commit_transaction_boxed<'a>(
+    state: &'a AppState,
+    pool_key: &'a str,
+    conn: &'a mut mysql_async::Conn,
+    allow_preserve: bool,
+    explicit_start_in_batch: bool,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<MysqlAutoCommitTransaction, String>> + Send + 'a>> {
+    Box::pin(settle_mysql_auto_commit_transaction(state, pool_key, conn, allow_preserve, explicit_start_in_batch))
+}
+
+/// Settles the open transaction of a tab-scoped MySQL connection after an
+/// execution: keeps an explicit user transaction when the caller opted in,
+/// otherwise rolls it back exactly as before.
+///
+/// `Err` means the transaction state could not be settled, so the caller must
+/// discard the connection instead of returning it to the pool.
+async fn settle_mysql_auto_commit_transaction(
+    state: &AppState,
+    pool_key: &str,
+    conn: &mut mysql_async::Conn,
+    allow_preserve: bool,
+    explicit_start_in_batch: bool,
+) -> Result<MysqlAutoCommitTransaction, String> {
+    let already_preserved = state.has_preserved_explicit_transaction(pool_key).await;
+    let mut status = db::mysql::session_status_from_last_ok(conn);
+    if status.is_none() && (allow_preserve || already_preserved) {
+        // Only pay for the extra round trip when the answer can change the
+        // outcome: without the opt-in the historical cleanup runs regardless.
+        status = db::mysql::ping_session_status_on_conn(conn).await.ok();
+    }
+    let decision =
+        decide_mysql_auto_commit_transaction(allow_preserve, already_preserved, explicit_start_in_batch, status);
+    if decision.preserve {
+        state.mark_preserved_explicit_transaction(pool_key).await;
+        return Ok(MysqlAutoCommitTransaction::Preserved);
+    }
+    state.clear_preserved_explicit_transaction(pool_key).await;
+    // Historical cleanup: `ROLLBACK` is a server no-op when no transaction is
+    // open, and releases the read view when one is.
+    db::mysql::rollback_open_transaction(conn).await?;
+    Ok(match decision.rollback {
+        MysqlAutoCommitRollback::Explicit => MysqlAutoCommitTransaction::RolledBackExplicit,
+        MysqlAutoCommitRollback::SessionAutocommit => MysqlAutoCommitTransaction::RolledBackSessionAutocommit,
+        MysqlAutoCommitRollback::None => MysqlAutoCommitTransaction::None,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_multi_mysql(
     state: &AppState,
@@ -3734,7 +4038,7 @@ async fn execute_multi_mysql(
         diagnostic_trace_id: options.execution_id.as_deref(),
     };
     let statements_started_at = std::time::Instant::now();
-    let (results, error_action) = execute_mysql_batch_statements(
+    let (mut results, error_action) = execute_mysql_batch_statements(
         &mut executor,
         statements,
         db_type,
@@ -3755,18 +4059,41 @@ async fn execute_multi_mysql(
     // the REPEATABLE READ snapshot for every later auto-commit query on that
     // tab, making the tab read stale rows until disconnect. Closing any open
     // transaction before returning the connection restores the auto-commit
-    // contract; ROLLBACK on an already-committed/implicit transaction is a
-    // server no-op, and a failure here only discards this connection.
+    // contract, unless the tab keeps explicit user transactions open
+    // (`preserve_explicit_transaction`); ROLLBACK on an already-committed/
+    // implicit transaction is a server no-op, and a failure here only discards
+    // this connection.
     {
+        let tab_scoped = pool.is_client_session_pool();
+        let explicit_start_in_batch = tab_scoped
+            && statements
+                .iter()
+                .any(|statement| crate::query_execution_sql::mysql_statement_opens_explicit_transaction(statement));
         let rollback_started_at = std::time::Instant::now();
-        match db::mysql::rollback_open_transaction(&mut conn).await {
-            Ok(()) => {
+        let transaction = if tab_scoped {
+            settle_mysql_auto_commit_transaction(
+                state,
+                pool_key,
+                &mut conn,
+                options.preserve_explicit_transaction,
+                explicit_start_in_batch,
+            )
+            .await
+        } else {
+            db::mysql::rollback_open_transaction(&mut conn).await.map(|()| MysqlAutoCommitTransaction::None)
+        };
+        match transaction {
+            Ok(transaction) => {
                 if rollback_started_at.elapsed() > std::time::Duration::from_millis(5) {
                     log::info!(
-                        "[query][mysql-batch] trace_id={} open_txn_rollback_ms={}",
+                        "[query][mysql-batch] trace_id={} open_txn_rollback_ms={} preserved={}",
                         trace_id,
-                        rollback_started_at.elapsed().as_millis()
+                        rollback_started_at.elapsed().as_millis(),
+                        transaction == MysqlAutoCommitTransaction::Preserved
                     );
+                }
+                for result in &mut results {
+                    transaction.mark(result);
                 }
             }
             Err(error) => {
@@ -6285,6 +6612,29 @@ async fn execute_manual_txn_mysql_statement(
         let mut result = conn.query_iter(sql).await.map_err(|e| format!("Query failed: {e}"))?;
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
         let column_types: Vec<String> = result.columns_ref().iter().map(db::mysql::mysql_column_type_name).collect();
+        // Some statements only *may* return rows — `EXECUTE` of a prepared DML statement
+        // finishes with a plain OK packet instead — so report the affected rows rather than
+        // failing on the missing result set.
+        if columns.is_empty() {
+            let affected_rows = result.affected_rows();
+            result.drop_result().await.map_err(|e| format!("Query failed: {e}"))?;
+            return Ok(db::QueryResult {
+                columns: Vec::new(),
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
+                rows: vec![],
+                affected_rows,
+                execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
+                truncated: false,
+                session_id: None,
+                has_more: false,
+                elasticsearch_raw_body: None,
+                messages: Vec::new(),
+            });
+        }
         let mut data: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(1024));
         let mut stream = result
             .stream::<mysql_async::Row>()
@@ -9352,7 +9702,7 @@ for line in sys.stdin:
         )
         .with_omitted_sql_context("SELECT * FROM dbx_table_that_does_not_exist");
 
-        let error = single_statement_multi_result(Err(error), false).unwrap_err();
+        let error = single_statement_multi_result(Err(error), false, None).unwrap_err();
         let backend_error = error.into_backend_error();
 
         assert_eq!(backend_error.code(), "DBX-JDBC-4001");
@@ -11517,7 +11867,7 @@ for line in sys.stdin:
 
     #[test]
     fn single_statement_preview_preserves_absent_statement_index() {
-        let result = single_statement_multi_result(Ok(empty_query_result(1)), true).unwrap();
+        let result = single_statement_multi_result(Ok(empty_query_result(1)), true, None).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].statement_index, None);
@@ -11539,6 +11889,116 @@ for line in sys.stdin:
     fn query_execution_options_use_transaction_some_false_is_preserved() {
         let opts = QueryExecutionOptions { use_transaction: Some(false), ..Default::default() };
         assert_eq!(opts.use_transaction, Some(false));
+    }
+
+    fn mysql_status(in_transaction: bool, autocommit: bool) -> db::mysql::MySqlSessionStatus {
+        db::mysql::MySqlSessionStatus { in_transaction, autocommit }
+    }
+
+    #[test]
+    fn mysql_auto_commit_default_rolls_back_an_explicitly_opened_transaction() {
+        // The historical behavior for the default setting: a `BEGIN` a user
+        // left open is rolled back, but the cleanup is now reported so the tab
+        // can tell the user instead of discarding the transaction silently.
+        let decision = decide_mysql_auto_commit_transaction(false, false, true, Some(mysql_status(true, true)));
+        assert!(!decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::Explicit);
+    }
+
+    #[test]
+    fn mysql_auto_commit_opt_in_keeps_an_explicitly_opened_transaction() {
+        // The opt-in decision is made from the *submitted* statement list, not
+        // from how much of the batch actually ran. A batch that opens a
+        // transaction and is then cancelled (or aborted by an error) has only
+        // executed a prefix of its statements, yet the opener is still part of
+        // the batch, so the connection keeps whatever the prefix did and stays
+        // in the transaction. Preserving is what makes the abandoned work
+        // visible — the tab shows the open-transaction badge and the manual
+        // rollback action — instead of silently rolling back a transaction the
+        // user asked for. `decide(true, false, true, ..)` below is exactly that
+        // cancelled-batch case: the caller still passes the opener it was
+        // about to run, so the decision must be preserve, not roll back.
+        let decision = decide_mysql_auto_commit_transaction(true, false, true, Some(mysql_status(true, true)));
+        assert!(decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_auto_commit_opt_in_keeps_the_transaction_of_a_later_execution() {
+        // `START TRANSACTION` ran first, this execution only ran an UPDATE, so
+        // the batch itself carries no opener: the kept state is the only signal.
+        let decision = decide_mysql_auto_commit_transaction(true, true, false, Some(mysql_status(true, true)));
+        assert!(decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+
+        // The kept state survives even when the caller does not pass the option
+        // (auxiliary queries, result paging): an open user transaction is never
+        // destroyed from another code path.
+        let no_option = decide_mysql_auto_commit_transaction(false, true, false, Some(mysql_status(true, true)));
+        assert!(no_option.preserve);
+        assert_eq!(no_option.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_auto_commit_opt_in_keeps_a_transaction_opened_by_auto_commit_off() {
+        let decision = decide_mysql_auto_commit_transaction(true, false, false, Some(mysql_status(true, false)));
+        assert!(decision.preserve);
+
+        // Without the opt-in the same connection is cleaned up as before, but
+        // reported as a session-level implicit transaction: nobody typed
+        // `BEGIN`, the connection simply runs with auto-commit off.
+        let default = decide_mysql_auto_commit_transaction(false, false, false, Some(mysql_status(true, false)));
+        assert!(!default.preserve);
+        assert_eq!(default.rollback, MysqlAutoCommitRollback::SessionAutocommit);
+    }
+
+    #[test]
+    fn mysql_auto_commit_reports_a_batch_opener_ahead_of_autocommit_off() {
+        // Both signals at once: a `BEGIN` in the batch wins, so the notice is
+        // the explicit-transaction one.
+        let decision = decide_mysql_auto_commit_transaction(false, false, true, Some(mysql_status(true, false)));
+        assert!(!decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::Explicit);
+    }
+
+    #[test]
+    fn mysql_auto_commit_rolls_back_a_leftover_transaction_without_reporting_it() {
+        // No opener in the batch and auto-commit still on: this is a leftover
+        // transaction (cancelled or aborted batch), not a user transaction.
+        let decision = decide_mysql_auto_commit_transaction(true, false, false, Some(mysql_status(true, true)));
+        assert!(!decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_auto_commit_leaves_a_clean_connection_alone() {
+        // `BEGIN; ...; COMMIT;` in one batch ends with nothing open.
+        let decision = decide_mysql_auto_commit_transaction(true, false, true, Some(mysql_status(false, true)));
+        assert!(!decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+
+        // A kept transaction that the user committed in this batch must be
+        // forgotten, so later executions are auto-commit again.
+        let after_commit = decide_mysql_auto_commit_transaction(true, true, false, Some(mysql_status(false, true)));
+        assert!(!after_commit.preserve);
+        assert_eq!(after_commit.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_auto_commit_uses_the_batch_opener_when_the_status_packet_is_missing() {
+        // The last statement ended with an ERR packet, so no status is cached
+        // and the COM_PING refresh failed.
+        let kept = decide_mysql_auto_commit_transaction(true, false, true, None);
+        assert!(kept.preserve);
+        assert_eq!(kept.rollback, MysqlAutoCommitRollback::None);
+
+        let cleaned = decide_mysql_auto_commit_transaction(false, false, true, None);
+        assert!(!cleaned.preserve);
+        assert_eq!(cleaned.rollback, MysqlAutoCommitRollback::Explicit);
+
+        let unknown_without_opener = decide_mysql_auto_commit_transaction(true, false, false, None);
+        assert!(!unknown_without_opener.preserve);
+        assert_eq!(unknown_without_opener.rollback, MysqlAutoCommitRollback::None);
     }
 
     #[test]

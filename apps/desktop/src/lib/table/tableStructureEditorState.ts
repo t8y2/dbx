@@ -630,6 +630,68 @@ export const SQLSERVER_TYPE_LENGTHS: Record<string, string> = {
 
 export const DEFAULT_TYPE_LENGTH_DISABLES: string[] = [];
 
+const DUCKDB_TYPE_LENGTH_DISABLES = new Set([
+  "tinyint",
+  "int1",
+  "smallint",
+  "int2",
+  "short",
+  "int16",
+  "integer",
+  "int",
+  "int4",
+  "signed",
+  "integral",
+  "int32",
+  "bigint",
+  "int8",
+  "long",
+  "oid",
+  "int64",
+  "hugeint",
+  "int128",
+  "utinyint",
+  "uint8",
+  "usmallint",
+  "uint16",
+  "uinteger",
+  "uint32",
+  "ubigint",
+  "uint64",
+  "uhugeint",
+  "uint128",
+  "real",
+  "float4",
+  "double",
+  "double precision",
+  "float8",
+  "boolean",
+  "bool",
+  "logical",
+  "blob",
+  "bytea",
+  "binary",
+  "varbinary",
+  "bit",
+  "bitstring",
+  "varint",
+  "bignum",
+  "date",
+  "time",
+  "time without time zone",
+  "time with time zone",
+  "timetz",
+  "timestamptz",
+  "timestamp with time zone",
+  "timestamp_s",
+  "timestamp_ms",
+  "timestamp_ns",
+  "uuid",
+  "guid",
+  "json",
+  "interval",
+]);
+
 export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
   "bigint",
   "int8",
@@ -895,6 +957,10 @@ const NUMERIC_PRECISION_METADATA_TYPES = new Set(["decimal", "number", "numeric"
 const XUGU_SINGLE_PRECISION_METADATA_TYPES = new Set(["bit", "time", "time with time zone", "timestamp", "timestamp with time zone", "varbit"]);
 
 function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+  if (databaseType === "duckdb") {
+    const normalized = normalizeDuckdbDataType(column.data_type);
+    if (normalized !== column.data_type) return normalized;
+  }
   const parsed = splitDataTypeForDatabase(databaseType, column.data_type);
   if (parsed.params) return column.data_type;
 
@@ -1194,6 +1260,10 @@ export function splitDataType(raw: string): { baseType: string; params: string }
 }
 
 function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
+  if (dbType === "duckdb") {
+    const parsed = splitDuckdbScalarDataType(raw);
+    if (parsed) return parsed;
+  }
   if (dbType === "xugu") {
     const match = raw.trim().match(/^(TIME|TIMESTAMP)\s*\(([^()]*)\)\s+WITH\s+TIME\s+ZONE$/i);
     if (match) {
@@ -1315,23 +1385,49 @@ export function combineDataType(baseType: string, params: string): string {
 }
 
 export function combineDataTypeForDatabase(dbType: DatabaseType | undefined, baseType: string, params: string): string {
+  if (dbType === "duckdb") baseType = normalizeDuckdbDataType(baseType);
   if (isDataTypeLengthDisabled(dbType, baseType)) {
     return baseType;
   }
   const normalizedParams = normalizeDataTypeParams(dbType, baseType, params);
   const mysqlType = combineMysqlNumericAttributeType(dbType, baseType, normalizedParams);
   if (mysqlType) return mysqlType;
-  const xuguTemporalType = combineXuguTemporalType(baseType, normalizedParams, dbType);
-  if (xuguTemporalType) return xuguTemporalType;
+  const qualifiedTemporalType = combineQualifiedTemporalType(baseType, normalizedParams, dbType);
+  if (qualifiedTemporalType) return qualifiedTemporalType;
   return combineDataType(baseType, normalizedParams);
 }
 
 export function dataTypeLengthInputValue(dbType: DatabaseType | undefined, rawDataType: string): string {
   const parsed = splitDataTypeForDatabase(dbType, rawDataType);
+  if (dbType === "duckdb") {
+    return isDataTypeLengthDisabled(dbType, parsed.baseType) ? "" : normalizeDataTypeParams(dbType, parsed.baseType, parsed.params);
+  }
   return isDataTypeLengthDisabled(dbType, parsed.baseType) ? "" : splitDataTypeLengthParams(dbType, rawDataType).length;
 }
 
-function combineXuguTemporalType(baseType: string, params: string, dbType: DatabaseType | undefined): string | null {
+function splitDuckdbScalarDataType(raw: string): { baseType: string; params: string } | null {
+  const match = raw.trim().match(/^([a-z][a-z0-9_\s]*?)\s*\(([^()]*)\)(?:\s+(WITH(?:OUT)?\s+TIME\s+ZONE))?$/i);
+  if (!match) return null;
+  const baseType = match[1]!.trim();
+  if (match[3] && !/^(time|timestamp)$/i.test(baseType)) return null;
+  return { baseType: match[3] ? `${baseType} ${match[3]}` : baseType, params: match[2]!.trim() };
+}
+
+function normalizeDuckdbDataType(raw: string): string {
+  const parsed = splitDuckdbScalarDataType(raw);
+  if (!parsed?.params) return raw;
+  if (isDataTypeLengthDisabled("duckdb", parsed.baseType)) return parsed.baseType;
+  if (parsed.baseType.toLowerCase() === "float") {
+    return combineDataType(parsed.baseType, normalizeDataTypeParams("duckdb", parsed.baseType, parsed.params));
+  }
+  return raw;
+}
+
+function combineQualifiedTemporalType(baseType: string, params: string, dbType: DatabaseType | undefined): string | null {
+  if (dbType === "duckdb") {
+    const match = baseType.trim().match(/^(TIMESTAMP)\s+WITHOUT\s+TIME\s+ZONE$/i);
+    return match ? (params ? `${match[1]}(${params}) WITHOUT TIME ZONE` : baseType.trim()) : null;
+  }
   if (dbType !== "xugu") return null;
   const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+WITH\s+TIME\s+ZONE$/i);
   if (!match) return null;
@@ -1341,6 +1437,9 @@ function combineXuguTemporalType(baseType: string, params: string, dbType: Datab
 export function normalizeDataTypeParams(dbType: DatabaseType | undefined, baseType: string, params: string): string {
   const p = params.trim();
   if (!p) return "";
+  if (dbType === "duckdb" && baseType.trim().toLowerCase() === "float") {
+    return /^\d+$/.test(p) && Number(p) >= 1 && Number(p) <= 53 ? p : "";
+  }
   if (!isTemporalPrecisionType(dbType, baseType)) return p;
   return isValidTemporalPrecision(dbType, baseType, p) ? p : "";
 }
@@ -1416,6 +1515,7 @@ export interface DataTypeDefaultOptions {
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string, options: DataTypeDefaultOptions = {}): string {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "duckdb" && (key === "float" || isDataTypeLengthDisabled(_dbType, baseType))) return "";
   if (_dbType === "mysql" && options.omitMysqlDeprecatedDefaults && isMysqlDeprecatedDefaultParameterType(key)) return "";
   if (_dbType === "sqlite" || _dbType === "rqlite" || _dbType === "turso") {
     return "";
@@ -1493,7 +1593,9 @@ function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
 
 export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {
   const key = baseType.trim().toLowerCase();
-  if (_dbType === "questdb") {
+  if (_dbType === "duckdb") {
+    return DUCKDB_TYPE_LENGTH_DISABLES.has(key.replace(/\s+/g, " "));
+  } else if (_dbType === "questdb") {
     return key !== "geohash" && key !== "decimal";
   } else if (_dbType === "manticoresearch") {
     return key !== "bit" && key !== "float_vector";

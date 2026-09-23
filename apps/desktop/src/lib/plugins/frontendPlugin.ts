@@ -58,7 +58,7 @@ export class FrontendPluginRegistry {
     return this.listContributions("filesystem-provider");
   }
 
-  /** Native context-menu entries declared for a specific menu surface such as `connection`. */
+  /** Native context-menu entries declared for a specific menu surface. */
   listContextMenuItems(menu: string): PluginContributionEntry<PluginContextMenuContribution>[] {
     return this.listContributions("context-menu").filter((entry) => entry.contribution.menu === menu);
   }

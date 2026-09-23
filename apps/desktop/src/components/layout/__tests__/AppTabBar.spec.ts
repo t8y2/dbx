@@ -55,7 +55,7 @@ describe("AppTabBar close confirmation layout", () => {
     const end = tabBarSource.indexOf("</PopoverContent>", start);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(tabBarSource.slice(start, end)).toContain("tabDisplayTitle(tab, t)");
+    expect(tabBarSource.slice(start, end)).toContain("closeConfirmTabTitle(tab)");
   });
 });
 

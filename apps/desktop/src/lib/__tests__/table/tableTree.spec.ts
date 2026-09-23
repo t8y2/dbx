@@ -72,6 +72,23 @@ describe("case-sensitive database objects", () => {
     expect(grouped.find((node) => node.type === "group-views")?.children?.map((node) => node.valid)).toEqual([false, true]);
   });
 
+  it("stores the canonical table name separately from the display label", () => {
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "public",
+      tables: [
+        { name: "users", table_type: "BASE TABLE" },
+        { name: "active_users", table_type: "VIEW" },
+      ],
+    });
+    const table = nodes.find((node) => node.type === "table");
+    const view = nodes.find((node) => node.type === "view");
+
+    expect(table).toMatchObject({ type: "table", label: "users", tableName: "users" });
+    expect(view).toMatchObject({ type: "view", label: "active_users" });
+    expect(view?.tableName).toBeUndefined();
+  });
+
   it("keeps table nodes whose names differ only by case across pages", () => {
     const firstPage = buildTableTreeNodes({
       ...context,

@@ -686,14 +686,52 @@ export function parseInsertValuesClausesInRanges(sql: string, ranges: readonly T
   return clauses;
 }
 
+/**
+ * Split one statement group into its individual INSERT statements.
+ *
+ * Semicolons are optional in several dialects (T-SQL in particular), so a single top-level group
+ * can hold more than one INSERT statement -- `BEGIN TRANSACTION ... INSERT ... INSERT ... COMMIT`
+ * typed in one query window is the everyday case. `parseInsertClause` only ever reads the first
+ * INSERT of the token list it is handed, so passing it the whole group left every later INSERT
+ * without its VALUES/SELECT-to-column mapping (#9966). Splitting at each INSERT keyword keeps the
+ * per-statement parse working for semicolon-less scripts; scripts that do terminate their
+ * statements with `;` still yield one group (and therefore one segment) per statement.
+ *
+ * An `insert` word is only a statement start when the next token is `into`: MySQL/MariaDB also
+ * expose the INSERT(str, pos, len, newstr) string function, and splitting at that call would
+ * truncate its host statement mid-expression (parseInsertClause requires INTO anyway).
+ */
+function splitInsertStatements(tokens: readonly SqlSemanticToken[]): Array<{ span: SqlSemanticSpan; tokens: SqlSemanticToken[] }> {
+  const starts: number[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const item = tokens[index];
+    const next = tokens[index + 1];
+    if (item?.kind === "word" && item.normalized === "insert" && next?.kind === "word" && next.normalized === "into") {
+      starts.push(index);
+    }
+  }
+  const statements: Array<{ span: SqlSemanticSpan; tokens: SqlSemanticToken[] }> = [];
+  for (let position = 0; position < starts.length; position += 1) {
+    const from = starts[position]!;
+    const to = position + 1 < starts.length ? starts[position + 1]! : tokens.length;
+    const statementTokens = tokens.slice(from, to);
+    const first = statementTokens[0]!;
+    const last = statementTokens[statementTokens.length - 1]!;
+    statements.push({ span: { start: first.span.start, end: last.span.end }, tokens: statementTokens });
+  }
+  return statements;
+}
+
 /** Parse all INSERT ... VALUES/SELECT clauses in `sql` (multi-statement aware). Prefer ranged parsing for editors. */
 export function parseInsertValuesClauses(sql: string, dialectId = "mysql"): InsertValuesClause[] {
   if (!sql.trim()) return [];
   const allTokens = tokenizeSqlSemantic(sql, dialectId);
   const clauses: InsertValuesClause[] = [];
-  for (const { span, tokens } of statementTokenGroups(sql, allTokens)) {
-    const clause = parseInsertClause(tokens, span);
-    if (clause) clauses.push(clause);
+  for (const { tokens } of statementTokenGroups(sql, allTokens)) {
+    for (const statement of splitInsertStatements(tokens)) {
+      const clause = parseInsertClause(statement.tokens, statement.span);
+      if (clause) clauses.push(clause);
+    }
   }
   return clauses;
 }

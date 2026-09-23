@@ -234,6 +234,21 @@ async fn collection_stats_and_create_database_run_over_the_legacy_agent() {
     )
     .await;
 
+    // The database view's object statistics take the same numbers per collection, skipping views.
+    command(&state, id, &database, doc! { "create": "orders_view", "viewOn": "orders", "pipeline": [] }).await;
+    command(&state, id, &database, doc! { "create": "empty" }).await;
+    let mut objects = dbx_core::schema::list_object_statistics_core(&state, id, &database, "").await.unwrap();
+    objects.sort_by(|a, b| a.name.cmp(&b.name));
+    // `system.views` is a real collection and is listed on the native path too; the view is not.
+    let names: Vec<&str> = objects.iter().map(|o| o.name.as_str()).collect();
+    assert!(!names.contains(&"orders_view"), "views own no storage and are skipped: {names:?}");
+    let by_name =
+        |name: &str| objects.iter().find(|o| o.name == name).unwrap_or_else(|| panic!("{name} missing: {names:?}"));
+    assert_eq!(by_name("orders").estimated_rows, Some(3), "{objects:?}");
+    assert!(by_name("orders").total_bytes.is_some_and(|bytes| bytes > 0), "{objects:?}");
+    assert_eq!(by_name("orders").schema.as_deref(), Some(database.as_str()));
+    assert_eq!(by_name("empty").estimated_rows, Some(0), "{objects:?}");
+
     let stats = mongo_collection_stats_core(&state, id, &database, "orders", None).await.unwrap();
     assert_eq!(stats.count, serde_json::json!(3), "{stats:?}");
     assert_eq!(stats.nindexes, serde_json::json!(2), "{stats:?}");

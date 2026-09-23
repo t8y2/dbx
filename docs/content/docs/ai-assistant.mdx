@@ -116,6 +116,14 @@ Templates can also be marked as the **default for one or more database types** (
 
 Templates enter model context. Do not put passwords, tokens, or unnecessary business data in them. Keep rules concise and non-conflicting because models may not resolve contradictory instructions as expected.
 
+
+## Skills (SKILL.md)
+
+Desktop can attach read-only [`SKILL.md`](https://developers.openai.com/codex/skills) rule files to a request as supplementary instructions. Skills are always discovered in `~/.agents/skills`; Settings → AI can additionally enable one custom directory. Each directory is validated independently, same names are kept side by side and labeled by source (`Default directory` / `Custom directory`), and custom-directory skills sort first.
+
+Select skills from the composer `Skills` entry (or type `/skill`) and remove them from the chips above the input. The selection lives for the lifetime of one open AI panel — conversation switches and new conversations keep it; closing the panel or restarting DBX clears it. Nothing is persisted, and DBX never writes to skill files.
+
+Skill bodies are read only when a request is sent, directly from disk, and validated then: file deleted or unreadable, invalid frontmatter, non-UTF-8 content, over the 1 MiB per-file limit, or a symlink escaping its root blocks the send with a banner above the composer naming the failed skill and offering Retry, Refresh, Remove, or Open Settings. With no skills selected, prompts are byte-for-byte identical to the pre-feature behavior. Web ships this feature unsupported.
 ## Writes and Production Safety
 
 AI Agent execution boundaries are enforced by the backend, not only by prompting:

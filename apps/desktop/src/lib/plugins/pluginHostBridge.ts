@@ -1,6 +1,7 @@
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
+import { createPluginAiConversation, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -92,6 +93,7 @@ export interface PluginHostBridgeApi {
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
+  openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
@@ -255,6 +257,7 @@ export class PluginHostBridge {
         downloadFile: !!this.api.downloadFile,
         planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
         storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
+        ai: !!this.api.openAiConversation,
         // Additive with the same "absence means unsupported" contract: an older
         // host omits these, and a web host has neither.
         clipboardWrite: !!this.api.copyText,
@@ -342,6 +345,13 @@ export class PluginHostBridge {
       return null;
     }
     if (method === "host.getContext") return snapshotPluginWorkbenchContext(this.context);
+    if (method === "host.ai.openConversation") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation) throw new Error("DBX AI conversation panel is unavailable");
+      const request = createPluginAiConversation(this.plugin.manifest, params);
+      await this.api.openAiConversation(request);
+      return null;
+    }
     if (method === "backend.invoke") {
       const input = requireRecord(params, "backend.invoke params");
       const backendMethod = requireProtocolName(input.method, "backend method");
@@ -807,6 +817,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       downloadFile: (options) => request('host.downloadFile', options),
       cancelDownload: (downloadId) => request('host.cancelDownload', { downloadId }),
       request,
+      ai: Object.freeze({ openConversation: (options) => request('host.ai.openConversation', options) }),
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       stream,
       notify: (method, params) => request('backend.notify', { method, params }),

@@ -148,7 +148,8 @@ describe("PluginWorkbenchHost initialization", () => {
   it("claims OS drops over its iframe and forwards opened handles to the plugin", async () => {
     const { frame, postMessage } = await mountHost();
     const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
-    mocks.openPluginLocalFile.mockResolvedValue({ handleId: 7, name: "a.txt", size: 3, contentType: "text/plain", write: false });
+    // The Rust registry hands out uuid strings; the `t` prefix stays opaque.
+    mocks.openPluginLocalFile.mockResolvedValue({ handleId: "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81", name: "a.txt", size: 3, contentType: "text/plain", write: false });
 
     const claimed = !document.dispatchEvent(
       new CustomEvent("dbx:tauri-file-drop", {
@@ -160,7 +161,7 @@ describe("PluginWorkbenchHost initialization", () => {
     expect(claimed).toBe(true);
     await vi.waitFor(() => {
       const posted = postMessage.mock.calls.map(([message]) => message as Record<string, unknown>);
-      expect(posted.some((message) => message.type === "filedrop" && (message.files as Array<Record<string, unknown>>)?.some((file) => file.handleId === "t7" && file.name === "a.txt"))).toBe(true);
+      expect(posted.some((message) => message.type === "filedrop" && (message.files as Array<Record<string, unknown>>)?.some((file) => file.handleId === "t0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81" && file.name === "a.txt"))).toBe(true);
     });
     expect(mocks.openPluginLocalFile).toHaveBeenCalledWith("sample", "/tmp/a.txt", false);
     elementFromPoint.mockRestore();

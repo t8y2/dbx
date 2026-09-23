@@ -459,13 +459,22 @@ export interface PluginFilesystemMutationResult {
   entry?: PluginFilesystemEntry;
 }
 
+export type PluginContextMenuTarget = "connection" | "table";
+
+export interface PluginTableContext {
+  connectionId: string;
+  database?: string;
+  schema?: string;
+  table: string;
+}
+
 export interface PluginContextMenuContribution {
   type: "context-menu";
   id: string;
   label: string;
   description?: string;
   icon?: string;
-  menu: string;
+  menu: PluginContextMenuTarget;
 }
 
 export interface PluginResultViewContribution {
@@ -1118,6 +1127,21 @@ export interface QueryResult {
   /** Manual-transaction UX marker for the same dialects: set on the synthetic
    *  successful result of an empty/whitespace/comments-only manual script. */
   manual_transaction_no_statement?: true;
+  /** MySQL auto-commit tab session state reported by the backend for this
+   *  execution: true = the tab connection still holds a transaction the user
+   *  opened explicitly (`BEGIN` / `START TRANSACTION`) and DBX kept it open;
+   *  false = the backend settled the connection and no such transaction is
+   *  open. Absent when the execution never observed a tab-scoped MySQL
+   *  connection, so the tab must keep its previous state. */
+  auto_commit_open_transaction?: boolean;
+  /** MySQL auto-commit tab: the backend rolled back a transaction the user
+   *  opened explicitly and left open (the tab did not opt into keeping them). */
+  auto_commit_explicit_transaction_rolled_back?: true;
+  /** MySQL auto-commit tab: the backend rolled back a transaction the session
+   *  opened implicitly because auto-commit was off (`SET autocommit = 0`).
+   *  Nobody typed `BEGIN`, so the tab reports it separately — and only once per
+   *  connection instead of after every execution. */
+  auto_commit_session_autocommit_rolled_back?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
@@ -1443,7 +1467,7 @@ export interface SidebarLayout {
   order: SidebarOrderEntry[];
 }
 
-export type TableVGroupOrderEntry = { type: "group"; id: string; children?: TableVGroupOrderEntry[] } | { type: "table"; name: string };
+export type TableVGroupOrderEntry = { type: "group"; id: string; children?: TableVGroupOrderEntry[] } | { type: "table"; name: string; /** 行类型（view/procedure/…）。同名双行容器（包 spec/body、type/type-body）靠它区分成员；缺省 = 按名字匹配（历史数据与表）。 */ rowType?: string };
 
 export interface TableVGroupLayout {
   version?: number;
@@ -1510,6 +1534,8 @@ export interface TreeNode {
   savedSqlFolderId?: string;
   /** Set on synthetic table virtual-group container nodes. */
   vgroupId?: string;
+  /** 投影时盖章的分组类别（tables/views/…），供拖拽落点 O(1) 类别判定。 */
+  vgroupKind?: string;
   meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
   loadMore?: {
     parentId: string;
@@ -1665,6 +1691,16 @@ export interface QueryTab {
   createdAt?: number;
   title: string;
   customTitle?: boolean;
+  /**
+   * 同名标签之间用来区分的稳定编号，以及分配编号时的那个显示标题。
+   *
+   * 编号只在标签首次出现重名时分配一次，之后即使其它重名标签被关闭也不再回收到
+   * 其它标签上：关闭中间的标签不会让后面的标签改名（#9938）。因为标签的显示标题
+   * 会随库名切换、重命名、紧凑标题设置而变，所以用 titleNumberKey 记住分配时的
+   * 标题，标题变了就重新参与分配。
+   */
+  titleNumber?: number;
+  titleNumberKey?: string;
   /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
   forceWordWrap?: boolean;
   connectionId: string;
@@ -1994,6 +2030,25 @@ export interface QueryTab {
    *  statement DBX cannot prove read-only. Commit/Rollback actions are hidden
    *  while a session is clean. Never cleared by a later read. */
   txnPossiblyDirty?: boolean;
+  /** Auto-commit tabs (`Tx:A`) with a MySQL-family connection: whether the tab's
+   *  connection currently holds a transaction the user opened explicitly
+   *  (`BEGIN` / `START TRANSACTION`). The backend reports it on every execution
+   *  that observed the connection; the tab mirrors it into the `Tx` badge and
+   *  the commit/rollback actions. Not persisted. */
+  autoCommitOpenTransaction?: boolean;
+  /** Auto-commit tab: show the notice that the backend rolled back an explicit
+   *  transaction this tab left open, so the cleanup is never silent. */
+  autoCommitTxnRolledBack?: boolean;
+  /** Same cleanup, but the rolled-back transaction came from a session with
+   *  auto-commit turned off (`SET autocommit = 0`) rather than from a `BEGIN`
+   *  the user typed. Shown with its own wording so the notice is not mistaken
+   *  for a lost explicit transaction. */
+  autoCommitSessionTxnRolledBack?: boolean;
+  /** Dedupe marker for {@link autoCommitSessionTxnRolledBack}: an
+   *  auto-commit-off session rolls back an implicit transaction after *every*
+   *  execution, so the notice is raised once and re-armed only after the
+   *  connection stops reporting that rollback. */
+  autoCommitSessionTxnRolledBackNotified?: boolean;
 }
 
 export interface SavedSqlFolder {

@@ -85,13 +85,19 @@ RabbitMQ 等消息队列 Agent 还可能同时使用业务协议和管理 API。
 
 所有 Agent 都提供单驱动 ZIP，可直接使用**导入离线包**安装。Java Agent 的单驱动包跨平台，但不重复携带 JRE；KingbaseES、Oracle、Xugu 等原生 Agent 的单驱动包按操作系统和 CPU 架构区分。
 
-如果目标机器尚未安装 Java Agent 所需的托管 JRE，可在**导入离线包**中选择对应平台的 `dbx-jre-21-<platform>.tar.zst`，或者直接使用包含全部驱动和 JRE 的完整离线 ZIP 包。独立 JRE 包仅包含 Java 运行时，不包含数据库驱动，也不需要 `agent-registry.json`。DBX 会验证 Java 的操作系统和 CPU 架构后安装到托管 JRE 目录。
+如果目标机器尚未安装 Java Agent 所需的托管 JRE，可在**导入离线包**中选择对应平台的 `dbx-jre-<jre-key>-<platform>.tar.zst`（例如 `dbx-jre-21-macos-aarch64.tar.zst`），或者直接使用包含全部驱动和 JRE 的完整离线 ZIP 包。独立 JRE 包仅包含 Java 运行时，不包含数据库驱动，也不需要 `agent-registry.json`。DBX 会验证 Java 的操作系统和 CPU 架构后安装到托管 JRE 目录。
 
 ### Windows 导入 KingbaseES
 
 Windows x64 下载 `dbx-agent-kingbase-<version>-windows-x64.zip`，Windows ARM64 下载 `dbx-agent-kingbase-<version>-windows-aarch64.zip`，然后在驱动管理中选择**导入离线包**。请勿导入 Linux 或 macOS 包。
 
 ZIP 内包含版本信息和对应平台的原生 Agent。DBX 会将其安装为 `%USERPROFILE%\.dbx\agents\drivers\kingbase\agent.exe`，不需要手动解除浏览器下载文件的阻止状态或复制文件。
+
+### 离线导入 JDBC 插件
+
+通用 JDBC 连接（自定义 JDBC URL + 导入的驱动 JAR）通过独立的 **DBX JDBC 插件** 运行，发布为单独的 `dbx-jdbc-plugin-*.zip` 资源，**不会**打进各数据库的 Agent ZIP。请在 **JDBC 驱动** 页签使用 **本地安装** 安装它（不要用内置驱动里的**导入离线包**，那是给 Agent ZIP 用的）。
+
+导入真正的驱动 JAR（例如 Oracle 的 `ojdbc*.jar`）始终是本地操作，不需要这个插件包，也不需要网络——在同一页签使用 **导入 JAR**，无论 JDBC 插件本身是否已安装。
 
 ## 插件更新
 

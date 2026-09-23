@@ -18,6 +18,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 mod kingbase;
+mod mongodb_columns;
+pub mod plugin_metadata;
+#[cfg(test)]
+mod plugin_metadata_tests;
 
 macro_rules! extract_pool {
     ($pool:expr, $variant:ident) => {
@@ -1869,6 +1873,7 @@ fn oracle_object_statistics_from_query_result(result: db::QueryResult) -> Vec<db
                 schema: query_result_cell_string(&row, 1),
                 estimated_rows: query_result_cell_i64(&row, 2),
                 total_bytes: query_result_cell_i64(&row, 3),
+                ..Default::default()
             })
         })
         .collect()
@@ -3209,6 +3214,7 @@ mod tests {
             rows,
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -3601,6 +3607,7 @@ done
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = std::sync::Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
@@ -3716,6 +3723,7 @@ done
                     backend_executable: Some(executable),
                     ..Default::default()
                 },
+                provenance: None,
             };
             let session = std::sync::Arc::new(
                 PluginDriverSession::start_for_test(plugin, "jdbc".into(), PluginRuntimeEnv::default()).await.unwrap(),
@@ -4077,6 +4085,7 @@ done
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4104,6 +4113,7 @@ done
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4128,6 +4138,7 @@ done
             rows: vec![vec![serde_json::json!("users"), serde_json::json!("CREATE TABLE `users` (`id` bigint);\n")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4156,6 +4167,7 @@ done
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4183,6 +4195,7 @@ done
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5153,6 +5166,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5201,6 +5215,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5237,6 +5252,27 @@ for line in sys.stdin:
             "Agent RPC error (-1): Completion assistant search is not supported by this agent"
         ));
         assert!(!super::is_agent_completion_assistant_unsupported("Agent RPC error (-1): Connection failed"));
+    }
+
+    #[test]
+    fn detects_unsupported_agent_partition_method_errors() {
+        assert!(super::is_agent_partition_method_unsupported(
+            "Agent RPC error (-1): unknown method: get_table_partitioning",
+            "get_table_partitioning",
+        ));
+        assert!(super::is_agent_partition_method_unsupported(
+            "Agent RPC error (-32601): Method not found: get_table_partition_status",
+            "get_table_partition_status",
+        ));
+        // A different method in the same error must not match.
+        assert!(!super::is_agent_partition_method_unsupported(
+            "Agent RPC error (-1): unknown method: get_table_partitioning",
+            "get_table_partition_status",
+        ));
+        assert!(!super::is_agent_partition_method_unsupported(
+            "Agent RPC error (-1): Connection failed",
+            "get_table_partitioning",
+        ));
     }
 
     #[test]
@@ -5384,6 +5420,7 @@ for line in sys.stdin:
             rows: vec![vec![serde_json::json!("Customer table")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5402,6 +5439,7 @@ for line in sys.stdin:
             rows: vec![vec![serde_json::json!("  ")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5438,6 +5476,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5632,6 +5671,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5737,6 +5777,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6125,6 +6166,15 @@ fn is_agent_completion_assistant_unsupported(error: &str) -> bool {
         || error.contains("completion assistant search is not supported")
 }
 
+/// True when an agent built against an older protocol does not implement a
+/// table-partition RPC. A mixed-version deployment (new core, old agent) must
+/// hide the Partitions tab rather than fail every probe, so callers degrade to
+/// the default value instead of surfacing the error.
+fn is_agent_partition_method_unsupported(error: &str, method: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains(method) && (error.contains("unknown method") || error.contains("method not found"))
+}
+
 async fn completion_assistant_fallback_core(
     state: &AppState,
     request: &db::CompletionAssistantRequest,
@@ -6272,6 +6322,9 @@ async fn list_object_statistics_once(
         }
     }
     if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
+            return crate::mongo_ops::mongo_agent_list_object_statistics(&client, database).await;
+        }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
             return oracle_agent_list_object_statistics(
                 client,
@@ -6324,7 +6377,10 @@ async fn list_object_statistics_once(
             if *mode == MysqlMode::OceanBaseOracle || db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
                 Ok(vec![])
             } else {
-                db::mysql::list_object_statistics(p, database).await
+                let include_mysql_details = db_config.as_ref().is_some_and(|config| {
+                    config.db_type == DatabaseType::Mysql && !db::mysql_compatible::uses_show_metadata(config)
+                });
+                db::mysql::list_object_statistics(p, database, include_mysql_details).await
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => Ok(vec![]),
@@ -6332,6 +6388,7 @@ async fn list_object_statistics_once(
         PoolKind::ClickHouse(client) => {
             db::clickhouse_driver::list_object_statistics(client, clickhouse_metadata_database(database, schema)).await
         }
+        PoolKind::MongoDb(client) => db::mongo_driver::list_object_statistics(client, database).await,
         _ => Ok(vec![]),
     }
 }
@@ -6809,6 +6866,22 @@ async fn retry_metadata_connection_for_session<T, F, Fut>(
     connection_id: &str,
     database: Option<&str>,
     client_session_id: Option<&str>,
+    operation: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    Box::pin(run_metadata_connection_for_session(state, connection_id, database, client_session_id, true, operation))
+        .await
+}
+
+async fn run_metadata_connection_for_session<T, F, Fut>(
+    state: &AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    client_session_id: Option<&str>,
+    allow_recovery: bool,
     mut operation: F,
 ) -> Result<T, String>
 where
@@ -6825,6 +6898,9 @@ where
         }
         None => None,
     };
+    if !allow_recovery {
+        return operation().await;
+    }
     let mut retried = false;
     let mut missing_pool_retry = false;
     loop {
@@ -7001,6 +7077,9 @@ pub async fn get_columns_core_for_session(
     table: &str,
     client_session_id: Option<&str>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    if connection_config(state, connection_id).await.is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
+        return Box::pin(mongodb_columns::get_columns(state, connection_id, database, table)).await;
+    }
     if client_session_id.is_none() {
         let metadata_session =
             EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "columns").await;
@@ -7031,20 +7110,76 @@ async fn get_columns_core_for_session_inner(
     client_session_id: Option<&str>,
     use_client_session_context: bool,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    get_columns_core_for_session_inner_with_pool(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        client_session_id,
+        use_client_session_context,
+        None,
+        true,
+    )
+    .await
+}
+
+async fn get_columns_core_for_existing_pool(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    pool_key: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    get_columns_core_for_session_inner_with_pool(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        None,
+        true,
+        Some(pool_key),
+        false,
+    )
+    .await
+}
+
+async fn get_columns_core_for_session_inner_with_pool(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+    use_client_session_context: bool,
+    existing_pool_key: Option<&str>,
+    allow_recovery: bool,
+) -> Result<Vec<db::ColumnInfo>, String> {
     let context_session_id = if use_client_session_context { client_session_id } else { None };
-    retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
-        let pool_key = state
-            .get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id)
-            .await?;
+    let existing_pool_key = existing_pool_key.map(str::to_owned);
+    let operation = || async {
+        let pool_key = if let Some(pool_key) = existing_pool_key.as_deref() {
+            pool_key.to_string()
+        } else {
+            state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?
+        };
         let db_config = connection_config(state, connection_id).await;
+
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
+            let pool_handle = state.pool_handle(&pool_key).await.ok_or("Pool not found")?;
+            return mongodb_columns::get_columns_from_existing_pool(&pool_handle, database, table).await;
+        }
 
         {
             let pool_handle = state.pool_handle(&pool_key).await;
             if let Some(PoolKind::ExternalDriver { config, session, .. }) = pool_handle.as_ref() {
                 let config = config.clone();
                 let session = session.clone();
-                                if uses_presto_like_information_schema_tables(&config.db_type) {
-                    return external_driver_presto_like_columns(session, config.as_ref(), database, schema, table).await;
+                if uses_presto_like_information_schema_tables(&config.db_type) {
+                    return external_driver_presto_like_columns(session, config.as_ref(), database, schema, table)
+                        .await;
                 }
                 let query_oracle_columns_first =
                     should_query_oracle_columns_via_sql_first(&config.db_type, context_session_id);
@@ -7115,25 +7250,29 @@ async fn get_columns_core_for_session_inner(
                 let database = database.to_string();
                 let schema = schema.to_string();
                 let table = table.to_string();
-                                return client.list_columns(database, schema, table).await;
+                return client.list_columns(database, schema, table).await;
             }
             if let Some(client) = extract_pool!(pool_handle.as_ref(), ClickHouse) {
-                                return db::clickhouse_driver::get_columns(&client, clickhouse_metadata_database(database, schema), table)
-                    .await
-                    .map(deduplicate_column_infos);
+                return db::clickhouse_driver::get_columns(
+                    &client,
+                    clickhouse_metadata_database(database, schema),
+                    table,
+                )
+                .await
+                .map(deduplicate_column_infos);
             }
             if let Some(client) = extract_pool!(pool_handle.as_ref(), InfluxDb) {
-                                return db::influxdb_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
+                return db::influxdb_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
             }
             if let Some(client) = extract_pool!(pool_handle.as_ref(), InfluxDb3) {
-                                return db::influxdb3_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
+                return db::influxdb3_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
             }
             if let Some(client) = extract_pool!(pool_handle.as_ref(), VictoriaMetrics) {
-                                return db::victoriametrics_driver::get_columns(&client, table).await.map(deduplicate_column_infos);
+                return db::victoriametrics_driver::get_columns(&client, table).await.map(deduplicate_column_infos);
             }
             if let Some(linked) = crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema) {
                 if let Some(client) = extract_pool!(pool_handle.as_ref(), SqlServer) {
-                                        let mut client = lock_sqlserver_metadata_client(&client).await?;
+                    let mut client = lock_sqlserver_metadata_client(&client).await?;
                     return db::sqlserver::get_linked_server_columns(
                         &mut client,
                         &linked.server,
@@ -7148,10 +7287,10 @@ async fn get_columns_core_for_session_inner(
             try_sqlserver!(pool_handle, get_columns, schema, table);
             if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
                 let fallback_config = db_config.clone();
-                                let mut client = client.lock().await;
-                let oracle_sql_config = fallback_config.as_ref().filter(|config| {
-                    should_query_oracle_columns_via_sql_first(&config.db_type, context_session_id)
-                });
+                let mut client = client.lock().await;
+                let oracle_sql_config = fallback_config
+                    .as_ref()
+                    .filter(|config| should_query_oracle_columns_via_sql_first(&config.db_type, context_session_id));
                 let query_oracle_columns_first = oracle_sql_config.is_some();
                 if let Some(config) = oracle_sql_config {
                     match oracle_columns_via_sql(
@@ -7199,7 +7338,9 @@ async fn get_columns_core_for_session_inner(
                                 )
                                 .await
                                 {
-                                    Ok(fallback_columns) if !fallback_columns.is_empty() => return Ok(fallback_columns),
+                                    Ok(fallback_columns) if !fallback_columns.is_empty() => {
+                                        return Ok(fallback_columns)
+                                    }
                                     Ok(_) => {}
                                     Err(error) => {
                                         log::warn!(
@@ -7213,6 +7354,8 @@ async fn get_columns_core_for_session_inner(
                                     }
                                 }
                             }
+                        }
+                        if let Some(config) = fallback_config.as_ref().filter(|_| existing_pool_key.is_none()) {
                             match native_postgres_metadata_pool(state, connection_id, database, config).await {
                                 Ok(Some(pool)) => {
                                     return db::postgres::get_columns(&pool, schema, table)
@@ -7235,7 +7378,7 @@ async fn get_columns_core_for_session_inner(
                         return Ok(deduplicate_column_infos(columns));
                     }
                     Err(agent_error) => {
-                        if let Some(config) = fallback_config.as_ref() {
+                        if let Some(config) = fallback_config.as_ref().filter(|_| existing_pool_key.is_none()) {
                             if let Some(pool) =
                                 native_postgres_metadata_pool(state, connection_id, database, config).await?
                             {
@@ -7301,9 +7444,9 @@ async fn get_columns_core_for_session_inner(
             PoolKind::Turso(client) => {
                 db::turso_driver::get_columns(client, schema, table).await.map(deduplicate_column_infos)
             }
-            PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::get_columns(client, schema, table)
-                .await
-                .map(deduplicate_column_infos),
+            PoolKind::CloudflareD1(client) => {
+                db::cloudflare_d1_driver::get_columns(client, schema, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::Elasticsearch(client) => {
                 db::elasticsearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
@@ -7318,7 +7461,15 @@ async fn get_columns_core_for_session_inner(
             }
             _ => Ok(vec![]),
         }
-    })
+    };
+    Box::pin(run_metadata_connection_for_session(
+        state,
+        connection_id,
+        Some(database),
+        client_session_id,
+        allow_recovery,
+        operation,
+    ))
     .await
 }
 
@@ -7359,6 +7510,9 @@ fn deduplicate_column_infos(columns: Vec<db::ColumnInfo>) -> Vec<db::ColumnInfo>
             }
             if existing.data_type.trim().is_empty() && !column.data_type.trim().is_empty() {
                 existing.data_type = column.data_type;
+            }
+            if existing.metadata_capabilities != column.metadata_capabilities {
+                existing.metadata_capabilities = None;
             }
         } else {
             result.push(column);
@@ -7789,12 +7943,79 @@ pub async fn table_partition_status_core(
         match pool_handle.as_ref() {
             Some(PoolKind::Postgres(pool)) => {
                 let info = db::postgres::get_table_partition_info(pool, schema, table).await?;
-                Ok(TablePartitionStatus {
-                    is_partitioned_parent: info.key.is_some() && !info.is_partition,
-                    is_partition: info.is_partition,
-                })
+                Ok(TablePartitionStatus { is_partitioned_parent: info.key.is_some(), is_partition: info.is_partition })
+            }
+            Some(PoolKind::Agent(client)) => {
+                // Resolve the config once: it gates the arm and feeds the RPC
+                // timeout.
+                let db_config = connection_config(state, connection_id).await;
+                if !db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+                    return Ok(TablePartitionStatus::default());
+                }
+                let mut client = client.lock().await;
+                match client
+                    .get_table_partition_status::<TablePartitionStatus>(
+                        database,
+                        schema,
+                        table,
+                        agent_metadata_timeout(db_config.as_ref()),
+                    )
+                    .await
+                {
+                    Ok(status) => Ok(status),
+                    Err(error) if is_agent_partition_method_unsupported(&error, "get_table_partition_status") => {
+                        Ok(TablePartitionStatus::default())
+                    }
+                    Err(error) => Err(error),
+                }
             }
             _ => Ok(TablePartitionStatus::default()),
+        }
+    })
+    .await
+}
+
+/// Structured declarative partitioning view used by the table structure
+/// editor. Native PostgreSQL pools and compatible agents (such as Kingbase)
+/// provide the same response shape; unsupported pools return the default
+/// all-false/empty value.
+pub async fn get_table_partitioning_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<db::PgTablePartitioning, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let pool_handle = state.pool_handle(&pool_key).await;
+        match pool_handle.as_ref() {
+            Some(PoolKind::Postgres(pool)) => db::postgres::get_table_partitioning(pool, schema, table).await,
+            Some(PoolKind::Agent(client)) => {
+                // Resolve the config once: it gates the arm and feeds the RPC
+                // timeout.
+                let db_config = connection_config(state, connection_id).await;
+                if !db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+                    return Ok(db::PgTablePartitioning::default());
+                }
+                let mut client = client.lock().await;
+                match client
+                    .get_table_partitioning::<db::PgTablePartitioning>(
+                        database,
+                        schema,
+                        table,
+                        agent_metadata_timeout(db_config.as_ref()),
+                    )
+                    .await
+                {
+                    Ok(partitioning) => Ok(partitioning),
+                    Err(error) if is_agent_partition_method_unsupported(&error, "get_table_partitioning") => {
+                        Ok(db::PgTablePartitioning::default())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            _ => Ok(db::PgTablePartitioning::default()),
         }
     })
     .await
@@ -10994,6 +11215,23 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_metadata_batch_runs_serially_on_single_connection_pools() {
+        let postgres_pool = |max_size: usize| {
+            let manager = deadpool_postgres::Manager::new(tokio_postgres::Config::new(), tokio_postgres::NoTls);
+            deadpool_postgres::Pool::builder(manager)
+                .runtime(deadpool_postgres::Runtime::Tokio1)
+                .max_size(max_size)
+                .build()
+                .expect("build PostgreSQL test pool")
+        };
+        // 会话级池（导出元数据池）只有一条连接：批量元数据必须顺序执行，
+        // 否则队尾 checkout 会排在同一个连接后面并超时（issue #10018）。
+        assert!(postgres_pool_serves_one_request_at_a_time(&postgres_pool(1)));
+        // 基础池是多连接池，保留并发批量取元数据的既有行为。
+        assert!(!postgres_pool_serves_one_request_at_a_time(&postgres_pool(10)));
+    }
+
+    #[test]
     fn table_structure_export_includes_partition_tree() {
         assert_table_ddl_options(TableDdlOptions::EXPORT, true, true, false);
         assert_table_ddl_options(TableDdlOptions::RELATION_EXPORT, false, true, false);
@@ -11791,6 +12029,50 @@ mod ddl_tests {
     }
 
     #[test]
+    fn sqlserver_table_ddl_renders_referential_actions_once_per_constraint() {
+        let fk_with_actions = |name: &str, columns: &[(&str, &str)]| db::ForeignKeyInfo {
+            name: name.to_string(),
+            column: columns[0].0.to_string(),
+            ref_schema: Some("dbo".to_string()),
+            ref_table: "parent".to_string(),
+            ref_column: columns[0].1.to_string(),
+            on_update: Some("SET NULL".to_string()),
+            on_delete: Some("CASCADE".to_string()),
+        };
+        let composite = [
+            fk_with_actions("fk_pair", &[("a", "pa")]),
+            db::ForeignKeyInfo {
+                column: "b".to_string(),
+                ref_column: "pb".to_string(),
+                ..fk_with_actions("fk_pair", &[("a", "pa")])
+            },
+        ];
+        let ddl = render_sqlserver_table_ddl("dbo", "child", &[column("a", "int")], &[], &composite, None);
+        assert!(
+            ddl.contains("REFERENCES [dbo].[parent]([pa], [pb]) ON DELETE CASCADE ON UPDATE SET NULL"),
+            "actions once at constraint tail: {ddl}"
+        );
+        assert_eq!(ddl.matches("ON DELETE").count(), 1, "ddl: {ddl}");
+        assert_eq!(ddl.matches("ON UPDATE").count(), 1, "ddl: {ddl}");
+    }
+
+    #[test]
+    fn sqlserver_table_ddl_qualifies_cross_schema_references() {
+        let cross_schema = db::ForeignKeyInfo {
+            name: "fk_other".to_string(),
+            column: "ref_id".to_string(),
+            ref_schema: Some("other".to_string()),
+            ref_table: "target".to_string(),
+            ref_column: "id".to_string(),
+            on_update: Some("NO ACTION".to_string()),
+            on_delete: None,
+        };
+        let ddl = render_sqlserver_table_ddl("dbo", "child", &[column("ref_id", "int")], &[], &[cross_schema], None);
+        assert!(ddl.contains("REFERENCES [other].[target]([id])"), "cross-schema reference qualified: {ddl}");
+        assert!(!ddl.contains("ON UPDATE"), "NO ACTION omitted: {ddl}");
+    }
+
+    #[test]
     fn sqlserver_table_ddl_includes_identity_clause() {
         let mut id = column("FIDS", "int");
         id.is_nullable = false;
@@ -11800,6 +12082,41 @@ mod ddl_tests {
         let ddl = render_sqlserver_table_ddl("dbo", "ZHLSBS", &[id], &[], &[], None);
 
         assert!(ddl.contains("[FIDS] int IDENTITY(1,1) NOT NULL"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn sqlserver_table_ddl_groups_composite_foreign_key_columns() {
+        let fk = |name: &str, column: &str, ref_table: &str, ref_column: &str| db::ForeignKeyInfo {
+            name: name.to_string(),
+            column: column.to_string(),
+            ref_schema: Some("dbo".to_string()),
+            ref_table: ref_table.to_string(),
+            ref_column: ref_column.to_string(),
+            on_update: None,
+            on_delete: None,
+        };
+        let fkeys = [
+            fk("FK_TRIGGERS_JOB", "sched_name", "JOB_DETAILS", "sched_name"),
+            fk("FK_TRIGGERS_JOB", "job_name", "JOB_DETAILS", "job_name"),
+            fk("FK_TRIGGERS_JOB", "job_group", "JOB_DETAILS", "job_group"),
+            fk("FK_TRIGGERS_CAL", "calendar_name", "CALENDARS", "calendar_name"),
+        ];
+
+        let ddl = render_sqlserver_table_ddl("dbo", "TRIGGERS", &[column("sched_name", "nvarchar")], &[], &fkeys, None);
+
+        assert!(
+            ddl.contains(
+                "CONSTRAINT [FK_TRIGGERS_JOB] FOREIGN KEY ([sched_name], [job_name], [job_group]) REFERENCES [dbo].[JOB_DETAILS]([sched_name], [job_name], [job_group])"
+            ),
+            "ddl: {ddl}"
+        );
+        assert_eq!(ddl.matches("CONSTRAINT [FK_TRIGGERS_JOB]").count(), 1, "ddl: {ddl}");
+        assert!(
+            ddl.contains(
+                "CONSTRAINT [FK_TRIGGERS_CAL] FOREIGN KEY ([calendar_name]) REFERENCES [dbo].[CALENDARS]([calendar_name])"
+            ),
+            "ddl: {ddl}"
+        );
     }
 
     #[test]
@@ -12340,6 +12657,30 @@ fn ensure_display_ddl_terminated(sql: String) -> String {
     }
 }
 
+/// 该 PostgreSQL 池一次只服务一条请求（会话级池只有一个物理连接）。
+///
+/// 这类池上并发 checkout 不会带来任何并行度，只会把请求排到同一条连接后面；
+/// 队尾等待时间随并发数线性增长，超过 checkout 超时后整批元数据都会以
+/// "DBX metadata pool is busy; please retry" 失败（issue #10018）。
+fn postgres_pool_serves_one_request_at_a_time(pool: &deadpool_postgres::Pool) -> bool {
+    pool.status().max_size <= 1
+}
+
+/// 在一个 PostgreSQL 池上批量取元数据：多连接池并发、单连接池顺序执行。
+///
+/// 两个分支返回同一组结果的元组，调用方无需关心池的形状。单连接池上顺序执行
+/// 与并发执行的端到端耗时相同（一条连接本来也只能串行处理），但不会产生排队
+/// 导致的 checkout 超时。
+macro_rules! postgres_metadata_batch {
+    ($pool:expr, $($call:expr),+ $(,)?) => {{
+        if postgres_pool_serves_one_request_at_a_time($pool) {
+            Ok(($($call.await?,)+))
+        } else {
+            tokio::try_join!($($call),+)
+        }
+    }};
+}
+
 /// DDL for a single relation. Callers that already iterate a relation set
 /// themselves (database export, table transfer) must use this rather than
 /// `pg_ddl_with_partitions` — recursing into partition children here would
@@ -12347,12 +12688,13 @@ fn ensure_display_ddl_terminated(sql: String) -> String {
 /// once from the caller's own loop over that same child relation).
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
     let (columns, indexes, fkeys, constraints, table_comment, partition_info, trigger_definitions, check_constraints) =
-        tokio::try_join!(
+        postgres_metadata_batch!(
+            pool,
             db::postgres::get_columns(pool, schema, table),
             db::postgres::list_indexes(pool, schema, table),
             db::postgres::list_foreign_keys(pool, schema, table),
             db::postgres::list_constraints(pool, schema, table),
-            async { db::postgres::get_table_comment(pool, schema, table).await },
+            db::postgres::get_table_comment(pool, schema, table),
             db::postgres::get_table_partition_info(pool, schema, table),
             db::postgres::list_trigger_definitions(pool, schema, table),
             db::postgres::list_check_constraints(pool, schema, table),
@@ -12429,7 +12771,8 @@ pub async fn pg_ddl_with_partitions(
         triggers_by_oid,
         checks_by_oid,
         local_objects_by_oid,
-    ) = tokio::try_join!(
+    ) = postgres_metadata_batch!(
+        pool,
         db::postgres::get_columns_for_relations(pool, &relations),
         db::postgres::list_indexes_for_relations(pool, &relations),
         db::postgres::list_foreign_keys_for_relations(pool, &relation_pairs),
@@ -13446,6 +13789,17 @@ pub async fn build_sqlserver_ddl(
     Ok(render_sqlserver_table_ddl(schema, table, &columns, &indexes, &fkeys, table_comment.as_deref()))
 }
 
+fn sqlserver_fk_action_clause(kind: &str, value: Option<&str>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    match value.trim().to_ascii_uppercase().as_str() {
+        "CASCADE" | "SET NULL" | "SET DEFAULT" => format!(" ON {kind} {}", value.trim().to_ascii_uppercase()),
+        // NO ACTION / RESTRICT are the default semantics; SQL Server only accepts NO ACTION.
+        _ => String::new(),
+    }
+}
+
 pub fn render_sqlserver_table_ddl(
     schema: &str,
     table: &str,
@@ -13481,13 +13835,26 @@ pub fn render_sqlserver_table_ddl(
             pks.iter().map(|k| sqlserver_ident(k)).collect::<Vec<_>>().join(", ")
         ));
     }
-    for fk in fkeys {
+    for fk_group in group_foreign_keys_by_name(fkeys) {
+        let Some(first_fk) = fk_group.first() else {
+            continue;
+        };
+        let columns = fk_group.iter().map(|fk| sqlserver_ident(&fk.column)).collect::<Vec<_>>().join(", ");
+        let ref_columns = fk_group.iter().map(|fk| sqlserver_ident(&fk.ref_column)).collect::<Vec<_>>().join(", ");
+        let ref_table = match first_fk.ref_schema.as_deref().map(str::trim) {
+            Some(ref_schema) if !ref_schema.is_empty() => {
+                format!("{}.{}", sqlserver_ident(ref_schema), sqlserver_ident(&first_fk.ref_table))
+            }
+            _ => sqlserver_ident(&first_fk.ref_table),
+        };
+        let on_delete = sqlserver_fk_action_clause("DELETE", first_fk.on_delete.as_deref());
+        let on_update = sqlserver_fk_action_clause("UPDATE", first_fk.on_update.as_deref());
         ddl.push_str(&format!(
-            ",\n  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
-            sqlserver_ident(&fk.name),
-            sqlserver_ident(&fk.column),
-            sqlserver_ident(&fk.ref_table),
-            sqlserver_ident(&fk.ref_column)
+            ",\n  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}){on_delete}{on_update}",
+            sqlserver_ident(&first_fk.name),
+            columns,
+            ref_table,
+            ref_columns
         ));
     }
     ddl.push_str("\n);\n");

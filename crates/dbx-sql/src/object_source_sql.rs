@@ -127,6 +127,9 @@ pub fn build_routine_rename_object_source_statements(
 }
 
 pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlInput) -> Result<Vec<String>, String> {
+    if input.database_type == DatabaseType::OceanbaseOracle && input.object_type == ObjectSourceKind::Sequence {
+        return Ok(vec![oceanbase_sequence_edit_sql(&input)?]);
+    }
     let source = input.source.trim();
     let source = if is_opengauss_like(input.database_type) && input.object_type == ObjectSourceKind::Procedure {
         strip_standalone_trailing_slash(source)
@@ -160,7 +163,9 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         )]);
     }
 
-    if is_oracle_like(input.database_type) && input.object_type == ObjectSourceKind::View {
+    if (is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        && input.object_type == ObjectSourceKind::View
+    {
         return Ok(vec![executable_oracle_view_ddl(input.schema.as_deref(), &input.name, source)]);
     }
 
@@ -278,7 +283,17 @@ pub fn build_export_object_source_sql(
     if source.is_empty() {
         return String::new();
     }
-    if is_mysql_like(database_type) && matches!(object_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function) {
+    // MySQL routine bodies, trigger bodies and event bodies may contain `;`, so the
+    // exported statements need a client-side delimiter the same way `mysqldump` emits one.
+    if is_mysql_like(database_type)
+        && matches!(
+            object_type,
+            ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Trigger
+                | ObjectSourceKind::Event
+        )
+    {
         return mysql_delimited_routine_source(source);
     }
     ensure_semicolon(source)
@@ -319,6 +334,92 @@ fn build_routine_rename_cleanup(input: &EditableObjectSourceSqlInput, source: &s
         object_type_keyword(&input.object_type),
         postgres_qualified_name(input.schema.as_deref(), &input.name),
         declaration.signature
+    ))
+}
+
+/// Alter sequence options without replaying START WITH or dropping the existing sequence.
+fn oceanbase_sequence_edit_sql(input: &EditableObjectSourceSqlInput) -> Result<String, String> {
+    let invalid = || {
+        "Expected CREATE/ALTER SEQUENCE for the selected object with supported sequence options; restart and additional statements are not allowed.".to_string()
+    };
+    let mut tokens: Vec<Token> = Tokenizer::new(&OracleDialect {}, input.source.trim())
+        .tokenize()
+        .map_err(|_| invalid())?
+        .into_iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    if matches!(tokens.last(), Some(Token::SemiColon)) {
+        tokens.pop();
+    }
+    let word = |index: usize, expected: &str| matches!(tokens.get(index), Some(Token::Word(w)) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(expected));
+    let creating = word(0, "CREATE");
+    if (!creating && !word(0, "ALTER")) || !word(1, "SEQUENCE") {
+        return Err(invalid());
+    }
+    let mut index = 2;
+    let mut names = Vec::new();
+    loop {
+        let Some(Token::Word(name)) = tokens.get(index) else {
+            return Err(invalid());
+        };
+        names.push(if name.quote_style.is_some() { name.value.clone() } else { name.value.to_uppercase() });
+        index += 1;
+        if !matches!(tokens.get(index), Some(Token::Period)) {
+            break;
+        }
+        index += 1;
+    }
+    let expected = match input.schema.as_deref().filter(|schema| !schema.is_empty()) {
+        Some(schema) => vec![schema.to_string(), input.name.clone()],
+        None => vec![input.name.clone()],
+    };
+    if names != expected && names != vec![input.name.clone()] {
+        return Err(invalid());
+    }
+    let mut options = Vec::new();
+    while index < tokens.len() {
+        let start = index;
+        let skip_start = creating && word(index, "START");
+        let numeric = if word(index, "INCREMENT") || skip_start {
+            let next = if skip_start { "WITH" } else { "BY" };
+            if !word(index + 1, next) {
+                return Err(invalid());
+            }
+            index += 2;
+            true
+        } else if ["MINVALUE", "MAXVALUE", "CACHE"].iter().any(|option| word(index, option)) {
+            index += 1;
+            true
+        } else if ["NOMINVALUE", "NOMAXVALUE", "NOCACHE", "CYCLE", "NOCYCLE", "ORDER", "NOORDER"]
+            .iter()
+            .any(|option| word(index, option))
+        {
+            index += 1;
+            false
+        } else {
+            return Err(invalid());
+        };
+        if numeric {
+            if matches!(tokens.get(index), Some(Token::Minus | Token::Plus)) {
+                index += 1;
+            }
+            if !matches!(tokens.get(index), Some(Token::Number(value, false)) if !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit()))
+            {
+                return Err(invalid());
+            }
+            index += 1;
+        }
+        if !skip_start {
+            options.push(tokens[start..index].iter().map(ToString::to_string).collect::<Vec<_>>().join(" "));
+        }
+    }
+    if options.is_empty() {
+        return Err(invalid());
+    }
+    Ok(format!(
+        "ALTER SEQUENCE {}\n  {};",
+        postgres_qualified_name(input.schema.as_deref(), &input.name),
+        options.join("\n  ")
     ))
 }
 
@@ -478,14 +579,18 @@ fn leading_sql_statement_start(source: &str) -> usize {
 
 fn executable_oracle_view_ddl(schema: Option<&str>, name: &str, source: &str) -> String {
     let trimmed = source.trim();
-    if Regex::new(r"(?i)^CREATE\s+OR\s+REPLACE\s+").unwrap().is_match(trimmed) || source_starts_with_alter(trimmed) {
+    let statement_start = leading_sql_statement_start(trimmed);
+    let executable = &trimmed[statement_start..];
+    if Regex::new(r"(?i)^CREATE\s+OR\s+REPLACE\s+").unwrap().is_match(executable)
+        || source_starts_with_alter(executable)
+    {
         return ensure_semicolon(trimmed);
     }
 
     let create_view = Regex::new(r"(?i)^CREATE\s+((?:(?:NO)?FORCE\s+)?(?:(?:NON)?EDITIONABLE\s+)?VIEW\s+)").unwrap();
-    if create_view.is_match(trimmed) {
-        let replaced = create_view.replace(trimmed, "CREATE OR REPLACE $1");
-        return ensure_semicolon(replaced.as_ref());
+    if create_view.is_match(executable) {
+        let replaced = create_view.replace(executable, "CREATE OR REPLACE $1");
+        return ensure_semicolon(&format!("{}{}", &trimmed[..statement_start], replaced));
     }
 
     format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name), ensure_semicolon(trimmed))
@@ -596,14 +701,32 @@ fn executable_mysql_routine_statements(input: &EditableObjectSourceSqlInput, sou
 
     let declaration = mysql_routine_declaration(source).filter(|declaration| declaration.kind == input.object_type);
     let create_name = declaration.as_ref().map(|declaration| declaration.name.as_str()).unwrap_or(&input.name);
-    let mut statements = Vec::with_capacity(3);
+    let is_rename =
+        declaration.as_ref().is_some_and(|declaration| routine_name_changed(&declaration.name, &input.name));
+    let mut statements = Vec::with_capacity(6);
 
-    // MySQL has no cross-version CREATE OR REPLACE for stored routines; DBeaver also
-    // replaces them by dropping the target routine before executing the CREATE body.
+    // MySQL has no cross-version CREATE OR REPLACE for stored routines. Validate the CREATE
+    // body under a temporary name first (same idea as Informix view saves) so a syntax error
+    // cannot leave the original routine deleted after DROP.
+    let validation_name = mysql_validation_routine_name(create_name);
+    if let Some(validation_source) = replace_mysql_routine_declaration_name(source, &validation_name) {
+        statements.push(mysql_drop_routine_if_exists(
+            input.object_type.clone(),
+            input.schema.as_deref(),
+            &validation_name,
+        ));
+        statements.push(ensure_semicolon(&validation_source));
+        statements.push(mysql_drop_routine_if_exists(
+            input.object_type.clone(),
+            input.schema.as_deref(),
+            &validation_name,
+        ));
+    }
+
     statements.push(mysql_drop_routine_if_exists(input.object_type.clone(), input.schema.as_deref(), create_name));
     statements.push(ensure_semicolon(source));
 
-    if declaration.as_ref().is_some_and(|declaration| routine_name_changed(&declaration.name, &input.name)) {
+    if is_rename {
         statements.push(mysql_drop_routine_if_exists(input.object_type.clone(), input.schema.as_deref(), &input.name));
     }
 
@@ -616,6 +739,15 @@ fn mysql_drop_routine_if_exists(object_type: ObjectSourceKind, schema: Option<&s
 
 fn mysql_source_starts_with_create_routine(source: &str) -> bool {
     Regex::new(r"(?is)^\s*CREATE\s+(?:DEFINER\s*=.+?\s+)?(?:FUNCTION|PROCEDURE)\b").unwrap().is_match(source)
+}
+
+fn mysql_validation_routine_name(target_name: &str) -> String {
+    let mut hash = 0x811c9dc5u32;
+    for byte in target_name.bytes() {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    format!("dbx_routine_check_{hash:08x}")
 }
 
 fn informix_validation_view_name(target_name: &str) -> String {
@@ -993,6 +1125,70 @@ fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ob_sequence(source: &str, schema: Option<&str>, name: &str) -> EditableObjectSourceSqlInput {
+        EditableObjectSourceSqlInput {
+            database_type: DatabaseType::OceanbaseOracle,
+            object_type: ObjectSourceKind::Sequence,
+            schema: schema.map(str::to_string),
+            name: name.to_string(),
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn oceanbase_sequence_edit_preserves_counter_and_object_identity() {
+        let source = "CREATE SEQUENCE \"App\".\"Seq\" MINVALUE -999 MAXVALUE 9999999999999999999999999999 INCREMENT BY -2 START WITH 40 CACHE 20 NOCYCLE NOORDER;";
+        let input = ob_sequence(source, Some("App"), "Seq");
+        let expected = "ALTER SEQUENCE \"App\".\"Seq\"\n  MINVALUE - 999\n  MAXVALUE 9999999999999999999999999999\n  INCREMENT BY - 2\n  CACHE 20\n  NOCYCLE\n  NOORDER;";
+        assert_eq!(build_editable_object_source(input.clone()), expected);
+        assert_eq!(build_executable_object_source_statements(input).unwrap(), vec![expected]);
+        let alter = ob_sequence(expected, Some("App"), "Seq");
+        assert_eq!(build_executable_object_source_statements(alter).unwrap(), vec![expected]);
+    }
+
+    #[test]
+    fn oceanbase_sequence_edit_handles_unqualified_and_quoted_names() {
+        for (schema, name, source, expected_name) in [
+            (Some("APP"), "SEQ", "alter sequence seq increment by 3 nocache", "\"APP\".\"SEQ\""),
+            (None, "SEQ", "create sequence seq start with 1 increment by 1", "\"SEQ\""),
+            (
+                Some("A.B"),
+                "S\"Q",
+                "CREATE SEQUENCE \"A.B\".\"S\"\"Q\" START WITH 1 -- no reset\n INCREMENT BY 2",
+                "\"A.B\".\"S\"\"Q\"",
+            ),
+        ] {
+            let sql = build_executable_object_source_sql(ob_sequence(source, schema, name)).unwrap();
+            assert!(sql.starts_with(&format!("ALTER SEQUENCE {expected_name}")));
+            assert!(!sql.contains("START WITH"));
+            assert!(!sql.contains("DROP"));
+        }
+    }
+
+    #[test]
+    fn oceanbase_sequence_edit_rejects_restart_wrong_targets_and_extra_statements() {
+        for source in [
+            "ALTER SEQUENCE APP.SEQ RESTART START WITH 1",
+            "ALTER SEQUENCE APP.OTHER INCREMENT BY 1",
+            "ALTER SEQUENCE OTHER.SEQ INCREMENT BY 1",
+            "ALTER SEQUENCE \"app\".SEQ INCREMENT BY 1",
+            "ALTER SEQUENCE APP.SEQ INCREMENT BY 1; DROP TABLE APP.T",
+            "DROP SEQUENCE APP.SEQ",
+            "CREATE OR REPLACE SEQUENCE APP.SEQ INCREMENT BY 1",
+            "CREATE SEQUENCE APP.SEQ START WITH 1",
+            "ALTER SEQUENCE APP.SEQ CACHE 1.5",
+            "ALTER SEQUENCE APP.SEQ CACHE 1e3",
+            "ALTER SEQUENCE APP.SEQ INCREMENT BY",
+            "ALTER SEQUENCE APP.SEQ START WITH 1",
+            "CREATE SEQUENCE APP.SEQ START WITH 1 INCREMENT BY 1; SELECT 1 FROM DUAL",
+        ] {
+            assert!(
+                build_executable_object_source_statements(ob_sequence(source, Some("APP"), "SEQ")).is_err(),
+                "{source}"
+            );
+        }
+    }
 
     #[test]
     fn oracle_ddl_terminator_respects_quoted_tokens_and_slash_delimiters() {
@@ -1516,6 +1712,56 @@ mod tests {
     }
 
     #[test]
+    fn oceanbase_oracle_view_source_builds_executable_replace_ddl() {
+        for (source, expected) in [
+            (
+                "SELECT 2 AS N FROM DUAL",
+                "CREATE OR REPLACE VIEW \"SYS\".\"DBX_VIEW_SAVE_PROBE\" AS\nSELECT 2 AS N FROM DUAL;",
+            ),
+            (
+                "CREATE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 3 AS N FROM DUAL",
+                "CREATE OR REPLACE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 3 AS N FROM DUAL;",
+            ),
+        ] {
+            let input = EditableObjectSourceSqlInput {
+                database_type: DatabaseType::OceanbaseOracle,
+                object_type: ObjectSourceKind::View,
+                schema: Some("SYS".to_string()),
+                name: "DBX_VIEW_SAVE_PROBE".to_string(),
+                source: source.to_string(),
+            };
+
+            assert_eq!(build_editable_object_source(input.clone()), expected);
+            assert_eq!(build_executable_object_source_sql(input).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn oceanbase_oracle_view_full_ddl_keeps_leading_comments() {
+        for (source, expected) in [
+            (
+                "/* Keep this note */\nCREATE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 2 AS N FROM DUAL",
+                "/* Keep this note */\nCREATE OR REPLACE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 2 AS N FROM DUAL;",
+            ),
+            (
+                "-- Keep this note\nCREATE OR REPLACE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 3 AS N FROM DUAL",
+                "-- Keep this note\nCREATE OR REPLACE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 3 AS N FROM DUAL;",
+            ),
+        ] {
+            let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+                database_type: DatabaseType::OceanbaseOracle,
+                object_type: ObjectSourceKind::View,
+                schema: Some("SYS".to_string()),
+                name: "DBX_VIEW_SAVE_PROBE".to_string(),
+                source: source.to_string(),
+            })
+            .unwrap();
+
+            assert_eq!(sql, expected);
+        }
+    }
+
+    #[test]
     fn oracle_view_create_source_saves_as_create_or_replace_view() {
         let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Oracle,
@@ -1807,62 +2053,80 @@ mod tests {
 
     #[test]
     fn mysql_routine_rename_adds_drop_cleanup() {
+        let source =
+            "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache_v2`(IN mode_name varchar(20)) BEGIN SELECT 1; END";
         let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Mysql,
             object_type: ObjectSourceKind::Procedure,
             schema: Some("app".to_string()),
             name: "refresh_cache".to_string(),
-            source:
-                "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache_v2`(IN mode_name varchar(20)) BEGIN SELECT 1; END"
-                    .to_string(),
+            source: source.to_string(),
         })
         .unwrap();
+        let validation_name = mysql_validation_routine_name("refresh_cache_v2");
+        let validation_source = replace_mysql_routine_declaration_name(source, &validation_name).unwrap();
         assert_eq!(
             statements,
             vec![
-                "DROP PROCEDURE IF EXISTS `app`.`refresh_cache_v2`;",
-                "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache_v2`(IN mode_name varchar(20)) BEGIN SELECT 1; END;",
-                "DROP PROCEDURE IF EXISTS `app`.`refresh_cache`;",
+                format!("DROP PROCEDURE IF EXISTS `app`.`{validation_name}`;"),
+                ensure_semicolon(&validation_source),
+                format!("DROP PROCEDURE IF EXISTS `app`.`{validation_name}`;"),
+                "DROP PROCEDURE IF EXISTS `app`.`refresh_cache_v2`;".to_string(),
+                "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache_v2`(IN mode_name varchar(20)) BEGIN SELECT 1; END;"
+                    .to_string(),
+                "DROP PROCEDURE IF EXISTS `app`.`refresh_cache`;".to_string(),
             ]
         );
     }
 
     #[test]
     fn mysql_procedure_save_replaces_existing_routine() {
+        let source = "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`() BEGIN SELECT 1; END";
         let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Mysql,
             object_type: ObjectSourceKind::Procedure,
             schema: Some("app".to_string()),
             name: "refresh_cache".to_string(),
-            source: "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`() BEGIN SELECT 1; END".to_string(),
+            source: source.to_string(),
         })
         .unwrap();
+        let validation_name = mysql_validation_routine_name("refresh_cache");
+        let validation_source = replace_mysql_routine_declaration_name(source, &validation_name).unwrap();
 
         assert_eq!(
             statements,
             vec![
-                "DROP PROCEDURE IF EXISTS `app`.`refresh_cache`;",
-                "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`() BEGIN SELECT 1; END;",
+                format!("DROP PROCEDURE IF EXISTS `app`.`{validation_name}`;"),
+                ensure_semicolon(&validation_source),
+                format!("DROP PROCEDURE IF EXISTS `app`.`{validation_name}`;"),
+                "DROP PROCEDURE IF EXISTS `app`.`refresh_cache`;".to_string(),
+                "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`() BEGIN SELECT 1; END;".to_string(),
             ]
         );
     }
 
     #[test]
     fn mysql_function_save_replaces_existing_routine() {
+        let source = "CREATE DEFINER=CURRENT_USER FUNCTION `active_count`() RETURNS INT RETURN 1";
         let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Mysql,
             object_type: ObjectSourceKind::Function,
             schema: Some("app".to_string()),
             name: "active_count".to_string(),
-            source: "CREATE DEFINER=CURRENT_USER FUNCTION `active_count`() RETURNS INT RETURN 1".to_string(),
+            source: source.to_string(),
         })
         .unwrap();
+        let validation_name = mysql_validation_routine_name("active_count");
+        let validation_source = replace_mysql_routine_declaration_name(source, &validation_name).unwrap();
 
         assert_eq!(
             statements,
             vec![
-                "DROP FUNCTION IF EXISTS `app`.`active_count`;",
-                "CREATE DEFINER=CURRENT_USER FUNCTION `active_count`() RETURNS INT RETURN 1;",
+                format!("DROP FUNCTION IF EXISTS `app`.`{validation_name}`;"),
+                ensure_semicolon(&validation_source),
+                format!("DROP FUNCTION IF EXISTS `app`.`{validation_name}`;"),
+                "DROP FUNCTION IF EXISTS `app`.`active_count`;".to_string(),
+                "CREATE DEFINER=CURRENT_USER FUNCTION `active_count`() RETURNS INT RETURN 1;".to_string(),
             ]
         );
     }
@@ -1986,6 +2250,32 @@ mod tests {
         assert_eq!(
             sql,
             "DELIMITER //\nCREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`()\nBEGIN\n  SELECT 1;\nEND//\nDELIMITER ;"
+        );
+    }
+
+    #[test]
+    fn mysql_trigger_and_event_export_use_delimiter_script() {
+        let trigger = build_export_object_source_sql(
+            DatabaseType::Mysql,
+            ObjectSourceKind::Trigger,
+            "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders_ai` AFTER INSERT ON `orders` FOR EACH ROW\nBEGIN\n  INSERT INTO audit_log(msg) VALUES ('x');\nEND",
+        );
+
+        assert_eq!(
+            trigger,
+            "DELIMITER //\nCREATE DEFINER=`root`@`%` TRIGGER `trg_orders_ai` AFTER INSERT ON `orders` FOR EACH ROW\nBEGIN\n  INSERT INTO audit_log(msg) VALUES ('x');\nEND//\nDELIMITER ;"
+        );
+
+        // An event body already carries its schedule, so only the terminator changes.
+        let event = build_export_object_source_sql(
+            DatabaseType::Mysql,
+            ObjectSourceKind::Event,
+            "CREATE DEFINER=`root`@`%` EVENT `ev_purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM audit_log WHERE id < 0;",
+        );
+
+        assert_eq!(
+            event,
+            "DELIMITER //\nCREATE DEFINER=`root`@`%` EVENT `ev_purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM audit_log WHERE id < 0//\nDELIMITER ;"
         );
     }
 

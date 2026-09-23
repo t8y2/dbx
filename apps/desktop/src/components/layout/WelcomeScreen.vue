@@ -20,7 +20,7 @@ defineProps<{
   recentConnections: ConnectionConfig[];
   savedSqlHistoryItems: WelcomeSavedSqlHistoryItem[];
   appVersion: string;
-  hasConnections: boolean;
+  canNewQuery: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -94,7 +94,7 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
             <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('new-connection')">
               <Plus class="h-4 w-4 shrink-0" /> <span class="min-w-0 truncate">{{ t("toolbar.newConnection") }}</span>
             </button>
-            <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" :disabled="!hasConnections" @click="emit('new-query')">
+            <button v-if="canNewQuery" class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('new-query')">
               <FilePlus2 class="h-4 w-4 shrink-0" /> <span class="min-w-0 truncate">{{ t("toolbar.newQuery") }}</span>
             </button>
             <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('show-history')">

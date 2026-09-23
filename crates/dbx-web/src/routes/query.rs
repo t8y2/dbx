@@ -36,6 +36,11 @@ pub struct ExecuteQueryRequest {
     pub use_transaction: Option<bool>,
     pub continue_on_error: Option<bool>,
     pub execution_mode: Option<dbx_core::query::QueryExecutionMode>,
+    /// MySQL auto-commit tabs: keep a transaction the user opened explicitly
+    /// (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
+    /// ROLLBACK. Defaults to the historical cleanup when omitted.
+    #[serde(default)]
+    pub preserve_explicit_transaction: bool,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +80,9 @@ pub struct ExecuteBatchRequest {
     pub catalog: Option<String>,
     pub timeout_secs: Option<u64>,
     pub destructive_confirmed: Option<bool>,
+    /// Opt-in single transaction for the whole batch (see
+    /// [`dbx_core::query::execute_statements_with_transaction_option`]).
+    pub use_transaction: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +279,19 @@ pub struct BuildTableStructureSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BuildTableOwnerChangeSqlRequest {
     pub options: dbx_core::table_structure_sql::TableOwnerChangeSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildTablePartitionOperationSqlRequest {
+    pub options: dbx_core::table_structure_sql::TablePartitionSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildCreatePartitionedTableSqlRequest {
+    pub options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    pub partitioning: dbx_core::table_structure_sql::TablePartitionDefinition,
 }
 
 #[derive(Deserialize)]
@@ -584,6 +605,7 @@ pub async fn execute_multi(
             use_transaction: req.use_transaction,
             continue_on_error: req.continue_on_error.unwrap_or(false),
             execution_mode: req.execution_mode.unwrap_or_default(),
+            preserve_explicit_transaction: req.preserve_explicit_transaction,
         },
     )
     .await;
@@ -625,12 +647,13 @@ pub async fn execute_batch(
         super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, statement, false).await?;
     }
     tracing::debug!(connection_id = %req.connection_id, "execute_batch");
-    let result = dbx_core::query::execute_statements(
+    let result = dbx_core::query::execute_statements_with_transaction_option(
         &state.app,
         &req.connection_id,
         &database,
         &req.statements,
         req.schema.as_deref(),
+        req.use_transaction == Some(true),
         req.timeout_secs,
     )
     .await
@@ -810,6 +833,12 @@ pub struct GetExplainInfoRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GetPluginPlanCapabilitiesRequest {
+    pub connection_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildCreateUserSqlRequest {
     pub username: String,
     pub password: String,
@@ -827,10 +856,34 @@ pub async fn get_explain_info(
         req.schema.as_deref(),
         &req.sql,
         req.mode.as_deref(),
+        None,
     )
     .await
     .map_err(AppError::from)?;
     Ok(Json(plan))
+}
+
+/// Plugin Host API: what the current host and connection can plan, reported
+/// without connecting or running any SQL.
+pub async fn get_plugin_plan_capabilities(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<GetPluginPlanCapabilitiesRequest>,
+) -> Result<Json<dbx_core::query::plugin_plan::PluginPlanCapabilities>, AppError> {
+    let capabilities = dbx_core::query::plugin_plan::plugin_plan_capabilities(&state.app, &req.connection_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(capabilities))
+}
+
+/// Plugin Host API: read-only estimated plan acquisition. The request carries
+/// the original SQL only; the host generates and owns the EXPLAIN.
+pub async fn get_plugin_estimated_plan(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<dbx_core::query::plugin_plan::PluginPlanRequest>,
+) -> Result<Json<dbx_core::query::plugin_plan::PluginPlanResult>, AppError> {
+    let result =
+        dbx_core::query::plugin_plan::explain_estimated_plan(&state.app, request).await.map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn build_create_user_sql(Json(req): Json<BuildCreateUserSqlRequest>) -> Result<Json<String>, AppError> {
@@ -995,6 +1048,18 @@ pub async fn build_table_owner_change_sql(
     Json(req): Json<BuildTableOwnerChangeSqlRequest>,
 ) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
     Json(dbx_core::table_structure_sql::build_table_owner_change_sql(req.options))
+}
+
+pub async fn build_table_partition_operation_sql(
+    Json(req): Json<BuildTablePartitionOperationSqlRequest>,
+) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
+    Json(dbx_core::table_structure_sql::build_table_partition_operation_sql(req.options))
+}
+
+pub async fn build_create_partitioned_table_sql(
+    Json(req): Json<BuildCreatePartitionedTableSqlRequest>,
+) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
+    Json(dbx_core::table_structure_sql::build_create_partitioned_table_sql(req.options, req.partitioning))
 }
 
 pub async fn preview_sqlite_table_structure_change(
@@ -1237,6 +1302,7 @@ mod tests {
             catalog: None,
             timeout_secs: None,
             destructive_confirmed: None,
+            use_transaction: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -1262,6 +1328,7 @@ mod tests {
             catalog: None,
             timeout_secs: None,
             destructive_confirmed: None,
+            use_transaction: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req)).await.expect("empty deploy should succeed");
@@ -1284,6 +1351,7 @@ mod tests {
             catalog: None,
             timeout_secs: None,
             destructive_confirmed: None,
+            use_transaction: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -1308,6 +1376,7 @@ mod tests {
             catalog: None,
             timeout_secs: None,
             destructive_confirmed: None,
+            use_transaction: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -1331,6 +1400,7 @@ mod tests {
                 rows: vec![vec![serde_json::json!("relation customer_orders does not exist")]],
                 affected_rows: 0,
                 execution_time_ms: 0,
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -1346,6 +1416,9 @@ mod tests {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         };
 
         let response = execute_multi_response(vec![result], 17).unwrap();

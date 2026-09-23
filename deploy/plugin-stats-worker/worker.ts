@@ -8,6 +8,8 @@
 //   not re-enter Workers, so the pass-through cannot loop.
 // - dbxio.com/api/plugins/install: fire-and-forget beacon the desktop app can
 //   send after a successful marketplace install. Decorative statistics only.
+// - dbxio.com/api/plugins/stats: public read of the display counters (installs
+//   per plugin) from the archive summary — consumed by the website cards.
 // - dbxio.com/api/plugins/archive: token-gated manual trigger for the daily
 //   aggregation (same handler the cron runs), for verification and backfills.
 //
@@ -61,10 +63,24 @@ const ARCHIVE_TRIGGER_HEADER = "x-archive-token";
 const SQL_ENDPOINT = "https://api.cloudflare.com/client/v4/accounts";
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
   "Access-Control-Max-Age": "86400",
 };
+
+// Served from the archive summary's `inst` section: the agreed public display
+// number (fresh installs; the pre-2026-09-19 mixed install+update base). Raw
+// dl/updt and unique counters stay internal.
+async function handleStatsRequest(env: Env): Promise<Response> {
+  let installs: Record<string, number> = {};
+  try {
+    const summary = JSON.parse((await env.PLUGIN_ARCHIVE.get(ARCHIVE_SUMMARY_KEY)) ?? "{}") as Record<string, Record<string, number>>;
+    installs = summary.inst ?? {};
+  } catch (error) {
+    console.error("plugin-stats summary read failed", error);
+  }
+  return Response.json({ installs }, { headers: { ...CORS_HEADERS, "Cache-Control": "public, max-age=300" } });
+}
 
 // Truncated HMAC of (salt, ip|utc-day): lets aggregations count distinct
 // downloaders per group without storing IPs. Anti-inflation only — a
@@ -236,6 +252,10 @@ async function handleInstallBeacon(request: Request, env: Env): Promise<Response
   if (request.method === "OPTIONS") return emptyResponse(204);
 
   const url = new URL(request.url);
+  if (url.pathname === "/api/plugins/stats") {
+    if (request.method !== "GET" && request.method !== "HEAD") return emptyResponse(405);
+    return handleStatsRequest(env);
+  }
   if (url.pathname === "/api/plugins/archive") {
     if (request.method !== "POST") return emptyResponse(405);
     if (request.headers.get(ARCHIVE_TRIGGER_HEADER) !== env.ANALYTICS_TOKEN) return emptyResponse(401);

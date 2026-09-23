@@ -59,6 +59,12 @@ This guide gets you through three things:
     flatpak update com.dbxio.dbx
     ```
 
+    On Kylin V10, UnionTech UOS, and similar Chinese desktop distributions, install from the [Spark App Store](https://spk-resolv.spark-app.store/?spk=spk://store/development/dbx) and choose the **APM build**. AmberPM provides a compatible runtime that reduces install/startup failures caused by distro dependency drift; updates are also available from the Spark App Store client.
+
+    <Callout type="warn">
+      The APM build runs DBX inside that compatibility runtime. If you select the host Java for Agent/JDBC drivers, prefix the path with `/host` — enter `/host/usr/bin/java` instead of `/usr/bin/java`.
+    </Callout>
+
     You can also download a package from [GitHub Releases](https://github.com/t8y2/dbx/releases):
 
     | Format | Use Case |

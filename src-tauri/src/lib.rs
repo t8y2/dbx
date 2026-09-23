@@ -1,11 +1,15 @@
+mod background_backup;
 mod commands;
 mod data_dir;
+pub use background_backup::run_if_requested as run_backup_worker_if_requested;
 mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
 #[cfg(target_os = "macos")]
 mod macos_escape_guard;
+mod migration_gate;
 mod models;
+mod plugin_ui_protocol;
 #[cfg(any(target_os = "windows", test))]
 mod startup_recovery;
 #[cfg(all(not(target_os = "windows"), not(test)))]
@@ -1436,15 +1440,11 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Metadata/completion command chains nest very large async futures (a single
-    // frame can be 60-150 KiB), which can exhaust tokio's default 2 MiB worker
-    // stack and abort the process with STATUS_STACK_OVERFLOW. Give the runtime a
-    // roomier worker stack so those chains have headroom.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(16 * 1024 * 1024)
-        .build()
-        .expect("Failed to build tokio runtime");
+    // Metadata/completion command chains nest very large async futures and can
+    // exhaust tokio's default 2 MiB worker stack, which aborts the process with
+    // STATUS_STACK_OVERFLOW. Share the roomier stack the backup worker and Web
+    // server runtimes use as well.
+    let runtime = dbx_core::scheduled_backup::worker_runtime().expect("Failed to build tokio runtime");
     let runtime_handle = runtime.handle().clone();
     let _runtime = Box::leak(Box::new(runtime));
     tauri::async_runtime::set(runtime_handle);
@@ -1461,7 +1461,10 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init());
+        .plugin(tauri_plugin_fs::init())
+        // Plugin workbench sandbox documents lazy-load their code-split chunks
+        // through this scheme; see plugin_ui_protocol.rs.
+        .register_asynchronous_uri_scheme_protocol(plugin_ui_protocol::PLUGIN_UI_SCHEME, plugin_ui_protocol::handle);
 
     let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
@@ -1531,6 +1534,8 @@ pub fn run() {
 
     builder
         .manage(CloseBehaviorState::new())
+        .manage(commands::plugin_file::PluginFileState::new())
+        .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
@@ -1571,15 +1576,19 @@ pub fn run() {
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
-                let s = Storage::open(&db_path).await.expect("Failed to open storage");
+                let s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
                 eprintln!("[STARTUP]   Storage::open in {:?}", t.elapsed());
                 append_startup_probe(format!("storage opened in {:?}", t.elapsed()));
                 let t2 = Instant::now();
-                s.migrate_from_json(&data_dir).await.expect("Failed to migrate JSON data");
-                eprintln!("[STARTUP]   migrate_from_json in {:?}", t2.elapsed());
-                append_startup_probe(format!("json migration completed in {:?}", t2.elapsed()));
+                eprintln!("[STARTUP]   migration wizard deferred in {:?}", t2.elapsed());
+                append_startup_probe(format!("migration deferred to security wizard in {:?}", t2.elapsed()));
                 s
             });
+            let migration_ready = tauri::async_runtime::block_on(storage.inspect_data_migration())
+                .map(|status| status.is_ready())
+                .unwrap_or(false);
+            let migration_gate = Arc::new(migration_gate::MigrationGate::new(migration_ready));
+            app.manage(migration_gate.clone());
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
@@ -1660,10 +1669,24 @@ pub fn run() {
             let state = Arc::new(state);
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
+            let backups = tauri::async_runtime::block_on(async {
+                background_backup::BackgroundBackup::new(state.clone(), data_dir.clone())
+            });
+            match backups {
+                Ok(backups) => {
+                    if let Err(error) = backups.resume() {
+                        log::error!("[database-backup] background registration failed: {error}");
+                    }
+                    app.manage(backups);
+                }
+                Err(error) => log::error!("[database-backup] worker startup failed: {error}"),
+            }
             let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
             app.manage(mcp_http_server.clone());
             let mcp_http_state = state.clone();
+            let mcp_gate = migration_gate.clone();
             tauri::async_runtime::spawn(async move {
+                mcp_gate.wait().await;
                 commands::mcp_http_server::start_if_enabled(mcp_http_state, mcp_http_server).await;
             });
             app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
@@ -1690,7 +1713,10 @@ pub fn run() {
             open_plugin_install_deep_links(app.handle(), startup_plugin_install_links);
 
             let app_handle = app.handle().clone();
-            commands::mcp_bridge::start(app_handle, state, data_dir);
+            tauri::async_runtime::spawn(async move {
+                migration_gate.wait().await;
+                commands::mcp_bridge::start(app_handle, state, data_dir);
+            });
             eprintln!("[STARTUP] setup complete in {:?} (total {:?})", setup_start.elapsed(), startup_begin.elapsed());
             append_startup_probe(format!(
                 "setup tasks complete in {:?} total {:?}",
@@ -1754,7 +1780,7 @@ pub fn run() {
                 request_app_close(app, "settings");
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(migration_gate::guard_handler(tauri::generate_handler![
             commands::ai::ai_complete,
             commands::ai::ai_stream,
             commands::ai::ai_agent_stream,
@@ -1784,10 +1810,14 @@ pub fn run() {
             commands::prompt_template::delete_prompt_template,
             commands::prompt_template::get_ai_global_custom_instructions,
             commands::prompt_template::set_ai_global_custom_instructions,
+            commands::user_skills::list_user_skills,
+            commands::user_skills::read_user_skills,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
             commands::app_settings::load_max_agent_turns,
             commands::app_settings::save_max_agent_turns,
+            commands::app_settings::load_history_retention_limit,
+            commands::app_settings::save_history_retention_limit,
             commands::app_settings::load_max_retries,
             commands::app_settings::save_max_retries,
             commands::app_settings::set_app_locale,
@@ -1830,6 +1860,10 @@ pub fn run() {
             commands::diagnostics::get_process_memory_info,
             commands::support_info::get_app_support_info,
             commands::cloud_sync::webdav_sync_test,
+            commands::cloud_sync::migration_status,
+            commands::cloud_sync::migration_start,
+            commands::cloud_sync::migration_retry,
+            commands::cloud_sync::migration_cleanup_backups,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,
             commands::cloud_sync::forget_webdav_saved_password,
@@ -1860,6 +1894,7 @@ pub fn run() {
             commands::connection::clear_all_session_credentials,
             commands::connection::refresh_connections,
             commands::connection::check_connection_health,
+            commands::connection::prewarm_connection,
             commands::connection::connection_identifier_quote,
             commands::connection::connection_database_info,
             commands::connection::save_connection_database_info,
@@ -1873,6 +1908,13 @@ pub fn run() {
             commands::connection::save_table_vgroups,
             commands::connection::load_table_vgroups,
             commands::connection::delete_table_vgroups_for_connection,
+            commands::plugin_file::plugin_file_open,
+            commands::plugin_file::plugin_file_read,
+            commands::plugin_file::plugin_file_write,
+            commands::plugin_file::plugin_file_close,
+            commands::plugin_storage::plugin_ui_storage_get,
+            commands::plugin_storage::plugin_ui_storage_set,
+            commands::plugin_storage::plugin_ui_storage_delete,
             commands::plugins::list_plugins,
             commands::plugins::list_plugin_trusted_keys,
             commands::plugins::save_plugin_trusted_key,
@@ -1890,6 +1932,8 @@ pub fn run() {
             commands::plugins::list_active_plugins,
             commands::plugins::stop_plugin,
             commands::plugins::invoke_plugin,
+            commands::plugin_download::download_plugin_file,
+            commands::plugin_download::cancel_plugin_download,
             commands::plugins::invoke_plugin_connection_action,
             commands::plugins::notify_plugin,
             commands::plugins::send_plugin_binary,
@@ -1940,6 +1984,7 @@ pub fn run() {
             commands::schema::list_schema_infos,
             commands::schema::list_data_types,
             commands::schema::get_columns,
+            commands::schema::get_plugin_table_metadata,
             commands::schema::get_all_columns,
             commands::schema::get_sqlserver_column_metadata,
             commands::schema::list_indexes,
@@ -1950,6 +1995,7 @@ pub fn run() {
             commands::schema::list_constraints,
             commands::schema::list_partitions,
             commands::schema::get_table_partition_status,
+            commands::schema::get_table_partitioning,
             commands::schema::list_invalid_indexes,
             commands::schema::list_subpartitions,
             commands::schema::get_table_ddl,
@@ -1994,6 +2040,8 @@ pub fn run() {
             commands::query::build_sorted_query_sql,
             commands::query::build_explain_sql,
             commands::query::get_explain_info,
+            commands::query::get_plugin_plan_capabilities,
+            commands::query::get_plugin_estimated_plan,
             commands::query::build_create_user_sql,
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
@@ -2029,6 +2077,8 @@ pub fn run() {
             commands::query::preview_sqlite_table_structure_change,
             commands::query::apply_sqlite_table_structure_change,
             commands::query::build_create_table_sql,
+            commands::query::build_create_partitioned_table_sql,
+            commands::query::build_table_partition_operation_sql,
             commands::query::build_single_column_alter_sql,
             commands::query::analyze_editable_query_editability,
             commands::query::prepare_data_grid_save,
@@ -2313,6 +2363,8 @@ pub fn run() {
             commands::fs_open::reveal_path_in_file_manager,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
+            background_backup::database_backup_command,
+            background_backup::database_backup_background,
             commands::sqlite_backup::backup_sqlite_database,
             commands::sqlite_backup::restore_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
@@ -2377,6 +2429,7 @@ pub fn run() {
             commands::document_cmd::meilisearch_update_index_settings,
             commands::document_cmd::meilisearch_get_index_stats,
             commands::document_cmd::meilisearch_get_index_overview,
+            commands::document_cmd::meilisearch_create_index,
             commands::document_cmd::meilisearch_delete_index,
             commands::document_cmd::meilisearch_delete_all_documents,
             commands::document_cmd::meilisearch_get_system_overview,
@@ -2640,7 +2693,7 @@ pub fn run() {
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
             commands::tunnel_profiles::test_tunnel_profile,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .inspect(|app| {
             append_startup_probe(format!("tauri application built after {:?}", startup_begin.elapsed()));
@@ -2673,6 +2726,9 @@ pub fn run() {
                         }
                     }
                     tauri::async_runtime::block_on(async {
+                        if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
+                            backups.shutdown().await;
+                        }
                         if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>()
                         {
                             server.shutdown(Duration::from_secs(1)).await;
@@ -2757,7 +2813,13 @@ pub fn run() {
                     );
                 }
                 let app_handle = app_handle.clone();
+                let migration_gate =
+                    app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
+                    let Some(migration_gate) = migration_gate else {
+                        return;
+                    };
+                    migration_gate.wait().await;
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }
@@ -2766,7 +2828,13 @@ pub fn run() {
 
             if let RunEvent::Resumed = &event {
                 let app_handle = app_handle.clone();
+                let migration_gate =
+                    app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
+                    let Some(migration_gate) = migration_gate else {
+                        return;
+                    };
+                    migration_gate.wait().await;
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }

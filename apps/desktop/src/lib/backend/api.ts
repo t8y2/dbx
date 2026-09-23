@@ -23,6 +23,10 @@ async function getBackend(): Promise<Backend> {
 // ---------------------------------------------------------------------------
 
 function forward<K extends keyof Backend>(name: K): Backend[K] {
+  // SAFETY: the resolved module is one of exactly two implementations of the same
+  // surface — `http.ts` imports its request/response types from `tauri.ts` on
+  // purpose, so both transports are kept signature-compatible by construction.
+  // TypeScript cannot express that cross-module equivalence, hence the cast.
   return (async (...args: unknown[]) => {
     const startedAt = performance.now();
     const operation = String(name);
@@ -66,6 +70,7 @@ export const sessionCredentialStatus = forward("sessionCredentialStatus");
 export const forgetSessionCredential = forward("forgetSessionCredential");
 export const replaceNacosSessionCredential = forward("replaceNacosSessionCredential");
 export const checkConnectionHealth = forward("checkConnectionHealth");
+export const prewarmConnection = forward("prewarmConnection");
 export const connectionIdentifierQuote = forward("connectionIdentifierQuote");
 export const closeDatabaseConnection = forward("closeDatabaseConnection");
 export const refreshConnections = forward("refreshConnections");
@@ -177,6 +182,10 @@ export const savedSqlStorageDir = forward("savedSqlStorageDir");
 export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
 export const revealPathInFileManager = forward("revealPathInFileManager");
 export const deleteDatabaseBackupFiles = forward("deleteDatabaseBackupFiles");
+export const databaseBackupCommand = forward("databaseBackupCommand");
+export const databaseBackupBackground = forward("databaseBackupBackground");
+export const downloadDatabaseBackupFile = forward("downloadDatabaseBackupFile");
+export const prepareDatabaseBackupRestore = forward("prepareDatabaseBackupRestore");
 export const isSqliteDatabaseFile = forward("isSqliteDatabaseFile");
 export const backupSqliteDatabase = forward("backupSqliteDatabase");
 export const restoreSqliteDatabase = forward("restoreSqliteDatabase");
@@ -210,6 +219,7 @@ export const getObjectSource = forward("getObjectSource");
 export const getEventInfo = forward("getEventInfo");
 export const getCustomTypeDetails = forward("getCustomTypeDetails");
 export const getColumns = forward("getColumns");
+export const getPluginTableMetadata = forward("getPluginTableMetadata");
 export const getAllColumns = forward("getAllColumns");
 export const getSqlServerColumnMetadata = forward("getSqlServerColumnMetadata");
 export const listDataTypes = forward("listDataTypes");
@@ -221,6 +231,7 @@ export const listTriggers = forward("listTriggers");
 export const listConstraints = forward("listConstraints");
 export const listPartitions = forward("listPartitions");
 export const getTablePartitionStatus = forward("getTablePartitionStatus");
+export const getTablePartitioning = forward("getTablePartitioning");
 export const listInvalidIndexes = forward("listInvalidIndexes");
 export const listSubpartitions = forward("listSubpartitions");
 export const getTableDdl = forward("getTableDdl");
@@ -267,6 +278,8 @@ export const prepareQueryPaginationExecutionPlan = forward("prepareQueryPaginati
 export const buildSortedQuerySql = forward("buildSortedQuerySql");
 export const buildExplainSql = forward("buildExplainSql");
 export const getExplainInfo = forward("getExplainInfo");
+export const getPluginPlanCapabilities = forward("getPluginPlanCapabilities");
+export const getPluginEstimatedPlan = forward("getPluginEstimatedPlan");
 export const buildCreateUserSql = forward("buildCreateUserSql");
 export const buildDroppedFilePreviewSql = forward("buildDroppedFilePreviewSql");
 export const buildTableSelectSql = forward("buildTableSelectSql");
@@ -298,6 +311,8 @@ export const buildRoutineRenameObjectSourceStatements = forward("buildRoutineRen
 export const buildViewDdlSql = forward("buildViewDdlSql");
 export const buildTableStructureChangeSql = forward("buildTableStructureChangeSql");
 export const buildTableOwnerChangeSql = forward("buildTableOwnerChangeSql");
+export const buildTablePartitionOperationSql = forward("buildTablePartitionOperationSql");
+export const buildCreatePartitionedTableSql = forward("buildCreatePartitionedTableSql");
 export const previewSqliteTableStructureChange = forward("previewSqliteTableStructureChange");
 export const applySqliteTableStructureChange = forward("applySqliteTableStructureChange");
 export const buildCreateTableSql = forward("buildCreateTableSql");
@@ -350,6 +365,8 @@ export const loadMaxAgentTurns = forward("loadMaxAgentTurns");
 export const loadSqlFileUploadMaxBytes = forward("loadSqlFileUploadMaxBytes");
 export const saveSqlFileUploadMaxMb = forward("saveSqlFileUploadMaxMb");
 export const saveMaxAgentTurns = forward("saveMaxAgentTurns");
+export const loadHistoryRetentionLimit = forward("loadHistoryRetentionLimit");
+export const saveHistoryRetentionLimit = forward("saveHistoryRetentionLimit");
 export const loadMaxRetries = forward("loadMaxRetries");
 export const saveMaxRetries = forward("saveMaxRetries");
 export const completeAppClose = forward("completeAppClose");
@@ -378,6 +395,10 @@ export const saveSavedSqlEditorPositions = forward("saveSavedSqlEditorPositions"
 export const loadTransferTaskLibrary = forward("loadTransferTaskLibrary");
 export const saveTransferTaskLibrary = forward("saveTransferTaskLibrary");
 export const webdavSyncTest = forward("webdavSyncTest");
+export const migrationStatus = forward("migrationStatus");
+export const migrationStart = forward("migrationStart");
+export const migrationRetry = forward("migrationRetry");
+export const migrationCleanupBackups = forward("migrationCleanupBackups");
 export const webdavPasswordStatus = forward("webdavPasswordStatus");
 export const saveWebdavSavedPassword = forward("saveWebdavSavedPassword");
 export const forgetWebdavSavedPassword = forward("forgetWebdavSavedPassword");
@@ -409,6 +430,10 @@ export const deletePromptTemplate = forward("deletePromptTemplate");
 export const getAiGlobalCustomInstructions = forward("getAiGlobalCustomInstructions");
 export const setAiGlobalCustomInstructions = forward("setAiGlobalCustomInstructions");
 
+// User Skills (read-only Codex-compatible SKILL.md library)
+export const listUserSkills = forward("listUserSkills");
+export const readUserSkills = forward("readUserSkills");
+
 // System
 export const listSystemFonts = forward("listSystemFonts");
 export const listSshConfigHosts = forward("listSshConfigHosts");
@@ -416,6 +441,7 @@ export const listLocalSshKeys = forward("listLocalSshKeys");
 
 // SQL File Execution
 export const previewSqlFile = forward("previewSqlFile");
+export const releaseSqlFilePreview = forward("releaseSqlFilePreview");
 export const executeSqlFile = forward("executeSqlFile");
 export const executeSqlFiles = forward("executeSqlFiles");
 export const cancelSqlFileExecution = forward("cancelSqlFileExecution");
@@ -843,6 +869,7 @@ export const meilisearchGetIndexSettings = forward("meilisearchGetIndexSettings"
 export const meilisearchUpdateIndexSettings = forward("meilisearchUpdateIndexSettings");
 export const meilisearchGetIndexStats = forward("meilisearchGetIndexStats");
 export const meilisearchGetIndexOverview = forward("meilisearchGetIndexOverview");
+export const meilisearchCreateIndex = forward("meilisearchCreateIndex");
 export const meilisearchDeleteIndex = forward("meilisearchDeleteIndex");
 export const meilisearchDeleteAllDocuments = forward("meilisearchDeleteAllDocuments");
 export const meilisearchGetSystemOverview = forward("meilisearchGetSystemOverview");

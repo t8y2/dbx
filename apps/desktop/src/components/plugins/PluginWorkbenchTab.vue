@@ -36,7 +36,7 @@ const hostContext = computed(() => {
   if (!resolvedConnectionId.value || props.context?.connectionId) return props.context;
   return { ...props.context, connectionId: resolvedConnectionId.value };
 });
-const entry = computed(() => createFrontendPluginRegistry(plugins.value, appLocale.value).findWorkbench(props.pluginId, props.contributionId));
+const entry = computed(() => createFrontendPluginRegistry(plugins.value, appLocale.value).findUiContribution(props.pluginId, props.contributionId));
 
 async function load() {
   const generation = ++loadGeneration;
@@ -91,6 +91,8 @@ function start() {
 }
 
 function openWorkbench(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }) {
+  // `host.openWorkbench` navigates between declared workbenches only; the tab it
+  // opens resolves its own entry contribution through `findUiContribution`.
   const target = createFrontendPluginRegistry(plugins.value, appLocale.value).findWorkbench(pluginId, contributionId);
   // Session tabs are per-connection: title them after the connection (like the
   // sidebar-opened tab) so parallel sessions read "server", "server (2)", …

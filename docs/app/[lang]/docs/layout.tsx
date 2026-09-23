@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { DocsLayout } from "fumadocs-ui/layouts/docs";
 import { RootProvider } from "fumadocs-ui/provider/next";
 import { DocsSidebarFooter, DocsSidebarLanguageButton } from "@/components/DocsSidebarFooter";
+import { FloatingSponsorCard } from "@/components/FloatingSponsorCard";
 import { StaticSearchDialog } from "@/components/StaticSearchDialog";
 import { i18nUI, resolveLang } from "@/lib/i18n";
 import { source } from "@/lib/source";
@@ -37,6 +38,7 @@ export default async function Layout({ params, children }: { params: Promise<{ l
         }}
       >
         {children}
+        <FloatingSponsorCard lang={locale} />
       </DocsLayout>
     </RootProvider>
   );

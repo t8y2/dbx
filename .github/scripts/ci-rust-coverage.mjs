@@ -29,8 +29,7 @@ export function assertCoverage(coverage) {
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const coverage = {};
   for (const group of ["workspace", ...Object.keys(rustGroups)]) {
-    const args = rustCommand("test", group, "fast");
-    args[0] = "tree";
+    const args = rustCommand("tree", group, "fast");
     args.push("--depth", "0", "--prefix", "none", "--format", "{p}|{f}");
     coverage[group] = parseCoverage(execFileSync("cargo", args, { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] }));
   }

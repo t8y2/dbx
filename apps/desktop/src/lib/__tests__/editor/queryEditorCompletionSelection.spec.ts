@@ -9,7 +9,7 @@ import { EditorView, keymap, runScopeHandlers } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
 import { acceptSelectedCompletionWithRetry, acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
 
-const queryEditorSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+const queryEditorSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/editor/queryEditorSqlExtensions.ts"), "utf8");
 
 function createCompletionView(doc = "", selectFirstCompletionOnOpen = false, interactionDelay: number | null = 0) {
   return new EditorView({

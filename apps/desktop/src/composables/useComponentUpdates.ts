@@ -1,15 +1,17 @@
 import { computed, ref } from "vue";
 import * as api from "@/lib/backend/api";
 import { currentLocale } from "@/i18n";
-import { buildMarketplacePluginListings, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { buildMarketplacePluginListings, pluginSourceChange, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isUpdatePreviewMockEnabled, previewDriverUpdates, previewJdbcUpdate, previewMcpUpdate, previewPluginUpdates } from "@/lib/updates/updatePreviewMock";
 import type { ComponentUpdateCategory } from "@/lib/updates/componentUpdateOrchestration";
-import type { AgentDriverInfo, McpServerStatus } from "@/lib/backend/tauri";
+import type { AgentDriverInfo, AgentUpdateBlocker, McpServerStatus } from "@/lib/backend/tauri";
 import type { JdbcPluginStatus } from "@/types/database";
 
 export type { ComponentUpdateCategory } from "@/lib/updates/componentUpdateOrchestration";
+
+export type PluginUpdateBlock = { pluginName: string; reason: "connections"; connections: string } | { pluginName: string; reason: "operations" | "inProgress" };
 
 export interface ComponentUpdateResult {
   drivers: number;
@@ -17,11 +19,31 @@ export interface ComponentUpdateResult {
   mcp: boolean;
   plugins: number;
   skippedDrivers: number;
+  blockedDrivers: AgentUpdateBlocker[];
   failed: string[];
+  blockedPlugins: PluginUpdateBlock[];
+}
+
+interface ComponentUpdateRefreshOptions {
+  force?: boolean;
 }
 
 function emptyResult(): ComponentUpdateResult {
-  return { drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, failed: [] };
+  return { drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] };
+}
+
+function pluginUpdateBlock(pluginName: string, message: string): PluginUpdateBlock | null {
+  const connectionsPrefix = "Plugin update blocked by active connections: ";
+  if (message.startsWith(connectionsPrefix)) {
+    return { pluginName, reason: "connections", connections: message.slice(connectionsPrefix.length) };
+  }
+  if (message === "Plugin update blocked by active operations. Please wait for them to finish.") {
+    return { pluginName, reason: "operations" };
+  }
+  if (message === "Plugin update is in progress. Please try again after it finishes.") {
+    return { pluginName, reason: "inProgress" };
+  }
+  return null;
 }
 
 export function useComponentUpdates(options: { isDesktop: boolean }) {
@@ -44,16 +66,18 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
   const totalUpdateCount = computed(() => driverUpdateCount.value + (jdbcUpdateAvailable.value ? 1 : 0) + (mcpUpdateAvailable.value ? 1 : 0) + pluginUpdateCount.value);
 
   let refreshPromise: Promise<boolean> | null = null;
+  let refreshVersion = 0;
   let activeUpdatePromise: Promise<ComponentUpdateResult> | null = null;
 
-  function refresh() {
+  function startRefresh(): Promise<boolean> {
     if (!options.isDesktop) return Promise.resolve(false);
-    if (refreshPromise) return refreshPromise;
-    refreshPromise = (async () => {
+    const version = ++refreshVersion;
+    refreshPromise = Promise.resolve().then(async () => {
       loading.value = true;
       lastError.value = "";
       try {
         if (isUpdatePreviewMockEnabled()) {
+          if (version !== refreshVersion) return false;
           drivers.value = previewDriverUpdates();
           jdbcPluginStatus.value = previewJdbcUpdate();
           mcpStatus.value = previewMcpUpdate();
@@ -61,6 +85,7 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
           return true;
         }
         const [agentResult, jdbcResult, mcpResult, installedPluginsResult, catalogsResult] = await Promise.allSettled([api.listInstalledAgents(), api.jdbcPluginStatus(), api.checkMcpServerStatus(), api.listPlugins(), api.fetchPluginMarketplaceCatalogs()]);
+        if (version !== refreshVersion) return false;
         const errors: string[] = [];
         if (agentResult.status === "fulfilled") drivers.value = agentResult.value;
         else {
@@ -87,14 +112,22 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
         lastError.value = errors.join("; ");
         return errors.length === 0;
       } catch (error) {
+        if (version !== refreshVersion) return false;
         lastError.value = error instanceof Error ? error.message : String(error);
         return false;
       } finally {
-        loading.value = false;
-        refreshPromise = null;
+        if (version === refreshVersion) {
+          loading.value = false;
+          refreshPromise = null;
+        }
       }
-    })();
+    });
     return refreshPromise;
+  }
+
+  function refresh(refreshOptions: ComponentUpdateRefreshOptions = {}) {
+    if (!refreshOptions.force && refreshPromise) return refreshPromise;
+    return startRefresh();
   }
 
   async function updateDrivers(result: ComponentUpdateResult) {
@@ -107,6 +140,7 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
     const blockers = await api.checkAgentUpdateBlockers(updatable);
     if (blockers.length) {
       result.skippedDrivers = blockers.length;
+      result.blockedDrivers = blockers;
       return;
     }
     const upgraded = await api.upgradeAllAgents();
@@ -135,7 +169,10 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
   }
 
   async function updatePlugins(result: ComponentUpdateResult) {
-    const updatable = pluginUpdates.value.filter((item) => item.artifact);
+    // Listings whose recorded provenance differs from the offering repository/publisher/key need an
+    // explicit confirmation, which the automatic path cannot give: keep them visible in the update
+    // center (they still count) but let the user confirm them in the Plugin Center instead.
+    const updatable = pluginUpdates.value.filter((item) => item.artifact && !pluginSourceChange(item));
     if (isUpdatePreviewMockEnabled()) {
       result.plugins += updatable.length;
       return;
@@ -149,7 +186,10 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
         });
         result.plugins += 1;
       } catch (error) {
-        result.failed.push(`${listing.name}: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        const block = pluginUpdateBlock(listing.name, message);
+        if (block) result.blockedPlugins.push(block);
+        result.failed.push(`${listing.name}: ${message}`);
       }
     }
   }

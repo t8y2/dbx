@@ -554,6 +554,7 @@ fn clickhouse_object_statistics_from_row(row: &[serde_json::Value], database: &s
         schema: Some(database.to_string()),
         estimated_rows: json_value_as_i64(row.get(1)),
         total_bytes: json_value_as_i64(row.get(2)),
+        ..Default::default()
     })
 }
 
@@ -588,6 +589,7 @@ fn limited_query_result(result: ChJsonResult, execution_time_ms: u128, max_rows:
         rows,
         affected_rows: 0,
         execution_time_ms,
+        server_execute_time_us: None,
         truncated,
         session_id: None,
         has_more: false,
@@ -845,6 +847,7 @@ pub async fn execute_query_with_max_rows(
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,

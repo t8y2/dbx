@@ -13,10 +13,10 @@ import { test } from "vitest";
  * line 1 instead of the previous viewport (#8374).
  */
 function activateTabDocumentSource(): string {
-  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/useQueryEditorDocumentState.ts"), "utf8");
   const start = source.indexOf("function activateTabDocument");
-  assert.notEqual(start, -1, "expected activateTabDocument in QueryEditor.vue");
-  const end = source.indexOf("\n}", start);
+  assert.notEqual(start, -1, "expected activateTabDocument in useQueryEditorDocumentState.ts");
+  const end = source.indexOf("\n  }", start);
   assert.notEqual(end, -1, "expected activateTabDocument closing brace");
   return source.slice(start, end);
 }
@@ -39,12 +39,12 @@ test("cached tab activation keeps restoring selection and viewport", () => {
 });
 
 test("viewport restore prefers the per-tab saved viewport", () => {
-  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/useQueryEditorDocumentState.ts"), "utf8");
   assert.match(source, /function restoreEditorViewport\(viewport = props\.initialViewport \?\? latestViewport\) \{/);
 });
 
 test("captures the outgoing editor viewport before KeepAlive deactivation", () => {
-  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/useQueryEditorDocumentState.ts"), "utf8");
   assert.match(source, /function captureEditorStateBeforeTabSwitch\(event: Event\) \{/);
   assert.match(source, /fromTabId !== props\.tabId/);
   assert.match(source, /captureEditorStateBeforeTabSwitch[\s\S]*?flushEditorViewport\(\);[\s\S]*?flushEditorSelection\(\);[\s\S]*?emit\("editorStateFlushed"\);/);
@@ -53,27 +53,28 @@ test("captures the outgoing editor viewport before KeepAlive deactivation", () =
 });
 
 test("does not flush a reset viewport after a tab-switch capture", () => {
-  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/useQueryEditorDocumentState.ts"), "utf8");
   assert.match(source, /let tabSwitchStateCaptured = false;/);
   assert.match(source, /tabSwitchStateCaptured = true;/);
-  assert.match(source, /const stateWasCapturedBeforeTabSwitch = tabSwitchStateCaptured;[\s\S]*?tabSwitchStateCaptured = false;[\s\S]*?if \(editorIsActive && !stateWasCapturedBeforeTabSwitch\) \{[\s\S]*?flushEditorViewport\(\);/);
+  assert.match(source, /const stateWasCapturedBeforeTabSwitch = tabSwitchStateCaptured;[\s\S]*?tabSwitchStateCaptured = false;[\s\S]*?if \(runtime\.editorIsActive && !stateWasCapturedBeforeTabSwitch\) \{[\s\S]*?flushEditorViewport\(\);/);
   assert.match(source, /if \(!tabSwitchStateCaptured\) flushEditorViewport\(\);/);
 });
 
 test("does not flush an editor again when KeepAlive evicts it after deactivation", () => {
-  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
-  assert.match(source, /if \(editorIsActive && !stateWasCapturedBeforeTabSwitch\) \{[\s\S]*?flushEditorViewport\(\);/);
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/useQueryEditorDocumentState.ts"), "utf8");
+  assert.match(source, /if \(runtime\.editorIsActive && !stateWasCapturedBeforeTabSwitch\) \{[\s\S]*?flushEditorViewport\(\);/);
 });
 
 test("restores a saved cursor into view when no viewport was persisted", () => {
-  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
-  assert.match(source, /restoreEditorSelection\(props\.initialSelection, !props\.initialViewport\);/);
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/useQueryEditorDocumentState.ts"), "utf8");
+  const editorSource = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  assert.match(editorSource, /restoreEditorSelection\(props\.initialSelection, !props\.initialViewport\);/);
   assert.match(source, /function restoreEditorSelection\(selection = props\.initialSelection \?\? latestSelection, scrollIntoView = false\)/);
   assert.match(source, /view\.value\.dispatch\(\{ selection: normalizedSelection, scrollIntoView \}\);/);
 });
 
 test("re-applies the viewport when saved SQL content hydrates after mount", () => {
-  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/useQueryEditorDocumentState.ts"), "utf8");
   assert.match(source, /watch\(\s*\(\) => props\.initialViewport,[\s\S]*?previousViewport[\s\S]*?latestViewport = \{ \.\.\.viewport \};[\s\S]*?restoreEditorViewport\(viewport\);/);
   assert.match(source, /watch\(\s*\(\) => props\.initialSelection,[\s\S]*?previousSelection[\s\S]*?restoreEditorSelection\(selection, !props\.initialViewport\);/);
   assert.match(source, /if \(attempts >= 32\)/);

@@ -20,10 +20,19 @@ describe("EditorSettingsDialog preview cleanup", () => {
     expect(dialogSource).toContain("restoreLocaleOptionPreview();");
   });
 
-  it("keeps language hover preview while scale stays an unapplied draft", () => {
+  it("coalesces pointer previews while keeping keyboard previews immediate", () => {
     expect(dialogSource).toContain('@update:open="onLocaleOpenChange"');
     expect(dialogSource).toContain('@pointerleave="restoreLocaleOptionPreview"');
-    expect(dialogSource).toContain('@pointerenter="previewLocaleOption(locale.value)"');
+    expect(dialogSource).toContain('@pointerenter="scheduleLocaleOptionPreview(locale.value)"');
+    expect(dialogSource).toContain('@focus="previewLocaleOption(locale.value)"');
+    expect(dialogSource).toContain('@pointerenter="scheduleThemePalettePreview(option.value)"');
+    expect(dialogSource).toContain('@focus="previewThemePaletteOption(option.value)"');
+    expect(dialogSource).toContain('@option-hover="scheduleUiFontOptionPreview"');
+    expect(dialogSource).toContain('@option-highlight="previewUiFontOption"');
+    expect(dialogSource).toContain("createDelayedPreview");
+  });
+
+  it("keeps scale as an unapplied draft", () => {
     expect(dialogSource).toContain('@update:model-value="onUiScaleChange"');
     expect(dialogSource).not.toContain("useUiScalePreview");
     expect(dialogSource).not.toContain("previewUiScaleOption");

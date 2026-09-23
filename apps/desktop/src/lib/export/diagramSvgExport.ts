@@ -1,8 +1,8 @@
 import type { EngineeringDiagram, EngineeringEntityNode } from "@/lib/diagram/engineeringDiagram";
-import type { DiagramPosition, DiagramRelationship, DiagramTable } from "@/lib/diagram/erDiagram";
+import { isDroppedColumn, type DiagramPosition, type DiagramRelationship, type DiagramTable } from "@/lib/diagram/erDiagram";
 import { pickHandles } from "@/lib/diagram/vue-flow-adapter";
 import { pointAlongPolyline, pointsToSvgPath, type Point } from "@/lib/diagram/edge-obstacle-router";
-import { CARD_BOTTOM_PADDING, CARD_HEADER_HEIGHT, CARD_WIDTH, COLUMN_ROW_HEIGHT, MARGIN } from "@/lib/diagram/diagram-constants";
+import { CARD_WIDTH, COMMENT_LINE_HEIGHT, MARGIN, diagramTableCardHeight, tableCardHeight, type DiagramCardMetrics } from "@/lib/diagram/diagram-constants";
 
 const SOURCE_CARDINALITY_T = 0.18;
 const TARGET_CARDINALITY_T = 0.82;
@@ -25,8 +25,32 @@ export interface DiagramSvgLayer {
   height: number;
 }
 
+/**
+ * Table plus the id the canvas positions it by.
+ *
+ * Diagram positions are keyed by the diagram table id (`getTableKey`), which is
+ * schema-qualified once more than one schema is selected. Export code used to look positions
+ * up by the bare table name, so in multi-schema mode every card silently fell back to
+ * `{ x: 0, y: 0 }` and the whole diagram was exported stacked on the origin (issue #9445).
+ */
+export type DiagramSvgTable = DiagramTable & { diagramKey?: string };
+
+function tableExportKey(table: DiagramSvgTable): string {
+  return table.diagramKey || table.name;
+}
+
+/** Comments are optional metadata; blank/whitespace-only values render nothing. */
+function commentText(value: string | null | undefined): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** Columns the card actually renders: pending-drop columns are hidden on the canvas too. */
+function tableExportColumns(table: DiagramTable): DiagramTable["columns"] {
+  return table.columns.filter((column) => !isDroppedColumn(table, column.name));
+}
+
 export interface TableDiagramSvgOptions {
-  tables: DiagramTable[];
+  tables: DiagramSvgTable[];
   relationships: DiagramRelationship[];
   positions: Record<string, DiagramPosition>;
   relationshipPaths: Record<string, string>;
@@ -37,14 +61,10 @@ export interface TableDiagramSvgOptions {
   cardHeaderHeight: number;
   columnRowHeight: number;
   cardBottomPadding?: number;
+  /** Extra height for a rendered table/column comment line. */
+  commentLineHeight?: number;
   layers?: DiagramSvgLayer[];
 }
-
-type CardHeightMetrics = {
-  cardHeaderHeight: number;
-  columnRowHeight: number;
-  cardBottomPadding?: number;
-};
 
 function escapeXml(value: string | number): string {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
@@ -82,11 +102,6 @@ function svgText(
   return `<text ${attrs.join(" ")}>${escapeXml(label)}</text>`;
 }
 
-/** Shared table card height for SVG canvas / paths / cards. */
-function svgCardHeight(columnCount: number, metrics: CardHeightMetrics): number {
-  return metrics.cardHeaderHeight + columnCount * metrics.columnRowHeight + (metrics.cardBottomPadding ?? CARD_BOTTOM_PADDING);
-}
-
 function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
   return table.foreignKeys.some((fk) => fk.column === columnName);
 }
@@ -112,12 +127,13 @@ function orthogonalPointsBetweenTables(sourcePos: DiagramPosition, targetPos: Di
 type RelationshipGeometryInput = {
   relationships: DiagramRelationship[];
   positions: Record<string, DiagramPosition>;
-  tables: DiagramTable[];
+  tables: DiagramSvgTable[];
   waypoints?: Record<string, Point[]>;
   cardWidth?: number;
   cardHeaderHeight?: number;
   columnRowHeight?: number;
   cardBottomPadding?: number;
+  commentLineHeight?: number;
 };
 
 /**
@@ -125,12 +141,20 @@ type RelationshipGeometryInput = {
  */
 export function buildTableRelationshipPolylines(input: RelationshipGeometryInput): Record<string, Point[]> {
   const cardWidth = input.cardWidth ?? CARD_WIDTH;
-  const metrics: CardHeightMetrics = {
-    cardHeaderHeight: input.cardHeaderHeight ?? CARD_HEADER_HEIGHT,
-    columnRowHeight: input.columnRowHeight ?? COLUMN_ROW_HEIGHT,
-    cardBottomPadding: input.cardBottomPadding ?? CARD_BOTTOM_PADDING,
+  const metrics: DiagramCardMetrics = {
+    cardHeaderHeight: input.cardHeaderHeight,
+    columnRowHeight: input.columnRowHeight,
+    cardBottomPadding: input.cardBottomPadding,
+    commentLineHeight: input.commentLineHeight,
   };
-  const heightByName = new Map(input.tables.map((t) => [t.name, svgCardHeight(t.columns.length, metrics)]));
+  // Relationships address tables by their diagram id, cards by their table; index both so the
+  // routed edges match the drawn card heights in multi-schema mode too.
+  const heightByName = new Map<string, number>();
+  for (const table of input.tables) {
+    const height = diagramTableCardHeight(table, metrics);
+    heightByName.set(tableExportKey(table), height);
+    heightByName.set(table.name, height);
+  }
   const polylines: Record<string, Point[]> = {};
 
   for (const rel of input.relationships) {
@@ -142,8 +166,8 @@ export function buildTableRelationshipPolylines(input: RelationshipGeometryInput
     const sourcePos = input.positions[rel.sourceTable];
     const targetPos = input.positions[rel.targetTable];
     if (!sourcePos || !targetPos) continue;
-    const sh = heightByName.get(rel.sourceTable) ?? svgCardHeight(0, metrics);
-    const th = heightByName.get(rel.targetTable) ?? svgCardHeight(0, metrics);
+    const sh = heightByName.get(rel.sourceTable) ?? tableCardHeight(0, metrics);
+    const th = heightByName.get(rel.targetTable) ?? tableCardHeight(0, metrics);
     polylines[rel.id] = orthogonalPointsBetweenTables(sourcePos, targetPos, sh, th, cardWidth);
   }
   return polylines;
@@ -163,13 +187,14 @@ export function buildTableRelationshipPaths(input: RelationshipGeometryInput): R
 
 /** Compute canvas size that fits tables + layers + relationship polylines with padding. */
 export function computeTableDiagramCanvas(
-  tables: DiagramTable[],
+  tables: DiagramSvgTable[],
   positions: Record<string, DiagramPosition>,
   options: {
     cardWidth: number;
     cardHeaderHeight: number;
     columnRowHeight: number;
     cardBottomPadding?: number;
+    commentLineHeight?: number;
     layers?: DiagramSvgLayer[];
     relationshipPolylines?: Record<string, Point[]>;
     padding?: number;
@@ -194,8 +219,8 @@ export function computeTableDiagramCanvas(
   }
 
   for (const table of tables) {
-    const pos = positions[table.name] ?? { x: 0, y: 0 };
-    const height = svgCardHeight(table.columns.length, options);
+    const pos = positions[tableExportKey(table)] ?? positions[table.name] ?? { x: 0, y: 0 };
+    const height = diagramTableCardHeight(table, options);
     expand(pos.x, pos.y, pos.x + options.cardWidth, pos.y + height);
   }
 
@@ -276,23 +301,38 @@ export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
   parts.push("</g>");
 
   for (const table of options.tables) {
-    const position = options.positions[table.name] ?? { x: 0, y: 0 };
-    const height = svgCardHeight(table.columns.length, options);
+    const position = options.positions[tableExportKey(table)] ?? options.positions[table.name] ?? { x: 0, y: 0 };
+    const columns = tableExportColumns(table);
+    const height = diagramTableCardHeight(table, options);
+    const showSchema = Boolean(table.schema) && tableExportKey(table) !== table.name;
+    const nameY = options.cardHeaderHeight / 2 + (showSchema ? 6 : 0);
     parts.push(`<g transform="translate(${svgNumber(position.x)} ${svgNumber(position.y)})">`);
     parts.push(`<rect width="${options.cardWidth}" height="${svgNumber(height)}" rx="6" fill="#ffffff" stroke="#d4d4d8"/>`);
     parts.push(`<rect width="${options.cardWidth}" height="${options.cardHeaderHeight}" rx="6" fill="#f4f4f5"/>`);
     parts.push(`<path d="M 0 ${options.cardHeaderHeight} H ${options.cardWidth}" stroke="#e4e4e7"/>`);
-    parts.push(svgText(table.name, 36, options.cardHeaderHeight / 2, { size: 13, weight: "600" }));
+    if (showSchema) {
+      parts.push(svgText(table.schema ?? "", 36, options.cardHeaderHeight / 2 - 6, { size: 10, fill: "#71717a", family: "Menlo, Consolas, monospace" }));
+    }
+    parts.push(svgText(table.name, 36, nameY, { size: 13, weight: "600" }));
     parts.push(
-      svgText(String(table.columns.length), options.cardWidth - 18, options.cardHeaderHeight / 2, {
+      svgText(String(columns.length), options.cardWidth - 18, options.cardHeaderHeight / 2, {
         size: 10,
         anchor: "end",
         fill: "#52525b",
       }),
     );
 
-    table.columns.forEach((column, index) => {
-      const rowTop = options.cardHeaderHeight + index * options.columnRowHeight;
+    const commentLineHeight = options.commentLineHeight ?? COMMENT_LINE_HEIGHT;
+    let rowTop = options.cardHeaderHeight;
+    const tableComment = commentText(table.comment);
+    if (tableComment) {
+      parts.push(`<rect x="0" y="${svgNumber(rowTop)}" width="${options.cardWidth}" height="${svgNumber(commentLineHeight)}" fill="#fafafa"/>`);
+      parts.push(`<path d="M 0 ${svgNumber(rowTop)} H ${options.cardWidth}" stroke="#e4e4e7"/>`);
+      parts.push(svgText(tableComment, 36, rowTop + commentLineHeight / 2, { size: 9, fill: "#71717a" }));
+      rowTop += commentLineHeight;
+    }
+
+    columns.forEach((column) => {
       const rowCenter = rowTop + options.columnRowHeight / 2;
       parts.push(`<path d="M 0 ${svgNumber(rowTop)} H ${options.cardWidth}" stroke="#f0f0f1"/>`);
       if (column.is_primary_key) {
@@ -308,6 +348,12 @@ export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
           anchor: "end",
         }),
       );
+      rowTop += options.columnRowHeight;
+      const columnComment = commentText(column.comment);
+      if (columnComment) {
+        parts.push(svgText(columnComment, 38, rowTop + commentLineHeight / 2, { size: 9, fill: "#71717a" }));
+        rowTop += commentLineHeight;
+      }
     });
     parts.push("</g>");
   }

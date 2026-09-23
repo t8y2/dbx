@@ -37,6 +37,11 @@ public final class JdbcExecutor {
         return AgentExecutionContext.jdbcExecutor();
     }
 
+    public static int statementMaxRows(int maxRows) {
+        int effectiveMaxRows = Math.max(maxRows, 1);
+        return effectiveMaxRows == Integer.MAX_VALUE ? Integer.MAX_VALUE : effectiveMaxRows + 1;
+    }
+
     public QueryResult execute(Connection conn, String sql, String schema, Function<String, String> setSchemaSql) {
         return execute(conn, sql, schema, setSchemaSql, DEFAULT_MAX_ROWS, null, this::defaultResultValue);
     }
@@ -141,7 +146,7 @@ public final class JdbcExecutor {
                 activeStatements.add(stmt);
                 try {
                 int effectiveMaxRows = Math.max(maxRows, 1);
-                stmt.setMaxRows(effectiveMaxRows + 1);
+                stmt.setMaxRows(statementMaxRows(maxRows));
                 applyQueryTimeout(stmt, timeoutSecs);
                 if (fetchSize != null && fetchSize > 0) {
                     stmt.setFetchSize(fetchSize);
@@ -170,6 +175,13 @@ public final class JdbcExecutor {
                     try (ResultSet rs = stmt.getResultSet()) {
                         result = readResultSet(rs, elapsed, effectiveMaxRows, valueReader);
                     }
+                    // `elapsed` stops at `stmt.execute()`. Retrieving and
+                    // converting the rows above is frequently the dominant
+                    // cost of a statement, so report the whole duration the
+                    // same way the native drivers do. Without this a
+                    // fetch-heavy result shows up in the UI as a few
+                    // milliseconds while the caller waited for seconds.
+                    result.setExecution_time_ms(System.currentTimeMillis() - start);
                 } else {
                     result = new QueryResult(
                         Collections.emptyList(),
@@ -459,7 +471,11 @@ public final class JdbcExecutor {
                 );
                 createdSession = session;
                 targetSessions.put(sessionId, session);
-                return readSessionPage(targetSessions, session, options.getPageSize(), elapsed);
+                QueryPageResult page = readSessionPage(targetSessions, session, options.getPageSize(), elapsed);
+                // Same reason as `execute`: pulling the first page's rows is
+                // part of the duration the caller waited for.
+                page.setExecution_time_ms(System.currentTimeMillis() - start);
+                return page;
             } catch (Exception e) {
                 if (createdSession != null) {
                     closeSession(targetSessions, createdSession.id);
@@ -706,8 +722,14 @@ public final class JdbcExecutor {
             throw new IllegalArgumentException(missingMessage);
         }
         synchronized (session) {
+            long fetchStart = System.currentTimeMillis();
             try {
-                return readSessionPage(targetSessions, session, pageSize, 0L);
+                QueryPageResult page = readSessionPage(targetSessions, session, pageSize, 0L);
+                // A later page reads its rows after `stmt.execute()` has long
+                // returned, so it has to measure the fetch itself instead of
+                // reporting 0ms while the caller waits.
+                page.setExecution_time_ms(System.currentTimeMillis() - fetchStart);
+                return page;
             } catch (RuntimeException | Error error) {
                 closeSession(targetSessions, sessionId);
                 throw error;
@@ -734,7 +756,7 @@ public final class JdbcExecutor {
             while (rows.size() < effectivePageSize && session.rowsRead < session.maxRows) {
                 if (!session.resultSet.next()) {
                     closeSession(targetSessions, session.id);
-                    return new QueryPageResult(session.columns, session.columnTypes, rows, 0L, executionTimeMs, false, null, false);
+                    return sessionPageResult(session, rows, executionTimeMs, false, null, false);
                 }
                 rows.add(rowValues(session.resultSet, session.valueReader, session.sqlTypeByIndex, session.typeNameByIndex));
                 session.rowsRead += 1;
@@ -743,19 +765,32 @@ public final class JdbcExecutor {
             if (session.rowsRead >= session.maxRows) {
                 boolean truncated = session.resultSet.next();
                 closeSession(targetSessions, session.id);
-                return new QueryPageResult(session.columns, session.columnTypes, rows, 0L, executionTimeMs, truncated, null, false);
+                return sessionPageResult(session, rows, executionTimeMs, truncated, null, false);
             }
 
             boolean hasMore = session.resultSet.next();
             if (!hasMore) {
                 closeSession(targetSessions, session.id);
-                return new QueryPageResult(session.columns, session.columnTypes, rows, 0L, executionTimeMs, false, null, false);
+                return sessionPageResult(session, rows, executionTimeMs, false, null, false);
             }
 
             session.pendingRow = rowValues(session.resultSet, session.valueReader, session.sqlTypeByIndex, session.typeNameByIndex);
             session.rowsRead += 1;
-            return new QueryPageResult(session.columns, session.columnTypes, rows, 0L, executionTimeMs, false, session.id, true);
+            return sessionPageResult(session, rows, executionTimeMs, false, session.id, true);
         });
+    }
+
+    private static QueryPageResult sessionPageResult(
+        QuerySession session,
+        List<List<Object>> rows,
+        long executionTimeMs,
+        boolean truncated,
+        String sessionId,
+        boolean hasMore
+    ) {
+        QueryPageResult result = new QueryPageResult(session.columns, session.columnTypes, rows, 0L, executionTimeMs, truncated, sessionId, hasMore);
+        result.setCursor_rows_read(session.rowsRead);
+        return result;
     }
 
     private void closeAllSessions(ConcurrentHashMap<String, QuerySession> targetSessions) {

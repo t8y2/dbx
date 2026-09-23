@@ -1,6 +1,6 @@
 ---
 title: DBX Configuration Cloud Sync
-description: Sync DBX connections, settings, and saved SQL with WebDAV, GitHub Gist, or Gitee snippets.
+description: Sync DBX connections, settings, and saved SQL with WebDAV, GitHub Gist, Gitee, or GitLab Snippets.
 ---
 
 <Callout type="info">
@@ -12,7 +12,7 @@ DBX can package connections, application settings, and saved SQL into a snapshot
 Choose a provider under **Settings → Sync**:
 
 - **WebDAV**: Best when you already use a NAS, Nextcloud, or another WebDAV service. Supports scheduled uploads.
-- **GitHub / Gitee snippets**: Stores the snapshot in a private Gist or code snippet without requiring your own server. It is currently exposed in Desktop only, and uploads and downloads are manual.
+- **GitHub / Gitee / GitLab snippets**: Stores the snapshot in a private snippet, including on self-managed GitLab. It is currently exposed in Desktop only; uploads and downloads are manual and never merge automatically.
 
 ## What Is Synchronized
 
@@ -68,7 +68,7 @@ A classic token also works, but grant only the `gist` scope.
 <Step>
     ### Select GitHub
 
-    Open **Settings → Sync → GitHub / Gitee** and select **GitHub Gist**.
+    Open **Settings → Sync → Snippets** and select **GitHub Gist**.
   </Step>
 <Step>
     ### Enter the token
@@ -126,15 +126,25 @@ Plain-text snippets created by older versions cannot be safely migrated in place
 
 ### Upload and Restore
 
-1. Select **Gitee Snippet** under **Settings → Sync → GitHub / Gitee**.
+1. Select **Gitee Snippet** under **Settings → Sync → Snippets**.
 2. Enter the personal access token. Leave the snippet ID empty on the first upload; DBX creates a private snippet and stores its ID.
 3. To restore elsewhere, enter the same snippet ID and select **Download**.
 
 Gitee snippets also use a `dbx-sync.json` file.
 
+## GitLab Snippets (including self-managed instances)
+
+1. Create a personal access token in GitLab under **User Settings → Access Tokens** with `api` scope. Do not put the token in the instance URL.
+2. In Desktop, open **Settings → Sync → Snippets**, select **GitLab Snippets**, and enter the root URL of your GitLab instance (for example, `https://gitlab.example.com` or `http://gitlab.internal` on an internal network; the default is `https://gitlab.com`). URLs with credentials, queries, or fragments are rejected. Leaving the field or pressing Enter applies a changed instance.
+3. Enter the token and a snippet encryption password. Leave the ID empty for the first upload: DBX creates a private personal Snippet. Later uploads update `dbx-sync.json` in that Snippet. To restore on another device, provide the same instance, token, ID, and encryption password, then manually download.
+
+GitLab Snippets are **not** GitLab repository file sync. Each instance keeps its own local token, ID, and pending migration cleanup. Uploads and downloads do not merge automatically. A legacy plaintext DBX snapshot must use **Migrate legacy snippet**: DBX first creates an encrypted replacement, then rereads and deletes the old Snippet only if unchanged. If the old content has changed or cleanup fails, delete the old Snippet manually.
+
+<Callout type="warn">HTTP transmits the GitLab access token in cleartext even though the snapshot is encrypted. Use HTTP only on a trusted internal network; prefer HTTPS for self-managed GitLab.</Callout>
+
 ## Sync Password and Secrets
 
-GitHub Gist and Gitee snippets always encrypt the entire snapshot with a **snippet encryption password**. The password is never uploaded or saved and cannot be recovered. This password is independent from the password that encrypts optional synced credentials.
+GitHub Gist, Gitee, and GitLab snippets always encrypt the entire snapshot with a **snippet encryption password**. The password is never uploaded or saved and cannot be recovered. This password is independent from the password that encrypts optional synced credentials.
 
 Snapshots exclude credentials by default. To restore passwords on another device:
 
@@ -146,7 +156,7 @@ Snapshots exclude credentials by default. To restore passwords on another device
 DBX derives the encryption key with **Argon2id** and uses **AES-256-GCM** encryption. Provider access tokens are encrypted with a device-local key and are never written to `dbx-sync.json`.
 
 <Callout type="warn">
-Neither password can be recovered. An encrypted GitHub/Gitee snippet cannot be restored without its snippet encryption password. For WebDAV, a snapshot without encrypted secrets can still be restored without a passphrase.
+Neither password can be recovered. An encrypted snippet cannot be restored without its snippet encryption password. For WebDAV, a snapshot without encrypted secrets can still be restored without a passphrase.
 </Callout>
 
 ## WebDAV

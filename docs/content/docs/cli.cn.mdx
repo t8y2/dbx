@@ -7,6 +7,8 @@ description: 使用原生 DBX CLI 在终端、脚本、CI 和 Codex 中读取连
 
 ## 安装
 
+### npm
+
 ```bash
 npm install -g @dbx-app/cli
 ```
@@ -182,7 +184,7 @@ open 'dbx://open'
 <a href="dbx://open">使用 DBX 打开</a>
 ```
 
-使用 `dbx://connection/new` 可以打开新建连接窗口并预填连接信息。
+使用不带 `id` 的 `dbx://connection/new` 可以打开新建连接窗口并预填连接信息。
 
 DSN 模式：
 
@@ -227,6 +229,36 @@ open 'dbx://connection/new?type=r-nacos&url=http%3A%2F%2F127.0.0.1%3A8848%2Fnaco
 ```
 
 `nacos` 是 `nacos-v2` 的别名，`rnacos` 是 `r-nacos` 的别名。URL 模式会保留服务端点路径，顶层 `host`、`port`、`user`、`password`、`ssl` 会覆盖 `url` 中的对应值。Consul 的 `password` 表示 ACL token；Nacos 传入 `password` 时必须同时传入 `user`。省略 `v` 或使用 `v=1` 表示当前深链协议，其他版本会被拒绝。
+
+### 按 ID 更新已保存连接
+
+在同一个 `dbx://connection/new` 路由上增加 `id`，即可打开指定的已保存连接进行编辑。例如，堡垒机可以为已有连接传入新的登录凭据：
+
+```bash
+open 'dbx://connection/new?id=saved-connection-id&user=fresh-sso-token&password=fresh-sso-token'
+```
+
+将 `saved-connection-id` 替换为 MCP 工具 `dbx_list_connections` 返回的连接 ID。更新按 ID 精确匹配，不按显示名称查找。CLI 命令 `dbx connections list --json` 目前只列出名称和端点等信息，不返回连接 ID。
+
+收到更新链接后，DBX 只打开预填好的编辑窗口。检查修改内容并点击**保存**后，才会以原连接 ID 和原侧栏分组持久化修改。链接不会自动保存、测试或连接数据库；取消编辑不会修改已保存配置。ID 为空或不存在、目标是一次性连接、已有其他连接窗口打开时，更新会被拒绝，不会退回新建连接。
+
+更新支持使用内置 MySQL、PostgreSQL、SQL Server 配置的已保存字段式连接；存在非空 `connection_string` 的连接不支持此更新流程。只有链接中明确提供的字段才会修改：
+
+| 参数 | 更新行为 |
+| --- | --- |
+| `name`、`host` | 替换当前值，不接受空值 |
+| `port` | 替换为 1 到 65535 之间的整数端口 |
+| `user`、`password` | 预填凭据并保留首尾空白字符；传空值表示清空 |
+| `database`、`url_params` | 替换当前值；传空值表示清空 |
+| `ssl` | 更新 SSL 开关；最终 TLS 行为遵循驱动和 URL 参数规则 |
+
+省略的字段保留原值，包括端口和 SSL 设置。需要清空字段时，保留参数名并传空值，例如 `database=&url_params=`。参数值应进行 URL 编码，例如密码中的字面量 `+` 应编码为 `%2B`。
+
+保存时仍遵循现有的凭据清理规则和该连接的“保存密码”设置。
+
+除 `id` 和上述字段外，只接受可选的协议版本 `v=1`。更新链接不接受 `type`、`url`、`one_time`（包括 `one_time=false`）、未知参数或重复参数名，也不能更改驱动配置或要求自动操作。
+
+保存新的 SSO 凭据不会延长其有效期。MCP 可以读取保存后的连接配置，但仍会独立建立数据库会话，需要凭据仍然有效；更新不会把桌面端正在使用的会话转交给 MCP。
 
 <Callout type="info">测试系统级 `dbx://` 唤起前，请先安装并启动一次 DBX 桌面端，让系统注册 URL 协议。macOS 可使用 `open 'dbx://open'` 或 `open 'dbx://connection/new?...'` 测试。</Callout>
 

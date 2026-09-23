@@ -9,10 +9,10 @@ use mongodb::bson::{Document, RawDocumentBuf};
 use tokio::sync::mpsc;
 
 use super::{
-    archive, cancelled, source::CatalogSource, CancelFuture, MongoDatabaseDumpProgress, MongoDatabaseRestoreRequest,
-    MongoDumpFormat, PreparedCollection,
+    archive, cancelled, source::CatalogSource, CancelFuture, DumpClient, MongoDatabaseDumpProgress,
+    MongoDatabaseRestoreRequest, MongoDumpFormat, PreparedCollection,
 };
-use crate::{connection::AppState, db::mongo_driver::insert_bson_documents};
+use crate::connection::AppState;
 
 const BATCH_BYTES: usize = 8 * 1024 * 1024;
 
@@ -142,17 +142,16 @@ fn produce(
 }
 
 pub(super) async fn initialize_collection(
-    client: &mongodb::Client,
+    client: &DumpClient,
     request: &MongoDatabaseRestoreRequest,
     entry: &PreparedCollection,
     exists: bool,
 ) -> Result<(), String> {
-    let db = client.database(&request.database);
     if request.drop_existing && exists {
-        db.collection::<Document>(&entry.metadata.collection_name).drop().await.map_err(|e| e.to_string())?;
+        client.drop_collection(&request.database, &entry.metadata.collection_name).await?;
     }
     if !exists || request.drop_existing {
-        db.run_command(entry.metadata.create_command(request.restore_options)).await.map_err(|e| e.to_string())?;
+        client.create_collection(&request.database, entry.metadata.create_command(request.restore_options)).await?;
     }
     Ok(())
 }
@@ -167,7 +166,7 @@ pub(super) async fn writable(state: &AppState, id: &str) -> Result<(), String> {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn restore_data(
     state: &AppState,
-    client: &mongodb::Client,
+    client: &DumpClient,
     request: &MongoDatabaseRestoreRequest,
     source: Arc<CatalogSource>,
     entries: &[PreparedCollection],
@@ -238,9 +237,7 @@ pub(super) async fn restore_data(
                         progress.documents_validated += documents.len() as u64;
                     }
                     let outcome =
-                        insert_bson_documents(client, &request.database, &entry.metadata.collection_name, documents)
-                            .await
-                            .map_err(|e| e.message)?;
+                        client.insert_documents(&request.database, &entry.metadata.collection_name, documents).await?;
                     progress.documents_written += outcome.inserted;
                     progress.documents_failed += outcome.errors.len() as u64;
                     progress.emit(started, on_progress);

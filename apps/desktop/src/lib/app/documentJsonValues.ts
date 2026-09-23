@@ -41,6 +41,9 @@ export function documentStoreValueForGrid(value: unknown, kind: DocumentStoreKin
 export function serializeDocumentStoreId(value: unknown, kind: DocumentStoreKind): string {
   if (kind !== "mongodb" && isLosslessJsonNumber(value)) return value.raw;
   if (kind === "elasticsearch") return String(value);
+  // Solr document ids are the uniqueKey field value verbatim — no quoting or
+  // sentinel encoding like Meilisearch's string-id marker.
+  if (kind === "solr") return String(value);
   if (kind === "meilisearch") return typeof value === "string" ? `__dbx_meilisearch_string_id__${JSON.stringify(value)}` : String(value);
   if (kind === "dynamodb") return stringifyJsonPreservingLargeNumbers(value);
   return serializeMongoDocumentId(value);

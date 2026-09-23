@@ -11,6 +11,67 @@ use crate::types::QueryResult;
 pub const MONGO_SHOW_DATABASES_DATABASE: &str = "admin";
 pub const MONGO_SHOW_DATABASES_COMMAND_JSON: &str = r#"{"listDatabases":1}"#;
 
+/// Runs one server command through the legacy agent's generic `runCommand` and returns the
+/// response document. The agent surfaces `ok: 0` as an error, so a returned document succeeded.
+async fn agent_run_command_document(
+    client: &crate::db::agent_driver::PooledAgentClient,
+    database: &str,
+    command: mongodb::bson::Document,
+    label: &str,
+) -> Result<mongodb::bson::Document, String> {
+    let mut client = client.lock().await;
+    if !client.supports_capability(AgentCapability::MongoRunCommand) {
+        return Err(format!(
+            "MongoDB Legacy Agent does not support {label}; upgrade or reinstall the MongoDB Legacy driver"
+        ));
+    }
+    let result: MongoDocumentResult = client
+        .mongo_run_command(serde_json::json!({
+            "database": database,
+            "command_json": mongo_driver::document_to_canonical_extended_json(&command).to_string(),
+        }))
+        .await?;
+    let response = result
+        .extended_documents
+        .as_ref()
+        .and_then(|documents| documents.first())
+        .or_else(|| result.documents.first())
+        .ok_or_else(|| format!("MongoDB Legacy Agent returned an empty {label} response"))?;
+    mongo_driver::json_object_to_document_extended_json(response)
+}
+
+/// The database view's per-collection "rows"/"size" columns over the legacy agent: one
+/// `collStats` per non-view collection through `runCommand`, mirroring
+/// `mongo_driver::list_object_statistics`. A collection whose `collStats` fails is left out so
+/// the view keeps that row blank instead of failing the whole listing. The agent connection is
+/// a single RPC channel, so the round trips run sequentially.
+pub async fn mongo_agent_list_object_statistics(
+    client: &crate::db::agent_driver::PooledAgentClient,
+    database: &str,
+) -> Result<Vec<crate::db::ObjectStatistics>, String> {
+    let database = database.trim();
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    let specs = {
+        let mut client = client.lock().await;
+        if !client.supports_capability(AgentCapability::MongoRunCommand) {
+            return Ok(Vec::new());
+        }
+        crate::document_ops::mongo_collection_specs_from_agent_response(
+            client.mongo_list_collection_specs(database).await?,
+        )?
+    };
+    let mut statistics = Vec::with_capacity(specs.len());
+    for spec in specs.into_iter().filter(|spec| spec.kind != mongo_driver::MongoCollectionKind::View) {
+        let Ok(command) = mongo_driver::collection_stats_command(&spec.name, None) else { continue };
+        if let Ok(result) = agent_run_command_document(client, database, command, "collection stats").await {
+            statistics.push(mongo_driver::object_statistics_from_collection_stats(&spec.name, database, &result));
+        }
+    }
+    Ok(statistics)
+}
+
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
     state.get_or_create_pool(connection_id, None).await.map(|_| ())
 }
@@ -32,7 +93,11 @@ pub async fn mongo_create_database_core(state: &AppState, connection_id: &str, d
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::create_database(client, database).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support create database".to_string()),
+        PoolKind::Agent(client) => {
+            let database = mongo_driver::validate_create_database_name(database)?;
+            let command = mongodb::bson::doc! { "create": mongo_driver::CREATE_DATABASE_PLACEHOLDER_COLLECTION };
+            agent_run_command_document(client, database, command, "create database").await.map(|_| ())
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -167,15 +232,12 @@ pub async fn mongo_server_version_core(
     }
 }
 
-pub async fn mongo_run_command_core(
-    state: &AppState,
-    connection_id: &str,
+pub(crate) async fn mongo_run_command_with_existing_pool(
+    pool: &PoolKind,
     database: &str,
     command_json: &str,
 ) -> Result<MongoDocumentResult, String> {
-    ensure_document_pool(state, connection_id).await?;
-    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    match pool {
         PoolKind::MongoDb(client) => mongo_driver::run_command(client, database, command_json).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -196,6 +258,17 @@ pub async fn mongo_run_command_core(
     }
 }
 
+pub async fn mongo_run_command_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    command_json: &str,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    mongo_run_command_with_existing_pool(&pool, database, command_json).await
+}
+
 pub async fn mongo_show_databases_core(state: &AppState, connection_id: &str) -> Result<MongoDocumentResult, String> {
     mongo_run_command_core(state, connection_id, MONGO_SHOW_DATABASES_DATABASE, MONGO_SHOW_DATABASES_COMMAND_JSON).await
 }
@@ -211,7 +284,11 @@ pub async fn mongo_collection_stats_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::collection_stats(client, database, collection, scale).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support collection stats helpers".to_string()),
+        PoolKind::Agent(client) => {
+            let command = mongo_driver::collection_stats_command(collection, scale.as_ref())?;
+            let response = agent_run_command_document(client, database, command, "collection stats").await?;
+            Ok(mongo_driver::collection_stats_result_from_document(&response))
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -516,8 +593,11 @@ pub async fn mongo_distinct_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::distinct(client, database, collection, field, filter).await,
-        // The legacy agent protocol has no distinct method and no read that could stand in for it.
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support distinct".to_string()),
+        PoolKind::Agent(client) => {
+            let command = mongo_driver::distinct_command(collection, field, filter)?;
+            let response = agent_run_command_document(client, database, command, "distinct").await?;
+            mongo_driver::distinct_response_result(response)
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -983,7 +1063,12 @@ pub async fn mongo_find_one_and_update_core(
             mongo_driver::find_one_and_update(client, database, collection, filter_json, update_json, options_json)
                 .await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support findOneAndUpdate".to_string()),
+        PoolKind::Agent(client) => {
+            let command =
+                mongo_driver::find_one_and_update_command(collection, filter_json, update_json, options_json)?;
+            let response = agent_run_command_document(client, database, command, "findOneAndUpdate").await?;
+            mongo_driver::find_and_modify_response_result(&response)
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -1011,7 +1096,12 @@ pub async fn mongo_find_one_and_replace_core(
             )
             .await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support findOneAndReplace".to_string()),
+        PoolKind::Agent(client) => {
+            let command =
+                mongo_driver::find_one_and_replace_command(collection, filter_json, replacement_json, options_json)?;
+            let response = agent_run_command_document(client, database, command, "findOneAndReplace").await?;
+            mongo_driver::find_and_modify_response_result(&response)
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -1030,7 +1120,11 @@ pub async fn mongo_find_one_and_delete_core(
         PoolKind::MongoDb(client) => {
             mongo_driver::find_one_and_delete(client, database, collection, filter_json, options_json).await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support findOneAndDelete".to_string()),
+        PoolKind::Agent(client) => {
+            let command = mongo_driver::find_one_and_delete_command(collection, filter_json, options_json)?;
+            let response = agent_run_command_document(client, database, command, "findOneAndDelete").await?;
+            mongo_driver::find_and_modify_response_result(&response)
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -1288,6 +1382,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, affecte
         rows,
         affected_rows,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,

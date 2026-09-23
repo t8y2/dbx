@@ -30,6 +30,8 @@ import {
 import CompareKeyColumnsSelect from "@/components/diff/CompareKeyColumnsSelect.vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, RotateCcw, Square } from "@lucide/vue";
 
@@ -75,6 +77,14 @@ const compareProgressCurrent = ref(0);
 const compareProgressTotal = ref(0);
 const compareProgressTable = ref("");
 const executing = ref(false);
+const manualTransaction = ref(false);
+const txnSessionId = ref<string>();
+let commitUncertain = false;
+const resolvingTransaction = ref(false);
+const transactionFailed = ref(false);
+let executionInterrupted = false;
+const executionLocked = computed(() => executing.value || resolvingTransaction.value || !!txnSessionId.value);
+const canUseManualTransaction = computed(() => supportsTransaction(store.getConfig(targetConnectionId.value)?.db_type));
 const executedCount = ref(0);
 const executeTotal = ref(0);
 const syncErrors = ref<{ sql: string; error: string }[]>([]);
@@ -104,7 +114,7 @@ let initializingPrefillGeneration = 0;
 let componentUnmounted = false;
 let shownSessionError = "";
 
-const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(connection.db_type)));
+const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(connection.db_type)));
 const selectedSourceTableNames = computed(() => sourceTables.value.filter((table) => selectedSourceTables.value.has(table)));
 const isBatchCompare = computed(() => selectedSourceTableNames.value.length > 1);
 // Bridge the shared TableMultiSelect `string[]` v-model with the Set-based selection store.
@@ -465,6 +475,7 @@ function applyDataCompareSession(session: DataCompareSession | undefined): void 
 }
 
 function swapSourceTarget() {
+  if (executionLocked.value) return;
   const previousSelectedTables = [...selectedSourceTableNames.value];
   const nextSingleTarget = previousSelectedTables.length === 1 ? (previousSelectedTables[0] ?? "") : "";
   const nextSourceSelection = previousSelectedTables.length <= 1 ? [targetTable.value].filter(Boolean) : previousSelectedTables;
@@ -622,6 +633,7 @@ function toggleShowAll(table: DataCompareTableResult, kind: DiffKind) {
 }
 
 function setDiffSelection(kind: DiffKind, selected: boolean) {
+  if (executionLocked.value) return;
   batchResults.value.forEach((table) => {
     table.diff[kind].forEach((row) => {
       row.selected = selected;
@@ -631,6 +643,7 @@ function setDiffSelection(kind: DiffKind, selected: boolean) {
 }
 
 function setTableDiffSelection(table: DataCompareTableResult, kind: DiffKind, selected: boolean) {
+  if (executionLocked.value) return;
   table.diff[kind].forEach((row) => {
     row.selected = selected;
   });
@@ -638,6 +651,7 @@ function setTableDiffSelection(table: DataCompareTableResult, kind: DiffKind, se
 }
 
 function clearAllSelections() {
+  if (executionLocked.value) return;
   (["added", "removed", "modified"] as DiffKind[]).forEach((kind) => {
     batchResults.value.forEach((table) => {
       table.diff[kind].forEach((row) => {
@@ -649,6 +663,7 @@ function clearAllSelections() {
 }
 
 function toggleRowSelection(row: SelectableDataCompareRow | SelectableDataCompareModifiedRow) {
+  if (executionLocked.value) return;
   row.selected = !row.selected;
   rebuildSyncPlan().catch((e) => toast(String(e), 5000));
 }
@@ -695,7 +710,7 @@ async function rebuildSyncPlan() {
 }
 
 function startCompare(): void {
-  if (!canCompare.value || comparing.value || executing.value) return;
+  if (!canCompare.value || comparing.value || executionLocked.value) return;
   const tasks = buildCompareTasks();
   if (tasks.length === 0) {
     toast(t("dataCompare.noComparableTables"), 5000);
@@ -747,30 +762,46 @@ async function copySql() {
 }
 
 async function executeSql() {
-  if (!syncPlan.value.syncSql.trim() || syncPlan.value.syncStatements.length === 0 || executing.value) return;
-  const targetConnection = store.getConfig(targetConnectionId.value);
+  if (!syncPlan.value.syncSql.trim() || syncPlan.value.syncStatements.length === 0 || planningSync.value || comparing.value || executionLocked.value) return;
+  const connectionId = targetConnectionId.value;
+  const database = targetDatabase.value;
+  const schema = targetSchema.value;
+  const statements = [...syncPlan.value.syncStatements];
+  const useTransaction = manualTransaction.value && canUseManualTransaction.value;
+  const targetConnection = store.getConfig(connectionId);
+  executing.value = true;
+  executionInterrupted = false;
+  transactionFailed.value = false;
   try {
     const failed = await executeWithProductionSqlGuard({
       connection: targetConnection,
-      database: targetDatabase.value,
+      database,
       sql: syncPlan.value.syncSql,
       source: t("production.sourceDataCompare"),
       execute: async () => {
-        executing.value = true;
         syncErrors.value = [];
-        executeTotal.value = syncPlan.value.syncStatements.length;
+        executeTotal.value = statements.length;
         executedCount.value = 0;
-        await store.ensureConnected(targetConnectionId.value);
-        const statements = syncPlan.value.syncStatements;
+        await store.ensureConnected(connectionId);
+        if (useTransaction && (componentUnmounted || executionInterrupted)) return undefined;
+        if (useTransaction) {
+          txnSessionId.value = await api.beginManualTransaction(connectionId, database, schema);
+          commitUncertain = false;
+        }
         for (let index = 0; index < statements.length; index += SYNC_EXECUTE_BATCH_SIZE) {
+          if (useTransaction && (componentUnmounted || executionInterrupted)) return undefined;
           const batch = statements.slice(index, index + SYNC_EXECUTE_BATCH_SIZE);
           try {
-            await api.executeBatch(targetConnectionId.value, targetDatabase.value, batch, targetSchema.value);
+            if (useTransaction) await api.executeInManualTransaction(txnSessionId.value!, batch.join(";\n"), database, schema);
+            else await api.executeBatch(connectionId, database, batch, schema);
             executedCount.value += batch.length;
           } catch (e: any) {
+            // A failed manual transaction is rolled back by the backend. Never
+            // replay its statements on an ordinary connection.
+            if (useTransaction) throw e;
             for (const stmt of batch) {
               try {
-                await api.executeBatch(targetConnectionId.value, targetDatabase.value, [stmt], targetSchema.value);
+                await api.executeBatch(connectionId, database, [stmt], schema);
               } catch (singleError: any) {
                 syncErrors.value.push({ sql: stmt, error: singleError?.message || String(singleError) });
               }
@@ -782,17 +813,75 @@ async function executeSql() {
       },
     });
     if (failed === undefined) return;
-    if (failed === 0) {
+    if (failed === 0 && !txnSessionId.value) {
       toast(t("dataCompare.syncSuccess"), 2000);
-    } else {
-      toast(t("diff.syncSummary", { success: syncPlan.value.syncStatements.length - failed, failed }), 5000);
+    } else if (failed > 0) {
+      toast(t("diff.syncSummary", { success: statements.length - failed, failed }), 5000);
     }
   } catch (e: any) {
+    transactionFailed.value = true;
     toast(e?.message || String(e), 5000);
   } finally {
+    if (txnSessionId.value && (transactionFailed.value || componentUnmounted || executionInterrupted)) await finishTransaction(false);
     executing.value = false;
   }
 }
+
+async function finishTransaction(commit: boolean): Promise<boolean> {
+  const sessionId = txnSessionId.value;
+  if (!sessionId || resolvingTransaction.value || (commit && (executing.value || transactionFailed.value))) return false;
+  resolvingTransaction.value = true;
+  try {
+    let committed = false;
+    let outcomeUnknown = false;
+    try {
+      if (commit) {
+        await api.commitManualTransaction(sessionId);
+        committed = true;
+      } else await api.rollbackManualTransaction(sessionId);
+    } catch (error) {
+      if (!isManualTransactionSessionExpired(error) && formatError(error) !== "Transaction session not found") {
+        if (commit) {
+          commitUncertain = true;
+          transactionFailed.value = true;
+        }
+        throw error;
+      }
+      outcomeUnknown = commitUncertain;
+      if (outcomeUnknown) toast(t("toolbar.commitOutcomeUnknown"), 5000);
+      else if (commit) toast(t("dataCompare.transactionEnded"), 5000);
+    }
+    txnSessionId.value = undefined;
+    if (committed || outcomeUnknown) {
+      const session = getDataCompareSession(activeSessionId.value);
+      if (session) {
+        session.batchResults = [];
+        session.syncPlan = emptyDataCompareSyncPlan();
+        session.version++;
+      }
+      clearResult();
+      if (committed) toast(t("dataCompare.syncSuccess"), 2000);
+    }
+    return true;
+  } catch (error) {
+    toast(formatError(error), 5000);
+    return false;
+  } finally {
+    resolvingTransaction.value = false;
+  }
+}
+
+async function handleOpenChange(value: boolean) {
+  if (!value && ((executing.value && manualTransaction.value) || resolvingTransaction.value)) return;
+  if (!value && txnSessionId.value) {
+    if (!window.confirm(t("dataCompare.rollbackBeforeClose")) || !(await finishTransaction(false))) return;
+  }
+  open.value = value;
+}
+
+watch(canUseManualTransaction, (supported) => {
+  if (!supported && !executionLocked.value) manualTransaction.value = false;
+});
 
 function formatValue(value: DataCompareCellValue): string {
   if (value == null) return "NULL";
@@ -912,7 +1001,12 @@ watch(targetTable, () => {
 watch(
   [() => open.value, () => props.sessionId],
   async ([value, sessionId]) => {
-    if (!value) return;
+    if (!value) {
+      executionInterrupted = true;
+      if (!executing.value && txnSessionId.value) void finishTransaction(false);
+      return;
+    }
+    if (executionLocked.value) return;
     clearResult();
     shownSessionError = "";
     const session = getDataCompareSession(sessionId);
@@ -960,11 +1054,12 @@ watch(
 );
 onBeforeUnmount(() => {
   componentUnmounted = true;
+  if (!executing.value && txnSessionId.value) void finishTransaction(false);
 });
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent class="sm:max-w-5xl max-h-[85vh] flex flex-col overflow-hidden" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
@@ -973,378 +1068,386 @@ onBeforeUnmount(() => {
         </DialogTitle>
       </DialogHeader>
 
-      <div class="flex-1 min-h-0 overflow-auto space-y-4 py-2">
-        <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
-          <div class="space-y-2 rounded-lg border border-blue-500/35 bg-blue-500/5 p-3">
-            <div class="flex items-center gap-2 text-sm font-medium text-blue-600 dark:text-blue-400">
-              <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-500/15 text-[11px] font-semibold">S</span>
-              {{ t("diff.source") }}
-            </div>
-            <ConnectionTreeSelect
-              v-model="sourceConnectionId"
-              :disabled="comparing"
-              :connections="sqlConnections"
-              :layout="store.sidebarLayout"
-              :placeholder="t('diff.selectConnection')"
-              :search-placeholder="t('diff.searchConnection')"
-              :empty-text="t('common.noResults')"
-              trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
-              list-class="w-[var(--reka-popover-trigger-width)]"
-            />
-            <SearchableSelect
-              v-model="sourceDatabase"
-              :options="sourceDatabases"
-              :placeholder="t('diff.selectDatabase')"
-              :search-placeholder="t('diff.searchDatabase')"
-              :empty-text="t('common.noResults')"
-              :disabled="comparing || !sourceDatabases.length"
-              trigger-variant="outline"
-              trigger-class="h-8 w-full justify-between text-xs"
-              content-class="w-[var(--reka-popover-trigger-width)]"
-            />
-            <SearchableSelect
-              v-if="sourceSchemas.length"
-              v-model="sourceSchema"
-              :options="sourceSchemas"
-              :disabled="comparing"
-              :placeholder="t('diff.selectSchema')"
-              :search-placeholder="t('diff.searchSchema')"
-              :empty-text="t('common.noResults')"
-              trigger-variant="outline"
-              trigger-class="h-8 w-full justify-between text-xs"
-              content-class="w-[var(--reka-popover-trigger-width)]"
-            />
-
-            <TableMultiSelect
-              :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
-              v-model="sourceTableSelection"
-              :tables="sourceTables"
-              :title="t('dataCompare.sourceTables')"
-              :empty-text="!sourceConnectionId || !sourceDatabase ? t('dataCompare.selectSourceTables') : t('dataCompare.noTables')"
-              :disabled="comparing"
-            />
-          </div>
-
-          <div class="flex items-center pt-6">
-            <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing" @click="swapSourceTarget">
-              <ArrowLeftRight class="w-3.5 h-3.5" />
-            </Button>
-          </div>
-
-          <div class="space-y-2 rounded-lg border border-emerald-500/35 bg-emerald-500/5 p-3">
-            <div class="flex items-center gap-2 text-sm font-medium text-emerald-600 dark:text-emerald-400">
-              <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/15 text-[11px] font-semibold">T</span>
-              {{ t("diff.target") }}
-            </div>
-            <ConnectionTreeSelect
-              v-model="targetConnectionId"
-              :disabled="comparing"
-              :connections="sqlConnections"
-              :layout="store.sidebarLayout"
-              :placeholder="t('diff.selectConnection')"
-              :search-placeholder="t('diff.searchConnection')"
-              :empty-text="t('common.noResults')"
-              trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
-              list-class="w-[var(--reka-popover-trigger-width)]"
-            />
-            <SearchableSelect
-              v-model="targetDatabase"
-              :options="targetDatabases"
-              :placeholder="t('diff.selectDatabase')"
-              :search-placeholder="t('diff.searchDatabase')"
-              :empty-text="t('common.noResults')"
-              :disabled="comparing || !targetDatabases.length"
-              trigger-variant="outline"
-              trigger-class="h-8 w-full justify-between text-xs"
-              content-class="w-[var(--reka-popover-trigger-width)]"
-            />
-            <SearchableSelect
-              v-if="targetSchemas.length"
-              v-model="targetSchema"
-              :options="targetSchemas"
-              :disabled="comparing"
-              :placeholder="t('diff.selectSchema')"
-              :search-placeholder="t('diff.searchSchema')"
-              :empty-text="t('common.noResults')"
-              trigger-variant="outline"
-              trigger-class="h-8 w-full justify-between text-xs"
-              content-class="w-[var(--reka-popover-trigger-width)]"
-            />
-
-            <div v-if="!isBatchCompare" class="space-y-1">
-              <Label class="text-xs font-medium">{{ t("dataCompare.targetTable") }}</Label>
-              <SearchableSelect
-                v-model="targetTable"
-                :options="targetTables"
-                :placeholder="t('dataCompare.selectTable')"
-                :search-placeholder="t('dataCompare.searchTable')"
+      <div class="flex-1 min-h-0 min-w-0 overflow-auto">
+        <fieldset :disabled="executionLocked" class="space-y-4 py-2">
+          <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
+            <div class="space-y-2 rounded-lg border border-blue-500/35 bg-blue-500/5 p-3">
+              <div class="flex items-center gap-2 text-sm font-medium text-blue-600 dark:text-blue-400">
+                <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-500/15 text-[11px] font-semibold">S</span>
+                {{ t("diff.source") }}
+              </div>
+              <ConnectionTreeSelect
+                v-model="sourceConnectionId"
+                :disabled="comparing || executionLocked"
+                :connections="sqlConnections"
+                :layout="store.sidebarLayout"
+                :placeholder="t('diff.selectConnection')"
+                :search-placeholder="t('diff.searchConnection')"
                 :empty-text="t('common.noResults')"
-                :disabled="comparing"
+                trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+                list-class="w-[var(--reka-popover-trigger-width)]"
+              />
+              <SearchableSelect
+                v-model="sourceDatabase"
+                :options="sourceDatabases"
+                :placeholder="t('diff.selectDatabase')"
+                :search-placeholder="t('diff.searchDatabase')"
+                :empty-text="t('common.noResults')"
+                :disabled="comparing || executionLocked || !sourceDatabases.length"
                 trigger-variant="outline"
                 trigger-class="h-8 w-full justify-between text-xs"
                 content-class="w-[var(--reka-popover-trigger-width)]"
               />
+              <SearchableSelect
+                v-if="sourceSchemas.length"
+                v-model="sourceSchema"
+                :options="sourceSchemas"
+                :disabled="comparing || executionLocked"
+                :placeholder="t('diff.selectSchema')"
+                :search-placeholder="t('diff.searchSchema')"
+                :empty-text="t('common.noResults')"
+                trigger-variant="outline"
+                trigger-class="h-8 w-full justify-between text-xs"
+                content-class="w-[var(--reka-popover-trigger-width)]"
+              />
+
+              <TableMultiSelect
+                :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
+                v-model="sourceTableSelection"
+                :tables="sourceTables"
+                :title="t('dataCompare.sourceTables')"
+                :empty-text="!sourceConnectionId || !sourceDatabase ? t('dataCompare.selectSourceTables') : t('dataCompare.noTables')"
+                :disabled="comparing || executionLocked"
+              />
             </div>
-            <div v-else class="space-y-2 rounded-lg border p-3 text-xs">
-              <div class="font-medium">{{ t("dataCompare.autoMatchHint") }}</div>
-              <div class="text-muted-foreground">
-                {{ t("dataCompare.matchedTables", { matched: matchedTaskCount, total: selectedSourceTableNames.length }) }}
+
+            <div class="flex items-center pt-6">
+              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing || executionLocked" @click="swapSourceTarget">
+                <ArrowLeftRight class="w-3.5 h-3.5" />
+              </Button>
+            </div>
+
+            <div class="space-y-2 rounded-lg border border-emerald-500/35 bg-emerald-500/5 p-3">
+              <div class="flex items-center gap-2 text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/15 text-[11px] font-semibold">T</span>
+                {{ t("diff.target") }}
               </div>
-              <div v-if="missingTargetTables.length" class="text-destructive">
-                {{ t("dataCompare.missingTargetTables", { tables: missingTargetTables.join(", ") }) }}
+              <ConnectionTreeSelect
+                v-model="targetConnectionId"
+                :disabled="comparing || executionLocked"
+                :connections="sqlConnections"
+                :layout="store.sidebarLayout"
+                :placeholder="t('diff.selectConnection')"
+                :search-placeholder="t('diff.searchConnection')"
+                :empty-text="t('common.noResults')"
+                trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+                list-class="w-[var(--reka-popover-trigger-width)]"
+              />
+              <SearchableSelect
+                v-model="targetDatabase"
+                :options="targetDatabases"
+                :placeholder="t('diff.selectDatabase')"
+                :search-placeholder="t('diff.searchDatabase')"
+                :empty-text="t('common.noResults')"
+                :disabled="comparing || executionLocked || !targetDatabases.length"
+                trigger-variant="outline"
+                trigger-class="h-8 w-full justify-between text-xs"
+                content-class="w-[var(--reka-popover-trigger-width)]"
+              />
+              <SearchableSelect
+                v-if="targetSchemas.length"
+                v-model="targetSchema"
+                :options="targetSchemas"
+                :disabled="comparing || executionLocked"
+                :placeholder="t('diff.selectSchema')"
+                :search-placeholder="t('diff.searchSchema')"
+                :empty-text="t('common.noResults')"
+                trigger-variant="outline"
+                trigger-class="h-8 w-full justify-between text-xs"
+                content-class="w-[var(--reka-popover-trigger-width)]"
+              />
+
+              <div v-if="!isBatchCompare" class="space-y-1">
+                <Label class="text-xs font-medium">{{ t("dataCompare.targetTable") }}</Label>
+                <SearchableSelect
+                  v-model="targetTable"
+                  :options="targetTables"
+                  :placeholder="t('dataCompare.selectTable')"
+                  :search-placeholder="t('dataCompare.searchTable')"
+                  :empty-text="t('common.noResults')"
+                  :disabled="comparing || executionLocked"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                />
               </div>
-              <div v-if="compareTasksPreview.length" class="max-h-36 overflow-auto rounded border bg-muted/20">
-                <div v-for="task in compareTasksPreview" :key="`${task.sourceTable}:${task.targetTable}`" class="flex items-center justify-between gap-2 border-b px-2 py-1 last:border-b-0">
-                  <span class="truncate font-mono">{{ task.sourceTable }}</span>
-                  <span class="text-muted-foreground">→</span>
-                  <span class="truncate font-mono" :class="task.matched ? '' : 'text-destructive'">
-                    {{ task.targetTable || t("dataCompare.targetTableMissing", { table: task.sourceTable }) }}
-                  </span>
+              <div v-else class="space-y-2 rounded-lg border p-3 text-xs">
+                <div class="font-medium">{{ t("dataCompare.autoMatchHint") }}</div>
+                <div class="text-muted-foreground">
+                  {{ t("dataCompare.matchedTables", { matched: matchedTaskCount, total: selectedSourceTableNames.length }) }}
+                </div>
+                <div v-if="missingTargetTables.length" class="text-destructive">
+                  {{ t("dataCompare.missingTargetTables", { tables: missingTargetTables.join(", ") }) }}
+                </div>
+                <div v-if="compareTasksPreview.length" class="max-h-36 overflow-auto rounded border bg-muted/20">
+                  <div v-for="task in compareTasksPreview" :key="`${task.sourceTable}:${task.targetTable}`" class="flex items-center justify-between gap-2 border-b px-2 py-1 last:border-b-0">
+                    <span class="truncate font-mono">{{ task.sourceTable }}</span>
+                    <span class="text-muted-foreground">→</span>
+                    <span class="truncate font-mono" :class="task.matched ? '' : 'text-destructive'">
+                      {{ task.targetTable || t("dataCompare.targetTableMissing", { table: task.sourceTable }) }}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <div class="space-y-1">
-          <div class="flex flex-wrap items-center gap-2">
-            <Label class="text-xs font-medium">{{ t("dataCompare.keyColumns") }}</Label>
-            <span v-if="singleKeyColumnRow" class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium" :class="singleKeyColumnRow.manual ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'">
-              {{ singleKeyColumnRow.manual ? t("dataCompare.keyColumnsStatusManual") : t("dataCompare.keyColumnsStatusAuto") }}
-            </span>
-            <Button v-if="singleKeyColumnRow?.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing" @click="clearTableKeyColumnsOverride(singleKeyColumnRow.table)">
-              {{ t("dataCompare.keyColumnsResetAuto") }}
-            </Button>
-          </div>
-
-          <div v-if="!selectedSourceTableNames.length" class="text-[11px] text-muted-foreground">
-            {{ t("dataCompare.keyColumnsSelectTableHint") }}
-          </div>
-
-          <!-- Single table: pick match columns straight from the real database columns. -->
-          <div v-else-if="singleKeyColumnRow" class="space-y-1">
-            <CompareKeyColumnsSelect :model-value="singleKeyColumnRow.columns" :columns="columnsForTable(singleKeyColumnRow.table)" :loading="singleKeyColumnRow.loading" :disabled="comparing" @update:model-value="(columns) => setTableKeyColumns(singleKeyColumnRow!.table, columns)" />
-            <div class="text-[11px]" data-key-column-hint :class="singleKeyColumnRow.error || singleKeyColumnRow.status === 'missing' ? 'text-destructive' : 'text-muted-foreground'">
-              {{ singleKeyColumnRow.hint }}
+          <div class="space-y-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <Label class="text-xs font-medium">{{ t("dataCompare.keyColumns") }}</Label>
+              <span v-if="singleKeyColumnRow" class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium" :class="singleKeyColumnRow.manual ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'">
+                {{ singleKeyColumnRow.manual ? t("dataCompare.keyColumnsStatusManual") : t("dataCompare.keyColumnsStatusAuto") }}
+              </span>
+              <Button v-if="singleKeyColumnRow?.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing || executionLocked" @click="clearTableKeyColumnsOverride(singleKeyColumnRow.table)">
+                {{ t("dataCompare.keyColumnsResetAuto") }}
+              </Button>
             </div>
-          </div>
 
-          <!-- Batch compare: every table keeps its own match columns. -->
-          <div v-else class="space-y-1">
-            <div class="rounded-lg border">
-              <div class="border-b bg-muted/20 px-2 py-1 text-[11px] text-muted-foreground">
-                {{ t("dataCompare.keyColumnsPerTableHint") }}
+            <div v-if="!selectedSourceTableNames.length" class="text-[11px] text-muted-foreground">
+              {{ t("dataCompare.keyColumnsSelectTableHint") }}
+            </div>
+
+            <!-- Single table: pick match columns straight from the real database columns. -->
+            <div v-else-if="singleKeyColumnRow" class="space-y-1">
+              <CompareKeyColumnsSelect
+                :model-value="singleKeyColumnRow.columns"
+                :columns="columnsForTable(singleKeyColumnRow.table)"
+                :loading="singleKeyColumnRow.loading"
+                :disabled="comparing || executionLocked"
+                @update:model-value="(columns) => setTableKeyColumns(singleKeyColumnRow!.table, columns)"
+              />
+              <div class="text-[11px]" data-key-column-hint :class="singleKeyColumnRow.error || singleKeyColumnRow.status === 'missing' ? 'text-destructive' : 'text-muted-foreground'">
+                {{ singleKeyColumnRow.hint }}
               </div>
-              <div class="max-h-56 divide-y overflow-auto">
-                <div v-for="row in keyColumnRows" :key="row.table">
-                  <button type="button" class="dbx-compare-key-table-row flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-muted/40" :data-key-column-table="row.table" @click="toggleKeyColumnTable(row.table)">
-                    <ChevronDown v-if="expandedKeyColumnTable === row.table" class="h-3.5 w-3.5 shrink-0" />
-                    <ChevronRight v-else class="h-3.5 w-3.5 shrink-0" />
-                    <span class="min-w-0 flex-1 truncate font-mono">{{ row.table }}</span>
-                    <span class="min-w-0 max-w-[45%] shrink-0 truncate font-mono" :class="row.columns.length > 0 ? (row.manual ? 'text-foreground' : 'text-muted-foreground') : 'text-destructive'">
-                      {{ row.loading ? t("dataCompare.keyColumnsLoading") : row.columns.length > 0 ? row.columns.join(", ") : t("dataCompare.keyColumnsNeedsSelection") }}
-                    </span>
-                    <span class="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium" :class="row.status === 'manual' ? 'bg-primary/15 text-primary' : row.status === 'auto' ? 'bg-muted text-muted-foreground' : 'bg-destructive/15 text-destructive'">
-                      {{ row.status === "manual" ? t("dataCompare.keyColumnsStatusManual") : row.status === "auto" ? t("dataCompare.keyColumnsStatusAuto") : t("dataCompare.keyColumnsNeedsSelection") }}
-                    </span>
-                  </button>
-                  <div v-if="expandedKeyColumnTable === row.table" class="space-y-1 border-t bg-muted/10 px-2 py-2">
-                    <CompareKeyColumnsSelect :model-value="row.columns" :columns="columnsForTable(row.table)" :loading="row.loading" :disabled="comparing" @update:model-value="(columns) => setTableKeyColumns(row.table, columns)" />
-                    <div class="flex flex-wrap items-center gap-2 text-[11px]">
-                      <span data-key-column-hint :class="row.error || (row.status === 'missing' && row.matched) ? 'text-destructive' : 'text-muted-foreground'">{{ row.hint }}</span>
-                      <Button v-if="row.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing" @click="clearTableKeyColumnsOverride(row.table)">
-                        {{ t("dataCompare.keyColumnsResetAuto") }}
-                      </Button>
+            </div>
+
+            <!-- Batch compare: every table keeps its own match columns. -->
+            <div v-else class="space-y-1">
+              <div class="rounded-lg border">
+                <div class="border-b bg-muted/20 px-2 py-1 text-[11px] text-muted-foreground">
+                  {{ t("dataCompare.keyColumnsPerTableHint") }}
+                </div>
+                <div class="max-h-56 divide-y overflow-auto">
+                  <div v-for="row in keyColumnRows" :key="row.table">
+                    <button type="button" class="dbx-compare-key-table-row flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-muted/40" :data-key-column-table="row.table" @click="toggleKeyColumnTable(row.table)">
+                      <ChevronDown v-if="expandedKeyColumnTable === row.table" class="h-3.5 w-3.5 shrink-0" />
+                      <ChevronRight v-else class="h-3.5 w-3.5 shrink-0" />
+                      <span class="min-w-0 flex-1 truncate font-mono">{{ row.table }}</span>
+                      <span class="min-w-0 max-w-[45%] shrink-0 truncate font-mono" :class="row.columns.length > 0 ? (row.manual ? 'text-foreground' : 'text-muted-foreground') : 'text-destructive'">
+                        {{ row.loading ? t("dataCompare.keyColumnsLoading") : row.columns.length > 0 ? row.columns.join(", ") : t("dataCompare.keyColumnsNeedsSelection") }}
+                      </span>
+                      <span class="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium" :class="row.status === 'manual' ? 'bg-primary/15 text-primary' : row.status === 'auto' ? 'bg-muted text-muted-foreground' : 'bg-destructive/15 text-destructive'">
+                        {{ row.status === "manual" ? t("dataCompare.keyColumnsStatusManual") : row.status === "auto" ? t("dataCompare.keyColumnsStatusAuto") : t("dataCompare.keyColumnsNeedsSelection") }}
+                      </span>
+                    </button>
+                    <div v-if="expandedKeyColumnTable === row.table" class="space-y-1 border-t bg-muted/10 px-2 py-2">
+                      <CompareKeyColumnsSelect :model-value="row.columns" :columns="columnsForTable(row.table)" :loading="row.loading" :disabled="comparing || executionLocked" @update:model-value="(columns) => setTableKeyColumns(row.table, columns)" />
+                      <div class="flex flex-wrap items-center gap-2 text-[11px]">
+                        <span data-key-column-hint :class="row.error || (row.status === 'missing' && row.matched) ? 'text-destructive' : 'text-muted-foreground'">{{ row.hint }}</span>
+                        <Button v-if="row.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing || executionLocked" @click="clearTableKeyColumnsOverride(row.table)">
+                          {{ t("dataCompare.keyColumnsResetAuto") }}
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <div v-if="comparing" class="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
-          <Loader2 class="h-3.5 w-3.5 animate-spin text-primary" />
-          <span>{{ compareProgressLabel || t("diff.progress.comparing") }}</span>
-        </div>
-
-        <div v-if="hasResults" class="space-y-3">
-          <div class="rounded-lg border p-3 text-sm space-y-2">
-            <div>{{ summary }}</div>
-            <div class="text-xs text-muted-foreground">{{ selectedSummary }}</div>
+          <div v-if="comparing" class="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+            <Loader2 class="h-3.5 w-3.5 animate-spin text-primary" />
+            <span>{{ compareProgressLabel || t("diff.progress.comparing") }}</span>
           </div>
 
-          <div class="rounded-lg border p-3 space-y-3">
-            <div class="flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="outline" class="h-7 text-xs" :class="showAdded ? 'border-primary' : ''" @click="showAdded = !showAdded"> {{ t("diff.added") }} · {{ totalAdded }} </Button>
-              <Button size="sm" variant="outline" class="h-7 text-xs" :class="showRemoved ? 'border-primary' : ''" @click="showRemoved = !showRemoved"> {{ t("diff.removed") }} · {{ totalRemoved }} </Button>
-              <Button size="sm" variant="outline" class="h-7 text-xs" :class="showModified ? 'border-primary' : ''" @click="showModified = !showModified"> {{ t("diff.modified") }} · {{ totalModified }} </Button>
-              <span class="flex-1" />
-              <Select v-model="detailPreviewLimit">
-                <SelectTrigger class="h-7 w-32 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="limit in PREVIEW_LIMIT_OPTIONS" :key="limit" :value="String(limit)">
-                    {{ t("dataCompare.previewLimitOption", { count: limit }) }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+          <div v-if="hasResults" class="space-y-3">
+            <div class="rounded-lg border p-3 text-sm space-y-2">
+              <div>{{ summary }}</div>
+              <div class="text-xs text-muted-foreground">{{ selectedSummary }}</div>
             </div>
 
-            <div class="flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="outline" class="h-7 text-xs" @click="setDiffSelection('added', true)">
-                {{ t("dataCompare.selectAllKind", { kind: t("diff.added") }) }}
-              </Button>
-              <Button size="sm" variant="outline" class="h-7 text-xs" @click="setDiffSelection('removed', true)">
-                {{ t("dataCompare.selectAllKind", { kind: t("diff.removed") }) }}
-              </Button>
-              <Button size="sm" variant="outline" class="h-7 text-xs" @click="setDiffSelection('modified', true)">
-                {{ t("dataCompare.selectAllKind", { kind: t("diff.modified") }) }}
-              </Button>
-              <Button size="sm" variant="outline" class="h-7 text-xs" @click="clearAllSelections">
-                {{ t("dataCompare.clearSelection") }}
-              </Button>
+            <div class="rounded-lg border p-3 space-y-3">
+              <div class="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="outline" class="h-7 text-xs" :class="showAdded ? 'border-primary' : ''" @click="showAdded = !showAdded"> {{ t("diff.added") }} · {{ totalAdded }} </Button>
+                <Button size="sm" variant="outline" class="h-7 text-xs" :class="showRemoved ? 'border-primary' : ''" @click="showRemoved = !showRemoved"> {{ t("diff.removed") }} · {{ totalRemoved }} </Button>
+                <Button size="sm" variant="outline" class="h-7 text-xs" :class="showModified ? 'border-primary' : ''" @click="showModified = !showModified"> {{ t("diff.modified") }} · {{ totalModified }} </Button>
+                <span class="flex-1" />
+                <Select v-model="detailPreviewLimit">
+                  <SelectTrigger class="h-7 w-32 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="limit in PREVIEW_LIMIT_OPTIONS" :key="limit" :value="String(limit)">
+                      {{ t("dataCompare.previewLimitOption", { count: limit }) }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="outline" class="h-7 text-xs" @click="setDiffSelection('added', true)">
+                  {{ t("dataCompare.selectAllKind", { kind: t("diff.added") }) }}
+                </Button>
+                <Button size="sm" variant="outline" class="h-7 text-xs" @click="setDiffSelection('removed', true)">
+                  {{ t("dataCompare.selectAllKind", { kind: t("diff.removed") }) }}
+                </Button>
+                <Button size="sm" variant="outline" class="h-7 text-xs" @click="setDiffSelection('modified', true)">
+                  {{ t("dataCompare.selectAllKind", { kind: t("diff.modified") }) }}
+                </Button>
+                <Button size="sm" variant="outline" class="h-7 text-xs" @click="clearAllSelections">
+                  {{ t("dataCompare.clearSelection") }}
+                </Button>
+              </div>
             </div>
-          </div>
 
-          <div class="rounded-lg border overflow-hidden">
-            <div class="max-h-64 overflow-auto">
-              <table class="w-full text-xs">
-                <thead class="bg-muted sticky top-0 z-10">
-                  <tr>
-                    <th class="px-3 py-2 text-left font-medium">{{ t("diff.table") }}</th>
-                    <th class="px-3 py-2 text-left font-medium">{{ t("dataCompare.targetTable") }}</th>
-                    <th class="px-3 py-2 text-left font-medium">{{ t("diff.status") }}</th>
-                    <th class="px-3 py-2 text-left font-medium">{{ t("diff.details") }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="item in batchResults" :key="`${item.sourceTable}:${item.targetTable}`" class="border-t">
-                    <td class="px-3 py-2 align-top font-mono">{{ item.sourceTable }}</td>
-                    <td class="px-3 py-2 align-top font-mono text-muted-foreground">{{ item.targetTable }}</td>
-                    <td class="px-3 py-2 align-top">
-                      <span class="inline-flex rounded px-2 py-0.5 text-[11px]" :class="resultStatusClass(item.status)">
-                        {{ resultStatusLabel(item.status) }}
-                      </span>
-                    </td>
-                    <td class="px-3 py-2 align-top text-muted-foreground">
-                      <div v-if="item.status === 'error'" class="text-destructive">{{ item.error }}</div>
-                      <template v-else>
-                        <div>
-                          {{
-                            t("dataCompare.summary", {
-                              added: item.added,
-                              removed: item.removed,
-                              modified: item.modified,
-                            })
-                          }}
-                        </div>
-                        <div class="mt-1">
-                          {{
-                            t("dataCompare.rowCounts", {
-                              source: item.sourceRowCount,
-                              target: item.targetRowCount,
-                            })
-                          }}
-                        </div>
-                        <div class="mt-1">
-                          {{ t("dataCompare.keyColumnsInline", { columns: item.keyColumns.join(", ") }) }}
-                        </div>
-                        <div v-if="item.status === 'different'" class="mt-1">
-                          {{
-                            t("dataCompare.selectedInline", {
-                              selected: selectedRows(item, "added") + selectedRows(item, "removed") + selectedRows(item, "modified"),
-                              total: item.added + item.removed + item.modified,
-                            })
-                          }}
-                        </div>
-                      </template>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+            <div class="rounded-lg border overflow-hidden">
+              <div class="max-h-64 overflow-auto">
+                <table class="w-full text-xs">
+                  <thead class="bg-muted sticky top-0 z-10">
+                    <tr>
+                      <th class="px-3 py-2 text-left font-medium">{{ t("diff.table") }}</th>
+                      <th class="px-3 py-2 text-left font-medium">{{ t("dataCompare.targetTable") }}</th>
+                      <th class="px-3 py-2 text-left font-medium">{{ t("diff.status") }}</th>
+                      <th class="px-3 py-2 text-left font-medium">{{ t("diff.details") }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in batchResults" :key="`${item.sourceTable}:${item.targetTable}`" class="border-t">
+                      <td class="px-3 py-2 align-top font-mono">{{ item.sourceTable }}</td>
+                      <td class="px-3 py-2 align-top font-mono text-muted-foreground">{{ item.targetTable }}</td>
+                      <td class="px-3 py-2 align-top">
+                        <span class="inline-flex rounded px-2 py-0.5 text-[11px]" :class="resultStatusClass(item.status)">
+                          {{ resultStatusLabel(item.status) }}
+                        </span>
+                      </td>
+                      <td class="px-3 py-2 align-top text-muted-foreground">
+                        <div v-if="item.status === 'error'" class="text-destructive">{{ item.error }}</div>
+                        <template v-else>
+                          <div>
+                            {{
+                              t("dataCompare.summary", {
+                                added: item.added,
+                                removed: item.removed,
+                                modified: item.modified,
+                              })
+                            }}
+                          </div>
+                          <div class="mt-1">
+                            {{
+                              t("dataCompare.rowCounts", {
+                                source: item.sourceRowCount,
+                                target: item.targetRowCount,
+                              })
+                            }}
+                          </div>
+                          <div class="mt-1">
+                            {{ t("dataCompare.keyColumnsInline", { columns: item.keyColumns.join(", ") }) }}
+                          </div>
+                          <div v-if="item.status === 'different'" class="mt-1">
+                            {{
+                              t("dataCompare.selectedInline", {
+                                selected: selectedRows(item, "added") + selectedRows(item, "removed") + selectedRows(item, "modified"),
+                                total: item.added + item.removed + item.modified,
+                              })
+                            }}
+                          </div>
+                        </template>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
 
-          <div class="space-y-3">
-            <div v-for="item in batchResults.filter((entry) => entry.status === 'different')" :key="`details-${item.sourceTable}:${item.targetTable}`" class="rounded-lg border overflow-hidden">
-              <button type="button" class="flex w-full items-center gap-2 border-b bg-muted/30 px-3 py-2 text-left text-sm font-medium" @click="toggleTableExpanded(item)">
-                <ChevronDown v-if="item.expanded" class="h-4 w-4 shrink-0" />
-                <ChevronRight v-else class="h-4 w-4 shrink-0" />
-                <span class="font-mono">{{ item.sourceTable }}</span>
-                <span class="text-muted-foreground">→</span>
-                <span class="font-mono text-muted-foreground">{{ item.targetTable }}</span>
-              </button>
+            <div class="space-y-3">
+              <div v-for="item in batchResults.filter((entry) => entry.status === 'different')" :key="`details-${item.sourceTable}:${item.targetTable}`" class="rounded-lg border overflow-hidden">
+                <button type="button" class="flex w-full items-center gap-2 border-b bg-muted/30 px-3 py-2 text-left text-sm font-medium" @click="toggleTableExpanded(item)">
+                  <ChevronDown v-if="item.expanded" class="h-4 w-4 shrink-0" />
+                  <ChevronRight v-else class="h-4 w-4 shrink-0" />
+                  <span class="font-mono">{{ item.sourceTable }}</span>
+                  <span class="text-muted-foreground">→</span>
+                  <span class="font-mono text-muted-foreground">{{ item.targetTable }}</span>
+                </button>
 
-              <div v-if="item.expanded" class="space-y-3 p-3">
-                <div v-for="kind in visibleKinds" :key="`${item.sourceTable}:${kind}`" class="rounded-lg border" v-show="hasDiffRows(item, kind)">
-                  <div class="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-3 py-2 text-xs">
-                    <span class="font-medium">{{ t(`diff.${kind}`) }}</span>
-                    <span class="text-muted-foreground">{{ selectedRows(item, kind) }}/{{ item.diff[kind].length }}</span>
-                    <span class="flex-1" />
-                    <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="setTableDiffSelection(item, kind, true)">
-                      {{ t("dataCompare.selectAllKind", { kind: t(`diff.${kind}`) }) }}
-                    </Button>
-                    <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="setTableDiffSelection(item, kind, false)">
-                      {{ t("dataCompare.clearKind", { kind: t(`diff.${kind}`) }) }}
-                    </Button>
-                    <Button v-if="item.diff[kind].length > detailPreviewLimitNumber" size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="toggleShowAll(item, kind)">
-                      {{ item.showAll[kind] ? t("dataCompare.showLessRows") : t("dataCompare.showAllRows", { count: item.diff[kind].length }) }}
-                    </Button>
-                  </div>
+                <div v-if="item.expanded" class="space-y-3 p-3">
+                  <div v-for="kind in visibleKinds" :key="`${item.sourceTable}:${kind}`" class="rounded-lg border" v-show="hasDiffRows(item, kind)">
+                    <div class="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-3 py-2 text-xs">
+                      <span class="font-medium">{{ t(`diff.${kind}`) }}</span>
+                      <span class="text-muted-foreground">{{ selectedRows(item, kind) }}/{{ item.diff[kind].length }}</span>
+                      <span class="flex-1" />
+                      <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="setTableDiffSelection(item, kind, true)">
+                        {{ t("dataCompare.selectAllKind", { kind: t(`diff.${kind}`) }) }}
+                      </Button>
+                      <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="setTableDiffSelection(item, kind, false)">
+                        {{ t("dataCompare.clearKind", { kind: t(`diff.${kind}`) }) }}
+                      </Button>
+                      <Button v-if="item.diff[kind].length > detailPreviewLimitNumber" size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="toggleShowAll(item, kind)">
+                        {{ item.showAll[kind] ? t("dataCompare.showLessRows") : t("dataCompare.showAllRows", { count: item.diff[kind].length }) }}
+                      </Button>
+                    </div>
 
-                  <div class="max-h-72 overflow-auto divide-y">
-                    <button v-for="row in rowsForDisplay(item, kind)" :key="`${item.sourceTable}:${kind}:${row.key}`" type="button" class="flex w-full items-start gap-3 px-3 py-2 text-left text-xs hover:bg-muted/40" @click="toggleRowSelection(row)">
-                      <CheckSquare v-if="row.selected" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-                      <Square v-else class="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />
-                      <div class="min-w-0 flex-1">
-                        <div class="font-mono">{{ formatKeyValues(row.keyValues) }}</div>
-                        <div class="mt-1 text-muted-foreground break-words">
-                          {{ kind === "modified" ? formatModifiedSummary(row as SelectableDataCompareModifiedRow) : formatRowValues((row as SelectableDataCompareRow).values) }}
+                    <div class="max-h-72 overflow-auto divide-y">
+                      <button v-for="row in rowsForDisplay(item, kind)" :key="`${item.sourceTable}:${kind}:${row.key}`" type="button" class="flex w-full items-start gap-3 px-3 py-2 text-left text-xs hover:bg-muted/40" @click="toggleRowSelection(row)">
+                        <CheckSquare v-if="row.selected" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                        <Square v-else class="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />
+                        <div class="min-w-0 flex-1">
+                          <div class="font-mono">{{ formatKeyValues(row.keyValues) }}</div>
+                          <div class="mt-1 text-muted-foreground break-words">
+                            {{ kind === "modified" ? formatModifiedSummary(row as SelectableDataCompareModifiedRow) : formatRowValues((row as SelectableDataCompareRow).values) }}
+                          </div>
                         </div>
-                      </div>
-                    </button>
-                  </div>
+                      </button>
+                    </div>
 
-                  <div v-if="remainingRows(item, kind) > 0 && !item.showAll[kind]" class="border-t px-3 py-2 text-xs text-muted-foreground">
-                    {{ t("dataCompare.remainingRows", { count: remainingRows(item, kind) }) }}
+                    <div v-if="remainingRows(item, kind) > 0 && !item.showAll[kind]" class="border-t px-3 py-2 text-xs text-muted-foreground">
+                      {{ t("dataCompare.remainingRows", { count: remainingRows(item, kind) }) }}
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <div v-if="planningSync" class="text-sm text-muted-foreground">
-            {{ t("dataCompare.planningSync") }}
-          </div>
-          <div v-else-if="syncPlan.syncSql.trim()" class="space-y-1">
-            <Label class="text-xs font-medium">{{ t("diff.generatedSql") }}</Label>
-            <textarea :value="syncPlan.syncSql" readonly class="w-full h-48 rounded-[6px] border bg-muted/20 p-3 font-mono text-xs resize-none focus:outline-none focus:ring-1 focus:ring-ring" />
-          </div>
-          <div v-else-if="differentTableCount === 0 && failedTableCount === 0" class="text-sm text-muted-foreground">
-            {{ t("dataCompare.noDifferences") }}
-          </div>
-          <div v-else class="text-sm text-muted-foreground">
-            {{ t("dataCompare.noSelectedDifferences") }}
-          </div>
-        </div>
-
-        <div v-if="syncErrors.length > 0" class="space-y-1">
-          <Label class="text-xs font-medium text-destructive">
-            {{ t("diff.syncSummary", { success: executeTotal - syncErrors.length, failed: syncErrors.length }) }}
-          </Label>
-          <div class="max-h-32 overflow-auto border rounded-lg bg-destructive/5 p-2 space-y-1">
-            <div v-for="(err, i) in syncErrors" :key="i" class="text-xs font-mono">
-              <span class="text-destructive">{{ err.error }}</span>
-              <span class="text-muted-foreground ml-1">— {{ err.sql.slice(0, 80) }}{{ err.sql.length > 80 ? "..." : "" }}</span>
+            <div v-if="planningSync" class="text-sm text-muted-foreground">
+              {{ t("dataCompare.planningSync") }}
+            </div>
+            <div v-else-if="syncPlan.syncSql.trim()" class="space-y-1">
+              <Label class="text-xs font-medium">{{ t("diff.generatedSql") }}</Label>
+              <textarea :value="syncPlan.syncSql" readonly class="w-full h-48 rounded-[6px] border bg-muted/20 p-3 font-mono text-xs resize-none focus:outline-none focus:ring-1 focus:ring-ring" />
+            </div>
+            <div v-else-if="differentTableCount === 0 && failedTableCount === 0" class="text-sm text-muted-foreground">
+              {{ t("dataCompare.noDifferences") }}
+            </div>
+            <div v-else class="text-sm text-muted-foreground">
+              {{ t("dataCompare.noSelectedDifferences") }}
             </div>
           </div>
-        </div>
+
+          <div v-if="syncErrors.length > 0" class="space-y-1">
+            <Label class="text-xs font-medium text-destructive">
+              {{ t("diff.syncSummary", { success: executeTotal - syncErrors.length, failed: syncErrors.length }) }}
+            </Label>
+            <div class="max-h-32 overflow-auto border rounded-lg bg-destructive/5 p-2 space-y-1">
+              <div v-for="(err, i) in syncErrors" :key="i" class="text-xs font-mono">
+                <span class="text-destructive">{{ err.error }}</span>
+                <span class="text-muted-foreground ml-1">— {{ err.sql.slice(0, 80) }}{{ err.sql.length > 80 ? "..." : "" }}</span>
+              </div>
+            </div>
+          </div>
+        </fieldset>
       </div>
 
       <DialogFooter v-if="!hasResults">
-        <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
+        <Button variant="outline" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
         <span v-if="compareProgressLabel" class="text-xs text-muted-foreground self-center">{{ compareProgressLabel }}</span>
         <Button size="sm" :disabled="!canCompare || comparing" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3.5 h-3.5 animate-spin mr-1" />
@@ -1354,8 +1457,8 @@ onBeforeUnmount(() => {
       </DialogFooter>
 
       <DialogFooter v-else class="flex items-center gap-2">
-        <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
-        <Button variant="outline" size="sm" :disabled="comparing || executing || !canCompare" @click="startCompare">
+        <Button variant="outline" :disabled="(executing && manualTransaction) || resolvingTransaction" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
+        <Button variant="outline" size="sm" :disabled="comparing || executionLocked || !canCompare" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3 h-3 animate-spin mr-1" />
           <RotateCcw v-else class="w-3 h-3 mr-1" />
           {{ t("dataCompare.recompare") }}
@@ -1378,7 +1481,16 @@ onBeforeUnmount(() => {
           }}
         </span>
         <Button variant="outline" size="sm" :disabled="!syncPlan.syncSql.trim()" @click="copySql"> <Copy class="w-3 h-3 mr-1" /> {{ t("diff.copySql") }} </Button>
-        <Button size="sm" :disabled="planningSync || executing || syncPlan.statementCount === 0" @click="executeSql">
+        <template v-if="txnSessionId && !executing">
+          <span class="text-xs text-muted-foreground">{{ t("dataCompare.pendingTransaction") }}</span>
+          <Button variant="outline" size="sm" :disabled="resolvingTransaction" @click="finishTransaction(false)">{{ t("toolbar.rollback") }}</Button>
+          <Button size="sm" :disabled="resolvingTransaction || transactionFailed" @click="finishTransaction(true)">{{ t("toolbar.commit") }}</Button>
+        </template>
+        <label v-else-if="canUseManualTransaction" class="flex items-center gap-2 text-xs" :title="t('dataCompare.manualTransactionHint')">
+          <input v-model="manualTransaction" type="checkbox" :disabled="executionLocked" />
+          {{ t("toolbar.manualTransaction") }}
+        </label>
+        <Button v-if="!txnSessionId" size="sm" :disabled="planningSync || comparing || executionLocked || syncPlan.statementCount === 0" @click="executeSql">
           <Loader2 v-if="executing" class="w-3 h-3 animate-spin mr-1" />
           <Play v-else class="w-3 h-3 mr-1" />
           {{ t("diff.executeSync") }}

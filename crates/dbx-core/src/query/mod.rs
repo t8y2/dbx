@@ -1,7 +1,9 @@
+pub mod batch_progress;
 pub mod document_ops;
 pub mod hbase_ops;
 pub mod mongo_ops;
 pub mod object_cache;
+pub mod plugin_plan;
 pub mod query_cancel;
 pub mod redis_ops;
 pub mod two_phase_commit;
@@ -252,6 +254,31 @@ pub struct ExecuteMultiResult {
     /// treat it as a no-op rather than an unproven statement.
     #[serde(skip_serializing_if = "is_false")]
     pub manual_transaction_no_statement: bool,
+    /// MySQL auto-commit tab: set on every result of the batch when the tab's
+    /// connection was settled. `Some(true)` means the connection still holds a
+    /// transaction the user opened explicitly and DBX kept it open
+    /// (`preserve_explicit_transaction`); `Some(false)` means the settlement ran
+    /// and no such transaction is open. `None` means this execution never
+    /// observed a tab-scoped MySQL connection, so it says nothing about the
+    /// tab's state. The frontend mirrors `Some(..)` into the tab's transaction
+    /// badge/actions so the state is never silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_commit_open_transaction: Option<bool>,
+    /// MySQL auto-commit tab: set on every result of the batch when DBX rolled
+    /// back a transaction the user opened explicitly (`BEGIN` /
+    /// `START TRANSACTION`) and left open. Lets the UI report the cleanup
+    /// instead of discarding the transaction silently.
+    #[serde(skip_serializing_if = "is_false")]
+    pub auto_commit_explicit_transaction_rolled_back: bool,
+    /// MySQL auto-commit tab: set on every result of the batch when DBX rolled
+    /// back a transaction nobody opened explicitly — the session turned
+    /// auto-commit off (`SET autocommit = 0`), so its transactions are implicit.
+    /// Reported separately from the explicit case: the user never asked for a
+    /// transaction, so the tab shows a distinct notice that is raised once per
+    /// connection instead of repeating "your explicit transaction was rolled
+    /// back" after every execution.
+    #[serde(skip_serializing_if = "is_false")]
+    pub auto_commit_session_autocommit_rolled_back: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -300,6 +327,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -315,6 +345,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -332,6 +365,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -345,6 +381,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -369,6 +408,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -392,6 +434,9 @@ impl ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -693,6 +738,9 @@ impl From<db::QueryResult> for ExecuteMultiResult {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 }
@@ -708,6 +756,9 @@ impl From<db::sqlserver::SqlServerBatchResult> for ExecuteMultiResult {
             server_message: result.server_message,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 }
@@ -1142,6 +1193,13 @@ pub struct QueryExecutionOptions {
     /// `PostgresReadOnlyTransaction` executes on an isolated client session and
     /// always rolls the transaction back after the result is collected.
     pub execution_mode: QueryExecutionMode,
+    /// MySQL auto-commit tabs only: keep a transaction the user opened
+    /// explicitly (`BEGIN` / `START TRANSACTION`, or a batch that disabled
+    /// auto-commit) open across executions instead of rolling it back when the
+    /// batch finishes. Opt-in per execution (driven by the editor setting);
+    /// `false` keeps the historical cleanup that stops a leftover transaction
+    /// from pinning the tab's read view (#9479).
+    pub preserve_explicit_transaction: bool,
 }
 
 fn validate_query_execution_mode(
@@ -1645,6 +1703,7 @@ async fn do_execute_typed(
     schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
+    transaction_outcome: &mut Option<MysqlAutoCommitTransaction>,
 ) -> Result<db::QueryResult, QueryExecutionError> {
     crate::sql_diagnostics::debug_sql("do_execute", sql);
     if let Some(execution_id) = options.execution_id.as_deref() {
@@ -1662,6 +1721,13 @@ async fn do_execute_typed(
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let pool = state.pool_handle(pool_key).await.ok_or("Connection not found")?;
+    // Everything the driver dispatch does for this statement — pool checkout,
+    // schema/search_path setup, the statement, and the post-statement cleanup —
+    // is what the user actually waited for. Report that span instead of the
+    // driver-internal timer, which starts only after a client is in hand and
+    // therefore hides connection-pool stalls from the summary (#6097 fixed the
+    // same mismatch for SQL Server's shared-connection lock).
+    let dispatch_start = std::time::Instant::now();
 
     let mut typed_agent_error = None;
     #[cfg(feature = "duckdb-sidecar")]
@@ -1768,19 +1834,31 @@ async fn do_execute_typed(
             // would therefore leave its transaction open and pin the
             // connection's REPEATABLE READ read view, so every later
             // auto-commit query in the tab would keep reading the same stale
-            // snapshot until the connection was closed. Clear it here, exactly
-            // like the multi-statement MySQL path does, so each execution
-            // restores the auto-commit contract (ROLLBACK is a server no-op
-            // when no transaction is open).
+            // snapshot until the connection was closed. Settle it here, exactly
+            // like the multi-statement MySQL path does: roll the transaction
+            // back, unless the tab keeps explicit user transactions open
+            // (`preserve_explicit_transaction`) or a later execution already
+            // decided to keep this one.
             if p.is_client_session_pool() {
-                if let Err(error) = db::mysql::rollback_open_transaction(&mut conn).await {
-                    log::warn!(
-                        "[query][mysql] trace_id={} open_txn_rollback_failed error={}",
-                        options.execution_id.as_deref().unwrap_or_default(),
-                        error
-                    );
-                    let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
-                    state.remove_pool_by_key(pool_key).await;
+                let transaction = settle_mysql_auto_commit_transaction_boxed(
+                    state,
+                    pool_key,
+                    &mut conn,
+                    options.preserve_explicit_transaction,
+                    crate::query_execution_sql::mysql_statement_opens_explicit_transaction(sql),
+                )
+                .await;
+                match transaction {
+                    Ok(transaction) => *transaction_outcome = Some(transaction),
+                    Err(error) => {
+                        log::warn!(
+                            "[query][mysql] trace_id={} open_txn_rollback_failed error={}",
+                            options.execution_id.as_deref().unwrap_or_default(),
+                            error
+                        );
+                        let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
+                        state.remove_pool_by_key(pool_key).await;
+                    }
                 }
             }
             statement_result
@@ -1957,6 +2035,20 @@ async fn do_execute_typed(
             )
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
+        PoolKind::Solr(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            // cursorMark 分页只服务文档浏览器；REST 查询是一次性请求，不需要 session 游标。
+            let result =
+                wait_for_query_opt(cancel_token, query_timeout, db::solr_driver::execute_rest_query(&client, &sql))
+                    .await
+                    .map(|result| truncate_result_with_max_rows(result, max_rows));
             if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
                 state.remove_pool_by_key(pool_key).await;
             }
@@ -2148,6 +2240,10 @@ async fn do_execute_typed(
         PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
+        .map(|mut result| {
+            result.execution_time_ms = result.execution_time_ms.max(dispatch_start.elapsed().as_millis());
+            result
+        })
         .map_err(|error| {
             #[cfg(feature = "duckdb-sidecar")]
             if let Some(duckdb_error) = typed_duckdb_error {
@@ -2206,7 +2302,7 @@ pub async fn do_execute(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<db::QueryResult, String> {
-    do_execute_typed(state, pool_key, mysql_dialect, database, sql, schema, cancel_token, options)
+    do_execute_typed(state, pool_key, mysql_dialect, database, sql, schema, cancel_token, options, &mut None)
         .await
         .map_err(QueryExecutionError::into_legacy_string)
 }
@@ -2595,8 +2691,52 @@ pub async fn execute_sql_statement_with_options_typed(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<db::QueryResult, QueryExecutionError> {
+    // `_with_outcome` is a second async layer in front of
+    // `execute_sql_statement_with_options_typed_inner`. Awaiting it inline nests
+    // one more concrete future type into every caller's generator, which pushed
+    // Rust targets of this workspace past rustc's query depth limit on Linux
+    // (`error: queries overflow the depth limit!`). Erasing the type keeps this
+    // wrapper as shallow as it was before the outcome was added.
+    let executed: ExecutedSqlStatement<'_> = Box::pin(execute_sql_statement_with_options_typed_with_outcome(
+        state,
+        connection_id,
+        database,
+        sql,
+        schema,
+        cancel_token,
+        options,
+    ));
+    executed.await.map(|(result, _)| result)
+}
+
+/// Boxed, type-erased run of one SQL statement, awaiting it without nesting
+/// another concrete future type into the caller's generator.
+type ExecutedSqlStatement<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ExecutedSqlStatementOutcome> + Send + 'a>>;
+
+/// Result of [`ExecutedSqlStatement`].
+type ExecutedSqlStatementOutcome = Result<(db::QueryResult, Option<MysqlAutoCommitTransaction>), QueryExecutionError>;
+
+/// Same as [`execute_sql_statement_with_options_typed`], but also returns how
+/// the MySQL auto-commit settlement left the tab-scoped connection (see
+/// [`MysqlAutoCommitTransaction`]). `None` means the statement did not run on a
+/// tab-scoped MySQL connection, so there is no such state to report.
+pub(crate) async fn execute_sql_statement_with_options_typed_with_outcome(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+) -> Result<(db::QueryResult, Option<MysqlAutoCommitTransaction>), QueryExecutionError> {
     let db_type = connection_database_type(state, connection_id).await;
     let invalidate = crate::object_cache::sql_may_change_object_metadata(sql, db_type);
+    let mut transaction = None;
+    // Same contract as the multi-statement entry point: a single statement is
+    // reported with the duration of the whole request, including creating or
+    // reconnecting the pool, so the summary matches the loading indicator.
+    let request_start = std::time::Instant::now();
     let result = execute_sql_statement_with_options_typed_inner(
         state,
         connection_id,
@@ -2605,12 +2745,16 @@ pub async fn execute_sql_statement_with_options_typed(
         schema,
         cancel_token,
         options,
+        &mut transaction,
     )
     .await;
     if invalidate {
         crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
     }
-    result
+    result.map(|mut result| {
+        result.execution_time_ms = result.execution_time_ms.max(request_start.elapsed().as_millis());
+        (result, transaction)
+    })
 }
 
 async fn recover_postgres_create_table_after_connection_error(
@@ -2650,6 +2794,7 @@ async fn recover_postgres_create_table_after_connection_error(
         schema,
         cancel_token.clone(),
         options.clone(),
+        &mut None,
     )
     .await
     {
@@ -2684,6 +2829,7 @@ async fn recover_postgres_create_table_after_connection_error(
         None,
         cancel_token,
         verify_options,
+        &mut None,
     )
     .await
     .ok()
@@ -2700,6 +2846,7 @@ async fn execute_sql_statement_with_options_typed_inner(
     schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
+    transaction_outcome: &mut Option<MysqlAutoCommitTransaction>,
 ) -> Result<db::QueryResult, QueryExecutionError> {
     // MongoDB connections use shell-style commands dispatched through the
     // frontend parser. Queries that fall through to the generic SQL executor
@@ -2748,6 +2895,7 @@ async fn execute_sql_statement_with_options_typed_inner(
         schema,
         cancel_token.clone(),
         options.clone(),
+        transaction_outcome,
     )
     .await;
 
@@ -2781,8 +2929,18 @@ async fn execute_sql_statement_with_options_typed_inner(
                 .await
                 .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
             with_sql_context(
-                do_execute_typed(state, &new_key, mysql_dialect, Some(database), sql, schema, cancel_token, options)
-                    .await,
+                do_execute_typed(
+                    state,
+                    &new_key,
+                    mysql_dialect,
+                    Some(database),
+                    sql,
+                    schema,
+                    cancel_token,
+                    options,
+                    &mut None,
+                )
+                .await,
             )
         }
         Some(PoolErrorAction::Discard) => {
@@ -2925,6 +3083,11 @@ pub async fn close_query_session(
             db::easysearch_driver::close_cursor(&client, session_id).await?;
             Ok(true)
         }
+        PoolKind::Solr(client) => {
+            let client = client.clone();
+            db::solr_driver::close_cursor(&client, session_id).await?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -3039,6 +3202,11 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
 ) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
     let db_type = connection_database_type(state, connection_id).await;
     let invalidate = crate::object_cache::sql_may_change_object_metadata(sql, db_type);
+    // A run that produced a single statement result is reported back as one
+    // duration, so make it the duration of the whole request: pool creation or
+    // reconnection for a cold pool happens outside the statement dispatcher and
+    // would otherwise be invisible while the loading indicator counts it.
+    let request_start = std::time::Instant::now();
     let result = execute_multi_core_with_options_for_client_and_progress_typed_inner(
         state,
         connection_id,
@@ -3053,7 +3221,14 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     if invalidate {
         crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
     }
-    result
+    result.map(|mut results| {
+        if results.len() == 1 {
+            if let Some(item) = results.first_mut() {
+                item.result.execution_time_ms = item.result.execution_time_ms.max(request_start.elapsed().as_millis());
+            }
+        }
+        results
+    })
 }
 
 async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
@@ -3164,6 +3339,7 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
             )
             .await,
             table_data_preview,
+            None,
         );
     }
 
@@ -3185,19 +3361,21 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     {
         let single_sql = statements.into_iter().next().unwrap_or_default();
         let table_data_preview = options.table_data_preview;
-        return single_statement_multi_result(
-            execute_sql_statement_with_options_typed(
-                state,
-                connection_id,
-                database,
-                &single_sql,
-                schema,
-                cancel_token,
-                options,
-            )
-            .await,
-            table_data_preview,
-        );
+        let executed = execute_sql_statement_with_options_typed_with_outcome(
+            state,
+            connection_id,
+            database,
+            &single_sql,
+            schema,
+            cancel_token,
+            options,
+        )
+        .await;
+        let (result, transaction) = match executed {
+            Ok((result, transaction)) => (Ok(result), transaction),
+            Err(error) => (Err(error), None),
+        };
+        return single_statement_multi_result(result, table_data_preview, transaction);
     }
 
     if let Some((pool, mode)) = mysql_pool {
@@ -3352,8 +3530,15 @@ pub async fn connection_pool_is_sqlserver_agent(state: &AppState, connection_id:
 fn single_statement_multi_result(
     result: Result<db::QueryResult, QueryExecutionError>,
     table_data_preview: bool,
+    transaction: Option<MysqlAutoCommitTransaction>,
 ) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
-    result.map(|result| vec![ExecuteMultiResult::success_with_optional_server_large_values(result, table_data_preview)])
+    result.map(|result| {
+        let mut result = ExecuteMultiResult::success_with_optional_server_large_values(result, table_data_preview);
+        if let Some(transaction) = transaction {
+            transaction.mark(&mut result);
+        }
+        vec![result]
+    })
 }
 
 fn mysql_single_statement_uses_batch_route(
@@ -3638,6 +3823,146 @@ where
     (results, None)
 }
 
+/// Settled transaction state of a tab-scoped MySQL connection after one
+/// execution finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MysqlAutoCommitTransaction {
+    /// No transaction is open on the connection.
+    None,
+    /// A transaction the user opened explicitly is still open and was kept.
+    Preserved,
+    /// DBX rolled back a transaction the user opened explicitly.
+    RolledBackExplicit,
+    /// DBX rolled back a transaction the session opened implicitly because
+    /// auto-commit was turned off (`SET autocommit = 0`).
+    RolledBackSessionAutocommit,
+}
+
+impl MysqlAutoCommitTransaction {
+    fn mark(self, result: &mut ExecuteMultiResult) {
+        result.auto_commit_open_transaction = Some(self == Self::Preserved);
+        result.auto_commit_explicit_transaction_rolled_back = self == Self::RolledBackExplicit;
+        result.auto_commit_session_autocommit_rolled_back = self == Self::RolledBackSessionAutocommit;
+    }
+}
+
+/// What the settlement did with the transaction that was still open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MysqlAutoCommitRollback {
+    /// Nothing was rolled back.
+    None,
+    /// A transaction the batch opened explicitly (`BEGIN` / `START TRANSACTION`).
+    Explicit,
+    /// A transaction the session opened implicitly: auto-commit was off
+    /// (`SET autocommit = 0`), so every statement starts one.
+    SessionAutocommit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MysqlAutoCommitDecision {
+    preserve: bool,
+    rollback: MysqlAutoCommitRollback,
+}
+
+/// Decides what to do with a transaction that is still open when an
+/// auto-commit tab finished executing.
+///
+/// A `BEGIN` / `START TRANSACTION` the user typed (or a batch that turned
+/// auto-commit off) is an explicit request to hold the changes until `COMMIT` /
+/// `ROLLBACK`, so `preserve_explicit_transaction` keeps it — including the
+/// later executions that never mention a transaction, which is what
+/// `already_preserved` carries. Everything else keeps the historical cleanup
+/// that stops a leftover transaction from pinning the tab's read view (#9479),
+/// and is reported so the cleanup is never silent.
+fn decide_mysql_auto_commit_transaction(
+    allow_preserve: bool,
+    already_preserved: bool,
+    explicit_start_in_batch: bool,
+    status: Option<db::mysql::MySqlSessionStatus>,
+) -> MysqlAutoCommitDecision {
+    // A session or batch that turned auto-commit off opens its transactions
+    // implicitly, so the server status is the only signal for those.
+    let explicit_transaction = explicit_start_in_batch || status.is_some_and(|status| !status.autocommit);
+    let transaction_open = match status {
+        Some(status) => status.in_transaction,
+        // No usable status packet (the last statement ended with an ERR packet
+        // and the refresh failed): an explicit opener is the only evidence left.
+        None => explicit_start_in_batch || already_preserved,
+    };
+    if !transaction_open {
+        return MysqlAutoCommitDecision { preserve: false, rollback: MysqlAutoCommitRollback::None };
+    }
+    if already_preserved || (allow_preserve && explicit_transaction) {
+        return MysqlAutoCommitDecision { preserve: true, rollback: MysqlAutoCommitRollback::None };
+    }
+    // Distinguish who opened it: only a batch with its own `BEGIN` /
+    // `START TRANSACTION` is a user transaction; `autocommit = 0` opens
+    // transactions implicitly for every statement.
+    let rollback = if explicit_start_in_batch {
+        MysqlAutoCommitRollback::Explicit
+    } else if status.is_some_and(|status| !status.autocommit) {
+        MysqlAutoCommitRollback::SessionAutocommit
+    } else {
+        MysqlAutoCommitRollback::None
+    };
+    MysqlAutoCommitDecision { preserve: false, rollback }
+}
+
+/// Type-erased entry point for [`settle_mysql_auto_commit_transaction`].
+///
+/// `do_execute_typed` is one of the largest async fns in the crate and is
+/// reached transitively by the workspace's live tests and examples. Awaiting the
+/// settle future inline nests its concrete future type inside that generator,
+/// which pushed `dbx-core` targets past rustc's query depth limit on Linux
+/// (`error: queries overflow the depth limit!`). Erasing the type keeps the
+/// enclosing generators as shallow as they were before the settlement moved in.
+fn settle_mysql_auto_commit_transaction_boxed<'a>(
+    state: &'a AppState,
+    pool_key: &'a str,
+    conn: &'a mut mysql_async::Conn,
+    allow_preserve: bool,
+    explicit_start_in_batch: bool,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<MysqlAutoCommitTransaction, String>> + Send + 'a>> {
+    Box::pin(settle_mysql_auto_commit_transaction(state, pool_key, conn, allow_preserve, explicit_start_in_batch))
+}
+
+/// Settles the open transaction of a tab-scoped MySQL connection after an
+/// execution: keeps an explicit user transaction when the caller opted in,
+/// otherwise rolls it back exactly as before.
+///
+/// `Err` means the transaction state could not be settled, so the caller must
+/// discard the connection instead of returning it to the pool.
+async fn settle_mysql_auto_commit_transaction(
+    state: &AppState,
+    pool_key: &str,
+    conn: &mut mysql_async::Conn,
+    allow_preserve: bool,
+    explicit_start_in_batch: bool,
+) -> Result<MysqlAutoCommitTransaction, String> {
+    let already_preserved = state.has_preserved_explicit_transaction(pool_key).await;
+    let mut status = db::mysql::session_status_from_last_ok(conn);
+    if status.is_none() && (allow_preserve || already_preserved) {
+        // Only pay for the extra round trip when the answer can change the
+        // outcome: without the opt-in the historical cleanup runs regardless.
+        status = db::mysql::ping_session_status_on_conn(conn).await.ok();
+    }
+    let decision =
+        decide_mysql_auto_commit_transaction(allow_preserve, already_preserved, explicit_start_in_batch, status);
+    if decision.preserve {
+        state.mark_preserved_explicit_transaction(pool_key).await;
+        return Ok(MysqlAutoCommitTransaction::Preserved);
+    }
+    state.clear_preserved_explicit_transaction(pool_key).await;
+    // Historical cleanup: `ROLLBACK` is a server no-op when no transaction is
+    // open, and releases the read view when one is.
+    db::mysql::rollback_open_transaction(conn).await?;
+    Ok(match decision.rollback {
+        MysqlAutoCommitRollback::Explicit => MysqlAutoCommitTransaction::RolledBackExplicit,
+        MysqlAutoCommitRollback::SessionAutocommit => MysqlAutoCommitTransaction::RolledBackSessionAutocommit,
+        MysqlAutoCommitRollback::None => MysqlAutoCommitTransaction::None,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_multi_mysql(
     state: &AppState,
@@ -3714,7 +4039,7 @@ async fn execute_multi_mysql(
         diagnostic_trace_id: options.execution_id.as_deref(),
     };
     let statements_started_at = std::time::Instant::now();
-    let (results, error_action) = execute_mysql_batch_statements(
+    let (mut results, error_action) = execute_mysql_batch_statements(
         &mut executor,
         statements,
         db_type,
@@ -3735,18 +4060,41 @@ async fn execute_multi_mysql(
     // the REPEATABLE READ snapshot for every later auto-commit query on that
     // tab, making the tab read stale rows until disconnect. Closing any open
     // transaction before returning the connection restores the auto-commit
-    // contract; ROLLBACK on an already-committed/implicit transaction is a
-    // server no-op, and a failure here only discards this connection.
+    // contract, unless the tab keeps explicit user transactions open
+    // (`preserve_explicit_transaction`); ROLLBACK on an already-committed/
+    // implicit transaction is a server no-op, and a failure here only discards
+    // this connection.
     {
+        let tab_scoped = pool.is_client_session_pool();
+        let explicit_start_in_batch = tab_scoped
+            && statements
+                .iter()
+                .any(|statement| crate::query_execution_sql::mysql_statement_opens_explicit_transaction(statement));
         let rollback_started_at = std::time::Instant::now();
-        match db::mysql::rollback_open_transaction(&mut conn).await {
-            Ok(()) => {
+        let transaction = if tab_scoped {
+            settle_mysql_auto_commit_transaction(
+                state,
+                pool_key,
+                &mut conn,
+                options.preserve_explicit_transaction,
+                explicit_start_in_batch,
+            )
+            .await
+        } else {
+            db::mysql::rollback_open_transaction(&mut conn).await.map(|()| MysqlAutoCommitTransaction::None)
+        };
+        match transaction {
+            Ok(transaction) => {
                 if rollback_started_at.elapsed() > std::time::Duration::from_millis(5) {
                     log::info!(
-                        "[query][mysql-batch] trace_id={} open_txn_rollback_ms={}",
+                        "[query][mysql-batch] trace_id={} open_txn_rollback_ms={} preserved={}",
                         trace_id,
-                        rollback_started_at.elapsed().as_millis()
+                        rollback_started_at.elapsed().as_millis(),
+                        transaction == MysqlAutoCommitTransaction::Preserved
                     );
+                }
+                for result in &mut results {
+                    transaction.mark(result);
                 }
             }
             Err(error) => {
@@ -3788,6 +4136,7 @@ fn error_query_result(message: String) -> db::QueryResult {
         rows: vec![vec![serde_json::Value::String(message)]],
         affected_rows: 0,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -3806,6 +4155,7 @@ fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
         rows: vec![],
         affected_rows: 0,
         execution_time_ms,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -3945,6 +4295,93 @@ pub async fn execute_statements(
     result
 }
 
+/// Execute a batch, optionally on a single transaction.
+///
+/// `use_transaction` is opt-in and only the structure editor sets it, for
+/// batches that change a partition hierarchy: a mid-batch failure there would
+/// otherwise leave a half-created hierarchy behind. The shared transaction
+/// kernel rejects backends whose DDL cannot roll back, and statements that
+/// cannot run inside a transaction block (`... CONCURRENTLY`) are refused up
+/// front rather than half-applied.
+pub async fn execute_statements_with_transaction_option(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    statements: &[String],
+    schema: Option<&str>,
+    use_transaction: bool,
+    timeout_secs: Option<u64>,
+) -> Result<db::QueryResult, String> {
+    if use_transaction && statements.len() > 1 {
+        if batch_has_concurrently_statement(statements) {
+            return Err(
+                "use_transaction cannot wrap CONCURRENTLY statements: they cannot run inside a transaction block. Run the batch without use_transaction."
+                    .to_string(),
+            );
+        }
+        let db_type = connection_database_type(state, connection_id).await;
+        if batch_transaction_ddl_is_unrollbackable(db_type, statements) {
+            return Err(
+                "use_transaction cannot be used with a batch whose DDL cannot be rolled back: DDL statements implicitly commit and cannot be undone. Run the batch without use_transaction (auto-commit, one result per statement) or split the DDL and DML into separate calls."
+                    .to_string(),
+            );
+        }
+        let result = execute_statements_in_transaction_typed(
+            state,
+            connection_id,
+            database,
+            statements,
+            schema,
+            None,
+            timeout_secs,
+        )
+        .await
+        .map_err(|error| error.into_legacy_string())?;
+        let invalidate = statements.iter().any(|sql| crate::object_cache::sql_may_change_object_metadata(sql, db_type));
+        if invalidate {
+            crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
+        }
+        return Ok(result);
+    }
+    execute_statements(state, connection_id, database, statements, schema, timeout_secs).await
+}
+
+/// Whether a batch contains a statement PostgreSQL-family servers refuse to run
+/// inside a transaction block (`CREATE/DROP INDEX CONCURRENTLY`,
+/// `ALTER TABLE ... DETACH PARTITION CONCURRENTLY`, ...).
+fn batch_has_concurrently_statement(statements: &[String]) -> bool {
+    statements.iter().any(|statement| {
+        let upper = statement.to_ascii_uppercase();
+        // Real CONCURRENTLY statements always start with one of these verbs.
+        // Requiring the verb plus a standalone keyword keeps the word inside
+        // string literals, comments or plain identifiers (e.g. a table named
+        // `concurrently`) from silently demoting the batch to auto-commit; the
+        // direction stays fail-safe because no CONCURRENTLY statement form
+        // starts with another verb.
+        let trimmed = upper.trim_start();
+        let starts_with_ddl_verb =
+            ["CREATE ", "DROP ", "REINDEX", "REFRESH ", "ALTER "].iter().any(|verb| trimmed.starts_with(verb));
+        starts_with_ddl_verb && contains_standalone_concurrently_keyword(&upper)
+    })
+}
+
+fn contains_standalone_concurrently_keyword(upper: &str) -> bool {
+    let keyword = "CONCURRENTLY";
+    let mut search_from = 0;
+    while let Some(pos) = upper[search_from..].find(keyword) {
+        let pos = search_from + pos;
+        let boundary =
+            |ch: Option<char>| ch.map(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '"').unwrap_or(false);
+        let before = boundary(upper[..pos].chars().next_back());
+        let after = boundary(upper[pos + keyword.len()..].chars().next());
+        if !before && !after {
+            return true;
+        }
+        search_from = pos + 1;
+    }
+    false
+}
+
 async fn execute_statements_inner(
     state: &AppState,
     connection_id: &str,
@@ -4065,6 +4502,7 @@ async fn execute_statements_inner(
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4210,6 +4648,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::DynamoDb(_)
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
+        | PoolKind::Solr(_)
         | PoolKind::Meilisearch(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
@@ -4613,6 +5052,7 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::CloudflareD1(_)
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
+        | PoolKind::Solr(_)
         | PoolKind::Meilisearch(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
@@ -4674,6 +5114,7 @@ async fn exec_tx_pg_inner(
             rows: vec![],
             affected_rows: total_affected,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4767,6 +5208,7 @@ async fn exec_tx_mysql_inner(
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4959,6 +5401,7 @@ async fn exec_tx_sqlite_inner(
                         rows: vec![],
                         affected_rows: total_affected,
                         execution_time_ms: start.elapsed().as_millis(),
+                        server_execute_time_us: None,
                         truncated: false,
                         session_id: None,
                         has_more: false,
@@ -5042,6 +5485,7 @@ async fn exec_tx_explicit_inner(
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6149,6 +6593,7 @@ async fn execute_manual_txn_postgres_statement(
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6168,6 +6613,29 @@ async fn execute_manual_txn_mysql_statement(
         let mut result = conn.query_iter(sql).await.map_err(|e| format!("Query failed: {e}"))?;
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
         let column_types: Vec<String> = result.columns_ref().iter().map(db::mysql::mysql_column_type_name).collect();
+        // Some statements only *may* return rows — `EXECUTE` of a prepared DML statement
+        // finishes with a plain OK packet instead — so report the affected rows rather than
+        // failing on the missing result set.
+        if columns.is_empty() {
+            let affected_rows = result.affected_rows();
+            result.drop_result().await.map_err(|e| format!("Query failed: {e}"))?;
+            return Ok(db::QueryResult {
+                columns: Vec::new(),
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
+                rows: vec![],
+                affected_rows,
+                execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
+                truncated: false,
+                session_id: None,
+                has_more: false,
+                elasticsearch_raw_body: None,
+                messages: Vec::new(),
+            });
+        }
         let mut data: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(1024));
         let mut stream = result
             .stream::<mysql_async::Row>()
@@ -6192,6 +6660,7 @@ async fn execute_manual_txn_mysql_statement(
             rows: data,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -6211,6 +6680,7 @@ async fn execute_manual_txn_mysql_statement(
             rows: vec![],
             affected_rows,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6267,6 +6737,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
         rows: vec![],
         affected_rows: 0,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6296,6 +6767,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
         rows: vec![],
         affected_rows: 0,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -7073,7 +7545,6 @@ mod tests {
         assert!(!is_destructive_schema_diff_statement("SELECT 'DROP TABLE users'"));
         assert!(!is_destructive_schema_diff_statement("ALTER TABLE \"DROP INDEX audit\" ADD COLUMN note TEXT"));
     }
-    #[cfg(unix)]
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
     #[cfg(unix)]
@@ -8159,6 +8630,37 @@ for line in sys.stdin:
         assert!(!batch_transaction_ddl_is_unrollbackable(None, &ddl));
     }
 
+    #[test]
+    fn batch_has_concurrently_statement_detects_transaction_block_escapees() {
+        assert!(batch_has_concurrently_statement(&["CREATE INDEX CONCURRENTLY idx ON t (id)".to_string(),]));
+        assert!(batch_has_concurrently_statement(&[
+            "ALTER TABLE parent DETACH PARTITION child CONCURRENTLY".to_string(),
+        ]));
+        // Case-insensitive, and a single CONCURRENTLY anywhere in the batch is enough.
+        assert!(batch_has_concurrently_statement(&[
+            "ALTER TABLE t ADD COLUMN c int".to_string(),
+            "drop index concurrently idx".to_string(),
+        ]));
+        assert!(!batch_has_concurrently_statement(&[
+            "CREATE TABLE child PARTITION OF parent FOR VALUES FROM (0) TO (1)".to_string(),
+        ]));
+        // The word inside literals or plain identifiers must not demote a batch
+        // that would otherwise run in one transaction.
+        assert!(!batch_has_concurrently_statement(&[
+            "INSERT INTO notes (body) VALUES ('run CREATE INDEX CONCURRENTLY later')".to_string(),
+        ]));
+        assert!(!batch_has_concurrently_statement(&[
+            "SELECT id FROM concurrently WHERE label = 'drop index concurrently idx'".to_string(),
+        ]));
+        assert!(!batch_has_concurrently_statement(&[
+            "-- refresh materialized view concurrently next".to_string(),
+            "SELECT 1".to_string(),
+        ]));
+        // REINDEX/REFRESH forms still detect.
+        assert!(batch_has_concurrently_statement(&["REINDEX TABLE CONCURRENTLY t".to_string()]));
+        assert!(batch_has_concurrently_statement(&["REFRESH MATERIALIZED VIEW CONCURRENTLY mv".to_string()]));
+    }
+
     #[tokio::test]
     async fn connection_pool_is_sqlserver_agent_detects_agent_and_native_pools() {
         let dir = std::env::temp_dir().join(format!("dbx-query-sqlserver-agent-flag-{}", uuid::Uuid::new_v4()));
@@ -8426,6 +8928,7 @@ for line in sys.stdin:
                     rows: vec![vec![serde_json::json!(2)]],
                     affected_rows: 0,
                     execution_time_ms: 4,
+                    server_execute_time_us: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -8700,6 +9203,7 @@ for line in sys.stdin:
             rows: vec![vec![serde_json::json!(value)]],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -9199,7 +9703,7 @@ for line in sys.stdin:
         )
         .with_omitted_sql_context("SELECT * FROM dbx_table_that_does_not_exist");
 
-        let error = single_statement_multi_result(Err(error), false).unwrap_err();
+        let error = single_statement_multi_result(Err(error), false, None).unwrap_err();
         let backend_error = error.into_backend_error();
 
         assert_eq!(backend_error.code(), "DBX-JDBC-4001");
@@ -9401,6 +9905,7 @@ for line in sys.stdin:
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -9507,6 +10012,7 @@ for line in sys.stdin:
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
@@ -9624,6 +10130,7 @@ for line in sys.stdin:
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -9688,6 +10195,7 @@ for line in sys.stdin:
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -9755,6 +10263,7 @@ for line in sys.stdin:
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -9780,6 +10289,7 @@ for line in sys.stdin:
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -10683,7 +11193,6 @@ for line in sys.stdin:
     /// Spawns a fake Python agent and registers a manual transaction session in
     /// the app state so `execute_in_manual_transaction_with_options` can run
     /// end to end without a live database.
-    #[cfg(unix)]
     async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
         use std::io::Write;
 
@@ -10699,6 +11208,9 @@ for line in sys.stdin:
     method = request.get("method")
     if method == "execute_query":
         sql = request.get("params", {{}}).get("sql", "")
+        if "RAISE_FILE_ERROR" in sql:
+            print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "file statement rejected"}}}}), flush=True)
+            continue
         row = [sql]
     else:
         # commit_manual_transaction / rollback_manual_transaction / disconnect
@@ -10720,8 +11232,9 @@ for line in sys.stdin:
         .unwrap();
         script.flush().unwrap();
 
+        let python = if cfg!(windows) { "python" } else { "python3" };
         let client = AgentDriverClient::spawn(
-            AgentLaunchSpec::new("python3").with_args([script.path().to_string_lossy().to_string()]),
+            AgentLaunchSpec::new(python).with_args([script.path().to_string_lossy().to_string()]),
         )
         .await
         .unwrap();
@@ -10762,6 +11275,162 @@ for line in sys.stdin:
             },
         );
         (state, txn_session_id, dir)
+    }
+
+    fn manual_sql_file_request(session_id: &str) -> crate::sql::SqlFileRequest {
+        crate::sql::SqlFileRequest {
+            txn_session_id: Some(session_id.to_string()),
+            execution_id: "manual-file-test".to_string(),
+            connection_id: "agent-conn".to_string(),
+            database: "ORCL".to_string(),
+            file_path: String::new(),
+            continue_on_error: false,
+            selected_tables: None,
+            part_cooldown_ms: 0,
+            skip_relational_constraints: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_retains_session_until_commit() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        let request = manual_sql_file_request(&session_id);
+        let mut events = Vec::new();
+        // Only the held transaction has a connected agent. A fallback through
+        // the ordinary pool cannot execute these statements successfully.
+        crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &request,
+            "UPDATE T SET V = 1; UPDATE T SET V = 2;",
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap();
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal.status, crate::sql::SqlFileStatus::Done);
+        assert_eq!(terminal.success_count, 2);
+        assert!(state.transaction_sessions.read().await.contains_key(&session_id));
+        commit_manual_transaction(&state, &session_id).await.unwrap();
+        assert!(!state.transaction_sessions.read().await.contains_key(&session_id));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_cancel_stops_next_statement_and_releases_session() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        let request = manual_sql_file_request(&session_id);
+        let token = CancellationToken::new();
+        let mut events = Vec::new();
+        crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &request,
+            "UPDATE T SET V = 1; UPDATE T SET V = 2;",
+            token.clone(),
+            std::time::Instant::now(),
+            |event| {
+                if event.success_count == 1 {
+                    token.cancel();
+                }
+                events.push(event);
+            },
+        )
+        .await
+        .unwrap();
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal.status, crate::sql::SqlFileStatus::Cancelled);
+        assert_eq!(terminal.success_count, 1);
+        assert!(!state.transaction_sessions.read().await.contains_key(&session_id));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_read_failure_rolls_back_held_session() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        let request = manual_sql_file_request(&session_id);
+        let result = crate::data::sql_file_import::execute_sql_file_path(
+            &state,
+            &request,
+            &dir.join("missing.sql"),
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |_| {},
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!state.transaction_sessions.read().await.contains_key(&session_id));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_statement_failure_rolls_back_without_retry_or_later_execution() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        let request = manual_sql_file_request(&session_id);
+        let mut events = Vec::new();
+        let error = crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &request,
+            "UPDATE T SET V = 1; UPDATE RAISE_FILE_ERROR SET V = 2; UPDATE T SET V = 3;",
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("file statement rejected"));
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal.status, crate::sql::SqlFileStatus::Error);
+        assert_eq!(terminal.success_count, 1);
+        assert_eq!(terminal.failure_count, 1);
+        assert_eq!(terminal.statement_index, 2);
+        assert!(!state.transaction_sessions.read().await.contains_key(&session_id));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_rejects_different_target_without_using_or_closing_its_session() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        for mismatch_connection in [false, true] {
+            let mut request = manual_sql_file_request(&session_id);
+            if mismatch_connection {
+                request.connection_id = "other".to_string();
+            } else {
+                request.database = "other".to_string();
+            }
+            let mut events = Vec::new();
+            let error = crate::data::sql_file_import::execute_sql_file_content(
+                &state,
+                &request,
+                "UPDATE T SET V = 1;",
+                CancellationToken::new(),
+                std::time::Instant::now(),
+                |event| events.push(event),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("target does not match"));
+            assert!(events.is_empty());
+            assert!(state.transaction_sessions.read().await.contains_key(&session_id));
+        }
+        rollback_manual_transaction(&state, &session_id).await.unwrap();
+        let error = crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &manual_sql_file_request(&session_id),
+            "UPDATE T SET V = 1;",
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("session not found"));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Regression: multi-statement scripts under a manual transaction must keep
@@ -10916,6 +11585,7 @@ for line in sys.stdin:
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -10953,6 +11623,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11020,6 +11691,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11059,6 +11731,7 @@ for line in sys.stdin:
             rows: vec![vec![serde_json::json!("0x0102030405"), serde_json::json!("B:4:5")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11090,6 +11763,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11128,6 +11802,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11160,6 +11835,7 @@ for line in sys.stdin:
             rows: Vec::new(),
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11192,7 +11868,7 @@ for line in sys.stdin:
 
     #[test]
     fn single_statement_preview_preserves_absent_statement_index() {
-        let result = single_statement_multi_result(Ok(empty_query_result(1)), true).unwrap();
+        let result = single_statement_multi_result(Ok(empty_query_result(1)), true, None).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].statement_index, None);
@@ -11214,6 +11890,116 @@ for line in sys.stdin:
     fn query_execution_options_use_transaction_some_false_is_preserved() {
         let opts = QueryExecutionOptions { use_transaction: Some(false), ..Default::default() };
         assert_eq!(opts.use_transaction, Some(false));
+    }
+
+    fn mysql_status(in_transaction: bool, autocommit: bool) -> db::mysql::MySqlSessionStatus {
+        db::mysql::MySqlSessionStatus { in_transaction, autocommit }
+    }
+
+    #[test]
+    fn mysql_auto_commit_default_rolls_back_an_explicitly_opened_transaction() {
+        // The historical behavior for the default setting: a `BEGIN` a user
+        // left open is rolled back, but the cleanup is now reported so the tab
+        // can tell the user instead of discarding the transaction silently.
+        let decision = decide_mysql_auto_commit_transaction(false, false, true, Some(mysql_status(true, true)));
+        assert!(!decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::Explicit);
+    }
+
+    #[test]
+    fn mysql_auto_commit_opt_in_keeps_an_explicitly_opened_transaction() {
+        // The opt-in decision is made from the *submitted* statement list, not
+        // from how much of the batch actually ran. A batch that opens a
+        // transaction and is then cancelled (or aborted by an error) has only
+        // executed a prefix of its statements, yet the opener is still part of
+        // the batch, so the connection keeps whatever the prefix did and stays
+        // in the transaction. Preserving is what makes the abandoned work
+        // visible — the tab shows the open-transaction badge and the manual
+        // rollback action — instead of silently rolling back a transaction the
+        // user asked for. `decide(true, false, true, ..)` below is exactly that
+        // cancelled-batch case: the caller still passes the opener it was
+        // about to run, so the decision must be preserve, not roll back.
+        let decision = decide_mysql_auto_commit_transaction(true, false, true, Some(mysql_status(true, true)));
+        assert!(decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_auto_commit_opt_in_keeps_the_transaction_of_a_later_execution() {
+        // `START TRANSACTION` ran first, this execution only ran an UPDATE, so
+        // the batch itself carries no opener: the kept state is the only signal.
+        let decision = decide_mysql_auto_commit_transaction(true, true, false, Some(mysql_status(true, true)));
+        assert!(decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+
+        // The kept state survives even when the caller does not pass the option
+        // (auxiliary queries, result paging): an open user transaction is never
+        // destroyed from another code path.
+        let no_option = decide_mysql_auto_commit_transaction(false, true, false, Some(mysql_status(true, true)));
+        assert!(no_option.preserve);
+        assert_eq!(no_option.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_auto_commit_opt_in_keeps_a_transaction_opened_by_auto_commit_off() {
+        let decision = decide_mysql_auto_commit_transaction(true, false, false, Some(mysql_status(true, false)));
+        assert!(decision.preserve);
+
+        // Without the opt-in the same connection is cleaned up as before, but
+        // reported as a session-level implicit transaction: nobody typed
+        // `BEGIN`, the connection simply runs with auto-commit off.
+        let default = decide_mysql_auto_commit_transaction(false, false, false, Some(mysql_status(true, false)));
+        assert!(!default.preserve);
+        assert_eq!(default.rollback, MysqlAutoCommitRollback::SessionAutocommit);
+    }
+
+    #[test]
+    fn mysql_auto_commit_reports_a_batch_opener_ahead_of_autocommit_off() {
+        // Both signals at once: a `BEGIN` in the batch wins, so the notice is
+        // the explicit-transaction one.
+        let decision = decide_mysql_auto_commit_transaction(false, false, true, Some(mysql_status(true, false)));
+        assert!(!decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::Explicit);
+    }
+
+    #[test]
+    fn mysql_auto_commit_rolls_back_a_leftover_transaction_without_reporting_it() {
+        // No opener in the batch and auto-commit still on: this is a leftover
+        // transaction (cancelled or aborted batch), not a user transaction.
+        let decision = decide_mysql_auto_commit_transaction(true, false, false, Some(mysql_status(true, true)));
+        assert!(!decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_auto_commit_leaves_a_clean_connection_alone() {
+        // `BEGIN; ...; COMMIT;` in one batch ends with nothing open.
+        let decision = decide_mysql_auto_commit_transaction(true, false, true, Some(mysql_status(false, true)));
+        assert!(!decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+
+        // A kept transaction that the user committed in this batch must be
+        // forgotten, so later executions are auto-commit again.
+        let after_commit = decide_mysql_auto_commit_transaction(true, true, false, Some(mysql_status(false, true)));
+        assert!(!after_commit.preserve);
+        assert_eq!(after_commit.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_auto_commit_uses_the_batch_opener_when_the_status_packet_is_missing() {
+        // The last statement ended with an ERR packet, so no status is cached
+        // and the COM_PING refresh failed.
+        let kept = decide_mysql_auto_commit_transaction(true, false, true, None);
+        assert!(kept.preserve);
+        assert_eq!(kept.rollback, MysqlAutoCommitRollback::None);
+
+        let cleaned = decide_mysql_auto_commit_transaction(false, false, true, None);
+        assert!(!cleaned.preserve);
+        assert_eq!(cleaned.rollback, MysqlAutoCommitRollback::Explicit);
+
+        let unknown_without_opener = decide_mysql_auto_commit_transaction(true, false, false, None);
+        assert!(!unknown_without_opener.preserve);
+        assert_eq!(unknown_without_opener.rollback, MysqlAutoCommitRollback::None);
     }
 
     #[test]

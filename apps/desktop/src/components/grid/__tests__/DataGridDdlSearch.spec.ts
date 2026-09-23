@@ -6,7 +6,18 @@ const metadataLoaderSource = readFileSync(new URL("../../../composables/useDataG
 
 describe("DataGrid DDL search navigation", () => {
   it("resets navigation when the raw search query changes", () => {
-    expect(dataGridSource).toMatch(/watch\(\s*\[filteredDdlContent, searchQuery\],/);
+    expect(dataGridSource).toMatch(/watch\(\s*searchQuery,\s*async \(\) => \{\s*ddlSearchMatchIndex\.value = 0;/);
+  });
+
+  it("highlights the DDL once and marks the rendered DOM for the search", () => {
+    // #9212: re-highlighting (and re-parsing) the whole DDL on every keystroke
+    // froze the window, so the highlighted HTML only depends on the DDL itself
+    // and the search marks are applied to the already-rendered <pre>.
+    expect(dataGridSource).toMatch(/const highlightedDdlContent = computed\(\(\) => \(ddlContent\.value \? highlight\(ddlContent\.value\) : ""\)\);/);
+    expect(dataGridSource).toContain('v-html="highlightedDdlContent"');
+    expect(dataGridSource).toContain('import { applyDdlSearchMarks } from "@/lib/sql/ddlSearchMarks"');
+    expect(dataGridSource).not.toContain("filteredDdlContent");
+    expect(dataGridSource.match(/applyDdlSearchMarks\(ddlPreRef\.value, searchQuery\.value\)/g) ?? []).toHaveLength(3);
   });
 
   it("uses the shared DDL cache policy and exposes refresh controls", () => {

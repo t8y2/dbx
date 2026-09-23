@@ -19,7 +19,8 @@ pub fn clamp_sql_file_upload_max_mb(value: u32) -> u32 {
     value.clamp(1, MAX_SQL_FILE_UPLOAD_MAX_MB)
 }
 use crate::query::{
-    execute_sql_statement_with_options, pool_error_action, wait_for_query_opt, DbOperationBudget, PoolErrorAction,
+    execute_in_manual_transaction, execute_sql_statement_with_options, keep_manual_transaction_alive,
+    pool_error_action, rollback_manual_transaction, wait_for_query_opt, DbOperationBudget, PoolErrorAction,
     QueryExecutionOptions,
 };
 use crate::sql::{
@@ -85,7 +86,7 @@ struct ControlledSqlFileImportStatement {
     stop_on_error: bool,
 }
 
-const SQL_FILE_READ_CHUNK_BYTES: usize = 256 * 1024;
+pub(crate) const SQL_FILE_READ_CHUNK_BYTES: usize = 256 * 1024;
 const SQL_FILE_STATEMENT_BATCH_SIZE: usize = 256;
 const SQL_FILE_PREVIEW_ENCODING_SAMPLE_BYTES: usize = 1024 * 1024;
 const SQL_FILE_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
@@ -241,6 +242,9 @@ impl MySqlSqlFileExecutor {
         request: &SqlFileRequest,
         import_target: Option<&SqlFileImportTarget>,
     ) -> Result<Option<Self>, String> {
+        if request.txn_session_id.is_some() {
+            return Ok(None);
+        }
         let Some(target) = import_target else {
             return Ok(None);
         };
@@ -583,7 +587,67 @@ async fn set_relational_constraints_enabled(
     .map(|_| ())
 }
 
+async fn sql_file_transaction_schema(state: &AppState, request: &SqlFileRequest) -> Result<Option<String>, String> {
+    let Some(session_id) = request.txn_session_id.as_deref() else {
+        return Ok(None);
+    };
+    let sessions = state.transaction_sessions.read().await;
+    let session =
+        sessions.get(session_id).ok_or("SQL file transaction session not found; no statements were retried")?;
+    if session.connection_id != request.connection_id || session.database != request.database {
+        return Err("SQL file target does not match its manual transaction".to_string());
+    }
+    Ok(session.schema.clone())
+}
+
+async fn with_sql_file_transaction<T>(
+    state: &AppState,
+    request: &SqlFileRequest,
+    token: &CancellationToken,
+    execution: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let Some(session_id) = request.txn_session_id.as_deref() else {
+        return execution.await;
+    };
+    sql_file_transaction_schema(state, request).await?;
+    if request.continue_on_error || request.skip_relational_constraints {
+        return Err("Manual SQL file execution cannot continue after an error or disable constraints".to_string());
+    }
+    let _keep_alive = keep_manual_transaction_alive(state, session_id).await?;
+    let result = execution.await;
+    let should_rollback =
+        (result.is_err() || token.is_cancelled()) && state.transaction_sessions.read().await.contains_key(session_id);
+    if should_rollback {
+        // Never drop an in-flight database future on cancellation. Finish that
+        // round trip, stop before the next statement, then roll back the session.
+        if let Err(rollback_error) = rollback_manual_transaction(state, session_id).await {
+            return Err(format!(
+                "{}. Rollback failed: {rollback_error}",
+                result.err().unwrap_or_else(|| "SQL file cancelled".to_string())
+            ));
+        }
+    }
+    result
+}
+
 pub async fn execute_sql_file_content(
+    state: &AppState,
+    request: &SqlFileRequest,
+    file_content: &str,
+    token: CancellationToken,
+    started_at: Instant,
+    emit: impl FnMut(SqlFileProgress),
+) -> Result<(), String> {
+    with_sql_file_transaction(
+        state,
+        request,
+        &token,
+        Box::pin(execute_sql_file_content_inner(state, request, file_content, token.clone(), started_at, emit)),
+    )
+    .await
+}
+
+async fn execute_sql_file_content_inner(
     state: &AppState,
     request: &SqlFileRequest,
     file_content: &str,
@@ -609,10 +673,11 @@ pub async fn execute_sql_file_content(
         filter_restore_statements(&mut statements, &mut TableRestoreFilter::with_views(views), selected)?;
     }
 
-    let planned_statements = optimize_controlled_sql_file_import_statements(
+    let planned_statements = plan_sql_file_statements(
         &statements,
         import_target.as_ref().map(|target| target.db_type),
         import_target.as_ref().and_then(|target| target.driver_profile.as_deref()),
+        request.txn_session_id.is_some(),
     );
     // MySQL-family imports need one pinned connection so `USE` and session
     // state survive across the whole file.
@@ -677,6 +742,23 @@ pub async fn execute_sql_file_path(
 /// state such as `USE`, temporary tables, variables, and transactions remains
 /// available to the next file in the batch.
 pub async fn execute_sql_file_paths(
+    state: &AppState,
+    request: &SqlFileRequest,
+    file_paths: &[&Path],
+    token: CancellationToken,
+    started_at: Instant,
+    emit: impl FnMut(SqlFileProgress),
+) -> Result<(), String> {
+    with_sql_file_transaction(
+        state,
+        request,
+        &token,
+        Box::pin(execute_sql_file_paths_inner(state, request, file_paths, token.clone(), started_at, emit)),
+    )
+    .await
+}
+
+async fn execute_sql_file_paths_inner(
     state: &AppState,
     request: &SqlFileRequest,
     file_paths: &[&Path],
@@ -1060,8 +1142,9 @@ pub async fn read_sql_file_preview(file_path: &Path, max_chars: usize) -> Result
     Ok(preview.chars().take(max_chars).collect())
 }
 
-struct SqlFileStreamDecoder {
+pub(crate) struct SqlFileStreamDecoder {
     reader: SqlFileByteReader,
+    encoding: &'static encoding_rs::Encoding,
     decoder: encoding_rs::Decoder,
     mysql_binary_normalizer: Option<MysqlDumpBinaryLiteralNormalizer>,
     pending_bytes: Vec<u8>,
@@ -1127,6 +1210,21 @@ impl SqlFileByteReader {
     }
 }
 
+/// 嗅探文件开头的字节序标记，存在时返回 BOM 对应的编码与长度。
+///
+/// 表导入显式选择编码时也优先按 BOM 解码：与非流式 `Encoding::decode`
+/// 的行为保持一致，避免显式编码与 BOM 不匹配时把 BOM 字节解成
+/// 垃圾前缀黏在首条语句上。
+async fn detect_file_bom(file_path: &Path) -> Result<(&'static encoding_rs::Encoding, usize), String> {
+    let mut reader = SqlFileByteReader::open(file_path).await?;
+    let mut prefix = [0u8; 3];
+    let prefix_len = reader.read(&mut prefix).await?;
+    match encoding_rs::Encoding::for_bom(&prefix[..prefix_len]) {
+        Some((encoding, bom_len)) => Ok((encoding, bom_len)),
+        None => Ok((encoding_rs::UTF_8, 0)),
+    }
+}
+
 fn is_gzip_sql_file_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -1160,6 +1258,31 @@ impl SqlFileStreamDecoder {
         Self::open_with_options(file_path, None, normalize_mysql_binary_literals, Some(bytes_read)).await
     }
 
+    /// 以调用方已经确定的编码打开解码器。
+    ///
+    /// 表导入会先解析用户的编码设置：显式选择了编码时不再自动探测，
+    /// 但文件带 BOM 时仍优先按 BOM 的编码解码并跳过，保持与旧的非流式
+    /// 实现一致的语义。
+    pub(crate) async fn open_for_import(
+        file_path: &Path,
+        encoding: Option<&'static encoding_rs::Encoding>,
+        normalize_mysql_binary_literals: bool,
+        bytes_read: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, String> {
+        let Some(encoding) = encoding else {
+            return Self::open_with_options(file_path, None, normalize_mysql_binary_literals, bytes_read).await;
+        };
+        let (bom_encoding, bom_len) = detect_file_bom(file_path).await?;
+        let (encoding, bom_len) = if bom_len > 0 { (bom_encoding, bom_len) } else { (encoding, 0) };
+        Self::open_with_resolved_encoding(file_path, encoding, bom_len, normalize_mysql_binary_literals, bytes_read)
+            .await
+    }
+
+    /// 解码器实际使用的文本编码（显式指定或自动探测的结果）。
+    pub(crate) fn encoding(&self) -> &'static encoding_rs::Encoding {
+        self.encoding
+    }
+
     async fn open_with_options(
         file_path: &Path,
         detection_limit: Option<usize>,
@@ -1168,6 +1291,23 @@ impl SqlFileStreamDecoder {
     ) -> Result<Self, String> {
         let (encoding, bom_len, detected_mysql_binary_literals) =
             detect_sql_file_encoding(file_path, detection_limit).await?;
+        Self::open_with_resolved_encoding(
+            file_path,
+            encoding,
+            bom_len,
+            normalize_mysql_binary_literals || detected_mysql_binary_literals,
+            bytes_read,
+        )
+        .await
+    }
+
+    async fn open_with_resolved_encoding(
+        file_path: &Path,
+        encoding: &'static encoding_rs::Encoding,
+        bom_len: usize,
+        normalize_mysql_binary_literals: bool,
+        bytes_read: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, String> {
         let mut reader = SqlFileByteReader::open_with_progress(file_path, bytes_read).await?;
         let mut prefix = [0u8; 3];
         let prefix_len = reader.read(&mut prefix).await?;
@@ -1176,9 +1316,9 @@ impl SqlFileStreamDecoder {
         pending_bytes.reserve(SQL_FILE_READ_CHUNK_BYTES);
         Ok(Self {
             reader,
+            encoding,
             decoder: encoding.new_decoder_without_bom_handling(),
-            mysql_binary_normalizer: (encoding == encoding_rs::UTF_8
-                && (normalize_mysql_binary_literals || detected_mysql_binary_literals))
+            mysql_binary_normalizer: (encoding == encoding_rs::UTF_8 && normalize_mysql_binary_literals)
                 .then(MysqlDumpBinaryLiteralNormalizer::default),
             pending_bytes,
             pending_decoded_bytes: Vec::new(),
@@ -1186,7 +1326,7 @@ impl SqlFileStreamDecoder {
         })
     }
 
-    async fn next_chunk(&mut self) -> Result<Option<String>, String> {
+    pub(crate) async fn next_chunk(&mut self) -> Result<Option<String>, String> {
         if self.reached_eof && self.pending_bytes.is_empty() && self.pending_decoded_bytes.is_empty() {
             return Ok(None);
         }
@@ -1560,12 +1700,28 @@ async fn validate_utf8_with_mysql_binary_literals(
     }
 }
 
-enum StreamingSqlFileSplitter {
+pub(crate) struct StreamingSqlFileSplitter(StreamingSqlFileSplitterKind);
+
+enum StreamingSqlFileSplitterKind {
     Statements(SqlStatementSplitter),
     SqlServerBatches(SqlServerBatchSplitter),
 }
 
 impl StreamingSqlFileSplitter {
+    pub(crate) fn new(db_type: Option<DatabaseType>, options: SqlParsingOptions) -> Self {
+        Self(StreamingSqlFileSplitterKind::new(db_type, options))
+    }
+
+    pub(crate) fn push_chunk(&mut self, chunk: &str) -> Vec<SqlStatementWithControl> {
+        self.0.push_chunk(chunk)
+    }
+
+    pub(crate) fn finish(self) -> Vec<SqlStatementWithControl> {
+        self.0.finish()
+    }
+}
+
+impl StreamingSqlFileSplitterKind {
     fn new(db_type: Option<DatabaseType>, options: SqlParsingOptions) -> Self {
         if db_type == Some(DatabaseType::SqlServer) {
             Self::SqlServerBatches(SqlServerBatchSplitter::default())
@@ -1657,10 +1813,11 @@ async fn execute_sql_file_statement_batch(
         return Ok(());
     }
     let statements = std::mem::take(statements);
-    let planned_statements = optimize_controlled_sql_file_import_statements(
+    let planned_statements = plan_sql_file_statements(
         &statements,
         import_target.map(|target| target.db_type),
         import_target.and_then(|target| target.driver_profile.as_deref()),
+        request.txn_session_id.is_some(),
     );
     execute_planned_statements_with_progress(
         state,
@@ -1724,6 +1881,28 @@ fn split_sql_file_import_statements_with_control(
     let mut statements = splitter.push_chunk_with_control(file_content);
     statements.extend(splitter.finish_with_control());
     statements
+}
+
+fn plan_sql_file_statements(
+    statements: &[SqlStatementWithControl],
+    db_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+    manual: bool,
+) -> Vec<ControlledSqlFileImportStatement> {
+    if !manual {
+        return optimize_controlled_sql_file_import_statements(statements, db_type, driver_profile);
+    }
+    // Preserve each statement and its error boundary. The normal import path
+    // may merge INSERTs and retry them individually, which is not valid after
+    // a failed manual transaction has been rolled back.
+    statements
+        .iter()
+        .flat_map(|statement| {
+            optimize_sql_file_import_statements(std::slice::from_ref(&statement.sql), db_type, driver_profile)
+                .into_iter()
+                .map(|statement| ControlledSqlFileImportStatement { statement, stop_on_error: true })
+        })
+        .collect()
 }
 
 fn optimize_controlled_sql_file_import_statements(
@@ -2346,6 +2525,19 @@ async fn execute_sql_file_statement(
     token: &CancellationToken,
     statement_index: usize,
 ) -> Result<QueryResult, String> {
+    if let Some(session_id) = request.txn_session_id.as_deref() {
+        let schema = sql_file_transaction_schema(state, request).await?;
+        let mut results =
+            execute_in_manual_transaction(state, session_id, sql, &request.database, schema.as_deref(), Some(1))
+                .await?
+                .into_iter();
+        let mut result = results.next().ok_or("SQL file statement returned no result")?;
+        for next in results {
+            result.affected_rows += next.affected_rows;
+            result.execution_time_ms += next.execution_time_ms;
+        }
+        return Ok(result);
+    }
     let execution_id = sql_file_statement_execution_id(&request.execution_id, statement_index);
     let registered = state.running_queries.register(execution_id.clone());
     let child_token = registered.token();
@@ -2453,6 +2645,53 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_SQL_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn manual_file_plan_keeps_insert_error_boundaries() {
+        let statements = split_sql_file_import_statements_with_control(
+            "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);",
+            Some(DatabaseType::Postgres),
+            None,
+        );
+        let optimized = plan_sql_file_statements(&statements, Some(DatabaseType::Postgres), None, false);
+        assert_eq!(optimized.len(), 1);
+        let manual = plan_sql_file_statements(&statements, Some(DatabaseType::Postgres), None, true);
+        assert_eq!(manual.len(), 2);
+        assert!(manual.iter().all(|item| item.stop_on_error && item.statement.source_statement_count == 1));
+        assert_eq!(manual[0].statement.sql, statements[0].sql);
+        assert_eq!(manual[1].statement.sql, statements[1].sql);
+    }
+
+    #[tokio::test]
+    async fn manual_file_missing_session_never_falls_back_to_ordinary_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::storage::Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let request = SqlFileRequest {
+            txn_session_id: Some("expired-session".to_string()),
+            execution_id: "file-missing-session".to_string(),
+            connection_id: "unconfigured".to_string(),
+            database: String::new(),
+            file_path: String::new(),
+            continue_on_error: false,
+            selected_tables: None,
+            part_cooldown_ms: 0,
+            skip_relational_constraints: false,
+        };
+        let mut events = Vec::new();
+        let error = execute_sql_file_content(
+            &state,
+            &request,
+            "INSERT INTO t VALUES (1);",
+            CancellationToken::new(),
+            Instant::now(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("transaction session not found"));
+        assert!(events.is_empty());
+    }
 
     async fn temporary_sql_file(bytes: &[u8]) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -2718,6 +2957,7 @@ mod tests {
         ] {
             let path = temporary_sql_file(&bytes).await;
             let request = SqlFileRequest {
+                txn_session_id: None,
                 execution_id: "file-progress".to_string(),
                 connection_id: "unconfigured".to_string(),
                 database: String::new(),
@@ -2894,6 +3134,59 @@ mod tests {
         tokio::fs::remove_file(path).await.unwrap();
 
         assert_eq!(decoded, "SELECT '中文';");
+    }
+
+    #[tokio::test]
+    async fn streaming_import_prefers_utf8_bom_over_explicit_gbk() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("INSERT INTO t VALUES ('中文');".as_bytes());
+        let path = temporary_sql_file(&bytes).await;
+        let mut decoder =
+            SqlFileStreamDecoder::open_for_import(&path, Some(encoding_rs::GBK), false, None).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoder.encoding(), encoding_rs::UTF_8);
+        assert_eq!(decoded, "INSERT INTO t VALUES ('中文');");
+    }
+
+    #[tokio::test]
+    async fn streaming_import_prefers_utf16le_bom_over_explicit_utf8() {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "SELECT '中文';".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let path = temporary_sql_file(&bytes).await;
+        let mut decoder =
+            SqlFileStreamDecoder::open_for_import(&path, Some(encoding_rs::UTF_8), false, None).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoder.encoding(), encoding_rs::UTF_16LE);
+        assert_eq!(decoded, "SELECT '中文';");
+    }
+
+    #[tokio::test]
+    async fn streaming_import_uses_explicit_encoding_without_bom() {
+        let sql = "INSERT INTO t VALUES ('中文');";
+        let (encoded, _, _) = encoding_rs::GBK.encode(sql);
+        let path = temporary_sql_file(encoded.as_ref()).await;
+        let mut decoder =
+            SqlFileStreamDecoder::open_for_import(&path, Some(encoding_rs::GBK), false, None).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoder.encoding(), encoding_rs::GBK);
+        assert_eq!(decoded, sql);
     }
 
     #[tokio::test]
@@ -3082,6 +3375,7 @@ mod tests {
         )
         .await;
         let request = SqlFileRequest {
+            txn_session_id: None,
             execution_id: "gauss-stop-on-error".to_string(),
             connection_id: "gauss-stream".to_string(),
             database: String::new(),

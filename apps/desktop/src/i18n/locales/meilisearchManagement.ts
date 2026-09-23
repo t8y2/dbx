@@ -106,6 +106,14 @@ const en = {
   taskOperationFinished: "Task operation finished with status {status}",
   taskPollingTimeout: "Task #{uid} is still pending after 60 seconds. Refresh manually to check it.",
   taskOutsideIndex: "This task does not belong to the current index.",
+  createIndex: "Create index",
+  createIndexUid: "Index UID",
+  createIndexPrimaryKey: "Primary key",
+  indexCreated: "Index created",
+  createIndexUidRequired: "Index UID is required.",
+  createIndexUidPlaceholder: "Enter index UID",
+  createIndexPrimaryKeyPlaceholder: "Optional primary key",
+  createIndexPrimaryKeyHelp: "Leave empty to set the primary key when adding the first document.",
 };
 
 const zhCN = {
@@ -217,6 +225,14 @@ const zhCN = {
   taskOperationFinished: "任务操作结束，状态为 {status}",
   taskPollingTimeout: "任务 #{uid} 在 60 秒后仍未完成，请手动刷新查看。",
   taskOutsideIndex: "该任务不属于当前索引。",
+  createIndex: "创建索引",
+  createIndexUid: "索引 UID",
+  createIndexPrimaryKey: "主键",
+  indexCreated: "索引已创建",
+  createIndexUidRequired: "索引 UID 不能为空。",
+  createIndexUidPlaceholder: "输入索引 UID",
+  createIndexPrimaryKeyPlaceholder: "可选，输入主键字段",
+  createIndexPrimaryKeyHelp: "留空时可在添加第一条文档时设置主键。",
 };
 
 export const meilisearchManagementMessages = {

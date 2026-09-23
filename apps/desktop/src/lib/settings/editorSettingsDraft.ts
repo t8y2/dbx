@@ -30,6 +30,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sortCompletionColumnsAlphabetically",
   "selectFirstCompletionOnOpen",
   "wordWrap",
+  "showWhitespace",
   "vimModeEnabled",
   "autoCloseBrackets",
   "sqlSemanticDiagnosticsMode",
@@ -52,6 +53,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
   "dataGridFilterEditorView",
+  "dataGridToolbarLayout",
   "dataGridKeepFilterEditorExpanded",
   "dataGridTextFilterPanelHeight",
   "defaultAutoKeepResults",
@@ -83,6 +85,8 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarBrowseObjectsOnDatabaseActivation",
   "openTabsRestoreMode",
   "disconnectTabHandlingMode",
+  "deleteConnectionTabHandlingMode",
+  "rememberConnectionDatabaseOnDelete",
   "dataTabReuseMode",
   "openDataTabsNextToActive",
   "prefillNewQueryWithSelect",
@@ -126,6 +130,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "clickTableNavigationTarget",
   "completionTriggerMode",
   "defaultTransactionMode",
+  "keepExplicitTransactionInAutoCommit",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];

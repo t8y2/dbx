@@ -122,9 +122,13 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  * `mqtt`) belong to the same group: brokers have no SQL engine, and their
  * workbench is the MQ/MQTT admin tab. The sidebar entry used to open a plain
  * SQL editor against a broker (issue #8415).
+ *
+ * Meilisearch exposes its own index search and management workspaces rather
+ * than a general-purpose SQL query surface, so the generic sidebar action is
+ * hidden there as well (issue #9609).
  */
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt" && dbType !== "meilisearch";
 }
 
 /**

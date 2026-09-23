@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "../../editor/queryEditorExecutionViewport";
 
-const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
+const queryEditorSource = ["QueryEditor.vue", "useQueryEditorExecution.ts"].map((file) => readFileSync(new URL(`../../../components/editor/${file}`, import.meta.url), "utf8")).join("\n");
 const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
 const editorToolbarSource = readFileSync(new URL("../../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
 const editorGroupSource = readFileSync(new URL("../../../components/layout/EditorGroup.vue", import.meta.url), "utf8");
@@ -32,7 +32,10 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain("function executeFromContextMenu()");
     expect(queryEditorSource).toContain("requestExecute();\n  focusEditor();");
     expect(queryEditorSource).toContain("function executeSqlStatementFromGutter");
-    expect(queryEditorSource).toContain("emitExecutionRequest({ ...sqlExecutionSnapshotForRange(currentView, statementRange), editorViewportRequestId })");
+    expect(queryEditorSource).toContain("const hasSelectedSql = !selection.empty && currentView.state.sliceDoc(selection.from, selection.to).trim().length > 0;");
+    expect(queryEditorSource).toContain("const selectionOverlapsStatement = hasSelectedSql && selection.from < statementRange.to && statementRange.from < selection.to;");
+    expect(queryEditorSource).toContain("const executionSnapshot = selectionOverlapsStatement ? sqlExecutionSnapshotFromView(currentView) : sqlExecutionSnapshotForRange(currentView, statementRange);");
+    expect(queryEditorSource).toContain("emitExecutionRequest({ ...executionSnapshot, editorViewportRequestId })");
   });
 
   it("routes the new-result-tab shortcut through the same target selection contract", () => {
@@ -97,7 +100,9 @@ describe("QueryEditor execution routing", () => {
 
   it("preserves the source range when executing from the statement gutter", () => {
     expect(queryEditorSource).toContain("const editorViewportRequestId = executionViewportOwnership.beginRequest()");
-    expect(queryEditorSource).toContain("emitExecutionRequest({ ...sqlExecutionSnapshotForRange(currentView, statementRange), editorViewportRequestId })");
+    expect(queryEditorSource).toContain("sqlExecutionSnapshotFromView(currentView)");
+    expect(queryEditorSource).toContain("sqlExecutionSnapshotForRange(currentView, statementRange)");
+    expect(queryEditorSource).toContain("emitExecutionRequest({ ...executionSnapshot, editorViewportRequestId })");
     expect(queryEditorSource).not.toContain('emit("execute", statementRange.sql)');
   });
 
@@ -143,7 +148,7 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain("shouldBlockExecutionShortcut(event, currentView)");
     expect(queryEditorSource).toContain("if (props.readOnly) return true;");
     expect(queryEditorSource).toContain("settingsStore.editorSettings.sqlShortcuts");
-    expect(queryEditorSource).toContain("runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap))");
+    expect(queryEditorSource).toContain("runKeymapComp.reconfigure(runKeymapExtension(codeMirrorRuntime.editorViewModule.keymap))");
   });
 });
 

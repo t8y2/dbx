@@ -1,5 +1,5 @@
 import { ref, shallowRef } from "vue";
-import type { TreeNode } from "@/types/database";
+import type { DatabaseType, TreeNode } from "@/types/database";
 import type { PasteTableMode } from "@/lib/table/tableClipboard";
 import { fallbackCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
@@ -24,7 +24,7 @@ export const deleteConnectionsWithGroup = ref(false);
 export const showTableVGroupDialog = ref(false);
 export const tableVGroupName = ref("");
 /** Scope snapshot + creation payload for the table vgroup naming dialog. */
-export const tableVGroupDialogScope = shallowRef<TableVGroupScope | null>(null);
+export const tableVGroupDialogScope = shallowRef<TreeNode | null>(null);
 export const tableVGroupDialogParentGroupId = ref<string | null>(null);
 export const tableVGroupDialogTableNames = ref<string[]>([]);
 export const showTableVGroupDeleteConfirm = ref(false);
@@ -39,7 +39,7 @@ export const showBatchTruncateConfirm = ref(false);
 export const showStructurePreviewDialog = ref(false);
 export const showStructureDocCopyDialog = ref(false);
 export const structurePreviewSql = ref("");
-export const structurePreviewHasOceanBase = ref(false);
+export const structurePreviewDdlStorageType = ref<DatabaseType | undefined>(undefined);
 export const structurePreviewTitle = ref("");
 export const structurePreviewDefaultFileName = ref("structure.sql");
 export const structurePreviewError = ref("");
@@ -133,6 +133,11 @@ export const dropMongoIndexLoading = ref(false);
 export const showDropAllMongoIndexesConfirm = ref(false);
 export const dropAllMongoIndexesLoading = ref(false);
 export const showCreateMongoIndexDialog = ref(false);
+export const showCreateMeilisearchIndexDialog = ref(false);
+export const meilisearchCreateIndexUid = ref("");
+export const meilisearchCreateIndexPrimaryKey = ref("");
+export const meilisearchCreateIndexError = ref("");
+export const meilisearchCreateIndexLoading = ref(false);
 
 function emptyMongoCreateIndexForm(): MongoCreateIndexForm {
   return {
@@ -234,6 +239,7 @@ const openFlags = [
   showDropMongoIndexConfirm,
   showDropAllMongoIndexesConfirm,
   showCreateMongoIndexDialog,
+  showCreateMeilisearchIndexDialog,
   showMongoIndexManagerDialog,
   showClearElasticsearchIndexConfirm,
   showFlushRedisDbConfirm,
@@ -268,6 +274,10 @@ export function resetSidebarTreeDialogState() {
   cloneMongoCollectionError.value = "";
   cloneMongoCollectionLoading.value = false;
   resetMongoCreateIndexForm();
+  meilisearchCreateIndexUid.value = "";
+  meilisearchCreateIndexPrimaryKey.value = "";
+  meilisearchCreateIndexError.value = "";
+  meilisearchCreateIndexLoading.value = false;
   resetMongoIndexManager();
   vacuumTableExecuting.value = false;
   sidebarTreeDialogOwner.value = null;

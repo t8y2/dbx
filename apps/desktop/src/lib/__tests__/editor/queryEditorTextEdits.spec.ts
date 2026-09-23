@@ -3,7 +3,9 @@ import { EditorSelection, EditorState } from "@codemirror/state";
 import { describe, expect, it, vi } from "vitest";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 
-const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
+const queryEditorSource = ["QueryEditor.vue", "useQueryEditorTextActions.ts"].map((file) => readFileSync(new URL(`../../../components/editor/${file}`, import.meta.url), "utf8")).join("\n");
+
+const contextMenuSource = readFileSync(new URL("../../../components/editor/QueryEditorContextMenu.vue", import.meta.url), "utf8");
 
 function applyBlankLineDeletion(doc: string, from: number, to: number): string {
   const state = EditorState.create({
@@ -27,7 +29,7 @@ describe("replaceSelectedEditorText", () => {
   });
 
   it("disables and guards delimited-list generation in QueryEditor", () => {
-    expect(queryEditorSource).toContain("disabled: props.readOnly || !canCopySelectedSql.value");
+    expect(contextMenuSource).toContain("disabled: state.readOnly || !canCopySelectedSql");
     expect(queryEditorSource).toMatch(/function openDelimitedListDialog\(\) \{\s+if \(props\.readOnly\) return;/);
     expect(queryEditorSource).toMatch(/function applyDelimitedListResult\(result: string\) \{[\s\S]*if \(!currentView \|\| props\.readOnly\) return;[\s\S]*replaceSelectedEditorText/);
   });

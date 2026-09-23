@@ -74,7 +74,14 @@ test("AI request failures use localized backend diagnostics", () => {
 
 test("AI analysis export keeps the connection that produced each assistant response", () => {
   assert.match(source, /sourceConnectionName\?: string/);
-  assert.match(source, /runMessages\.push\(\{ role: "assistant", content: "", sourceConnectionName: connection\.name \}\)/);
-  assert.match(source, /connectionName: msg\.sourceConnectionName \?\? props\.connection\?\.name/);
+  assert.match(source, /const runSourceName = runPluginContext\?\.pluginName \?\? connection\?\.name \?\? ""/);
+  // The assistant placeholder must record the connection that produced it. The
+  // literal also carries per-run fields (the frozen `sourceBinding` target,
+  // #9902), so pin the pair instead of the closing brace.
+  assert.match(source, /runMessages\.push\(\{ role: "assistant", content: "", sourceConnectionName: runSourceName,/);
+  assert.match(source, /sourceBinding: runBinding \}\);/);
+  // The fallback for a message that predates `sourceConnectionName` is the
+  // conversation's own bound connection, not whatever tab is visible (#9902).
+  assert.match(source, /connectionName: msg\.sourceConnectionName \?\? boundConnection\.value\?\.name/);
   assert.match(source, /sourceConnectionName: m\.role === "assistant" \? conv\.connectionName : undefined/);
 });

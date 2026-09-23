@@ -33,6 +33,8 @@ export interface DataGridSaveStatementOptions {
   dirtyRows: Array<[number, Array<[number, GridCellValue]>]>;
   deletedRows: number[];
   newRows: GridCellValue[][];
+  /** `生成 SQL 时包含数据库名`: qualify `database.table` engines in the save SQL. */
+  includeDatabaseName?: boolean;
 }
 
 export interface DataGridCopyUpdateStatementOptions {

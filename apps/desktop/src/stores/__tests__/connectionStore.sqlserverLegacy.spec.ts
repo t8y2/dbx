@@ -50,6 +50,7 @@ describe("connectionStore SQL Server legacy compatibility", () => {
       connectDb,
       installAgent,
       isAgentInstalled: vi.fn().mockResolvedValue(false),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
@@ -81,6 +82,7 @@ describe("connectionStore SQL Server legacy compatibility", () => {
       connectDb,
       installAgent,
       isAgentInstalled: vi.fn().mockResolvedValue(true),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");

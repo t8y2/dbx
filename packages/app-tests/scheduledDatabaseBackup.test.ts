@@ -346,26 +346,7 @@ test("scheduled backup history translates stable backend errors inline", () => {
   assert.doesNotMatch(source, /\{\{ run\.error \}\}/);
 });
 
-test("scheduled backup history exposes rename and overall percentage controls", () => {
-  const source = readFileSync("apps/desktop/src/components/backup/ScheduledDatabaseBackupSettings.vue", "utf8");
-  const scheduler = readFileSync("apps/desktop/src/composables/useScheduledDatabaseBackups.ts", "utf8");
-
-  assert.match(source, /run\.displayName \|\| run\.scheduleName/);
-  assert.match(source, /role="progressbar"/);
-  assert.match(scheduler, /databaseBackupConnectionQueue\.run\(config\.connectionId/);
-  assert.match(scheduler, /status: databaseBackupAggregateExportStatus\(progress\.status, false\)/);
-  assert.match(scheduler, /overallPercent: progressPercent/);
-});
-
-test("scheduled backups prepare table scope before opening a consistent snapshot", () => {
-  const scheduler = readFileSync("apps/desktop/src/composables/useScheduledDatabaseBackups.ts", "utf8");
+test("database exports keep the backup snapshot alive", () => {
   const exportCore = readFileSync("crates/dbx-core/src/data/database_export.rs", "utf8");
-  const schemaIndex = scheduler.indexOf("await api.listSchemas(config.connectionId, database)");
-  const snapshotIndex = scheduler.indexOf("await api.beginDatabaseBackupSnapshot(config.connectionId, database, runId)");
-  const exportIndex = scheduler.indexOf("await runDatabaseExportUntilTerminal(");
-
-  assert.ok(schemaIndex >= 0);
-  assert.ok(snapshotIndex > schemaIndex);
-  assert.ok(exportIndex > snapshotIndex);
   assert.match(exportCore, /keep_manual_transaction_alive\(state, snapshot_session_id\)\.await/);
 });

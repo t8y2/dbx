@@ -3,6 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine;
 use chrono::Utc;
@@ -123,6 +124,41 @@ struct PluginPackageSignature {
     signature: String,
 }
 
+/// Where an installed plugin came from. Recorded with every activation so an update can detect a
+/// changed repository / publisher / signing key instead of silently replacing the plugin.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_key_id: Option<String>,
+    #[serde(default)]
+    pub source: PluginInstallSource,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginInstallSource {
+    Marketplace,
+    Url,
+    File,
+    #[default]
+    Unknown,
+}
+
+/// The active installation of one plugin id: the semver activation version plus whatever
+/// provenance was recorded when it was installed. Provenance is `None` for installs made before
+/// provenance existed (and for legacy migrated containers); those stay unconstrained until the
+/// next install records fresh provenance.
+#[derive(Debug, Clone)]
+pub(crate) struct PluginInstallIdentity {
+    pub version: String,
+    pub provenance: Option<PluginInstallProvenance>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PluginActivationRecord {
@@ -132,6 +168,8 @@ struct PluginActivationRecord {
     previous_version: Option<String>,
     package_sha256: String,
     activated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provenance: Option<PluginInstallProvenance>,
 }
 
 pub struct PluginPackageInstaller {
@@ -145,9 +183,54 @@ pub struct PluginPackageInstaller {
 pub(super) struct PluginPackageExpectation {
     pub id: String,
     pub version: String,
+    pub repository_id: Option<String>,
     pub publisher: String,
     pub permissions: BTreeSet<String>,
     pub signing_key_id: String,
+}
+
+/// Read-only identity lookup for one plugin id under the store root: the activation version plus
+/// the recorded provenance. Free function so the marketplace pre-flight can call it without
+/// constructing an installer (which would load the user trust store as a side effect).
+pub(crate) fn read_install_identity(root_dir: &Path, plugin_id: &str) -> Result<Option<PluginInstallIdentity>, String> {
+    validate_plugin_id(plugin_id)?;
+    let Some(record) = read_latest_activation(&root_dir.join(plugin_id))? else { return Ok(None) };
+    Ok(Some(PluginInstallIdentity { version: record.version, provenance: record.provenance }))
+}
+
+/// Rejects an update whose repository / publisher / signing key differs from the recorded
+/// provenance, or that would downgrade below the active version, unless `allow` is set (the
+/// user confirmed the change in the UI). The marketplace pre-flight calls this before any
+/// download; `install_bytes_locked` re-checks under the store lock.
+pub(crate) fn ensure_update_continuity(
+    provenance: &PluginInstallProvenance,
+    active_version: &str,
+    repository_id: Option<&str>,
+    publisher: &str,
+    signing_key_id: &str,
+    candidate_version: &str,
+    allow: bool,
+) -> Result<(), String> {
+    // Compare against the activation version (always semver); a legacy manifest version string
+    // that fails to parse simply skips the downgrade check.
+    if let (Ok(active), Ok(candidate)) = (Version::parse(active_version), Version::parse(candidate_version)) {
+        if candidate < active && !allow {
+            return Err(format!(
+                "Plugin downgrade to version {candidate_version} is not allowed (installed {active_version})"
+            ));
+        }
+    }
+    let repository_changed =
+        provenance.repository_id.as_deref().is_some_and(|recorded| Some(recorded) != repository_id);
+    let publisher_changed = provenance.publisher.as_deref().is_some_and(|recorded| recorded != publisher);
+    let key_changed = provenance.signing_key_id.as_deref().is_some_and(|recorded| recorded != signing_key_id);
+    if (repository_changed || publisher_changed || key_changed) && !allow {
+        return Err(
+            "Plugin update source change requires confirmation: the offering repository, publisher, or signing key differs from the recorded install"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 impl PluginTrustStore {
@@ -291,22 +374,33 @@ impl PluginPackageInstaller {
     }
 
     pub fn install_bytes(&self, package: &[u8], policy: PluginInstallPolicy) -> Result<PluginInstallResult, String> {
-        self.install_bytes_with_expectation(package, policy, None)
+        self.install_bytes_with_expectation(package, policy, None, PluginInstallSource::File, false)
     }
 
     pub(super) fn install_marketplace_bytes(
         &self,
         package: &[u8],
         expectation: &PluginPackageExpectation,
+        allow_source_change: bool,
     ) -> Result<PluginInstallResult, String> {
-        self.install_bytes_with_expectation(package, PluginInstallPolicy::LocalSigned, Some(expectation))
+        self.install_bytes_with_expectation(
+            package,
+            PluginInstallPolicy::LocalSigned,
+            Some(expectation),
+            PluginInstallSource::Marketplace,
+            allow_source_change,
+        )
     }
 
-    fn install_bytes_with_expectation(
+    /// Shared entry point for every install path: `PluginPackageExpectation` (and therefore this
+    /// signature) stays inside the `plugins` module, exactly like the expectation type.
+    pub(super) fn install_bytes_with_expectation(
         &self,
         package: &[u8],
         policy: PluginInstallPolicy,
         expectation: Option<&PluginPackageExpectation>,
+        source: PluginInstallSource,
+        allow_source_change: bool,
     ) -> Result<PluginInstallResult, String> {
         if package.len() > MAX_PLUGIN_PACKAGE_BYTES {
             return Err(format!("Plugin package exceeds {MAX_PLUGIN_PACKAGE_BYTES} bytes"));
@@ -314,7 +408,7 @@ impl PluginPackageInstaller {
         std::fs::create_dir_all(&self.root_dir).map_err(|error| error.to_string())?;
         let lock = open_install_lock(&self.root_dir)?;
         lock.lock_exclusive().map_err(|error| format!("Failed to lock plugin store: {error}"))?;
-        let result = self.install_bytes_locked(package, policy, expectation);
+        let result = self.install_bytes_locked(package, policy, expectation, source, allow_source_change);
         let _ = FileExt::unlock(&lock);
         result
     }
@@ -343,11 +437,18 @@ impl PluginPackageInstaller {
         result
     }
 
+    /// Recorded provenance of one container's active installation, if any.
+    pub(super) fn read_container_provenance(container_dir: &Path) -> Result<Option<PluginInstallProvenance>, String> {
+        Ok(read_latest_activation(container_dir)?.and_then(|record| record.provenance))
+    }
+
     fn install_bytes_locked(
         &self,
         package: &[u8],
         policy: PluginInstallPolicy,
         expectation: Option<&PluginPackageExpectation>,
+        source: PluginInstallSource,
+        allow_source_change: bool,
     ) -> Result<PluginInstallResult, String> {
         let package_sha256 = sha256_hex(package);
         let staging = tempfile::Builder::new()
@@ -393,6 +494,26 @@ impl PluginPackageInstaller {
         let version_string = version.to_string();
         let version_dir = versions_dir.join(&version_string);
         let current = read_latest_activation(&container_dir)?;
+        // Update continuity (crate::plugins::installer::ensure_update_continuity): a marketplace
+        // update whose recorded repository / publisher / signing key differs from the offering one,
+        // or that would downgrade the active version, is rejected unless the user explicitly
+        // confirmed. Installs without recorded provenance stay unconstrained until the next
+        // install records fresh provenance.
+        if let (Some(expectation), Some(record)) = (expectation, current.as_ref()) {
+            if !matches!(policy, PluginInstallPolicy::LocalDevelopment) {
+                if let Some(provenance) = &record.provenance {
+                    ensure_update_continuity(
+                        provenance,
+                        &record.version,
+                        expectation.repository_id.as_deref(),
+                        &expectation.publisher,
+                        &expectation.signing_key_id,
+                        &version_string,
+                        allow_source_change,
+                    )?;
+                }
+            }
+        }
         // Only the version the newest activation record resolves to *and* that is still a usable
         // install counts as "already installed". Directory existence alone is not enough: rollback
         // deliberately retains the version it replaces as the next rollback target, so an
@@ -434,28 +555,53 @@ impl PluginPackageInstaller {
         } else {
             None
         };
-        if let Err(error) = std::fs::rename(&package_dir, &version_dir) {
+        if let Err(error) = rename_with_transient_lock_retry(&package_dir, &version_dir) {
             let mut message = format!("Failed to store plugin '{}' version {}: {error}", manifest.id, version);
             if let Some(backup) = &replaced_version_dir {
-                if let Err(restore) = std::fs::rename(backup, &version_dir) {
+                if let Err(restore) = rename_with_transient_lock_retry(backup, &version_dir) {
                     message.push_str(&format!("; previous copy kept at {}: {restore}", backup.display()));
                 }
             }
             return Err(message);
         }
 
+        let provenance = match expectation {
+            Some(expectation) => PluginInstallProvenance {
+                repository_id: expectation.repository_id.clone(),
+                publisher: Some(expectation.publisher.clone()),
+                signing_key_id: Some(expectation.signing_key_id.clone()),
+                source: PluginInstallSource::Marketplace,
+            },
+            None => {
+                let previous = current.as_ref().and_then(|record| record.provenance.as_ref());
+                PluginInstallProvenance {
+                    // A file/URL replacement carries the recorded repository forward so a
+                    // non-marketplace overwrite cannot silently erase a marketplace install's
+                    // source identity; publisher and signing key record what is actually
+                    // being installed now.
+                    repository_id: previous.and_then(|provenance| provenance.repository_id.clone()),
+                    publisher: Some(manifest.publisher.clone()),
+                    signing_key_id: match &signature {
+                        PluginSignatureStatus::Trusted { key_id } => Some(key_id.clone()),
+                        PluginSignatureStatus::Unsigned => None,
+                    },
+                    source,
+                }
+            }
+        };
         let activation = PluginActivationRecord {
             sequence: current.as_ref().map_or(1, |record| record.sequence.saturating_add(1)),
             version: version_string,
             previous_version: previous_version.clone(),
             package_sha256: package_sha256.clone(),
             activated_at: Utc::now().to_rfc3339(),
+            provenance: Some(provenance),
         };
         if let Err(error) = write_activation_record(&container_dir, &activation) {
             let _ = std::fs::remove_dir_all(&version_dir);
             let mut message = error;
             if let Some(backup) = &replaced_version_dir {
-                if let Err(restore) = std::fs::rename(backup, &version_dir) {
+                if let Err(restore) = rename_with_transient_lock_retry(backup, &version_dir) {
                     message.push_str(&format!("; previous copy kept at {}: {restore}", backup.display()));
                 }
             }
@@ -469,7 +615,8 @@ impl PluginPackageInstaller {
         if let Err(error) = prune_plugin_history(&container_dir, &activation) {
             log::warn!("Failed to prune plugin '{}' install history: {error}", manifest.id);
         }
-        let plugin = InstalledPlugin::new(manifest, version_dir, &self.app_version);
+        let plugin = InstalledPlugin::new(manifest, version_dir, &self.app_version)
+            .with_provenance(activation.provenance.clone());
         Ok(PluginInstallResult { plugin, previous_version, package_sha256, signature, _update_guard: update_guard })
     }
 
@@ -500,13 +647,18 @@ impl PluginPackageInstaller {
             ));
         }
         let target_record = read_latest_activation_for_version(&container_dir, &previous_version)?;
+        let plugin = plugin.with_provenance(target_record.as_ref().and_then(|record| record.provenance.clone()));
         let activation = PluginActivationRecord {
             sequence: current.sequence.saturating_add(1),
             version: previous_version.clone(),
             previous_version: Some(current.version),
             package_sha256: target_record
-                .map_or_else(|| "legacy-unmanaged".to_string(), |record| record.package_sha256),
+                .as_ref()
+                .map_or_else(|| "legacy-unmanaged".to_string(), |record| record.package_sha256.clone()),
             activated_at: Utc::now().to_rfc3339(),
+            // Roll the target version's own provenance forward: a rollback re-activates that
+            // version, so its recorded source identity is the truthful one to keep guarding with.
+            provenance: target_record.as_ref().and_then(|record| record.provenance.clone()),
         };
         write_activation_record(&container_dir, &activation)?;
         if let Err(error) = prune_plugin_history(&container_dir, &activation) {
@@ -853,6 +1005,7 @@ fn migrate_legacy_container(container_dir: &Path) -> Result<(), String> {
                 previous_version: None,
                 package_sha256: "legacy-unmanaged".to_string(),
                 activated_at: Utc::now().to_rfc3339(),
+                provenance: None,
             },
         )
     })();
@@ -905,6 +1058,34 @@ fn open_install_lock(root_dir: &Path) -> Result<File, String> {
         .truncate(false)
         .open(root_dir.join(INSTALL_LOCK_FILE))
         .map_err(|error| error.to_string())
+}
+
+// Antivirus scanners briefly hold handles on freshly extracted plugin binaries, which fails
+// directory renames with ERROR_ACCESS_DENIED (5) or ERROR_SHARING_VIOLATION (32); the scan
+// normally finishes well inside this retry window.
+const TRANSIENT_LOCK_RETRY_DELAYS: [Duration; 3] =
+    [Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
+
+fn rename_with_transient_lock_retry(src: &Path, dst: &Path) -> std::io::Result<()> {
+    retry_transient_lock(&TRANSIENT_LOCK_RETRY_DELAYS, || std::fs::rename(src, dst))
+}
+
+fn retry_transient_lock<T>(
+    delays: &[Duration],
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    for delay in delays {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if cfg!(windows) && is_windows_lock_error(&error) => std::thread::sleep(*delay),
+            Err(error) => return Err(error),
+        }
+    }
+    operation()
+}
+
+fn is_windows_lock_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32))
 }
 
 fn make_backend_executable(path: &Option<PathBuf>) -> Result<(), String> {
@@ -1018,15 +1199,17 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{Cursor, Write};
     use std::path::Path;
+    use std::time::Duration;
 
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
     use zip::write::SimpleFileOptions;
 
     use super::{
-        is_activation_record_file, sha256_hex, validate_package_expectation, PluginInstallPolicy,
-        PluginPackageExpectation, PluginPackageInstaller, PluginSignatureStatus, PluginTrustStore, ACTIVATIONS_DIR,
-        PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE, VERSIONS_DIR,
+        is_activation_record_file, read_install_identity, retry_transient_lock, sha256_hex,
+        validate_package_expectation, PluginInstallPolicy, PluginPackageExpectation, PluginPackageInstaller,
+        PluginSignatureStatus, PluginTrustStore, ACTIVATIONS_DIR, PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE,
+        VERSIONS_DIR,
     };
     use crate::plugins::{PluginManifest, PluginRegistry};
 
@@ -1092,15 +1275,19 @@ mod tests {
             .unwrap_err()
             .contains("active operations"));
         let expectation = PluginPackageExpectation {
+            repository_id: None,
             id: "sample.hello".to_string(),
             version: "1.1.0".to_string(),
             publisher: "sample".to_string(),
             permissions: BTreeSet::from(["host.events".to_string()]),
             signing_key_id: "test".to_string(),
         };
-        assert!(installer.install_marketplace_bytes(&bytes, &expectation).unwrap_err().contains("active operations"));
+        assert!(installer
+            .install_marketplace_bytes(&bytes, &expectation, false)
+            .unwrap_err()
+            .contains("active operations"));
         drop(operation);
-        installer.install_marketplace_bytes(&bytes, &expectation).unwrap();
+        installer.install_marketplace_bytes(&bytes, &expectation, false).unwrap();
         assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.1.0");
     }
 
@@ -1287,6 +1474,7 @@ mod tests {
         let trust = PluginTrustStore::from_base64_keys(keys).unwrap();
         let installer = PluginPackageInstaller::with_trust_store(root.path().to_path_buf(), "0.5.67", trust);
         let expectation = PluginPackageExpectation {
+            repository_id: None,
             id: "sample.hello".to_string(),
             version: "1.0.0".to_string(),
             publisher: "sample".to_string(),
@@ -1294,10 +1482,10 @@ mod tests {
             signing_key_id: "sample-key".to_string(),
         };
         let unsigned = package("1.0.0", None, false);
-        assert!(installer.install_marketplace_bytes(&unsigned, &expectation).is_err());
+        assert!(installer.install_marketplace_bytes(&unsigned, &expectation, false).is_err());
 
         let signed = package("1.0.0", Some((&signing_key, "sample-key")), false);
-        let result = installer.install_marketplace_bytes(&signed, &expectation).unwrap();
+        let result = installer.install_marketplace_bytes(&signed, &expectation, false).unwrap();
         assert_eq!(result.signature, PluginSignatureStatus::Trusted { key_id: "sample-key".to_string() });
     }
 
@@ -1410,6 +1598,7 @@ mod tests {
         .unwrap();
         let signature = PluginSignatureStatus::Trusted { key_id: "sample-key".to_string() };
         let expectation = PluginPackageExpectation {
+            repository_id: None,
             id: "sample.hello".to_string(),
             version: "1.0.0".to_string(),
             publisher: "sample".to_string(),
@@ -1490,6 +1679,146 @@ mod tests {
         (installer, signing_key)
     }
 
+    #[test]
+    fn rejects_source_changed_update_unless_confirmed() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [21u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+        let expectation = |repository: &str, version: &str| PluginPackageExpectation {
+            id: "sample.hello".to_string(),
+            version: version.to_string(),
+            repository_id: Some(repository.to_string()),
+            publisher: "sample".to_string(),
+            permissions: BTreeSet::from(["host.events".to_string()]),
+            signing_key_id: "sample-key".to_string(),
+        };
+
+        installer.install_marketplace_bytes(&signed("1.0.0"), &expectation("repo-a", "1.0.0"), false).unwrap();
+
+        // The recorded install came from repo-a; a repo-b update needs the explicit confirmation.
+        let rejected =
+            installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("repo-b", "1.1.0"), false).unwrap_err();
+        assert!(rejected.contains("source change requires confirmation"), "{rejected}");
+        assert_eq!(read_install_identity(root.path(), "sample.hello").unwrap().unwrap().version, "1.0.0");
+
+        let confirmed =
+            installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("repo-b", "1.1.0"), true).unwrap();
+        assert_eq!(
+            confirmed.plugin.provenance.as_ref().and_then(|provenance| provenance.repository_id.clone()).as_deref(),
+            Some("repo-b")
+        );
+
+        // A downgrade below the confirmed active version needs the same explicit confirmation.
+        let downgraded =
+            installer.install_marketplace_bytes(&signed("1.0.5"), &expectation("repo-b", "1.0.5"), false).unwrap_err();
+        assert!(downgraded.contains("downgrade"), "{downgraded}");
+    }
+
+    #[test]
+    fn rollback_carries_the_target_versions_provenance_forward() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [22u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+        let expectation = |repository: &str, version: &str| PluginPackageExpectation {
+            id: "sample.hello".to_string(),
+            version: version.to_string(),
+            repository_id: Some(repository.to_string()),
+            publisher: "sample".to_string(),
+            permissions: BTreeSet::from(["host.events".to_string()]),
+            signing_key_id: "sample-key".to_string(),
+        };
+
+        installer.install_marketplace_bytes(&signed("1.0.0"), &expectation("repo-a", "1.0.0"), false).unwrap();
+        installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("repo-b", "1.1.0"), true).unwrap();
+        assert_eq!(installer.rollback("sample.hello").unwrap().previous_version, "1.0.0");
+
+        // After rolling back to the repo-a version, the recorded provenance is repo-a again, so a
+        // repo-a update proceeds without confirmation while repo-b still requires one.
+        let identity = read_install_identity(root.path(), "sample.hello").unwrap().unwrap();
+        assert_eq!(identity.version, "1.0.0");
+        assert_eq!(identity.provenance.and_then(|provenance| provenance.repository_id), Some("repo-a".to_string()));
+        installer.install_marketplace_bytes(&signed("1.2.0"), &expectation("repo-a", "1.2.0"), false).unwrap();
+        let rejected =
+            installer.install_marketplace_bytes(&signed("1.3.0"), &expectation("repo-b", "1.3.0"), false).unwrap_err();
+        assert!(rejected.contains("source change requires confirmation"), "{rejected}");
+    }
+
+    /// Rewrites the newest activation record without its `provenance` field: the on-disk shape an
+    /// activation written by a build that predates provenance has.
+    fn strip_latest_activation_provenance(container: &Path) {
+        let mut records = std::fs::read_dir(container.join(ACTIVATIONS_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| is_activation_record_file(path))
+            .collect::<Vec<_>>();
+        records.sort();
+        let path = records.pop().expect("activation record");
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(value.as_object_mut().unwrap().remove("provenance").is_some());
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_pre_provenance_activation_stays_unconstrained_until_the_next_install() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [23u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+        let expectation = |repository: &str, version: &str| PluginPackageExpectation {
+            id: "sample.hello".to_string(),
+            version: version.to_string(),
+            repository_id: Some(repository.to_string()),
+            publisher: "sample".to_string(),
+            permissions: BTreeSet::from(["host.events".to_string()]),
+            signing_key_id: "sample-key".to_string(),
+        };
+
+        installer.install_marketplace_bytes(&signed("1.0.0"), &expectation("repo-a", "1.0.0"), false).unwrap();
+        strip_latest_activation_provenance(&root.path().join("sample.hello"));
+
+        // An activation record without provenance still parses (serde default) and records no source.
+        let identity = read_install_identity(root.path(), "sample.hello").unwrap().unwrap();
+        assert_eq!(identity.version, "1.0.0");
+        assert!(identity.provenance.is_none());
+
+        // Nothing was recorded, so the next install from any repository proceeds without a
+        // confirmation and starts recording provenance again.
+        let updated =
+            installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("repo-b", "1.1.0"), false).unwrap();
+        assert_eq!(
+            updated.plugin.provenance.and_then(|provenance| provenance.repository_id).as_deref(),
+            Some("repo-b")
+        );
+    }
+
+    #[test]
+    fn updating_a_plugin_leaves_its_data_directory_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        // The registry root sits beside plugin-data/, exactly like the app layout, so
+        // `PluginRegistry::plugin_data_dir("sample.hello")` resolves to the path below.
+        let plugins_root = root.path().join("plugins");
+        let (installer, signing_key) = signed_installer(&plugins_root, [24u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+        let expectation = |repository: &str, version: &str| PluginPackageExpectation {
+            id: "sample.hello".to_string(),
+            version: version.to_string(),
+            repository_id: Some(repository.to_string()),
+            publisher: "sample".to_string(),
+            permissions: BTreeSet::from(["host.events".to_string()]),
+            signing_key_id: "sample-key".to_string(),
+        };
+
+        installer.install_marketplace_bytes(&signed("1.0.0"), &expectation("repo-a", "1.0.0"), false).unwrap();
+        let data_dir = root.path().join("plugin-data").join("sample.hello");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("state.json"), b"{\"rows\":1}").unwrap();
+
+        installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("repo-a", "1.1.0"), false).unwrap();
+        installer.rollback("sample.hello").unwrap();
+
+        // Plugin user data lives outside the versioned container and must survive update + rollback.
+        assert_eq!(std::fs::read(data_dir.join("state.json")).unwrap(), b"{\"rows\":1}");
+    }
+
     fn activation_record_count(container: &Path) -> usize {
         std::fs::read_dir(container.join(ACTIVATIONS_DIR))
             .unwrap()
@@ -1512,6 +1841,7 @@ mod tests {
         let (installer, signing_key) = signed_installer(root.path(), [13u8; 32]);
         let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
         let expectation = |version: &str| PluginPackageExpectation {
+            repository_id: None,
             id: "sample.hello".to_string(),
             version: version.to_string(),
             publisher: "sample".to_string(),
@@ -1519,13 +1849,13 @@ mod tests {
             signing_key_id: "sample-key".to_string(),
         };
 
-        installer.install_marketplace_bytes(&signed("1.0.0"), &expectation("1.0.0")).unwrap();
-        installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("1.1.0")).unwrap();
+        installer.install_marketplace_bytes(&signed("1.0.0"), &expectation("1.0.0"), false).unwrap();
+        installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("1.1.0"), false).unwrap();
         assert_eq!(installer.rollback("sample.hello").unwrap().previous_version, "1.0.0");
 
         // 1.1.0 is installed but inactive after the rollback: reinstalling it has to replace the
         // retained directory instead of failing with "already installed".
-        let reinstalled = installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("1.1.0")).unwrap();
+        let reinstalled = installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("1.1.0"), false).unwrap();
 
         assert_eq!(reinstalled.previous_version.as_deref(), Some("1.0.0"));
         let container = root.path().join("sample.hello");
@@ -1701,5 +2031,66 @@ mod tests {
             zip.finish().unwrap();
         }
         output.into_inner()
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn transient_lock_retry_recovers_from_windows_lock_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for code in [5, 32] {
+            let attempts = AtomicUsize::new(0);
+            let result = retry_transient_lock(&[Duration::ZERO, Duration::ZERO, Duration::ZERO], || {
+                if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(std::io::Error::from_raw_os_error(code))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_ok());
+            assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn transient_lock_retry_returns_last_error_after_exhausting_delays() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: std::io::Result<()> = retry_transient_lock(&[Duration::ZERO], || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::from_raw_os_error(5))
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(5));
+    }
+
+    #[test]
+    fn transient_lock_retry_does_not_retry_other_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: std::io::Result<()> = retry_transient_lock(&[Duration::ZERO; 3], || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::from_raw_os_error(2))
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn transient_lock_retry_treats_windows_lock_codes_as_final_on_unix() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Raw code 5 on Unix is EIO, not a Windows lock error, so the retry gate must leave it final.
+        let attempts = AtomicUsize::new(0);
+        let result: std::io::Result<()> = retry_transient_lock(&[Duration::ZERO; 3], || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::from_raw_os_error(5))
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(5));
     }
 }

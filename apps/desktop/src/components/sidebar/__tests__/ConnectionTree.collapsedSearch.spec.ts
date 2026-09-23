@@ -7,8 +7,12 @@ const source = readFileSync(new URL("../ConnectionTree.vue", import.meta.url), "
 describe("ConnectionTree global search loading", () => {
   it("discovers collapsed database and schema containers before searching object groups", () => {
     expect(source).toContain("function isSidebarSearchContainer(node: TreeNode)");
-    expect(source).toMatch(/isSidebarSearchContainer\(node\) && !node\.children\?\.length/);
-    expect(source).toContain("store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery })");
+    // A collapsed database already holds the saved-SQL root, so it has children
+    // even when its object groups were never fetched; the search has to look for
+    // a searchable group instead of an empty child list.
+    expect(source).toMatch(/isSidebarSearchContainer\(node\) && needsSidebarObjectGroupDiscovery\(node, searchableObjectGroupTypes\)/);
+    expect(source).not.toMatch(/isSidebarSearchContainer\(node\) && !node\.children\?\.length/);
+    expect(source).toContain("store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery, sidebarSearch: true })");
     expect(source).toContain("searchExpansionState.markFiltered(node.id, wasCollapsed)");
     expect(source).toMatch(/if \(refreshedNodeIds && node\.children\) \{[\s\S]*?searchableObjectGroupTypes\.has\(child\.type\)/);
   });
@@ -19,6 +23,26 @@ describe("ConnectionTree global search loading", () => {
     expect(source).toContain("const restoreTasks = !newQuery && oldQuery ? restoreTrackedSearchTargets() : [];");
     expect(source).toContain("if (shouldCollapse) node.isExpanded = false;");
     expect(source).toContain("store.discardFilteredTreeNodeChildren(node.id);");
+  });
+
+  it("restores the pre-search children of an expanded group instead of reloading page one", () => {
+    // Clearing a remote search must put back the pages the user had loaded
+    // through "load more"; only an uncaptured group falls back to a reload.
+    expect(source).toContain("} else if (!store.restoreFilteredObjectGroupChildren(node)) {");
+    expect(source).toMatch(/restoreFilteredObjectGroupChildren\(node\)\) \{[\s\S]*?tasks\.push\(\(\) => store\.loadObjectGroupChildren\(node, \{ force: true, sidebarSearch: true \}\)\);/);
+  });
+
+  it("never lets the global search connect a connection on the user's behalf", () => {
+    // Searching the sidebar is a background projection. Reconnecting here is what
+    // surfaced a raw SQL Server TLS/login error for a connection whose saved
+    // database no longer exists, so only already-connected connections may be
+    // refreshed and every search-driven load is tagged for the store.
+    expect(source).toContain("const connectionIsConnected = store.connectedIds.has(node.connectionId);");
+    expect(source).toMatch(/if \(!connectionIsConnected \|\| node\.connectionId !== store\.activeConnectionId\) return;/);
+    // Search-driven loads are tagged so the store degrades a failed reconnect to a
+    // one-line skip hint instead of the raw driver error (see the store spec).
+    expect(source.match(/sidebarSearch: true/g)?.length ?? 0).toBeGreaterThanOrEqual(7);
+    expect(source).not.toMatch(/tasks\.push\(\(\) => store\.connect\(/);
   });
 
   it("limits concurrent metadata loads without dropping a task", async () => {

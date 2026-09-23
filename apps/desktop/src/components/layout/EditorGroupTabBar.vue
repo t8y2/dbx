@@ -84,7 +84,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
 import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems } from "@/lib/tabs/tabMenu";
-import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabDisplayTitles, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
 import type { QueryTab } from "@/types/database";
@@ -176,13 +176,12 @@ const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.edi
 // The icon-only collapse only exists in the vertical toolbar; horizontal
 // placements must ignore the persisted collapse state entirely.
 const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);
+// Outer [data-workspace-tab-navigation] / [data-special-page-navigation] owns
+// the shared vertical rail width; fill that rail so nested pane bars stay in
+// sync while the resize handle updates the outer panel (issue #9977).
 const tabBarStyle = computed<CSSProperties | undefined>(() => {
   if (!isVerticalLayout.value) return undefined;
-  if (props.tabBarCollapsed) {
-    return { width: "100%", flex: "0 0 100%" };
-  }
-  const width = props.tabBarWidth ?? 240;
-  return { width: `${width}px`, flex: `0 0 ${width}px` };
+  return { width: "100%", flex: "0 0 100%" };
 });
 const tabBarCollapseIcon = computed(() => {
   const isLeft = settingsStore.editorSettings.tabPlacement === "left";
@@ -267,7 +266,7 @@ const filteredGroupTabs = computed(() => {
   if (!query) {
     return props.tabs;
   }
-  return props.tabs.filter((tab) => tabDisplayTitle(tab, t).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query));
+  return props.tabs.filter((tab) => tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query));
 });
 
 watch(tabOverflowOpen, (open) => {
@@ -412,18 +411,23 @@ function compareTabGroupKeys(left: string, right: string) {
   return localized || (left < right ? -1 : 1);
 }
 
+// Numbered across every open tab (not just this group's) so a tab keeps the
+// same label when the same query tab is moved between panes.
+const tabTitles = computed(() => tabDisplayTitles(queryStore.tabs, t));
+
 function tabTitleText(tab: QueryTab) {
-  return tabDisplayTitle(tab, t);
+  return tabTitles.value.get(tab.id) ?? tabDisplayTitle(tab, t);
 }
 
 function tabConnectionLabel(tab: QueryTab) {
-  return connectionStore.getConfig(tab.connectionId)?.name || tab.connectionId;
+  // 连接已删除但页签被保留时，回退到原连接名，避免显示成裸 uuid。
+  return connectionStore.getConfig(tab.connectionId)?.name || tab.detachedConnectionName || tab.connectionId;
 }
 
 function tabConnectionTargetLabel(tab: QueryTab) {
   const connection = connectionStore.getConfig(tab.connectionId);
   const host = connection?.host.trim();
-  return connection && host ? `${host}:${connection.port}` : tab.connectionId;
+  return connection && host ? `${host}:${connection.port}` : tab.detachedConnectionName || tab.connectionId;
 }
 
 function databaseTabGroupBaseLabel(tab: QueryTab) {
@@ -843,7 +847,7 @@ type StripEntry = { kind: "header"; key: string; tab: QueryTab; pinned: boolean;
  * pills. Collapsed pills remain mounted so their visibility can animate.
  */
 function tabMatchesSearch(tab: QueryTab, query: string) {
-  const title = tabDisplayTitle(tab, t).toLocaleLowerCase();
+  const title = tabTitleText(tab).toLocaleLowerCase();
   return title.includes(query) || tab.title.toLocaleLowerCase().includes(query);
 }
 
@@ -925,6 +929,9 @@ function tabDropStyle(tab: QueryTab): CSSProperties | undefined {
   if (groupTabDrag.targetTabId !== tab.id) {
     return undefined;
   }
+  if (isVerticalLayout.value) {
+    return groupTabDrag.position === "before" ? { borderTop: "2px solid var(--ring)" } : { borderBottom: "2px solid var(--ring)" };
+  }
   if (groupTabDrag.position === "before") {
     return { boxShadow: "inset 3px 0 0 0 var(--ring)" };
   }
@@ -973,6 +980,12 @@ function activateTab(tabId: string) {
 
 function handleTabPointerDown(event: PointerEvent, tab: QueryTab) {
   if (event.button !== 0) {
+    return;
+  }
+  // Reordering only has a stable meaning when the strip follows the manual
+  // order. Derived sort modes would immediately move a dragged tab back to
+  // their computed position, so keep those strips click-only.
+  if (settingsStore.editorSettings.tabSortMode !== "manual") {
     return;
   }
   // A drag session is already in progress (second pointer device): ignore.
@@ -1098,7 +1111,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       label: t("contextMenu.copyName"),
       action: async () => {
         try {
-          await copyToClipboard(tabDisplayTitle(tab, t));
+          await copyToClipboard(tabTitleText(tab));
           toast(t("connection.copied"), 2000);
         } catch (e: any) {
           toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
@@ -1263,9 +1276,10 @@ function handleTabPointerMove(event: PointerEvent) {
     return;
   }
   if (!drag.active) {
-    // Horizontal-only threshold, matching the legacy tab bar: absorbs click
-    // jitter and touch tap drift (touch never arms the drag at all).
-    if (Math.abs(event.clientX - drag.startX) < TAB_DRAG_HORIZONTAL_THRESHOLD) {
+    // Use the strip's primary axis for the drag threshold: horizontal strips
+    // react to horizontal movement, while left/right strips react vertically.
+    const distance = isVerticalLayout.value ? Math.abs(event.clientY - drag.startY) : Math.abs(event.clientX - drag.startX);
+    if (distance < TAB_DRAG_HORIZONTAL_THRESHOLD) {
       return;
     }
     drag.active = true;
@@ -1288,7 +1302,9 @@ function handleTabPointerMove(event: PointerEvent) {
   if (tabElement && groupElement) {
     drag.targetTabId = tabElement.dataset.tabId ?? null;
     const rect = tabElement.getBoundingClientRect();
-    drag.position = event.clientX < rect.left + rect.width / 2 ? "before" : "after";
+    const pointerPosition = isVerticalLayout.value ? event.clientY : event.clientX;
+    const targetMiddle = isVerticalLayout.value ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
+    drag.position = pointerPosition < targetMiddle ? "before" : "after";
   }
 }
 
@@ -1606,7 +1622,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             />
                             <span v-else-if="!isTabBarCollapsed" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
                               <span v-if="isDirtyTab(entry.tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                              <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(entry.tab)">{{ tabDisplayTitle(entry.tab, t) }}</span>
+                              <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(entry.tab)">{{ tabTitleText(entry.tab) }}</span>
                             </span>
                             <ReadOnlySessionControl v-if="!isTabBarCollapsed" :connection-id="entry.tab.connectionId" compact />
                             <button
@@ -1737,7 +1753,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                 <div
                   class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
                   :class="isTabActive(tab) ? 'bg-accent/70 text-accent-foreground' : ''"
-                  :title="tabDisplayTitle(tab, t)"
+                  :title="tabTitleText(tab)"
                   role="menuitem"
                   tabindex="0"
                   @click="
@@ -1755,7 +1771,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                   </TabExecutionStatus>
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                    <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabDisplayTitle(tab, t) }}</span>
+                    <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
                   </span>
                   <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
                   <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />

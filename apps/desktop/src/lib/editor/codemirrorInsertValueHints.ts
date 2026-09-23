@@ -70,7 +70,7 @@ function decorationsForHints(hints: readonly InsertValueHint[]): DecorationSet {
  * keep this list in sync instead of re-inlining it at call sites.
  */
 export function supportsInsertValueHints(databaseType: string | undefined | null): boolean {
-  return databaseType !== "redis" && databaseType !== "mongodb" && databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "meilisearch" && databaseType !== "victoriametrics";
+  return databaseType !== "redis" && databaseType !== "mongodb" && databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "meilisearch" && databaseType !== "solr" && databaseType !== "victoriametrics";
 }
 
 export function buildInsertValueHintDecorations(hints: readonly InsertValueHint[]): DecorationSet {
@@ -99,7 +99,7 @@ function shiftClause(clause: InsertValuesClause, offset: number): InsertValuesCl
   return {
     ...clause,
     span: { start: clause.span.start + offset, end: clause.span.end + offset },
-    rows: clause.rows.map((row) => row.map((from) => from + offset)),
+    rows: clause.rows.map((row) => row.map((source) => ({ ...source, from: source.from + offset }))),
   };
 }
 

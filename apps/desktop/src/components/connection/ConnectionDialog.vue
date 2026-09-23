@@ -69,9 +69,11 @@ import {
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { hasXuguConnectionDatabase } from "@/lib/connection/xuguDatabase";
 import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
-import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseServiceConnectionUrl, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
+import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseConnectionDeepLinkUpdate, parseServiceConnectionUrl, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
@@ -91,6 +93,7 @@ import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInf
 import { agentDriverInstallKey, appendAgentDriverUpdateHint, connectionUsesSsh, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState, type DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriver";
 import { JDBCX_DEFAULT_URL, JDBCX_DRIVER_PROFILE, JDBCX_JDBC_DRIVER_CLASS, ensureJdbcxRuntimeDrivers, isJdbcxRuntimeBundle, isJdbcxRuntimePath, jdbcxHighPrivilegeExtensionsEnabled, setJdbcxHighPrivilegeExtensionsEnabled } from "@/lib/database/jdbcxBuiltinDriver";
+import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { consulAgentAddressesMatch } from "@/lib/consul/agentTarget";
@@ -286,6 +289,7 @@ const isDesktop = isTauriRuntime();
 const props = defineProps<{
   editConfig?: ConnectionConfig;
   prefillConfig?: ConnectionDeepLinkDraft | null;
+  updatePrefill?: ConnectionDeepLinkUpdate | null;
   pluginProvider?: PluginCenterFocus | null;
   initialTab?: ConfigTab;
 }>();
@@ -1963,6 +1967,7 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
   const operationId = beginAgentDriverInstall(driverKey, label);
   try {
     await api.installAgent(driverKey, operationId);
+    notifyComponentUpdatesChanged();
     await refreshLocalAgentDrivers();
     // A stale promise (cancelled then retried) must not close the retry's dialog.
     if (agentInstallOperationId.value === operationId) finishAgentDriverInstall(operationId);
@@ -1998,6 +2003,7 @@ async function ensureRequiredJdbcxDriverInstalled(config: ConnectionConfig): Pro
     testResult.value = { ok: true, message: "Installing JDBC plugin..." };
   });
   if (!result) return;
+  notifyComponentUpdatesChanged();
 
   jdbcMavenBundles.value = result.bundles;
   addJdbcDriverPaths(result.paths);
@@ -2011,6 +2017,7 @@ async function ensureRequiredJdbcxDriverInstalled(config: ConnectionConfig): Pro
 async function ensureRequiredJdbcProductRuntimeInstalled(config: ConnectionConfig): Promise<void> {
   const result = await ensureRegisteredJdbcProductRuntimeDrivers(config, api);
   if (!result) return;
+  notifyComponentUpdatesChanged();
 
   jdbcMavenBundles.value = result.bundles;
   jdbcDriverPathsInput.value = result.paths.join("\n");
@@ -2030,6 +2037,7 @@ async function ensureRequiredGaussdbMJdbcRuntime(config: ConnectionConfig): Prom
   if (status.installed && status.compatible) return;
   testResult.value = { ok: true, message: t("connection.gaussdbMJdbcPluginInstalling") };
   await api.installJdbcPlugin();
+  notifyComponentUpdatesChanged();
 }
 
 async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<boolean> {
@@ -2039,6 +2047,7 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
   const operationId = beginAgentDriverInstall(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, label);
   try {
     await api.installAgent(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, operationId);
+    notifyComponentUpdatesChanged();
     await refreshLocalAgentDrivers();
     // A stale promise (cancelled then retried) must not close the retry's dialog.
     if (agentInstallOperationId.value === operationId) finishAgentDriverInstall(operationId);
@@ -2619,15 +2628,42 @@ function switchGbaseProfile(profile: "gbase8a" | "gbase8s") {
   resetTestState();
 }
 
+let applyingConnectionUpdate = false;
+let appliedConnectionUpdate: ConnectionDeepLinkUpdate | null = null;
+
+function finishApplyingConnectionUpdate() {
+  void nextTick(() => {
+    applyingConnectionUpdate = false;
+  });
+}
+
+// The external_config shaped by an update link must survive submit verbatim
+// only while the submitted values are still the ones the link patched: once
+// the user edits the port away from the patched value, or the patch targeted
+// another connection, the flag is re-derived from the form like any edit.
+function connectionUpdateExternalConfigPreserved(config: Pick<ConnectionConfig, "id" | "port">): boolean {
+  if (!appliedConnectionUpdate || appliedConnectionUpdate.connectionId !== config.id) return false;
+  const patchedPort = appliedConnectionUpdate.patch.port;
+  return patchedPort === undefined || patchedPort === config.port;
+}
+
 watch(
   [() => props.editConfig, open],
-  ([config, isOpen]) => {
-    const syncAction = connectionEditDraftSyncAction(config?.id ?? null, isOpen, editingId.value);
+  ([savedConfig, isOpen]) => {
+    const syncAction = connectionEditDraftSyncAction(savedConfig?.id ?? null, isOpen, editingId.value);
     if (syncAction === "preserve") return;
+    // Hydrate a detached edit draft before form watchers observe it. Do not
+    // mutate the saved record or apply create defaults to an ID update. Only
+    // flag the update as applied when the prefill really targeted this
+    // connection, so an ID mismatch cannot freeze port-flag recomputation.
+    const connectionUpdate = savedConfig && props.updatePrefill?.connectionId === savedConfig.id ? props.updatePrefill : null;
+    const config = connectionUpdate && savedConfig ? applyConnectionDeepLinkUpdate(savedConfig, connectionUpdate) : savedConfig;
     resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
     editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
     if (syncAction === "hydrate" && config) {
+      appliedConnectionUpdate = connectionUpdate;
+      if (connectionUpdate) applyingConnectionUpdate = true;
       clearSavedDatabaseInfo();
       const legacyConfig = config as LegacyConnectionConfig;
       const profile = profileForConfig(config);
@@ -2770,13 +2806,15 @@ watch(
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
       configTab.value = initialConfigTab();
+      if (props.updatePrefill) finishApplyingConnectionUpdate();
       // Form/profile watchers normalize derived fields in this flush. Capture
       // the saved baseline afterwards so those initial changes are not treated
       // as user edits that invalidate persisted database metadata.
       void nextTick(() => {
-        if (open.value && props.editConfig?.id === config.id) applySavedDatabaseInfo(config);
+        if (open.value && props.editConfig?.id === config.id && !props.updatePrefill) applySavedDatabaseInfo(config);
       });
     } else {
+      appliedConnectionUpdate = null;
       clearSavedDatabaseInfo();
       editingId.value = null;
       selectedConnectionGroupId.value = initialConnectionGroupId();
@@ -2820,6 +2858,30 @@ watch(
   },
 );
 
+// 删除连接时若开启了「记住连接名与数据库」，新建同名**同类型**连接会自动选中记住的数据库。
+// 只在数据库字段为空、或仍是上一次自动回填的值时才覆盖，避免抢走用户手输的内容。
+const lastRememberedDatabaseAutofill = ref("");
+watch(
+  () => [open.value, editingId.value, form.value.name, form.value.db_type] as const,
+  ([isOpen, editing, rawName, dbType]) => {
+    if (!isOpen || editing) {
+      lastRememberedDatabaseAutofill.value = "";
+      return;
+    }
+    const name = (rawName ?? "").trim();
+    const remembered = name ? settingsStore.rememberedDatabaseForConnection(name, dbType) : "";
+    const current = (form.value.database ?? "").trim();
+    if (current === remembered) {
+      lastRememberedDatabaseAutofill.value = remembered;
+      return;
+    }
+    if (current && current !== lastRememberedDatabaseAutofill.value) return;
+    form.value.database = remembered || undefined;
+    lastRememberedDatabaseAutofill.value = remembered;
+  },
+  { immediate: true },
+);
+
 const databaseLabel = computed(() => {
   if (form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns") return t("connection.oracleTnsAlias");
   if (form.value.db_type === "oracle") return t("connection.serviceName");
@@ -2829,6 +2891,7 @@ const databaseLabel = computed(() => {
 
 const databasePlaceholder = computed(() => {
   if (form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns") return t("connection.oracleTnsAliasPlaceholder");
+  if (form.value.db_type === "xugu") return t("connection.databasePlaceholderRequired");
   if (form.value.db_type === "kingbase") return t("connection.databasePlaceholderRequired");
   const fallback = defaultDatabaseForProfile();
   if (!fallback) return t("connection.databasePlaceholder");
@@ -3178,6 +3241,7 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
   "elasticsearch",
   "easysearch",
   "meilisearch",
+  "solr",
   "hbase",
   "qdrant",
   "milvus",
@@ -3898,6 +3962,18 @@ function clearEditedConnectionErrorAfterSuccessfulTest() {
 
 function applyConnectionUrlToForm(input: string): boolean {
   try {
+    const update = parseConnectionDeepLinkUpdate(input);
+    if (update) {
+      if (update.connectionId !== editingId.value || props.editConfig?.one_time) throw new Error("Open the saved connection specified by this update link before applying it.");
+      const draft = applyConnectionDeepLinkUpdate(form.value, update);
+      applyingConnectionUpdate = true;
+      appliedConnectionUpdate = update;
+      form.value = draft;
+      finishApplyingConnectionUpdate();
+      resetTestState();
+      appliedConnectionUrlInput.value = input.trim();
+      return true;
+    }
     const draft = parseConnectionDeepLink(input) ?? parseServiceConnectionUrl(input);
     if (draft) {
       applyConnectionDraftToForm({ ...draft, oneTime: undefined });
@@ -3977,6 +4053,11 @@ function ensureConnectionHostResolvedFromUrl(): boolean {
 function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
   const url = connectionUrlInput.value.trim();
   if (url && url !== appliedConnectionUrlInput.value) {
+    const update = parseConnectionDeepLinkUpdate(url);
+    if (update) {
+      if (update.connectionId !== editingId.value || props.editConfig?.one_time) throw new Error("Open the saved connection specified by this update link before applying it.");
+      return applyConnectionDeepLinkUpdate(form.value, update);
+    }
     const draft = parseConnectionDeepLink(url);
     if (draft) {
       return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
@@ -4155,6 +4236,12 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   }
   if (!config.name?.trim()) {
     config.name = generatedName.trim() || generateConnectionName();
+  }
+  if (config.db_type === "xugu") {
+    config.database = config.database?.trim() || undefined;
+    if (!hasXuguConnectionDatabase(config.database, config.connection_string)) {
+      throw new Error(t("connection.xuguDatabaseRequired"));
+    }
   }
   if (config.db_type === "kingbase") {
     config.database = config.database?.trim() || undefined;
@@ -4346,7 +4433,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.password = config.password.trim();
     config.database = undefined;
   } else if (config.db_type === "sqlserver") {
-    config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
+    if (!connectionUpdateExternalConfigPreserved(config)) config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);
     const targetServerType = gaussdbTargetServerType(config);
@@ -4359,7 +4446,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     // Plugin connections keep `external_config`: the manifest-driven form
     // fields land there via buildPluginConnectionConfig. Only the built-in
     // drivers without an external-config payload get wiped here.
-    config.external_config = undefined;
+    if (!connectionUpdateExternalConfigPreserved(config)) config.external_config = undefined;
   }
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
     config.connection_string = undefined;
@@ -4483,12 +4570,12 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
       throw new Error(t("connection.etcdClientCertPairRequired"));
     }
-  } else if (form.value.db_type !== "consul" && config.db_type !== "elasticsearch" && config.db_type !== "easysearch") {
+  } else if (form.value.db_type !== "consul" && config.db_type !== "elasticsearch" && config.db_type !== "easysearch" && config.db_type !== "solr") {
     config.etcd_endpoints = undefined;
     config.client_cert_path = undefined;
     config.client_key_path = undefined;
   }
-  if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
+  if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "solr") {
     config.client_cert_path = config.client_cert_path?.trim() || "";
     config.client_key_path = config.client_key_path?.trim() || "";
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
@@ -4505,7 +4592,8 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.db_type !== "victoriametrics" &&
     config.db_type !== "zookeeper" &&
     config.db_type !== "elasticsearch" &&
-    config.db_type !== "easysearch"
+    config.db_type !== "easysearch" &&
+    config.db_type !== "solr"
   ) {
     config.ca_cert_path = undefined;
   } else {
@@ -5543,7 +5631,9 @@ watch(
     });
     // Preload database names so the summary count is accurate right away.
     void nextTick(() => {
-      if (canChooseVisibleDatabases.value && hasVisibleDatabaseFilter.value) {
+      // An external update may change the endpoint while retaining its saved
+      // password. Do not send credentials until the user tests or saves it.
+      if (!props.updatePrefill && canChooseVisibleDatabases.value && hasVisibleDatabaseFilter.value) {
         void preloadVisibleDatabaseNames();
       }
     });
@@ -5580,7 +5670,7 @@ watch([() => form.value.db_type, () => form.value.username], () => {
 watch(
   () => connectionConfigSnapshotForVisibleDatabases(),
   (current, previous) => {
-    if (!previous || !visibleObjectFiltersNeedReset(previous, current)) return;
+    if (applyingConnectionUpdate || !previous || !visibleObjectFiltersNeedReset(previous, current)) return;
     form.value.visible_databases = undefined;
     form.value.visible_schemas = undefined;
     resetVisibleDatabaseDraftState();
@@ -5827,6 +5917,14 @@ function startSavedConnection(config: ConnectionConfig) {
     });
 }
 
+function validateConnectionUpdateTarget() {
+  const update = props.updatePrefill ?? appliedConnectionUpdate;
+  if (!update) return;
+  const target = store.getConfig(update.connectionId);
+  resolveConnectionDeepLinkUpdate(update, target ? [target] : [], false);
+  if (editingId.value !== update.connectionId) throw new Error("The connection specified by the update link is no longer being edited.");
+}
+
 async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
   if (!ensureConnectionHostResolvedFromUrl()) return false;
   if (isSaving.value) return false;
@@ -5843,10 +5941,12 @@ async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
   let connectionSaved = false;
   try {
     let savedConfig: ConnectionConfig;
+    validateConnectionUpdateTarget();
     if (editingId.value) {
       const updated = withSavedDatabaseInfo(connectionConfigForSubmit(editingId.value), databaseInfoForSave);
       await ensureRequiredAgentDriverInstalled(updated);
       await ensureRequiredGaussdbMJdbcRuntime(updated);
+      validateConnectionUpdateTarget();
       await persistGlobalTimeoutDrafts();
       await store.updateConnection(updated);
       savedConfig = updated;
@@ -6801,7 +6901,7 @@ function openExternalUrl(url: string) {
                                 <span>{{ t(option.labelKey) }}</span>
                                 <Badge v-if="option.recommended" class="h-4 rounded-full px-1.5 text-[10px] leading-none">{{ t("connection.sqliteWorkerPlacementDefault") }}</Badge>
                               </div>
-                              <p class="text-[11px] leading-relaxed text-background/80">{{ t(option.hintKey) }}</p>
+                              <p class="text-[11px] leading-relaxed text-background-solid/80">{{ t(option.hintKey) }}</p>
                             </TooltipContent>
                           </Tooltip>
                         </div>
@@ -7698,7 +7798,7 @@ function openExternalUrl(url: string) {
                       <Input v-model.number="mqttConnectTimeoutSecs" type="number" class="col-span-3 w-32" min="1" max="300" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">最大报文（字节）</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttMaxPacketSize") }}</Label>
                       <Input v-model.number="mqttMaxPacketSizeBytes" type="number" class="col-span-3 w-40" min="1024" max="268435455" />
                     </div>
                   </template>
@@ -8017,7 +8117,7 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
 
-                    <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'solr' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                       <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                     </div>

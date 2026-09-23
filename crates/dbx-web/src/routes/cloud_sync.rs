@@ -3,16 +3,16 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use dbx_core::cloud_sync::{
-    apply_sync_snapshot, build_sync_snapshot, build_sync_snapshot_with_saved_secrets, finalize_snippet_migration,
-    forget_snippet_token, forget_webdav_password,
-    forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase, resolve_snippet_token,
-    resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup,
-    save_snippet_sync_id as core_save_snippet_sync_id, save_snippet_token, save_webdav_password,
-    save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference, snippet_saved_token_status,
-    snippet_sync_settings as core_snippet_sync_settings, webdav_saved_password_status,
-    webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions, ApplySnapshotSummary,
-    SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings, SnippetSyncSummary, SnippetTokenStatus,
-    WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
+    apply_sync_snapshot, build_sync_snapshot_with_options, finalize_snippet_migration, forget_snippet_token,
+    forget_webdav_password, forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase,
+    resolve_snippet_token, resolve_webdav_password, resolve_webdav_sync_secrets_passphrase,
+    retry_pending_snippet_cleanup, save_snippet_sync_id_for_instance as core_save_snippet_sync_id, save_snippet_token,
+    save_webdav_password, save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference,
+    snippet_saved_token_status, snippet_sync_settings_for_instance as core_snippet_sync_settings,
+    webdav_saved_password_status, webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions,
+    ApplySnapshotSummary, SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings,
+    SnippetSyncSummary, SnippetTokenStatus, WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus,
+    WebDavSyncSummary,
 };
 use dbx_core::storage::DesktopSettings;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,9 @@ pub struct WebDavUploadRequest {
     pub config: WebDavConfig,
     pub editor_settings: Option<serde_json::Value>,
     pub secrets_passphrase: Option<String>,
+    /// Explicit opt-in for exporting credentials.
+    #[serde(default)]
+    pub include_secrets: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +67,15 @@ pub struct WebDavUploadRequest {
 pub struct WebDavDownloadRequest {
     pub config: WebDavConfig,
     pub secrets_passphrase: Option<String>,
+    /// Explicitly controls whether encrypted or legacy plaintext secrets may
+    /// be restored. Older clients omitted this field and retain the historical
+    /// restore behavior.
+    #[serde(default = "default_restore_secrets")]
+    pub restore_secrets: bool,
+}
+
+fn default_restore_secrets() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,12 +123,14 @@ pub struct SnippetDownloadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SnippetSyncSettingsRequest {
     pub provider: SnippetProvider,
+    pub instance_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveSnippetSyncIdRequest {
     pub provider: SnippetProvider,
+    pub instance_url: Option<String>,
     pub snippet_id: Option<String>,
 }
 
@@ -178,11 +192,27 @@ pub async fn webdav_sync_upload(
     Json(mut req): Json<WebDavUploadRequest>,
 ) -> Result<Json<WebDavSyncSummary>, AppError> {
     resolve_webdav_password(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
-    let snapshot = build_sync_snapshot_with_saved_secrets(
+    let explicit_passphrase = req.secrets_passphrase.as_deref().and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then_some(value)
+    });
+    let saved_passphrase = if explicit_passphrase.is_none() {
+        resolve_webdav_sync_secrets_passphrase(&state.app.storage).await.map_err(AppError::from)?
+    } else {
+        None
+    };
+    let passphrase = explicit_passphrase.or(saved_passphrase.as_deref());
+    let snapshot = build_sync_snapshot_with_options(
         &state.app.storage,
         env!("CARGO_PKG_VERSION"),
         req.editor_settings,
-        req.secrets_passphrase.as_deref(),
+        dbx_core::cloud_sync::SyncExportOptions {
+            include_secrets: req.include_secrets,
+            sync_passphrase: passphrase,
+            include_ai_secrets: req.include_secrets,
+            include_tunnel_secrets: req.include_secrets,
+            include_plugin_secrets: req.include_secrets,
+        },
     )
     .await
     .map_err(AppError::from)?;
@@ -206,7 +236,7 @@ pub async fn webdav_sync_download(
         &snapshot,
         ApplySnapshotOptions {
             secrets_passphrase: explicit_passphrase.or(saved_passphrase.as_deref()),
-            restore_secrets: true,
+            restore_secrets: req.restore_secrets,
         },
     )
     .await
@@ -224,7 +254,7 @@ pub async fn snippet_sync_test(
     Json(mut req): Json<SnippetConfigRequest>,
 ) -> Result<Json<()>, AppError> {
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
-    SnippetSyncClient::new(req.config).test().await.map_err(AppError::from)?;
+    SnippetSyncClient::new(req.config).map_err(AppError::from)?.test().await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -255,14 +285,17 @@ pub async fn snippet_sync_settings(
     State(state): State<Arc<WebState>>,
     Json(req): Json<SnippetSyncSettingsRequest>,
 ) -> Result<Json<SnippetSyncSettings>, AppError> {
-    core_snippet_sync_settings(&state.app.storage, req.provider).await.map(Json).map_err(AppError::from)
+    core_snippet_sync_settings(&state.app.storage, req.provider, req.instance_url.as_deref())
+        .await
+        .map(Json)
+        .map_err(AppError::from)
 }
 
 pub async fn save_snippet_sync_id(
     State(state): State<Arc<WebState>>,
     Json(req): Json<SaveSnippetSyncIdRequest>,
 ) -> Result<Json<()>, AppError> {
-    core_save_snippet_sync_id(&state.app.storage, req.provider, req.snippet_id.as_deref())
+    core_save_snippet_sync_id(&state.app.storage, req.provider, req.instance_url.as_deref(), req.snippet_id.as_deref())
         .await
         .map_err(AppError::from)?;
     Ok(Json(()))
@@ -274,7 +307,7 @@ pub async fn retry_snippet_legacy_cleanup(
 ) -> Result<Json<SnippetSyncSettings>, AppError> {
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let provider = req.config.provider;
-    let client = SnippetSyncClient::new(req.config);
+    let client = SnippetSyncClient::new(req.config).map_err(AppError::from)?;
     retry_pending_snippet_cleanup(&state.app.storage, provider, &client).await.map(Json).map_err(AppError::from)
 }
 
@@ -294,11 +327,22 @@ pub async fn snippet_sync_upload(
     } else {
         None
     };
-    let snapshot =
-        build_sync_snapshot(&state.app.storage, env!("CARGO_PKG_VERSION"), req.editor_settings, secrets_passphrase)
-            .await
-            .map_err(AppError::from)?;
-    let client = SnippetSyncClient::new(req.config);
+    let include_secrets = req.include_secrets;
+    let snapshot = build_sync_snapshot_with_options(
+        &state.app.storage,
+        env!("CARGO_PKG_VERSION"),
+        req.editor_settings,
+        dbx_core::cloud_sync::SyncExportOptions {
+            include_secrets,
+            sync_passphrase: secrets_passphrase,
+            include_ai_secrets: include_secrets,
+            include_tunnel_secrets: include_secrets,
+            include_plugin_secrets: include_secrets,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    let client = SnippetSyncClient::new(req.config).map_err(AppError::from)?;
     let mut summary = client
         .put_snapshot(&snapshot, req.snippet_passphrase.as_deref(), secrets_passphrase)
         .await
@@ -313,6 +357,7 @@ pub async fn snippet_sync_download(
 ) -> Result<Json<SnippetDownloadResult>, AppError> {
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let (snapshot, summary) = SnippetSyncClient::new(req.config)
+        .map_err(AppError::from)?
         .get_snapshot(req.snippet_passphrase.as_deref())
         .await
         .map_err(AppError::from)?;
@@ -360,7 +405,7 @@ mod tests {
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         let Json(settings) = super::snippet_sync_settings(
             State(state),
-            Json(super::SnippetSyncSettingsRequest { provider: SnippetProvider::GitHub }),
+            Json(super::SnippetSyncSettingsRequest { provider: SnippetProvider::GitHub, instance_url: None }),
         )
         .await
         .unwrap();

@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { ConnectionConfig, SidebarLayout, SidebarOrderEntry } from "@/types/database";
 
 type ScopeMode = "all" | "custom";
@@ -325,32 +326,29 @@ function connectionPolicyMode(connectionId: string): ExecutionMode | "inherit" {
             <p class="truncate font-medium">{{ node.type === "group" ? node.name : node.connection.name }}</p>
             <p v-if="node.type === 'connection'" class="truncate font-mono text-[10px] text-muted-foreground">{{ node.connection.db_type }} · {{ node.connection.host || node.connection.database || node.id }}</p>
           </div>
-          <select
-            v-if="node.type === 'group' && selectedGroupIds.has(node.id)"
-            :value="groupPolicyMode(node.id)"
-            class="h-7 shrink-0 rounded border bg-background px-1.5 text-[11px]"
-            :disabled="disabled || busy"
-            @click.stop
-            @change="emit('set:group-policy', node.id, ($event.target as HTMLSelectElement).value as ExecutionMode | 'inherit')"
-          >
-            <option value="inherit">{{ t("settings.mcpConnectionPolicyInherit") }}</option>
-            <option value="read_only">{{ t("settings.mcpConnectionPolicyReadOnly") }}</option>
-            <option value="safe_write">{{ t("settings.mcpConnectionPolicySafeWrite") }}</option>
-            <option value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</option>
-          </select>
-          <select
+          <Select v-if="node.type === 'group' && selectedGroupIds.has(node.id)" :model-value="groupPolicyMode(node.id)" :disabled="disabled || busy" @update:model-value="(value) => emit('set:group-policy', node.id, value as ExecutionMode | 'inherit')">
+            <SelectTrigger size="sm" class="h-7 w-44 shrink-0 text-[11px]" @click.stop><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit">{{ t("settings.mcpConnectionPolicyInherit") }}</SelectItem>
+              <SelectItem value="read_only">{{ t("settings.mcpConnectionPolicyReadOnly") }}</SelectItem>
+              <SelectItem value="safe_write">{{ t("settings.mcpConnectionPolicySafeWrite") }}</SelectItem>
+              <SelectItem value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select
             v-if="node.type === 'connection' && (explicitConnectionIds.has(node.id) || Boolean(selectedAncestor(node)))"
-            :value="connectionPolicyMode(node.id)"
-            class="h-7 shrink-0 rounded border bg-background px-1.5 text-[11px]"
+            :model-value="connectionPolicyMode(node.id)"
             :disabled="disabled || busy"
-            @click.stop
-            @change="emit('set:connection-policy', node.id, ($event.target as HTMLSelectElement).value as ExecutionMode | 'inherit')"
+            @update:model-value="(value) => emit('set:connection-policy', node.id, value as ExecutionMode | 'inherit')"
           >
-            <option value="inherit">{{ selectedAncestor(node) ? t("settings.mcpGroupPolicyInherit") : t("settings.mcpConnectionPolicyInherit") }}</option>
-            <option value="read_only">{{ t("settings.mcpConnectionPolicyReadOnly") }}</option>
-            <option value="safe_write">{{ t("settings.mcpConnectionPolicySafeWrite") }}</option>
-            <option value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</option>
-          </select>
+            <SelectTrigger size="sm" class="h-7 w-44 shrink-0 text-[11px]" @click.stop><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit">{{ selectedAncestor(node) ? t("settings.mcpGroupPolicyInherit") : t("settings.mcpConnectionPolicyInherit") }}</SelectItem>
+              <SelectItem value="read_only">{{ t("settings.mcpConnectionPolicyReadOnly") }}</SelectItem>
+              <SelectItem value="safe_write">{{ t("settings.mcpConnectionPolicySafeWrite") }}</SelectItem>
+              <SelectItem value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</SelectItem>
+            </SelectContent>
+          </Select>
           <Badge v-if="selectedAncestor(node)" variant="secondary" class="shrink-0 rounded font-normal">{{ t("settings.mcpResourceScopeInherited", { group: groupLabel(selectedAncestor(node)!) }) }}</Badge>
           <Badge v-else-if="node.type === 'group' && selectedGroupIds.has(node.id)" variant="outline" class="shrink-0 rounded font-normal">{{ t("settings.mcpResourceScopeDynamic") }}</Badge>
           <Badge v-else-if="node.type === 'group' && groupHasSelectedDescendant(node)" variant="secondary" class="shrink-0 rounded font-normal">{{ t("settings.mcpResourceScopePartial") }}</Badge>

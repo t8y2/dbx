@@ -1864,6 +1864,37 @@ describe("cell detail surfaces", () => {
     expect(dataGridSource).toContain(':disabled="!canCompareDetailJson" @mousedown.prevent @click="openDetailJsonCompare"');
     expect(dataGridSource).toContain('v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot"');
   });
+
+  // issue #9832：编辑中点「压缩 JSON」会把草稿压成单行，此时必须仍能点「格式化 JSON」
+  // 重新展开，否则 Mongo 这类对象字段的 JSON 一旦压缩就再也无法格式化。
+  it("keeps the JSON format action reachable while a compacted draft is being edited", async () => {
+    const formatJson = vi.fn();
+    const mounted = mountComponent(DataGridCellDetailPanel, {
+      detail: detail(),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: true,
+      editing: true,
+      sideJsonView: false,
+      showCompactJson: true,
+      canCompactJson: true,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => false,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      onFormatJson: formatJson,
+    });
+
+    const formatButton = findOne(mounted.root, (node) => node.props.title === "grid.formatJson");
+    dispatch(formatButton, "click");
+    expect(formatJson).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ showCompactJson: false });
+    expect(findAll(mounted.root, (node) => node.props.title === "grid.formatJson")).toHaveLength(0);
+  });
 });
 
 describe("DataGridCopyColumnNamesDialog", () => {

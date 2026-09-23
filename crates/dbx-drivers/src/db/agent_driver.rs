@@ -1219,6 +1219,8 @@ pub enum AgentMethod {
     ListConstraints,
     ListPartitions,
     ListSubpartitions,
+    GetTablePartitionStatus,
+    GetTablePartitioning,
     GetTableDdl,
     ExecuteQuery,
     ExecuteQueryPage,
@@ -1238,7 +1240,7 @@ pub enum AgentMethod {
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 41] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -1263,6 +1265,8 @@ impl AgentMethod {
         Self::ListConstraints,
         Self::ListPartitions,
         Self::ListSubpartitions,
+        Self::GetTablePartitionStatus,
+        Self::GetTablePartitioning,
         Self::ExecuteQuery,
         Self::ExecuteQueryPage,
         Self::FetchQueryPage,
@@ -1308,6 +1312,8 @@ impl AgentMethod {
             Self::ListConstraints => "list_constraints",
             Self::ListPartitions => "list_partitions",
             Self::ListSubpartitions => "list_subpartitions",
+            Self::GetTablePartitionStatus => "get_table_partition_status",
+            Self::GetTablePartitioning => "get_table_partitioning",
             Self::ExecuteQuery => "execute_query",
             Self::ExecuteQueryPage => "execute_query_page",
             Self::FetchQueryPage => "fetch_query_page",
@@ -1997,7 +2003,12 @@ impl AgentDriverClient {
     pub async fn disconnect(&mut self) -> Result<Value, String> {
         self.invalidate_cached_query();
         if self.shared_runtime.is_some() {
-            let session_id = self.agent_session_id.as_ref().ok_or("Shared Agent session id is missing")?.clone();
+            // A manual transaction can close its session before the detached
+            // pool finishes cleanup. Closing it again must not be reported as
+            // a runtime failure and terminate unrelated shared sessions.
+            let Some(session_id) = self.agent_session_id.clone() else {
+                return Ok(Value::Null);
+            };
             let result =
                 self.call_method(AgentMethod::CloseSession, serde_json::json!({ "agentSessionId": session_id })).await;
             if result.is_ok() {
@@ -2325,6 +2336,36 @@ impl AgentDriverClient {
     ) -> Result<T, String> {
         self.call_method_with_timeout(
             AgentMethod::ListSubpartitions,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn get_table_partition_status<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::GetTablePartitionStatus,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn get_table_partitioning<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::GetTablePartitioning,
             agent_schema_table_params(database, schema, table),
             timeout_duration,
         )
@@ -4365,6 +4406,25 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn shared_session_disconnect_is_idempotent_and_preserves_sibling() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("repeat-disconnect-test").await;
+        runtime.increment_session_count();
+        runtime.increment_session_count();
+        let mut closing = AgentDriverClient::shared_session(runtime.clone(), "closing-session".to_string());
+        let mut sibling = AgentDriverClient::shared_session(runtime.clone(), "sibling-session".to_string());
+        closing.disconnect().await.unwrap();
+        assert_eq!(runtime.active_session_count(), 1);
+        assert_eq!(closing.disconnect().await.unwrap(), serde_json::Value::Null);
+        assert_eq!(runtime.active_session_count(), 1);
+        let reply: serde_json::Value = sibling.call("probe", serde_json::json!({})).await.unwrap();
+        assert_eq!(reply, serde_json::json!({"ok": true}));
+        assert!(!runtime.is_failed());
+        sibling.disconnect().await.unwrap();
+        runtime.kill_and_wait().await;
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
     async fn shared_runtime_kill_and_wait_joins_existing_reaper() {
         let (runtime, script_path) = spawn_stateful_test_runtime("kill-and-wait-reap-test").await;
 
@@ -5094,6 +5154,8 @@ for line in sys.stdin:
         assert_eq!(AgentMethod::ListConstraints.as_str(), "list_constraints");
         assert_eq!(AgentMethod::ListPartitions.as_str(), "list_partitions");
         assert_eq!(AgentMethod::ListSubpartitions.as_str(), "list_subpartitions");
+        assert_eq!(AgentMethod::GetTablePartitionStatus.as_str(), "get_table_partition_status");
+        assert_eq!(AgentMethod::GetTablePartitioning.as_str(), "get_table_partitioning");
         assert_eq!(AgentMethod::GetTableDdl.as_str(), "get_table_ddl");
         assert_eq!(AgentMethod::ExecuteQuery.as_str(), "execute_query");
         assert_eq!(AgentMethod::ExecuteQueryPage.as_str(), "execute_query_page");

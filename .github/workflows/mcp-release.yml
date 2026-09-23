@@ -158,6 +158,11 @@ jobs:
       - name: Update Rust lockfile
         run: cargo check -p dbx-mcp -p dbx-cli --no-default-features
 
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.68.13
+        with:
+          tool: cargo-nextest@0.9.137
+
       - name: Verify workspace lockfile
         run: pnpm install --frozen-lockfile --lockfile-only --ignore-scripts
 

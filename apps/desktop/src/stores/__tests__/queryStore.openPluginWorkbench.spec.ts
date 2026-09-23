@@ -40,6 +40,40 @@ describe("queryStore openPluginWorkbench reuse", () => {
     expect(tab?.pluginWorkbench?.context).toEqual({ connectionId: "conn-1", workbenchId: "wb-original" });
   });
 
+  it("refreshes a reused result-view context when explicitly requested", () => {
+    const queryStore = useQueryStore();
+
+    const firstId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", sql: "SELECT 1" },
+    });
+    const secondId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", sql: "SELECT 2" },
+      refreshContextOnReuse: true,
+    });
+
+    expect(secondId).toBe(firstId);
+    expect(queryStore.tabs.find((tab) => tab.id === firstId)?.pluginWorkbench?.context).toEqual({ connectionId: "conn-1", sql: "SELECT 2" });
+  });
+
+  it("refreshes a reused result-view result snapshot when explicitly requested", () => {
+    const queryStore = useQueryStore();
+
+    const firstId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", result: { columns: ["id"], rows: [[1]], truncated: false } },
+    });
+    const secondId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", result: { columns: ["id"], rows: [[2]], truncated: false } },
+      refreshContextOnReuse: true,
+    });
+
+    expect(secondId).toBe(firstId);
+    expect(queryStore.tabs.find((tab) => tab.id === firstId)?.pluginWorkbench?.context?.result).toEqual({ columns: ["id"], rows: [[2]], truncated: false });
+  });
+
   it("a different connection still opens its own workbench tab", () => {
     const queryStore = useQueryStore();
 
@@ -94,6 +128,23 @@ describe("queryStore openPluginWorkbench reuse", () => {
     expect(queryStore.groups[0]?.activeTabId).toBe(id);
     // Adoption must not replace the live context (same no-deep-reload rule).
     expect(queryStore.tabs.find((t) => t.id === id)?.pluginWorkbench?.context).toEqual({ connectionId: "conn-1" });
+  });
+
+  it("keeps a result-view tab distinct from the plugin's workbench tab", () => {
+    const queryStore = useQueryStore();
+
+    const workbenchId = queryStore.openPluginWorkbench("io.dbx.ssh", "ssh.main", { title: "SSH server", connectionId: "conn-1", context: { connectionId: "conn-1" } });
+    const resultViewId = queryStore.openPluginWorkbench("io.dbx.ssh", "ssh.erd", {
+      title: "Graph",
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", sql: "SELECT 1", result: { columns: ["id"], rows: [[1]], truncated: false } },
+    });
+
+    // The tab keeps the entry contribution id: the renderer resolves it as a
+    // result-view, and the sidebar workbench tab is not reused for it.
+    expect(resultViewId).not.toBe(workbenchId);
+    expect(queryStore.tabs.find((tab) => tab.id === resultViewId)?.pluginWorkbench?.contributionId).toBe("ssh.erd");
+    expect(queryStore.tabs.find((tab) => tab.id === resultViewId)?.pluginWorkbench?.context?.result).toEqual({ columns: ["id"], rows: [[1]], truncated: false });
   });
 
   it("numbers same-connection session tabs Termius-style and never backfills", async () => {
@@ -164,5 +215,64 @@ describe("queryStore openPluginWorkbench reuse", () => {
     const bridged = queryStore.tabs.find((tab) => tab.id === bridgedId);
     expect(bridged?.title).toBe("A (1)");
     expect(bridged?.connectionId).toBe("conn-1");
+  });
+});
+
+describe("queryStore localizePluginTabTitles", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal("window", { dispatchEvent: vi.fn() });
+    setActivePinia(createPinia());
+  });
+
+  it("relocalizes connectionless workbench titles on locale change, preserving session suffixes and skipping bound, renamed, or unresolvable tabs", () => {
+    const queryStore = useQueryStore();
+
+    // Two connectionless workbench tabs: bare title + session-suffixed title.
+    const bareId = queryStore.openPluginWorkbench("io.dbx.ssh", "workbench", { title: "Workbench", forceNew: true });
+    const suffixedId = queryStore.openPluginWorkbench("io.dbx.ssh", "workbench", { title: "Workbench", forceNew: true });
+    // Connection-bound session tab is titled after the connection and stays as-is.
+    const boundId = queryStore.openPluginWorkbench("io.dbx.ssh", "workbench", { title: "prod-server", connectionId: "conn-1", context: { connectionId: "conn-1" }, forceNew: true });
+    // A contribution whose label is unavailable in the new locale keeps its title.
+    const unresolvableId = queryStore.openPluginWorkbench("io.dbx.mystery", "workbench", { title: "Mystery", forceNew: true });
+    // An explicitly renamed tab: customTitle wins over the locale refresh.
+    // (Session numbering is plugin-wide per connection, so this third
+    // connectionless io.dbx.ssh tab is created as "Pinned (2)".)
+    const renamedId = queryStore.openPluginWorkbench("io.dbx.ssh", "result-view", { title: "Pinned", forceNew: true });
+    const renamedTab = queryStore.tabs.find((tab) => tab.id === renamedId);
+    expect(renamedTab).toBeDefined();
+    renamedTab!.customTitle = true;
+    const renamedTitleBefore = renamedTab!.title;
+
+    queryStore.localizePluginTabTitles((pluginId, contributionId, surface) => (pluginId === "io.dbx.ssh" && contributionId === "workbench" && surface === "ui" ? "工作台" : undefined));
+
+    const titles = Object.fromEntries(queryStore.tabs.map((tab) => [tab.id, tab.title]));
+    expect(titles[bareId]).toBe("工作台");
+    expect(titles[suffixedId]).toBe("工作台 (1)");
+    expect(titles[boundId]).toBe("prod-server");
+    expect(titles[unresolvableId]).toBe("Mystery");
+    expect(titles[renamedId]).toBe(renamedTitleBefore);
+  });
+
+  it("relocalizes connectionless plugin-filesystem titles on locale change, skipping connection-bound ones", () => {
+    const queryStore = useQueryStore();
+
+    // PluginWorkbenchTab.vue opens the filesystem browse with the localized
+    // provider label and no connection binding; that title must follow the
+    // app locale like the workbench tabs do.
+    const freeId = queryStore.openPluginFilesystem("io.dbx.ssh", "ssh.files", { title: "Files", forceNew: true });
+    const boundId = queryStore.openPluginFilesystem("io.dbx.ssh", "ssh.files", { title: "prod-server · SFTP", connectionId: "conn-1", forceNew: true });
+
+    queryStore.localizePluginTabTitles((pluginId, contributionId, surface) => (pluginId === "io.dbx.ssh" && contributionId === "ssh.files" && surface === "filesystem" ? "文件" : undefined));
+
+    const titles = Object.fromEntries(queryStore.tabs.map((tab) => [tab.id, tab.title]));
+    expect(titles[freeId]).toBe("文件");
+    expect(titles[boundId]).toBe("prod-server · SFTP");
   });
 });

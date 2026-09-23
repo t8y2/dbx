@@ -674,7 +674,7 @@ describe("sqlCompletion table aliases", () => {
     });
 
     const table = items.find((item) => item.label === "materials_order_item" && item.type === "table");
-    expect(table?.apply).toBe("materials_order_item AS moi");
+    expect(table?.apply).toBe("materials_order_item moi");
   });
 
   it("uses every word initial for longer multi-word names", () => {
@@ -686,7 +686,7 @@ describe("sqlCompletion table aliases", () => {
     });
 
     const table = items.find((item) => item.label === "super_long_customer_order_history_archive_snapshot_daily_replica" && item.type === "table");
-    expect(table?.apply).toBe("super_long_customer_order_history_archive_snapshot_daily_replica AS slcohasdr");
+    expect(table?.apply).toBe("super_long_customer_order_history_archive_snapshot_daily_replica slcohasdr");
   });
 
   it("applies generated aliases to table completions when enabled", () => {
@@ -698,7 +698,7 @@ describe("sqlCompletion table aliases", () => {
     });
 
     const table = items.find((item) => item.label === "order_items" && item.type === "table");
-    expect(table?.apply).toBe("order_items AS oi");
+    expect(table?.apply).toBe("order_items oi");
   });
 
   it("omits AS from Oracle table alias completions", () => {
@@ -772,7 +772,7 @@ describe("sqlCompletion table aliases", () => {
     });
 
     const table = items.find((item) => item.label === "order_items" && item.type === "table");
-    expect(table?.apply).toBe("order_items AS oi2");
+    expect(table?.apply).toBe("order_items oi2");
   });
 
   it("applies generated aliases in comma-separated FROM table lists", () => {
@@ -784,7 +784,7 @@ describe("sqlCompletion table aliases", () => {
     });
 
     const table = items.find((item) => item.label === "order_items" && item.type === "table");
-    expect(table?.apply).toBe("order_items AS oi");
+    expect(table?.apply).toBe("order_items oi");
   });
 
   it("does not apply generated aliases to non-query table completions", () => {
@@ -797,6 +797,25 @@ describe("sqlCompletion table aliases", () => {
 
     const table = items.find((item) => item.label === "order_items" && item.type === "table");
     expect(table?.apply).toBe("order_items");
+  });
+
+  it("emits table aliases without AS on every dialect (issue #9525)", () => {
+    // `FROM orders AS o` is rejected by Oracle and the Oracle-compatible profiles, while the
+    // implicit form is accepted everywhere, so generated SQL must use it for all dialects.
+    for (const databaseType of ["postgres", "mysql", "sqlserver", "oracle", "sqlite", "clickhouse"] as const) {
+      const sql = "SELECT * FROM ord";
+      const items = buildSqlCompletionItems(sql, sql.length, {
+        databaseType,
+        tables: [{ name: "order_items", type: "table" }],
+        columnsByTable: new Map(),
+        autoAliasTables: true,
+      });
+
+      const table = items.find((item) => item.label === "order_items" && item.type === "table");
+      // Oracle additionally double-quotes the identifier to preserve its stored case.
+      expect(table?.apply, databaseType).not.toContain(" AS ");
+      expect(table?.apply, databaseType).toMatch(/order_items"? oi$/);
+    }
   });
 });
 

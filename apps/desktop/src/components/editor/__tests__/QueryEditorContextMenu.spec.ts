@@ -8,10 +8,19 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 
 const source = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
 
+const menuSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/editor/QueryEditorContextMenu.vue"), "utf8");
+
+const documentSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/editor/useQueryEditorDocumentState.ts"), "utf8");
+const batchSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/editor/useQueryEditorBatchSelection.ts"), "utf8");
+
+const completionSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/editor/useQueryEditorCompletion.ts"), "utf8");
+const completionKeysSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/editor/useQueryEditorCompletionKeys.ts"), "utf8");
+const extensionsSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/editor/queryEditorSqlExtensions.ts"), "utf8");
+
 describe("QueryEditor context menu lifecycle", () => {
   it("keeps heavyweight context derivation out of the per-update path", () => {
     const updateStart = source.indexOf("EditorView.updateListener.of((update) => {");
-    const updateEnd = source.indexOf("\n      fontThemeComp.of(", updateStart);
+    const updateEnd = source.indexOf("initializedRuntime.fontThemeComp.of(", updateStart);
     const updateSource = source.slice(updateStart, updateEnd);
 
     expect(updateStart).toBeGreaterThanOrEqual(0);
@@ -23,13 +32,13 @@ describe("QueryEditor context menu lifecycle", () => {
 
   it("does not suppress legitimate external model updates", () => {
     expect(source).not.toContain("lastEmittedModelValue");
-    expect(source).toContain("if (val !== currentEditorDocText(view.value)) {");
+    expect(documentSource).toContain("if (val !== currentEditorDocText(view.value)) {");
   });
 
   it("resynchronizes context state after restoring a tab document", () => {
-    const activateStart = source.indexOf("function activateTabDocument");
-    const activateEnd = source.indexOf("\nwatch([() => props.tabId", activateStart);
-    const activateSource = source.slice(activateStart, activateEnd);
+    const activateStart = documentSource.indexOf("function activateTabDocument");
+    const activateEnd = documentSource.indexOf("\n  watch([() => props.tabId", activateStart);
+    const activateSource = documentSource.slice(activateStart, activateEnd);
 
     expect(activateStart).toBeGreaterThanOrEqual(0);
     expect(activateEnd).toBeGreaterThan(activateStart);
@@ -49,9 +58,9 @@ describe("QueryEditor context menu lifecycle", () => {
     const syncSource = source.slice(syncStart, syncEnd);
     const syncIndex = source.indexOf("syncContextMenuStateAtEvent(view, e);");
     const openIndex = source.indexOf("onContextMenu(e);", syncIndex);
-    const getterStart = source.indexOf("function currentContextMenuItems()");
-    const getterEnd = source.indexOf("\n}", getterStart);
-    const getterSource = source.slice(getterStart, getterEnd);
+    const getterStart = menuSource.indexOf("function currentContextMenuItems()");
+    const getterEnd = menuSource.indexOf("\n}", getterStart);
+    const getterSource = menuSource.slice(getterStart, getterEnd);
 
     expect(syncStart).toBeGreaterThanOrEqual(0);
     expect(syncEnd).toBeGreaterThan(syncStart);
@@ -64,8 +73,9 @@ describe("QueryEditor context menu lifecycle", () => {
     expect(getterSource).toContain("return contextMenuItems.value;");
     expect(getterSource).not.toContain("nextTick");
     expect(getterSource).not.toContain("setTimeout");
-    expect(source).toContain(':items="currentContextMenuItems"');
-    expect(source).not.toContain('<CustomContextMenu :items="contextMenuItems"');
+    expect(menuSource).toContain(':items="currentContextMenuItems"');
+    expect(source).toContain(':get-state="getContextMenuState"');
+    expect(menuSource).not.toContain('<CustomContextMenu :items="contextMenuItems"');
   });
 
   it("uses the target synchronized in the current context-menu event", async () => {
@@ -135,67 +145,67 @@ describe("QueryEditor context menu lifecycle", () => {
 
 describe("QueryEditor batch column selection", () => {
   it("keeps the confirmation action visible during pinyin filtering and supports keyboard toggling", () => {
-    const bypassFilterStart = source.indexOf("function completionItemsForBypassedFilter");
-    const bypassFilterEnd = source.indexOf("\n}\n\nfunction localCompletionDatabaseNames", bypassFilterStart);
-    const bypassFilterSource = source.slice(bypassFilterStart, bypassFilterEnd);
+    const bypassFilterStart = completionSource.indexOf("function completionItemsForBypassedFilter");
+    const bypassFilterEnd = completionSource.indexOf("\n  }\n\n  function localCompletionDatabaseNames", bypassFilterStart);
+    const bypassFilterSource = completionSource.slice(bypassFilterStart, bypassFilterEnd);
 
     expect(bypassFilterStart).toBeGreaterThanOrEqual(0);
     expect(bypassFilterEnd).toBeGreaterThan(bypassFilterStart);
     expect(bypassFilterSource).toContain("if (isBatchColumnSelectionAction(item)) return true;");
     expect(source).toContain('key: "Space"');
     expect(source).toContain("run: toggleSelectedBatchColumnSelection");
-    expect(source).toContain("codeMirrorSelectedCompletion?.(view.state)");
+    expect(completionKeysSource).toContain("codeMirrorSelectedCompletion?.(view.state)");
   });
 
   it("applies checked columns directly through Enter and the completion Tab shortcut", () => {
-    const handleEnterStart = source.indexOf("function handleEnter");
-    const handleEnterEnd = source.indexOf("\n}\n\nfunction clearPendingCompletionEnter", handleEnterStart);
-    const tabStart = source.indexOf("function acceptCompletionOrNextSnippetField");
-    const tabEnd = source.indexOf("\n}\n\nfunction clearPendingCompletionTab", tabStart);
+    const handleEnterStart = completionKeysSource.indexOf("function handleEnter");
+    const handleEnterEnd = completionKeysSource.indexOf("\n  }", handleEnterStart);
+    const tabStart = completionKeysSource.indexOf("function acceptCompletionOrNextSnippetField");
+    const tabEnd = completionKeysSource.indexOf("\n  }", tabStart);
 
-    expect(source).toContain("function applySelectedBatchColumnSelection");
-    expect(source.slice(handleEnterStart, handleEnterEnd)).toContain("if (isBatchColumnSelectionCompletionActive(codeMirrorCompletionStatus?.(view.state) ?? null) && applySelectedBatchColumnSelection(view)) return true;");
-    expect(source.slice(handleEnterStart, handleEnterEnd)).toContain("if (codeMirrorAcceptCompletion?.(view)) return true;");
-    expect(source.slice(tabStart, tabEnd)).toContain("if (isBatchColumnSelectionCompletionActive(completionStatus) && applySelectedBatchColumnSelection(view)) return true;");
-    expect(source).toContain("defaultKeymap: false");
+    expect(batchSource).toContain("function applySelectedBatchColumnSelection");
+    expect(completionKeysSource.slice(handleEnterStart, handleEnterEnd)).toContain("if (isBatchColumnSelectionCompletionActive(codeMirrorRuntime.codeMirrorCompletionStatus?.(view.state) ?? null) && applySelectedBatchColumnSelection(view)) return true;");
+    expect(completionKeysSource.slice(handleEnterStart, handleEnterEnd)).toContain("if (codeMirrorRuntime.codeMirrorAcceptCompletion?.(view)) return true;");
+    expect(completionKeysSource.slice(tabStart, tabEnd)).toContain("if (isBatchColumnSelectionCompletionActive(completionStatus) && applySelectedBatchColumnSelection(view)) return true;");
+    expect(extensionsSource).toContain("defaultKeymap: false");
     expect(source).toContain('{ key: "ArrowDown", run: (view) => moveCompletion(view, true) }');
     expect(source).toContain('{ key: "ArrowUp", run: (view) => moveCompletion(view, false) }');
   });
 
   it("marks the insertion action so the completion menu can keep it sticky", () => {
-    expect(source).toContain("dbxBatchColumnSelectionAction: { sessionKey: item.sessionKey, ...(item.batchColumnSelectionToggleAll ? { toggleAll: true as const } : {}) }");
-    expect(source).toContain('optionClass: (completion) => ((completion as QueryCompletionOption).dbxBatchColumnSelectionAction ? "cm-batch-column-selection-action" : "")');
+    expect(completionSource).toContain("dbxBatchColumnSelectionAction: { sessionKey: item.sessionKey, ...(item.batchColumnSelectionToggleAll ? { toggleAll: true as const } : {}) }");
+    expect(extensionsSource).toContain('optionClass: (completion) => ((completion as QueryCompletionOption).dbxBatchColumnSelectionAction ? "cm-batch-column-selection-action" : "")');
   });
 
   it("updates the insertion count while a mouse selection is still in progress", () => {
-    const dragUpdateStart = source.indexOf("function updateBatchColumnSelectionAtPoint");
-    const dragUpdateEnd = source.indexOf("\n}\n\nconst BATCH_COLUMN_SELECTION_AUTO_SCROLL_EDGE_PX", dragUpdateStart);
+    const dragUpdateStart = batchSource.indexOf("function updateBatchColumnSelectionAtPoint");
+    const dragUpdateEnd = batchSource.indexOf("\n  }\n\n  const BATCH_COLUMN_SELECTION_AUTO_SCROLL_EDGE_PX", dragUpdateStart);
 
-    expect(source).toContain("function updateBatchColumnSelectionActionLabel");
-    expect(source.slice(dragUpdateStart, dragUpdateEnd)).toContain("updateBatchColumnSelectionActionLabel(state.view, state.sessionKey);");
-    expect(source).toContain("const batchColumnSelectionTooltipParents = new WeakMap<EditorViewType, HTMLElement>();");
-    expect(source).toContain("batchColumnSelectionTooltipParents.set(view.value, tooltipParent);");
-    expect(source).toContain("const batchColumnSelectionActionMarkers = new WeakMap<HTMLElement, { sessionKey: string; toggleAll: boolean }>();");
-    expect(source).toContain("!markerState || markerState.sessionKey !== sessionKey");
-    expect(source).toContain("renderBatchColumnSelectionActionMarker");
+    expect(batchSource).toContain("function updateBatchColumnSelectionActionLabel");
+    expect(batchSource.slice(dragUpdateStart, dragUpdateEnd)).toContain("updateBatchColumnSelectionActionLabel(state.view, state.sessionKey);");
+    expect(batchSource).toContain("const batchColumnSelectionTooltipParents = new WeakMap<EditorViewType, HTMLElement>();");
+    expect(batchSource).toContain("batchColumnSelectionTooltipParents.set(currentView, tooltipParent);");
+    expect(batchSource).toContain("const batchColumnSelectionActionMarkers = new WeakMap<HTMLElement, { sessionKey: string; toggleAll: boolean }>();");
+    expect(batchSource).toContain("!markerState || markerState.sessionKey !== sessionKey");
+    expect(batchSource).toContain("renderBatchColumnSelectionActionMarker");
   });
 
   it("cancels stale scroll restoration before a new drag can begin", () => {
-    const refreshStart = source.indexOf("function scheduleBatchColumnSelectionRefresh");
-    const refreshEnd = source.indexOf("\n}\n\nfunction finishBatchColumnSelectionDrag", refreshStart);
-    const dragStart = source.indexOf("function startBatchColumnSelectionDrag");
-    const dragEnd = source.indexOf("\n}\n\nfunction renderBatchColumnSelectionCheckbox", dragStart);
+    const refreshStart = batchSource.indexOf("function scheduleBatchColumnSelectionRefresh");
+    const refreshEnd = batchSource.indexOf("\n  }\n\n  function finishBatchColumnSelectionDrag", refreshStart);
+    const dragStart = batchSource.indexOf("function startBatchColumnSelectionDrag");
+    const dragEnd = batchSource.indexOf("\n  }\n\n  function renderBatchColumnSelectionCheckbox", dragStart);
 
-    expect(source).toContain("let batchColumnSelectionRefreshCleanup: (() => void) | null = null;");
-    expect(source.slice(refreshStart, refreshEnd)).toContain("cancelBatchColumnSelectionRefresh();");
-    expect(source.slice(dragStart, dragEnd)).toContain("cancelBatchColumnSelectionRefresh();");
-    expect(source).toContain("if (restoreStartTimer) window.clearTimeout(restoreStartTimer);");
+    expect(batchSource).toContain("let batchColumnSelectionRefreshCleanup: (() => void) | null = null;");
+    expect(batchSource.slice(refreshStart, refreshEnd)).toContain("cancelBatchColumnSelectionRefresh();");
+    expect(batchSource.slice(dragStart, dragEnd)).toContain("cancelBatchColumnSelectionRefresh();");
+    expect(batchSource).toContain("if (restoreStartTimer) window.clearTimeout(restoreStartTimer);");
   });
 
   it("only expands rendering for batch field selection", () => {
-    expect(source).toContain("function setBatchColumnSelectionExpandedRendering");
-    expect(source).toContain("setBatchColumnSelectionExpandedRendering(true);");
-    expect(source).toContain("setBatchColumnSelectionExpandedRendering(false);");
-    expect(source).toContain("maxRenderedOptions: batchColumnSelectionExpandedRendering ? Number.MAX_SAFE_INTEGER : 100,");
+    expect(batchSource).toContain("function setBatchColumnSelectionExpandedRendering");
+    expect(batchSource).toContain("setBatchColumnSelectionExpandedRendering(true);");
+    expect(batchSource).toContain("setBatchColumnSelectionExpandedRendering(false);");
+    expect(extensionsSource).toContain("maxRenderedOptions: batchSelection.expandedRendering ? Number.MAX_SAFE_INTEGER : 100,");
   });
 });

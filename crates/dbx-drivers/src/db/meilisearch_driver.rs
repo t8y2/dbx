@@ -250,6 +250,36 @@ pub async fn list_indexes(client: &MeilisearchClient) -> Result<Vec<String>, Str
     Ok(names)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchCreateIndexInput {
+    pub uid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key: Option<String>,
+}
+
+pub async fn create_index(client: &MeilisearchClient, input: &MeilisearchCreateIndexInput) -> Result<(), String> {
+    let uid = input.uid.trim();
+    if uid.is_empty() {
+        return Err("Meilisearch index UID cannot be empty".to_string());
+    }
+
+    let mut body = serde_json::Map::new();
+    body.insert("uid".to_string(), Value::String(uid.to_string()));
+    if let Some(primary_key) = input.primary_key.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        body.insert("primaryKey".to_string(), Value::String(primary_key.to_string()));
+    }
+
+    let response = client
+        .post("/indexes")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let task = task_from_response(response, "index creation").await?;
+    wait_for_task(client, task.task_uid).await
+}
+
 #[derive(Debug, Deserialize)]
 struct DocumentsResponse {
     results: Vec<Value>,
@@ -266,7 +296,6 @@ fn meilisearch_fetch_body(
     let mut body = Map::new();
     body.insert("offset".to_string(), Value::Number(offset.into()));
     body.insert("limit".to_string(), Value::Number(limit.into()));
-    body.insert("fields".to_string(), Value::Array(vec![Value::String("*".to_string())]));
     if let Some(filter) = meilisearch_filter_from_request(filter, primary_key)? {
         body.insert("filter".to_string(), filter);
     }
@@ -366,6 +395,7 @@ pub async fn get_columns(client: &MeilisearchClient, index: &str) -> Result<Vec<
             enum_values: None,
             character_set: None,
             collation: None,
+            metadata_capabilities: None,
         })
         .collect())
 }
@@ -906,6 +936,9 @@ fn meilisearch_search_body(
     }
     body.insert("offset".to_string(), Value::Number(offset.into()));
     body.insert("limit".to_string(), Value::Number(limit.into()));
+    // Search results are also used for filtered export. Request the complete
+    // stored document instead of the index's displayed-attributes subset.
+    body.insert("attributesToRetrieve".to_string(), Value::Array(vec![Value::String("*".to_string())]));
     if let Some(filter) = meilisearch_filter_from_request(filter, primary_key)? {
         body.insert("filter".to_string(), filter);
     }
@@ -1061,8 +1094,37 @@ pub struct MeilisearchIndexOverview {
     pub updated_at: Option<String>,
     pub number_of_documents: u64,
     pub is_indexing: bool,
+    /// Raw document store size of *this* index in bytes (`rawDocumentDbSize`,
+    /// Meilisearch >= 1.14). `None` on servers that do not report per-index sizes.
+    pub document_size: Option<u64>,
+    /// Average size of one document in this index in bytes (`avgDocumentSize`,
+    /// Meilisearch >= 1.14). `None` on older servers.
+    pub avg_document_size: Option<u64>,
     /// Instance-wide database size in bytes; `None` when the API key cannot read instance stats.
+    /// It counts every index of the instance, so the UI only uses it as a fallback.
     pub database_size: Option<u64>,
+}
+
+/// Builds the index overview from the three responses the tab needs. Kept pure
+/// so the per-index size fields (Meilisearch >= 1.14) and the older-server
+/// fallback can be covered without a live server.
+fn parse_index_overview(
+    index: &str,
+    info: &Value,
+    stats: &Value,
+    instance_stats: Option<&Value>,
+) -> MeilisearchIndexOverview {
+    MeilisearchIndexOverview {
+        uid: info.get("uid").and_then(Value::as_str).unwrap_or(index).to_string(),
+        primary_key: info.get("primaryKey").and_then(Value::as_str).map(str::to_string),
+        created_at: info.get("createdAt").and_then(Value::as_str).map(str::to_string),
+        updated_at: info.get("updatedAt").and_then(Value::as_str).map(str::to_string),
+        number_of_documents: stats.get("numberOfDocuments").and_then(Value::as_u64).unwrap_or(0),
+        is_indexing: stats.get("isIndexing").and_then(Value::as_bool).unwrap_or(false),
+        document_size: stats.get("rawDocumentDbSize").and_then(Value::as_u64),
+        avg_document_size: stats.get("avgDocumentSize").and_then(Value::as_u64),
+        database_size: instance_stats.and_then(|value| value.get("databaseSize")).and_then(Value::as_u64),
+    }
 }
 
 pub async fn get_index_overview(client: &MeilisearchClient, index: &str) -> Result<MeilisearchIndexOverview, String> {
@@ -1077,22 +1139,11 @@ pub async fn get_index_overview(client: &MeilisearchClient, index: &str) -> Resu
     .await?;
     let stats = get_index_stats(client, index).await?;
     // Instance stats require broader key permissions, so keep them best-effort.
-    let database_size = match client.get("/stats").send().await {
-        Ok(response) => response_json(response, "instance stats lookup")
-            .await
-            .ok()
-            .and_then(|value| value.get("databaseSize").and_then(Value::as_u64)),
+    let instance_stats = match client.get("/stats").send().await {
+        Ok(response) => response_json(response, "instance stats lookup").await.ok(),
         Err(_) => None,
     };
-    Ok(MeilisearchIndexOverview {
-        uid: info.get("uid").and_then(Value::as_str).unwrap_or(index).to_string(),
-        primary_key: info.get("primaryKey").and_then(Value::as_str).map(str::to_string),
-        created_at: info.get("createdAt").and_then(Value::as_str).map(str::to_string),
-        updated_at: info.get("updatedAt").and_then(Value::as_str).map(str::to_string),
-        number_of_documents: stats.get("numberOfDocuments").and_then(Value::as_u64).unwrap_or(0),
-        is_indexing: stats.get("isIndexing").and_then(Value::as_bool).unwrap_or(false),
-        database_size,
-    })
+    Ok(parse_index_overview(index, &info, &stats, instance_stats.as_ref()))
 }
 
 pub async fn delete_index(client: &MeilisearchClient, index: &str) -> Result<(), String> {
@@ -1858,6 +1909,7 @@ fn raw_response_result(status: u16, body: String, start: Instant, truncated: boo
         rows: vec![vec![Value::Number(status.into()), Value::String(body)]],
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated,
         session_id: None,
         has_more: false,
@@ -1871,8 +1923,9 @@ mod tests {
     use super::{
         decode_bounded_rest_body, decoded_identity, ensure_task_index, filter_expression, identity_path,
         meilisearch_base_url, meilisearch_filter_from_request, meilisearch_search_body, meilisearch_sort_from_request,
-        parse_key, parse_meilisearch_search_response, parse_rest_request_line, parse_system_stats, task_selector_query,
-        MeilisearchClient, MeilisearchOverviewSection, MeilisearchTask, MeilisearchTaskSelector,
+        parse_index_overview, parse_key, parse_meilisearch_search_response, parse_rest_request_line,
+        parse_system_stats, task_selector_query, MeilisearchClient, MeilisearchOverviewSection, MeilisearchTask,
+        MeilisearchTaskSelector,
     };
     use reqwest::Method;
     use serde_json::{json, Value};
@@ -2002,6 +2055,57 @@ mod tests {
         task.index_uid = None;
         let indexless = ensure_task_index(&task, Some("books")).unwrap_err();
         assert!(indexless.contains("not associated with an index"));
+    }
+
+    #[test]
+    fn index_overview_prefers_the_per_index_size_when_the_server_reports_one() {
+        // Meilisearch >= 1.14: /indexes/{uid}/stats carries the index's own sizes.
+        let overview = parse_index_overview(
+            "movies",
+            &json!({ "uid": "movies", "primaryKey": "id", "createdAt": "2026-08-01T00:00:00Z" }),
+            &json!({
+                "numberOfDocuments": 256,
+                "indexSize": 90_000_000,
+                "rawDocumentDbSize": 26_935_296,
+                "avgDocumentSize": 105_216,
+                "isIndexing": false
+            }),
+            Some(&json!({ "databaseSize": 999_999_999 })),
+        );
+
+        assert_eq!(overview.document_size, Some(26_935_296));
+        assert_eq!(overview.avg_document_size, Some(105_216));
+        // The instance-wide number stays available, but the UI must not present it as this index's size.
+        assert_eq!(overview.database_size, Some(999_999_999));
+        assert_eq!(overview.number_of_documents, 256);
+    }
+
+    #[test]
+    fn index_overview_leaves_per_index_sizes_unset_on_older_servers() {
+        // Meilisearch <= 1.13 answers index stats without rawDocumentDbSize / avgDocumentSize.
+        let overview = parse_index_overview(
+            "movies",
+            &json!({ "uid": "movies" }),
+            &json!({ "numberOfDocuments": 12, "isIndexing": true, "fieldDistribution": { "id": 12 } }),
+            Some(&json!({ "databaseSize": 4096 })),
+        );
+
+        assert_eq!(overview.document_size, None);
+        assert_eq!(overview.avg_document_size, None);
+        assert_eq!(overview.database_size, Some(4096));
+        assert_eq!(overview.number_of_documents, 12);
+        assert!(overview.is_indexing);
+    }
+
+    #[test]
+    fn index_overview_survives_a_forbidden_instance_stats_lookup() {
+        let overview = parse_index_overview("movies", &json!({}), &json!({ "numberOfDocuments": 1 }), None);
+
+        assert_eq!(overview.database_size, None);
+        assert_eq!(overview.document_size, None);
+        assert_eq!(overview.uid, "movies");
+        assert_eq!(overview.number_of_documents, 1);
+        assert!(!overview.is_indexing);
     }
 
     #[test]
@@ -2372,7 +2476,10 @@ mod tests {
             super::meilisearch_fetch_body(0, 1000, Some(r#"genre = "sci-fi""#), Some("movie_id:asc"), Some("movie_id"))
                 .unwrap();
 
-        assert_eq!(body.get("fields"), Some(&json!(["*"])));
+        // Omitting `fields` asks Meilisearch to return every stored field.
+        // A wildcard field is treated as a literal field name by some versions
+        // and produces `{}` documents in the export response.
+        assert!(!body.contains_key("fields"));
         assert_eq!(body.get("limit"), Some(&json!(1000)));
         assert_eq!(body.get("offset"), Some(&json!(0)));
     }

@@ -13,6 +13,10 @@ export function isMeilisearchDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "meilisearch";
 }
 
+export function isSolrDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "solr";
+}
+
 export interface SqlSnippet {
   id: string;
   label: string;
@@ -455,13 +459,22 @@ export interface PluginFilesystemMutationResult {
   entry?: PluginFilesystemEntry;
 }
 
+export type PluginContextMenuTarget = "connection" | "table";
+
+export interface PluginTableContext {
+  connectionId: string;
+  database?: string;
+  schema?: string;
+  table: string;
+}
+
 export interface PluginContextMenuContribution {
   type: "context-menu";
   id: string;
   label: string;
   description?: string;
   icon?: string;
-  menu: string;
+  menu: PluginContextMenuTarget;
 }
 
 export interface PluginResultViewContribution {
@@ -472,7 +485,96 @@ export interface PluginResultViewContribution {
   icon?: string;
 }
 
-export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution;
+export type PluginCommandPresentation = "tab" | "panel";
+export type PluginCommandReuse = "singleton" | "new";
+export type PluginCommandRestore = "none";
+
+/** v1 ships exactly one action (HOST_PLUGIN_UI_SPEC §4.1): open a declared workbench. */
+export interface PluginOpenWorkbenchAction {
+  type: "open-workbench";
+  /** Workbench contribution of the SAME plugin. */
+  workbench: string;
+  presentation?: PluginCommandPresentation;
+  reuse?: PluginCommandReuse;
+  instance_key?: string;
+  restore?: PluginCommandRestore;
+  /** Opaque plugin payload; the host serves it under `context.plugin`. */
+  context?: Record<string, unknown>;
+  /**
+   * Generic launch-options extension point: sidecar method returning
+   * `{ entries: [{ label, description?, context? }] }` for the dock "+" picker.
+   * The host renders labels and merges the chosen context into the
+   * host-authored panel context — never interpreting the business meaning.
+   */
+  options_action?: string;
+  /** When true, the host also offers the plugin's own saved connections as launch targets. */
+  connection_targets?: boolean;
+}
+
+export type PluginConditionOperator = "equals" | "notEquals" | "oneOf";
+
+/** §5.3 structured condition clause; key/operator are host-reserved word lists — unknown values were rejected at parse time. */
+export interface PluginConditionClause {
+  key: string;
+  operator: PluginConditionOperator;
+  value: string | boolean | string[];
+}
+
+/** enablement/when condition group: implicit AND within `all`; absent field defaults to true. */
+export interface PluginCommandEnablement {
+  all: PluginConditionClause[];
+}
+
+/** Context-key snapshot for condition evaluation (host-provided per scenario; clauses referencing a missing key are always false). */
+export type PluginConditionContextKeys = Record<string, string | boolean | undefined>;
+
+export interface PluginCommandLaunchOption {
+  label: string;
+  description?: string;
+  context?: Record<string, unknown>;
+}
+
+export interface PluginCommandContribution {
+  type: "command";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+  action: PluginOpenWorkbenchAction;
+  enablement?: PluginCommandEnablement;
+}
+
+export type PluginMenuLocation = "commandPalette" | "appToolbar" | "appSidebar";
+
+export interface PluginMenuItem {
+  location: PluginMenuLocation;
+  /** Short command id of the SAME plugin. */
+  command: string;
+  group: string;
+  order: number;
+  /** Toolbar entries default to hidden; sidebar entries default to visible. */
+  default_visible?: boolean;
+  /** Placement visibility condition (defaults to true); evaluated independently from command.enablement. */
+  when?: PluginCommandEnablement;
+}
+
+export interface PluginMenusContribution {
+  type: "menus";
+  id: string;
+  items: PluginMenuItem[];
+}
+
+/**
+ * Contribution types the host renders through the plugin's own UI entrypoint in
+ * a plugin tab. A `workbench` is launched from the sidebar, the plugin center,
+ * or `host.openWorkbench`; a `result-view` is launched from the query-result
+ * toolbar with the current result snapshot as context. Both declare display
+ * metadata only — the opened contribution id is what tells the plugin UI which
+ * of its declared surfaces to render.
+ */
+export type PluginUiContribution = PluginWorkbenchContribution | PluginResultViewContribution;
+
+export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution;
 
 export interface PluginEngines {
   dbx: string;
@@ -542,10 +644,18 @@ export interface PluginManifest {
   localizations?: Record<string, PluginManifestLocalization>;
 }
 
+export interface PluginInstallProvenance {
+  repositoryId?: string;
+  publisher?: string;
+  signingKeyId?: string;
+  source?: "marketplace" | "url" | "file" | "unknown";
+}
+
 export interface InstalledPlugin {
   manifest: PluginManifest;
   compatibility: PluginCompatibility;
   path?: string;
+  provenance?: PluginInstallProvenance;
 }
 
 export interface PluginTrustedKey {
@@ -625,6 +735,7 @@ export interface PluginMarketplaceInstallRequest {
   repositoryId: string;
   pluginId: string;
   version?: string;
+  allowSourceChange?: boolean;
 }
 
 export interface ActivePluginSession {
@@ -825,6 +936,18 @@ export interface ObjectStatistics {
   schema?: string | null;
   estimated_rows?: number | null;
   total_bytes?: number | null;
+  data_length?: number | null;
+  engine?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  collation?: string | null;
+  row_format?: string | null;
+  avg_row_length?: number | null;
+  max_data_length?: number | null;
+  check_time?: string | null;
+  index_length?: number | null;
+  auto_increment?: string | null;
+  data_free?: number | null;
 }
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
@@ -1095,6 +1218,21 @@ export interface QueryResult {
   /** Manual-transaction UX marker for the same dialects: set on the synthetic
    *  successful result of an empty/whitespace/comments-only manual script. */
   manual_transaction_no_statement?: true;
+  /** MySQL auto-commit tab session state reported by the backend for this
+   *  execution: true = the tab connection still holds a transaction the user
+   *  opened explicitly (`BEGIN` / `START TRANSACTION`) and DBX kept it open;
+   *  false = the backend settled the connection and no such transaction is
+   *  open. Absent when the execution never observed a tab-scoped MySQL
+   *  connection, so the tab must keep its previous state. */
+  auto_commit_open_transaction?: boolean;
+  /** MySQL auto-commit tab: the backend rolled back a transaction the user
+   *  opened explicitly and left open (the tab did not opt into keeping them). */
+  auto_commit_explicit_transaction_rolled_back?: true;
+  /** MySQL auto-commit tab: the backend rolled back a transaction the session
+   *  opened implicitly because auto-commit was off (`SET autocommit = 0`).
+   *  Nobody typed `BEGIN`, so the tab reports it separately — and only once per
+   *  connection instead of after every execution. */
+  auto_commit_session_autocommit_rolled_back?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
@@ -1126,6 +1264,10 @@ export interface QueryResult {
   mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
+  /** OceanBase SQL Audit EXECUTE_TIME for a completed statement, in microseconds. */
+  server_execute_time_us?: number;
+  /** Desktop wait from query request dispatch to the complete result payload; summed across appended pages. OceanBase Oracle query tabs only. */
+  client_request_wait_ms?: number;
   /** Whether a backend-reported result total is exact. */
   total_is_exact?: boolean;
   truncated?: boolean;
@@ -1416,7 +1558,7 @@ export interface SidebarLayout {
   order: SidebarOrderEntry[];
 }
 
-export type TableVGroupOrderEntry = { type: "group"; id: string; children?: TableVGroupOrderEntry[] } | { type: "table"; name: string };
+export type TableVGroupOrderEntry = { type: "group"; id: string; children?: TableVGroupOrderEntry[] } | { type: "table"; name: string; /** 行类型（view/procedure/…）。同名双行容器（包 spec/body、type/type-body）靠它区分成员；缺省 = 按名字匹配（历史数据与表）。 */ rowType?: string };
 
 export interface TableVGroupLayout {
   version?: number;
@@ -1483,6 +1625,8 @@ export interface TreeNode {
   savedSqlFolderId?: string;
   /** Set on synthetic table virtual-group container nodes. */
   vgroupId?: string;
+  /** 投影时盖章的分组类别（tables/views/…），供拖拽落点 O(1) 类别判定。 */
+  vgroupKind?: string;
   meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
   loadMore?: {
     parentId: string;
@@ -1502,7 +1646,43 @@ export interface TableNameFilter {
   excludePatterns: string[];
 }
 
-export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "ddl";
+export type TableInfoTab = "info" | "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "partitions" | "ddl";
+
+/** PostgreSQL declarative partitioning strategy (`pg_partitioned_table.partstrat`). */
+export type PgPartitionKind = "range" | "list" | "hash";
+
+/** Structured form of a partition's `pg_get_expr(relpartbound)` definition. Values are the SQL literal text PostgreSQL reported (`'2024-01-01'`, `MINVALUE`, `0`). */
+export type PgPartitionBound = { kind: "range"; from: string[]; to: string[] } | { kind: "list"; values: string[] } | { kind: "hash"; modulus: number; remainder: number } | { kind: "default" };
+
+export interface PgPartitionNode {
+  schema: string;
+  name: string;
+  strategy?: PgPartitionKind;
+  keyDefinition?: string;
+  bound?: PgPartitionBound;
+  boundDefinition?: string;
+  isLeaf: boolean;
+  rowEstimate?: number;
+  totalBytes?: number;
+  children: PgPartitionNode[];
+}
+
+export interface PgTablePartitioning {
+  isPartitioned: boolean;
+  isPartition: boolean;
+  parent?: string;
+  parentSchema?: string;
+  parentTable?: string;
+  ownBound?: PgPartitionBound;
+  strategy?: PgPartitionKind;
+  keyDefinition?: string;
+  keyColumns: string[];
+  keyExpression?: string;
+  defaultPartition?: string;
+  partitions: PgPartitionNode[];
+  /** `server_version_num`, used to gate `DETACH PARTITION CONCURRENTLY` (14+). */
+  serverVersionNum?: number;
+}
 
 export interface TableStructureEditorTarget {
   kind: "column" | "index";
@@ -1535,6 +1715,13 @@ export interface TableStructureEditorDraft {
   constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
+  /** Pending PostgreSQL partition operations (create/attach/detach/drop). */
+  partitionOperations?: import("@/lib/table/tableStructureEditorSql").TablePartitionOperation[];
+  /** Create-mode `PARTITION BY` declaration. */
+  createPartitioningEnabled?: boolean;
+  createPartitioningKind?: import("@/types/database").PgPartitionKind;
+  createPartitioningColumns?: string[];
+  createPartitioningExpression?: string;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */
@@ -1595,10 +1782,25 @@ export interface QueryTab {
   createdAt?: number;
   title: string;
   customTitle?: boolean;
+  /**
+   * 同名标签之间用来区分的稳定编号，以及分配编号时的那个显示标题。
+   *
+   * 编号只在标签首次出现重名时分配一次，之后即使其它重名标签被关闭也不再回收到
+   * 其它标签上：关闭中间的标签不会让后面的标签改名（#9938）。因为标签的显示标题
+   * 会随库名切换、重命名、紧凑标题设置而变，所以用 titleNumberKey 记住分配时的
+   * 标题，标题变了就重新参与分配。
+   */
+  titleNumber?: number;
+  titleNumberKey?: string;
   /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
   forceWordWrap?: boolean;
   connectionId: string;
   database: string;
+  /**
+   * 所属连接被删除后，被保留下来的 SQL 页签会记录原连接名。新建同名连接时按此
+   * 字段把页签重新绑定到新连接上；绑定完成后清空。
+   */
+  detachedConnectionName?: string;
   /** Optional branch context for a driver-profile database workspace. */
   workspaceBranch?: string;
   schema?: string;
@@ -1725,6 +1927,7 @@ export interface QueryTab {
     | "mysql-dashboard"
     | "postgres-dashboard"
     | "xugu-dashboard"
+    | "solr-admin"
     | "dolt-version-control"
     | "plugin-workbench"
     | "plugin-filesystem";
@@ -1752,6 +1955,8 @@ export interface QueryTab {
   nacosTargetRequestId?: number;
   nacosConfigEditorViewport?: NacosConfigEditorViewport;
   structureTableName?: string;
+  /** Navigation type of the opened structure object; views matter for "view data" routing. */
+  structureTableType?: "table" | "view";
   structureInitialTab?: TableInfoTab;
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;
@@ -1788,6 +1993,8 @@ export interface QueryTab {
    */
   sourceLoad?: {
     startedAt: number;
+    /** Whether this request should open an editable object definition instead of the original source. */
+    initialEditing?: boolean;
     /** 加载失败时写入；保留 request 以便就地重试 */
     error?: string;
     /**
@@ -1914,6 +2121,25 @@ export interface QueryTab {
    *  statement DBX cannot prove read-only. Commit/Rollback actions are hidden
    *  while a session is clean. Never cleared by a later read. */
   txnPossiblyDirty?: boolean;
+  /** Auto-commit tabs (`Tx:A`) with a MySQL-family connection: whether the tab's
+   *  connection currently holds a transaction the user opened explicitly
+   *  (`BEGIN` / `START TRANSACTION`). The backend reports it on every execution
+   *  that observed the connection; the tab mirrors it into the `Tx` badge and
+   *  the commit/rollback actions. Not persisted. */
+  autoCommitOpenTransaction?: boolean;
+  /** Auto-commit tab: show the notice that the backend rolled back an explicit
+   *  transaction this tab left open, so the cleanup is never silent. */
+  autoCommitTxnRolledBack?: boolean;
+  /** Same cleanup, but the rolled-back transaction came from a session with
+   *  auto-commit turned off (`SET autocommit = 0`) rather than from a `BEGIN`
+   *  the user typed. Shown with its own wording so the notice is not mistaken
+   *  for a lost explicit transaction. */
+  autoCommitSessionTxnRolledBack?: boolean;
+  /** Dedupe marker for {@link autoCommitSessionTxnRolledBack}: an
+   *  auto-commit-off session rolls back an implicit transaction after *every*
+   *  execution, so the notice is raised once and re-armed only after the
+   *  connection stops reporting that rollback. */
+  autoCommitSessionTxnRolledBackNotified?: boolean;
 }
 
 export interface SavedSqlFolder {

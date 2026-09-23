@@ -17,12 +17,12 @@ jobs:
   frontend-checks:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # The workspace intentionally contains platform-specific CLI/MCP packages for every release target.
       NPM_CONFIG_LOGLEVEL: error
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -30,7 +30,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -53,7 +53,7 @@ jobs:
         run: pnpm build:docs-export
 
       # continue-on-error for one cycle: every reproducibility observation
-      # so far was same-platform, and this job is ubuntu-22.04 x86_64 like
+      # so far was same-platform, and this job is ubuntu-24.04 x86_64 like
       # every contributor's toolchain is lockfile-pinned to expect. If a
       # byte ever differs cross-platform, surface it in the job summary
       # rather than reddening every PR at once on a repo we contribute to,
@@ -65,11 +65,11 @@ jobs:
   frontend-typecheck:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -77,7 +77,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -91,7 +91,7 @@ jobs:
   frontend-test:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
     strategy:
@@ -100,7 +100,7 @@ jobs:
         shard: [1, 2]
     name: frontend-test (${{ matrix.shard }}/2)
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -108,7 +108,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -133,11 +133,11 @@ jobs:
       - frontend-typecheck
       - frontend-test
     if: always()
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Check selected frontend jobs
@@ -148,12 +148,12 @@ jobs:
   github-scripts:
     needs: changes
     if: needs.changes.outputs.github_scripts == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
 
@@ -163,7 +163,7 @@ jobs:
   packages:
     needs: changes
     if: needs.changes.outputs.packages == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # Unsupported-platform package warnings are expected while validating cross-platform package metadata.
       NPM_CONFIG_LOGLEVEL: error
@@ -173,7 +173,7 @@ jobs:
       # (see rust-fmt-clippy) and lean on the rust-cache restore from main.
       RUSTC_WRAPPER: ${{ secrets.SCCACHE_S3_BUCKET != '' && 'sccache' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -181,7 +181,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -191,9 +191,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
 
-      # Jammy's mold 1.0.3 (2022) mis-links the bundled duckdb C++ library
-      # (duckdb_create_config fails at runtime), so install a current static
-      # build pinned from upstream releases instead.
+      # Pin mold because runner image updates can change bundled DuckDB C++ links.
+      # The pinned build prevents duckdb_create_config runtime failures.
       - name: Install mold linker
         run: |
           curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
@@ -209,10 +208,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.68.13
         with:
-          version: "v0.10.0"
+          tool: cargo-nextest@0.9.137
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.RUSTC_WRAPPER == 'sccache'
@@ -281,7 +285,7 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_VERSION: windows-standard-v1
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Rust for standard Windows
         uses: dtolnay/rust-toolchain@1.97.1
@@ -305,9 +309,18 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
+      SCCACHE_IDLE_TIMEOUT: "0"
+      # Single source for the job's nightly pin: the toolchain step and the
+      # prebuilt AWS-LC cache key must move together.
+      WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-07-22
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -315,7 +328,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -326,8 +339,166 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: ${{ env.WIN7_NIGHTLY_TOOLCHAIN }}
           components: rust-src
+
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
+      - name: Restore prebuilt Win7 AWS-LC
+        id: aws-lc-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/win7-aws-lc-install
+          # Key covers the workspace Cargo.lock too: a main-workspace aws-lc-sys
+          # bump must rebuild the prebuilt artifacts instead of reusing the
+          # cached headers/lib for a stale version.
+          key: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
+
+      - name: Build Win7 AWS-LC cache
+        if: steps.aws-lc-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          $targetRoot = Join-Path $env:RUNNER_TEMP "win7-aws-lc-build"
+          $installRoot = Join-Path $env:RUNNER_TEMP "win7-aws-lc-install"
+          cargo build --locked --release `
+            --manifest-path .github/fixtures/win7-aws-lc-cache/Cargo.toml `
+            --target x86_64-win7-windows-msvc `
+            -Z build-std=std,panic_abort
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $include = Get-ChildItem $targetRoot -Directory -Recurse -Filter include |
+            Where-Object { Test-Path (Join-Path $_.FullName "openssl/base.h") } |
+            Select-Object -First 1
+          $library = Get-ChildItem $targetRoot -File -Recurse -Filter "*crypto.lib" |
+            Where-Object { $_.Name -like "*aws_lc_0_43_0_crypto.lib" } |
+            Select-Object -First 1
+          if (!$include -or !$library) {
+            Write-Error "AWS-LC did not create the required headers and static library."
+            exit 1
+          }
+
+          $metadata = cargo metadata --locked --format-version 1 `
+            --manifest-path .github/fixtures/win7-aws-lc-cache/Cargo.toml |
+            ConvertFrom-Json
+          $awsLcPackage = $metadata.packages |
+            Where-Object { $_.name -eq "aws-lc-sys" } |
+            Select-Object -First 1
+          $crateRoot = Split-Path $awsLcPackage.manifest_path -Parent
+          $bindings = Join-Path $crateRoot "src/x86_64_pc_windows_msvc_crypto.rs"
+          if (!(Test-Path $bindings)) {
+            Write-Error "AWS-LC did not provide the Windows MSVC bindings."
+            exit 1
+          }
+
+          New-Item -ItemType Directory -Path (Join-Path $installRoot "include") -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $installRoot "lib") -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $installRoot "share/rust") -Force | Out-Null
+          Copy-Item -Path (Join-Path $include.FullName "*") `
+            -Destination (Join-Path $installRoot "include") -Recurse -Force
+          Copy-Item -LiteralPath $library.FullName `
+            -Destination (Join-Path $installRoot "lib/crypto.lib") -Force
+          $bindingOutput = Join-Path $installRoot "share/rust/aws_lc_bindings.rs"
+          $insideInnerAttribute = $false
+          $bindingLines = foreach ($line in Get-Content -LiteralPath $bindings) {
+            if (!$insideInnerAttribute -and $line -eq "#![allow(") {
+              $insideInnerAttribute = $true
+              continue
+            }
+            if ($insideInnerAttribute) {
+              if ($line -eq ")]") {
+                $insideInnerAttribute = $false
+              }
+              continue
+            }
+            $line
+          }
+          $bindingLines | Set-Content -LiteralPath $bindingOutput -Encoding utf8NoBOM
+          $timer.Stop()
+          "AWS-LC cache build: $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds" >> $env:GITHUB_STEP_SUMMARY
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/win7-aws-lc-build
+
+      - name: Configure prebuilt Win7 AWS-LC
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "win7-aws-lc-install"
+          $requiredFiles = @(
+            "include/openssl/base.h",
+            "include/openssl/boringssl_prefix_symbols.h",
+            "lib/crypto.lib",
+            "share/rust/aws_lc_bindings.rs"
+          )
+          foreach ($relativePath in $requiredFiles) {
+            if (!(Test-Path (Join-Path $installRoot $relativePath))) {
+              Write-Error "The AWS-LC cache does not contain $relativePath."
+              exit 1
+            }
+          }
+          "AWS_LC_SYS_SYSTEM_DIR=$installRoot" >> $env:GITHUB_ENV
+          "AWS_LC_SYS_USE_SYSTEM=1" >> $env:GITHUB_ENV
+          "AWS_LC_SYS_STATIC=1" >> $env:GITHUB_ENV
+          "AWS-LC cache hit: ${{ steps.aws-lc-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Restore prebuilt Win7 OpenSSL
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/win7-openssl-install
+          key: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
+
+      - name: Build Win7 OpenSSL cache
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          $targetRoot = Join-Path $env:RUNNER_TEMP "win7-openssl-build"
+          $installRoot = Join-Path $env:RUNNER_TEMP "win7-openssl-install"
+          cargo build --locked --release `
+            --manifest-path .github/fixtures/win7-openssl-cache/Cargo.toml `
+            --target x86_64-win7-windows-msvc `
+            -Z build-std=std,panic_abort
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $install = Get-ChildItem $targetRoot -Directory -Recurse -Filter install |
+            Where-Object { $_.FullName -like "*openssl-build*" } |
+            Select-Object -First 1
+          if (!$install) {
+            Write-Error "OpenSSL did not create an install directory."
+            exit 1
+          }
+          New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+          Copy-Item -Path (Join-Path $install.FullName "*") -Destination $installRoot -Recurse -Force
+          $timer.Stop()
+          "OpenSSL cache build: $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds" >> $env:GITHUB_STEP_SUMMARY
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/win7-openssl-build
+
+      - name: Configure prebuilt Win7 OpenSSL
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "win7-openssl-install"
+          if (!(Test-Path (Join-Path $installRoot "include/openssl/ssl.h"))) {
+            Write-Error "The OpenSSL cache does not contain ssl.h."
+            exit 1
+          }
+          if (!(Get-ChildItem (Join-Path $installRoot "lib") -Filter "*ssl*.lib")) {
+            Write-Error "The OpenSSL cache does not contain an SSL library."
+            exit 1
+          }
+          if (!(Get-ChildItem (Join-Path $installRoot "lib") -Filter "*crypto*.lib")) {
+            Write-Error "The OpenSSL cache does not contain a crypto library."
+            exit 1
+          }
+          "OPENSSL_DIR=$installRoot" >> $env:GITHUB_ENV
+          "OPENSSL_NO_VENDOR=1" >> $env:GITHUB_ENV
+          "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+          "OpenSSL cache hit: ${{ steps.openssl-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh
@@ -348,7 +519,16 @@ jobs:
         shell: pwsh
         run: |
           $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
-          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
+          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --timings
+
+      - name: Upload Windows 7 Cargo timings
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: DBX-win7-cargo-timings
+          path: target/cargo-timings/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Audit Windows 7 PE imports
         shell: pwsh
@@ -380,8 +560,13 @@ jobs:
             Select-Object -First 1
           ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
 
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
+
       - name: Upload Windows 7 test installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: DBX-win7-fixed-runtime-test
           path: target/x86_64-win7-windows-msvc/release/bundle/nsis/*.exe
@@ -404,7 +589,7 @@ jobs:
       CC: "sccache cl.exe"
       CXX: "sccache cl.exe"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
@@ -417,7 +602,7 @@ jobs:
         with:
           arch: x64
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -442,7 +627,7 @@ jobs:
       - changes
       - fast-checks
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
@@ -453,7 +638,7 @@ jobs:
       # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -466,9 +651,9 @@ jobs:
           components: clippy, rustfmt
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.RUSTC_WRAPPER == 'sccache'
@@ -522,7 +707,7 @@ jobs:
       - changes
       - fast-checks
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
@@ -536,7 +721,7 @@ jobs:
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
       RUST_TEST_GROUP: ${{ matrix.group }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -544,8 +729,8 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
         if: matrix.group != 'foundation'
 
-      # Jammy's mold 1.0.3 (2022) is too old for modern C++ links; see the
-      # packages job note for the pinned upstream install.
+      # Pin mold because runner image updates can change bundled C++ links.
+      # See the packages job note for the pinned upstream build.
       - name: Install mold linker
         run: |
           curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
@@ -556,9 +741,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.RUSTC_WRAPPER == 'sccache'
@@ -600,11 +785,20 @@ jobs:
           # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        with:
+          tool: cargo-nextest@0.9.137
+
       # mold -run wraps the whole process tree (see the packages job note):
       # test-binary linking dominates this job and sccache cannot cache links.
-      - name: Cargo test
+      - name: Nextest
         run: |-
           mold -run node .github/scripts/ci-rust.mjs test "$RUST_TEST_GROUP" "$RUST_FEATURE_MODE"
+
+      - name: Rust doc tests
+        run: |-
+          mold -run node .github/scripts/ci-rust.mjs doctest "$RUST_TEST_GROUP" "$RUST_FEATURE_MODE"
 
       - name: Show sccache stats
         if: always()
@@ -623,11 +817,11 @@ jobs:
       - rust-fmt-clippy
       - rust-test
     if: always()
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Check selected rust jobs
@@ -638,14 +832,14 @@ jobs:
   jdbc:
     needs: changes
     if: needs.changes.outputs.jdbc == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -666,12 +860,12 @@ jobs:
   offline-jdbc-release:
     needs: changes
     if: needs.changes.outputs.offline_jdbc == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -706,10 +900,10 @@ jobs:
   nix-packaging:
     needs: changes
     if: needs.changes.outputs.nix == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -718,7 +912,7 @@ jobs:
         run: nix build .#dbx-pnpm-deps .#dbx-cargo-deps --no-link --print-build-logs
 
   changes:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       frontend: ${{ steps.filter.outputs.frontend }}
       packages: ${{ steps.filter.outputs.packages }}
@@ -743,7 +937,7 @@ jobs:
       agent_integration_changed: ${{ steps.plan.outputs.agent_integration_changed }}
       plan: ${{ steps.plan.outputs.plan }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -854,6 +1048,7 @@ jobs:
               - 'vendor/ctor/**'
               - 'vendor/dirs-sys/**'
               - 'vendor/pageant/**'
+              - 'vendor/webview2-com-sys/**'
               - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
@@ -881,11 +1076,11 @@ jobs:
       - agent-go
       - agent-integration
     if: always()
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Check selected agents jobs
@@ -895,9 +1090,9 @@ jobs:
   fast-checks:
     needs: changes
     if: needs.changes.outputs.fast == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
         with:
@@ -907,7 +1102,7 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         run: cargo fmt --check
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: CI planner and gate tests
@@ -936,14 +1131,14 @@ jobs:
   agent-checks:
     needs: changes
     if: needs.changes.outputs.agents == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Install packaging tools
@@ -959,21 +1154,23 @@ jobs:
   agent-java:
     needs: [changes, fast-checks, agent-checks]
     if: needs.changes.outputs.agent_java == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: |-
             8
             21
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
       - name: Install packaging tools
         run: |
           sudo apt-get update
@@ -985,7 +1182,7 @@ jobs:
   agent-rust:
     needs: [changes, fast-checks, agent-checks]
     if: needs.changes.outputs.agent_rust_changed == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
@@ -996,20 +1193,25 @@ jobs:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        if: matrix.driver == 'duckdb'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
-      # Jammy's mold 1.0.3 (2022) mis-links the bundled duckdb C++ library;
-      # see the packages job note for the pinned upstream install.
+      # Pin mold because runner image updates can change bundled DuckDB C++ links.
+      # See the packages job note for the pinned upstream build.
       - name: Install mold linker
         run: |
           curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
             | sudo tar -C /usr/local --strip-components=1 -xz
           mold --version
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
       - name: Configure S3 sccache
         if: env.RUSTC_WRAPPER == 'sccache'
         shell: bash
@@ -1046,12 +1248,18 @@ jobs:
           shared-key: ci-agent-rust-v2-${{ matrix.driver }}
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        with:
+          tool: cargo-nextest@0.9.137
       # mold -run wraps the whole process tree (see the packages job note);
       # the duckdb sidecar links a large bundled C++ static library.
       - name: Native Rust driver tests
         env:
           DRIVER: ${{ matrix.driver }}
-        run: mold -run cargo test --manifest-path "drivers/$DRIVER/Cargo.toml" --locked
+        run: |
+          mold -run cargo nextest run --manifest-path "drivers/$DRIVER/Cargo.toml" --locked --no-fail-fast
+          mold -run cargo test --doc --manifest-path "drivers/$DRIVER/Cargo.toml" --locked
       - name: TDengine native agent build
         if: matrix.driver == 'tdengine'
         run: mold -run cargo build --manifest-path drivers/tdengine/Cargo.toml --locked --release --bin dbx-tdengine-driver
@@ -1067,14 +1275,14 @@ jobs:
   agent-go:
     needs: [changes, fast-checks, agent-checks]
     if: needs.changes.outputs.agent_go_changed == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: 1.25.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
@@ -1091,20 +1299,20 @@ jobs:
   agent-integration:
     needs: [changes, fast-checks, agent-checks]
     if: needs.changes.outputs.agent_integration_changed == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup RocketMQ server Java
         if: matrix.scenario == 'rocketmq'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: 1.25.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
@@ -1112,6 +1320,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
         if: matrix.driver == 'tdengine'
+      - name: Install nextest
+        if: matrix.driver == 'tdengine'
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        with:
+          tool: cargo-nextest@0.9.137
       - name: TDengine Rust cache
         if: matrix.driver == 'tdengine'
         uses: swatinem/rust-cache@v2
@@ -1146,11 +1359,11 @@ jobs:
       - offline-jdbc-release
       - nix-packaging
     if: always()
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Check selected all jobs

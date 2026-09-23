@@ -12,7 +12,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::installer::{validate_key_id, PluginPackageExpectation};
+use super::installer::{ensure_update_continuity, validate_key_id, PluginPackageExpectation};
 use super::manifest::{parse_host_network_permission, MAX_PLUGIN_NETWORK_ORIGINS};
 use super::{
     current_plugin_target, PluginInstallPolicy, PluginInstallResult, PluginPackageInstaller, PluginTrustStore,
@@ -155,6 +155,10 @@ pub struct PluginMarketplaceInstallRequest {
     pub plugin_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Set after the user explicitly confirmed a changed update source (repository / publisher /
+    /// signing key) or an intentional downgrade; the install is rejected without it.
+    #[serde(default)]
+    pub allow_source_change: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -408,6 +412,22 @@ impl PluginMarketplace {
         let artifact = select_marketplace_artifact(version, &target).ok_or_else(|| {
             format!("Plugin '{}' version '{}' does not support target '{}'", plugin.id, version.version, target)
         })?;
+        // Read-only provenance pre-flight: reject a source-changed or downgraded update before any
+        // download or runtime teardown happens. install_bytes_locked re-checks under the lock.
+        let allow_source_change = request.allow_source_change;
+        if let Some(identity) = super::installer::read_install_identity(&self.root_dir, &request.plugin_id)? {
+            if let Some(provenance) = &identity.provenance {
+                ensure_update_continuity(
+                    provenance,
+                    &identity.version,
+                    Some(&repository.id),
+                    &plugin.publisher,
+                    &artifact.signing_key_id,
+                    requested_version,
+                    allow_source_change,
+                )?;
+            }
+        }
         let artifact_url =
             Url::parse(&artifact.url).map_err(|error| format!("Invalid plugin artifact URL: {error}"))?;
         let package = self.download_limited(artifact_url, MAX_PLUGIN_PACKAGE_BYTES, "Plugin package").await?;
@@ -416,6 +436,7 @@ impl PluginMarketplace {
         let expectation = PluginPackageExpectation {
             id: plugin.id.clone(),
             version: version.version.clone(),
+            repository_id: Some(repository.id.clone()),
             publisher: plugin.publisher.clone(),
             permissions: plugin.permissions.iter().cloned().collect(),
             signing_key_id: artifact.signing_key_id.clone(),
@@ -425,7 +446,7 @@ impl PluginMarketplace {
             self.app_version.clone(),
             trust_store,
         ))
-        .install_marketplace_bytes(&package, &expectation)
+        .install_marketplace_bytes(&package, &expectation, allow_source_change)
     }
 
     /// Downloads a .dbxp package from a direct http(s) URL and installs it with
@@ -467,7 +488,7 @@ impl PluginMarketplace {
             on_progress(bytes.len() as u64, total);
         }
         self.guard_installer(PluginPackageInstaller::new(self.root_dir.clone(), self.app_version.clone())?)
-            .install_bytes(&bytes, policy)
+            .install_bytes_with_expectation(&bytes, policy, None, super::installer::PluginInstallSource::Url, false)
     }
 
     async fn download_limited(&self, url: Url, max_bytes: usize, label: &str) -> Result<Vec<u8>, String> {
@@ -1166,6 +1187,7 @@ mod tests {
                 repository_id: repository.id,
                 plugin_id: "marketplace.install".to_string(),
                 version: None,
+                allow_source_change: false,
             })
             .await
             .unwrap();
@@ -1336,6 +1358,7 @@ mod tests {
                 repository_id: "not-configured".to_string(),
                 plugin_id: "marketplace.install".to_string(),
                 version: None,
+                allow_source_change: false,
             })
             .await
             .unwrap_err();

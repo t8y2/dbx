@@ -39,6 +39,10 @@ pub mod mq_cmd;
 #[cfg(feature = "mq-admin")]
 pub mod mqtt_cmd;
 pub mod nacos_cmd;
+pub mod plugin_download;
+pub mod plugin_download_file;
+pub mod plugin_file;
+pub mod plugin_storage;
 pub mod plugins;
 pub mod prompt_template;
 pub mod query;
@@ -66,6 +70,7 @@ pub mod tunnel_profiles;
 pub mod update;
 mod update_cache;
 mod update_portable;
+pub mod user_skills;
 pub mod vector_cmd;
 pub mod window_controls;
 pub mod xlsx_export;

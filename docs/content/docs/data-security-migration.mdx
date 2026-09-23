@@ -1,0 +1,212 @@
+---
+title: Data Security Upgrade and Migration
+description: A complete guide to upgrading existing DBX data to the encrypted Secret Store.
+---
+
+<Callout type="warn">If the installation already contains connections, saved passwords, plugin credentials, AI provider keys, tunnel credentials, or sync credentials, complete this upgrade before using DBX. Back up the complete data directory and keep the existing encryption key.</Callout>
+
+This release moves sensitive values out of legacy plaintext fields and JSON configuration into DBX's encrypted Secret Store. The upgrade runs once for each data directory. The wizard shows what will be migrated, creates a rollback backup, migrates and verifies the data, and keeps the backup until you explicitly remove it.
+
+## What changes during the upgrade
+
+The migration covers sensitive values associated with:
+
+- database connections, including passwords, SSH credentials, private key passphrases, and HTTP tunnel secrets;
+- plugin connection fields marked as secrets;
+- AI provider credentials;
+- SSH and other tunnel profiles;
+- WebDAV and other synchronization credentials;
+- legacy `connections.json`, `secrets.json`, and related JSON files.
+
+Public connection and provider settings remain in the normal configuration. Secret values are stored as encrypted fields and are decrypted only through the local Secret Store. Existing values are not uploaded, logged, or placed in the migration diagnostic.
+
+The migration uses the fixed ID `secret-store-v1` and records one of these states:
+
+| State          | Meaning                                                 | What you should do                                                      |
+| -------------- | ------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `pending`      | Data needs migration or the environment needs attention | Review the wizard and fix any key or file issue                         |
+| `running`      | Backup or migration is in progress                      | Wait for the operation to finish; do not replace the data directory     |
+| `failed`       | A check, write, or verification step failed             | Read the redacted error, fix the cause, then choose **Retry migration** |
+| `succeeded`    | Migration and verification completed                    | Test DBX, then optionally delete the migration backup                   |
+| `not_required` | No legacy data needs conversion                         | Continue to DBX                                                         |
+
+## Before you upgrade
+
+1. Stop DBX and make a copy of the complete data directory, including `dbx.db`, any WAL files, JSON configuration files, and the `.dbx` directory.
+2. Identify the key source used by the deployment. Never rotate, delete, or replace a key while encrypted values exist.
+3. Make sure the account running DBX can read and write the data directory and can access its platform credential store or configured external key.
+4. If the data directory is on a mounted volume, make the volume persistent before restarting the new version.
+5. Do not copy only `dbx.db` to another operating system. Use DBX encrypted export/import for cross-device moves.
+
+The migration backup is an additional rollback copy. It does not replace your normal backup policy.
+
+## Choose the instructions for your deployment
+
+### Desktop application
+
+The desktop build uses the operating system credential store:
+
+| Platform | Key source                                                                    |
+| -------- | ----------------------------------------------------------------------------- |
+| macOS    | Keychain (and the platform-specific fallback described by the build)          |
+| Windows  | Credential Manager                                                            |
+| Linux    | Secret Service; configure a persistent key if no usable provider is available |
+
+Upgrade procedure:
+
+1. Install the new DBX version without deleting the existing profile.
+2. Start DBX and allow Keychain, Credential Manager, or Secret Service access when prompted.
+3. Review the counts and the list of legacy files in **Data Security Upgrade**.
+4. Select **Start migration**. Keep DBX open while the backup, migration, and verification run.
+5. On the completion page, open representative connections and verify plugins, AI providers, tunnels, and sync features.
+6. Keep the backup until those checks pass. Use **Delete migration backups** only when you no longer need rollback.
+
+During this process the main DBX window and normal business commands remain blocked. Status, start, retry, diagnostics, and backup cleanup remain available so the wizard can recover from an incomplete upgrade.
+
+### Docker and `dbx-web`
+
+Use one persistent data volume for the database, legacy files, and managed key. The default managed key is:
+
+```text
+${DBX_DATA_DIR}/.dbx/secret.key
+```
+
+For Docker:
+
+1. Stop the old container and back up the named volume or bind-mounted `DBX_DATA_DIR`.
+2. Keep the same volume mounted at the same path in the new container.
+3. If you use a production key, mount it and set `DBX_SECRET_KEY_FILE` before starting the new image:
+
+```yaml
+services:
+  dbx:
+    image: t8y2/dbx:latest
+    environment:
+      DBX_DATA_DIR: /app/data
+      DBX_SECRET_KEY_FILE: /run/secrets/dbx_secret_key
+    secrets:
+      - dbx_secret_key
+    volumes:
+      - dbx-data:/app/data
+
+secrets:
+  dbx_secret_key:
+    file: ./dbx_secret_key
+```
+
+4. Start the new container and open the Web UI. The migration wizard is served before normal business APIs are enabled.
+5. Start the migration, wait for the success page, and verify representative connections through the Web UI.
+6. Keep the volume and key together. Remove migration backups only after verification.
+
+`DBX_SECRET_KEY` can be supplied by a secret manager instead of `DBX_SECRET_KEY_FILE`. Explicit key configuration takes precedence over the managed data-directory key. If an explicit key is unreadable or invalid, DBX does not silently fall back to another key.
+
+The Web API allows only migration status, start, retry, ping, authentication, and backup cleanup before migration is ready. Other API calls, MCP routes, and business operations return `423 DATA_MIGRATION_REQUIRED`.
+
+### Standalone binary or systemd service
+
+1. Stop the service and back up the directory named by `DBX_DATA_DIR`.
+2. Confirm that the service account can preserve `${DBX_DATA_DIR}/.dbx/secret.key`, or provide a stable `DBX_SECRET_KEY_FILE`/`DBX_SECRET_KEY`.
+3. Upgrade the binary and restart the service.
+4. Open the Web UI exposed by `dbx-web` and complete the wizard.
+5. For systemd, place the key environment in the service's protected environment or credentials mechanism. Do not put a production key in a world-readable unit file.
+6. Verify connections and integrations before deleting migration backups.
+
+### CLI and MCP
+
+CLI and standalone MCP commands inspect migration state and existing key material, but they do not create a key or run the legacy-data migration. Point `DBX_DATA_DIR` at the existing profile and complete the migration first with Desktop or `dbx-web`. Until then, commands that need business data fail with `DATA_MIGRATION_REQUIRED`.
+
+## Key management rules
+
+DBX has two separate key boundaries:
+
+| Key                    | Used for                                                | Where it lives                                                               | Can it be copied through sync?                         |
+| ---------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Local Secret Store key | Encrypts secrets in the local `dbx.db`                  | Platform credential store, managed data-dir key, or explicit environment key | No                                                     |
+| Sync passphrase        | Encrypts the sensitive part of an export/import package | Entered by the user for that package                                         | Only as the package protection, never as the local key |
+
+The managed data-directory key is created only when migration or a sensitive write needs it. Back up it with `dbx.db`. A key stored in the same volume protects the database contents at rest, but it does not protect a stolen copy of the entire volume.
+
+If the database already contains encrypted values, using a new key makes them unreadable. Restore the original key instead of creating another one.
+
+## What the migration does internally
+
+The storage layer separates the operation into three phases:
+
+```text
+open_unmigrated()
+  -> open SQLite and initialize the required schema without changing legacy data
+inspect_data_migration()
+  -> read-only scan of database rows, JSON files, and key availability
+start_data_migration()/retry_data_migration()
+  -> create backup, migrate, verify, and record the final state
+```
+
+Before writing data, DBX creates a restricted `dbx-secret-migration-<uuid>/` directory containing a consistent SQLite backup and existing legacy JSON files. SQLite backup APIs preserve WAL state. If backup creation fails, migration does not proceed.
+
+Migration writes secret fields to the local Secret Store, leaves only non-sensitive configuration in public JSON, and verifies that old plaintext columns are empty and all encrypted values can be decrypted. Legacy JSON files are imported and verified before they are renamed to `.bak`; parse or verification failures leave the original source file available for repair and retry. Later failures restore the SQLite backup before reporting `failed`.
+
+The preflight response contains counts, states, non-sensitive provider names, and file names. It does not expose passwords, tokens, private keys, key contents, or key paths. Scan counts carry a source fingerprint so stale pre-migration counts cannot make a completed migration appear incomplete.
+
+## After a successful migration
+
+1. Test at least one connection from every database family you use.
+2. Test plugin connections, AI providers, SSH/tunnel profiles, and sync operations that contain credentials.
+3. Restart DBX or the container and confirm that the next start goes directly to the application.
+4. Keep the migration backup until these checks pass.
+5. Use **Delete migration backups** to remove the rollback copy. Cleanup is allowed through the startup gate, but the storage layer still refuses cleanup unless the recorded migration state is `succeeded`.
+
+Keeping the backup does not block future starts. Deleting it is irreversible; retain your normal data backup if you may need to restore the pre-migration state.
+
+## Failure recovery
+
+### The wizard reports a failed migration
+
+The original data and migration backup are retained. Read the error shown in the wizard, fix the environment, and choose **Retry migration**. Typical causes include:
+
+- a denied Keychain, Credential Manager, or Secret Service request;
+- a missing or unreadable `.dbx/secret.key`;
+- a changed `DBX_SECRET_KEY_FILE` or `DBX_SECRET_KEY`;
+- malformed legacy JSON;
+- insufficient permission or disk space for the backup;
+- a legacy value that cannot be validated.
+
+Do not delete `dbx.db`, WAL files, legacy JSON, or the migration directory while diagnosing the problem.
+
+### The wizard appears again after a restart
+
+Export the redacted diagnostic and check `state`, `needsMigration`, `errorCode`, `backupPath`, and the count fields. A successful migration should report `succeeded` or `not_required`. If the key or data directory changed between launches, restore the original pairing before retrying.
+
+### A key is unavailable
+
+For Desktop, grant access to the platform credential store. For Web, Docker, or a binary service, verify the mounted data directory and the explicit key configuration. Do not create a replacement key for an existing encrypted profile.
+
+### A connection loses its password
+
+Check that the application is using the same data directory and key as before the upgrade. If `save_password=false` was set, the migration intentionally does not recreate a password. Re-enter it through the normal connection editor only after confirming the correct profile and key.
+
+### Backup cleanup fails
+
+Keep the backup and retry after checking that the migration state is `succeeded`, the data directory is writable, and no backup file was manually changed. The cleanup validates manifest paths and file digests before removing files.
+
+## Cross-device moves are separate from this upgrade
+
+Never move a profile by copying `dbx.db` between operating systems. Local keys belong to the source device. Use encrypted Config Export/Import instead:
+
+1. Export public configuration and sensitive values separately.
+2. Protect the sensitive payload with the user-provided sync passphrase.
+3. Import it on the destination device.
+4. Re-encrypt imported values with the destination's local Secret Store key.
+
+Wrong passphrases, ID conflicts, or field-level failures do not commit a partial import.
+
+## Verification checklist
+
+- [ ] A complete pre-upgrade data-directory backup exists.
+- [ ] The original local or externally managed key is preserved.
+- [ ] The migration wizard completed with `succeeded` or the profile reported `not_required`.
+- [ ] Representative connections and integrations work.
+- [ ] A restart no longer blocks on migration.
+- [ ] The migration backup is retained or deliberately deleted after verification.
+- [ ] Cross-device moves use encrypted export/import rather than database copying.
+
+For the state machine, storage implementation, and developer test matrix, see [DBX Data Security Upgrade and Migration reference](https://github.com/t8y2/dbx/blob/main/docs/data-security-migration.md).

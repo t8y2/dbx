@@ -152,6 +152,22 @@ describe("buildMongoObjectBrowserRows", () => {
     ]);
   });
 
+  it("sorts collections by document count and on-disk bytes once stats are merged", () => {
+    const stats = [
+      { name: "stores", estimatedRows: 50, totalBytes: 40_960 },
+      { name: "customer_events", estimatedRows: 30_000, totalBytes: 1_912_832 },
+      { name: "orders_10k", estimatedRows: 10_000, totalBytes: 901_120 },
+    ];
+    const rows = buildMongoObjectBrowserRows({ collections: stats.map(({ name }) => ({ name, kind: "collection" })), database: "app" }).map((row, index) => ({
+      ...row,
+      estimatedRows: stats[index]!.estimatedRows,
+      totalBytes: stats[index]!.totalBytes,
+    }));
+
+    expect(sortObjectBrowserRows(rows, "totalBytes", "desc").map((row) => row.name)).toEqual(["customer_events", "orders_10k", "stores"]);
+    expect(sortObjectBrowserRows(rows, "estimatedRows", "desc").map((row) => row.name)).toEqual(["customer_events", "orders_10k", "stores"]);
+  });
+
   it("preserves distinct MongoDB collection identifiers verbatim", () => {
     const rows = buildMongoObjectBrowserRows({
       collections: [{ name: " users " }, { name: "users" }, { name: " " }, { name: "" }],

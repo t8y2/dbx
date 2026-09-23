@@ -34,6 +34,23 @@ afterEach(() => {
 });
 
 describe("SearchableSelect trigger", () => {
+  it("does not traverse option values while the popover is closed", () => {
+    let optionReads = 0;
+    const options = ["Point", "LineString"];
+    Object.defineProperty(options, "1", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        optionReads += 1;
+        return "LineString";
+      },
+    });
+
+    mountSelect({ options });
+
+    expect(optionReads).toBe(0);
+  });
+
   it("renders the trigger button itself as the layout participant", () => {
     const { root } = mountSelect({ triggerClass: "min-w-0 flex-1" });
 

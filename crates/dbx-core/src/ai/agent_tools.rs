@@ -344,7 +344,7 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
         vec![list_collections_tool(), get_current_time_tool()]
     } else {
-        vec![list_databases_tool(), list_tables_tool(), get_columns_tool(), get_current_time_tool()]
+        vec![list_databases_tool(), list_tables_tool(), get_columns_tool(db_type), get_current_time_tool()]
     }
 }
 
@@ -355,9 +355,14 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
     if is_vector_db(db_type) {
         return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
-    let mut tools = vec![list_databases_tool(), list_tables_tool(), get_columns_tool(), get_current_time_tool()];
+    let mut tools = vec![list_databases_tool(), list_tables_tool(), get_columns_tool(db_type), get_current_time_tool()];
     if db_type == DatabaseType::MongoDb {
         tools.push(mongo_execute_query_tool(sql_permissions));
+    } else if db_type == DatabaseType::Solr {
+        // Solr has no SQL surface; the agent drives the same `METHOD /path`
+        // REST requests the query console accepts. Writes (`/{core}/update`)
+        // still flow through the shared risk classifier and confirmation gate.
+        tools.push(solr_execute_query_tool(sql_permissions));
     } else if supports_sql_query(db_type) {
         tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
@@ -401,6 +406,58 @@ fn mongo_execute_query_tool(_sql_permissions: AgentSqlPermissions) -> ToolDefini
     }
 }
 
+/// Solr `execute_query` tool — the `sql` argument carries a DBX REST-console
+/// request (`METHOD /path` plus an optional JSON body), not SQL.
+fn solr_execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
+    let description = if sql_permissions.allow_dangerous {
+        "Execute a Solr REST request after the user explicitly confirmed this operation. Read, write, and admin requests are allowed for this run."
+    } else if sql_permissions.allow_writes {
+        "Execute a Solr REST request after the user explicitly confirmed this operation. Read requests and document writes are allowed for this run."
+    } else {
+        "Execute a read-only Solr REST request and return results (default 50 rows, up to 1000 with the limit argument). \
+         The request uses the DBX REST-console format: `METHOD /path` on the first line, then an optional JSON body. \
+         Examples: `GET /{core}/select?q=*:*&rows=20`, `GET /{core}/schema/fields`, `POST /{core}/query` with a JSON body \
+         such as {\"query\":\"name:foo\",\"limit\":10}. The leading /solr segment may be omitted — paths are resolved \
+         against the Solr server root. This run cannot execute writes (`/{core}/update`) or admin/schema requests \
+         because no specific request has been confirmed yet; when the user requests a write, first propose the exact \
+         request in one ```sql code block and ask for confirmation."
+    };
+    ToolDefinition {
+        name: "execute_query",
+        description,
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "The Solr REST request to execute (`METHOD /path` plus optional JSON body)"
+                },
+                "limit": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": MAX_EXECUTE_QUERY_ROWS,
+                    "description": format!("Max rows to return (default {EXECUTE_QUERY_LIMIT}, max {MAX_EXECUTE_QUERY_ROWS})")
+                },
+                "cell_char_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000,
+                    "description": "Start character offset for every string cell (default 0). Use the next offset reported by a truncated result to slide through long values. Narrow the request to the target document and field before expanding."
+                },
+                "cell_char_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4000,
+                    "description": "Maximum characters returned per string cell (default 200, max 4000). Increase only for an explicit long-value expansion."
+                }
+            },
+            "required": ["sql"]
+        }),
+        read_only: true,
+        parallel_ok: false,
+    }
+}
+
 /// list_tables tool definition.
 fn list_tables_tool() -> ToolDefinition {
     ToolDefinition {
@@ -426,13 +483,18 @@ fn list_tables_tool() -> ToolDefinition {
 }
 
 /// get_columns tool definition.
-fn get_columns_tool() -> ToolDefinition {
+fn get_columns_tool(db_type: DatabaseType) -> ToolDefinition {
     ToolDefinition {
         name: "get_columns",
-        description:
+        description: if db_type == DatabaseType::MongoDb {
+            "Sample up to 100 documents from a MongoDB collection and infer up to 512 top-level field names and types. \
+             The sample may be smaller and is not a complete schema or a guarantee of required fields. \
+             Nested documents and arrays remain object and array fields; numeric BSON types are reported as number."
+        } else {
             "Get column definitions for a table: names, types, primary keys, nullable, defaults, and comments. \
              Use this when the user asks about table structure, column details, or field information — \
-             even if some schema context was provided, this tool returns the authoritative and complete column list.",
+             even if some schema context was provided, this tool returns the authoritative and complete column list."
+        },
         parameters: json!({
             "type": "object",
             "properties": {
@@ -751,7 +813,7 @@ async fn execute_get_columns(
     connection_id: &str,
     database: &str,
     default_schema: Option<&str>,
-    _db_type: &DatabaseType,
+    db_type: &DatabaseType,
 ) -> Result<String, String> {
     let database = effective_database(tool_call, database);
     let table = tool_call
@@ -780,11 +842,20 @@ async fn execute_get_columns(
         .map_err(|e| format!("Failed to get columns for {table}: {e}"))?;
 
     if columns.is_empty() {
+        if *db_type == DatabaseType::MongoDb {
+            return Ok(format!(
+                "No fields could be inferred from collection '{table}': the sample contains no documents or fields."
+            ));
+        }
         return Ok(format!("No columns found for table '{table}'."));
     }
 
     let mut lines = Vec::new();
-    lines.push(format!("Columns of {table}:"));
+    lines.push(if *db_type == DatabaseType::MongoDb {
+        format!("Sampled fields of {table} (up to 100 documents and 512 top-level fields; not a complete schema or a guarantee of required fields):")
+    } else {
+        format!("Columns of {table}:")
+    });
     for col in &columns {
         let mut flags: Vec<String> = Vec::new();
         if col.is_primary_key {
@@ -1166,6 +1237,7 @@ async fn execute_explain_query(
             default_schema,
             sql,
             Some("explain"),
+            None,
         )
         .await
         {
@@ -1642,6 +1714,34 @@ for line in sys.stdin:
         assert!(names.contains(&"get_current_time"));
     }
 
+    #[test]
+    fn solr_agent_registers_rest_execute_query_tool() {
+        let tools = all_tools(DatabaseType::Solr, AgentSqlPermissions::default());
+        let names = tools.iter().map(|tool| tool.name).collect::<Vec<_>>();
+        // Solr gets the shared metadata tools plus a REST `execute_query`; SQL
+        // sample/explain helpers are not meaningful for a non-SQL backend.
+        assert!(names.contains(&"list_tables"));
+        assert!(names.contains(&"get_columns"));
+        assert!(names.contains(&"execute_query"));
+        assert!(!names.contains(&"get_sample_data"));
+        assert!(!names.contains(&"explain_query"));
+
+        let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(execute_query.description.contains("METHOD /path"));
+        assert!(!execute_query.description.contains("SQL query to execute"));
+
+        let confirmed_tools = all_tools(
+            DatabaseType::Solr,
+            AgentSqlPermissions {
+                allow_writes: true,
+                allow_dangerous: false,
+                confirmed_write_sql: Some("POST /mycore/update\n{\"add\":{\"doc\":{\"id\":\"1\"}}}".to_string()),
+            },
+        );
+        let confirmed_execute_query = confirmed_tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(confirmed_execute_query.description.contains("confirmed"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn mongodb_agent_registers_shell_query_tool_and_routes_find_one_as_read_only() {
@@ -1821,6 +1921,7 @@ for line in sys.stdin:
             rows,
             affected_rows,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,

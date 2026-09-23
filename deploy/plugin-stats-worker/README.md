@@ -18,6 +18,10 @@ directory; OAuth login required).
   optional and absent on legacy app versions). Decorative statistics only: no
   auth, no PII — `clientId` is a purely random per-installation id the app
   generates locally, not a hardware or user fingerprint.
+- `dbxio.com/api/plugins/stats` — `GET` public display counters for the
+  website: `{"installs": {"<plugin id>": <n>}}` read from the archive
+  summary's `inst` section only (dl/updt and unique counts stay internal).
+  Cached for 5 minutes.
 
 ## Storage — Workers Analytics Engine
 
@@ -65,8 +69,9 @@ curl -s -X POST https://dbxio.com/api/plugins/archive -H "x-archive-token: <toke
 
 ## Reading counters
 
-No HTTP stats endpoint (there is no consumer yet; add one when the marketplace
-UI ships). Query via the SQL REST API with an API token that has
+The website reads the display number via `GET dbxio.com/api/plugins/stats`
+(installs per plugin, served from the archive summary). For anything richer,
+query the SQL REST API directly with an API token that has
 Account → Analytics → Read:
 
 ```sh

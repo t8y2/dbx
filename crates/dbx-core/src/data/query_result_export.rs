@@ -112,6 +112,13 @@ pub struct QueryResultExportRequest {
     /// Frontend sends these in original full-query column order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_column_types: Option<Vec<Option<String>>>,
+    /// Column EXTRA metadata (for example SQL Server/Dameng `identity`) for SQL
+    /// INSERT export, sent by the frontend from the result's table metadata.
+    /// Without it the exported INSERT writes identity values without
+    /// `SET IDENTITY_INSERT` and fails with SQL Server error 544 on replay.
+    /// Entries align with `export_column_types` (original full-query order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_column_extras: Option<Vec<Option<String>>>,
     #[serde(default)]
     pub numeric_column_right_align: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,6 +331,7 @@ struct SqlInsertWriter {
     insert_mode: SqlInsertMode,
     columns: Vec<String>,
     column_types: Vec<Option<String>>,
+    column_extras: Vec<Option<String>>,
     spatial_columns: Vec<SpatialColumn>,
     database_type: DatabaseType,
     schema: Option<String>,
@@ -412,6 +420,7 @@ impl SqlInsertWriter {
             insert_mode: request.insert_mode,
             columns: Vec::new(),
             column_types: Vec::new(),
+            column_extras: Vec::new(),
             spatial_columns: Vec::new(),
             database_type: request.database_type,
             schema: request.schema.clone(),
@@ -432,6 +441,9 @@ impl SqlInsertWriter {
         request: &QueryResultExportRequest,
     ) {
         self.column_types = sql_insert_column_types(request, result_column_types);
+        // Column extras come from the request and align with the result columns the
+        // same way `export_column_types` does; missing entries simply mean "unknown".
+        self.column_extras = request.export_column_extras.clone().unwrap_or_default();
         self.spatial_columns = spatial_columns.to_vec();
         self.columns = columns;
     }
@@ -458,7 +470,7 @@ impl SqlInsertWriter {
                 qualified_table_name: None,
                 columns: self.columns.clone(),
                 column_types: self.column_types.clone(),
-                column_extras: Vec::new(),
+                column_extras: self.column_extras.clone(),
                 spatial_columns: self.spatial_columns.clone(),
                 spatial_values: mem::take(&mut self.pending_spatial_values),
                 rows: mem::take(&mut self.pending_rows),
@@ -2091,6 +2103,91 @@ mod tests {
         assert!(!stream_export_was_cancelled("network failure", false, false));
     }
 
+    fn sqlserver_identity_export_request(
+        file_path: &std::path::Path,
+        export_column_extras: Option<Vec<Option<String>>>,
+    ) -> QueryResultExportRequest {
+        QueryResultExportRequest {
+            export_id: "export-identity".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "dbx_test".to_string(),
+            schema: Some("dbo".to_string()),
+            catalog: None,
+            sql: "SELECT * FROM [dbo].[gen_table]".to_string(),
+            query_base_sql: "SELECT * FROM [dbo].[gen_table]".to_string(),
+            setup_sql: Vec::new(),
+            database_type: DatabaseType::SqlServer,
+            use_agent_cursor: false,
+            file_path: file_path.to_string_lossy().to_string(),
+            format: "sql".to_string(),
+            include_sql_sheet: false,
+            page_size: 1000,
+            row_limit: None,
+            total_rows: None,
+            timeout_secs: None,
+            keyset_optimization_enabled: false,
+            client_session_id: None,
+            execution_id: None,
+            date_time_format: None,
+            export_table_name: Some("gen_table".to_string()),
+            export_column_types: Some(vec![Some("int".to_string()), Some("nvarchar(200)".to_string())]),
+            export_column_extras,
+            numeric_column_right_align: false,
+            column_comments: None,
+            auto_filter: None,
+            identifier_quote: None,
+            insert_mode: SqlInsertMode::Batch,
+            csv_quote_mode: Default::default(),
+            exclude_primary_keys: false,
+            primary_keys: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sql_insert_writer_wraps_sqlserver_identity_columns_with_identity_insert() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("gen_table.sql");
+        let request =
+            sqlserver_identity_export_request(&file_path, Some(vec![Some("identity(1,1)".to_string()), None]));
+
+        let mut writer = SqlInsertWriter::create(&request).expect("create sql insert writer");
+        writer.set_columns(
+            vec!["table_id".to_string(), "table_name".to_string()],
+            &["int".to_string(), "nvarchar(200)".to_string()],
+            &[],
+            &request,
+        );
+        writer.write_row(vec![json!(23), json!("t_destype")], None).expect("write export row");
+        writer.finish().expect("finish export");
+
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read sql export"),
+            "SET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (23, N't_destype');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;\n"
+        );
+    }
+
+    #[test]
+    fn sql_insert_writer_skips_identity_wrapper_without_column_extras() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("gen_table.sql");
+        let request = sqlserver_identity_export_request(&file_path, None);
+
+        let mut writer = SqlInsertWriter::create(&request).expect("create sql insert writer");
+        writer.set_columns(
+            vec!["table_id".to_string(), "table_name".to_string()],
+            &["int".to_string(), "nvarchar(200)".to_string()],
+            &[],
+            &request,
+        );
+        writer.write_row(vec![json!(23), json!("t_destype")], None).expect("write export row");
+        writer.finish().expect("finish export");
+
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read sql export"),
+            "INSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (23, N't_destype');\n"
+        );
+    }
+
     #[test]
     fn sql_insert_writer_omits_excluded_primary_key_columns() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -2119,6 +2216,7 @@ mod tests {
             date_time_format: None,
             export_table_name: Some("users".to_string()),
             export_column_types: None,
+            export_column_extras: None,
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -2201,6 +2299,7 @@ mod tests {
             csv_quote_mode: CsvQuoteMode::All,
             export_table_name: None,
             export_column_types: None,
+            export_column_extras: None,
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -2247,7 +2346,7 @@ mod tests {
         let output = rendered_sql_insert_output(SqlInsertMode::Batch);
 
         assert_eq!(output.matches("INSERT INTO").count(), 1);
-        assert!(output.contains("VALUES (1, 'Ada'), (2, 'Lin');"));
+        assert!(output.contains("VALUES\n(1, 'Ada'),\n(2, 'Lin');"));
     }
 
     #[test]

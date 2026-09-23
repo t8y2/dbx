@@ -145,6 +145,34 @@ describe("data grid detail TSV", () => {
   });
 });
 
+describe("Cassandra collection cell detail presentation", () => {
+  function detailFor(value: string, databaseType?: "cassandra" | "mysql") {
+    return buildDataGridCellDetail({
+      rowIndex: 0,
+      rowId: 0,
+      row: [value],
+      columns: ["attrs"],
+      columnIndex: 0,
+      displayValue: () => value,
+      isEditable: false,
+      databaseType,
+    });
+  }
+
+  it("formats CQL collection literals as JSON for Cassandra results", () => {
+    expect(detailFor("{'color': 'blue', 'tier': 'gold'}", "cassandra")!.formattedJson).toBe('{\n  "color": "blue",\n  "tier": "gold"\n}');
+    expect(detailFor("(1, 'a')", "cassandra")!.formattedJson).toBe('[\n  1,\n  "a"\n]');
+    expect(detailFor("{'a', 'b'}", "cassandra")!.formattedJson).toBe('[\n  "a",\n  "b"\n]');
+  });
+
+  it("keeps plain JSON formatting and leaves other databases untouched", () => {
+    expect(detailFor('{"k": 1}', "cassandra")!.formattedJson).toBe('{\n  "k": 1\n}');
+    expect(detailFor("{'color': 'blue'}", "mysql")!.formattedJson).toBe("");
+    expect(detailFor("{'color': 'blue'}")!.formattedJson).toBe("");
+    expect(detailFor("not a literal", "cassandra")!.formattedJson).toBe("");
+  });
+});
+
 describe("Mongo collection cell detail presentation", () => {
   it.each([null, "NULL", MONGO_DOCUMENT_GRID_NULL])("presents BSON value %j without leaking grid encoding", (bsonValue) => {
     const value = mongoDocumentGridValue(bsonValue) as string;

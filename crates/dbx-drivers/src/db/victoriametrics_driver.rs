@@ -270,6 +270,7 @@ pub async fn list_object_statistics(client: &VictoriaMetricsClient) -> Result<Ve
             estimated_rows: item.value.as_i64().or_else(|| item.value.as_str().and_then(|value| value.parse().ok())),
             // VictoriaMetrics exposes series counts here, but no per-metric storage size.
             total_bytes: None,
+            ..Default::default()
         })
         .collect())
 }
@@ -353,6 +354,7 @@ fn series_result_to_query_result(series: Vec<SeriesResult>, start: Instant) -> Q
         affected_rows: rows.len() as u64,
         rows,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         spatial_columns: vec![],
         spatial_values: vec![],
         truncated: false,
@@ -390,6 +392,7 @@ fn simple_result(rows: Vec<Vec<Value>>, value_type: &str, start: Instant) -> Que
         affected_rows: rows.len() as u64,
         rows,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         spatial_columns: vec![],
         spatial_values: vec![],
         truncated: false,

@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { rustGroups } from "./ci-config.mjs";
 
 export function rustCommand(action, group, mode) {
-  if (!["test", "clippy"].includes(action) || !["full", "fast"].includes(mode)
+  if (!["test", "doctest", "clippy", "tree"].includes(action) || !["full", "fast"].includes(mode)
     || (group !== "workspace" && !Object.hasOwn(rustGroups, group)) || (action === "clippy" && group !== "workspace")) {
     throw new Error(`Unknown Rust CI configuration: ${action}/${group}/${mode}`);
   }
@@ -18,7 +18,8 @@ export function rustCommand(action, group, mode) {
     "dbx-sqlite-worker/runtime", "dbx-types/openapi", "dbx-sql/openapi",
   ] : appFeatures;
   const packages = group === "workspace" ? ["--workspace"] : rustGroups[group].flatMap((name) => ["--package", name]);
-  return [action, ...packages, "--locked", ...(action === "clippy" ? ["--all-targets"] : []),
+  const command = action === "test" ? ["nextest", "run", "--no-fail-fast"] : action === "doctest" ? ["test", "--doc"] : [action];
+  return [...command, ...packages, "--locked", ...(action === "clippy" ? ["--all-targets"] : []),
     "--no-default-features", "--features", features.join(","), ...(action === "clippy" ? ["--", "-D", "warnings"] : [])];
 }
 

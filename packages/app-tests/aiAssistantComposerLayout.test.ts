@@ -9,15 +9,15 @@ const zhCnLocalePath = fileURLToPath(new URL("../../apps/desktop/src/i18n/locale
 const source = readFileSync(aiAssistantPath, "utf8");
 const zhCnLocaleSource = readFileSync(zhCnLocalePath, "utf8");
 
-test("AI composer keeps templates available without connections", () => {
+test("AI composer keeps templates available without connections outside plugin conversations", () => {
   const contextRowStart = source.indexOf("data-ai-composer-context-row");
   const contextRowEnd = source.indexOf('v-if="mentionOpen"', contextRowStart);
   const contextRow = source.slice(contextRowStart, contextRowEnd);
 
   assert.notEqual(contextRowStart, -1, "the composer context row should exist");
   assert.notEqual(contextRowEnd, -1, "the connection context row should end before mention suggestions");
-  assert.match(contextRow, /<template v-if="connectionStore\.connections\.length">/);
-  assert.match(contextRow, /<Popover v-model:open="showTemplateSelector">/);
+  assert.match(contextRow, /<details v-if="pluginContext"[\s\S]*?<template v-else-if="connectionStore\.connections\.length">/);
+  assert.match(contextRow, /<Popover v-if="!pluginContext" v-model:open="showTemplateSelector">/);
   assert.match(contextRow, /max-w-\[40%\]/);
   assert.match(contextRow, /<span class="ai-template-selector-label truncate">\{\{ templateSelectorTriggerLabel \}\}<\/span>/);
   assert.match(contextRow, /:aria-label="templateSelectorTriggerLabel"/);
@@ -37,7 +37,7 @@ test("AI composer exposes mode and action as one compact selector", () => {
 
   assert.notEqual(footerStart, -1, "the combined mode and action selector should exist");
   assert.notEqual(footerEnd, -1, "the model selector should follow the combined selector");
-  assert.match(footer, /<Popover v-model:open="modeActionOpen">/);
+  assert.match(footer, /<span v-if="pluginContext"[\s\S]*?<Popover v-else v-model:open="modeActionOpen">/);
   assert.match(footer, /:aria-label="modeActionTriggerLabel"/);
   assert.match(footer, /switchModeActionTab\('ask'\)/);
   assert.match(footer, /switchModeActionTab\('agent'\)/);

@@ -13,17 +13,19 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use axum::extract::DefaultBodyLimit;
-use axum::http::Uri;
+use axum::http::{Request, StatusCode, Uri};
 use axum::middleware;
-use axum::response::Redirect;
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use dbx_core::connection::AppState;
+use dbx_core::persistence::secret_codec::SecretKeyPolicy;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::Storage;
 use dbx_mcp::{streamable_http_router, DbxBackend, HttpAuth, LocalBackend};
 use state::WebState;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
@@ -76,6 +78,35 @@ fn web_body_limit_bytes_from_value(value: Option<&str>) -> usize {
     const DEFAULT_MB: usize = 1024;
     let mb = value.and_then(|value| value.parse::<usize>().ok()).filter(|value| *value > 0).unwrap_or(DEFAULT_MB);
     mb.saturating_mul(1024 * 1024)
+}
+
+async fn migration_gate(
+    state: axum::extract::State<Arc<WebState>>,
+    request: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let suffix = auth::middleware_api_path_suffix(request.uri().path(), &state.public_base_path);
+    let allowed = suffix.is_some_and(|path| {
+        matches!(
+            path,
+            "migration/status" | "migration/start" | "migration/retry" | "migration/cleanup-backups" | "ping"
+        ) || path.starts_with("auth/")
+    });
+    if !allowed && !state.migration_ready.load(Ordering::Acquire) {
+        return (
+            StatusCode::LOCKED,
+            axum::Json(serde_json::json!({
+                "code": "DATA_MIGRATION_REQUIRED",
+                "message": "Complete the data security migration before using DBX"
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+async fn storage_migration_ready(app: &Arc<AppState>) -> bool {
+    app.storage.inspect_data_migration().await.map(|status| status.is_ready()).unwrap_or(false)
 }
 
 fn web_agent_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -281,8 +312,12 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let runtime = dbx_core::scheduled_backup::worker_runtime().expect("Failed to build tokio runtime");
+    runtime.block_on(serve());
+}
+
+async fn serve() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -301,8 +336,10 @@ async fn main() {
 
     let app_state = {
         let db_path = data_dir.join("dbx.db");
-        let storage = Storage::open(&db_path).await.expect("Failed to open storage");
-        storage.migrate_from_json(&data_dir).await.expect("Failed to migrate JSON data");
+        let storage = Storage::open_unmigrated(&db_path)
+            .await
+            .expect("Failed to open storage")
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
 
         // Initialize core dialect registry and load external plugin dialects
         register_core_dialects();
@@ -349,6 +386,7 @@ async fn main() {
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
 
+    let migration_ready = storage_migration_ready(&app_state).await;
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
@@ -360,16 +398,34 @@ async fn main() {
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
+        managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
+        migration_ready: Arc::new(AtomicBool::new(migration_ready)),
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
+    routes::sql_file::start_sql_file_cleanup(&web_state);
+
+    let backup_root = std::env::var_os("DBX_BACKUP_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| web_state.data_dir.join("backups"));
+    std::fs::create_dir_all(&backup_root).expect("Failed to create server backup root");
+    let backup_service = routes::scheduled_backup::service(&web_state).expect("Failed to resolve server backup root");
+    let backup_stop = tokio_util::sync::CancellationToken::new();
+    let backup_worker = backup_service.start(backup_stop.clone());
 
     // API routes
     let api = Router::new()
+        .route("/migration/status", get(routes::migration::status))
+        .route("/migration/start", post(routes::migration::start))
+        .route("/migration/retry", post(routes::migration::retry))
+        .route("/migration/cleanup-backups", post(routes::migration::cleanup_backups))
+        .route("/database-backups", post(routes::scheduled_backup::command))
+        .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
+        .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
         // Auth
         .route("/auth/login", post(auth::login))
         .route("/auth/check", get(auth::check))
@@ -389,6 +445,7 @@ async fn main() {
         .route("/connection/final-proxy-port", post(routes::connection::connection_final_proxy_port))
         .route("/connection/disconnect", post(routes::connection::disconnect_db))
         .route("/connection/check-health", post(routes::connection::check_connection_health))
+        .route("/connection/prewarm", post(routes::connection::prewarm_connection))
         .route("/connection/session-credential-status", post(routes::connection::session_credential_status))
         .route("/connection/forget-session-credential", post(routes::connection::forget_session_credential))
         .route(
@@ -509,6 +566,7 @@ async fn main() {
         .route("/schema/event-info", get(routes::schema::get_event_info))
         .route("/schema/custom-type-details", get(routes::schema::get_custom_type_details))
         .route("/schema/columns", get(routes::schema::list_columns))
+        .route("/plugin/table-metadata", post(routes::schema::get_plugin_table_metadata))
         .route("/schema/all-columns", get(routes::schema::get_all_columns))
         .route("/schema/data-types", get(routes::schema::list_data_types))
         .route("/schema/indexes", get(routes::schema::list_indexes))
@@ -519,6 +577,7 @@ async fn main() {
         .route("/schema/constraints", get(routes::schema::list_constraints))
         .route("/schema/partitions", get(routes::schema::list_partitions))
         .route("/schema/table-partition-status", get(routes::schema::get_table_partition_status))
+        .route("/schema/table-partitioning", get(routes::schema::get_table_partitioning))
         .route("/schema/invalid-indexes", get(routes::schema::list_invalid_indexes))
         .route("/schema/subpartitions", get(routes::schema::list_subpartitions))
         .route("/schema/functions", get(routes::schema::list_functions))
@@ -567,6 +626,8 @@ async fn main() {
         .route("/query/build-explain-sql", post(routes::query::build_explain_sql))
         .route("/query/build-dropped-file-preview-sql", post(routes::query::build_dropped_file_preview_sql))
         .route("/query/get-explain-info", post(routes::query::get_explain_info))
+        .route("/query/plugin-plan-capabilities", post(routes::query::get_plugin_plan_capabilities))
+        .route("/query/plugin-estimated-plan", post(routes::query::get_plugin_estimated_plan))
         .route("/query/build-create-user-sql", post(routes::query::build_create_user_sql))
         .route("/query/build-table-select-sql", post(routes::query::build_table_select_sql))
         .route("/query/build-database-search-sql", post(routes::query::build_database_search_sql))
@@ -602,6 +663,8 @@ async fn main() {
         .route("/query/build-view-ddl-sql", post(routes::query::build_view_ddl_sql))
         .route("/query/build-table-structure-change-sql", post(routes::query::build_table_structure_change_sql))
         .route("/query/build-table-owner-change-sql", post(routes::query::build_table_owner_change_sql))
+        .route("/query/build-table-partition-operation-sql", post(routes::query::build_table_partition_operation_sql))
+        .route("/query/build-create-partitioned-table-sql", post(routes::query::build_create_partitioned_table_sql))
         .route(
             "/query/preview-sqlite-table-structure-change",
             post(routes::query::preview_sqlite_table_structure_change),
@@ -932,6 +995,7 @@ async fn main() {
         .route("/document-store/meilisearch/settings/update", post(routes::document_store::meilisearch_update_settings))
         .route("/document-store/meilisearch/stats", post(routes::document_store::meilisearch_get_stats))
         .route("/document-store/meilisearch/overview", post(routes::document_store::meilisearch_get_overview))
+        .route("/document-store/meilisearch/index/create", post(routes::document_store::meilisearch_create_index))
         .route("/document-store/meilisearch/index/delete", post(routes::document_store::meilisearch_delete_index))
         .route(
             "/document-store/meilisearch/system/overview",
@@ -1097,6 +1161,7 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(routes::sql_file::sql_file_upload_hard_cap_bytes())),
         )
         .route("/sql-file/execute", post(routes::sql_file::execute_sql_file))
+        .route("/sql-file/preview/release", post(routes::sql_file::release_sql_file_preview))
         .route("/sql-file/tables", post(routes::sql_file::inspect_sql_file_tables))
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
         .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))
@@ -1141,6 +1206,11 @@ async fn main() {
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
         )
         .route(
+            "/app-settings/history-retention-limit",
+            get(routes::app_settings::load_history_retention_limit)
+                .put(routes::app_settings::save_history_retention_limit),
+        )
+        .route(
             "/app-settings/max-retries",
             get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
         )
@@ -1182,6 +1252,7 @@ async fn main() {
         api.route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql));
 
     let api = add_mq_routes(api)
+        .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate))
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
 
@@ -1193,7 +1264,7 @@ async fn main() {
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     if let Some(mcp_router) = web_mcp_router(&web_state).expect("Invalid DBX Web MCP configuration") {
-        app = app.merge(mcp_router);
+        app = app.merge(mcp_router.layer(middleware::from_fn_with_state(web_state.clone(), migration_gate)));
         tracing::info!("DBX Web MCP is enabled at /mcp");
     }
 
@@ -1217,13 +1288,20 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
     let shutdown_state = web_state.app.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                tracing::warn!("Failed to listen for shutdown signal: {error}");
+        .with_graceful_shutdown(async move {
+            #[cfg(unix)]
+            {
+                let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to listen for SIGTERM");
+                tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
             }
+            #[cfg(not(unix))]
+            let _ = tokio::signal::ctrl_c().await;
+            backup_stop.cancel();
         })
         .await
         .expect("Server error");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), backup_worker).await;
     shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;
 }
 
@@ -1241,6 +1319,45 @@ mod tests {
     use axum::routing::{get, post};
     use axum::Router;
     use tower_http::compression::predicate::Predicate;
+
+    #[tokio::test]
+    async fn migration_http_gate_blocks_business_until_ready_but_allows_cleanup_handler() {
+        use std::sync::{atomic::Ordering, Arc};
+        let directory = tempfile::tempdir().unwrap();
+        let storage = dbx_core::storage::Storage::open_unmigrated(&directory.path().join("dbx.db")).await.unwrap();
+        let app = Arc::new(dbx_core::connection::AppState::new(storage));
+        let state = Arc::new(crate::state::WebState::for_tests(app, directory.path().to_path_buf()));
+        state.migration_ready.store(false, Ordering::Release);
+        let router = Router::new()
+            .route("/api/migration/status", get(|| async { "status" }))
+            .route("/api/migration/cleanup-backups", post(|| async { "cleanup" }))
+            .route("/api/connection/list", get(|| async { "connections" }))
+            .route("/mcp", post(|| async { "mcp" }))
+            .layer(axum::middleware::from_fn_with_state(state.clone(), super::migration_gate));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+        assert_eq!(
+            client.get(format!("http://{address}/api/migration/status")).send().await.unwrap().status(),
+            StatusCode::OK
+        );
+        for (method, path) in [(reqwest::Method::GET, "/api/connection/list"), (reqwest::Method::POST, "/mcp")] {
+            let response = client.request(method, format!("http://{address}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::LOCKED);
+            assert_eq!(response.json::<serde_json::Value>().await.unwrap()["code"], "DATA_MIGRATION_REQUIRED");
+        }
+        assert_eq!(
+            client.post(format!("http://{address}/api/migration/cleanup-backups")).send().await.unwrap().status(),
+            StatusCode::OK
+        );
+        state.migration_ready.store(true, Ordering::Release);
+        assert_eq!(
+            client.get(format!("http://{address}/api/connection/list")).send().await.unwrap().status(),
+            StatusCode::OK
+        );
+        server.abort();
+    }
 
     fn compression_response(content_type: &str) -> Response<Body> {
         Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()

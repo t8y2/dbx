@@ -221,6 +221,20 @@ LEFT JOIN (
     expect(foldedTextAtLine(state, 3)).toBe("\n  SELECT account_id, SUM(amount) AS total\n  FROM fee\n  GROUP BY account_id\n");
   });
 
+  it("folds multiline parenthesized IN lists while keeping the surrounding SQL visible", () => {
+    const sql = `SELECT *
+FROM account
+WHERE account_id IN (
+  '7687402546616451098',
+  '7687402818521628718',
+  '7687402206655496235'
+)
+AND status = 'active';`;
+    const state = stateFor(sql);
+
+    expect(foldedTextAtLine(state, 3)).toBe("\n  '7687402546616451098',\n  '7687402818521628718',\n  '7687402206655496235'\n");
+  });
+
   it("folds SELECT branches around UNION ALL at the same query level", () => {
     const sql = `WITH combined AS (
   SELECT id, amount

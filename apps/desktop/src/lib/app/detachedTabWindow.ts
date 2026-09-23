@@ -1,5 +1,6 @@
 import { assertUpdateAllowsInteraction, beginUpdateSensitiveOperation } from "@/lib/app/updatePreparation";
 import { detachedWindowLabel, detachedWindowUrl } from "@/lib/app/windowContext";
+import { pinDetachedWindowIfMainPinned } from "@/lib/app/windowAlwaysOnTop";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 export interface DetachedWindowOpenPosition {
@@ -27,6 +28,7 @@ export async function openDetachedTabWindow(tabId: string, title: string, positi
     const label = detachedWindowLabel(tabId);
     const existing = await WebviewWindow.getByLabel(label);
     if (existing) {
+      await pinDetachedWindowIfMainPinned(existing);
       await existing.show();
       await existing.setFocus();
       return { opened: true };
@@ -77,6 +79,7 @@ export async function openDetachedTabWindow(tabId: string, title: string, positi
             const { PhysicalPosition } = await import("@tauri-apps/api/dpi");
             await child.setPosition(new PhysicalPosition(Math.round(position.x - 120), Math.round(position.y - 20)));
           }
+          await pinDetachedWindowIfMainPinned(child);
           await child.show();
           await child.setFocus();
           finish({ opened: true });

@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import ContentArea from "./ContentArea.vue";
 import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEvents";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryEditorSurfaceHandle, StatementRange } from "./querySurfaces";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 const props = defineProps<ContentAreaSurfaceProps & { autoFocus?: boolean }>();
 const emit = defineEmits<ContentAreaSurfaceEmits>();
@@ -37,8 +38,9 @@ defineExpose<QueryEditorSurfaceHandle>({
   acceptQueryEditorExecutionViewport: (requestId: number) => contentAreaRef.value?.acceptQueryEditorExecutionViewport(requestId) ?? false,
   pasteClipboardAsSqlInCondition: () => contentAreaRef.value?.pasteClipboardAsSqlInCondition() ?? Promise.resolve(false),
   applyTableStructureChanges: () => contentAreaRef.value?.applyTableStructureChanges() ?? Promise.resolve(false),
-  insertRedisCommand: (command: string) => contentAreaRef.value?.insertRedisCommand(command) ?? Promise.resolve(false),
-  executeRedisCommand: (command: string) => contentAreaRef.value?.executeRedisCommand(command) ?? Promise.resolve(false),
+  insertRedisCommand: (command: string, target: AiConversationBinding) => contentAreaRef.value?.insertRedisCommand(command, target) ?? Promise.resolve(false),
+  executeRedisCommand: (command: string, target: AiConversationBinding) => contentAreaRef.value?.executeRedisCommand(command, target) ?? Promise.resolve(false),
+  isRedisConsoleReady: (target: AiConversationBinding) => contentAreaRef.value?.isRedisConsoleReady(target) ?? false,
   previewStatementRange: (range: StatementRange | null) => contentAreaRef.value?.previewStatementRange(range) ?? false,
   focusStatementRange: (range: StatementRange | null) => contentAreaRef.value?.focusStatementRange(range) ?? false,
   focusErrorPosition: (offset: number) => contentAreaRef.value?.focusErrorPosition(offset) ?? false,

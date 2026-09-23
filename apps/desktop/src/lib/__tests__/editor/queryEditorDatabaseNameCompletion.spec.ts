@@ -3,15 +3,21 @@ import { describe, expect, it } from "vitest";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
+const diagnosticsSource = readFileSync(new URL("../../../components/editor/useQueryEditorDiagnostics.ts", import.meta.url), "utf8");
+
+const completionSource = readFileSync(new URL("../../../components/editor/useQueryEditorCompletion.ts", import.meta.url), "utf8");
+const metadataSource = readFileSync(new URL("../../../components/editor/useQueryEditorCompletionMetadata.ts", import.meta.url), "utf8");
+
 function extractFunction(name: string): string {
-  const start = queryEditorSource.indexOf(`function ${name}(`);
+  const source = [queryEditorSource, completionSource, metadataSource, diagnosticsSource].find((candidate) => candidate.includes(`function ${name}(`)) ?? "";
+  const start = source.indexOf(`function ${name}(`);
   if (start < 0) throw new Error(`Missing QueryEditor function: ${name}`);
-  const bodyStart = queryEditorSource.indexOf("{", start);
+  const bodyStart = source.indexOf("{", start);
   let depth = 0;
-  for (let index = bodyStart; index < queryEditorSource.length; index++) {
-    const character = queryEditorSource[index];
+  for (let index = bodyStart; index < source.length; index++) {
+    const character = source[index];
     if (character === "{") depth++;
-    if (character === "}" && --depth === 0) return queryEditorSource.slice(start, index + 1);
+    if (character === "}" && --depth === 0) return source.slice(start, index + 1);
   }
   throw new Error(`Unterminated QueryEditor function: ${name}`);
 }
@@ -43,7 +49,7 @@ describe("QueryEditor database name completion wiring", () => {
     expect(extractFunction("routineCompletionScopeForContext")).toContain("database: target.database");
     expect(extractFunction("completionObjectScopeKey")).toContain("scope.database");
     expect(extractFunction("completionObjectScopeKey")).toContain("scope.schema");
-    expect(queryEditorSource).toContain("cachedCompletionObjectsByScope");
+    expect(metadataSource).toContain("cachedCompletionObjectsByScope");
   });
 
   it("loads SQL Server capability metadata before offering or applying USE completion", () => {
@@ -58,8 +64,8 @@ describe("QueryEditor database name completion wiring", () => {
     const scope = extractFunction("semanticDiagnosticMetadataScope");
     expect(scope).toContain("sqlServerUseDatabaseBeforeCursor(sql, range.from)");
     expect(scope).toContain("lookupLocalCompletionDatabases");
-    expect(queryEditorSource).toMatch(/async function refreshSemanticDiagnostics[\s\S]*?semanticDiagnosticTablesForScope\(semanticAnalysis\.tables, metadataScope\)/);
-    expect(queryEditorSource).toContain("enrichSemanticDiagnosticTables(scopedAnalysis.tables, metadataScope)");
-    expect(queryEditorSource).toContain("ensureColumnsForSemanticDiagnostics(tables, metadataScope)");
+    expect(diagnosticsSource).toMatch(/async function refreshSemanticDiagnostics[\s\S]*?semanticDiagnosticTablesForScope\(semanticAnalysis\.tables, metadataScope\)/);
+    expect(diagnosticsSource).toContain("enrichSemanticDiagnosticTables(scopedAnalysis.tables, metadataScope)");
+    expect(diagnosticsSource).toContain("ensureColumnsForSemanticDiagnostics(tables, metadataScope)");
   });
 });

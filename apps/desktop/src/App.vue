@@ -3106,46 +3106,36 @@ function ensureQueryTabForConnection(target: AiConversationBinding): string {
 const REDIS_CONSOLE_READY_TIMEOUT_MS = 2000;
 const REDIS_CONSOLE_READY_POLL_MS = 50;
 
-/**
- * The `mode === "redis"` tab for the target connection/database, created when
- * absent. Redis "database" is the server-side db index.
- */
-function ensureRedisConsoleTab(target: AiConversationBinding): string {
-  const database = target.database || "0";
-  const existing = queryStore.tabs.find((tab) => tab.mode === "redis" && tab.connectionId === target.connectionId && (tab.database || "0") === database);
-  if (existing) return existing.id;
-  return queryStore.createTab(target.connectionId, database, `db${database}`, "redis", undefined, undefined, undefined, { activate: false });
-}
-
 function routeAiRedisCommand(command: string, execute: boolean, target: AiConversationBinding): boolean {
   const connection = target.connectionId ? connectionStore.getConfig(target.connectionId) : undefined;
   if (connection?.db_type !== "redis") return false;
 
   // Redis has no headless command path — the console *is* the execution vehicle,
-  // and it is rendered only for the active tab. So bring the bound connection's
-  // console on screen and use it. This is the one deliberate exception to "an AI
-  // action never moves the editor": the alternative (used before the console
-  // refused foreign targets) is silently dropping the command, or worse, running
-  // it against another server.
-  const tabId = ensureRedisConsoleTab(target);
-  if (!tabId) return true;
-  if (queryStore.activeTabId !== tabId) queryStore.switchTab(tabId);
+  // and it renders only for the active tab. We deliberately do NOT switch to the
+  // bound connection's console: "an AI action never moves the workspace" is the
+  // whole point of #9902, and an exception here would reintroduce exactly the
+  // behaviour it removes. The user opens that console and retries instead.
   void deliverRedisAiCommand(command, execute, target);
   return true;
 }
 
 /**
- * Waits for the console surface, then routes exactly once.
+ * Delivers to the bound connection's console when it is already on screen, and
+ * otherwise refuses with a visible reason.
  *
- * The wait polls a side-effect-free readiness probe rather than re-issuing the
- * command: a command that ran but reported `false` (e.g. a dangerous command
- * awaiting confirmation) must not be executed a second time.
+ * The bounded wait covers the one benign case — the user just switched to that
+ * console and it is still mounting. Readiness is polled through a side-effect-free
+ * probe rather than re-issuing the command: a command that ran but reported
+ * `false` (e.g. a dangerous command awaiting confirmation) must not execute twice.
  */
 async function deliverRedisAiCommand(command: string, execute: boolean, target: AiConversationBinding): Promise<void> {
   const deadline = performance.now() + REDIS_CONSOLE_READY_TIMEOUT_MS;
   while (!contentAreaRef.value?.isRedisConsoleReady(target.connectionId)) {
     if (performance.now() >= deadline) {
+      // A console.warn is invisible in a desktop app, and the command the user
+      // asked for is simply not going to run — say so, and say what to do.
       console.warn("[DBX] Redis AI command could not reach the bound Redis console");
+      toast(t("ai.redisConsoleUnreachable"), 5000);
       return;
     }
     await nextTick();
@@ -3153,7 +3143,10 @@ async function deliverRedisAiCommand(command: string, execute: boolean, target: 
   }
   const routed = execute ? contentAreaRef.value?.executeRedisCommand(command, target.connectionId) : contentAreaRef.value?.insertRedisCommand(command, target.connectionId);
   const handled = await routed;
-  if (!handled) console.warn("[DBX] Redis AI command was not accepted by the bound Redis console");
+  if (!handled) {
+    console.warn("[DBX] Redis AI command was not accepted by the bound Redis console");
+    toast(t("ai.redisConsoleUnreachable"), 5000);
+  }
 }
 
 /** Current editor text of the tab an AI action targets. */

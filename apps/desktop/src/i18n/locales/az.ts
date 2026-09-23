@@ -2965,6 +2965,7 @@ export default withEnglishFallback({
     truncated: "Kontekst kəsildi",
     contextSummary: "{database} · {tables} cədvəl",
     autoSqlBlocked: "AI-nin yaratdığı SQL avtomatik icra üçün həddindən artıq riskli göründü. İşlətməzdən əvvəl onu əl ilə nəzərdən keçirin.",
+    redisConsoleUnreachable: "AI əmri bu söhbətə bağlı Redis konsoluna çatmadı. Həmin bağlantının Redis konsolunu açıb yenidən cəhd edin.",
     writeSqlConfirmationRequired: "Bu SQL məlumatları və ya sxemi dəyişir. İcradan əvvəl diqqətlə nəzərdən keçirin.",
     writeSqlConfirmationQuestion: "Bu SQL bir dəfə icra edilsin?",
     writeSqlConfirmYes: "İcranı təsdiqlə",

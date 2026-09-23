@@ -3232,6 +3232,7 @@ export default withEnglishFallback({
     truncated: "コンテキストが切り詰められました",
     contextSummary: "{database} · {tables}テーブル",
     autoSqlBlocked: "AIが生成したSQLは自動実行するにはリスクが高すぎると判断されました。実行前に手動で確認してください。",
+    redisConsoleUnreachable: "AI コマンドをこの会話に紐づく Redis コンソールに送信できませんでした。その接続の Redis コンソールを開いて再試行してください。",
     writeSqlConfirmationRequired: "この SQL はデータまたはスキーマを変更します。実行前に内容をよく確認してください。",
     writeSqlConfirmationQuestion: "この SQL を一度実行しますか？",
     writeSqlConfirmYes: "実行を確認",

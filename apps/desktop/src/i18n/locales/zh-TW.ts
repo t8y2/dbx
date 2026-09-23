@@ -3090,6 +3090,7 @@ export default withEnglishFallback({
     truncated: "上下文已截斷",
     contextSummary: "{database} · {tables} 張資料表",
     autoSqlBlocked: "AI 產生的 SQL 風險較高，已阻止自動執行，請手動檢查後再執行。",
+    redisConsoleUnreachable: "AI 指令未能送達本工作階段綁定的 Redis 控制台。請開啟該連線的 Redis 控制台後重試。",
     writeSqlConfirmationRequired: "此 SQL 會修改資料或結構。執行前請仔細核對。",
     writeSqlConfirmationQuestion: "確認執行此 SQL 一次嗎？",
     writeSqlConfirmYes: "確認執行",

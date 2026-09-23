@@ -117,7 +117,9 @@ describe("Auto routing at send time", () => {
     // Auto is only routed when it was actually selected; every explicit
     // selection is passed through untouched.
     expect(sendBody).toContain("requestedAction = requestedSelection;");
-    expect(sendBody).toContain("requestedAction = await resolveAutoAction(text, requestedMode, runIsVisible());");
+    // The send pipeline hands the router its frozen run target, so a background
+    // send cannot route on the visible conversation's SQL or last error.
+    expect(sendBody).toContain("requestedAction = await resolveAutoAction(text, requestedMode, runIsVisible(), tab);");
     // A confirmed-write turn replies with component copy, so the router must not
     // run on it: the mode default keeps the pre-Auto confirmation contract.
     expect(sendBody).toContain("const confirmationContinuation = allowWriteSqlForNextRun || resumingConfirmedWrite;");
@@ -132,7 +134,7 @@ describe("Auto routing at send time", () => {
     expect(sendBody).toContain('userMessage.routedFrom = "auto";');
     expect(sendBody).toContain("userMessage.routedAction = requestedAction;");
 
-    const resolveBody = bodyOf("async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean): Promise<AiAction>");
+    const resolveBody = bodyOf("async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean, target: AiContextTarget = aiContextTarget.value): Promise<AiAction>");
     // Zero-latency rule layer first; the classifier (network) only on a miss.
     expect(resolveBody.indexOf("routeIntentByRules(input)")).toBeLessThan(resolveBody.indexOf("classifyIntentByLlm(input,"));
     expect(resolveBody).toContain("if (showProgress) routingInFlight.value = true;");
@@ -158,7 +160,7 @@ describe("Auto routing at send time", () => {
     // normal path, so clearMessages()/selectConversation()/onUnmounted must drop
     // the flag synchronously via resetPendingRequestState().
     expect(bodyOf("function resetPendingRequestState()")).toContain("routingInFlight.value = false;");
-    expect(bodyOf("async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean): Promise<AiAction>")).toContain("if (showProgress) routingInFlight.value = false;");
+    expect(bodyOf("async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean, target: AiContextTarget = aiContextTarget.value): Promise<AiAction>")).toContain("if (showProgress) routingInFlight.value = false;");
   });
 
   it("keeps external explicit triggers on the direct path", () => {

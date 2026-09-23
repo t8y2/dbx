@@ -146,7 +146,9 @@ describe("AI conversation owns its connection binding (#9902)", () => {
   it("derives a run's target from the frozen binding, not the live one", () => {
     const body = bodyOf("async function send()");
 
-    expect(body).toContain("const runBinding = auto ? auto.binding : conversationBinding.value;");
+    // A confirmation resume continues an existing run, so the run's frozen
+    // binding wins over the conversation's live one on that path too.
+    expect(body).toContain("const runBinding = auto ? auto.binding : activeRunBinding.value;");
     expect(body).toContain("aiContextTargetFor(runBinding, props.tab)");
     // A background send has no composer of its own, so its database selection is
     // the conversation's own database rather than the visible composer's.
@@ -164,5 +166,55 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     const body = bodyOf("async function bindConversation(binding: AiConversationBinding)");
     expect(body).toContain("sameConversationBinding(binding, conversationBinding.value)");
     expect(body).not.toContain("binding.connectionId === boundConnectionId.value");
+  });
+
+  it("judges production write protection and routing against the run's frozen binding", () => {
+    // A run's target is frozen at send time, so a rebind mid-run (or while the
+    // confirmation card is up) must not move the production verdict or the
+    // routing context onto the new connection. Judging the live binding could
+    // grant `allowWriteSql` for a production database.
+    const runBinding = bodyOf("const activeRunBinding = computed");
+    expect(runBinding).toContain("desktopAiRun<ChatMessage>(conversationId.value)");
+    expect(runBinding).toContain("return conversationBinding.value;");
+
+    expect(source).toContain("const productionContext = computed(() => productionContextOf(activeRunBinding.value));");
+    const productionOf = bodyOf("function productionContextOf(binding: AiConversationBinding)");
+    expect(productionOf).toContain("resolveAiDatabaseTarget({ database: binding.database, schema: binding.schema }, connection)");
+    expect(productionOf).not.toContain("boundDatabase");
+
+    const route = bodyOf("async function resolveAutoAction(");
+    expect(route).toContain("hasCurrentSql: !!target.sql?.trim()");
+    expect(route).toContain("tabHasLastError(target)");
+    expect(route).not.toContain("aiContextTarget.value.sql");
+    // The send pipeline hands it the frozen run target it already computed.
+    expect(bodyOf("async function send()")).toContain("resolveAutoAction(text, requestedMode, runIsVisible(), tab)");
+  });
+
+  it("confirms a proposed write against the run's binding, not the live one", () => {
+    // The card belongs to a run. Rebinding while it is up must not append the
+    // SQL to another connection, nor record the confirmation for one — the
+    // backend verifies the confirmed namespace against the real execution
+    // target, so a mismatch would also fail the confirmation.
+    const body = bodyOf("function sendProposalReply(positive: boolean)");
+
+    expect(body).toContain("const runBinding = activeRunBinding.value;");
+    expect(body).toContain('emit("appendSql", sql, runBinding);');
+    expect(body).toContain("confirmedConnectionId = runBinding.connectionId;");
+    expect(body).toContain("resolveAiDatabaseTarget({ database: runBinding.database, schema: runBinding.schema }, runConnection)");
+    expect(body).not.toContain("conversationBinding.value");
+    expect(body).not.toContain("boundConnection.value");
+    expect(body).not.toContain("boundDatabase.value");
+  });
+
+  it("keeps the snapshot's connection name and id on the same source", () => {
+    // Taking the name from the caller (a run, so connection A) while the id comes
+    // from the conversation record (B after a mid-run rebind) would save a
+    // record that displays A but targets B.
+    const body = bodyOf("function buildConversationSnapshot(");
+    expect(body).toContain("connectionName: binding.connectionId ? (connectionStore.getConfig(binding.connectionId)?.name ?? connectionName) : connectionName,");
+    expect(body).toContain("connectionId: binding.connectionId,");
+    // The caller-supplied name is only a fallback now, never stored bare next to
+    // an id taken from a different source.
+    expect(body).toContain(": connectionName," + String.fromCharCode(10));
   });
 });

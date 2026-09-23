@@ -3111,6 +3111,7 @@ export default withEnglishFallback({
     truncated: "上下文已截断",
     contextSummary: "{database} · {tables} 张表",
     autoSqlBlocked: "AI 生成的 SQL 风险较高，已阻止自动执行，请手动检查后再运行。",
+    redisConsoleUnreachable: "AI 命令未能送达本会话绑定的 Redis 控制台。请打开该连接的 Redis 控制台后重试。",
     writeSqlConfirmationRequired: "此 SQL 会修改数据或结构。执行前请仔细核对。",
     writeSqlConfirmationQuestion: "确认执行此 SQL 一次吗？",
     writeSqlConfirmYes: "确认执行",

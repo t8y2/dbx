@@ -366,6 +366,24 @@ const boundConnection = computed(() => (boundConnectionId.value ? connectionStor
 const boundDatabase = computed(() => conversationBinding.value.database);
 const boundSchema = computed(() => conversationBinding.value.schema);
 
+/**
+ * Binding the visible conversation's *active run* is executing against.
+ *
+ * A run's target is frozen when it starts (see `send()`), so everything that acts
+ * on that run's behalf — intent routing, the write-confirmation round trip, the
+ * write grant, the production badge — must read this rather than the
+ * conversation's live binding. Rebinding a conversation mid-run, or while its
+ * confirmation card is up, would otherwise judge and execute that run's SQL
+ * against the new connection (#9902 review).
+ *
+ * With no run in flight this is just the conversation's own binding.
+ */
+const activeRunBinding = computed<AiConversationBinding>(() => {
+  const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conversationId.value) : undefined;
+  if (run?.connectionId) return { connectionId: run.connectionId, database: run.database, schema: run.schema };
+  return conversationBinding.value;
+});
+
 const aiContextTarget = computed<AiContextTarget>(() => aiContextTargetFor(conversationBinding.value, props.tab));
 
 function restoreInitialConversation() {
@@ -1388,8 +1406,8 @@ function switchToRoutedAction(action: AiAction | null | undefined) {
 }
 
 /** Mirrors `buildAiContext`'s `lastError`: only a real failed execution counts. */
-function tabHasLastError(): boolean {
-  const result = aiContextTarget.value.result;
+function tabHasLastError(target: AiContextTarget = aiContextTarget.value): boolean {
+  const result = target.result;
   return !!result && isQueryExecutionErrorResult(result) && result.rows[0]?.[0] != null;
 }
 
@@ -1403,8 +1421,13 @@ function tabHasLastError(): boolean {
  * `showProgress` is only true for the conversation actually on screen — a
  * background auto-send must not flash "识别中" over an unrelated chat.
  */
-async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean): Promise<AiAction> {
-  const input: AiIntentRouteInput = { text, mode, hasCurrentSql: !!aiContextTarget.value.sql?.trim(), hasLastError: tabHasLastError() };
+/**
+ * `target` is the caller's frozen run target. Reading the live one instead would
+ * feed a background send of conversation A the SQL and last error of whatever
+ * conversation is on screen, and route the intent on that (#9902 review).
+ */
+async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean, target: AiContextTarget = aiContextTarget.value): Promise<AiAction> {
+  const input: AiIntentRouteInput = { text, mode, hasCurrentSql: !!target.sql?.trim(), hasLastError: tabHasLastError(target) };
   const byRules = routeIntentByRules(input);
   if (byRules) return byRules;
   const config = activeFullConfig.value;
@@ -1542,25 +1565,39 @@ function clearPendingWriteGrant() {
   confirmedSchema = undefined;
 }
 
-const productionContext = computed(() => {
-  // Production write protection must judge the *conversation's* connection: a
-  // run that confirms a write against the bound database must not be vetted
-  // against whichever tab is visible (#9902).
-  const connection = boundConnection.value;
+/** Production context of a specific binding — the connection a write would land on. */
+function productionContextOf(binding: AiConversationBinding) {
+  const connection = binding.connectionId ? connectionStore.getConfig(binding.connectionId) : undefined;
   if (!connection) return productionContextForDatabase(undefined, undefined);
-  const target = resolveAiDatabaseTarget({ database: boundDatabase.value, schema: boundSchema.value }, connection);
+  const target = resolveAiDatabaseTarget({ database: binding.database, schema: binding.schema }, connection);
   return productionContextForDatabase(connection, target.database);
-});
+}
+
+/**
+ * Production write protection must judge the connection the SQL will actually run
+ * on. For a run in flight that is the run's frozen binding, not the conversation's
+ * live one — otherwise rebinding (or waiting on a confirmation card while
+ * rebinding) could grant `allowWriteSql` for a production database, or deny it for
+ * a non-production one (#9902 review).
+ */
+const productionContext = computed(() => productionContextOf(activeRunBinding.value));
 
 function sendProposalReply(positive: boolean) {
   // Disable while a stream is in flight or no proposal is currently active.
   if (isGenerating.value) return;
   const target = proposalConfirmMessage.value;
   if (!target) return;
+  // The proposal belongs to a run, so its target is that run's frozen binding —
+  // not the conversation's live one. Rebinding while the card is up would
+  // otherwise append the SQL to, and record the write confirmation for, another
+  // connection; the backend verifies the confirmed namespace against the actual
+  // execution target, so it would also fail the confirmation (#9902 review).
+  const runBinding = activeRunBinding.value;
+  const runConnection = runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
   const isWriteConfirmation = isActionableWriteProposalMessage(target);
   if (positive && productionContext.value.active && (target.kind === "writeSqlConfirmation" || looksLikeWriteSqlProposal(target.content))) {
     const sql = extractFirstSqlCodeBlock(target.content);
-    if (sql) emit("appendSql", sql, conversationBinding.value);
+    if (sql) emit("appendSql", sql, runBinding);
     toast(t("production.aiReviewRequired"), 5000);
     return;
   }
@@ -1578,11 +1615,11 @@ function sendProposalReply(positive: boolean) {
     confirmedWriteSqlText = extractSingleSqlCodeBlock(target.content);
     if (confirmedWriteSqlText) {
       allowWriteSqlForNextRun = true;
-      confirmedConnectionId = boundConnectionId.value;
-      if (boundConnection.value) {
-        const target = resolveAiDatabaseTarget({ database: boundDatabase.value, schema: boundSchema.value }, boundConnection.value);
-        confirmedDatabase = target.database;
-        confirmedSchema = target.schema;
+      confirmedConnectionId = runBinding.connectionId;
+      if (runConnection) {
+        const resolved = resolveAiDatabaseTarget({ database: runBinding.database, schema: runBinding.schema }, runConnection);
+        confirmedDatabase = resolved.database;
+        confirmedSchema = resolved.schema;
       }
     }
     // When no SQL code block is found in the proposal, treat the
@@ -2559,6 +2596,8 @@ function imageAttachmentSupportErrorMessage(error: "provider" | "format"): strin
 }
 
 function selectedMessageMentions(tableMentions: AiTableMention[], sqlFileMentions: AiSqlFileMention[], csvAttachments: AiCsvFileContext[] = [], imageAttachments: AiImageAttachment[] = []): AiMessageMention[] {
+  // Only ever reached for the visible conversation: every caller passes empty
+  // arrays for a background/auto send (see the `auto ? [] : …` locals in send()).
   const connectionId = boundConnectionId.value;
   const database = mentionTargetDatabase() || boundConnection.value?.database || "";
   return [
@@ -3143,7 +3182,11 @@ async function send() {
   // cases need the frozen copy: a background auto-send belongs to another
   // conversation than the one on screen, and a run that is rebound mid-flight
   // must keep emitting against the connection it actually started on.
-  const runBinding = auto ? auto.binding : conversationBinding.value;
+  // A confirmation resume continues an *existing* run, and `resumingConfirmedWrite`
+  // is only known a few lines below — so the run being continued must win here,
+  // not the conversation's live binding. With no run in flight activeRunBinding
+  // is just the conversation's own binding, so a fresh send is unaffected.
+  const runBinding = auto ? auto.binding : activeRunBinding.value;
   const connection = runPluginContext ? undefined : runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
   const tab = runPluginContext ? undefined : aiContextTargetFor(runBinding, props.tab);
   const runSourceName = runPluginContext?.pluginName ?? connection?.name ?? "";
@@ -3391,7 +3434,7 @@ async function send() {
     // already explains what this turn does).
     requestedAction = resolveDefaultAction(requestedMode);
   } else {
-    requestedAction = await resolveAutoAction(text, requestedMode, runIsVisible());
+    requestedAction = await resolveAutoAction(text, requestedMode, runIsVisible(), tab);
     // Keep the outcome on the message so the "Auto · <action>" chip can explain
     // (and re-select) what the router chose.
     userMessage.routedFrom = "auto";
@@ -4319,7 +4362,11 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     id: targetConversationId,
     title: first?.pluginContext?.title || renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
     pluginContext: pluginContextFromMessages(targetMessages),
-    connectionName,
+    // Name and id must come from the same source: taking the name from the caller
+    // (a run, so possibly connection A) while the id comes from the conversation
+    // record (possibly B after a mid-run rebind) saves a record that *displays* A
+    // but targets B (#9902 review).
+    connectionName: binding.connectionId ? (connectionStore.getConfig(binding.connectionId)?.name ?? connectionName) : connectionName,
     connectionId: binding.connectionId,
     database: existingConversation ? binding.database : database,
     schema: existingConversation ? binding.schema : boundSchema.value,

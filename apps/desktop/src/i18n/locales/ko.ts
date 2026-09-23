@@ -2996,6 +2996,7 @@ export default withEnglishFallback({
     truncated: "컨텍스트가 잘렸습니다",
     contextSummary: "{database} · 테이블 {tables}개",
     autoSqlBlocked: "AI가 생성한 SQL이 자동 실행하기에는 너무 위험해 보입니다. 실행 전에 수동으로 검토하세요.",
+    redisConsoleUnreachable: "AI 명령을 이 대화에 바인딩된 Redis 콘솔로 전달하지 못했습니다. 해당 연결의 Redis 콘솔을 열고 다시 시도하세요.",
     writeSqlConfirmationRequired: "이 SQL은 데이터 또는 스키마를 변경합니다. 실행 전에 신중하게 검토하세요.",
     writeSqlConfirmationQuestion: "이 SQL을 한 번 실행할까요?",
     writeSqlConfirmYes: "실행 확인",

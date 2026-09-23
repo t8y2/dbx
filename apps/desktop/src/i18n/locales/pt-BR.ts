@@ -3199,6 +3199,7 @@ export default withEnglishFallback({
     truncated: "Contexto truncado",
     contextSummary: "{database} · {tables} tabelas",
     autoSqlBlocked: "O SQL gerado pela AI pareceu arriscado demais para execução automática. Revise-o manualmente antes de executar.",
+    redisConsoleUnreachable: "O comando da AI não chegou ao console Redis vinculado a esta conversa. Abra o console Redis dessa conexão e tente novamente.",
     writeSqlConfirmationRequired: "Este SQL altera dados ou o esquema. Revise-o cuidadosamente antes de executar.",
     writeSqlConfirmationQuestion: "Executar este SQL uma vez?",
     writeSqlConfirmYes: "Confirmar execução",

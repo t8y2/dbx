@@ -3199,6 +3199,7 @@ export default {
     truncated: "Context truncated",
     contextSummary: "{database} · {tables} tables",
     autoSqlBlocked: "The AI-generated SQL looked too risky to auto-execute. Review it manually before running.",
+    redisConsoleUnreachable: "The AI command could not reach this conversation's Redis console. Open the bound connection's Redis console and try again.",
     writeSqlConfirmationRequired: "This SQL changes data or schema. Review it carefully before execution.",
     writeSqlConfirmationQuestion: "Execute this SQL once?",
     writeSqlConfirmYes: "Confirm execution",

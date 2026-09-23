@@ -41,12 +41,30 @@ describe("AI Redis console routing", () => {
     expect(handler).not.toContain("buildAppendedEditorSql(");
   });
 
-  it("brings the bound connection's Redis console on screen instead of dropping the command", () => {
-    // Redis has no headless path, so the bound connection's console is created
-    // (without stealing focus) and focused explicitly, then driven.
-    expect(appSource).toContain("const tabId = ensureRedisConsoleTab(target);");
-    expect(appSource).toContain('queryStore.createTab(target.connectionId, database, `db${database}`, "redis", undefined, undefined, undefined, { activate: false })');
-    expect(appSource).toContain("if (queryStore.activeTabId !== tabId) queryStore.switchTab(tabId);");
+  it("refuses a Redis command rather than moving the workspace to the bound console", () => {
+    // "An AI action never moves the workspace" is the point of #9902. The bound
+    // console is driven only when it is already the visible tab; otherwise the
+    // user is told to open it. No tab is switched and none is created.
+    const start = appSource.indexOf("function routeAiRedisCommand");
+    const route = appSource.slice(start, appSource.indexOf("function aiTargetTabSql", start));
+
+    expect(route).not.toContain("switchTab");
+    expect(route).not.toContain("createTab");
+    expect(route).not.toContain("ensureRedisConsoleTab");
+    expect(appSource).not.toContain("ensureRedisConsoleTab");
+    expect(route).toContain("void deliverRedisAiCommand(command, execute, target);");
+    // The refusal is reported, not silent.
+    expect(appSource).toContain('toast(t("ai.redisConsoleUnreachable"), 5000);');
+  });
+
+  it("still drives the bound console when it is the visible tab", () => {
+    // The refusal above must not disable the working case: readiness means the
+    // on-screen console belongs to the bound connection.
+    expect(contentAreaSource).toContain('props.activeTab.mode === "redis" && props.activeTab.connectionId === connectionId');
+    const start = appSource.indexOf("async function deliverRedisAiCommand");
+    const deliver = appSource.slice(start, appSource.indexOf("function aiTargetTabSql", start));
+    expect(deliver).toContain("contentAreaRef.value?.executeRedisCommand(command, target.connectionId)");
+    expect(deliver).toContain("contentAreaRef.value?.insertRedisCommand(command, target.connectionId)");
   });
 
   it("waits for the console to mount without re-issuing the command", () => {
@@ -98,5 +116,17 @@ describe("AI Redis console routing", () => {
       const anyBlocked = batch.some((cmd) => classifyRedisCommandSafety(cmd) === "blocked");
       expect(anyBlocked).toBe(true);
     }
+  });
+
+  it("tells the user when the bound Redis console cannot be reached", () => {
+    // A console.warn is invisible in a desktop app, and the command the user
+    // asked for is not going to run — silence is the worst outcome.
+    // Sliced between two anchors: writing an escaped newline in a source anchor
+    // is fragile, and this pair is unambiguous.
+    const start = appSource.indexOf("async function deliverRedisAiCommand");
+    const deliver = appSource.slice(start, appSource.indexOf("function aiTargetTabSql", start));
+    expect(deliver).toContain('toast(t("ai.redisConsoleUnreachable"), 5000);');
+    // Both failure paths (mount timeout, command rejected) report.
+    expect(deliver.split('toast(t("ai.redisConsoleUnreachable")').length - 1).toBe(2);
   });
 });

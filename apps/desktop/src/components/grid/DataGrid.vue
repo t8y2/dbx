@@ -6492,21 +6492,16 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
 }
 
 const canvasRef = ref<HTMLCanvasElement>();
-const canvasBackRef = ref<HTMLCanvasElement>();
 // WKWebView（macOS）会为 canvas 元素滞留幽灵合成层：屏幕显示旧帧位图，2D 缓冲重绘
 // （甚至改尺寸）都无法清除，只有把显示元素换掉才有效。双 canvas 交替翻转：绘制进
 // 隐藏的那一张，画完移交可见性，幽灵层随旧元素的 display:none 一并废弃。
-const canvasUsingBackSurface = ref(false);
 function activeCanvasSurface(): HTMLCanvasElement | null {
-  return (canvasUsingBackSurface.value ? canvasBackRef.value : canvasRef.value) ?? null;
-}
-function inactiveCanvasSurface(): HTMLCanvasElement | null {
-  return (canvasUsingBackSurface.value ? canvasRef.value : canvasBackRef.value) ?? null;
+  return canvasRef.value ?? null;
 }
 const canvasOverlayRef = ref<HTMLElement>();
 
 function isCanvasGridInteractionTarget(target: Node): boolean {
-  return canvasOverlayRef.value?.contains(target) === true || canvasRef.value?.contains(target) === true || canvasBackRef.value?.contains(target) === true;
+  return canvasOverlayRef.value?.contains(target) === true || canvasRef.value?.contains(target) === true;
 }
 
 const canvasViewportWidth = ref(0);
@@ -6779,13 +6774,17 @@ function canvasHitTest(event: MouseEvent): { rowIndex: number; visibleColIdx: nu
   return { rowIndex, visibleColIdx, rowNumber: false };
 }
 
-function onCanvasScroll(event: Event) {
-  const target = event.target;
-  const scroller = target instanceof HTMLElement ? target : canvasScrollerElement();
+let canvasScrollRafId = 0;
+let pendingCanvasScrollTop = 0;
+let pendingCanvasScrollLeft = 0;
+
+function flushCanvasScrollSync() {
+  canvasScrollRafId = 0;
+  const scroller = canvasScrollerElement();
   if (!scroller) return;
 
-  const scrollTop = scroller.scrollTop;
-  const scrollLeft = scroller.scrollLeft;
+  const scrollTop = pendingCanvasScrollTop;
+  const scrollLeft = pendingCanvasScrollLeft;
   const viewportWidth = scroller.clientWidth;
   const viewportHeight = scroller.clientHeight;
   const scrollTopChanged = canvasScrollTop.value !== scrollTop;
@@ -6793,7 +6792,7 @@ function onCanvasScroll(event: Event) {
   const scrollLeftChanged = gridHorizontalScrollLeft.value !== scrollLeft;
   const viewportWidthChanged = gridViewportWidth.value !== viewportWidth || canvasViewportWidth.value !== viewportWidth;
 
-  if (canvasScrollTop.value !== scrollTop) canvasScrollTop.value = scrollTop;
+  if (scrollTopChanged) canvasScrollTop.value = scrollTop;
   if (canvasViewportWidth.value !== viewportWidth) canvasViewportWidth.value = viewportWidth;
   if (canvasViewportHeight.value !== viewportHeight) canvasViewportHeight.value = viewportHeight;
   if (scrollLeftChanged || viewportWidthChanged) {
@@ -6809,11 +6808,33 @@ function onCanvasScroll(event: Event) {
     const gutter = scrollbarGutterWidth(scroller);
     if (gridScrollbarGutter.value !== gutter) gridScrollbarGutter.value = gutter;
   }
-  if (headerRef.value && headerRef.value.scrollLeft !== scrollLeft) headerRef.value.scrollLeft = scrollLeft;
   recordScrollPosition({ top: scrollTop, left: scrollLeft });
   if (editingCell.value) scheduleActiveCellEditTextareaResize();
+}
+
+function onCanvasScroll(event: Event) {
+  const target = event.target;
+  const scroller = target instanceof HTMLElement ? target : canvasScrollerElement();
+  if (!scroller) return;
+
+  const scrollTop = scroller.scrollTop;
+  const scrollLeft = scroller.scrollLeft;
+  pendingCanvasScrollTop = scrollTop;
+  pendingCanvasScrollLeft = scrollLeft;
+
+  // 1. 同步纯 CSS 属性（transform / scrollLeft 不触发整树 Layout）
+  if (headerRef.value && headerRef.value.scrollLeft !== scrollLeft) {
+    headerRef.value.scrollLeft = scrollLeft;
+  }
+
+  // 2. 标滚动中，调度重绘
   markGridScrolling();
   scheduleCanvasDraw();
+
+  // 3. 繁重的滚动条布局读写与 Vue Ref 批量合并到单次 rAF
+  if (!canvasScrollRafId) {
+    canvasScrollRafId = requestAnimationFrame(flushCanvasScrollSync);
+  }
 }
 
 function shouldAccelerateCanvasWheel(event: WheelEvent): boolean {
@@ -7239,7 +7260,7 @@ const canvasRightAlignedActionCell = computed(() => {
 });
 
 function drawCanvasGrid() {
-  const canvas = inactiveCanvasSurface();
+  const canvas = canvasRef.value;
   const scroller = canvasScrollerElement();
   if (!canvas || !scroller || !useCanvasGridRows.value) return;
 
@@ -7288,13 +7309,7 @@ function drawCanvasGrid() {
     showWhitespace: showWhitespaceEnabled.value,
   });
   if (!drawn) return;
-  flipCanvasSurface();
   completeResultCanvasDraw(drawnResult);
-}
-
-function flipCanvasSurface() {
-  // 双 canvas 翻转：刚绘制的帧离开前景层，幽灵层随隐藏一并废弃，新显画布接到下一帧
-  canvasUsingBackSurface.value = !canvasUsingBackSurface.value;
 }
 
 watch(
@@ -13075,24 +13090,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 >
                   <canvas
                     ref="canvasRef"
-                    class="canvas-grid-surface dbx-data-grid-font-family sticky left-0 top-0 z-0 block font-normal"
+                    class="canvas-grid-surface dbx-data-grid-font-family sticky left-0 top-0 z-0 block font-normal pointer-events-auto"
                     :style="{
                       width: `${canvasSurfaceWidth}px`,
                       height: `${canvasViewportHeight}px`,
-                      display: canvasUsingBackSurface ? 'none' : '',
-                    }"
-                    @mousemove="onCanvasMouseMove"
-                    @mouseleave="onCanvasMouseLeave"
-                    @mousedown="onCanvasMouseDown"
-                    @contextmenu="onCanvasContext"
-                  />
-                  <canvas
-                    ref="canvasBackRef"
-                    class="canvas-grid-surface dbx-data-grid-font-family sticky left-0 top-0 z-0 block font-normal"
-                    :style="{
-                      width: `${canvasSurfaceWidth}px`,
-                      height: `${canvasViewportHeight}px`,
-                      display: canvasUsingBackSurface ? '' : 'none',
                     }"
                     @mousemove="onCanvasMouseMove"
                     @mouseleave="onCanvasMouseLeave"

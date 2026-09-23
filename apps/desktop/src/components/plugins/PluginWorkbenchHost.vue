@@ -60,6 +60,10 @@ let bridge: PluginHostBridge | undefined;
 let unsubscribeEvents: (() => void) | undefined;
 let disposed = false;
 let loadGeneration = 0;
+// Boot timing (§8.3 loading lifecycle): one console.debug line per iframe load
+// so panel-open latency can be attributed (doc cache / sandbox doc / parse+exec).
+let bootStartedAt = 0;
+let bootCacheHit = false;
 
 // --- Plugin file-transfer bridge (native dialogs + OS file drops) ---------
 // The sandboxed iframe cannot reach local files, so handles live here: Tauri
@@ -496,6 +500,8 @@ async function loadWorkbench() {
   loading.value = true;
   frameReady.value = false;
   error.value = "";
+  bootStartedAt = performance.now();
+  bootCacheHit = true;
   try {
     if (!props.plugin.compatibility.compatible) throw new Error((props.plugin.compatibility.errors || []).join("; ") || t("pluginPlatform.pluginIncompatible"));
     // The read/decode/inline pipeline over a multi-megabyte ui build dominates
@@ -507,13 +513,19 @@ async function loadWorkbench() {
     const htmlCacheKey = `${props.plugin.manifest.id}:${props.plugin.manifest.version}`;
     let cachedHtml = getCachedPluginUiHtml(htmlCacheKey);
     if (!cachedHtml) {
+      bootCacheHit = false;
       cachedHtml = await getOrLoadPluginUiHtml(htmlCacheKey, props.plugin.manifest.id);
       if (disposed || generation !== loadGeneration) return;
     }
     const { html, entryDirectory } = cachedHtml;
-    source.value = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
-      baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
-    });
+    // The final sandbox document is cached alongside the html: generating it
+    // re-runs megabyte-scale string surgery on every boot.
+    if (!cachedHtml.sandboxDoc) {
+      cachedHtml.sandboxDoc = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
+        baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
+      });
+    }
+    source.value = cachedHtml.sandboxDoc;
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
     createBridge();
@@ -531,6 +543,13 @@ function onMessage(event: MessageEvent) {
 }
 
 function onFrameLoad() {
+  if (bootStartedAt) {
+    const endedAt = performance.now();
+    const bootMs = Math.round(endedAt - bootStartedAt);
+    performance.measure(`pluginUi:boot:${props.plugin.manifest.id}`, { start: bootStartedAt, end: endedAt });
+    bootStartedAt = 0;
+    console.debug(`[plugin-ui-boot] ${props.plugin.manifest.id}@${props.plugin.manifest.version} iframeLoad=${bootMs}ms cacheHit=${bootCacheHit}`);
+  }
   // The load event can precede the webview's first actual paint (notably on
   // WKWebView); reveal after two animation frames, with a timer fallback
   // because rAF stalls in occluded/background webviews. Guarded by generation

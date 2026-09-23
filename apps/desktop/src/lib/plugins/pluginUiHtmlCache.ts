@@ -8,6 +8,11 @@ import * as api from "@/lib/backend/api";
 export interface PluginUiHtml {
   html: string;
   entryDirectory: string;
+  /** Final sandbox document (html + CSP/SDK/theme injection); built lazily once
+   * per plugin version — regenerating it re-runs megabyte-scale string surgery
+   * on every panel/tab boot. The embedded appearance only affects the pre-init
+   * first paint; the init message pushes the live theme right after. */
+  sandboxDoc?: string;
 }
 
 const cache = new Map<string, PluginUiHtml>();

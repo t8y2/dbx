@@ -431,6 +431,7 @@ export default withEnglishFallback({
     sortConnectionsManual: "Əl ilə sıralama",
     sortConnectionsAscending: "Ad: A–Z",
     sortConnectionsDescending: "Ad: Z–A",
+    searchConnectionSkipped: "Axtarış bu əlaqəni atladı: {message}",
     searchScopeConnection: "Əlaqə",
     searchScopeDatabase: "Verilənlər bazası",
     searchScopeSchema: "Sxem",

@@ -433,6 +433,7 @@ export default withEnglishFallback({
     sortConnectionsManual: "Elle sıralama",
     sortConnectionsAscending: "Ad: A–Z",
     sortConnectionsDescending: "Ad: Z–A",
+    searchConnectionSkipped: "Arama bu bağlantıyı atladı: {message}",
     searchScopeConnection: "Bağlantı",
     searchScopeDatabase: "Veritabanı",
     searchScopeSchema: "Şema",

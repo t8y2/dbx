@@ -588,6 +588,7 @@ export default withEnglishFallback({
     sortConnectionsManual: "Ordine manuale",
     sortConnectionsAscending: "Nome: A–Z",
     sortConnectionsDescending: "Nome: Z–A",
+    searchConnectionSkipped: "La ricerca ha ignorato questa connessione: {message}",
     searchScopeConnection: "Connessione",
     searchScopeDatabase: "Database",
     searchScopeSchema: "Schema",

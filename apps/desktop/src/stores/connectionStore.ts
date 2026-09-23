@@ -402,6 +402,10 @@ interface LoadTreeOptions {
   connectedOnly?: boolean;
   expectedSidebarSearchQuery?: string;
   searchFilter?: string;
+  // Set by the sidebar search walker: the load runs in the background, so a connection that
+  // cannot be reached must not leave the raw driver error on the node (see
+  // withSidebarSearchLoad).
+  sidebarSearch?: boolean;
   // Explicit actions can load the unfiltered backing group while the global search
   // continues to control presentation; normal watcher refreshes still reject mismatches.
   allowGlobalSearchMismatch?: boolean;
@@ -1486,9 +1490,58 @@ export const useConnectionStore = defineStore("connection", () => {
     return false;
   }
 
+  /**
+   * 侧边栏搜索是后台投影：搜索为了读取元数据而被动重连失败时，不能把驱动的原始错误
+   * （旧版 SQL Server 可能是一整段 TLS/加密提示）留在连接节点上，也不能每输入一个字就重试一次。
+   * 搜索驱动的加载在这里登记，ensureConnected() 据此识别并降级这类失败。
+   */
+  const sidebarSearchLoadCounts = new Map<string, number>();
+
+  function isSidebarSearchLoad(connectionId: string): boolean {
+    return (sidebarSearchLoadCounts.get(connectionId) ?? 0) > 0;
+  }
+
+  async function withSidebarSearchLoad<T>(connectionId: string | null | undefined, work: () => Promise<T>): Promise<T> {
+    const id = connectionId?.trim();
+    if (!id) return work();
+    sidebarSearchLoadCounts.set(id, (sidebarSearchLoadCounts.get(id) ?? 0) + 1);
+    try {
+      return await work();
+    } finally {
+      const remaining = (sidebarSearchLoadCounts.get(id) ?? 1) - 1;
+      if (remaining > 0) sidebarSearchLoadCounts.set(id, remaining);
+      else sidebarSearchLoadCounts.delete(id);
+    }
+  }
+
+  function sidebarSearchSkipMessage(error: unknown): string {
+    const firstLine =
+      connectionErrorMessage(error)
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) ?? "";
+    const detail = firstLine.length > 240 ? `${firstLine.slice(0, 240)}…` : firstLine;
+    return i18n.global.t("sidebar.searchConnectionSkipped", { message: detail });
+  }
+
+  /**
+   * 后台搜索重连失败：按被动断链处理（连接确实不可用了），但把驱动错误换成一行提示，
+   * 这样节点上只留一句“搜索已跳过该连接”，用户显式连接时仍能看到完整错误。
+   */
+  function recordSidebarSearchConnectionFailure(connectionId: string, error: unknown) {
+    markConnectionLost(connectionId, error);
+    setConnectionError(connectionId, sidebarSearchSkipMessage(error));
+  }
+
   // Metadata loaders keep this internal: match connection-loss errors before recording generic errors.
   function recordMetadataLoadError(connectionId: string, error: unknown, load?: TreeNodeLoadHandle) {
     if (load && !load.isCurrent()) return;
+    // 搜索驱动的后台加载失败按“搜索跳过该连接”降级：搜索只是投影动作，不能把驱动原始错误
+    // （旧版 SQL Server 会附带整段 TLS/加密提示）留在连接节点上。取消/被取代的尝试沿用原有清错处理。
+    if (isSidebarSearchLoad(connectionId) && !isCancelledConnectionAttempt(error) && !isSupersededConnectionAttempt(error)) {
+      recordSidebarSearchConnectionFailure(connectionId, error);
+      return;
+    }
     if (recordConnectionLostError(connectionId, error)) return;
     recordConnectionError(connectionId, error);
   }
@@ -4696,7 +4749,10 @@ export const useConnectionStore = defineStore("connection", () => {
         clearConnectionError(connectionId);
         return;
       }
-      recordConnectionError(connectionId, e);
+      // 后台搜索触发的重连失败只留一行提示，避免把完整驱动错误（如旧版 SQL Server 的 TLS 提示）
+      // 记到连接节点上，也避免搜索每轮都重复报同一个错。
+      if (isSidebarSearchLoad(connectionId) && !isSupersededConnectionAttempt(e)) recordSidebarSearchConnectionFailure(connectionId, e);
+      else recordConnectionError(connectionId, e);
       clearConnectionNodeLoading(connectionId);
       throw e;
     } finally {
@@ -6260,7 +6316,10 @@ export const useConnectionStore = defineStore("connection", () => {
     );
   }
 
-  async function loadObjectGroupChildren(node: TreeNode, options?: LoadTreeOptions) {
+  async function loadObjectGroupChildren(node: TreeNode, options?: LoadTreeOptions): Promise<void> {
+    if (options?.sidebarSearch) {
+      return withSidebarSearchLoad(node.connectionId, () => loadObjectGroupChildren(node, { ...options, sidebarSearch: false }));
+    }
     // Queued search/refresh tasks can outlive disconnect, which removes their nodes.
     if (!treeNodeInSidebarTree(node)) return;
     const packageOwnerId = packageMemberGroupOwnerId(node);
@@ -7281,7 +7340,10 @@ export const useConnectionStore = defineStore("connection", () => {
     return ids;
   }
 
-  async function loadTreeNodeChildren(node: TreeNode, options?: LoadTreeOptions) {
+  async function loadTreeNodeChildren(node: TreeNode, options?: LoadTreeOptions): Promise<void> {
+    if (options?.sidebarSearch) {
+      return withSidebarSearchLoad(node.connectionId, () => loadTreeNodeChildren(node, { ...options, sidebarSearch: false }));
+    }
     if (node.type === "connection" && node.connectionId) {
       const config = getConfig(node.connectionId);
       if (config?.db_type === "redis") {
@@ -7393,7 +7455,10 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function refreshTreeNode(node: TreeNode, options?: { skipObjectCacheInvalidation?: boolean }) {
+  async function refreshTreeNode(node: TreeNode, options?: { skipObjectCacheInvalidation?: boolean; sidebarSearch?: boolean }): Promise<void> {
+    if (options?.sidebarSearch) {
+      return withSidebarSearchLoad(node.connectionId, () => refreshTreeNode(node, { ...options, sidebarSearch: false }));
+    }
     invalidateCompletionCachesForNode(node);
     invalidateMetadataCachesForNode(node, options);
     if (objectTypesForGroupNode(node.type)) {

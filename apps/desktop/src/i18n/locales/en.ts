@@ -598,6 +598,7 @@ export default {
     sortConnectionsManual: "Manual order",
     sortConnectionsAscending: "Name: A–Z",
     sortConnectionsDescending: "Name: Z–A",
+    searchConnectionSkipped: "Search skipped this connection: {message}",
     searchScopeConnection: "Connection",
     searchScopeDatabase: "Database",
     searchScopeSchema: "Schema",

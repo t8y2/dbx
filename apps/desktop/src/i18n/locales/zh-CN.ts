@@ -514,6 +514,7 @@ export default withEnglishFallback({
     sortConnectionsManual: "手动排序",
     sortConnectionsAscending: "名称：A–Z",
     sortConnectionsDescending: "名称：Z–A",
+    searchConnectionSkipped: "搜索已跳过该连接：{message}",
     searchScopeConnection: "连接",
     searchScopeDatabase: "数据库",
     searchScopeSchema: "Schema",

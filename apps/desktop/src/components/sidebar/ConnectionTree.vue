@@ -383,25 +383,28 @@ async function loadSidebarSearchTargets(query: string, preservesNodeSubtree?: (n
 function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearchTask[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false, scheduledNodeIds?: Set<string>) {
   const preservesSearchSubtree = ancestorPreservesSearchSubtree || (!!refreshedNodeIds && !!preservesNodeSubtree?.(node));
   if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
-    if (store.connectedIds.has(node.connectionId) && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
+    const connectionIsConnected = store.connectedIds.has(node.connectionId);
+    if (connectionIsConnected && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
       const connectionId = node.connectionId;
       scheduledNodeIds?.add(node.id);
       tasks.push(() => store.loadConnectedConnectionRootForSidebarSearch(connectionId));
     }
-    if (node.connectionId !== store.activeConnectionId) return;
+    // 搜索不得替用户建连：只有连接中的连接（含当前激活的那个）才继续刷新子树。
+    // 断开或连不上的连接直接跳过，后台搜索不会因此弹出凭据输入或写入整段连接错误。
+    if (!connectionIsConnected || node.connectionId !== store.activeConnectionId) return;
   }
   if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {
     if (!scheduledNodeIds || !scheduledNodeIds.has(node.id)) {
       scheduledNodeIds?.add(node.id);
       if (preservesSearchSubtree) {
         if (refreshedNodeIds.delete(node.id)) {
-          tasks.push(() => store.loadTreeNodeChildren(node, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+          tasks.push(() => store.loadTreeNodeChildren(node, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery, sidebarSearch: true }));
         }
       } else {
         const wasCollapsed = node.isExpanded !== true;
         refreshedNodeIds.add(node.id);
         if (wasCollapsed) searchExpansionState.markFiltered(node.id, true);
-        tasks.push(() => store.refreshTreeNode(node));
+        tasks.push(() => store.refreshTreeNode(node, { sidebarSearch: true }));
       }
     }
     return;
@@ -410,7 +413,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
     scheduledNodeIds?.add(node.id);
     const wasCollapsed = node.isExpanded !== true;
     searchExpansionState.markFiltered(node.id, wasCollapsed);
-    tasks.push(() => store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+    tasks.push(() => store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery, sidebarSearch: true }));
   }
   if (refreshedNodeIds && node.children) {
     for (const child of node.children) {
@@ -419,11 +422,11 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
         scheduledNodeIds?.add(child.id);
         if (preservesSearchSubtree) {
           if (searchExpansionState.markUnfiltered(child.id)) {
-            tasks.push(() => store.loadObjectGroupChildren(child, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+            tasks.push(() => store.loadObjectGroupChildren(child, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery, sidebarSearch: true }));
           }
         } else {
           searchExpansionState.markFiltered(child.id, !child.isExpanded);
-          tasks.push(() => store.loadObjectGroupChildren(child, { force: true }));
+          tasks.push(() => store.loadObjectGroupChildren(child, { force: true, sidebarSearch: true }));
         }
       }
     }
@@ -438,12 +441,12 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
       } else if (!store.restoreFilteredObjectGroupChildren(node)) {
         // Nothing was captured because the group had not been loaded before the
         // search, so there is no previous list to put back.
-        tasks.push(() => store.loadObjectGroupChildren(node, { force: true }));
+        tasks.push(() => store.loadObjectGroupChildren(node, { force: true, sidebarSearch: true }));
       }
     } else if (simpleObjectParentTypes.has(node.type)) {
       const shouldCollapse = searchAutoExpandedNodeIds.has(node.id);
       tasks.push(async () => {
-        await store.refreshTreeNode(node);
+        await store.refreshTreeNode(node, { sidebarSearch: true });
         if (shouldCollapse) node.isExpanded = false;
       });
     }

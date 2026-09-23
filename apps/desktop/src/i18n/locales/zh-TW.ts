@@ -592,6 +592,7 @@ export default withEnglishFallback({
     sortConnectionsManual: "手動排序",
     sortConnectionsAscending: "名稱：A–Z",
     sortConnectionsDescending: "名稱：Z–A",
+    searchConnectionSkipped: "搜尋已略過此連線：{message}",
     searchScopeConnection: "連線",
     searchScopeDatabase: "資料庫",
     searchScopeSchema: "Schema",

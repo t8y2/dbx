@@ -596,6 +596,7 @@ export default withEnglishFallback({
     sortConnectionsManual: "수동 순서",
     sortConnectionsAscending: "이름: 가나다순",
     sortConnectionsDescending: "이름: 다나가순",
+    searchConnectionSkipped: "검색에서 이 연결을 건너뛰었습니다: {message}",
     searchScopeConnection: "연결",
     searchScopeDatabase: "데이터베이스",
     searchScopeSchema: "스키마",

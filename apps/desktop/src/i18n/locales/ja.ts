@@ -589,6 +589,7 @@ export default withEnglishFallback({
     sortConnectionsManual: "手動順",
     sortConnectionsAscending: "名前: A–Z",
     sortConnectionsDescending: "名前: Z–A",
+    searchConnectionSkipped: "検索ではこの接続をスキップしました: {message}",
     searchScopeConnection: "接続",
     searchScopeDatabase: "データベース",
     searchScopeSchema: "スキーマ",

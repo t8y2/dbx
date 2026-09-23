@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
 import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
@@ -1910,6 +1911,12 @@ export const useSettingsStore = defineStore("settings", () => {
   let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+  let persistedAlwaysOnTopToolbarVisibility = editorSettings.value.toolbarItems.alwaysOnTop;
+
+  function syncAlwaysOnTopToolbarVisibility(visible: boolean) {
+    editorSettings.value.toolbarItems.alwaysOnTop = visible;
+    persistedAlwaysOnTopToolbarVisibility = visible;
+  }
 
   function enqueueEditorSettingsOperation<T>(operation: () => Promise<T>): Promise<T> {
     const queuedOperation = editorSettingsOperationQueue ? editorSettingsOperationQueue.then(operation) : operation();
@@ -1924,8 +1931,14 @@ export const useSettingsStore = defineStore("settings", () => {
     return queuedOperation;
   }
 
-  function persistCurrentEditorSettings(): Promise<void> {
-    return api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+  async function persistCurrentEditorSettings(): Promise<void> {
+    const snapshot = editorSettingsSnapshot(editorSettings.value);
+    await api.saveEditorSettings(snapshot);
+    const visible = snapshot.toolbarItems.alwaysOnTop;
+    if (visible !== persistedAlwaysOnTopToolbarVisibility) {
+      persistedAlwaysOnTopToolbarVisibility = visible;
+      await emitAlwaysOnTopToolbarVisibilityChanged(visible);
+    }
   }
 
   function enqueueEditorSettingsSave(): Promise<void> {
@@ -1982,6 +1995,7 @@ export const useSettingsStore = defineStore("settings", () => {
             normalized.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion = SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
           }
           editorSettings.value = normalized;
+          persistedAlwaysOnTopToolbarVisibility = normalized.toolbarItems.alwaysOnTop;
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
@@ -1998,6 +2012,7 @@ export const useSettingsStore = defineStore("settings", () => {
         const legacy = loadLegacyEditorSettings();
         if (legacy) {
           editorSettings.value = legacy;
+          persistedAlwaysOnTopToolbarVisibility = legacy.toolbarItems.alwaysOnTop;
           try {
             await enqueueEditorSettingsSave();
             // Existing desktop users keep settings in localStorage; remove them only
@@ -2793,6 +2808,7 @@ export const useSettingsStore = defineStore("settings", () => {
     desktopSettings,
     mcpGlobalPolicy,
     initEditorSettings,
+    syncAlwaysOnTopToolbarVisibility,
     updateEditorSettings,
     updateEditorSettingsAndPersist,
     persistEditorSettings,

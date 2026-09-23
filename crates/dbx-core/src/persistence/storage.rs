@@ -8824,7 +8824,7 @@ mod tests {
             &path,
             "INSERT INTO ai_conversations (id, title, connection_name) VALUES ('prod', 'Prod chat', 'Prod MySQL');
              INSERT INTO ai_conversations (id, title, connection_name) VALUES ('orphan', 'Orphan chat', 'Deleted Conn');",
-            "INSERT INTO connections (id, config_json) VALUES ('c-prod', '{\"name\":\"Prod MySQL\"}');",
+            "INSERT INTO connections (id, config_json) VALUES ('c-prod', '{\"id\":\"c-prod\",\"name\":\"Prod MySQL\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}');",
         );
 
         let storage = Storage::open(&path).await.unwrap();
@@ -8848,8 +8848,8 @@ mod tests {
             &path,
             "INSERT INTO ai_conversations (id, title, connection_name) VALUES ('dup', 'Dup chat', 'Shared Name');
              INSERT INTO ai_conversations (id, title, connection_name) VALUES ('nameless', 'Nameless chat', '');",
-            "INSERT INTO connections (id, config_json) VALUES ('c1', '{\"name\":\"Shared Name\"}');
-             INSERT INTO connections (id, config_json) VALUES ('c2', '{\"name\":\"Shared Name\"}');",
+            "INSERT INTO connections (id, config_json) VALUES ('c1', '{\"id\":\"c1\",\"name\":\"Shared Name\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}');
+             INSERT INTO connections (id, config_json) VALUES ('c2', '{\"id\":\"c2\",\"name\":\"Shared Name\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}');",
         );
 
         let storage = Storage::open(&path).await.unwrap();
@@ -8874,7 +8874,7 @@ mod tests {
         // A connection matching the stored name appears *after* the binding was
         // written; re-running the backfill must leave the explicit binding alone.
         let conn = Connection::open(&path).unwrap();
-        conn.execute("INSERT INTO connections (id, config_json) VALUES ('conn-later', '{\"name\":\"local\"}')", [])
+        conn.execute("INSERT INTO connections (id, config_json) VALUES ('conn-later', '{\"id\":\"conn-later\",\"name\":\"local\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}')", [])
             .unwrap();
         drop(conn);
 

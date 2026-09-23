@@ -3911,6 +3911,10 @@ async function send() {
  *  input is consumed by the send pipeline once it actually starts, so a failed
  *  early bail (no config, superseded) does not silently drop it. */
 function scheduleAutoSend(convId: string, queued: QueuedConversationInput, messages: ChatMessage[], context = pluginContextFromMessages(messages)) {
+  // A conversation without a persisted record has no authoritative binding;
+  // falling back to the visible conversation's binding would recreate the
+  // cross-conversation leak this change removes.
+  if (!conversations.value.some((conversation) => conversation.id === convId)) return;
   pendingAutoSends.push({
     conversationId: convId,
     text: queued.text,
@@ -5715,7 +5719,7 @@ async function openExternalUrl(url: string) {
               <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-all p-2 text-[11px]">{{ pluginContextText(pluginContext) }}</pre>
             </details>
             <template v-else-if="connectionStore.connections.length">
-              <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
+              <DatabaseIcon v-if="boundConnection" :db-type="connectionIconType(boundConnection)" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
               <ConnectionTreeSelect
                 :model-value="boundConnectionId"

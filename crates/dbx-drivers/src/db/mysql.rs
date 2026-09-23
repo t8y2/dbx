@@ -1484,6 +1484,8 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
         || lower.contains("syntax error")
         || lower.contains("not supported");
     let setup_value_rejected = lower.contains("error 1231") && lower.contains("can't be set to");
+    // TDDL rejects the dynamic floor expression as an incorrect argument type (issue #10111).
+    let setup_argument_rejected = lower.contains("incorrect argument type") || lower.contains("error 1232");
     // Gaea tries to parse the built-in floor expression as an integer literal.
     let gaea_setup_expression_rejected = lower.contains("error 1105 (hy000)")
         && compact.contains(&format!(
@@ -1510,7 +1512,7 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     // without broadly matching user-supplied `cast(` expressions.
     let floor_statement_rejected = lower.contains("group_concat_max_len")
         || compact.contains(&format!("..._len,{MYSQL_GROUP_CONCAT_MAX_LEN})asunsigned)"));
-    if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected))
+    if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected || setup_argument_rejected))
         || gaea_setup_expression_rejected
         || starrocks_setup_expression_rejected
         || sphinxql_setup_query_rejected
@@ -8395,6 +8397,26 @@ mod tests {
     }
 
     #[test]
+    fn mysql_group_concat_tddl_incorrect_argument_type_retries_without_session_variable() {
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 1232 (HY000): Incorrect argument type to variable 'group_concat_max_len''",
+            "MySQL connection failed: Server error: `ERROR 1232 (HY000): [trace][host][tddl]Incorrect argument type to variable 'group_concat_max_len''",
+            "ERROR 1232 (HY000): Incorrect argument type to variable 'group_concat_max_len'",
+        ] {
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+                Some(MySqlSetupMode::Compatible),
+                "{error}"
+            );
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
+                None,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn mysql_group_concat_gaea_parse_int_error_retries_without_session_variable() {
         let error = "MySQL connection failed: Server error: `ERROR 1105 (HY000): strconv.ParseInt: parsing \"cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)\": invalid syntax'";
 
@@ -8517,6 +8539,13 @@ mod tests {
             mysql_group_concat_setup_fallback_mode(
                 MySqlSetupMode::Standard,
                 "MySQL connection failed: Server error: `ERROR 1105 (HY000): Syntax error near ..._len,2097152) as unsigned)'",
+            ),
+            None
+        );
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(
+                MySqlSetupMode::Standard,
+                "MySQL connection failed: Server error: `ERROR 1232 (HY000): Incorrect argument type to variable 'sql_mode''",
             ),
             None
         );

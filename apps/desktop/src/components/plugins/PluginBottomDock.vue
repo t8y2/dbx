@@ -127,11 +127,7 @@ async function loadPluginData() {
 // never competes with startup traffic; the module LRU bounds memory and
 // getOrLoadPluginUiHtml coalesces with real opens racing the warm.
 function schedulePanelUiWarm(definitions: InstalledPlugin[]) {
-  const candidates = definitions.filter((plugin) =>
-    (plugin.manifest.contributions || []).some(
-      (contribution) => contribution.type === "command" && contribution.action.type === "open-workbench" && contribution.action.presentation === "panel",
-    ),
-  );
+  const candidates = definitions.filter((plugin) => (plugin.manifest.contributions || []).some((contribution) => contribution.type === "command" && contribution.action.type === "open-workbench" && contribution.action.presentation === "panel"));
   if (!candidates.length) return;
   const idle: (callback: () => void) => void = typeof window.requestIdleCallback === "function" ? window.requestIdleCallback : (callback) => void window.setTimeout(callback, 2000);
   idle(() => {

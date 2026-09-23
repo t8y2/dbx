@@ -1,5 +1,5 @@
 import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/updatePreparation";
-import { defineStore, getActivePinia } from "pinia";
+import { defineStore } from "pinia";
 import { isRedisMonitorCommand, startRedisMonitor } from "@/lib/redis/redisMonitor";
 import { uuid } from "@/lib/common/utils";
 import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, toRaw, watch } from "vue";
@@ -5746,20 +5746,15 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultColumnComments = patch.resultColumnComments;
     tab.queryDisplaySourceColumns = patch.queryDisplaySourceColumns;
 
-    if (patch.tableMeta?.tableName && tab.result?.sourceStatement && tab.result?.sourceLabel) {
-      const effectiveDbType = databaseType ?? (getActivePinia() && tab.connectionId ? effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)) : undefined);
+    if (patch.tableMeta?.tableName && tab.result?.sourceStatement && tab.result.sourceLabel) {
       const nextLabel = canonicalizeQueryResultSourceLabel(tab.result.sourceLabel, tab.result.sourceStatement, patch.tableMeta, {
         database: database ?? tab.database,
-        databaseType: effectiveDbType,
+        databaseType,
       });
       if (nextLabel) {
         tab.result.sourceLabel = nextLabel;
-        if (tab.results?.length) {
-          const matching = tab.results.find((r) => r === tab.result) ?? (typeof tab.activeResultIndex === "number" ? tab.results[tab.activeResultIndex] : undefined) ?? tab.results.find((r) => r.sourceStatement && r.sourceStatement === tab.result?.sourceStatement);
-          if (matching) {
-            matching.sourceLabel = nextLabel;
-          }
-        }
+        const matching = tab.results?.find((result) => result === tab.result);
+        if (matching) matching.sourceLabel = nextLabel;
       }
     }
   }

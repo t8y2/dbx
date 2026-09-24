@@ -5714,6 +5714,221 @@ for line in sys.stdin:
         assert!(columns[1].is_nullable);
     }
 
+    /// A `jdbc:oracle:` connection answers `getColumns` from the object it was asked for,
+    /// so a synonym (or PUBLIC synonym) comes back empty. The core layer must resolve the
+    /// synonym through the driver, like the native Oracle agent does, instead of handing
+    /// the schema tree an empty column list (issue #8534).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jdbc_oracle_columns_fall_back_to_the_resolved_synonym_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-oracle-columns-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{}'
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"getColumns"'*)
+      case "$line" in
+        *'"table":"ORDERS_ALIAS"'*)
+          printf '{{"id":%s,"result":[]}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"result":[{{"name":"ID","data_type":"NUMBER","is_nullable":false,"column_default":null,"is_primary_key":true,"extra":null,"comment":"direct column","numeric_precision":10,"numeric_scale":0,"character_maximum_length":0}}]}}\n' "$id"
+          ;;
+      esac
+      ;;
+    *'"method":"executeQuery"'*)
+      case "$line" in
+        *'FROM ALL_SYNONYMS s'*)
+          printf '{{"id":%s,"result":{{"columns":["TABLE_OWNER","TABLE_NAME"],"rows":[["SYSTEM","ORDERS"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *"c.OWNER = 'SYSTEM' AND c.TABLE_NAME = 'ORDERS'"*)
+          printf '{{"id":%s,"result":{{"columns":["COLUMN_NAME","DATA_TYPE","NULLABLE","DATA_DEFAULT","DATA_LENGTH","DATA_PRECISION","DATA_SCALE","COLUMN_ID","IS_PK","COMMENTS"],"rows":[["ID","NUMBER","N",null,"22","10","0","1","1","target id"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"result":{{"columns":[],"rows":[],"affected_rows":0,"execution_time_ms":0}}}}\n' "$id"
+          ;;
+      esac
+      ;;
+  esac
+done
+"#,
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let state = AppState::new(Storage::open(&dir.join("storage.db")).await.unwrap());
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "jdbc-oracle-columns".to_string();
+        config.database = Some("demo".to_string());
+        config.connection_string = Some("jdbc:oracle:thin:@127.0.0.1:1521/demo".to_string());
+        config.jdbc_driver_class = Some("oracle.jdbc.OracleDriver".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    config.id.clone(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: std::sync::Arc::new(config),
+                        session,
+                    },
+                );
+            })
+            .await;
+
+        let synonym_columns =
+            super::get_columns_core(&state, "jdbc-oracle-columns", "demo", "DBX_TEST", "ORDERS_ALIAS").await.unwrap();
+        assert_eq!(synonym_columns.len(), 1);
+        assert_eq!(synonym_columns[0].data_type, "NUMBER(10)");
+        assert_eq!(synonym_columns[0].comment.as_deref(), Some("target id"));
+        assert!(synonym_columns[0].is_primary_key);
+
+        // A plain table keeps the driver answer and never runs the Oracle metadata SQL.
+        let table_columns =
+            super::get_columns_core(&state, "jdbc-oracle-columns", "demo", "DBX_TEST", "ORDERS").await.unwrap();
+        assert_eq!(table_columns.len(), 1);
+        assert_eq!(table_columns[0].comment.as_deref(), Some("direct column"));
+
+        let calls = std::fs::read_to_string(&calls).unwrap();
+        assert!(calls.contains("FROM ALL_SYNONYMS s"), "{calls}");
+        assert!(calls.contains("c.OWNER = 'DBX_TEST' AND c.TABLE_NAME = 'ORDERS_ALIAS'"), "{calls}");
+        assert!(calls.contains("c.OWNER = 'SYSTEM' AND c.TABLE_NAME = 'ORDERS'"), "{calls}");
+        // One probe for the alias, one for the resolved target: the plain table must not
+        // reach the Oracle metadata SQL at all.
+        assert_eq!(calls.matches("ALL_TAB_COLUMNS").count(), 2, "{calls}");
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The Oracle synonym fallback is keyed on the JDBC Oracle signals, so another JDBC
+    /// vendor must keep answering from the driver even when it reports no columns.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jdbc_mysql_columns_do_not_use_the_oracle_synonym_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-mysql-columns-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{}'
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"getColumns"'*)
+      printf '{{"id":%s,"result":[]}}\n' "$id"
+      ;;
+    *'"method":"executeQuery"'*)
+      printf '{{"id":%s,"error":{{"message":"unexpected statement"}}}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let state = AppState::new(Storage::open(&dir.join("storage.db")).await.unwrap());
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "jdbc-mysql-columns".to_string();
+        config.database = Some("demo".to_string());
+        config.connection_string = Some("jdbc:mysql://127.0.0.1:3306/demo".to_string());
+        config.jdbc_driver_class = Some("com.mysql.cj.jdbc.Driver".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    config.id.clone(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: std::sync::Arc::new(config),
+                        session,
+                    },
+                );
+            })
+            .await;
+
+        let columns = super::get_columns_core(&state, "jdbc-mysql-columns", "demo", "demo", "ORDERS").await.unwrap();
+        assert!(columns.is_empty());
+        let calls = std::fs::read_to_string(&calls).unwrap();
+        assert!(!calls.contains("ALL_TAB_COLUMNS"), "{calls}");
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn oracle_object_statistics_sql_reads_rows_and_segment_bytes() {
         let sql = oracle_object_statistics_sql("app's");
@@ -7206,6 +7421,13 @@ async fn get_columns_core_for_session_inner_with_pool(
                 }
                 let query_oracle_columns_first =
                     should_query_oracle_columns_via_sql_first(&config.db_type, context_session_id);
+                // A `jdbc:oracle:` connection has no Oracle agent, and the JDBC driver only
+                // reports the object it was asked for: synonyms (including PUBLIC ones) come
+                // back without any row, so the schema tree loses the column types, comments
+                // and primary keys of the target table (issue #8534). Resolve the synonym
+                // through the driver before accepting that empty answer.
+                let use_oracle_columns_sql_fallback = !query_oracle_columns_first
+                    && (config.db_type == DatabaseType::Oracle || is_oracle_external_driver_config(config.as_ref()));
                 if query_oracle_columns_first {
                     match external_driver_oracle_columns_via_sql(
                         session.clone(),
@@ -7242,7 +7464,7 @@ async fn get_columns_core_for_session_inner_with_pool(
                         agent_metadata_timeout(Some(config.as_ref())),
                     )
                     .await?;
-                if columns.is_empty() && config.db_type == DatabaseType::Oracle && !query_oracle_columns_first {
+                if columns.is_empty() && use_oracle_columns_sql_fallback {
                     match external_driver_oracle_columns_via_sql(
                         session.clone(),
                         config.as_ref(),

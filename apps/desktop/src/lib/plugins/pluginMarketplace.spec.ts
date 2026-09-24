@@ -220,6 +220,15 @@ describe("sortMarketplacePluginListings", () => {
 
   const ids = (listings: MarketplacePluginListing[]) => listings.map((listing) => listing.plugin.id);
 
+  // Exactly what the card renders for a listing: the latestVersion entry's date, undated → the
+  // sort's -Infinity bucket. Used to pin sort/display coherence without restating the production
+  // comparator.
+  const displayedTime = (listing: MarketplacePluginListing) => {
+    const time = Date.parse(listing.latestVersionReleasedAt || "");
+    return Number.isNaN(time) ? Number.NEGATIVE_INFINITY : time;
+  };
+  const displayedTimes = (listings: MarketplacePluginListing[]) => listings.map(displayedTime);
+
   it("surfaces the latest version's release date for display and blanks unparsable input", () => {
     const listings = buildMarketplacePluginListings(
       [
@@ -245,10 +254,11 @@ describe("sortMarketplacePluginListings", () => {
     expect(formatMarketplaceReleasedDate("not-a-date", "en")).toBe("");
   });
 
-  it("sorts recently-updated by the newest dated version and sinks undated listings", () => {
-    // Beta's latestVersion entry is NOT its newest-dated version: the max() over all
-    // versions must still rank it first (third-party catalogs owe us no such invariant).
-    const catalog = datedCatalog([
+  it("sorts recently-updated by the displayed latest-version date and sinks undated listings", () => {
+    // Beta's OLDER 0.9.0 entry carries the newest date in the catalog, but its card displays the
+    // latestVersion (1.0.0) date. The sort key must be that same displayed value, so Beta ties with
+    // Alpha instead of ranking above it while showing an older badge.
+    const contradictory = datedCatalog([
       { id: "a.old", name: "Alpha", latestVersion: "1.0.0", versions: [{ version: "1.0.0", releasedAt: "2025-01-01T00:00:00Z" }] },
       {
         id: "b.new",
@@ -261,12 +271,33 @@ describe("sortMarketplacePluginListings", () => {
       },
       { id: "c.none", name: "Gamma", latestVersion: "1.0.0", versions: [{ version: "1.0.0" }] },
     ]);
-    const listings = buildMarketplacePluginListings([catalog], [], "en");
+    const tied = sortMarketplacePluginListings(buildMarketplacePluginListings([contradictory], [], "en"), "recently-updated");
 
-    expect(ids(sortMarketplacePluginListings(listings, "recently-updated"))).toEqual(["b.new", "a.old", "c.none"]);
+    // Equal displayed dates → name order; the undated listing sinks to the tail.
+    expect(ids(tied)).toEqual(["a.old", "b.new", "c.none"]);
+
+    // The coherence invariant itself: the ranking is exactly the descending order of the field the
+    // card renders, with undated listings last. Nothing here looks at Beta's newer 0.9.0 date.
+    const dated = datedCatalog([
+      { id: "a.new", name: "Alpha", latestVersion: "1.0.0", versions: [{ version: "1.0.0", releasedAt: "2026-06-01T00:00:00Z" }] },
+      { id: "b.old", name: "Beta", latestVersion: "1.0.0", versions: [{ version: "1.0.0", releasedAt: "2025-01-01T00:00:00Z" }] },
+      { id: "c.none", name: "Gamma", latestVersion: "1.0.0", versions: [{ version: "1.0.0" }] },
+    ]);
+    const listings = buildMarketplacePluginListings([dated], [], "en");
+    const sorted = sortMarketplacePluginListings(listings, "recently-updated");
+
+    expect(ids(sorted)).toEqual(["a.new", "b.old", "c.none"]);
+    expect(sorted.map((listing) => listing.latestVersionReleasedAt)).toEqual(["2026-06-01T00:00:00Z", "2025-01-01T00:00:00Z", undefined]);
+    // The coherence invariant, stated fixture-independently: walking the sorted list never shows a
+    // badge date newer than the entry above it, and the undated listing holds the tail.
+    const displayed = displayedTimes(sorted);
+    expect(displayed.every((time, index) => index === 0 || displayed[index - 1] >= time)).toBe(true);
+    expect(sorted[sorted.length - 1].latestVersionReleasedAt).toBeUndefined();
   });
 
-  it("sorts recently-listed by the earliest version date", () => {
+  it("sorts recently-listed by the earliest version date, including a non-latest version", () => {
+    // Unlike "recently updated", this mode intentionally scans every version: no card text claims
+    // to show a first-listed date, so min(releasedAt) cannot contradict anything on screen.
     const catalog = datedCatalog([
       {
         id: "a.veteran",
@@ -278,13 +309,25 @@ describe("sortMarketplacePluginListings", () => {
         ],
       },
       { id: "b.newcomer", name: "Beta", latestVersion: "1.0.0", versions: [{ version: "1.0.0", releasedAt: "2025-06-01T00:00:00Z" }] },
+      // Newest latest-version date of the three, oldest first-listed date is still the veteran's.
+      {
+        id: "c.young",
+        name: "Gamma",
+        latestVersion: "1.0.0",
+        versions: [
+          { version: "1.0.0", releasedAt: "2026-08-01T00:00:00Z" },
+          { version: "0.1.0", releasedAt: "2024-06-01T00:00:00Z" },
+        ],
+      },
     ]);
     const listings = buildMarketplacePluginListings([catalog], [], "en");
 
-    expect(ids(sortMarketplacePluginListings(listings, "recently-listed"))).toEqual(["b.newcomer", "a.veteran"]);
+    expect(ids(sortMarketplacePluginListings(listings, "recently-listed"))).toEqual(["b.newcomer", "c.young", "a.veteran"]);
   });
 
   it("puts update-bearing listings first, then the newest-updated order; name mode keeps A–Z", () => {
+    // Both plugins have exactly one version, so the latestVersion entry and the single version share
+    // a date: updates-first's tie-break uses the same displayed value as "recently-updated".
     const catalog = datedCatalog([
       { id: "a.alpha", name: "Alpha", latestVersion: "2.0.0", versions: [{ version: "2.0.0", releasedAt: "2026-06-01T00:00:00Z" }] },
       { id: "b.zulu", name: "Zulu", latestVersion: "2.0.0", versions: [{ version: "2.0.0", releasedAt: "2025-01-01T00:00:00Z" }] },
@@ -293,7 +336,10 @@ describe("sortMarketplacePluginListings", () => {
 
     // The builder output itself is the long-standing default: localized name order.
     expect(ids(listings)).toEqual(["a.alpha", "b.zulu"]);
-    expect(ids(sortMarketplacePluginListings(listings, "updates-first"))).toEqual(["b.zulu", "a.alpha"]);
+    const updatesFirst = sortMarketplacePluginListings(listings, "updates-first");
+    expect(ids(updatesFirst)).toEqual(["b.zulu", "a.alpha"]);
+    // The update-bearing listing leads even though its displayed date is the older one.
+    expect(displayedTimes(updatesFirst)).toEqual([Date.parse("2025-01-01T00:00:00Z"), Date.parse("2026-06-01T00:00:00Z")]);
     expect(ids(sortMarketplacePluginListings(listings, "name"))).toEqual(["a.alpha", "b.zulu"]);
   });
 });

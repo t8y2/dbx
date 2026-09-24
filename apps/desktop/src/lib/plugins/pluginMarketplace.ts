@@ -169,13 +169,28 @@ export function filterMarketplacePluginListings(listings: readonly MarketplacePl
   });
 }
 
-// "Recently updated" scans EVERY version: third-party catalogs are not required to keep
-// latestVersion at the newest date (the official store satisfies that today, but nothing
-// enforces it), so the explicit max/min beats trusting the latestVersion entry. Listings
-// without any parsable releasedAt get -Infinity and sink below all dated ones.
-function listingReleaseTime(listing: MarketplacePluginListing, pick: (times: number[]) => number): number {
+// Missing or unparsable releasedAt sorts below every dated listing (-Infinity tail).
+function releaseTime(releasedAt: string | undefined): number {
+  const time = Date.parse(releasedAt || "");
+  return Number.isNaN(time) ? Number.NEGATIVE_INFINITY : time;
+}
+
+// "Recently updated" must use the SAME value the card renders (latestVersionReleasedAt, the
+// catalog's latestVersion entry): the ranking can then never contradict the date on the badge.
+// Third-party catalogs are not required to keep latestVersion at the newest date, so a catalog
+// that dates an older version later than its current one sorts by the date it advertises for its
+// current version — the honest reading of "recently updated". The official store satisfies the
+// latestVersion-is-newest invariant 30/30 (verified live 2026-09-24), so real data is unaffected.
+function latestVersionReleaseTime(listing: MarketplacePluginListing): number {
+  return releaseTime(listing.latestVersionReleasedAt);
+}
+
+// "Recently listed" scans EVERY version: nothing on the card claims to display a first-listed
+// date, so min(releasedAt) across the catalog is the only signal available (min ≈ first listed,
+// the docs-site heuristic) and cannot contradict the badge.
+function firstReleaseTime(listing: MarketplacePluginListing): number {
   const times = listing.plugin.versions.map((version) => Date.parse(version.releasedAt || "")).filter((time) => !Number.isNaN(time));
-  return times.length ? pick(times) : Number.NEGATIVE_INFINITY;
+  return times.length ? Math.min(...times) : Number.NEGATIVE_INFINITY;
 }
 
 // Copies before sorting: the builder output is also consumed elsewhere (batch selection,
@@ -183,15 +198,15 @@ function listingReleaseTime(listing: MarketplacePluginListing, pick: (times: num
 export function sortMarketplacePluginListings(listings: readonly MarketplacePluginListing[], mode: MarketplacePluginSortMode): MarketplacePluginListing[] {
   const byName = (left: MarketplacePluginListing, right: MarketplacePluginListing) => left.name.localeCompare(right.name);
   if (mode === "name") return [...listings].sort(byName);
+  const releaseTimeFor = mode === "recently-listed" ? firstReleaseTime : latestVersionReleaseTime;
   if (mode === "updates-first") {
     return [...listings].sort((left, right) => {
       const updatable = (listing: MarketplacePluginListing) => (listing.status === "update" ? 0 : 1);
       if (updatable(left) !== updatable(right)) return updatable(left) - updatable(right);
-      return listingReleaseTime(right, (times) => Math.max(...times)) - listingReleaseTime(left, (times) => Math.max(...times)) || byName(left, right);
+      return releaseTimeFor(right) - releaseTimeFor(left) || byName(left, right);
     });
   }
-  const pick = mode === "recently-listed" ? (times: number[]) => Math.min(...times) : (times: number[]) => Math.max(...times);
-  return [...listings].sort((left, right) => listingReleaseTime(right, pick) - listingReleaseTime(left, pick) || byName(left, right));
+  return [...listings].sort((left, right) => releaseTimeFor(right) - releaseTimeFor(left) || byName(left, right));
 }
 
 export function formatMarketplaceReleasedDate(releasedAt: string | undefined, locale: string): string {

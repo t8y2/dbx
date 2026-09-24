@@ -277,6 +277,17 @@ impl PluginRegistry {
         }))
     }
 
+    pub fn find_capability_for_plugin(
+        &self,
+        plugin_id: &str,
+        capability_id: &str,
+    ) -> Result<Option<InstalledPlugin>, String> {
+        Ok(self.find_plugin(plugin_id)?.filter(|plugin| {
+            plugin.compatibility.compatible
+                && plugin.manifest.capabilities.iter().any(|capability| capability.id == capability_id)
+        }))
+    }
+
     pub async fn invoke_capability<T>(
         &self,
         capability_id: &str,
@@ -289,6 +300,35 @@ impl PluginRegistry {
         let plugin = self
             .find_capability(capability_id)?
             .ok_or_else(|| format!("Plugin capability '{capability_id}' is not installed"))?;
+        self.invoke_capability_on_plugin(plugin, capability_id, method, params).await
+    }
+
+    pub async fn invoke_capability_for_plugin<T>(
+        &self,
+        plugin_id: &str,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let plugin = self
+            .find_capability_for_plugin(plugin_id, capability_id)?
+            .ok_or_else(|| format!("Plugin '{plugin_id}' capability '{capability_id}' is not installed"))?;
+        self.invoke_capability_on_plugin(plugin, capability_id, method, params).await
+    }
+
+    async fn invoke_capability_on_plugin<T>(
+        &self,
+        plugin: InstalledPlugin,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
         ensure_plugin_compatible(&plugin)?;
         let env = PluginRuntimeEnv::default().with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
         let session = PluginSidecarSession::start(plugin, self.app_version.clone(), env).await?;

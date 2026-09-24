@@ -542,6 +542,7 @@ const emit = defineEmits<{
   "update-all": [];
   "open-driver-store": [target?: DriverStoreTab];
   "open-plugin-center": [];
+  "open-cc-switch-plugin-center": [];
   "open-mcp-settings": [];
   "open-update-center": [];
   "ai-config-deep-link-handled": [];

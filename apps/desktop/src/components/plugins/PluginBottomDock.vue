@@ -175,7 +175,10 @@ async function loadLaunchOptions() {
   const action = activeAction.value;
   const pluginId = activeEntry.value?.pluginId;
   const commandId = activeCommand.value?.id;
-  const cacheKey = action && pluginId && commandId ? `${pluginId}:${commandId}` : "";
+  // options_action is OPTIONAL on open-workbench commands: without it there is
+  // nothing to fetch — proceeding fired a doomed invokePlugin(undefined) IPC
+  // round trip and a console.warn on every picker open / entry switch.
+  const cacheKey = action?.options_action && pluginId && commandId ? `${pluginId}:${commandId}` : "";
   if (!cacheKey) {
     launchOptionEntries.value = [];
     return;

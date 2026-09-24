@@ -3,6 +3,7 @@ import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import type { SqlExecutionOverride, SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 export interface StatementRange {
   from: number;
@@ -25,8 +26,17 @@ export interface QueryEditorSurfaceHandle {
   acceptQueryEditorExecutionViewport(requestId: number): boolean;
   pasteClipboardAsSqlInCondition(): Promise<boolean>;
   applyTableStructureChanges(): Promise<boolean>;
-  insertRedisCommand(command: string): Promise<boolean>;
-  executeRedisCommand(command: string): Promise<boolean>;
+  /** A Redis logical database is part of the execution target. */
+  insertRedisCommand(command: string, target: AiConversationBinding): Promise<boolean>;
+  executeRedisCommand(command: string, target: AiConversationBinding): Promise<boolean>;
+  /**
+   * Whether this surface's Redis console is mounted, on screen, and pointed at
+   * `target`. Side-effect free — the AI panel polls it before routing a
+   * command, because the console is a lazily-loaded component rendered only for
+   * the active tab, and retrying the *command* to detect readiness could run it
+   * twice.
+   */
+  isRedisConsoleReady(target: AiConversationBinding): boolean;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
   focusErrorPosition(offset: number): boolean;

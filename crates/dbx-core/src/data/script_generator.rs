@@ -1446,6 +1446,7 @@ mod tests {
             enum_values: None,
             character_set: None,
             collation: None,
+            metadata_capabilities: None,
         }
     }
 
@@ -2399,6 +2400,7 @@ mod tests {
                 enum_values: None,
                 character_set: None,
                 collation: None,
+                metadata_capabilities: None,
             }),
             target: Some(ColumnInfo {
                 name: "large_val".to_string(),
@@ -2416,6 +2418,7 @@ mod tests {
                 enum_values: None,
                 character_set: None,
                 collation: None,
+                metadata_capabilities: None,
             }),
             changes: vec!["data_type BIGINT → INT".to_string()],
             add_position: None,

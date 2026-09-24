@@ -93,6 +93,9 @@ const triggerBaseClass = computed(() =>
 const filteredOptions = computed(() => filterDatabaseOptions(props.options, searchText.value, props.displayName));
 const customOptionValue = computed(() => props.normalizeCustom(props.trimCustom ? searchText.value.trim() : searchText.value));
 const canSelectCustom = computed(() => props.allowCustom && !!customOptionValue.value && !props.options.includes(customOptionValue.value));
+const closedFilteredOptions: string[] = [];
+const openFilteredOptions = computed(() => (open.value ? filteredOptions.value : closedFilteredOptions));
+const openOptionsSignature = computed(() => (open.value ? props.options.join("\0") : ""));
 
 function highlightSelectedOption() {
   const selectedIndex = filteredOptions.value.findIndex((option) => option === props.modelValue);
@@ -134,22 +137,20 @@ watch(open, async (value) => {
 });
 
 watch(searchText, () => {
+  if (!open.value) return;
   highlightIndex.value = 0;
   activeHelpOption.value = searchableSelectKeyboardTooltipOption(filteredOptions.value, 0, props.optionTooltip);
 });
 
-watch(
-  () => [props.modelValue, props.options],
-  () => {
-    if (!open.value || searchText.value) return;
-    activeHelpOption.value = undefined;
-    highlightAndScrollSelectedOption();
-    activateInitialHelpOption();
-  },
-  { deep: true },
-);
+watch([() => (open.value ? props.modelValue : undefined), openOptionsSignature], ([_modelValue], [previousModelValue]) => {
+  if (!open.value || previousModelValue === undefined || searchText.value) return;
+  activeHelpOption.value = undefined;
+  highlightAndScrollSelectedOption();
+  activateInitialHelpOption();
+});
 
-watch([highlightIndex, filteredOptions], () => {
+watch([highlightIndex, openFilteredOptions], () => {
+  if (!open.value) return;
   void scrollHighlightedOptionIntoView();
   emit("option-highlight", filteredOptions.value[highlightIndex.value]);
 });
@@ -186,7 +187,8 @@ async function updateHelpPanelOffset() {
   });
 }
 
-watch([activeHelpOption, filteredOptions], () => {
+watch([activeHelpOption, openFilteredOptions], () => {
+  if (!open.value) return;
   void updateHelpPanelOffset();
 });
 

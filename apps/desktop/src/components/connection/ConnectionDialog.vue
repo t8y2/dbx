@@ -3241,6 +3241,7 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
   "elasticsearch",
   "easysearch",
   "meilisearch",
+  "solr",
   "hbase",
   "qdrant",
   "milvus",
@@ -4569,12 +4570,12 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
       throw new Error(t("connection.etcdClientCertPairRequired"));
     }
-  } else if (form.value.db_type !== "consul" && config.db_type !== "elasticsearch" && config.db_type !== "easysearch") {
+  } else if (form.value.db_type !== "consul" && config.db_type !== "elasticsearch" && config.db_type !== "easysearch" && config.db_type !== "solr") {
     config.etcd_endpoints = undefined;
     config.client_cert_path = undefined;
     config.client_key_path = undefined;
   }
-  if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
+  if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "solr") {
     config.client_cert_path = config.client_cert_path?.trim() || "";
     config.client_key_path = config.client_key_path?.trim() || "";
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
@@ -4591,7 +4592,8 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.db_type !== "victoriametrics" &&
     config.db_type !== "zookeeper" &&
     config.db_type !== "elasticsearch" &&
-    config.db_type !== "easysearch"
+    config.db_type !== "easysearch" &&
+    config.db_type !== "solr"
   ) {
     config.ca_cert_path = undefined;
   } else {
@@ -6899,7 +6901,7 @@ function openExternalUrl(url: string) {
                                 <span>{{ t(option.labelKey) }}</span>
                                 <Badge v-if="option.recommended" class="h-4 rounded-full px-1.5 text-[10px] leading-none">{{ t("connection.sqliteWorkerPlacementDefault") }}</Badge>
                               </div>
-                              <p class="text-[11px] leading-relaxed text-background/80">{{ t(option.hintKey) }}</p>
+                              <p class="text-[11px] leading-relaxed text-background-solid/80">{{ t(option.hintKey) }}</p>
                             </TooltipContent>
                           </Tooltip>
                         </div>
@@ -7796,7 +7798,7 @@ function openExternalUrl(url: string) {
                       <Input v-model.number="mqttConnectTimeoutSecs" type="number" class="col-span-3 w-32" min="1" max="300" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">最大报文（字节）</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttMaxPacketSize") }}</Label>
                       <Input v-model.number="mqttMaxPacketSizeBytes" type="number" class="col-span-3 w-40" min="1024" max="268435455" />
                     </div>
                   </template>
@@ -8115,7 +8117,7 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
 
-                    <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'solr' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                       <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                     </div>

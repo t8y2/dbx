@@ -315,6 +315,21 @@ function isIdentifierStartChar(char: string | undefined): boolean {
   return !!char && IDENTIFIER_START_CHAR.test(char);
 }
 
+/**
+ * MySQL/MariaDB allow an unquoted identifier to begin with a digit as long as it is not a pure
+ * number, so `01_tablename` is a table name while `123` / `1e3` / `0x1f` stay numeric literals
+ * (#9992). Other dialects reject the statement at parse time, so accepting the token here cannot
+ * resolve an identifier the server would refuse to run.
+ */
+function isNumberShapedToken(value: string): boolean {
+  if (!/^[0-9]/.test(value)) return false;
+  const rest = value.slice(1).toLowerCase();
+  if (rest === "") return true;
+  if (rest.startsWith("x")) return /^x[0-9a-f]+$/.test(rest);
+  if (rest.startsWith("b")) return /^b[01]+$/.test(rest);
+  return /^[0-9e]+$/.test(rest);
+}
+
 function isIdentifierChar(char: string | undefined): boolean {
   return !!char && IDENTIFIER_PART_CHAR.test(char);
 }
@@ -341,10 +356,14 @@ function readQuotedPart(text: string, start: number): IdentifierPart | null {
 }
 
 function readUnquotedPart(text: string, start: number): IdentifierPart | null {
-  if (!isIdentifierStartChar(text[start])) return null;
+  const first = text[start];
+  const startsWithDigit = !!first && /^[0-9]$/.test(first);
+  if (!isIdentifierStartChar(first) && !startsWithDigit) return null;
   let end = start + 1;
   while (end < text.length && isIdentifierChar(text[end])) end += 1;
-  return { value: text.slice(start, end), start, end, quoted: false };
+  const value = text.slice(start, end);
+  if (startsWithDigit && isNumberShapedToken(value)) return null;
+  return { value, start, end, quoted: false };
 }
 
 function readIdentifierPart(text: string, start: number): IdentifierPart | null {

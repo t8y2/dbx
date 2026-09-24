@@ -39,6 +39,7 @@ pub mod proxy_tunnel;
 pub mod questdb;
 pub mod redis_driver;
 pub mod rqlite_driver;
+pub mod solr_driver;
 pub mod sqlite;
 pub mod sqlite_worker;
 pub mod sqlserver;

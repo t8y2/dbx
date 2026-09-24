@@ -4,8 +4,8 @@ use super::capabilities::{
     firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, uses_xugu_row_id, TablePaginationStrategy,
 };
 use super::identifiers::{
-    normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_gaussdb_jdbc_identifier,
-    quote_iris_identifier, quote_table_identifier,
+    normalize_where_input, parse_sqlserver_linked_schema_ref, qualified_table_name, qualified_table_name_with_catalog,
+    quote_gaussdb_jdbc_identifier, quote_iris_identifier, quote_table_identifier,
 };
 use super::types::{
     TableDataSelectSqlOptions, TableSelectSqlOptions, DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN,
@@ -221,6 +221,7 @@ pub fn build_table_data_select_sql_with_database(
         database_qualified_table_name(
             database_type,
             options.catalog.as_deref(),
+            schema,
             options.database.as_deref(),
             &options.table_name,
         )
@@ -438,12 +439,26 @@ fn default_time_series_predicate(database_type: Option<DatabaseType>) -> Option<
     }
 }
 
-/// Returns a `database.table` reference for engines whose active database is
-/// normally omitted from table-data SQL. Doris and StarRocks retain an external
-/// catalog prefix when one is selected.
-fn database_qualified_table_name(
+/// Returns the fully qualified reference for engines whose active database is
+/// normally omitted from generated table SQL:
+///
+/// - `database.table` for MySQL-compatible engines and ClickHouse;
+/// - `database.schema.table` for SQL Server, whose tables are addressable
+///   across databases on the same connection;
+/// - Doris and StarRocks keep their external catalog prefix
+///   (`catalog.database.table`).
+///
+/// Shared by every "generated table SQL" surface that honors the
+/// `生成 SQL 时包含数据库名` setting, so the grid label, the copy-as-INSERT/UPDATE/
+/// SELECT statements and the data-grid save statements stay in sync.
+///
+/// `schema` wins over `database` for the MySQL family: after a cross-database
+/// editable result (`SELECT * FROM db_9.users`) the table's own namespace lives
+/// in `schema` while `database` still holds the connection's default database.
+pub fn database_qualified_table_name(
     database_type: Option<DatabaseType>,
     catalog: Option<&str>,
+    schema: Option<&str>,
     database: Option<&str>,
     table_name: &str,
 ) -> Option<String> {
@@ -455,7 +470,28 @@ fn database_qualified_table_name(
             quote_table_identifier(database_type, table_name)
         )),
         Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks) => {
-            Some(qualified_table_name_with_catalog(database_type, catalog, Some(database), Some(database), table_name))
+            let namespace = schema.map(str::trim).filter(|schema| !schema.is_empty()).unwrap_or(database);
+            Some(qualified_table_name_with_catalog(
+                database_type,
+                catalog,
+                Some(namespace),
+                Some(namespace),
+                table_name,
+            ))
+        }
+        Some(DatabaseType::SqlServer) => {
+            // A linked-server schema already carries `server|catalog|schema`, so
+            // prefixing it with the local database would produce a bogus name.
+            let schema = schema.map(str::trim).filter(|schema| !schema.is_empty())?;
+            if parse_sqlserver_linked_schema_ref(schema).is_some() {
+                return None;
+            }
+            Some(format!(
+                "{}.{}.{}",
+                quote_table_identifier(database_type, database),
+                quote_table_identifier(database_type, schema),
+                quote_table_identifier(database_type, table_name)
+            ))
         }
         _ => None,
     }
@@ -1009,6 +1045,78 @@ mod tests {
         let options = opts(DatabaseType::Mysql, None, Some("aaa"), "apis");
         assert_eq!(build_table_data_select_sql(options.clone()), "SELECT * FROM `apis` LIMIT 10;");
         assert_eq!(build_table_data_select_sql_with_database(options, true), "SELECT * FROM `aaa`.`apis` LIMIT 10;");
+    }
+
+    /// issue #9262: SQL Server addresses tables as `database.schema.table`, and
+    /// the grid label must reach the three-part form once the user opted into
+    /// `生成 SQL 时包含数据库名`.
+    #[test]
+    fn sqlserver_table_data_select_optionally_qualifies_database() {
+        let options = TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("dbo".to_string()),
+            database: Some("dbx".to_string()),
+            table_name: "AcceptanceProductLog".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_table_data_select_sql(options.clone()),
+            "SELECT TOP (100) * FROM [dbo].[AcceptanceProductLog]"
+        );
+        assert_eq!(
+            build_table_data_select_sql_with_database(options, true),
+            "SELECT TOP (100) * FROM [dbx].[dbo].[AcceptanceProductLog]"
+        );
+    }
+
+    /// A linked-server schema already encodes `server|catalog|schema`; the local
+    /// database must never be prefixed on top of it.
+    #[test]
+    fn sqlserver_linked_schema_ignores_include_database_name() {
+        let options = TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("__dbx_sqlserver_linked__:ERP|Finance|dbo".to_string()),
+            database: Some("dbx".to_string()),
+            table_name: "orders".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        };
+        let sql = build_table_data_select_sql_with_database(options, true);
+        assert_eq!(sql, "SELECT TOP (100) * FROM [ERP].[Finance].[dbo].[orders]");
+    }
+
+    /// `database_qualified_table_name` is shared by every generated-SQL surface,
+    /// so pin its per-engine contract directly.
+    #[test]
+    fn database_qualified_table_name_matches_engine_naming() {
+        assert_eq!(
+            database_qualified_table_name(Some(DatabaseType::Mysql), None, None, Some("dbx"), "t").as_deref(),
+            Some("`dbx`.`t`")
+        );
+        // A cross-database editable result keeps its own namespace, not the
+        // connection's default database.
+        assert_eq!(
+            database_qualified_table_name(Some(DatabaseType::Mysql), None, Some("db_9"), Some("dbx"), "t").as_deref(),
+            Some("`db_9`.`t`")
+        );
+        assert_eq!(
+            database_qualified_table_name(Some(DatabaseType::ClickHouse), None, Some("default"), Some("dbx"), "t")
+                .as_deref(),
+            Some("`dbx`.`t`")
+        );
+        assert_eq!(
+            database_qualified_table_name(Some(DatabaseType::SqlServer), None, Some("dbo"), Some("dbx"), "t")
+                .as_deref(),
+            Some("[dbx].[dbo].[t]")
+        );
+        // SQL Server without a schema cannot build a valid three-part name.
+        assert_eq!(database_qualified_table_name(Some(DatabaseType::SqlServer), None, None, Some("dbx"), "t"), None);
+        assert_eq!(
+            database_qualified_table_name(Some(DatabaseType::Postgres), None, Some("public"), Some("dbx"), "t"),
+            None
+        );
+        assert_eq!(database_qualified_table_name(Some(DatabaseType::Mysql), None, None, None, "t"), None);
     }
 
     #[test]

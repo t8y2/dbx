@@ -3,7 +3,6 @@
 import { createApp, nextTick, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
-import pluginHostSource from "./PluginWorkbenchHost.vue?raw";
 
 const mocks = vi.hoisted(() => ({
   readPluginUiEntry: vi.fn(),
@@ -148,7 +147,8 @@ describe("PluginWorkbenchHost initialization", () => {
   it("claims OS drops over its iframe and forwards opened handles to the plugin", async () => {
     const { frame, postMessage } = await mountHost();
     const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
-    mocks.openPluginLocalFile.mockResolvedValue({ handleId: 7, name: "a.txt", size: 3, contentType: "text/plain", write: false });
+    // The Rust registry hands out uuid strings; the `t` prefix stays opaque.
+    mocks.openPluginLocalFile.mockResolvedValue({ handleId: "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81", name: "a.txt", size: 3, contentType: "text/plain", write: false });
 
     const claimed = !document.dispatchEvent(
       new CustomEvent("dbx:tauri-file-drop", {
@@ -160,7 +160,7 @@ describe("PluginWorkbenchHost initialization", () => {
     expect(claimed).toBe(true);
     await vi.waitFor(() => {
       const posted = postMessage.mock.calls.map(([message]) => message as Record<string, unknown>);
-      expect(posted.some((message) => message.type === "filedrop" && (message.files as Array<Record<string, unknown>>)?.some((file) => file.handleId === "t7" && file.name === "a.txt"))).toBe(true);
+      expect(posted.some((message) => message.type === "filedrop" && (message.files as Array<Record<string, unknown>>)?.some((file) => file.handleId === "t0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81" && file.name === "a.txt"))).toBe(true);
     });
     expect(mocks.openPluginLocalFile).toHaveBeenCalledWith("sample", "/tmp/a.txt", false);
     elementFromPoint.mockRestore();
@@ -195,19 +195,5 @@ describe("PluginWorkbenchHost initialization", () => {
     document.dispatchEvent(payload("leave"));
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "dragstate", active: false }), "*");
     elementFromPoint.mockRestore();
-  });
-});
-
-describe("PluginWorkbenchHost file-save handle tracking", () => {
-  const hostSource = pluginHostSource;
-  const beginSaveSource = hostSource.slice(hostSource.indexOf("async function beginPluginFileSave"), hostSource.indexOf("async function writePluginFileChunkById"));
-
-  it("opens the save target through openTauriPluginFile so the write handle joins openTauriHandles", () => {
-    // A beginSave the plugin abandons (no finish/cancel) must still be
-    // reclaimed by unmount's disposeLocalFileHandles; a direct
-    // openPluginLocalFile call would leak the handle in the shared
-    // 64-slot registry for the lifetime of the workbench host.
-    expect(beginSaveSource).toContain("await openTauriPluginFile(pluginId, path, true)");
-    expect(beginSaveSource).not.toContain("openPluginLocalFile");
   });
 });

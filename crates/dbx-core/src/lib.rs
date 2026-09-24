@@ -81,6 +81,7 @@ pub use persistence::saved_sql;
 pub use query::query_cancel;
 pub use query::redis_ops;
 pub use safety::risk_metrics;
+pub mod scheduled_backup;
 pub mod schema;
 pub use connection::session_credentials;
 pub use connection::task_supervisor;

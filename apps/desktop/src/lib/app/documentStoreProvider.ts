@@ -1,10 +1,10 @@
 import type { ComposerTranslation } from "vue-i18n";
 import { normalizeJsonArgument } from "@dbx-app/mongo-shell";
-import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, type DatabaseType } from "@/types/database";
+import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 import { quoteUnquotedObjectKeys } from "@/lib/mongo/mongoShellCommand";
 import { formatMongoShellLiteral } from "@/lib/mongo/mongoDocumentValues";
 
-export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch";
+export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch" | "solr";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "begins-with" | "ends-with" | "greater-than" | "greater-than-or-equal" | "less-than" | "less-than-or-equal" | "in" | "not-in" | "between" | "not-between" | "is-null" | "is-not-null";
 export type DocumentFilterValueType = "auto" | "string" | "number" | "boolean" | "object-id" | "date" | "int32" | "int64" | "decimal128" | "json";
 export type ElasticsearchBoolClause = "filter" | "must" | "should" | "must_not";
@@ -80,7 +80,9 @@ const MONGO_ONLY_DOCUMENT_FILTER_MODES = new Set<DocumentFilterMode>(["begins-wi
 
 export function documentFilterModeOptionsFor(kind: DocumentStoreKind): Array<{ value: DocumentFilterMode; labelKey: string }> {
   if (kind === "meilisearch") return documentFilterModeOptions.filter((option) => option.value !== "like" && option.value !== "not-like" && !MONGO_ONLY_DOCUMENT_FILTER_MODES.has(option.value));
-  if (kind === "mongodb") return documentFilterModeOptions;
+  // Solr's driver translates every mode — including $in/$nin and range pairs —
+  // into fq clauses, so the full Mongo-style operator set is available.
+  if (kind === "mongodb" || kind === "solr") return documentFilterModeOptions;
   return documentFilterModeOptions.filter((option) => !MONGO_ONLY_DOCUMENT_FILTER_MODES.has(option.value));
 }
 
@@ -166,6 +168,22 @@ const meilisearchDocumentProvider: DocumentStoreProvider = {
   sortInputForColumn: mongoDocumentProvider.sortInputForColumn,
 };
 
+const solrDocumentProvider: DocumentStoreProvider = {
+  kind: "solr",
+  filterInputLabel: "filter",
+  sortInputLabel: "sort",
+  documentsLabel: ({ total }) => `${total} Documents`,
+  queryPreview: ({ collection, filterJson, sortJson, skip, limit }) => {
+    const lines = ["DBX SOLR QUERY DOCUMENTS", `core: ${JSON.stringify(collection)}`, `offset: ${skip}`, `limit: ${limit}`];
+    const filter = documentStorePreviewJson(filterJson);
+    if (filter) lines.push("filter:", filter);
+    const sort = documentStorePreviewJson(sortJson);
+    if (sort) lines.push("sort:", sort);
+    return lines.join("\n");
+  },
+  sortInputForColumn: mongoDocumentProvider.sortInputForColumn,
+};
+
 const dynamodbDocumentProvider: DocumentStoreProvider = {
   kind: "dynamodb",
   filterInputLabel: "filter",
@@ -197,6 +215,7 @@ export function documentStoreProviderFor(databaseType?: DatabaseType): DocumentS
   if (databaseType === "dynamodb") return dynamodbDocumentProvider;
   if (isElasticsearchCompatibleDatabaseType(databaseType)) return elasticsearchDocumentProvider;
   if (isMeilisearchDatabaseType(databaseType)) return meilisearchDocumentProvider;
+  if (isSolrDatabaseType(databaseType)) return solrDocumentProvider;
   return mongoDocumentProvider;
 }
 
@@ -590,7 +609,10 @@ function escapeRegexLiteral(value: string): string {
 }
 
 function mongoDocumentFilterKind(options: DocumentFilterParseOptions): boolean {
-  return options.kind === undefined || options.kind === "mongodb";
+  // Solr shares the Mongo-style filter document — the driver translates $in,
+  // $gte/$lte and anchored $regex into fq clauses — so it uses the same
+  // operator-rich condition shapes.
+  return options.kind === undefined || options.kind === "mongodb" || options.kind === "solr";
 }
 
 /** Splits a comma/newline separated filter value list, keeping quoted values intact. */
@@ -824,6 +846,7 @@ const documentQueryInputNormalizers: Record<DocumentStoreKind, DocumentQueryInpu
   dynamodb: quoteUnquotedObjectKeys,
   elasticsearch: quoteUnquotedObjectKeys,
   meilisearch: quoteUnquotedObjectKeys,
+  solr: quoteUnquotedObjectKeys,
 };
 
 function normalizeDocumentQueryObjectInput(input: string, kind?: DocumentStoreKind): string {

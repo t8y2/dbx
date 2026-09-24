@@ -61,17 +61,26 @@ describe("WebDAV sync HTTP API", () => {
     expect(lastCall(fetchMock)).toEqual({ url: "/api/cloud-sync/webdav/forget-sync-secrets-passphrase", body: {} });
 
     const editorSettings = { theme: "dark" };
-    await webdavSyncUpload(config, editorSettings, "sync-passphrase");
+    await webdavSyncUpload(config, editorSettings, "sync-passphrase", true);
     expect(lastCall(fetchMock)).toEqual({
       url: "/api/cloud-sync/webdav/upload",
-      body: { config, editorSettings, secretsPassphrase: "sync-passphrase" },
+      body: { config, editorSettings, secretsPassphrase: "sync-passphrase", includeSecrets: true },
     });
 
-    await webdavSyncDownload(config, "sync-passphrase");
+    await webdavSyncDownload(config, "sync-passphrase", true);
     expect(lastCall(fetchMock)).toEqual({
       url: "/api/cloud-sync/webdav/download",
-      body: { config, secretsPassphrase: "sync-passphrase" },
+      body: { config, secretsPassphrase: "sync-passphrase", restoreSecrets: true },
     });
+  });
+
+  it("accepts the migration cleanup endpoint's empty 204 response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { migrationCleanupBackups } = await import("@/lib/backend/http");
+
+    await expect(migrationCleanupBackups()).resolves.toBeUndefined();
+    expect(lastCall(fetchMock)).toEqual({ url: "/api/migration/cleanup-backups", body: {} });
   });
 });
 

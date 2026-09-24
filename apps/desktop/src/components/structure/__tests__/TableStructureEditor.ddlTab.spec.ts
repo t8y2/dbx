@@ -66,6 +66,7 @@ vi.mock("@lucide/vue", async () => {
     Plus: Icon,
     RefreshCw: Icon,
     RotateCcw: Icon,
+    Rows3: Icon,
     Save: Icon,
     Search: Icon,
     Settings: Icon,
@@ -447,6 +448,8 @@ describe("TableStructureEditor DDL tab", () => {
     buttonWithText(root, "structureEditor.apply").click();
     await vi.waitFor(() => expect(mocks.executeBatch).toHaveBeenCalledTimes(1), { timeout: 3000 });
     expect(mocks.executeBatch.mock.calls[0][2]).toEqual(["ALTER TABLE `users` ADD COLUMN `nickname` varchar(64)", "ALTER TABLE `users` ADD INDEX `idx_email` (`email`)"]);
+    // No partition DDL in this batch: it keeps the auto-commit path.
+    expect(mocks.executeBatch.mock.calls[0][5]).toBe(false);
     // The structure builder must not have contributed statements to that batch.
     expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
   });

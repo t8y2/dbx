@@ -6,6 +6,7 @@ export interface TableMetadataCapabilities {
   foreignKeys: boolean;
   constraints: boolean;
   triggers: boolean;
+  partitions: boolean;
   ddl: boolean;
 }
 
@@ -19,6 +20,9 @@ const defaultCapabilities: TableMetadataCapabilities = {
   // empty tab.
   constraints: false,
   triggers: true,
+  // Declarative partitioning metadata (pg_partitioned_table / pg_get_partkeydef)
+  // is PostgreSQL-only for now; other dialects leave the tab hidden.
+  partitions: false,
   ddl: true,
 };
 
@@ -26,8 +30,10 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
   oracle: {
     constraints: true,
   },
+  // KingbaseES V9 shares PostgreSQL's declarative partition catalog and DDL.
   kingbase: {
     constraints: true,
+    partitions: true,
   },
   vastbase: {
     constraints: true,
@@ -39,6 +45,7 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
   // EXCLUDE/NOT NULL) through list_constraints.
   postgres: {
     constraints: true,
+    partitions: true,
   },
   // SQL Server reports PK/UNIQUE/FOREIGN KEY/CHECK/DEFAULT constraints from the
   // sys.* catalog views through list_constraints.
@@ -72,6 +79,12 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     ddl: false,
   },
   meilisearch: {
+    indexes: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
+  solr: {
     indexes: false,
     foreignKeys: false,
     triggers: false,
@@ -155,6 +168,7 @@ export function isStructureMetadataTabSupported(tab: TableInfoTab, capabilities:
     (tab === "foreignKeys" && capabilities.foreignKeys) ||
     (tab === "constraints" && capabilities.constraints) ||
     (tab === "triggers" && capabilities.triggers) ||
+    (tab === "partitions" && capabilities.partitions) ||
     (tab === "ddl" && capabilities.ddl && !isCreateMode)
   );
 }

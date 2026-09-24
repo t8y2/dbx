@@ -23,8 +23,10 @@ function confirmCreate() {
   if (!scope || !name) return;
   const groupId = connectionStore.createTableVGroup(scope, name, tableVGroupDialogParentGroupId.value);
   if (groupId) {
+    // scope 即右键的源行节点，其 type 就是这批待移入行的类别（多选保证同类型）。
+    const rowType = scope.type;
     for (const tableName of tableVGroupDialogTableNames.value) {
-      connectionStore.moveTableToVGroup(scope, tableName, groupId);
+      connectionStore.moveTableToVGroup(scope, tableName, groupId, rowType);
     }
     emit("created", tableVGroupNodeId(groupId));
   }

@@ -380,6 +380,26 @@ describe("UpdateDialog release notes safety", () => {
 });
 
 describe("UpdateDialog aggregate update center", () => {
+  it("hides the tab bar when no updates are available", async () => {
+    await mountDialog(0, {}, undefined, {
+      updateInfo: {
+        current_version: "0.5.60",
+        latest_version: "0.5.60",
+        update_available: false,
+        portable_mode: false,
+        manual_update_only: false,
+        release_name: "",
+        release_url: "",
+        release_notes: "",
+      },
+      updateCheckMessage: "DBX is up to date (0.5.60).",
+    });
+
+    expect(document.body.querySelector('[role="tablist"]')).toBeNull();
+    expect(document.body.querySelector('[data-update-tab="app"]')).toBeNull();
+    expect(document.body.textContent).toContain("DBX is up to date (0.5.60).");
+  });
+
   it("keeps the client restart gated while update all is still updating components", async () => {
     await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 }, undefined, { isUpdatingAll: true });
 

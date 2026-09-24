@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { listDatabases, mongoListDatabases, redisListDatabases } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { McpConnectionPolicy } from "@/stores/settingsStore";
@@ -220,12 +221,15 @@ watch(databasePageCount, () => setDatabasePage(databasePage.value));
       <div class="border-b p-2 md:border-b-0 md:border-r">
         <div class="flex items-center justify-between gap-2 px-2 pb-2">
           <p class="text-xs font-medium text-muted-foreground">{{ t("settings.mcpDatabaseScopeAllowedConnections") }}</p>
-          <label class="flex h-7 items-center gap-1 rounded border bg-background px-1.5 text-[11px] text-muted-foreground">
-            {{ t("settings.mcpPerPage") }}
-            <select v-model.number="pageSize" class="bg-transparent text-[11px] text-foreground outline-none" :disabled="disabled">
-              <option v-for="size in PAGE_SIZE_OPTIONS" :key="size" :value="size">{{ size }}</option>
-            </select>
-          </label>
+          <div class="flex items-center gap-1 text-[11px] text-muted-foreground">
+            <span>{{ t("settings.mcpPerPage") }}</span>
+            <Select :model-value="String(pageSize)" :disabled="disabled" @update:model-value="(value) => (pageSize = Number(value))">
+              <SelectTrigger size="sm" class="h-7 w-14 px-1.5 text-[11px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="size in PAGE_SIZE_OPTIONS" :key="size" :value="String(size)">{{ size }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div class="space-y-1">
           <button
@@ -335,19 +339,15 @@ watch(databasePageCount, () => setDatabasePage(databasePage.value));
               <input type="checkbox" :checked="selectedDatabases.includes(database)" :disabled="disabled || busy" @change="toggleDatabase(database, ($event.target as HTMLInputElement).checked)" />
               <span class="min-w-0 flex-1 truncate font-mono">{{ database }}</span>
               <Check v-if="selectedDatabases.includes(database)" class="h-3.5 w-3.5 text-green-600" />
-              <select
-                v-if="selectedDatabases.includes(database)"
-                :value="databasePolicyMode(database)"
-                class="h-7 shrink-0 rounded border bg-background px-1.5 text-[11px]"
-                :disabled="disabled || busy"
-                @click.stop
-                @change="$emit('set:database-policy', selectedConnectionId, database, ($event.target as HTMLSelectElement).value as ExecutionMode | 'inherit')"
-              >
-                <option value="inherit">{{ t("settings.mcpConnectionPolicyInherit") }}</option>
-                <option value="read_only">{{ t("settings.mcpConnectionPolicyReadOnly") }}</option>
-                <option value="safe_write">{{ t("settings.mcpConnectionPolicySafeWrite") }}</option>
-                <option value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</option>
-              </select>
+              <Select v-if="selectedDatabases.includes(database)" :model-value="databasePolicyMode(database)" :disabled="disabled || busy" @update:model-value="(value) => $emit('set:database-policy', selectedConnectionId, database, value as ExecutionMode | 'inherit')">
+                <SelectTrigger size="sm" class="h-7 w-44 shrink-0 text-[11px]" @click.stop><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">{{ t("settings.mcpConnectionPolicyInherit") }}</SelectItem>
+                  <SelectItem value="read_only">{{ t("settings.mcpConnectionPolicyReadOnly") }}</SelectItem>
+                  <SelectItem value="safe_write">{{ t("settings.mcpConnectionPolicySafeWrite") }}</SelectItem>
+                  <SelectItem value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</SelectItem>
+                </SelectContent>
+              </Select>
             </label>
             <div v-if="databasePageCount > 1" class="flex items-center justify-center gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
               <Button type="button" size="icon-sm" variant="ghost" :disabled="databasePage === 1" :title="t('settings.mcpPreviousPage')" :aria-label="t('settings.mcpPreviousPage')" @click="setDatabasePage(databasePage - 1)"><ChevronLeft /></Button>

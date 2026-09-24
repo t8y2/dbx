@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
-import { structurePreviewHasOceanBase } from "./sidebarTreeDialogState";
+import { structurePreviewDdlStorageType } from "./sidebarTreeDialogState";
 import { computed, toRefs, watch } from "vue";
 import { AlertTriangle, Check, Loader2, Clipboard, Plus, Trash2, Upload } from "@lucide/vue";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -413,7 +413,7 @@ watch(
       <DialogHeader>
         <DialogTitle>{{ t("meilisearch.createIndex") }}</DialogTitle>
       </DialogHeader>
-      <div class="grid gap-3">
+      <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3">
         <label class="grid gap-1.5 text-sm font-medium">
           {{ t("meilisearch.createIndexUid") }}
           <Input v-model="meilisearchCreateIndexUid" :disabled="meilisearchCreateIndexLoading" :placeholder="t('meilisearch.createIndexUidPlaceholder')" @keydown.enter.prevent="confirmCreateMeilisearchIndex" />
@@ -423,7 +423,7 @@ watch(
           <Input v-model="meilisearchCreateIndexPrimaryKey" :disabled="meilisearchCreateIndexLoading" :placeholder="t('meilisearch.createIndexPrimaryKeyPlaceholder')" />
           <span class="text-xs font-normal text-muted-foreground">{{ t("meilisearch.createIndexPrimaryKeyHelp") }}</span>
         </label>
-        <p v-if="meilisearchCreateIndexError" class="text-sm text-destructive">{{ meilisearchCreateIndexError }}</p>
+        <p v-if="meilisearchCreateIndexError" class="min-w-0 max-w-full whitespace-pre-wrap break-all text-sm text-destructive">{{ meilisearchCreateIndexError }}</p>
       </div>
       <DialogFooter>
         <Button variant="outline" :disabled="meilisearchCreateIndexLoading" @click="showCreateMeilisearchIndexDialog = false">{{ t("dangerDialog.cancel") }}</Button>
@@ -469,7 +469,7 @@ watch(
         <pre v-else class="max-h-[56vh] min-h-64 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(structurePreviewSql)"></pre>
       </div>
       <DialogFooter>
-        <DdlStorageToggle :database-type="structurePreviewHasOceanBase ? 'oceanbase-oracle' : undefined" :disabled="isLoadingStructurePreview || !!structurePreviewError" class="mr-auto" />
+        <DdlStorageToggle :database-type="structurePreviewDdlStorageType" :disabled="isLoadingStructurePreview || !!structurePreviewError" class="mr-auto" />
         <Button variant="outline" @click="showStructurePreviewDialog = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button variant="outline" :disabled="isLoadingStructurePreview || !structurePreviewSql" @click="copyStructurePreview">
           <Clipboard class="h-4 w-4" />

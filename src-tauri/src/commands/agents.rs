@@ -24,6 +24,7 @@ use dbx_core::DownloadSource;
 pub struct AgentUpdateBlocker {
     pub db_type: String,
     pub label: String,
+    pub connections: Vec<String>,
 }
 
 #[tauri::command]
@@ -314,11 +315,15 @@ fn emit_agent_progress(app: &tauri::AppHandle, operation_id: &str, event: AgentP
 }
 
 async fn ensure_no_agent_update_blockers(state: &AppState, db_types: &[String]) -> Result<(), String> {
-    let blockers = update_blockers_from_keys(state.prepare_agent_driver_updates(db_types).await, db_types);
+    let blockers = update_blockers_from_connections(state.prepare_agent_driver_updates(db_types).await, db_types);
     if blockers.is_empty() {
         return Ok(());
     }
-    let labels = blockers.into_iter().map(|blocker| blocker.label).collect::<Vec<_>>().join(", ");
+    let labels = blockers
+        .into_iter()
+        .flat_map(|blocker| if blocker.connections.is_empty() { vec![blocker.label] } else { blocker.connections })
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(format!("Close these database connections before updating drivers: {labels}"))
 }
 
@@ -336,23 +341,24 @@ async fn ensure_no_offline_import_blockers(state: &AppState, plan: &OfflineImpor
 }
 
 async fn agent_update_blockers(state: &AppState, db_types: &[String]) -> Vec<AgentUpdateBlocker> {
-    update_blockers_from_keys(state.active_agent_connection_driver_keys().await, db_types)
+    update_blockers_from_connections(state.active_agent_connection_driver_connections().await, db_types)
 }
 
-fn update_blockers_from_keys(
-    active_keys: std::collections::HashSet<String>,
+fn update_blockers_from_connections(
+    active_connections: std::collections::HashMap<String, Vec<String>>,
     db_types: &[String],
 ) -> Vec<AgentUpdateBlocker> {
     let candidate_keys: std::collections::HashSet<&str> = db_types.iter().map(String::as_str).collect();
     if candidate_keys.is_empty() {
         return Vec::new();
     }
-    let mut blockers = active_keys
+    let mut blockers = active_connections
         .into_iter()
-        .filter(|key| candidate_keys.contains(key.as_str()))
-        .map(|db_type| AgentUpdateBlocker {
+        .filter(|(key, _)| candidate_keys.contains(key.as_str()))
+        .map(|(db_type, connections)| AgentUpdateBlocker {
             label: dbx_core::agent_catalog::label_for_key(&db_type).unwrap_or(&db_type).to_string(),
             db_type,
+            connections,
         })
         .collect::<Vec<_>>();
     blockers.sort_by(|left, right| left.label.cmp(&right.label));

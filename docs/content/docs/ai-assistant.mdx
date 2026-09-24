@@ -3,7 +3,7 @@ title: AI Assistant
 description: Connect cloud, compatible API, or local CLI models to generate SQL, analyze data, and run controlled Agent workflows with schema context.
 ---
 
-The AI Assistant combines the active database, schema, SQL, errors, result preview, and explicitly mentioned objects into context for SQL generation, explanation, optimization, error repair, and data analysis.
+The AI Assistant combines the connection, database, and schema bound to the current conversation with editor SQL, errors, result preview, and explicitly mentioned objects into context for SQL generation, explanation, optimization, error repair, and data analysis. Each conversation keeps its own binding, so conversations on different connections never share a target.
 
 <Callout type="warn">Ask mode produces suggestions. Agent mode can call query tools when the user explicitly requests real data. Any model output can be wrong. Review the target, fields, filters, parameters, and affected scope before executing SQL.</Callout>
 
@@ -89,7 +89,7 @@ Increasing the turn limit raises latency, database reads, and model cost. Prefer
 AI context can include:
 
 - Database type, connection name, database, and schema
-- Current or selected editor SQL and the latest error
+- Current or selected editor SQL and the latest error, once the open editor is on the conversation's own connection and database
 - Tables, columns, indexes, foreign keys, and limited sample rows
 - A bounded preview of the current result
 - Selected prompt templates
@@ -116,6 +116,14 @@ Templates can also be marked as the **default for one or more database types** (
 
 Templates enter model context. Do not put passwords, tokens, or unnecessary business data in them. Keep rules concise and non-conflicting because models may not resolve contradictory instructions as expected.
 
+
+## Skills (SKILL.md)
+
+Desktop can attach read-only [`SKILL.md`](https://developers.openai.com/codex/skills) rule files to a request as supplementary instructions. Skills are always discovered in `~/.agents/skills`; Settings → AI can additionally enable one custom directory. Each directory is validated independently, same names are kept side by side and labeled by source (`Default directory` / `Custom directory`), and custom-directory skills sort first.
+
+Select skills from the composer `Skills` entry (or type `/skill`) and remove them from the chips above the input. The selection lives for the lifetime of one open AI panel — conversation switches and new conversations keep it; closing the panel or restarting DBX clears it. Nothing is persisted, and DBX never writes to skill files.
+
+Skill bodies are read only when a request is sent, directly from disk, and validated then: file deleted or unreadable, invalid frontmatter, non-UTF-8 content, over the 1 MiB per-file limit, or a symlink escaping its root blocks the send with a banner above the composer naming the failed skill and offering Retry, Refresh, Remove, or Open Settings. With no skills selected, prompts are byte-for-byte identical to the pre-feature behavior. Web ships this feature unsupported.
 ## Writes and Production Safety
 
 AI Agent execution boundaries are enforced by the backend, not only by prompting:
@@ -143,7 +151,7 @@ Do not assume one UI label has identical semantics across providers.
 ## Conversations, History, and Export
 
 - Use ↑ and ↓ to navigate prompt history
-- Conversations can be saved with connection and database context
+- Each conversation is saved with its own connection, database, and schema binding, and restores it when reopened
 - Final AI analysis messages can be exported as Markdown with connection name and timestamp
 - Markdown export contains the final answer only; internal reasoning and Agent steps are not appended
 

@@ -39,6 +39,19 @@ export async function saveTextFile(content: string, defaultFileName: string, fil
   return true;
 }
 
+/**
+ * Export file base name for a query result (#9894).
+ *
+ * The result tab is already named after the SQL's nearby comment (`-- name: x`
+ * or a plain leading comment) or after the `schema.table` that produced it, so
+ * an export of that result should reuse the same name instead of the generic
+ * query tab title ("query 3", "查询 3"). Table data tabs keep passing their
+ * table name, which is why the caller decides the fallback.
+ */
+export function queryResultExportBaseName(resultLabel: string | undefined, tabTitle: string | undefined): string | undefined {
+  return resultLabel?.trim() || tabTitle?.trim() || undefined;
+}
+
 export function sanitizeExportBaseName(value: string): string {
   return replaceControlCharacters(
     value

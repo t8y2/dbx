@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
-import { tabDisplayTitle } from "@/lib/tabs/tabPresentation";
+import { tabDisplayTitle, tabDisplayTitles } from "@/lib/tabs/tabPresentation";
+import type { QueryTab } from "@/types/database";
 import "./appTabBar.css";
 
 const props = defineProps<{
@@ -69,9 +70,15 @@ function setTabBarTarget(groupId: string, element: unknown) {
 const closeConfirmDirtyCount = computed(() => queryStore.closeConfirmDirtyTabIds.length);
 const showCloseConfirmBulkActions = computed(() => closeConfirmDirtyCount.value > 1);
 const closeConfirmDirtyTabs = computed(() => queryStore.closeConfirmDirtyTabIds.map((id) => queryStore.tabs.find((tab) => tab.id === id)).filter((tab): tab is NonNullable<ReturnType<typeof queryStore.tabs.find>> => !!tab));
+// Numbered across every open tab so unsaved-change confirmations show the
+// same suffixed titles as the tab strip.
+const tabTitles = computed(() => tabDisplayTitles(queryStore.tabs, t));
+function closeConfirmTabTitle(tab: QueryTab): string {
+  return tabTitles.value.get(tab.id) ?? tabDisplayTitle(tab, t);
+}
 const closeConfirmCurrentTitle = computed(() => {
   const focusedTab = closeConfirmDirtyTabs.value.find((tab) => tab.id === queryStore.pendingCloseTabId) ?? closeConfirmDirtyTabs.value[0];
-  return focusedTab ? tabDisplayTitle(focusedTab, t) : "";
+  return focusedTab ? closeConfirmTabTitle(focusedTab) : "";
 });
 const closeConfirmMessage = computed(() => {
   const params = {
@@ -249,7 +256,7 @@ function handleCancelClose() {
               <div v-for="tab in closeConfirmDirtyTabs" :key="tab.id" class="flex min-w-0 items-center gap-2 rounded-[6px] px-2 py-1.5 text-sm" :class="tab.id === queryStore.pendingCloseTabId ? 'bg-muted text-foreground' : 'text-muted-foreground'">
                 <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="tab.id === queryStore.pendingCloseTabId ? 'bg-foreground' : 'bg-muted-foreground/50'" />
                 <span class="min-w-0 truncate">
-                  {{ tabDisplayTitle(tab, t) }}
+                  {{ closeConfirmTabTitle(tab) }}
                 </span>
               </div>
             </div>

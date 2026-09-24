@@ -4,7 +4,8 @@ import { createPinia, setActivePinia } from "pinia";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import { readWebDavAutoUploadConfig } from "@/lib/webdav/webdavAutoUploadConfig";
 
-const { webdavSyncUploadMock } = vi.hoisted(() => ({
+const { webdavSyncSecretsStatusMock, webdavSyncUploadMock } = vi.hoisted(() => ({
+  webdavSyncSecretsStatusMock: vi.fn(),
   webdavSyncUploadMock: vi.fn(),
 }));
 
@@ -18,6 +19,7 @@ vi.mock("vue", async (importOriginal) => {
 });
 
 vi.mock("@/lib/backend/api", () => ({
+  webdavSyncSecretsStatus: webdavSyncSecretsStatusMock,
   webdavSyncUpload: webdavSyncUploadMock,
 }));
 
@@ -78,6 +80,7 @@ function installWindow() {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  webdavSyncSecretsStatusMock.mockResolvedValue({ enabled: false, hasSavedPassphrase: false });
   webdavSyncUploadMock.mockResolvedValue({ bytes: 42, remotePath: "DBX/sync/snapshot.json" });
   restoreLocalStorage = installLocalStorage();
   restoreWindow = installWindow();
@@ -125,6 +128,7 @@ test("keeps WebDAV auto-upload running outside the settings dialog", async () =>
     username: undefined,
     remotePath: "DBX/sync/snapshot.json",
   });
+  assert.equal(webdavSyncUploadMock.mock.calls[0][3], false);
 
   localStorage.setItem("dbx-webdav-auto-upload-enabled", "false");
   window.dispatchEvent(new Event("dbx:webdav-auto-upload-config-changed"));

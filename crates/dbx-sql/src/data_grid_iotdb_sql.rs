@@ -268,6 +268,7 @@ mod tests {
             dirty_rows: Vec::new(),
             deleted_rows: Vec::new(),
             new_rows: Vec::new(),
+            include_database_name: false,
         }
     }
 

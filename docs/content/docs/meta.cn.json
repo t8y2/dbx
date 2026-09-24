@@ -43,6 +43,7 @@
     "web-api",
     "---安全与配置---",
     "production-safety",
+    "data-security-migration",
     "connection-import",
     "config-export",
     "cloud-sync",

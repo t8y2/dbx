@@ -1,0 +1,10 @@
+[package]
+name = "win7-aws-lc-cache"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+aws-lc-sys = { version = "=0.43.0", features = ["prebuilt-nasm"] }
+
+[workspace]

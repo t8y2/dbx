@@ -82,6 +82,24 @@ public final class DbxJdbcPlugin {
         "SYSTEM TABLE",
         "SYSTEM VIEW"
     };
+    /**
+     * MySQL/PostgreSQL 家族（含金仓、瀚高、优炫、海量这类 PG 衍生库）里 BIT 是位字段/位串：数据库自带
+     * 工具和 DBX 的内置驱动都按 `0`/`1`/`10101010` 展示。JDBC 驱动把这些列暴露成裸字节或强制转布尔，
+     * 走通用分支就成了 `0x00`/`true`。这类连接由 readBitStringColumnValue 按位串读取。
+     * SQL Server 这类把 BIT 当布尔类型的库不在名单内，保持驱动返回的布尔值。
+     */
+    private static final String[] BIT_STRING_JDBC_URL_PREFIXES = new String[] {
+        "jdbc:mysql:",
+        "jdbc:mariadb:",
+        "jdbc:starrocks:",
+        "jdbc:doris:",
+        "jdbc:postgresql:",
+        "jdbc:kingbase",
+        "jdbc:highgo:",
+        "jdbc:uxdb:",
+        "jdbc:vastbase:"
+    };
+
     private static final JdbcDriverQuirks DEFAULT_QUIRKS = new JdbcDriverQuirks(
         false,
         false,
@@ -853,6 +871,16 @@ public final class DbxJdbcPlugin {
         return driverClass != null && driverClass.equalsIgnoreCase("org.postgresql.Driver");
     }
 
+    private static boolean usesBitStringColumns(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        for (String prefix : BIT_STRING_JDBC_URL_PREFIXES) {
+            if (urlMatchesPrefix(url, prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean isPrestoOrTrinoConnection(JsonNode connection) {
         String url = jdbcUrl(connection);
         if (urlMatchesPrefix(url, "jdbc:presto:") || urlMatchesPrefix(url, "jdbc:trino:")) {
@@ -993,6 +1021,7 @@ public final class DbxJdbcPlugin {
         JdbcDriverQuirks quirks = driverQuirks(connection);
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
         ZoneId timestampZone = tdengineTimestampZone(connection, conn);
+        boolean bitStringColumns = usesBitStringColumns(connection);
         try (Statement statement = conn.createStatement()) {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
@@ -1022,7 +1051,7 @@ public final class DbxJdbcPlugin {
                         }
                         ArrayNode row = MAPPER.createArrayNode();
                         for (int i = 1; i <= columnCount; i++) {
-                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone)));
+                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns)));
                         }
                         rows.add(row);
                     }
@@ -1116,6 +1145,7 @@ public final class DbxJdbcPlugin {
         private final boolean restoreAutoCommit;
         private final boolean preserveOracleDateTime;
         private final ZoneId timestampZone;
+        private final boolean bitStringColumns;
         private int rowsReturned;
         private ArrayNode pendingRow;
 
@@ -1130,7 +1160,8 @@ public final class DbxJdbcPlugin {
             Connection connection,
             boolean restoreAutoCommit,
             boolean preserveOracleDateTime,
-            ZoneId timestampZone
+            ZoneId timestampZone,
+            boolean bitStringColumns
         ) {
             this.id = id;
             this.statement = statement;
@@ -1143,6 +1174,7 @@ public final class DbxJdbcPlugin {
             this.restoreAutoCommit = restoreAutoCommit;
             this.preserveOracleDateTime = preserveOracleDateTime;
             this.timestampZone = timestampZone;
+            this.bitStringColumns = bitStringColumns;
         }
     }
 
@@ -1162,6 +1194,7 @@ public final class DbxJdbcPlugin {
         JdbcDriverQuirks quirks = driverQuirks(connection);
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
         ZoneId timestampZone = tdengineTimestampZone(connection, conn);
+        boolean bitStringColumns = usesBitStringColumns(connection);
         boolean restoreAutoCommit = beginPagedQueryTransaction(connection, conn);
         Statement statement;
         try {
@@ -1209,7 +1242,8 @@ public final class DbxJdbcPlugin {
                 conn,
                 restoreAutoCommit,
                 preserveOracleDateTime,
-                timestampZone
+                timestampZone,
+                bitStringColumns
             );
             QUERY_SESSIONS.put(sessionId, session);
             try {
@@ -1282,7 +1316,7 @@ public final class DbxJdbcPlugin {
                     closeQuerySession(session.id);
                     return queryPageResult(session, rows, false, false);
                 }
-                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone);
+                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns);
             }
             rows.add(row);
             session.rowsReturned++;
@@ -1300,7 +1334,7 @@ public final class DbxJdbcPlugin {
             return queryPageResult(session, rows, false, false);
         }
 
-        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone);
+        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns);
         return queryPageResult(session, rows, false, true);
     }
 
@@ -1354,11 +1388,12 @@ public final class DbxJdbcPlugin {
         ResultSet rs,
         ResultSetMetaData meta,
         boolean preserveOracleDateTime,
-        ZoneId timestampZone
+        ZoneId timestampZone,
+        boolean bitStringColumns
     ) throws SQLException {
         ArrayNode row = MAPPER.createArrayNode();
         for (int i = 1; i <= meta.getColumnCount(); i++) {
-            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone)));
+            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns)));
         }
         return row;
     }
@@ -4258,7 +4293,7 @@ public final class DbxJdbcPlugin {
         int index,
         boolean preserveOracleDateTime
     ) throws SQLException {
-        return readValue(rs, meta, index, preserveOracleDateTime, null);
+        return readValue(rs, meta, index, preserveOracleDateTime, null, false);
     }
 
     private static Object readValue(
@@ -4266,7 +4301,8 @@ public final class DbxJdbcPlugin {
         ResultSetMetaData meta,
         int index,
         boolean preserveOracleDateTime,
-        ZoneId timestampZone
+        ZoneId timestampZone,
+        boolean bitStringColumns
     ) throws SQLException {
         int columnType = meta.getColumnType(index);
 
@@ -4293,6 +4329,13 @@ public final class DbxJdbcPlugin {
         if (isPhoenixEncodedBinaryColumn(meta, index, columnType)) {
             byte[] bytes = rs.getBytes(index);
             return bytes == null ? null : binaryToHex(bytes);
+        }
+
+        if (bitStringColumns && isBitStringColumn(meta, index, columnType)) {
+            Object bitValue = readBitStringColumnValue(rs, meta, index);
+            if (bitValue != BIT_COLUMN_UNSUPPORTED) {
+                return bitValue;
+            }
         }
 
         Object value = rs.getObject(index);
@@ -4452,6 +4495,116 @@ public final class DbxJdbcPlugin {
 
     private static String quotePhoenixIdentifier(String identifier) {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    /**
+     * readBitStringColumnValue 的哨兵：驱动读不出位串（例如 mssql-jdbc 不允许把 BIT 读成 byte[]），
+     * 调用方据此回落到原来的取值路径。SQL NULL 用 null 表示，两者必须分开。
+     */
+    private static final Object BIT_COLUMN_UNSUPPORTED = new Object();
+
+    private static boolean isBitStringColumn(ResultSetMetaData meta, int index, int columnType) {
+        String typeName = columnTypeName(meta, index);
+        String normalized = typeName.trim().toLowerCase(Locale.ROOT);
+        if (normalized.equals("bool") || normalized.equals("boolean")) {
+            // 金仓/PostgreSQL 的布尔列走 Types.BIT 上报，它们继续保持布尔值。
+            return false;
+        }
+        if (normalized.equals("bit") || normalized.equals("varbit") || normalized.startsWith("bit ")
+            || normalized.startsWith("bit(") || normalized.startsWith("bit varying")) {
+            return true;
+        }
+        return columnType == Types.BIT;
+    }
+
+    private static String columnTypeName(ResultSetMetaData meta, int index) {
+        try {
+            String typeName = meta.getColumnTypeName(index);
+            return typeName == null ? "" : typeName;
+        } catch (SQLException | RuntimeException error) {
+            return "";
+        }
+    }
+
+    private static Object readBitStringColumnValue(ResultSet rs, ResultSetMetaData meta, int index) throws SQLException {
+        byte[] payload;
+        try {
+            payload = rs.getBytes(index);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException error) {
+            return BIT_COLUMN_UNSUPPORTED;
+        }
+        if (payload == null) {
+            // wasNull() 区分 SQL NULL 与「驱动不支持按字节读取」。
+            return rs.wasNull() ? null : BIT_COLUMN_UNSUPPORTED;
+        }
+        int precision = bitColumnPrecision(meta, index);
+        if (payload.length == 1 && precision <= 1 && (payload[0] == 't' || payload[0] == 'f')) {
+            // GaussDB/金仓的布尔位串按 't'/'f' 返回，保持布尔语义；位宽大于 1 的列是位字段而不是布尔。
+            return payload[0] == 't';
+        }
+        if (payload.length == 1 && precision == 1 && payload[0] != 0x00 && payload[0] != 0x01
+            && payload[0] != '0' && payload[0] != '1') {
+            // Connector/J 默认把 tinyint(1) 上报成 Types.BIT 且位宽为 1，载荷超出 0/1 说明是数值列：
+            // 截成单个比特会静默丢数据，按有符号字节十进制展示（`'0'`/`'1'` 文本是驱动的位串形式，除外）。
+            return payload[0];
+        }
+        String bitString = bitStringFromPayload(payload, precision);
+        // 位宽不可信时 bitStringFromPayload 返回 null（不是 SQL NULL），交给通用分支保持 `0x..` 展示。
+        return bitString == null ? BIT_COLUMN_UNSUPPORTED : bitString;
+    }
+
+    private static int bitColumnPrecision(ResultSetMetaData meta, int index) {
+        try {
+            return meta.getPrecision(index);
+        } catch (SQLException | RuntimeException error) {
+            return 0;
+        }
+    }
+
+    /**
+     * 把 BIT 列的字节载荷还原成位串：
+     *
+     * - `0x30`/`0x31`（`'0'`/`'1'` 文本）是 PG 家族驱动的文本形式，位串长度等于声明位宽；
+     * - 其余载荷是裸位字段（MySQL 的 `bit(n)`、驱动不返回文本的 PG 列），按声明位宽展开；
+     * - 声明位宽超出载荷容量时返回 null，交给调用方保持原有的 `0x..` 展示。
+     */
+    private static String bitStringFromPayload(byte[] payload, int precision) {
+        if (payload.length == 0) {
+            return "";
+        }
+        if (isAsciiBitStringPayload(payload) && (precision <= 0 || payload.length == precision)) {
+            return new String(payload, StandardCharsets.US_ASCII);
+        }
+        int width = precision > 0 ? precision : significantBitWidth(payload);
+        if (width > payload.length * 8) {
+            return null;
+        }
+        StringBuilder bits = new StringBuilder(width);
+        for (int bit = width - 1; bit >= 0; bit--) {
+            int value = payload[payload.length - 1 - bit / 8];
+            bits.append(((value >> bit % 8) & 1) == 1 ? '1' : '0');
+        }
+        return bits.toString();
+    }
+
+    private static boolean isAsciiBitStringPayload(byte[] payload) {
+        for (byte value : payload) {
+            if (value != '0' && value != '1') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 没有声明位宽时，用能表达该数值的最短位宽（`0x00` -> 1 位，`0xaa` -> 8 位）。 */
+    private static int significantBitWidth(byte[] payload) {
+        for (int index = 0; index < payload.length; index++) {
+            int value = payload[index] & 0xff;
+            if (value != 0) {
+                return (payload.length - index - 1) * 8 + (32 - Integer.numberOfLeadingZeros(value));
+            }
+        }
+        return 1;
     }
 
     private static String binaryToHex(byte[] bytes) {

@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   openDataTabsNextToActive: false,
   metadataGeneration: 0,
   ensureConnected: vi.fn(),
+  warmConnection: vi.fn(),
   executeTabSql: vi.fn(),
   loadTableMetadata: vi.fn(),
   buildTableSelectSql: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: () => ({ id: "connection-1", db_type: mocks.databaseType }),
     ensureConnected: mocks.ensureConnected,
+    warmConnection: mocks.warmConnection,
     connectionIdentifierQuote: () => undefined,
     metadataGenerationFor: () => mocks.metadataGeneration,
   }),
@@ -235,6 +237,19 @@ describe("useSidebarDataOpenRuntime", () => {
     await useSidebarDataOpenRuntime().openData(tableNode);
 
     expect(mocks.tabs).toHaveLength(2);
+  });
+
+  it("prewarms the tab session pool before the first page is fetched", async () => {
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    const createdTab = mocks.tabs[0]!;
+    // The tab executes on its own session pool; warming it up front keeps the
+    // connection setup off the critical path of the visible loading spinner.
+    expect(mocks.warmConnection).toHaveBeenCalledWith("connection-1", {
+      database: "app",
+      catalog: undefined,
+      clientSessionId: createdTab.id,
+    });
   });
 
   it("keeps adjacent placement for every tab created in always-new mode", async () => {

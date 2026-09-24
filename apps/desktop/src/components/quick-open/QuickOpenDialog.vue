@@ -6,6 +6,8 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import { useQuickOpen, type QuickOpenItem } from "@/composables/useQuickOpen";
+import { usePluginCommandPalette } from "@/lib/plugins/pluginCommandPalette";
+import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { getGlobalSearchRoots, saveGlobalSearchRoots, getGlobalSearchExtensions, saveGlobalSearchExtensions } from "@/lib/globalSearch/globalSearchSettings";
@@ -22,7 +24,11 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles, loadPluginWorkbenches, contentMode, contentGroups, contentSelectedItem, contentSearching, setContentMode } = useQuickOpen();
+// Plugin commandPalette commands (HOST_PLUGIN_UI_SPEC §5): injected as extra quick-open entries;
+// list refresh is driven by dbx:plugins-changed / focus / locale change, with a fallback refresh when the dialog opens.
+const pluginPalette = usePluginCommandPalette();
+const { toast } = useToast();
+const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles, loadPluginWorkbenches, contentMode, contentGroups, contentSelectedItem, contentSearching, setContentMode } = useQuickOpen({ extraItems: pluginPalette.items });
 const inputRef = ref<HTMLInputElement | null>(null);
 const listRef = ref<HTMLElement | null>(null);
 const settingsStore = useSettingsStore();
@@ -129,6 +135,14 @@ function handleKeyDown(e: KeyboardEvent): void {
 }
 
 function handleSelect(item: QuickOpenItem): void {
+  // Plugin commands execute inside this component: they are NOT dispatched to App.vue object navigation (that chain
+  // connectionId-based connection/expand logic is meaningless for command entries); execution errors surface via the existing toast.
+  if (item.type === "plugin_command") {
+    const result = pluginPalette.open(item);
+    if (result.error) toast(result.error, 5000);
+    dialogOpen.value = false;
+    return;
+  }
   emit("select", item);
   dialogOpen.value = false;
 }
@@ -212,6 +226,12 @@ function getItemIcon(type: string) {
   return null;
 }
 
+/** Right badge copy: plugin commands show the source plugin name as provenance; others keep the type label. */
+function getTypeBadge(item: QuickOpenItem): string {
+  if (item.type === "plugin_command") return item.pluginName || item.pluginId || "";
+  return getTypeLabel(item.type);
+}
+
 watch(
   () => props.open,
   (newOpen) => {
@@ -220,6 +240,8 @@ watch(
       setContentMode(props.initialContentMode === true);
       searchSettingsOpen.value = false;
       refreshSearchSettings();
+      // Fallback refresh of the plugin command list on open (regular refresh is event-driven via dbx:plugins-changed).
+      void pluginPalette.refresh();
       // Eagerly load external SQL files so they appear in the initial list
       void loadExternalSqlFiles();
       // Refresh plugin workbench entries so installs/uninstalls show up without a restart
@@ -384,7 +406,7 @@ watch(selectedIndex, async () => {
                   </div>
                 </div>
                 <div class="text-xs px-2 py-1 rounded bg-muted text-muted-foreground whitespace-nowrap">
-                  {{ getTypeLabel(item.type) }}
+                  {{ getTypeBadge(item) }}
                 </div>
               </div>
             </div>

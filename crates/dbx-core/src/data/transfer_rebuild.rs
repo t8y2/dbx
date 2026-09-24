@@ -10,7 +10,7 @@
 
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{visit_relations, ObjectNamePart, Statement, TableFactor, Visit, Visitor};
-use sqlparser::dialect::{DuckDbDialect, SQLiteDialect};
+use sqlparser::dialect::{DuckDbDialect, MySqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
@@ -425,9 +425,27 @@ async fn detect_dependent_views(
     let sql = dependent_views_sql(database_type, database, schema, target_tables).ok_or_else(|| {
         format!("Cannot safely inspect dependent views for {} before rebuilding target tables", database_type.as_str())
     })?;
-    let result = read_dependency_metadata(state, pool_key, &sql, 4)
-        .await
-        .map_err(|error| format!("Failed to inspect dependent views before rebuilding target tables: {error}"))?;
+    let result = match read_dependency_metadata(state, pool_key, &sql, 4).await {
+        Ok(result) => result,
+        // `information_schema.VIEW_TABLE_USAGE` arrived with MySQL 8.0. Every MySQL 5.7
+        // target fails this lookup (ER_UNKNOWN_TABLE 1109/42S02), which used to abort the
+        // whole rebuild even when the target held no views at all. Inspect the stored view
+        // definitions instead: still fail-closed, just without the 8.0-only catalog.
+        Err(error)
+            if matches!(database_type, DatabaseType::Mysql | DatabaseType::Goldendb)
+                && mysql_view_usage_catalog_missing(&error) =>
+        {
+            log::info!(
+                "MySQL-compatible target has no information_schema.VIEW_TABLE_USAGE; \
+                 inspecting stored view definitions instead"
+            );
+            return detect_parsed_view_dependencies(state, pool_key, database, schema, target_tables, database_type)
+                .await;
+        }
+        Err(error) => {
+            return Err(format!("Failed to inspect dependent views before rebuilding target tables: {error}"))
+        }
+    };
     result
         .rows
         .iter()
@@ -505,6 +523,31 @@ fn dependent_views_sql(
     }
 }
 
+/// `information_schema.VIEW_TABLE_USAGE` exists from MySQL 8.0 on only. Older
+/// MySQL-compatible servers answer the lookup with ER_UNKNOWN_TABLE: MySQL 5.7 reports
+/// `ERROR 1109 (42S02): Unknown table 'VIEW_TABLE_USAGE' in information_schema`, and a
+/// server with `lower_case_table_names=1` (the Windows default) echoes the name
+/// lowercased. Match the table name so an unrelated `42S02` keeps reporting as an error.
+fn mysql_view_usage_catalog_missing(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("view_table_usage")
+        && (lower.contains("1109")
+            || lower.contains("1146")
+            || lower.contains("42s02")
+            || lower.contains("unknown table"))
+}
+
+/// Stored definitions for the fallback path. Mirrors [`dependent_views_sql`]'s MySQL
+/// branch: only views of the transferred database can be broken by rebuilding one of its
+/// tables, so the schema filter keeps the parse surface identical.
+fn mysql_view_definition_dependencies_sql(database: &str) -> String {
+    format!(
+        "SELECT '', TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
+         WHERE {database_match}",
+        database_match = mysql_metadata_name_matches("TABLE_SCHEMA", &[database]),
+    )
+}
+
 async fn detect_parsed_view_dependencies(
     state: &AppState,
     pool_key: &str,
@@ -520,6 +563,13 @@ async fn detect_parsed_view_dependencies(
         let sql =
             "SELECT database_name, schema_name, view_name, sql FROM duckdb_views() WHERE NOT internal".to_string();
         (database, schema, sql)
+    } else if matches!(database_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
+        // `VIEW_DEFINITION` is the resolved SELECT, and a MySQL database *is* the schema
+        // DBX rebuilds in, so the row's `TABLE_SCHEMA` decides which namespace an
+        // unqualified relation belongs to. The 8.0 catalog path keys on the database, so
+        // the fallback keeps the same spelling: dropping the database here would leave
+        // qualified references unmatched whenever the caller passes an empty schema.
+        (database.to_string(), schema.to_string(), mysql_view_definition_dependencies_sql(database))
     } else {
         let schema = resolve_sqlite_dependency_schema(state, pool_key, database, schema, database_type).await?;
         let mut sql = format!(
@@ -547,9 +597,12 @@ async fn detect_parsed_view_dependencies(
         };
         let ddl = dependency_metadata_text(row, 3)
             .map_err(|error| format!("Cannot safely inspect dependent view {qualified}: {error}"))?;
-        let references =
+        let references = if matches!(database_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
+            mysql_view_definition_target_references(ddl, &database, &schema, view_schema, target_tables)
+        } else {
             parsed_view_target_references(ddl, database_type, &database, &schema, view_schema, target_tables)
-                .map_err(|error| format!("Cannot safely inspect dependent view {qualified}: {error}"))?;
+        }
+        .map_err(|error| format!("Cannot safely inspect dependent view {qualified}: {error}"))?;
         for referenced in references {
             blocking.insert(format!("view {qualified} -> {schema}.{referenced}"));
         }
@@ -571,11 +624,41 @@ fn parsed_view_target_references(
     let [Statement::CreateView(view)] = statements.as_slice() else {
         return Err("the catalog did not return a complete CREATE VIEW definition".to_string());
     };
-    if let ControlFlow::Break(error) = view.query.visit(&mut StaticViewRelations) {
+    view_query_target_references(&view.query, database_type, database, schema, view_schema, target_tables)
+}
+
+/// MySQL stores only the resolved `SELECT` in `information_schema.VIEWS.VIEW_DEFINITION`
+/// (the `CREATE VIEW` wrapper and any `WITH CHECK OPTION` live outside that column), so
+/// the fallback parses the statement body instead of a complete DDL.
+fn mysql_view_definition_target_references(
+    definition: &str,
+    database: &str,
+    schema: &str,
+    view_schema: &str,
+    target_tables: &[String],
+) -> Result<BTreeSet<String>, String> {
+    let dialect = MySqlDialect {};
+    let statements = Parser::parse_sql(&dialect, definition).map_err(|error| error.to_string())?;
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return Err("the catalog did not return a complete view definition".to_string());
+    };
+    view_query_target_references(query, DatabaseType::Mysql, database, schema, view_schema, target_tables)
+}
+
+/// Shared relation walk for a parsed view body.
+fn view_query_target_references(
+    query: &sqlparser::ast::Query,
+    database_type: DatabaseType,
+    database: &str,
+    schema: &str,
+    view_schema: &str,
+    target_tables: &[String],
+) -> Result<BTreeSet<String>, String> {
+    if let ControlFlow::Break(error) = query.visit(&mut StaticViewRelations) {
         return Err(error.to_string());
     }
     let mut references = BTreeSet::new();
-    let visited = visit_relations(&view.query, |relation| {
+    let visited = visit_relations(query, |relation| {
         let names = relation
             .0
             .iter()
@@ -602,6 +685,15 @@ fn parsed_view_target_references(
                     catalog.eq_ignore_ascii_case(database) && namespace.eq_ignore_ascii_case(schema)
                 }
                 _ => return ControlFlow::Break("a DuckDB view relation has an unsupported qualified name".to_string()),
+            }
+        } else if matches!(database_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
+            // MySQL stores relations with their database name. DBX's `schema` and
+            // `database` are the same namespace for MySQL, so either spelling of the
+            // target proves an unqualified or single-qualifier reference points at it.
+            match qualifiers {
+                [] => view_schema.eq_ignore_ascii_case(schema) || view_schema.eq_ignore_ascii_case(database),
+                [qualified] => qualified.eq_ignore_ascii_case(schema) || qualified.eq_ignore_ascii_case(database),
+                _ => return ControlFlow::Break("a MySQL view relation has an unsupported qualified name".to_string()),
             }
         } else {
             match qualifiers {
@@ -1270,6 +1362,107 @@ mod tests {
         let statements = Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, &sql).unwrap();
         assert_eq!(statements.len(), 1);
         assert!(matches!(statements.first(), Some(Statement::Query(_))));
+    }
+
+    #[test]
+    fn mysql_view_usage_catalog_absence_is_recognized_without_hiding_other_failures() {
+        for message in [
+            "Server error: `ERROR 1109 (42S02): Unknown table 'VIEW_TABLE_USAGE' in information_schema`",
+            "Server error: `ERROR 1109 (42S02): Unknown table 'view_table_usage' in information_schema`",
+            "Server error: `ERROR 1146 (42S02): Table 'information_schema.view_table_usage' doesn't exist`",
+        ] {
+            assert!(mysql_view_usage_catalog_missing(message), "{message}");
+        }
+        for message in [
+            "Server error: `ERROR 1146 (42S02): Table 'information_schema.VIEWS' doesn't exist`",
+            "Server error: `ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)`",
+            "Server error: `ERROR 1142 (42000): SELECT command denied to user 'dbx'@'%' for table 'VIEW_TABLE_USAGE'`",
+            "connection reset by peer",
+        ] {
+            assert!(!mysql_view_usage_catalog_missing(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn mysql_view_definitions_are_parsed_for_target_references() {
+        // Captured from MySQL 5.7.43: `information_schema.VIEWS.VIEW_DEFINITION` names the
+        // resolved database on every relation and expands `SELECT *` into explicit columns.
+        let targets = vec!["orders".to_string(), "customers".to_string()];
+        let qualified = mysql_view_definition_target_references(
+            "select `shop`.`orders`.`id` AS `id`,`shop`.`orders`.`total` AS `total` \
+             from `shop`.`orders` where (`shop`.`orders`.`id` > 0)",
+            "shop",
+            "shop",
+            "shop",
+            &targets,
+        )
+        .unwrap();
+        assert_eq!(qualified.into_iter().collect::<Vec<_>>(), vec!["orders".to_string()]);
+
+        // A bare API call can reach the MySQL fallback with an empty target schema; the
+        // qualified reference must then match on the database spelling alone, exactly as
+        // the 8.0 catalog path filters `TABLE_SCHEMA` by database.
+        let empty_schema =
+            mysql_view_definition_target_references("select `id` from `shop`.`orders`", "shop", "", "shop", &targets)
+                .unwrap();
+        assert_eq!(empty_schema.into_iter().collect::<Vec<_>>(), vec!["orders".to_string()]);
+
+        let unqualified = mysql_view_definition_target_references(
+            "select `id` from `shop`.`orders` join `customers` on 1 = 1",
+            "shop",
+            "shop",
+            "shop",
+            &targets,
+        )
+        .unwrap();
+        assert_eq!(unqualified.into_iter().collect::<Vec<_>>(), vec!["customers".to_string(), "orders".to_string()]);
+
+        let other_database = mysql_view_definition_target_references(
+            "select `id` from `archive`.`orders`",
+            "shop",
+            "shop",
+            "shop",
+            &targets,
+        )
+        .unwrap();
+        assert!(
+            other_database.is_empty(),
+            "a view of the transferred database cannot be broken by another database's table"
+        );
+
+        let unrelated = mysql_view_definition_target_references(
+            "select `id` from `orders_summary`",
+            "shop",
+            "shop",
+            "shop",
+            &targets,
+        )
+        .unwrap();
+        assert!(unrelated.is_empty());
+
+        // MySQL has no three-part relation name, so the reference cannot be resolved and
+        // the check must fail closed instead of reporting "no dependency".
+        assert!(mysql_view_definition_target_references(
+            "select `id` from `shop`.`extra`.`orders`",
+            "shop",
+            "shop",
+            "shop",
+            &targets,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mysql_view_definition_fallback_query_targets_the_transferred_database() {
+        let sql = mysql_view_definition_dependencies_sql("shop");
+        assert!(sql.contains("FROM information_schema.VIEWS"), "{sql}");
+        assert!(!sql.contains("VIEW_TABLE_USAGE"), "{sql}");
+        assert!(sql.contains("'shop'"), "{sql}");
+        assert!(!sql.contains("TABLE_NAME IN"), "every view of the database has to be parsed: {sql}");
+        let statements = Parser::parse_sql(&MySqlDialect {}, &sql).unwrap();
+        assert_eq!(statements.len(), 1);
+
+        assert!(mysql_view_definition_dependencies_sql("sh'op").contains("'sh''op'"));
     }
 
     const LONG_TABLE: &str = "customer_order_line_item_revision_history";

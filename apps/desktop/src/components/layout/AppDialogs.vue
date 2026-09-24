@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 const ConnectionDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionDialog.vue"));
 const DangerConfirmDialog = defineAsyncComponent(() => import("@/components/editor/DangerConfirmDialog.vue"));
+const MultiDbDangerConfirmDialog = defineAsyncComponent(() => import("@/components/layout/MultiDbDangerConfirmDialog.vue"));
 const SqlParameterDialog = defineAsyncComponent(() => import("@/components/editor/SqlParameterDialog.vue"));
 const DataTransferDialog = defineAsyncComponent(() => import("@/components/transfer/DataTransferDialog.vue"));
 const SchemaDiffDialog = defineAsyncComponent(() => import("@/components/diff/SchemaDiffDialog.vue"));
@@ -126,16 +127,6 @@ watch(
     if (pending) unlockDuration.value = WRITE_UNLOCK_ONE_MINUTE_SECS;
   },
 );
-const multiDbDangerDetails = computed(() => {
-  const request = sqlExecutionDangerStore.pending;
-  if (!request) return "";
-  return [request.targetLabel || request.connectionName, request.database].filter(Boolean).join("\n");
-});
-const multiDbDangerMessage = computed(() => {
-  const request = sqlExecutionDangerStore.pending;
-  return request?.kind === "redis" ? t("dangerDialog.redisCommandMessage") : t("dangerDialog.message");
-});
-
 const editConfig = computed(() => {
   const id = connectionStore.editingConnectionId;
   if (!id) return undefined;
@@ -230,19 +221,7 @@ watch(
       </fieldset>
     </template>
   </DangerConfirmDialog>
-  <DangerConfirmDialog
-    v-if="sqlExecutionDangerStore.pending"
-    :open="true"
-    :title="t('multiDbExecute.dangerTitle')"
-    :message="multiDbDangerMessage"
-    :details-text="multiDbDangerDetails"
-    :sql="sqlExecutionDangerStore.pending.sql"
-    :confirm-label="t('multiDbExecute.dangerConfirm')"
-    :show-suppress-toggle="false"
-    :close-on-confirm="false"
-    @update:open="(open) => !open && sqlExecutionDangerStore.cancel()"
-    @confirm="sqlExecutionDangerStore.confirm()"
-  />
+  <MultiDbDangerConfirmDialog v-if="sqlExecutionDangerStore.pending" :request="sqlExecutionDangerStore.pending" @confirm="sqlExecutionDangerStore.confirm()" @cancel="sqlExecutionDangerStore.cancel()" />
   <SqlParameterDialog
     v-if="showSqlParameterDialog"
     :open="showSqlParameterDialog"
@@ -283,7 +262,13 @@ watch(
     :prefill-table="dialogs.dataComparePrefillTable.value"
     :session-id="dialogs.dataCompareSessionId.value"
   />
-  <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" :prefill-file-path="dialogs.sqlFilePrefillFilePath.value" />
+  <SqlFileExecutionDialog
+    v-model:open="dialogs.showSqlFileDialog.value"
+    :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value"
+    :prefill-database="dialogs.sqlFilePrefillDatabase.value"
+    :prefill-file-path="dialogs.sqlFilePrefillFilePath.value"
+    :prefill-preview="dialogs.sqlFilePrefillPreview.value"
+  />
   <SchemaDiagramDialog
     v-if="dialogs.showDiagramDialog.value"
     v-model:open="dialogs.showDiagramDialog.value"

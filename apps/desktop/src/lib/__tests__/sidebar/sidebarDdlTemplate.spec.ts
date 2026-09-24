@@ -30,7 +30,7 @@ describe("sidebar DDL template", () => {
     const sql = await buildSidebarDdlTemplateSql(
       [{ databaseType: "oracle" as const, catalog: undefined }],
       async () => 'CREATE TABLE "SYSTEM"."TEST" ("ID" NUMBER)',
-      async (ddl, target) => formatSidebarDdlTemplateForDisplay(ddl, "oracle", target.databaseType, false, true, target.catalog),
+      async (ddl, target) => formatSidebarDdlTemplateForDisplay(ddl, "oracle", target.databaseType, false, undefined, true, target.catalog),
     );
 
     expect(sql).toBe('CREATE TABLE "TEST" ("ID" NUMBER)');
@@ -44,7 +44,7 @@ describe("sidebar DDL template", () => {
     const sql = await buildSidebarDdlTemplateSql(
       targets,
       async (target) => `CREATE TABLE \`iceberg\`.\`analytics\`.\`${target.name}\` (\`id\` bigint)`,
-      async (ddl, target) => formatSidebarDdlTemplateForDisplay(ddl, "mysql", "starrocks", false, false, target.catalog),
+      async (ddl, target) => formatSidebarDdlTemplateForDisplay(ddl, "mysql", "starrocks", false, undefined, false, target.catalog),
     );
 
     expect(sql).toBe("CREATE TABLE iceberg.analytics.events (id bigint);\n\nCREATE TABLE iceberg.analytics.sessions (id bigint);\n");

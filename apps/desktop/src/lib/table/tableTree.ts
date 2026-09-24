@@ -87,6 +87,7 @@ function makeTableTreeEntry({
     database,
     schema,
     catalog,
+    ...(objectType === "TABLE" ? { tableName: name } : {}),
     isExpanded: false,
     children: [],
   };

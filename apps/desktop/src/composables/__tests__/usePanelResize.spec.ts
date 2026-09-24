@@ -145,4 +145,61 @@ describe("usePanelResize", () => {
     restored.setTabBarCollapsed(false);
     expect(localStorage.getItem("dbx-tab-bar-collapsed")).toBe("false");
   });
+
+  it("updates the outer workspace tab rail width and flex while dragging (issue #9977)", () => {
+    localStorage.setItem("dbx-tab-bar-width", "240");
+
+    const rail = document.createElement("div");
+    rail.setAttribute("data-workspace-tab-navigation", "");
+    rail.style.width = "240px";
+    rail.style.flex = "0 0 240px";
+    const target = document.createElement("div");
+    const tabBar = document.createElement("div");
+    tabBar.className = "app-tab-bar";
+    const handle = document.createElement("div");
+    tabBar.append(handle);
+    target.append(tabBar);
+    rail.append(target);
+    document.body.append(rail);
+
+    vi.spyOn(rail, "getBoundingClientRect").mockReturnValue(rect(0, 240));
+
+    const { tabBarWidth, startLeftTabBarResize } = usePanelResize();
+    handle.addEventListener("pointerdown", startLeftTabBarResize);
+    handle.dispatchEvent(pointerEvent("pointerdown", 240));
+    document.dispatchEvent(pointerEvent("pointermove", 320));
+
+    expect(rail.style.width).toBe("320px");
+    expect(rail.style.flex).toBe("0 0 320px");
+    expect(tabBar.style.width).toBe("");
+
+    document.dispatchEvent(pointerEvent("pointerup", 320));
+    expect(tabBarWidth.value).toBe(320);
+    expect(localStorage.getItem("dbx-tab-bar-width")).toBe("320");
+  });
+
+  it("shrinks a right-side tab rail toward the left edge while dragging", () => {
+    localStorage.setItem("dbx-tab-bar-width", "300");
+
+    const rail = document.createElement("div");
+    rail.setAttribute("data-special-page-navigation", "");
+    const tabBar = document.createElement("div");
+    const handle = document.createElement("div");
+    tabBar.append(handle);
+    rail.append(tabBar);
+    document.body.append(rail);
+
+    vi.spyOn(rail, "getBoundingClientRect").mockReturnValue(rect(900, 300));
+
+    const { tabBarWidth, startRightTabBarResize } = usePanelResize();
+    handle.addEventListener("pointerdown", startRightTabBarResize);
+    handle.dispatchEvent(pointerEvent("pointerdown", 900));
+    document.dispatchEvent(pointerEvent("pointermove", 960));
+
+    expect(rail.style.width).toBe("240px");
+    expect(rail.style.flex).toBe("0 0 240px");
+
+    document.dispatchEvent(pointerEvent("pointerup", 960));
+    expect(tabBarWidth.value).toBe(240);
+  });
 });

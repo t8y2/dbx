@@ -272,6 +272,27 @@ describe("queryStore pending object source tab", () => {
     expect(tab.sourceLoad).toBeUndefined();
   });
 
+  it("keeps a routine source tab saveable when opened from the view entry", async () => {
+    // 侧栏单击/双击存储过程走的是「查看源码」(initialEditing=false)。该 tab 必须
+    // 仍然挂着 objectSource，否则 Ctrl+S 会退化成「保存到 SQL 库」，用户再也改不了
+    // 存储过程（v0.6.18 回归）。同一次「查看」也应复用同一个 tab。
+    mocks.getObjectSource.mockResolvedValue(objectSource("CREATE OR REPLACE PROCEDURE app.sp_run AS BEGIN NULL; END;"));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const options = { ...pendingOptions({ name: "sp_run", objectType: "PROCEDURE" as const }), initialEditing: false };
+    const id = store.openObjectSourceTabPending(options);
+    await settle();
+
+    expect(store.tabs).toHaveLength(1);
+    expect(store.tabs[0]?.sql).toBe("CREATE OR REPLACE PROCEDURE app.sp_run AS BEGIN NULL; END;");
+    expect(store.tabs[0]?.objectSource).toMatchObject({ schema: SCHEMA, name: "sp_run", objectType: "PROCEDURE" });
+
+    expect(store.openObjectSourceTabPending(options)).toBe(id);
+    await settle();
+    expect(store.tabs).toHaveLength(1);
+  });
+
   it("keeps OceanBase sequence CREATE source for viewing and uses ALTER only for editing", async () => {
     mocks.connectionStore.dbType = "oceanbase-oracle";
     mocks.getObjectSource.mockResolvedValue(objectSource('CREATE SEQUENCE "APP"."SEQ_USERS" START WITH 10 INCREMENT BY 2'));

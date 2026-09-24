@@ -293,6 +293,7 @@ fn column_info_serialization_roundtrip() {
         enum_values: None,
         character_set: None,
         collation: None,
+        metadata_capabilities: None,
     };
     let json = serde_json::to_value(&col).unwrap();
     assert_eq!(json.get("is_unique"), Some(&serde_json::json!(true)));
@@ -340,6 +341,7 @@ fn table_columns_result_serialization_contract() {
             enum_values: None,
             character_set: None,
             collation: None,
+            metadata_capabilities: None,
         }],
         error: Some("partial".to_string()),
     };

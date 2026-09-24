@@ -79,7 +79,7 @@ const arrowClass = computed(() => {
   }
 });
 
-const tooltipSurfaceClass = computed(() => (props.surface === "popover" ? "bg-popover text-popover-foreground" : "bg-foreground text-background"));
+const tooltipSurfaceClass = computed(() => (props.surface === "popover" ? "bg-popover text-popover-foreground" : "bg-foreground text-background-solid"));
 
 const arrowSurfaceClass = computed(() => (props.surface === "popover" ? "bg-popover border-border" : "bg-foreground border-foreground"));
 

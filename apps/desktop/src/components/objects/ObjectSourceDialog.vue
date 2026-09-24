@@ -156,6 +156,12 @@ function cancelEditSource() {
   saveError.value = "";
 }
 
+async function refreshSource() {
+  if (loading.value || saving.value) return;
+  if (editing.value && !window.confirm(t("objects.refreshDiscardConfirm"))) return;
+  await loadSource(editing.value && canEdit.value);
+}
+
 async function saveSource() {
   if (saving.value || loading.value || !props.open) return;
   if (!canEdit.value) {
@@ -271,6 +277,10 @@ function closeDialog() {
 
       <DialogFooter>
         <Button variant="outline" @click="closeDialog">{{ t("common.close") }}</Button>
+        <Button variant="outline" :disabled="loading || saving" :title="t('structureEditor.refresh')" @click="refreshSource">
+          <RefreshCw class="h-4 w-4" />
+          {{ t("structureEditor.refresh") }}
+        </Button>
         <Button v-if="!editing" variant="outline" :disabled="!content" @click="copySource">
           <Clipboard class="h-4 w-4" />
           {{ t("grid.copy") }}

@@ -31,6 +31,7 @@ const assetIcons: Record<string, string> = {
   elasticsearch: "elasticsearch",
   easysearch: "easysearch",
   meilisearch: "meilisearch",
+  solr: "solr",
   oracle: "oracle",
   "oracle-10g": "oracle",
   "oracle-legacy": "oracle",
@@ -135,7 +136,7 @@ const assetSrc = computed(() => {
 </script>
 
 <template>
-  <img v-if="assetName" :src="assetSrc" alt="" class="database-logo object-contain" :class="{ 'database-logo-light': useLightIconInDarkMode, 'database-logo-impala': normalizedType === 'impala' }" aria-hidden="true" />
+  <img v-if="assetName" :src="assetSrc" alt="" class="database-logo object-contain" :class="{ 'database-logo-light': useLightIconInDarkMode, 'database-logo-impala': normalizedType === 'impala', 'database-logo-solr': normalizedType === 'solr' }" aria-hidden="true" />
   <Database v-else class="text-blue-400" />
 </template>
 
@@ -151,5 +152,11 @@ const assetSrc = computed(() => {
 
 .database-logo-impala {
   transform: scale(1.55);
+}
+
+/* solr.svg 的图形撑满整个 viewBox（无内边距），其他 logo 留白约 20-25%，
+   统一 scale(1.35) 下视觉偏大，单独收敛到与多数 logo 一致的占幅。 */
+.database-logo-solr {
+  transform: scale(1.02);
 }
 </style>

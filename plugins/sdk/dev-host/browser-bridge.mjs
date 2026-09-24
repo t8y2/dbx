@@ -125,6 +125,11 @@ function installBridge(channel) {
     openFilesystem: (providerId, context) => request("host.openFilesystem", { providerId, context }),
     reopenConnection: (connectionId) => request("host.reopenConnection", { connectionId }),
     copy: (text) => request("host.copy", { text }),
+    storage: {
+      get: (key) => request("host.storageGet", { key }),
+      set: (key, value) => request("host.storageSet", { key, value: value === undefined ? null : value }),
+      delete: (key) => request("host.storageDelete", { key }),
+    },
     onContext: (fn) => listen("context", fn),
     onEvent: (fn) => listen("event", fn),
     onBinary: (fn) => listen("binary", fn),

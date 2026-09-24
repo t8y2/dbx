@@ -46,7 +46,7 @@ const requiredContent = [
     file: `${language}.html`,
     includes: [`<html lang="${HTML_LANG[language] ?? language}"`, '"@type":"SoftwareApplication"'],
   })),
-  { file: "llms.txt", includes: ["90+ database", "25 MB", "Apache-2.0"] },
+  { file: "llms.txt", includes: ["90+ data systems", "25 MB", "Apache-2.0"] },
 ];
 
 for (const requirement of requiredContent) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConnectionConfig } from "@/types/database";
-import { connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
+import { connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, isTauriCommandUnavailable, normalizeConnectionTestResult, supportsConnectionDatabaseInfo } from "@/lib/connection/connectionDatabaseInfo";
 
 function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
   return {
@@ -17,6 +17,15 @@ function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
 }
 
 describe("connectionDatabaseInfo", () => {
+  it("hides database information for connections without database metadata", () => {
+    for (const dbType of ["dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "weaviate", "chromadb", "etcd", "zookeeper", "nacos", "consul", "mq", "mqtt", "victoriametrics"] as const) {
+      expect(supportsConnectionDatabaseInfo(dbType)).toBe(false);
+    }
+    for (const dbType of ["mysql", "redis", "mongodb", "milvus", "turso", "cloudflare-d1", "plugin"] as const) {
+      expect(supportsConnectionDatabaseInfo(dbType)).toBe(true);
+    }
+  });
+
   it("normalizes structured and legacy responses with a configured product fallback", () => {
     expect(normalizeConnectionTestResult("Connection successful", config())).toEqual({
       message: "Connection successful",

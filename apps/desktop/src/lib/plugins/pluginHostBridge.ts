@@ -1,6 +1,8 @@
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
+import { createPluginAiConversation, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
+import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -78,15 +80,31 @@ export interface PluginFileWriteResult {
 /** Chunk size the host advertises for streamed saves; fits the bridge payload cap after base64. */
 export const PLUGIN_SAVE_CHUNK_BYTES = 1024 * 1024;
 
+/**
+ * Per-value cap for `host.storage` entries. The whole store is additionally
+ * capped by the native host; both bounds keep this a UI-state store — bulk
+ * data belongs to the sidecar's data directory.
+ */
+export const MAX_PLUGIN_STORAGE_VALUE_BYTES = 256 * 1024;
+/** Longest accepted `host.storage` key, mirroring the native host's bound. */
+export const MAX_PLUGIN_STORAGE_KEY_CHARS = 256;
+
 export interface PluginHostBridgeApi {
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
+  openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
   reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
+  /**
+   * PR-A4 generic extension point: a read-only, secret-free connection list scoped to the calling plugin's own
+   * connection-providers, so plugins can implement their own connection switching inside panels/workbenches and
+   * their own business (the host stays unaware of the purpose).
+   */
+  listConnections?(pluginId: string): Array<{ id: string; name: string; providerId: string; connectionType?: string; readOnly: boolean }>;
   /**
    * Estimated plan capability metadata for one connection. Requires the plugin
    * to declare `host.plans:read`. The host only reads the stored connection
@@ -98,6 +116,8 @@ export interface PluginHostBridgeApi {
    * generates and owns the EXPLAIN statement; the plugin cannot pass one.
    */
   explainPlan?(request: PluginPlanRequest): Promise<PluginPlanResult>;
+  /** Read-only table schema metadata over an already-open Host connection. */
+  getTableMetadata?(context: PluginTableContext): Promise<PluginTableMetadata>;
   closeTab?(): Promise<void> | void;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
@@ -117,6 +137,10 @@ export interface PluginHostBridgeApi {
   finishFileSave?(pluginId: string, handleId: string): Promise<void>;
   /** Close any file handle, discarding unsaved state. */
   closeFileHandle?(pluginId: string, handleId: string): Promise<void>;
+  /** Persistent per-plugin key-value storage for sandboxed UIs; resolves null when the key is unset. */
+  storageGet?(pluginId: string, key: string): Promise<unknown>;
+  storageSet?(pluginId: string, key: string, value: unknown): Promise<void>;
+  storageDelete?(pluginId: string, key: string): Promise<void>;
 }
 
 interface PluginRequestMessage {
@@ -158,7 +182,16 @@ export class PluginHostBridge {
     if (!target || event.source !== target || !isRecord(event.data)) return false;
     if (event.data.source !== PLUGIN_MESSAGE_SOURCE || event.data.version !== BRIDGE_VERSION) return false;
     if (event.data.type === "ready") {
+      // Feature flags the SDK advertises at boot; unknown flags are ignored so
+      // host/plugin can evolve independently.
+      this.advertisedFeatures = new Set(Array.isArray(event.data.features) ? event.data.features.filter((feature): feature is string => typeof feature === "string") : []);
       void this.handleReady();
+      return true;
+    }
+    if (event.data.type === "workbench/close-ack") {
+      // Two-phase close handshake (§8.3): the plugin released its workbench scope.
+      this.pendingCloseAck?.();
+      this.pendingCloseAck = undefined;
       return true;
     }
     if (event.data.type === "shortcut" && event.data.shortcut === "closeTab") {
@@ -218,6 +251,39 @@ export class PluginHostBridge {
   private initGeneration = 0;
   private initSignals = { load: false, ready: false };
   private initStarted = false;
+  private advertisedFeatures = new Set<string>();
+  private pendingCloseAck?: () => void;
+
+  /**
+   * §8.3/§7.4 two-phase workbench close: give the plugin a chance to release
+   * its workbench scope (PTY sessions, subscriptions, temporary state) before
+   * the webview is torn down. Resolves true when the plugin acked; false when
+   * the handshake is unsupported (legacy SDK advertises no "workbench.close"
+   * feature) or the ack did not arrive inside the deadline. Either way the
+   * caller proceeds with teardown.
+   */
+  requestWorkbenchClose(timeoutMs = 400): Promise<boolean> {
+    if (this.disposed || !this.targetWindow()) return Promise.resolve(false);
+    const supported = this.advertisedFeatures.has("workbench.close");
+    if (!supported) {
+      // Legacy SDK: the message is inert, so do not stall the close on it.
+      this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "workbench/close", workbenchId: "" });
+      return Promise.resolve(false);
+    }
+    const workbenchId = typeof this.context.workbenchId === "string" ? this.context.workbenchId : "";
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (acked: boolean) => {
+        if (settled) return;
+        settled = true;
+        this.pendingCloseAck = undefined;
+        resolve(acked);
+      };
+      this.pendingCloseAck = () => settle(true);
+      this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "workbench/close", workbenchId });
+      setTimeout(() => settle(false), timeoutMs);
+    });
+  }
 
   private postInit(): void {
     this.post({
@@ -231,7 +297,13 @@ export class PluginHostBridge {
       permissions: [...(this.plugin.manifest.permissions || [])],
       // Additive capability advertisement: an older host omits `planApi`, and a
       // plugin must treat the absence as "unsupported" rather than probing.
-      capabilities: { downloadFile: !!this.api.downloadFile, planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan },
+      capabilities: {
+        downloadFile: !!this.api.downloadFile,
+        planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
+        [PLUGIN_SCHEMA_METADATA_CAPABILITY]: !!this.api.getTableMetadata,
+        storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
+        ai: !!this.api.openAiConversation,
+      },
       context: snapshotPluginWorkbenchContext(this.context),
     });
   }
@@ -314,6 +386,13 @@ export class PluginHostBridge {
       return null;
     }
     if (method === "host.getContext") return snapshotPluginWorkbenchContext(this.context);
+    if (method === "host.ai.openConversation") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation) throw new Error("DBX AI conversation panel is unavailable");
+      const request = createPluginAiConversation(this.plugin.manifest, params);
+      await this.api.openAiConversation(request);
+      return null;
+    }
     if (method === "backend.invoke") {
       const input = requireRecord(params, "backend.invoke params");
       const backendMethod = requireProtocolName(input.method, "backend method");
@@ -354,6 +433,11 @@ export class PluginHostBridge {
       await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
       return { ok: true };
     }
+    if (method === "host.listConnections") {
+      this.requirePermission("host.workbench");
+      if (!this.api.listConnections) throw new Error("Connection enumeration is unavailable on this host");
+      return this.api.listConnections(this.plugin.manifest.id);
+    }
     if (method === "host.openFilesystem") {
       this.requirePermission("host.filesystem");
       if (!this.api.openFilesystem) throw new Error("Host filesystem navigation is unavailable");
@@ -371,6 +455,11 @@ export class PluginHostBridge {
       this.requirePermission(PLUGIN_PLAN_PERMISSION);
       if (!this.api.explainPlan) throw new Error("Host plan API is unavailable");
       return this.api.explainPlan(requirePluginPlanRequest(requireRecord(params, "host.explainPlan params")));
+    }
+    if (method === "host.getTableMetadata") {
+      this.requirePermission(PLUGIN_SCHEMA_METADATA_PERMISSION);
+      if (!this.api.getTableMetadata) throw new Error("Host schema metadata API is unavailable");
+      return this.api.getTableMetadata(requirePluginTableContext(requireRecord(params, "host.getTableMetadata params")));
     }
     if (method === "host.saveFile") {
       const input = isRecord(params) ? params : {};
@@ -440,6 +529,33 @@ export class PluginHostBridge {
       await this.api.closeFileHandle(this.plugin.manifest.id, requireHandleId(input.handleId));
       return null;
     }
+    if (method === "host.storageGet") {
+      this.requirePermission("host.storage");
+      if (!this.api.storageGet) throw new Error("Host storage is unavailable");
+      const input = requireRecord(params, "host.storageGet params");
+      return this.api.storageGet(this.plugin.manifest.id, requireStorageKey(input.key));
+    }
+    if (method === "host.storageSet") {
+      this.requirePermission("host.storage");
+      if (!this.api.storageSet) throw new Error("Host storage is unavailable");
+      const input = requireRecord(params, "host.storageSet params");
+      const key = requireStorageKey(input.key);
+      // Sized before the structured clone reaches the host implementation, so
+      // the native host and the web fallback enforce the same bound.
+      const bytes = new TextEncoder().encode(JSON.stringify(input.value ?? null)).byteLength;
+      if (bytes > MAX_PLUGIN_STORAGE_VALUE_BYTES) {
+        throw new Error(`host.storage value exceeds ${MAX_PLUGIN_STORAGE_VALUE_BYTES} bytes`);
+      }
+      await this.api.storageSet(this.plugin.manifest.id, key, input.value ?? null);
+      return null;
+    }
+    if (method === "host.storageDelete") {
+      this.requirePermission("host.storage");
+      if (!this.api.storageDelete) throw new Error("Host storage is unavailable");
+      const input = requireRecord(params, "host.storageDelete params");
+      await this.api.storageDelete(this.plugin.manifest.id, requireStorageKey(input.key));
+      return null;
+    }
     throw new Error(`Unsupported plugin host method '${method}'`);
   }
 
@@ -477,10 +593,26 @@ export function pluginNetworkOrigins(permissions: readonly string[] | undefined)
   return [...origins];
 }
 
-export function pluginSandboxDocument(html: string, permissions?: readonly string[], theme?: PluginBridgeTheme): string {
+export interface PluginSandboxOptions {
+  /**
+   * Base URL under which the workbench document may fetch further plugin UI
+   * assets (code-split chunks, fonts) — `dbx-plugin://localhost/<id>/assets/`
+   * on native custom schemes, `http(s)://dbx-plugin.localhost/<id>/assets/`
+   * where WebView2 maps the scheme to an http subdomain. Injected as the
+   * document `<base>` and allowed in the resource CSP directives. Omit on
+   * hosts without the plugin asset protocol (the web host).
+   */
+  baseUrl?: string;
+}
+
+export function pluginSandboxDocument(html: string, permissions?: readonly string[], theme?: PluginBridgeTheme, options?: PluginSandboxOptions): string {
   const networkOrigins = pluginNetworkOrigins(permissions);
   const connectSrc = networkOrigins.length > 0 ? `connect-src ${networkOrigins.join(" ")};` : "connect-src 'none';";
-  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline' blob:; img-src data: blob:; font-src data: blob:; ${connectSrc} media-src data: blob:;">`;
+  const assetSource = pluginAssetCspSource(options?.baseUrl);
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:${assetSource}; style-src 'unsafe-inline' blob:; img-src data: blob:${assetSource}; font-src data: blob:${assetSource}; ${connectSrc} media-src data: blob:${assetSource};">`;
+  // <base> must precede every relative URL the document resolves (inlined CSS
+  // url(), dynamic import specifiers), so it leads the injection.
+  const base = options?.baseUrl && assetSource ? `<base href="${escapeHtmlAttribute(options.baseUrl)}">` : "";
   const sdk = `<script>${pluginSdkSource(theme)}</script>`;
   const uiKit = `<style>${pluginUiKitCss()}</style>`;
   // Placed after the uiKit so the boot `color-scheme` wins the cascade: the
@@ -488,9 +620,26 @@ export function pluginSandboxDocument(html: string, permissions?: readonly strin
   // has loaded, and the uiKit's token fallbacks would otherwise paint the
   // first frame white on dark hosts.
   const bootTheme = pluginBootThemeCss(theme);
-  const injection = `${csp}${uiKit}${bootTheme ? `<style>${bootTheme}</style>` : ""}${sdk}`;
+  const injection = `${csp}${base}${uiKit}${bootTheme ? `<style>${bootTheme}</style>` : ""}${sdk}`;
   if (/<head(?:\s[^>]*)?>/i.test(html)) return html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${injection}`);
   return `<!doctype html><html><head>${injection}</head><body>${html}</body></html>`;
+}
+
+/**
+ * CSP source expression for the plugin asset base URL: the exact origin for
+ * the http(s)-mapped form (WebView2), the whole scheme for the native custom
+ * scheme form. Only dbx-plugin shapes contribute a source — anything else is
+ * ignored (and suppresses the <base> too).
+ */
+function pluginAssetCspSource(baseUrl: string | undefined): string {
+  if (!baseUrl) return "";
+  const mapped = baseUrl.match(/^(https?:\/\/dbx-plugin\.localhost)(?:\/|$)/i);
+  if (mapped) return ` ${mapped[1].toLowerCase()}`;
+  return /^dbx-plugin:\/\//i.test(baseUrl) ? " dbx-plugin:" : "";
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /**
@@ -599,7 +748,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set() };
     let sequence = 0;
     let context;
     let locale = 'en';
@@ -709,6 +858,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       downloadFile: (options) => request('host.downloadFile', options),
       cancelDownload: (downloadId) => request('host.cancelDownload', { downloadId }),
       request,
+      ai: Object.freeze({ openConversation: (options) => request('host.ai.openConversation', options) }),
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       stream,
       notify: (method, params) => request('backend.notify', { method, params }),
@@ -729,6 +879,8 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       // its intent, and the host refuses anything other than "estimated".
       getPlanCapabilities: (connectionId) => request('host.getPlanCapabilities', { connectionId }),
       explainPlan: (planRequest) => request('host.explainPlan', planRequest),
+      // Read-only metadata; the host enforces the permission and open-session gate.
+      getTableMetadata: (tableContext) => request('host.getTableMetadata', tableContext),
       saveFile: (options = {}, data) => {
         if (data === undefined) return request('host.saveFile', options);
         if (typeof data === 'string') return request('host.saveFile', { ...(options || {}), dataBase64: data });
@@ -736,6 +888,13 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('host.saveFile', options, { transfer: bytes });
       },
       copy: (text) => request('host.copy', { text }),
+      // Persistent per-plugin key-value state; gate on capabilities.storage
+      // (older hosts omit it) and declare the host.storage permission.
+      storage: Object.freeze({
+        get: (key) => request('host.storageGet', { key }),
+        set: (key, value) => request('host.storageSet', { key, value: value === undefined ? null : value }),
+        delete: (key) => request('host.storageDelete', { key }),
+      }),
       fileTransfer: Object.freeze({
         pick: (options) => request('host.pickFiles', options || {}),
         read: (handleId, offset, length) => request('host.readFileChunk', { handleId, offset, length }),
@@ -757,6 +916,13 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
       onInit: (listener) => { listeners.init.add(listener); if (context !== undefined) listener(context); return () => listeners.init.delete(listener); },
+      // §8.3 workbench/close handshake: the host sends workbench/close before
+      // tearing the webview down; the plugin releases its workbench scope (PTY
+      // sessions, subscriptions) in the listeners and the SDK acks once every
+      // listener has settled. The host bounds the wait on its side.
+      workbench: Object.freeze({
+        onClose: (listener) => { listeners.close.add(listener); return () => listeners.close.delete(listener); },
+      }),
       decodeBase64: decode,
       encodeBase64: encode,
     });
@@ -803,6 +969,12 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const active = message.active === true;
         listeners.dragstate.forEach((listener) => listener(active));
         document.dispatchEvent(new CustomEvent('dbx-plugin-dragstate', { detail: active }));
+      } else if (message.type === 'workbench/close') {
+        const notifyClose = (listener) => Promise.resolve().then(listener).catch(() => undefined);
+        Promise.allSettled([...listeners.close].map(notifyClose)).finally(() => {
+          const workbenchId = context && typeof context.workbenchId === 'string' ? context.workbenchId : '';
+          parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'workbench/close-ack', workbenchId }, '*');
+        });
       }
     });
     addEventListener('keydown', (event) => {
@@ -812,7 +984,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       event.stopPropagation();
       parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*');
     }, true);
-    parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready' }, '*');
+    parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready', features: ['workbench.close'] }, '*');
   })();`;
 }
 
@@ -850,6 +1022,34 @@ function optionalPluginPlanScope(value: unknown, label: string): string | undefi
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string") throw new Error(`${label} must be a string`);
   return value.trim() ? requirePluginPlanIdentifier(value, label) : undefined;
+}
+
+function requirePluginTableContext(input: Record<string, unknown>): PluginTableContext {
+  const context: PluginTableContext = {
+    connectionId: requirePluginSchemaMetadataIdentifier(input.connectionId, "connectionId"),
+    table: requirePluginSchemaMetadataIdentifier(input.table, "table"),
+  };
+  const database = optionalPluginSchemaMetadataIdentifier(input.database, "database");
+  const schema = optionalPluginSchemaMetadataIdentifier(input.schema, "schema");
+  if (database !== undefined) context.database = database;
+  if (schema !== undefined) context.schema = schema;
+  return context;
+}
+
+function requirePluginSchemaMetadataIdentifier(value: unknown, label: string): string {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  const identifier = value.trim();
+  if (!identifier) throw new Error(`${label} must not be empty`);
+  if (Array.from(identifier).length > MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS) {
+    throw new Error(`${label} must be at most ${MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS} characters`);
+  }
+  return identifier;
+}
+
+function optionalPluginSchemaMetadataIdentifier(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  return value.trim() ? requirePluginSchemaMetadataIdentifier(value, label) : undefined;
 }
 
 /**
@@ -901,6 +1101,14 @@ function requireOffset(value: unknown): number {
 function requireChunkLength(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error("length is invalid");
   return Math.min(8 * 1024 * 1024, Math.floor(value));
+}
+
+/** A `host.storage` key: bounded, non-empty, no control characters. */
+function requireStorageKey(value: unknown): string {
+  if (typeof value !== "string" || !value || value.length > MAX_PLUGIN_STORAGE_KEY_CHARS || /[\u0000-\u001f]/.test(value)) {
+    throw new Error("storage key is invalid");
+  }
+  return value;
 }
 
 function base64ToBytes(value: string): ArrayBuffer {

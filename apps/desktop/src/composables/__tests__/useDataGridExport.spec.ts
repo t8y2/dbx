@@ -726,7 +726,7 @@ describe("useDataGridExport prepared row statements", () => {
     ]);
   });
 
-  it("uses escaped TSV for a multi-cell smart copy without relying on clipboard metadata", async () => {
+  it("uses TSV (quotes only for separator/newline) for a multi-cell smart copy without relying on clipboard metadata", async () => {
     const rows = [
       [1, '{"msg":"success"}'],
       [2, "inside\ttab\nnext line"],
@@ -737,7 +737,9 @@ describe("useDataGridExport prepared row statements", () => {
       columns: ["id", "name"],
       rows,
     };
-    const text = '1\t"{""msg"":""success""}"\n2\t"inside\ttab\nnext line"';
+    // A value containing only double quotes is copied verbatim (#10087); a value
+    // containing a tab/newline is still quoted so the TSV shape survives.
+    const text = '1\t{"msg":"success"}\n2\t"inside\ttab\nnext line"';
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text, mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 2, columnCount: 2 });
     const state = createExportState(editableTable, ["id", "name"], matrix, undefined, undefined, rows);
 

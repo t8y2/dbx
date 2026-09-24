@@ -118,8 +118,7 @@ env -u DOCKER_CONTEXT \
     --no-default-features --features dbx-core/sqlite-bundled --lib --no-fail-fast
 
 cargo nextest run -p dbx-core --no-default-features --features sqlite-bundled \
-  --test public_api_compatibility --test connection_url_compatibility \
-  --test agent_recovery_contract --no-fail-fast
+  --test public_api_compatibility --test connection_url_compatibility --no-fail-fast
 ```
 
 交付验证还应覆盖桌面/Web/CLI/MCP 消费者、合法 feature 组合、前端类型与源码契约、

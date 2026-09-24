@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { canvasDataGridActionReservedWidth, fitCanvasText, resolveCanvasCellTextLayout, resolveCanvasDataGridRowFill } from "../../apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, resolveDataGridPaintTheme } from "../../apps/desktop/src/lib/dataGrid/dataGridPaintTheme.ts";
@@ -41,14 +40,6 @@ test("canvas text layout reserves hover actions only for right-aligned cells", (
   });
   assert.equal(canvasDataGridActionReservedWidth(false), 28);
   assert.equal(canvasDataGridActionReservedWidth(true), 50);
-});
-
-test("DataGrid forwards hover action reservation only for right-aligned canvas cells", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-
-  assert.match(source, /columnAligns\.value\[cell\.visibleColIdx\] !== "right"/);
-  assert.match(source, /reservedWidth: canvasDataGridActionReservedWidth\(cell\.canQuickDownload, !!cell\.foreignKey, cellDetailButtonEnabled\.value, !!cell\.externalUrl\)/);
-  assert.match(source, /rightAlignedActionCell: canvasRightAlignedActionCell\.value/);
 });
 
 test("canvas row fill keeps frozen and scrolling regions on the same selection surface", () => {

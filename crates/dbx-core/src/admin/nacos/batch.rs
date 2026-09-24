@@ -180,6 +180,7 @@ async fn transfer_configs(
                 app_name: config.app_name,
                 desc: config.desc,
                 tags: config.tags,
+                cas_md5: None,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -745,6 +746,7 @@ mod tests {
             app_name: None,
             desc: None,
             tags: None,
+            cas_md5: None,
         }
     }
 

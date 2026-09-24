@@ -11,7 +11,9 @@ import { Diagnostics } from "./diagnostics.mjs";
 import { AutoReload } from "./auto-reload.mjs";
 
 const BRIDGE_LIMIT = 2 * 1024 * 1024,
-  UI_BINARY_LIMIT = 8 * 1024 * 1024;
+  UI_BINARY_LIMIT = 8 * 1024 * 1024,
+  STORAGE_VALUE_LIMIT = 256 * 1024,
+  STORAGE_TOTAL_LIMIT = 1024 * 1024;
 function jsonSize(value) {
   return Buffer.byteLength(JSON.stringify(value) ?? "null");
 }
@@ -103,6 +105,26 @@ export async function createMockHost(options) {
     await rename(temporary, settingsFile);
   };
   let autoReload = (await readSettings()).autoReload === true;
+  // `host.storage` entries mirror the native host's plugin-data store: a JSON
+  // map in the dev data dir, atomically replaced on every write. Serialized on
+  // the same queue so two frames cannot lose each other's updates.
+  const uiStorageFile = join(settingsDirectory, "ui-storage.json");
+  const readUiStorage = async () => {
+    try {
+      const parsed = JSON.parse(await readFile(uiStorageFile, "utf8"));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+  const writeUiStorage = async (entries) => {
+    const encoded = JSON.stringify(entries);
+    if (Buffer.byteLength(encoded) > STORAGE_TOTAL_LIMIT) throw new Error(`Plugin UI storage exceeds ${STORAGE_TOTAL_LIMIT} bytes`);
+    await mkdir(settingsDirectory, { recursive: true, mode: 0o700 });
+    const temporary = join(settingsDirectory, `.ui-storage-${randomUUID()}.tmp`);
+    await writeFile(temporary, encoded, { mode: 0o600, flag: "wx" });
+    await rename(temporary, uiStorageFile);
+  };
   const backendReload = new AutoReload(async () => {
     try {
       await serialize(async () => {
@@ -244,6 +266,26 @@ export async function createMockHost(options) {
       case "host.reopenConnection": {
         if (typeof p.connectionId !== "string" || !p.connectionId) throw new Error("connectionId is invalid");
         return { ok: true, mockReopenConnection: p.connectionId };
+      }
+      case "host.storageGet":
+      case "host.storageSet":
+      case "host.storageDelete": {
+        requirePermission(manifest, "host.storage");
+        if (typeof p.key !== "string" || !p.key || p.key.length > 256 || /[\u0000-\u001f]/.test(p.key)) throw new Error("storage key is invalid");
+        return serialize(async () => {
+          const entries = await readUiStorage();
+          if (input.method === "host.storageGet") return entries[p.key] === undefined ? null : structuredClone(entries[p.key]);
+          if (input.method === "host.storageDelete") {
+            delete entries[p.key];
+            await writeUiStorage(entries);
+            return null;
+          }
+          const value = p.value === undefined ? null : p.value;
+          if (Buffer.byteLength(JSON.stringify(value)) > STORAGE_VALUE_LIMIT) throw new Error(`storage value exceeds ${STORAGE_VALUE_LIMIT} bytes`);
+          entries[p.key] = value;
+          await writeUiStorage(entries);
+          return null;
+        });
       }
       default:
         throw new Error(`Unsupported mock host method: ${input.method}`);

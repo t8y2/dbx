@@ -217,6 +217,21 @@ test("preserves explicitly configured tab history shortcuts during migration", (
   assert.equal(normalized.switchToPreviousTab, backShortcut);
 });
 
+test("clears the gotoLine default when an explicit editor binding already owns its key", () => {
+  // Ctrl+G was a legal explicit binding slot before gotoLine adopted it on
+  // Windows/Linux; the user's explicit choice must keep winning over the new
+  // default (which registers earlier in the runtime keymap).
+  const windows = normalizeShortcutSettings({ formatSql: "Ctrl+G" }, "Win32");
+  assert.equal(windows.gotoLine, "");
+  assert.equal(windows.formatSql, "Ctrl+G");
+
+  // macOS defaults (⌘⌥G) never collide, and an explicit gotoLine config wins.
+  const mac = normalizeShortcutSettings({ formatSql: "Ctrl+G" }, "MacIntel");
+  assert.equal(mac.gotoLine, "Mod+Alt+G");
+  const explicit = normalizeShortcutSettings({ gotoLine: "Ctrl+G" }, "Win32");
+  assert.equal(explicit.gotoLine, "Ctrl+G");
+});
+
 test("matches Mod+number for switching to numbered tabs", () => {
   assert.equal(switchToTabIndexFromShortcut({ key: "1", metaKey: true }), 0);
   assert.equal(switchToTabIndexFromShortcut({ key: "5", ctrlKey: true }), 4);

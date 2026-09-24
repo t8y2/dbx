@@ -152,4 +152,44 @@ describe("useDataGridCellDetailEdit", () => {
     expect(editor.isEditingDetail.value).toBe(false);
     expect(editor.detailEditValue.value).toBe("");
   });
+
+  // issue #9832：单元格详情面板的「格式化 JSON」只重排编辑器草稿，不触发
+  // 「正在编辑格式化后的 JSON」提示，也不改动原始值。
+  it("expands a compacted JSON draft without warning about formatted JSON", async () => {
+    const compact = '{"owner":"zipg","tags":["a"]}';
+    const activeDetail = ref<DataGridCellDetail | null>(detail(compact));
+    const syncEditor = vi.fn();
+    const warnFormattedJsonEdit = vi.fn();
+    const editor = useDataGridCellDetailEdit({
+      activeDetail: computed(() => activeDetail.value),
+      activeTab: ref("valueEditor"),
+      jsonFormatted: computed(() => false),
+      databaseType: computed(() => "mongodb"),
+      resultRows: computed(() => [["id", compact]]),
+      getColumnInfo: () => undefined,
+      getRowItem: () => ({ sourceIndex: 0, isNew: false, isDeleted: false }),
+      hydrateLargeValueCell: async () => true,
+      applyCellValue: vi.fn(),
+      restoreCellValue: vi.fn(),
+      syncEditor,
+      refreshDetail: vi.fn(),
+      warnFormattedJsonEdit,
+    });
+
+    await editor.startDetailEdit();
+    syncEditor.mockClear();
+    warnFormattedJsonEdit.mockClear();
+    editor.formatDetailJsonDraft();
+
+    expect(editor.detailEditValue.value).toBe('{\n  "owner": "zipg",\n  "tags": [\n    "a"\n  ]\n}');
+    expect(editor.detailEditOriginalValue.value).toBe(compact);
+    expect(syncEditor).toHaveBeenLastCalledWith('{\n  "owner": "zipg",\n  "tags": [\n    "a"\n  ]\n}', "");
+    expect(warnFormattedJsonEdit).not.toHaveBeenCalled();
+
+    syncEditor.mockClear();
+    editor.detailEditValue.value = "not json";
+    editor.formatDetailJsonDraft();
+    expect(editor.detailEditValue.value).toBe("not json");
+    expect(syncEditor).not.toHaveBeenCalled();
+  });
 });

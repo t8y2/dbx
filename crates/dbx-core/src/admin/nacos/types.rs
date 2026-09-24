@@ -867,6 +867,8 @@ pub struct NacosConfigUpsert {
     pub desc: Option<String>,
     #[serde(default)]
     pub tags: Option<String>,
+    #[serde(default)]
+    pub cas_md5: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

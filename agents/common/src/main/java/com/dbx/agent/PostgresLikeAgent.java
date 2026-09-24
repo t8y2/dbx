@@ -542,10 +542,13 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             // dropped; their text comes from pg_get_indexdef instead of a.attname, and
             // is_expression records which case applied so Rust never has to guess from
             // characters in the text (#6312 review).
+            // `a.attname::text` keeps the cast: a bare COALESCE(name, text) resolves to
+            // `name`, which truncates an expression key part to 63 bytes (NAMEDATALEN - 1)
+            // and makes the rebuilt CREATE INDEX invalid (#9988).
             Map<String, IndexBuilder> byName = new LinkedHashMap<>();
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
                 "(ix.indisunique AND ix.indisvalid) AS is_unique, ix.indisprimary AS is_primary, " +
-                "COALESCE(a.attname, " + profile.catalogPrefixedFunction("get_indexdef") + "(ix.indexrelid, k.n, true)) AS column_text, " +
+                "COALESCE(a.attname::text, " + profile.catalogPrefixedFunction("get_indexdef") + "(ix.indexrelid, k.n, true)) AS column_text, " +
                 "(a.attname IS NULL) AS is_expression, " +
                 "array_length(ix.indoption, 1) AS nkeyatts, k.n AS key_position, " +
                 "ix.indoption[(k.n - 1)::int] AS key_option " +

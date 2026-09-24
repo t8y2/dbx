@@ -21,10 +21,11 @@ export interface QueryTableCandidateAtPositionInput {
   position: number;
 }
 
-export type QueryContextObjectAction = "view-data" | "edit-table-structure" | "edit-view" | "view-source" | "view-ddl";
+export type QueryContextObjectAction = "view-data" | "peek-table-structure" | "edit-table-structure" | "edit-view" | "view-source" | "view-ddl";
 
 export type QueryContextObjectRoute =
   | { event: "viewTableData"; payload: [target: SqlObjectNavigationTarget] }
+  | { event: "peekTableStructure"; payload: [target: SqlObjectNavigationTarget] }
   | { event: "editTableStructure"; payload: [target: SqlObjectNavigationTarget] }
   | { event: "openObjectSource"; payload: [target: SqlObjectNavigationTarget, initialEditing: boolean] }
   | { event: "viewTableDdl"; payload: [target: SqlObjectNavigationTarget] };
@@ -110,16 +111,18 @@ export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandi
 
 export function queryContextObjectActions(type?: SqlObjectNavigationType): QueryContextObjectAction[] {
   if (type === "view" || type === "materialized_view") {
-    return ["view-data", "edit-view", "view-source", "view-ddl"];
+    return ["view-data", "peek-table-structure", "edit-view", "view-source", "view-ddl"];
   }
   // Unknown metadata preserves the historical table actions instead of disabling existing entry points.
-  return ["view-data", "edit-table-structure", "view-ddl"];
+  return ["view-data", "peek-table-structure", "edit-table-structure", "view-ddl"];
 }
 
 export function queryContextObjectRoute(action: QueryContextObjectAction, target: SqlObjectNavigationTarget): QueryContextObjectRoute {
   switch (action) {
     case "view-data":
       return { event: "viewTableData", payload: [target] };
+    case "peek-table-structure":
+      return { event: "peekTableStructure", payload: [target] };
     case "edit-table-structure":
       return { event: "editTableStructure", payload: [target] };
     case "edit-view":

@@ -47,7 +47,8 @@ pub use table_select::{
     build_table_select_sql, DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX,
 };
 pub use table_select::{
-    quote_table_data_identifier, table_data_qualified_table_name, table_data_schema, uses_connection_identifier_quote,
+    database_qualified_table_name, quote_table_data_identifier, table_data_qualified_table_name, table_data_schema,
+    uses_connection_identifier_quote,
 };
 pub use type_rewrite::{
     apply_auto_inc_to_column_def, column_is_auto_increment, normalize_len_params, rewrite_column_type,

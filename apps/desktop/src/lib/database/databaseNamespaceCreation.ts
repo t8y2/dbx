@@ -1,5 +1,4 @@
 import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
-import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 export type DatabaseNamespaceCreationTarget = "database" | "schema" | "attach" | "special";
@@ -33,6 +32,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   elasticsearch: { deferred: "index creation is not modeled as database creation" },
   easysearch: { deferred: "index creation is not modeled as database creation" },
   meilisearch: { deferred: "index creation is not modeled as database creation" },
+  solr: { deferred: "core creation is not modeled as database creation" },
   hbase: { deferred: "namespace creation needs dedicated HBase namespace options" },
   qdrant: { deferred: "collection creation is separate from database creation" },
   milvus: { deferred: "collection/database lifecycle needs a dedicated vector workflow" },
@@ -113,7 +113,6 @@ function namespaceCreationMatrixEntry(connection: NonNullable<CreationConnection
 
 export function connectionNamespaceCreationTarget(connection: CreationConnection): ConnectionCreationTarget | null {
   if (!connection || connectionIsEffectivelyReadOnly(connection)) return null;
-  if (connection.db_type === "mongodb" && isMongoLegacyDriverProfile(connection.driver_profile)) return null;
   if (connection.db_type === "sqlite" && (connection.host?.trim().toLowerCase() === ":memory:" || Boolean(connection.password))) {
     return null;
   }

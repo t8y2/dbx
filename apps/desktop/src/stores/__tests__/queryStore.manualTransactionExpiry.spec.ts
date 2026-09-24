@@ -76,6 +76,10 @@ function successfulSelect() {
   return [{ columns: ["VALUE"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }];
 }
 
+function successfulReadOnlySelect() {
+  return [{ columns: ["VALUE"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, manual_transaction_proven_read_only: true }];
+}
+
 describe("queryStore manual transaction expiry recovery", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -123,6 +127,51 @@ describe("queryStore manual transaction expiry recovery", () => {
     expect(tab.txnAutoRolledBack).toBe(true);
     expect(tab.result?.execution_error).not.toBe(true);
     expect(tab.result?.affected_rows).toBe(1);
+  });
+
+  it("restarts an expired read-only transaction without the rollback notice", async () => {
+    mocks.beginManualTransaction.mockResolvedValueOnce("txn-old").mockResolvedValueOnce("txn-new");
+    mocks.executeInManualTransaction.mockResolvedValueOnce(successfulReadOnlySelect()).mockRejectedValueOnce(expiredTransactionError()).mockResolvedValueOnce(successfulReadOnlySelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    store.setAutoCommit(tabId, false);
+
+    await store.executeTabSql(tabId, "SELECT VALUE FROM DUAL");
+    await store.executeTabSql(tabId, "SELECT VALUE FROM DUAL");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.txnSessionId).toBe("txn-new");
+    expect(tab.result?.rows).toEqual([[1]]);
+    // 只读会话没有任何未提交改动，空闲回收后静默重建即可，不应提示「事务已自动回滚」(#9831)
+    expect(tab.txnAutoRolledBack).not.toBe(true);
+  });
+
+  it("keeps the rollback notice for a manual dialect without sticky read-only tracking", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "dameng-1",
+      name: "DM",
+      db_type: "dameng",
+      database: "DMHR",
+      query_timeout_secs: 30,
+    });
+    mocks.beginManualTransaction.mockResolvedValueOnce("txn-old").mockResolvedValueOnce("txn-new");
+    mocks.executeInManualTransaction.mockResolvedValueOnce(successfulSelect()).mockRejectedValueOnce(expiredTransactionError()).mockResolvedValueOnce(successfulSelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("dameng-1", "DMHR", "Query", "query", "SYSDBA");
+    store.setAutoCommit(tabId, false);
+
+    await store.executeTabSql(tabId, "SELECT 1 FROM DUAL");
+    await store.executeTabSql(tabId, "SELECT 1 FROM DUAL");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.txnSessionId).toBe("txn-new");
+    expect(tab.result?.rows).toEqual([[1]]);
+    // 不跟踪只读状态的方言无法判断会话是否干净，保留原有提示。
+    expect(tab.txnAutoRolledBack).toBe(true);
   });
 
   it("normalizes a stale manual tab for a non-transactional database before query dispatch", async () => {

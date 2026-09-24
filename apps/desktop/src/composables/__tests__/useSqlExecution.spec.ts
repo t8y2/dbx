@@ -1,7 +1,7 @@
 import { computed, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { isDangerousSql, requiresDatabaseSelection, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
+import { isDangerousSql, requiresDatabaseSelection, snapshotResultForMerge, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -1610,5 +1610,37 @@ SELECT @value AS Message;`;
     productionSafetyStore.confirm();
     await pendingExecution;
     expect(executeCurrentSql).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("snapshotResultForMerge", () => {
+  it("stays intact after the store releases the live payload in place", () => {
+    const live = {
+      columns: ["id", "amount"],
+      rows: [
+        [1, 10],
+        [2, 20],
+      ],
+      column_types: ["INT", "DECIMAL"],
+      affected_rows: 2,
+      execution_time_ms: 5,
+    };
+    const snapshot = snapshotResultForMerge(live as never)!;
+
+    // Mirrors queryStore.releaseResultObjectPayload: the arrays the merged view
+    // reads are detached, so clearing the live result must not empty them.
+    live.columns = [];
+    live.rows = [];
+
+    expect(snapshot.columns).toEqual(["id", "amount"]);
+    expect(snapshot.rows).toEqual([
+      [1, 10],
+      [2, 20],
+    ]);
+    expect(snapshot.column_types).toEqual(["INT", "DECIMAL"]);
+  });
+
+  it("passes undefined through", () => {
+    expect(snapshotResultForMerge(undefined)).toBeUndefined();
   });
 });

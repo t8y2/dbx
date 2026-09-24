@@ -356,11 +356,11 @@ describe("AppTabBar group navigation portal", () => {
     const rail = element(host, "[data-workspace-tab-navigation]");
     const bar = element(rail, "[data-main-tab-bar]");
     expect(rail.style.width).toBe("260px");
-    expect(bar.style.width).toBe("260px");
+    expect(bar.style.width).toBe("100%");
     navigation.width = 320;
     await settle();
     expect(rail.style.width).toBe("320px");
-    expect(bar.style.width).toBe("320px");
+    expect(bar.style.width).toBe("100%");
     navigation.collapsed = true;
     await settle();
     expect(rail.style.width).toBe("var(--collapsed-tab-rail-width)");
@@ -369,7 +369,7 @@ describe("AppTabBar group navigation portal", () => {
     navigation.collapsed = false;
     await settle();
     expect(rail.style.width).toBe("320px");
-    expect(bar.style.width).toBe("320px");
+    expect(bar.style.width).toBe("100%");
     expect(warnings).toEqual([]);
   });
 

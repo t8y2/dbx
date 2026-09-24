@@ -9,7 +9,20 @@ use crate::transaction::TransactionOwner;
 
 /// Idle time after which an MCP session is considered expired and its pinned
 /// backend connection pool may be reclaimed.
-const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+pub(crate) const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+
+pub(crate) fn session_idle_ttl_from_env() -> Duration {
+    session_idle_ttl_from_value(std::env::var("DBX_SESSION_IDLE_TTL_SECS").ok().as_deref())
+}
+
+pub(crate) fn session_idle_ttl_from_value(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .filter(|ttl| Instant::now().checked_add(*ttl).is_some())
+        .unwrap_or(SESSION_IDLE_TTL)
+}
 
 /// Maximum number of concurrent MCP sessions. Bounds how many pinned backend
 /// connection pools an agent can hold at once.
@@ -51,14 +64,20 @@ struct McpSessionState {
     closing: HashMap<String, McpSession>,
 }
 
-#[derive(Default)]
 pub struct McpSessionStore {
     state: Mutex<McpSessionState>,
+    idle_ttl: Duration,
+}
+
+impl Default for McpSessionStore {
+    fn default() -> Self {
+        Self { state: Mutex::new(McpSessionState::default()), idle_ttl: SESSION_IDLE_TTL }
+    }
 }
 
 impl McpSessionStore {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+        Arc::new(Self { idle_ttl: session_idle_ttl_from_env(), ..Self::default() })
     }
 
     /// Open a new session bound to `connection_id` + `database`.
@@ -67,7 +86,7 @@ impl McpSessionStore {
     /// reached; expired sessions are swept before the cap is enforced.
     pub async fn open(&self, connection_id: &str, database: &str) -> McpSessionStoreResult<Result<McpSession, String>> {
         let mut state = self.state.lock().await;
-        let expired = sweep_expired(&mut state);
+        let expired = sweep_expired(&mut state, self.idle_ttl);
         if session_count(&state) >= MAX_SESSIONS {
             return McpSessionStoreResult::new(
                 Err(format!(
@@ -87,7 +106,7 @@ impl McpSessionStore {
         database: &str,
     ) -> McpSessionStoreResult<Result<McpSession, String>> {
         let mut state = self.state.lock().await;
-        let expired = sweep_expired(&mut state);
+        let expired = sweep_expired(&mut state, self.idle_ttl);
         if session_count(&state) >= MAX_SESSIONS {
             return McpSessionStoreResult::new(
                 Err(format!(
@@ -124,7 +143,7 @@ impl McpSessionStore {
     /// Resolve a session id and refresh its idle timer.
     pub async fn resolve(&self, session_id: &str) -> McpSessionStoreResult<Option<McpSession>> {
         let mut state = self.state.lock().await;
-        let expired = sweep_expired(&mut state);
+        let expired = sweep_expired(&mut state, self.idle_ttl);
         let session = state.active.get_mut(session_id).map(|session| {
             session.last_used = Instant::now();
             session.clone()
@@ -136,7 +155,7 @@ impl McpSessionStore {
     /// cap until the backend pool is closed successfully.
     pub async fn begin_close(&self, session_id: &str) -> McpSessionStoreResult<Option<McpSession>> {
         let mut state = self.state.lock().await;
-        let expired = sweep_expired(&mut state);
+        let expired = sweep_expired(&mut state, self.idle_ttl);
         let session = state.active.remove(session_id);
         if let Some(session) = &session {
             state.closing.entry(session.id.clone()).or_insert_with(|| session.clone());
@@ -159,7 +178,7 @@ impl McpSessionStore {
     #[cfg(test)]
     pub(crate) async fn expire_for_test(&self, session_id: &str) {
         self.state.lock().await.active.get_mut(session_id).unwrap().last_used =
-            Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1);
+            Instant::now() - self.idle_ttl - Duration::from_secs(1);
     }
 }
 
@@ -182,12 +201,12 @@ fn session_count(state: &McpSessionState) -> usize {
     state.opening.len() + state.active.len() + state.closing.len()
 }
 
-fn sweep_expired(state: &mut McpSessionState) -> Vec<McpSession> {
+fn sweep_expired(state: &mut McpSessionState, idle_ttl: Duration) -> Vec<McpSession> {
     let now = Instant::now();
     let expired_ids = state
         .active
         .iter()
-        .filter(|(_, session)| now.duration_since(session.last_used) >= SESSION_IDLE_TTL)
+        .filter(|(_, session)| now.duration_since(session.last_used) >= idle_ttl)
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     let mut expired = Vec::with_capacity(expired_ids.len());
@@ -198,6 +217,67 @@ fn sweep_expired(state: &mut McpSessionState) -> Vec<McpSession> {
         }
     }
     expired
+}
+
+#[cfg(test)]
+mod ttl_tests {
+    use super::*;
+
+    #[test]
+    fn positive_seconds_override_the_default() {
+        for (value, seconds) in [("1", 1), ("43200", 43200), (" 3600 ", 3600)] {
+            assert_eq!(session_idle_ttl_from_value(Some(value)), Duration::from_secs(seconds));
+        }
+    }
+
+    fn store_with_ttl(value: &str) -> McpSessionStore {
+        McpSessionStore { idle_ttl: session_idle_ttl_from_value(Some(value)), ..McpSessionStore::default() }
+    }
+
+    #[tokio::test]
+    async fn longer_ttl_preserves_sessions_beyond_thirty_minutes_and_resolve_refreshes_idle_time() {
+        let store = store_with_ttl("43200");
+        let session = store.open("conn-1", "analytics").await.into_parts().0.unwrap();
+        store.state.lock().await.active.get_mut(&session.id).unwrap().last_used =
+            Instant::now() - Duration::from_secs(3600);
+        let (resolved, expired) = store.resolve(&session.id).await.into_parts();
+        assert!(expired.is_empty());
+        assert!(resolved.unwrap().last_used.elapsed() < Duration::from_secs(1));
+        store.expire_for_test(&session.id).await;
+        let (resolved, expired) = store.resolve(&session.id).await.into_parts();
+        assert!(resolved.is_none());
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].id, session.id);
+        assert!(store.state.lock().await.closing.contains_key(&session.id));
+        store.finish_close(&session.id).await;
+        assert!(!store.state.lock().await.closing.contains_key(&session.id));
+    }
+
+    #[tokio::test]
+    async fn shorter_ttl_is_used_by_every_sweep_entry_point() {
+        for entry_point in ["open", "reserve_opening", "resolve", "begin_close"] {
+            let store = store_with_ttl("1");
+            let session = store.open("conn-1", "").await.into_parts().0.unwrap();
+            store.state.lock().await.active.get_mut(&session.id).unwrap().last_used =
+                Instant::now() - Duration::from_secs(2);
+            let expired = match entry_point {
+                "open" => store.open("conn-2", "").await.into_parts().1,
+                "reserve_opening" => store.reserve_opening("conn-2", "").await.into_parts().1,
+                "resolve" => store.resolve(&session.id).await.into_parts().1,
+                _ => store.begin_close(&session.id).await.into_parts().1,
+            };
+            assert_eq!(expired.len(), 1, "{entry_point}");
+            assert_eq!(expired[0].id, session.id);
+        }
+    }
+
+    #[test]
+    fn invalid_or_unrepresentable_values_keep_thirty_minutes() {
+        assert_eq!(session_idle_ttl_from_value(None), SESSION_IDLE_TTL);
+        for value in ["", " ", "0", "-1", "1.5", "12h", "18446744073709551615", "18446744073709551616"] {
+            assert_eq!(session_idle_ttl_from_value(Some(value)), SESSION_IDLE_TTL, "{value:?}");
+        }
+    }
 }
 
 #[cfg(test)]

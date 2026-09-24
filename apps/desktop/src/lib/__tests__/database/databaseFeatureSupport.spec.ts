@@ -376,8 +376,9 @@ describe("database namespace creation", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "duckdb" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "sqlite" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb" })).toBe("special");
-    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBeNull();
-    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "legacy" })).toBeNull();
+    // The Legacy Agent creates databases through runCommand, so it gets the same flow.
+    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBe("special");
+    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "legacy" })).toBe("special");
   });
 
   it("hides persistent SQLite attachment for memory and SQLCipher connections", () => {

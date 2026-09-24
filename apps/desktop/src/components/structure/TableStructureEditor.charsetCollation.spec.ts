@@ -49,6 +49,7 @@ vi.mock("@lucide/vue", async () => {
     Pencil: Icon,
     Plus: Icon,
     RefreshCw: Icon,
+    Rows3: Icon,
     Save: Icon,
     Search: Icon,
     Settings: Icon,

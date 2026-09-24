@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
+use crate::types::PgPartitionKind;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -256,6 +257,90 @@ pub struct TableStructureSqlOptions {
     /// `StructureDialect::Mysql` so that DDL is generated with MySQL syntax.
     #[serde(default)]
     pub is_gaussdb_m_mode: bool,
+}
+
+/// Options for `build_table_partition_operation_sql`.
+///
+/// Partition maintenance is deliberately kept out of `TableStructureSqlOptions`:
+/// the operations are explicit user actions (never diffed against introspected
+/// state), and keeping them separate means a column/index draft cannot
+/// accidentally trigger or suppress partition DDL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePartitionSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// The edited table; also the default parent of every operation.
+    pub table_name: String,
+    #[serde(default)]
+    pub operations: Vec<TablePartitionOperation>,
+}
+
+/// Declarative partitioning for a table being created (`CREATE TABLE ...
+/// PARTITION BY ...`). PostgreSQL only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePartitionDefinition {
+    pub kind: PgPartitionKind,
+    /// Partition-key columns, used when `expression` is empty.
+    #[serde(default)]
+    pub columns: Vec<String>,
+    /// Raw partition-key expression (e.g. `date_trunc('month', ts)`), used
+    /// instead of `columns` when non-empty.
+    #[serde(default)]
+    pub expression: String,
+}
+
+/// One partition maintenance operation. The parent is the edited table unless
+/// `parent_table` names another relation (used when detaching the partition
+/// currently being edited).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePartitionOperation {
+    #[serde(default)]
+    pub id: String,
+    pub kind: TablePartitionOperationKind,
+    /// Partitioned parent's schema; empty falls back to the edited table's schema.
+    #[serde(default)]
+    pub parent_schema: String,
+    /// Partitioned parent; empty falls back to the edited table.
+    #[serde(default)]
+    pub parent_table: String,
+    /// Schema of the partition relation; empty falls back to the parent's schema.
+    #[serde(default)]
+    pub schema: String,
+    pub name: String,
+    /// Required for `create`/`attach`; must be absent for `detach`/`drop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<TablePartitionBoundDraft>,
+    /// Emit `DETACH PARTITION ... CONCURRENTLY` (PostgreSQL 14+).
+    #[serde(default)]
+    pub concurrently: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TablePartitionOperationKind {
+    Create,
+    Attach,
+    Detach,
+    Drop,
+}
+
+/// Partition bound as entered in the UI. Values are SQL literal text; the
+/// builder only wraps them in the PostgreSQL `FOR VALUES` grammar, so `1`,
+/// `'2024-01-01'`, `MINVALUE`, and `MAXVALUE` all round-trip unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum TablePartitionBoundDraft {
+    Range { from: Vec<String>, to: Vec<String> },
+    List { values: Vec<String> },
+    Hash { modulus: i32, remainder: i32 },
+    Default,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

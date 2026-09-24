@@ -104,20 +104,47 @@ function oracleInvalidIdentifierRange(sql: string, message: string, position: nu
   return bestRange;
 }
 
-export function sqlErrorDecorationRange(sql: string, message: string): SqlErrorRange | null {
+/**
+ * A position a driver reported in its error text, without needing the SQL it
+ * refers to. Engines that do not attach a typed position to their error
+ * envelope (Oracle) still name one in the message.
+ */
+export type SqlErrorMessagePosition = { kind: "location"; location: SqlErrorLocation } | { kind: "offset"; offset: number };
+
+const ORACLE_AGENT_POSITION_PATTERN = /\berror\s+occur(?:red)?\s+at\s+position\s*:\s*(\d+)\b/i;
+
+/**
+ * Parse the position carried by a driver error message.
+ *
+ * Textual locations (`line N, column M`, `LINE N:` with a `^` caret, and the
+ * line-only form MySQL emits) win over the Oracle Agent's absolute offset, the
+ * same precedence {@link sqlErrorDecorationRange} has always used.
+ */
+export function sqlErrorMessagePosition(message: string): SqlErrorMessagePosition | null {
   const location = parseSqlErrorLocation(message);
-  if (location) {
-    const offset = lineColumnToOffset(sql, location);
+  if (location) return { kind: "location", location };
+
+  // Oracle Agent reports a zero-based absolute offset into the statement text.
+  const positionMatch = ORACLE_AGENT_POSITION_PATTERN.exec(message);
+  if (!positionMatch?.[1]) return null;
+  const offset = Number.parseInt(positionMatch[1], 10);
+  if (!Number.isSafeInteger(offset) || offset < 0) return null;
+  return { kind: "offset", offset };
+}
+
+export function sqlErrorDecorationRange(sql: string, message: string): SqlErrorRange | null {
+  const position = sqlErrorMessagePosition(message);
+  if (!position) return null;
+
+  if (position.kind === "location") {
+    const offset = lineColumnToOffset(sql, position.location);
     if (offset == null || offset >= sql.length) return null;
     return { from: offset, to: offset + 1 };
   }
 
-  // Oracle Agent reports a zero-based absolute offset. For qualified invalid
-  // identifiers it can point later in the selector, so prefer the named token.
-  const positionMatch = /\berror\s+occur(?:red)?\s+at\s+position\s*:\s*(\d+)\b/i.exec(message);
-  if (!positionMatch?.[1]) return null;
-  const position = Number.parseInt(positionMatch[1], 10);
-  if (!Number.isSafeInteger(position) || position < 0 || position >= sql.length) return null;
-
-  return oracleInvalidIdentifierRange(sql, message, position) ?? { from: position, to: position + 1 };
+  const { offset } = position;
+  if (offset >= sql.length) return null;
+  // For qualified invalid identifiers the offset can point later in the
+  // selector, so prefer the named token.
+  return oracleInvalidIdentifierRange(sql, message, offset) ?? { from: offset, to: offset + 1 };
 }

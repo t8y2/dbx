@@ -2,6 +2,7 @@ import { cellImagePreviewUrl } from "@/lib/dataGrid/cellImageUrl";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { clipboardCellValue, displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { formatJsonText } from "@/lib/dataGrid/cellDetailPresentation";
+import { cqlLiteralToJsonText } from "@/lib/dataGrid/cqlLiteralJson";
 import type { DatabaseType } from "@/types/database";
 
 export const CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH = 12_000;
@@ -104,7 +105,7 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
   const rawValue = options.rawValue?.(value, options.columnIndex) ?? displayCellValue(value);
   const isNull = options.isNullValue?.(value) ?? value === null;
   const displayValue = options.displayValue(value, options.columnIndex);
-  const formattedJson = typeof value === "string" && looksLikeJsonContainer(value) ? (formatJsonText(value) ?? "") : "";
+  const formattedJson = typeof value === "string" ? detailFormattedJson(value, options.databaseType) : "";
   const rawValuePreview = previewText(rawValue);
   const displayValuePreview = previewText(displayValue);
   const type = detailColumnType(options.typeByColumn, options.resultColumnTypes, column, options.columnIndex);
@@ -292,6 +293,17 @@ export function filterDataGridDetailFields<T extends DataGridCellDetail>(fields:
   if (keyword.trim() === "") return [...fields];
   const kw = keyword.trim().toLowerCase();
   return fields.filter((field) => field.column.toLowerCase().includes(kw) || field.rawValuePreview.toLowerCase().includes(kw) || field.displayValuePreview.toLowerCase().includes(kw) || String(field.rowNumber).includes(kw));
+}
+
+function detailFormattedJson(value: string, databaseType: DatabaseType | undefined): string {
+  if (looksLikeJsonContainer(value)) {
+    const formatted = formatJsonText(value);
+    if (formatted !== undefined) return formatted;
+  }
+  if (databaseType !== "cassandra") return "";
+  // The Cassandra agent renders collections as CQL literals, e.g. {'k': 'v'} or (1, 'a').
+  const json = cqlLiteralToJsonText(value);
+  return json === undefined ? "" : (formatJsonText(json) ?? "");
 }
 
 function looksLikeJsonContainer(text: string): boolean {

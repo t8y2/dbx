@@ -140,6 +140,33 @@ pub async fn run_agent_loop(
     task_contract: Option<&AiTaskContract>,
     is_agent_mode: bool,
 ) -> Result<String, String> {
+    run_agent_loop_inner(
+        config,
+        system_prompt,
+        messages,
+        agent_ctx,
+        on_event,
+        cancelled,
+        max_tokens,
+        task_contract,
+        is_agent_mode,
+    )
+    .boxed()
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_loop_inner(
+    config: &AiConfig,
+    system_prompt: &str,
+    messages: &[AiMessage],
+    agent_ctx: &AgentLoopContext,
+    on_event: impl Fn(AgentEvent) + Send + Sync + Clone + 'static,
+    cancelled: &Notify,
+    max_tokens: Option<u32>,
+    task_contract: Option<&AiTaskContract>,
+    is_agent_mode: bool,
+) -> Result<String, String> {
     let contract_system_prompt = augment_system_prompt_with_task_contract(system_prompt, task_contract, is_agent_mode);
     let system_prompt = contract_system_prompt.as_str();
 

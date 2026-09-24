@@ -162,7 +162,7 @@ Regular `dbx_execute_query` calls are independent. When a workflow must preserve
 - Session variables and settings
 - Explicit transactions or multi-step diagnostics that require one connection
 
-Sessions support SQL connections only and are bound to one connection and database. Unknown, closed, or expired IDs fail instead of silently falling back to an ordinary query. Call `dbx_close_session` when finished. Idle sessions are reclaimed after 30 minutes, and the server allows at most 32 concurrent sessions.
+Sessions support SQL connections only and are bound to one connection and database. Unknown, closed, or expired IDs fail instead of silently falling back to an ordinary query. Call `dbx_close_session` when finished. Idle sessions are reclaimed after 30 minutes by default, and the server allows at most 32 concurrent sessions. Set `DBX_SESSION_IDLE_TTL_SECS=43200` in the process hosting MCP to allow 12 hours of inactivity, including transaction-owned connections. The value must be positive whole seconds; unset, invalid, zero, negative or unrepresentable values keep the 1800-second default. Restart the host after changing it. For embedded DBX Web MCP, set it on the Web server; for the standalone launcher, set it in the launcher environment.
 
 <Callout type="warn">A stateful session does not widen SQL policy. `USE` is meaningful only inside a session, while writes, DDL, production protection, connection read-only state, and database privileges are rechecked for every request.</Callout>
 
@@ -286,6 +286,7 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
 | Variable | Purpose |
 | --- | --- |
 | `DBX_DATA_DIR` | Override the local DBX data directory |
+| `DBX_SESSION_IDLE_TTL_SECS` | Stateful session idle timeout in positive whole seconds (default: `1800`). Invalid, zero, negative or unrepresentable values use the default. Applies to transaction-owned connections too; restart the MCP host after changing it. |
 | `DBX_WEB_URL` | Use a DBX Web/Docker backend |
 | `DBX_WEB_PASSWORD` | Authenticate to DBX Web |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | Standard system proxy variables for DBX Web requests; empty value means no proxy. Auth via `http://user:pass@host:port` |

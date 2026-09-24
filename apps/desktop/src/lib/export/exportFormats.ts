@@ -12,13 +12,16 @@ export function formatCsv(columns: string[], rows: ExportCellValue[][], quoteMod
 }
 
 // Tab-separated values with a header row, mirroring Navicat's "Text File (*.txt)"
-// export: fields are joined by a tab, NULL becomes empty, and a field is only
-// wrapped in double quotes (with " doubled) when it contains a tab, newline,
-// or quote - i.e. the minimum needed to round-trip the value.
+// export: fields are joined by a tab and NULL becomes empty. A field is wrapped
+// in double quotes only when it contains a tab or a line break - the characters
+// that would otherwise corrupt the TSV row/column shape. A field that merely
+// contains a double quote is emitted verbatim: TSV is parsed by splitting on the
+// tab alone (there is no quote state machine on paste-back), so quoting such a
+// value would corrupt it (e.g. a value of `"abc"` must not become `"""abc"""`).
 export function formatTsv(columns: string[], rows: ExportCellValue[][]): string {
   const esc = (value: ExportCellValue) => {
     const text = value === null ? "" : String(value);
-    if (text.includes("\t") || text.includes("\n") || text.includes("\r") || text.includes('"')) {
+    if (text.includes("\t") || text.includes("\n") || text.includes("\r")) {
       return `"${text.replace(/"/g, '""')}"`;
     }
     return text;

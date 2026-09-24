@@ -15,6 +15,8 @@ import {
   tabColorStyle,
   tabDatabaseIconType,
   tabDisplayTitle,
+  tabDisplayTitles,
+  syncTabTitleNumbers,
   tabIconClass,
   tabTooltipLines,
   tabularResultItems,
@@ -93,6 +95,13 @@ describe("query result SQL selection", () => {
 
     expect(queryResultBaseSql(tab)).toBe("SELECT * FROM dbo.second");
     expect(queryResultExecutionSql(tab)).toBe("SELECT * FROM dbo.second ORDER BY id DESC");
+  });
+
+  it("uses lastExecutedSql when a data tab has no editor SQL", () => {
+    const tab = queryTab({ mode: "data", sql: "", lastExecutedSql: "SELECT * FROM users", result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } });
+
+    expect(queryResultBaseSql(tab)).toBe("SELECT * FROM users");
+    expect(queryResultExecutionSql(tab)).toBe("SELECT * FROM users");
   });
 });
 
@@ -184,6 +193,89 @@ describe("query result grid identity", () => {
 });
 
 describe("tab group presentation", () => {
+  // 编号由 store 在标签列表变化时分配，渲染函数只读结果；这里把两步串起来，
+  // 与真实调用顺序保持一致（#9938）。
+  const titlesWithNumbers = (tabs: QueryTab[]) => {
+    syncTabTitleNumbers(tabs, translate);
+    return tabDisplayTitles(tabs, translate);
+  };
+
+  it("numbers colliding query tab titles so several tabs stay distinguishable", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" }), queryTab({ id: "tab-3" })];
+
+    const titles = titlesWithNumbers(tabs);
+    expect([...titles.values()]).toEqual(["PostgreSQL@db 1", "PostgreSQL@db 2", "PostgreSQL@db 3"]);
+  });
+
+  it("keeps the remaining numbers when a tab in the middle is closed", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" }), queryTab({ id: "tab-3" })];
+    titlesWithNumbers(tabs);
+
+    const titles = titlesWithNumbers(tabs.filter((tab) => tab.id !== "tab-2"));
+    expect(titles.get("tab-1")).toBe("PostgreSQL@db 1");
+    expect(titles.get("tab-3")).toBe("PostgreSQL@db 3");
+  });
+
+  it("keeps the number on the last surviving tab of a closed group", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" })];
+    titlesWithNumbers(tabs);
+
+    expect(titlesWithNumbers([tabs[0]!]).get("tab-1")).toBe("PostgreSQL@db 1");
+  });
+
+  it("continues after the highest number still in use when a new tab opens", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" }), queryTab({ id: "tab-3" })];
+    titlesWithNumbers(tabs);
+
+    const next = [...tabs.filter((tab) => tab.id !== "tab-2"), queryTab({ id: "tab-4" })];
+    const titles = titlesWithNumbers(next);
+    expect(titles.get("tab-1")).toBe("PostgreSQL@db 1");
+    expect(titles.get("tab-3")).toBe("PostgreSQL@db 3");
+    expect(titles.get("tab-4")).toBe("PostgreSQL@db 4");
+  });
+
+  it("drops the number of a tab whose title stops colliding", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" })];
+    titlesWithNumbers(tabs);
+
+    tabs[1]!.database = "other";
+    const titles = titlesWithNumbers(tabs);
+    expect(titles.get("tab-1")).toBe("PostgreSQL@db 1");
+    expect(titles.get("tab-2")).toBe("PostgreSQL@other");
+  });
+
+  it("leaves tab titles untouched while they are unique", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2", database: "other" }), queryTab({ id: "tab-3", customTitle: true, title: "orders.sql", savedSqlId: "sql-1" })];
+
+    const titles = titlesWithNumbers(tabs);
+    expect(titles.get("tab-1")).toBe("PostgreSQL@db");
+    expect(titles.get("tab-2")).toBe("PostgreSQL@other");
+    expect(titles.get("tab-3")).toBe("orders.sql");
+  });
+
+  it("numbers duplicate custom titles in strip order and skips preview tabs", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig, { id: "conn-preview", name: "[Preview] PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1", customTitle: true, title: "orders.sql", savedSqlId: "sql-1" }), queryTab({ id: "tab-preview", connectionId: "conn-preview" }), queryTab({ id: "tab-2", customTitle: true, title: "orders.sql", savedSqlId: "sql-2" })];
+
+    const titles = titlesWithNumbers(tabs);
+    expect(titles.get("tab-1")).toBe("orders.sql 1");
+    expect(titles.get("tab-2")).toBe("orders.sql 2");
+    expect(titles.get("tab-preview")).toBe("SQL");
+  });
+
   it("does not expose the internal objects mode in object browser tab titles", () => {
     const store = useConnectionStore();
     store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
@@ -228,6 +320,24 @@ describe("tab group presentation", () => {
       { label: "Group:", value: "Project / Staging" },
       { label: "Database:", value: "app" },
     ]);
+  });
+
+  it("omits the database row from tooltips for connections without a database target", () => {
+    const store = useConnectionStore();
+    store.sidebarLayout = {
+      groups: [],
+      order: [{ type: "connection", id: "conn-1" }],
+    };
+
+    for (const dbType of ["dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "weaviate", "chromadb", "etcd", "zookeeper", "nacos", "consul", "mq", "mqtt", "victoriametrics"] as const) {
+      store.connections = [{ id: "conn-1", name: "Local", db_type: dbType, database: "default" } as ConnectionConfig];
+
+      const lines = tabTooltipLines(queryTab({ database: "default" }), translate);
+
+      expect(lines, dbType).toContainEqual({ label: "Connection:", value: "Local" });
+      expect(lines, dbType).toContainEqual({ label: "Group:", value: "Ungrouped" });
+      expect(lines, dbType).not.toContainEqual({ label: "Database:", value: "default" });
+    }
   });
 
   it("labels a top-level connection as ungrouped", () => {

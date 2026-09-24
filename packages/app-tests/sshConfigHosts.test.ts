@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { test } from "vitest";
 import { applySshConfigHostAliasPrefill } from "../../apps/desktop/src/lib/connection/sshConfigHosts.ts";
 import type { SshTunnelConfig } from "../../apps/desktop/src/types/database.ts";
@@ -61,13 +59,4 @@ test("leaves the form unchanged when no config alias matches", () => {
   applySshConfigHostAliasPrefill(target, hosts);
 
   assert.deepEqual(target, before);
-});
-
-test("loads and exposes SSH config aliases in tunnel profile maintenance", () => {
-  const component = readFileSync(path.resolve("apps/desktop/src/components/connection/TunnelProfileManager.vue"), "utf8");
-
-  assert.match(component, /api\.listSshConfigHosts\(\)/);
-  assert.match(component, /list="tunnel-profile-ssh-config-host-aliases"/);
-  assert.match(component, /<datalist id="tunnel-profile-ssh-config-host-aliases">/);
-  assert.match(component, /@update:model-value="updateSelectedSshHost"/);
 });

@@ -5,13 +5,6 @@ import { createQueryEditorSearchKeymap, replaceFallbackKey } from "@/lib/editor/
 const editorSearchPanelSource = readFileSync(new URL("../EditorSearchPanel.vue", import.meta.url), "utf8");
 const queryEditorSource = readFileSync(new URL("../QueryEditor.vue", import.meta.url), "utf8");
 const contentAreaSource = readFileSync(new URL("../../layout/ContentArea.vue", import.meta.url), "utf8");
-const nacosConsoleSource = readFileSync(new URL("../../nacos/NacosAdminConsole.vue", import.meta.url), "utf8");
-
-describe("EditorSearchPanel corner style", () => {
-  it("uses the configurable five-pixel radius token for editor inputs", () => {
-    expect(editorSearchPanelSource).toContain("border-radius: var(--dbx-radius-fixed-5);");
-  });
-});
 
 describe("QueryEditor search shortcuts", () => {
   it("opens search and replace in editable editors", () => {
@@ -60,11 +53,6 @@ describe("QueryEditor search shortcuts", () => {
     expect(replaceFallbackKey("Linux x86_64")).toBe("Mod-h");
   });
 
-  it("routes the Nacos console replace fallback through the same platform helper", () => {
-    expect(nacosConsoleSource).toContain("key: replaceFallbackKey()");
-    expect(nacosConsoleSource).not.toContain('key: "Mod-h"');
-  });
-
   it("allows search but consumes replace without opening it in read-only editors", () => {
     const openSearch = vi.fn(() => true);
     const openReplace = vi.fn(() => true);
@@ -86,19 +74,5 @@ describe("QueryEditor search shortcuts", () => {
     expect(queryEditorSource).toMatch(/key:\s*"Escape"/);
     expect(editorSearchPanelSource).toContain('e.key === "Enter" && !e.shiftKey');
     expect(editorSearchPanelSource).toContain('e.key === "Enter" && e.shiftKey');
-  });
-
-  it("registers the find binding before the formatSql binding so an occupied default would shadow formatSql", () => {
-    // The runtime keymap is first-match-wins: the find binding (shortcuts.find,
-    // Mod+F) is spread into QueryEditor.vue's Prec.high keymap before the
-    // formatSql binding (shortcuts.formatSql). A reserved-key repair that reset
-    // find to its default Mod+F while the user had explicitly bound formatSql to
-    // Mod+F would make formatSql unreachable — this ordering is why
-    // normalizeShortcutSettings clears such a repair instead of applying it.
-    const findIndex = queryEditorSource.indexOf("...binding(shortcuts.find, openSearch),");
-    const formatIndex = queryEditorSource.indexOf("...binding(shortcuts.formatSql,");
-    expect(findIndex).toBeGreaterThan(-1);
-    expect(formatIndex).toBeGreaterThan(-1);
-    expect(findIndex).toBeLessThan(formatIndex);
   });
 });

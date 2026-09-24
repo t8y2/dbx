@@ -8,8 +8,11 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({
-  useI18n: () => ({ t: (key: string) => key }),
+// PR-A4: AppSidebar now pulls useQueryStore/useI18n chains through
+// chains, so partially mock vue-i18n here while keeping the other exports (e.g. createI18n).
+vi.mock("vue-i18n", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("vue-i18n")>()),
+  useI18n: () => ({ t: (key: string) => key, locale: { value: "en" } }),
 }));
 
 vi.mock("@/stores/connectionStore", () => ({

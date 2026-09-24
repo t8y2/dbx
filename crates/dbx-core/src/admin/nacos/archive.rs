@@ -189,6 +189,7 @@ pub fn decode_config_archive(bytes: &[u8], target_namespace: &str) -> Result<Vec
             app_name: item.app_name,
             desc: item.desc,
             tags: item.config_tags,
+            cas_md5: None,
         });
     }
     if let Some(orphan) = entries.keys().next() {

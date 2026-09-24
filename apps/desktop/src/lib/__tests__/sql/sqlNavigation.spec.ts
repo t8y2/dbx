@@ -355,11 +355,11 @@ describe("标识符提取的字符边界", () => {
     expect(extractIdentifierAt(sql, sql.indexOf("$col"))).toBe("$col");
   });
 
-  it("数字开头的片段不被当作标识符（只识别其后的字母段）", () => {
-    const sql = "select 1abc from t";
+  it("数字开头的标识符按 MySQL 规则识别，纯数字仍是字面量", () => {
+    const sql = "select 1abc, 123 from t";
 
-    expect(extractIdentifierAt(sql, sql.indexOf("1abc"))).toBeNull();
-    expect(extractIdentifierAt(sql, sql.indexOf("abc"))).toBe("abc");
+    expect(extractIdentifierAt(sql, sql.indexOf("1abc"))).toBe("1abc");
+    expect(extractIdentifierAt(sql, sql.indexOf("123"))).toBeNull();
   });
 
   it("引号包裹的中文标识符去掉引号并标记 quoted", () => {

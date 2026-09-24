@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::connection::DatabaseType;
+use crate::types::PgPartitionKind;
 
 fn column(name: &str) -> EditableStructureColumn {
     EditableStructureColumn {
@@ -8538,4 +8539,390 @@ fn postgres_expression_index_opclass_round_trips_from_indclass() {
     );
     // The bare expression text no longer carries the opclass, so it cannot be duplicated.
     assert!(!sql.contains("gin_trgm_ops gin_trgm_ops"), "Opclass must not be duplicated, got: {sql}");
+}
+
+fn partition_options(
+    database_type: DatabaseType,
+    schema: Option<&str>,
+    table_name: &str,
+    operations: Vec<TablePartitionOperation>,
+) -> TablePartitionSqlOptions {
+    TablePartitionSqlOptions {
+        database_type: Some(database_type),
+        driver_profile: None,
+        schema: schema.map(str::to_string),
+        table_name: table_name.to_string(),
+        operations,
+    }
+}
+
+fn partition_operation(
+    kind: TablePartitionOperationKind,
+    name: &str,
+    bound: Option<TablePartitionBoundDraft>,
+) -> TablePartitionOperation {
+    TablePartitionOperation {
+        id: format!("op:{name}"),
+        kind,
+        parent_schema: String::new(),
+        parent_table: String::new(),
+        schema: String::new(),
+        name: name.to_string(),
+        bound,
+        concurrently: false,
+    }
+}
+
+#[test]
+fn partition_create_uses_partition_of_with_each_bound_kind() {
+    let range = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "sales",
+        vec![partition_operation(
+            TablePartitionOperationKind::Create,
+            "sales_2025",
+            Some(TablePartitionBoundDraft::Range {
+                from: vec!["'2025-01-01'".to_string()],
+                to: vec!["'2026-01-01'".to_string()],
+            }),
+        )],
+    ));
+    assert!(range.warnings.is_empty(), "{:?}", range.warnings);
+    assert_eq!(
+        range.statements,
+        vec!["CREATE TABLE \"public\".\"sales_2025\" PARTITION OF \"public\".\"sales\" FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');"]
+    );
+
+    let list = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "events",
+        vec![partition_operation(
+            TablePartitionOperationKind::Create,
+            "events_ab",
+            Some(TablePartitionBoundDraft::List { values: vec!["'a'".to_string(), "'b'".to_string()] }),
+        )],
+    ));
+    assert_eq!(
+        list.statements,
+        vec!["CREATE TABLE \"public\".\"events_ab\" PARTITION OF \"public\".\"events\" FOR VALUES IN ('a', 'b');"]
+    );
+
+    let hash = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "h",
+        vec![partition_operation(
+            TablePartitionOperationKind::Create,
+            "h0",
+            Some(TablePartitionBoundDraft::Hash { modulus: 2, remainder: 0 }),
+        )],
+    ));
+    assert_eq!(
+        hash.statements,
+        vec!["CREATE TABLE \"public\".\"h0\" PARTITION OF \"public\".\"h\" FOR VALUES WITH (MODULUS 2, REMAINDER 0);"]
+    );
+
+    let default = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "sales",
+        vec![partition_operation(
+            TablePartitionOperationKind::Create,
+            "sales_default",
+            Some(TablePartitionBoundDraft::Default),
+        )],
+    ));
+    assert_eq!(
+        default.statements,
+        vec!["CREATE TABLE \"public\".\"sales_default\" PARTITION OF \"public\".\"sales\" DEFAULT;"]
+    );
+}
+
+#[test]
+fn partition_attach_detach_and_drop_generate_explicit_statements() {
+    let attach = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "sales",
+        vec![partition_operation(
+            TablePartitionOperationKind::Attach,
+            "sales_2025",
+            Some(TablePartitionBoundDraft::Range {
+                from: vec!["MINVALUE".to_string()],
+                to: vec!["'2025-01-01'".to_string()],
+            }),
+        )],
+    ));
+    assert_eq!(
+        attach.statements,
+        vec!["ALTER TABLE \"public\".\"sales\" ATTACH PARTITION \"public\".\"sales_2025\" FOR VALUES FROM (MINVALUE) TO ('2025-01-01');"]
+    );
+
+    let detach = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "sales",
+        vec![partition_operation(TablePartitionOperationKind::Detach, "sales_2024", None)],
+    ));
+    assert_eq!(detach.statements, vec!["ALTER TABLE \"public\".\"sales\" DETACH PARTITION \"public\".\"sales_2024\";"]);
+
+    let mut concurrent = partition_operation(TablePartitionOperationKind::Detach, "sales_2024", None);
+    concurrent.concurrently = true;
+    let detach_concurrently = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "sales",
+        vec![concurrent],
+    ));
+    assert_eq!(
+        detach_concurrently.statements,
+        vec!["ALTER TABLE \"public\".\"sales\" DETACH PARTITION \"public\".\"sales_2024\" CONCURRENTLY;"]
+    );
+
+    let drop = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "sales",
+        vec![partition_operation(TablePartitionOperationKind::Drop, "sales_2024", None)],
+    ));
+    assert_eq!(drop.statements, vec!["DROP TABLE \"public\".\"sales_2024\";"]);
+}
+
+#[test]
+fn partition_operation_can_target_an_explicit_parent_and_schema() {
+    // Detaching the partition currently being edited: the parent is not the
+    // edited table, and the child lives in another schema.
+    let mut detach = partition_operation(TablePartitionOperationKind::Detach, "sales_2024", None);
+    detach.parent_schema = "analytics".to_string();
+    detach.parent_table = "sales".to_string();
+    detach.schema = "archive".to_string();
+
+    let result = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "sales_2024",
+        vec![detach],
+    ));
+
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"analytics\".\"sales\" DETACH PARTITION \"archive\".\"sales_2024\";"]
+    );
+}
+
+#[test]
+fn partition_operations_are_refused_for_non_postgres() {
+    let result = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Mysql,
+        Some("db"),
+        "sales",
+        vec![partition_operation(
+            TablePartitionOperationKind::Create,
+            "sales_2025",
+            Some(TablePartitionBoundDraft::Default),
+        )],
+    ));
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings, vec!["Partition operations are not supported for this database engine.".to_string()]);
+}
+
+#[test]
+fn partition_operations_are_supported_for_kingbase() {
+    let result = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Kingbase,
+        Some("public"),
+        "sales",
+        vec![partition_operation(
+            TablePartitionOperationKind::Create,
+            "sales_2025",
+            Some(TablePartitionBoundDraft::Default),
+        )],
+    ));
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(
+        result.statements,
+        vec!["CREATE TABLE \"public\".\"sales_2025\" PARTITION OF \"public\".\"sales\" DEFAULT;"]
+    );
+}
+
+#[test]
+fn partition_operations_warn_on_malformed_bounds() {
+    let mismatched = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "sales",
+        vec![partition_operation(
+            TablePartitionOperationKind::Create,
+            "sales_x",
+            Some(TablePartitionBoundDraft::Range {
+                from: vec!["1".to_string()],
+                to: vec!["2".to_string(), "3".to_string()],
+            }),
+        )],
+    ));
+    assert!(mismatched.statements.is_empty());
+    assert!(mismatched.warnings[0].contains("RANGE partition bound"));
+
+    let bad_hash = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "h",
+        vec![partition_operation(
+            TablePartitionOperationKind::Create,
+            "h9",
+            Some(TablePartitionBoundDraft::Hash { modulus: 2, remainder: 2 }),
+        )],
+    ));
+    assert!(bad_hash.statements.is_empty());
+    assert!(bad_hash.warnings[0].contains("HASH partition bound"));
+
+    let detach_with_bound = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "sales",
+        vec![partition_operation(
+            TablePartitionOperationKind::Detach,
+            "sales_2024",
+            Some(TablePartitionBoundDraft::Default),
+        )],
+    ));
+    assert!(detach_with_bound.statements.is_empty());
+    assert!(detach_with_bound.warnings[0].contains("must not carry a bound"));
+}
+
+#[test]
+fn partition_operation_quotes_identifiers() {
+    let result = build_table_partition_operation_sql(partition_options(
+        DatabaseType::Postgres,
+        Some("we\"ird"),
+        "sales",
+        vec![partition_operation(
+            TablePartitionOperationKind::Create,
+            "part\"1",
+            Some(TablePartitionBoundDraft::Default),
+        )],
+    ));
+    assert_eq!(
+        result.statements,
+        vec!["CREATE TABLE \"we\"\"ird\".\"part\"\"1\" PARTITION OF \"we\"\"ird\".\"sales\" DEFAULT;"]
+    );
+}
+
+#[test]
+fn create_partitioned_table_appends_partition_by_clause() {
+    let column = EditableStructureColumn {
+        id: "sold_on".to_string(),
+        name: "sold_on".to_string(),
+        data_type: "date".to_string(),
+        is_nullable: false,
+        default_value: String::new(),
+        comment: String::new(),
+        is_primary_key: false,
+        extra: None,
+        original: None,
+        original_position: None,
+        marked_for_drop: false,
+        character_set: String::new(),
+        collation: String::new(),
+    };
+    let options = structure_change_options(DatabaseType::Postgres, Some("public"), "sales", vec![column]);
+
+    let result = build_create_partitioned_table_sql(
+        options,
+        TablePartitionDefinition {
+            kind: PgPartitionKind::Range,
+            columns: vec!["sold_on".to_string()],
+            expression: String::new(),
+        },
+    );
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements.len(), 1);
+    assert!(
+        result.statements[0].ends_with(") PARTITION BY RANGE (\"sold_on\");"),
+        "unexpected statement: {}",
+        result.statements[0]
+    );
+}
+
+#[test]
+fn create_partitioned_table_uses_expression_and_multi_column_keys() {
+    let options = structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "events",
+        vec![column("region"), column("occurred_at")],
+    );
+    let expression = build_create_partitioned_table_sql(
+        options,
+        TablePartitionDefinition {
+            kind: PgPartitionKind::Hash,
+            columns: Vec::new(),
+            expression: "abs(id)".to_string(),
+        },
+    );
+    assert!(expression.statements[0].ends_with(") PARTITION BY HASH (abs(id));"), "{}", expression.statements[0]);
+
+    let options = structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "events",
+        vec![column("region"), column("occurred_at")],
+    );
+    let multi = build_create_partitioned_table_sql(
+        options,
+        TablePartitionDefinition {
+            kind: PgPartitionKind::List,
+            columns: vec!["region".to_string(), "occurred_at".to_string()],
+            expression: String::new(),
+        },
+    );
+    assert!(
+        multi.statements[0].ends_with(") PARTITION BY LIST (\"region\", \"occurred_at\");"),
+        "{}",
+        multi.statements[0]
+    );
+}
+
+#[test]
+fn create_partitioned_table_requires_a_key_and_postgres() {
+    let options = structure_change_options(DatabaseType::Postgres, Some("public"), "events", vec![column("id")]);
+    let missing_key = build_create_partitioned_table_sql(
+        options,
+        TablePartitionDefinition { kind: PgPartitionKind::Range, columns: Vec::new(), expression: String::new() },
+    );
+    assert!(missing_key.statements.is_empty());
+    assert!(missing_key.warnings[0].contains("at least one column"));
+
+    let options = structure_change_options(DatabaseType::Mysql, Some("db"), "events", vec![column("id")]);
+    let mysql = build_create_partitioned_table_sql(
+        options,
+        TablePartitionDefinition {
+            kind: PgPartitionKind::Range,
+            columns: vec!["id".to_string()],
+            expression: String::new(),
+        },
+    );
+    assert!(mysql.statements.is_empty());
+    assert_eq!(mysql.warnings, vec!["Partitioning is not supported for this database engine.".to_string()]);
+}
+
+#[test]
+fn create_partitioned_table_is_supported_for_kingbase() {
+    let options = structure_change_options(DatabaseType::Kingbase, Some("public"), "events", vec![column("region")]);
+    let result = build_create_partitioned_table_sql(
+        options,
+        TablePartitionDefinition {
+            kind: PgPartitionKind::List,
+            columns: vec!["region".to_string()],
+            expression: String::new(),
+        },
+    );
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert!(result.statements[0].ends_with(") PARTITION BY LIST (\"region\");"), "{}", result.statements[0]);
 }

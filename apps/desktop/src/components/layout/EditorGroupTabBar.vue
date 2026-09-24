@@ -83,7 +83,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
 import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems } from "@/lib/tabs/tabMenu";
-import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabDisplayTitles, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
 import type { QueryTab } from "@/types/database";
@@ -175,13 +175,12 @@ const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.edi
 // The icon-only collapse only exists in the vertical toolbar; horizontal
 // placements must ignore the persisted collapse state entirely.
 const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);
+// Outer [data-workspace-tab-navigation] / [data-special-page-navigation] owns
+// the shared vertical rail width; fill that rail so nested pane bars stay in
+// sync while the resize handle updates the outer panel (issue #9977).
 const tabBarStyle = computed<CSSProperties | undefined>(() => {
   if (!isVerticalLayout.value) return undefined;
-  if (props.tabBarCollapsed) {
-    return { width: "100%", flex: "0 0 100%" };
-  }
-  const width = props.tabBarWidth ?? 240;
-  return { width: `${width}px`, flex: `0 0 ${width}px` };
+  return { width: "100%", flex: "0 0 100%" };
 });
 const tabBarCollapseIcon = computed(() => {
   const isLeft = settingsStore.editorSettings.tabPlacement === "left";
@@ -266,7 +265,7 @@ const filteredGroupTabs = computed(() => {
   if (!query) {
     return props.tabs;
   }
-  return props.tabs.filter((tab) => tabDisplayTitle(tab, t).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query));
+  return props.tabs.filter((tab) => tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query));
 });
 
 watch(tabOverflowOpen, (open) => {
@@ -411,8 +410,12 @@ function compareTabGroupKeys(left: string, right: string) {
   return localized || (left < right ? -1 : 1);
 }
 
+// Numbered across every open tab (not just this group's) so a tab keeps the
+// same label when the same query tab is moved between panes.
+const tabTitles = computed(() => tabDisplayTitles(queryStore.tabs, t));
+
 function tabTitleText(tab: QueryTab) {
-  return tabDisplayTitle(tab, t);
+  return tabTitles.value.get(tab.id) ?? tabDisplayTitle(tab, t);
 }
 
 function tabConnectionLabel(tab: QueryTab) {
@@ -843,7 +846,7 @@ type StripEntry = { kind: "header"; key: string; tab: QueryTab; pinned: boolean;
  * pills. Collapsed pills remain mounted so their visibility can animate.
  */
 function tabMatchesSearch(tab: QueryTab, query: string) {
-  const title = tabDisplayTitle(tab, t).toLocaleLowerCase();
+  const title = tabTitleText(tab).toLocaleLowerCase();
   return title.includes(query) || tab.title.toLocaleLowerCase().includes(query);
 }
 
@@ -1107,7 +1110,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       label: t("contextMenu.copyName"),
       action: async () => {
         try {
-          await copyToClipboard(tabDisplayTitle(tab, t));
+          await copyToClipboard(tabTitleText(tab));
           toast(t("connection.copied"), 2000);
         } catch (e: any) {
           toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
@@ -1617,7 +1620,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             />
                             <span v-else-if="!isTabBarCollapsed" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
                               <span v-if="isDirtyTab(entry.tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                              <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(entry.tab)">{{ tabDisplayTitle(entry.tab, t) }}</span>
+                              <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(entry.tab)">{{ tabTitleText(entry.tab) }}</span>
                             </span>
                             <ReadOnlySessionControl v-if="!isTabBarCollapsed" :connection-id="entry.tab.connectionId" compact />
                             <button
@@ -1748,7 +1751,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                 <div
                   class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
                   :class="isTabActive(tab) ? 'bg-accent/70 text-accent-foreground' : ''"
-                  :title="tabDisplayTitle(tab, t)"
+                  :title="tabTitleText(tab)"
                   role="menuitem"
                   tabindex="0"
                   @click="
@@ -1766,7 +1769,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                   </TabExecutionStatus>
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                    <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabDisplayTitle(tab, t) }}</span>
+                    <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
                   </span>
                   <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
                   <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />

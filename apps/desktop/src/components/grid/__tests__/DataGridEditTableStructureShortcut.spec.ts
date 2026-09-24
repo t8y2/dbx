@@ -167,7 +167,7 @@ describe("DataGrid edit-table-structure shortcut", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(bubbled).not.toHaveBeenCalled();
     expect(openTableStructure).toHaveBeenCalledOnce();
-    expect(openTableStructure).toHaveBeenCalledWith("connection-1", "app", "public", "users", "ddl", undefined, "warehouse");
+    expect(openTableStructure).toHaveBeenCalledWith("connection-1", "app", "public", "users", "ddl", undefined, "warehouse", "table");
   });
 
   it("uses a configured shortcut and leaves the default key untouched", async () => {

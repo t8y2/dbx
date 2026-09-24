@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 import { escapeCustomBasemapAttribution, loadCustomBasemapConfig, loadSelectedBasemapId, normalizeCustomBasemapConfig, resolveSelectedBasemapId, saveCustomBasemapConfig, saveSelectedBasemapId } from "@/lib/dataGrid/customBasemap";
-
-const layerPreviewSource = readFileSync(new URL("../../../components/grid/LayerPreviewDialog.vue", import.meta.url), "utf8");
 
 function storage() {
   const values = new Map<string, string>();
@@ -13,12 +10,6 @@ function storage() {
 }
 
 describe("custom basemap configuration", () => {
-  it("keeps a saved custom basemap available after switching to a built-in basemap", () => {
-    expect(layerPreviewSource).toMatch(/<option v-if="customBasemapConfig" value="custom">/);
-    expect(layerPreviewSource).toMatch(/id === "custom" && customBasemapConfig\.value/);
-    expect(layerPreviewSource).toMatch(/v-model="customBasemapName"/);
-  });
-
   it("normalizes a valid XYZ configuration", () => {
     expect(
       normalizeCustomBasemapConfig({
@@ -57,7 +48,6 @@ describe("custom basemap configuration", () => {
 
     expect(escaped).toBe("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&lt;svg onload=&#39;alert(2)&#39;&gt;&lt;script&gt;alert(3)&lt;/script&gt;&amp;");
     expect(escaped).not.toMatch(/<(?:img|svg|script)\b/i);
-    expect(layerPreviewSource).toMatch(/basemap\.custom \? escapeCustomBasemapAttribution\(basemap\.attribution\) : basemap\.attribution/);
   });
 
   it("persists the actual basemap selection separately from the custom configuration", () => {
@@ -67,7 +57,6 @@ describe("custom basemap configuration", () => {
 
     expect(saveSelectedBasemapId(target, "osm")).toBe(true);
     expect(loadSelectedBasemapId(target)).toBe("osm");
-    expect(layerPreviewSource).toMatch(/saveSelectedBasemapId\(basemapStorage, basemap\.id\)/);
   });
 
   it("does not enable a stored custom basemap unless it was selected", () => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { BackendError, SqlErrorPosition } from "@/lib/backend/errorUtils";
-import { mapExecutedOffsetToSource, scalarPositionToUtf16Offset, sqlErrorEditorOffset } from "@/lib/sql/errorPosition";
+import { mapExecutedOffsetToSource, scalarPositionToUtf16Offset, sqlErrorDisplayPosition, sqlErrorEditorOffset, sqlErrorHasMessagePosition } from "@/lib/sql/errorPosition";
 import type { QueryResult } from "@/types/database";
 
 function backendError(position?: SqlErrorPosition): BackendError {
@@ -17,11 +17,11 @@ function backendError(position?: SqlErrorPosition): BackendError {
   };
 }
 
-function errorResult(options: { editorStatement?: string; sourceFrom?: number; sourceTo?: number; executedStatement?: string; position?: SqlErrorPosition }): QueryResult {
+function errorResult(options: { editorStatement?: string; sourceFrom?: number; sourceTo?: number; executedStatement?: string; position?: SqlErrorPosition; message?: string }): QueryResult {
   const statement = options.editorStatement ?? "";
   return {
     columns: ["Error"],
-    rows: [["ERROR: relation does not exist"]],
+    rows: [[options.message ?? "ERROR: relation does not exist"]],
     affected_rows: 0,
     execution_time_ms: 0,
     execution_error: true,
@@ -160,6 +160,76 @@ describe("sqlErrorEditorOffset", () => {
 
       expect(sqlErrorEditorOffset({ editorSql: source, result })?.offset).toBe(source.indexOf("users"));
     });
+  });
+});
+
+describe("when the engine reports its position only in the error message", () => {
+  it("resolves the Oracle Agent offset and labels it with the caret's row/column", () => {
+    const sql = "SELECT nope_col\nFROM dual";
+    const result = errorResult({
+      editorStatement: sql,
+      message: 'ORA-00904: "NOPE_COL": invalid identifier error occur at position: 7',
+    });
+
+    expect(sqlErrorEditorOffset({ editorSql: sql, result })).toEqual({ offset: 7, line: 1, column: 8 });
+    // The label must describe the caret, not the executed statement it was projected from.
+    expect(sqlErrorDisplayPosition({ editorSql: sql, result })).toEqual({ line: 1, column: 8 });
+  });
+
+  it("maps an offset on a later line to that line and column", () => {
+    const sql = "SELECT 1\nFROM dual\nWHERE to_number('abc') = 1";
+    const offset = sql.indexOf("'abc'");
+    const result = errorResult({ editorStatement: sql, message: `ORA-01722: invalid number error occur at position: ${offset}` });
+
+    const mapped = sqlErrorEditorOffset({ editorSql: sql, result });
+    // `'abc'` starts at column 17 of "WHERE to_number('abc') = 1".
+    expect(mapped).toEqual({ offset, line: 3, column: 17 });
+    expect(sqlErrorDisplayPosition({ editorSql: sql, result })).toEqual({ line: 3, column: 17 });
+  });
+
+  it("projects a message offset back onto the source when DBX rewrote the statement", () => {
+    const source = "SELECT * FROM users";
+    const executed = 'SELECT *, "id" AS "__dbx_hidden_pk" FROM users LIMIT 100 OFFSET 0;';
+    const result = errorResult({
+      editorStatement: source,
+      executedStatement: executed,
+      message: `ORA-00942: table or view does not exist error occur at position: ${executed.indexOf("users")}`,
+    });
+
+    const mapped = sqlErrorEditorOffset({ editorSql: source, result });
+    expect(mapped?.offset).toBe(source.indexOf("users"));
+    // The label follows the projected source text, so it stays consistent with the caret.
+    expect(sqlErrorDisplayPosition({ editorSql: source, result })).toEqual({ line: 1, column: mapped!.offset + 1 });
+  });
+
+  it("uses a textual location when the message carries one", () => {
+    const sql = "SELECT 1\nFROM missing";
+    const result = errorResult({ editorStatement: sql, message: "syntax error at line 2, column 6" });
+
+    expect(sqlErrorEditorOffset({ editorSql: sql, result })).toEqual({ offset: 14, line: 2, column: 6 });
+  });
+
+  it("returns undefined when neither the envelope nor the message carries a position", () => {
+    const sql = "SELECT nope_col FROM dual";
+    const result = errorResult({ editorStatement: sql, message: 'ORA-00904: "NOPE_COL": invalid identifier' });
+
+    expect(sqlErrorEditorOffset({ editorSql: sql, result })).toBeUndefined();
+    expect(sqlErrorDisplayPosition({ editorSql: sql, result })).toBeUndefined();
+  });
+
+  it("still returns undefined when the message offset cannot be found in the editor", () => {
+    const result = errorResult({ editorStatement: "SELECT * FROM gone", message: "ORA-00942: table or view does not exist error occur at position: 14" });
+
+    expect(sqlErrorEditorOffset({ editorSql: "SELECT 1", result })).toBeUndefined();
+  });
+});
+
+describe("sqlErrorHasMessagePosition", () => {
+  it("detects the positions engines put in the message text", () => {
+    expect(sqlErrorHasMessagePosition('ORA-00904: "X": invalid identifier error occur at position: 9')).toBe(true);
+    expect(sqlErrorHasMessagePosition("syntax error at line 2, column 4")).toBe(true);
+    expect(sqlErrorHasMessagePosition("ERROR 1054 (42S22): Unknown column 'nope_col' in 'field list'")).toBe(false);
+    expect(sqlErrorHasMessagePosition("")).toBe(false);
   });
 });
 

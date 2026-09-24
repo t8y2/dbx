@@ -75,6 +75,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   editor: [
     "executeMode",
     "defaultTransactionMode",
+    "keepExplicitTransactionInAutoCommit",
     "executeAllOnBlankLine",
     "showExecutionTargetPicker",
     "showStatementRunButtons",
@@ -148,6 +149,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridFilterEditorView",
     "dataGridKeepFilterEditorExpanded",
     "dataGridTextFilterPanelHeight",
+    "dataGridToolbarLayout",
     "defaultAutoKeepResults",
     "multiStatementDefaultView",
     "dataGridAutoTransposeSingleRow",

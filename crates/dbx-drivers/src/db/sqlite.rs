@@ -18,9 +18,9 @@ extern crate libsqlite3_hotbundle;
 use super::file_validator::validate_file_path;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
-    ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
-    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo,
+    ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
+    CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
+    CompletionAssistantResponse, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo,
 };
 
 const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -1588,6 +1588,7 @@ pub async fn get_columns(pool: &SqliteHandle, schema: &str, table: &str) -> Resu
                     numeric_scale: None,
                     character_maximum_length: None,
                     enum_values: None,
+                    metadata_capabilities: Some(ColumnMetadataCapabilities::default_only()),
                     ..Default::default()
                 }
             })
@@ -1623,6 +1624,7 @@ pub async fn get_columns(pool: &SqliteHandle, schema: &str, table: &str) -> Resu
                         numeric_scale: None,
                         character_maximum_length: None,
                         enum_values: None,
+                        metadata_capabilities: Some(ColumnMetadataCapabilities::default_only()),
                         ..Default::default()
                     })
                 })

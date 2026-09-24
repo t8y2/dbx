@@ -315,10 +315,36 @@ pub struct ExecuteAndShowRequest {
     pub database: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct CellWindowArgs {
+    #[schemars(
+        description = "Start character offset for every string cell (default 0, max 1000000). Use the next offset reported by a truncated result to slide through a long value; narrow the query to the target row and column first."
+    )]
+    #[schemars(extend("type" = "integer"))]
+    pub cell_char_offset: Option<u64>,
+    #[schemars(
+        description = "Maximum characters returned per string cell (default 200, max 4000). Increase only for an explicit long-value expansion."
+    )]
+    #[schemars(extend("type" = "integer"))]
+    pub cell_char_limit: Option<u64>,
+}
+
+impl CellWindowArgs {
+    fn to_query_window(&self) -> QueryCellWindow {
+        QueryCellWindow::from_options(self.cell_char_offset, self.cell_char_limit)
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteBatchQueryRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    /// Per-cell character window for every rendered statement. Flattened from
+    /// `CellWindowArgs` so the batch tool accepts the same `cell_char_offset` /
+    /// `cell_char_limit` arguments as `dbx_execute_query` instead of silently
+    /// ignoring them (#9865).
+    #[serde(flatten)]
+    pub cell_window: CellWindowArgs,
     #[schemars(description = "Database name")]
     #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
@@ -764,6 +790,10 @@ impl DbxMcpServer {
             return self
                 .execute_batch_request(ExecuteBatchQueryRequest {
                     selector: ConnectionSelector { connection_id: Some(connection.id.clone()), connection_name: None },
+                    cell_window: CellWindowArgs {
+                        cell_char_offset: request.cell_char_offset,
+                        cell_char_limit: request.cell_char_limit,
+                    },
                     database: request.database.clone(),
                     sql: request.sql.clone(),
                     session_id: request.session_id.clone(),
@@ -1019,7 +1049,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_batch",
-        description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected when the backend cannot provide a rollbackable transaction or for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back)."
+        description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). Pass cell_char_offset/cell_char_limit to expand long string cells in every statement's result, exactly like dbx_execute_query. When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected when the backend cannot provide a rollbackable transaction or for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back)."
     )]
     async fn execute_batch_tool(
         &self,
@@ -1052,6 +1082,11 @@ impl DbxMcpServer {
         if sql.is_empty() {
             return tool_error("SQL_BATCH_EMPTY", "SQL script cannot be empty.");
         }
+        // Every statement is rendered on its own, so the requested per-cell
+        // character window has to reach `format_batch_results`; without it the
+        // renderer silently fell back to the 200-character default and
+        // `cell_char_limit` looked ignored (#9865).
+        let cell_window = request.cell_window.to_query_window();
         let session = match request.session_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
             Some(session_id) => {
                 let (session, expired) = self.sessions.resolve(session_id).await.into_parts();
@@ -1284,7 +1319,7 @@ impl DbxMcpServer {
                 }),
             )
             .await;
-            let mut tool_result = text(format_batch_results(&results));
+            let mut tool_result = text(format_batch_results(&results, cell_window));
             tool_result.structured_content = Some(json!({
                 "session_id": session.id,
                 "transaction_state": status.state,
@@ -1362,7 +1397,7 @@ impl DbxMcpServer {
                     affected_rows,
                 )
                 .await;
-                let markdown = format_batch_results(&results);
+                let markdown = format_batch_results(&results, cell_window);
                 // Issue #7548 requires structured per-statement results so callers do not
                 // parse concatenated text. MCP requires structuredContent to be an object,
                 // so the array lives under `results`.
@@ -1380,7 +1415,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_open_session",
-        description = "Open a stateful query session pinned to a single backend connection. Returns a session ID for dbx_execute_query: USE, SET CATALOG, session variables and temporary tables persist across calls within the session. Close with dbx_close_session when done; idle sessions expire after 30 minutes."
+        description = "Open a stateful query session pinned to a single backend connection. Returns a session ID for dbx_execute_query: USE, SET CATALOG, session variables and temporary tables persist across calls within the session. Close with dbx_close_session when done; idle sessions expire after 30 minutes by default (configurable with DBX_SESSION_IDLE_TTL_SECS)."
     )]
     async fn open_session_tool(
         &self,
@@ -2591,7 +2626,7 @@ fn mcp_sql_operation(sql: &str, database_type: DatabaseType) -> String {
 /// statement failed, how many rows each affected, or what each returned. A
 /// `merged` entry (use_transaction mode) is labelled as the transaction outcome
 /// instead of a per-statement result.
-fn format_batch_results(results: &[crate::backend::BatchStatementResult]) -> String {
+fn format_batch_results(results: &[crate::backend::BatchStatementResult], cell_window: QueryCellWindow) -> String {
     let mut output = String::new();
     for (index, result) in results.iter().enumerate() {
         if index > 0 {
@@ -2604,7 +2639,7 @@ fn format_batch_results(results: &[crate::backend::BatchStatementResult]) -> Str
                 let message = result.error_message.as_deref().unwrap_or("Transaction failed");
                 output.push_str(&format!("**Status:** failed\n\n{message}\n"));
             } else {
-                let rendered = format_query_result_as_text(&result.result, BATCH_MAX_ROWS, QueryCellWindow::default())
+                let rendered = format_query_result_as_text(&result.result, BATCH_MAX_ROWS, cell_window)
                     .unwrap_or_else(|error| error);
                 output.push_str(rendered.trim_start_matches("Query executed. "));
             }
@@ -2620,8 +2655,8 @@ fn format_batch_results(results: &[crate::backend::BatchStatementResult]) -> Str
             let message = result.error_message.as_deref().unwrap_or("Statement failed");
             output.push_str(&format!("**Status:** failed\n\n{message}\n"));
         } else {
-            let rendered = format_query_result_as_text(&result.result, BATCH_MAX_ROWS, QueryCellWindow::default())
-                .unwrap_or_else(|error| error);
+            let rendered =
+                format_query_result_as_text(&result.result, BATCH_MAX_ROWS, cell_window).unwrap_or_else(|error| error);
             output.push_str(rendered.trim_start_matches("Query executed. "));
         }
     }
@@ -4064,7 +4099,17 @@ mod tests {
             ("dbx_list_routines", &["database", "schema", "routine_type"]),
             ("dbx_get_routine_source", &["database", "schema", "signature"]),
             ("dbx_execute_query", &["database", "session_id", "cell_char_offset", "cell_char_limit", "max_rows"]),
-            ("dbx_execute_batch", &["database", "session_id", "continue_on_error", "use_transaction"]),
+            (
+                "dbx_execute_batch",
+                &[
+                    "database",
+                    "session_id",
+                    "continue_on_error",
+                    "use_transaction",
+                    "cell_char_offset",
+                    "cell_char_limit",
+                ],
+            ),
             ("dbx_open_session", &["database", "enable_transactions"]),
             ("dbx_open_table", &["database", "schema"]),
             ("dbx_execute_and_show", &["database"]),
@@ -5038,6 +5083,7 @@ mod tests {
                 server
                     .execute_batch(Parameters(ExecuteBatchQueryRequest {
                         selector: selector("mysql"),
+                        cell_window: CellWindowArgs::default(),
                         database: None,
                         sql: "UPDATE accounts SET name = 'first' WHERE id = 1; SELECT id FROM accounts WHERE id = 1"
                             .to_string(),
@@ -5620,6 +5666,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: Some("app".to_string()),
                 sql: "SELECT 1; SELECT 2".to_string(),
                 session_id: None,
@@ -5667,6 +5714,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "SELECT 1; SELECT 2".to_string(),
                 session_id: Some(session_id.clone()),
@@ -5690,6 +5738,7 @@ mod tests {
             let result = server
                 .execute_batch(Parameters(ExecuteBatchQueryRequest {
                     selector: selector(id),
+                    cell_window: CellWindowArgs::default(),
                     database: None,
                     sql: "SELECT 1".to_string(),
                     session_id: None,
@@ -5714,6 +5763,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "SELECT 1; SELECT 2".to_string(),
                 session_id: None,
@@ -5739,6 +5789,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "   ".to_string(),
                 session_id: None,
@@ -5790,6 +5841,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: sql.to_string(),
                 session_id: None,
@@ -5813,6 +5865,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "SELECT 1 /* FAIL_MCP_NO_MESSAGE_TEST */".to_string(),
                 session_id: None,
@@ -5835,6 +5888,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: " ".to_string(),
                 session_id: None,
@@ -5876,6 +5930,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "SELECT 1; SELECT 2".to_string(),
                 session_id: Some(session_id),
@@ -5899,6 +5954,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)".to_string(),
                 session_id: None,
@@ -5924,6 +5980,7 @@ mod tests {
         let ddl = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("my"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "CREATE TABLE a (id INT); INSERT INTO missing VALUES (1)".to_string(),
                 session_id: None,
@@ -5942,6 +5999,7 @@ mod tests {
         let goldendb_ddl = goldendb_server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("goldendb"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "CREATE TABLE a (id INT); INSERT INTO missing VALUES (1)".to_string(),
                 session_id: None,
@@ -5955,6 +6013,7 @@ mod tests {
         let dml = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("my"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)".to_string(),
                 session_id: None,
@@ -5975,6 +6034,7 @@ mod tests {
         let pg_ddl = postgres_server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "CREATE TABLE a (id INT); INSERT INTO t VALUES (1)".to_string(),
                 session_id: None,
@@ -5998,6 +6058,7 @@ mod tests {
         let ddl = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("ora"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "CREATE TABLE a (id NUMBER); INSERT INTO missing VALUES (1)".to_string(),
                 session_id: None,
@@ -6025,6 +6086,7 @@ mod tests {
         let with_continue = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "INSERT INTO t VALUES (1)".to_string(),
                 session_id: None,
@@ -6051,6 +6113,7 @@ mod tests {
         let with_session = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "INSERT INTO t VALUES (1)".to_string(),
                 session_id: Some(session_id),
@@ -6073,6 +6136,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "SELECT 1; SELECT 2".to_string(),
                 session_id: None,
@@ -6128,6 +6192,20 @@ mod tests {
     }
 
     #[test]
+    fn solr_rest_requests_stay_on_the_single_request_path() {
+        // Solr speaks the DBX REST-console format (`METHOD /path` + optional
+        // JSON body), not SQL. A single request must not be routed through the
+        // `;`-splitting batch executor.
+        assert!(!sql_requires_batch_execution("GET /mycore/select?q=*:*&rows=20", DatabaseType::Solr));
+        assert!(!sql_requires_batch_execution(
+            "POST /mycore/update\n{\"add\":{\"doc\":{\"id\":\"1\",\"title\":\"x\"}}}",
+            DatabaseType::Solr
+        ));
+        // A REST request is never a forbidden database switch.
+        assert!(!mcp_sql_has_forbidden_database_switch("GET /mycore/select?q=*:*", DatabaseType::Solr));
+    }
+
+    #[test]
     fn format_batch_results_renders_failed_statement() {
         let results = vec![crate::backend::BatchStatementResult {
             result: dbx_core::db::QueryResult {
@@ -6153,7 +6231,7 @@ mod tests {
             transaction_state: None,
             transaction_outcome: None,
         }];
-        let output = format_batch_results(&results);
+        let output = format_batch_results(&results, QueryCellWindow::default());
         assert!(output.contains("### Statement 3"));
         assert!(output.contains("**Status:** failed"));
         assert!(output.contains("syntax error near SELECT"));
@@ -6185,10 +6263,68 @@ mod tests {
             transaction_state: None,
             transaction_outcome: None,
         }];
-        let output = format_batch_results(&results);
+        let output = format_batch_results(&results, QueryCellWindow::default());
         assert!(output.contains("### Transaction outcome"));
         assert!(output.contains("2 row(s) affected"));
         assert!(!output.contains("Statement 1"));
+    }
+
+    #[test]
+    fn format_batch_results_honors_requested_cell_window() {
+        let long_value = "A".repeat(500);
+        let batch_result = |value: String| crate::backend::BatchStatementResult {
+            result: dbx_core::db::QueryResult {
+                columns: vec!["body".to_string()],
+                column_types: vec![],
+                column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
+                rows: vec![vec![serde_json::Value::String(value)]],
+                affected_rows: 1,
+                execution_time_ms: 0,
+                server_execute_time_us: None,
+                truncated: false,
+                session_id: None,
+                has_more: false,
+                elasticsearch_raw_body: None,
+                messages: vec![],
+            },
+            execution_error: false,
+            statement_index: Some(0),
+            error_message: None,
+            merged: false,
+            transaction_state: None,
+            transaction_outcome: None,
+        };
+
+        let capped = format_batch_results(&[batch_result(long_value.clone())], QueryCellWindow::default());
+        assert!(capped.contains(&format!("{}... [chars 0..200; next cell_char_offset=200]", "A".repeat(200))));
+
+        let expanded = format_batch_results(
+            &[batch_result(long_value.clone())],
+            QueryCellWindow::from_options(Some(0), Some(4000)),
+        );
+        assert!(expanded.contains(&long_value), "batch cells should honor cell_char_limit: {expanded}");
+        assert!(!expanded.contains("next cell_char_offset"), "a 500-character cell fits in the 4000-character window");
+    }
+
+    #[test]
+    fn batch_request_deserializes_the_cell_window_arguments() {
+        let request: ExecuteBatchQueryRequest = serde_json::from_value(serde_json::json!({
+            "connection_name": "mysql",
+            "sql": "SELECT body FROM t",
+            "cell_char_offset": 0,
+            "cell_char_limit": 4000,
+        }))
+        .expect("batch request should accept the cell window arguments");
+        assert_eq!(request.cell_window.cell_char_offset, Some(0));
+        assert_eq!(request.cell_window.cell_char_limit, Some(4000));
+        assert_eq!(request.cell_window.to_query_window(), QueryCellWindow::from_options(Some(0), Some(4000)));
+
+        let without_window: ExecuteBatchQueryRequest =
+            serde_json::from_value(serde_json::json!({ "connection_name": "mysql", "sql": "SELECT body FROM t" }))
+                .expect("batch request should keep the cell window optional");
+        assert_eq!(without_window.cell_window.to_query_window(), QueryCellWindow::default());
     }
 
     #[tokio::test]
@@ -6200,6 +6336,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)".to_string(),
                 session_id: None,
@@ -6229,6 +6366,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("pg"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "INSERT INTO t VALUES (1)".to_string(),
                 session_id: None,
@@ -6255,6 +6393,7 @@ mod tests {
         let result = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
                 selector: selector("mssql"),
+                cell_window: CellWindowArgs::default(),
                 database: None,
                 sql: "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)".to_string(),
                 session_id: None,

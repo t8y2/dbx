@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { Check, Database, Filter, Loader2, Search } from "@lucide/vue";
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, Database, Filter, Loader2, Search } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
+import type { DataGridLocalFilterOption, DataGridLocalFilterSort } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 
 type LocalFilterMode = "local" | "server";
 
@@ -20,6 +20,7 @@ interface DataGridColumnFilterPopoverProps {
   draftMode?: LocalFilterMode;
   draftValues?: Set<string>;
   options: DataGridLocalFilterOption[];
+  sort?: DataGridLocalFilterSort;
   allOptionsCount: number;
   canApplyTypedValue: boolean;
   typedValue: string;
@@ -35,6 +36,7 @@ const emit = defineEmits<{
   "update:open": [value: boolean];
   "update:search": [value: string];
   resizeStart: [event: MouseEvent, direction: "left" | "right"];
+  sort: [field: DataGridLocalFilterSort["field"]];
   toggleAll: [];
   toggleValue: [key: string];
   applyTypedValue: [];
@@ -84,8 +86,24 @@ const { t } = useI18n();
         >
           <Check v-if="props.options.length > 0 && props.draftValues && props.options.every((option) => props.draftValues?.has(option.key))" class="h-3 w-3 stroke-[3]" />
         </button>
-        <span>{{ t("grid.value") }}</span>
-        <span class="text-right">{{ t("grid.count") }}</span>
+        <template v-if="props.draftMode === 'local' && props.sort">
+          <button
+            v-for="field in ['value', 'count'] as const"
+            :key="field"
+            type="button"
+            class="flex min-w-0 items-center gap-0.5 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :class="field === 'count' ? 'justify-end' : 'justify-start'"
+            :aria-label="`${t(`grid.${field}`)}: ${t(props.sort.field === field ? (props.sort.direction === 'asc' ? 'grid.sortAscending' : 'grid.sortDescending') : field === 'count' ? 'grid.sortDescending' : 'grid.sortAscending')}`"
+            @click.stop="emit('sort', field)"
+          >
+            <span>{{ t(`grid.${field}`) }}</span>
+            <component :is="props.sort.field === field ? (props.sort.direction === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown" class="h-3 w-3 shrink-0" aria-hidden="true" />
+          </button>
+        </template>
+        <template v-else>
+          <span>{{ t("grid.value") }}</span>
+          <span class="text-right">{{ t("grid.count") }}</span>
+        </template>
       </div>
       <div v-if="props.draftMode === 'server' && (props.serverLoading || props.serverError || props.serverLimited)" class="flex items-center gap-1.5 border-b px-2 py-1 text-[11px] text-muted-foreground">
         <Loader2 v-if="props.serverLoading" class="h-3 w-3 animate-spin" />

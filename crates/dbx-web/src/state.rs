@@ -1,6 +1,7 @@
 use dbx_core::connection::AppState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -32,17 +33,21 @@ pub struct WebState {
     pub data_dir: PathBuf,
     pub public_base_path: String,
     pub password_disabled: bool,
+    /// `DBX_DEMO_MODE`：公网演示部署的封锁开关（见 `demo` 模块）。
+    pub demo_mode: bool,
     pub password_hash: RwLock<Option<String>>,
     pub sessions: RwLock<HashSet<String>>,
     pub sse_channels: RwLock<HashMap<String, broadcast::Sender<String>>>,
     pub transfer_progress_channels: RwLock<HashMap<String, Arc<TransferProgressChannel>>>,
     pub table_import_channels: RwLock<HashMap<String, watch::Sender<String>>>,
     pub sql_file_executions: RwLock<HashMap<String, CancellationToken>>,
+    pub managed_sql_previews: crate::routes::sql_file::ManagedSqlPreviews,
     pub nacos_imports: RwLock<HashMap<String, NacosImportContext>>,
     pub login_rate_limit: Mutex<LoginRateLimit>,
     /// Completed Web export temp files waiting for the browser download.
     pub export_files: RwLock<HashMap<String, WebExportFile>>,
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
+    pub migration_ready: Arc<AtomicBool>,
 }
 
 impl WebState {
@@ -58,16 +63,19 @@ impl WebState {
             data_dir,
             public_base_path: "/".to_string(),
             password_disabled: false,
+            demo_mode: false,
             password_hash: RwLock::new(None),
             sessions: RwLock::new(HashSet::new()),
             sse_channels: RwLock::new(HashMap::new()),
             transfer_progress_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
+            managed_sql_previews: Default::default(),
             nacos_imports: RwLock::new(HashMap::new()),
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
+            migration_ready: Arc::new(AtomicBool::new(true)),
         }
     }
 }

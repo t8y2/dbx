@@ -1,4 +1,4 @@
-import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { applyDdlStoragePreference, supportsDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import { watch, createApp, getCurrentScope, onScopeDispose, type ShallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import i18n from "@/i18n";
@@ -29,7 +29,7 @@ import {
   structurePreviewError,
   structurePreviewSql,
   structurePreviewTitle,
-  structurePreviewHasOceanBase,
+  structurePreviewDdlStorageType,
 } from "@/components/sidebar/sidebarTreeDialogState";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 
@@ -171,7 +171,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     isLoadingStructurePreview.value = true;
     structurePreviewError.value = "";
     structurePreviewSql.value = "";
-    structurePreviewHasOceanBase.value = false;
+    structurePreviewDdlStorageType.value = undefined;
     structureSource = [];
     structurePreviewTitle.value = targets.length === 1 ? t("contextMenu.exportStructurePreviewTitle", { name: targets[0]!.label }) : t("contextMenu.exportStructurePreviewTitleMultiple", { count: targets.length });
     structurePreviewDefaultFileName.value = targets.length === 1 ? `${targets[0]!.label}.sql` : "structures.sql";
@@ -186,7 +186,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         requestSource.push({ ddl, databaseType });
       }
       structureSource = requestSource;
-      structurePreviewHasOceanBase.value = requestSource.some(({ databaseType }) => databaseType === "oceanbase-oracle");
+      structurePreviewDdlStorageType.value = requestSource.map(({ databaseType }) => databaseType).find(supportsDdlStoragePreference);
       renderStructurePreview();
     } catch (error: any) {
       if (requestId !== structureRequestId) return;

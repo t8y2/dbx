@@ -15,10 +15,17 @@ describe("connectionStore table virtual groups during disk reload", () => {
     vi.doMock("@/lib/backend/api", () => ({
       loadConnections: vi.fn().mockResolvedValue([]),
       loadEditorSettings: vi.fn().mockResolvedValue(null),
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listTables: vi.fn().mockResolvedValue([]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
       loadTableVGroups: vi.fn().mockResolvedValue({}),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),
+      listObjects: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveEditorSettings: vi.fn().mockResolvedValue(undefined),
       savePinnedTreeNodeIds: vi.fn().mockResolvedValue(undefined),
@@ -79,5 +86,56 @@ describe("connectionStore table virtual groups during disk reload", () => {
 
     expect(api.loadConnections).toHaveBeenCalledTimes(4);
     expect(store.tableVGroupLayoutFor(container)).toEqual(layout);
+  });
+
+  it("keeps views layouts separate from tables layouts for the same database", async () => {
+    const api = await import("@/lib/backend/api");
+    const { tableVGroupScopeKey } = await import("@/lib/table/tableVGroup");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const config: ConnectionConfig = { id: "pg-9733", name: "PG", db_type: "postgresql", host: "127.0.0.1", port: 5432, username: "u", password: "", database: "app" };
+    const viewsScope = { connectionId: config.id, database: "app", objectType: "views" as const };
+    const viewsLayout = { version: 1, enabled: true, groups: [{ id: "vg", name: "支付视图", collapsed: false }], order: [{ type: "group" as const, id: "vg", children: [{ type: "table" as const, name: "v_pay" }] }] };
+    vi.mocked(api.loadConnections).mockResolvedValue([config]);
+    vi.mocked(api.loadTableVGroups).mockResolvedValue({ [tableVGroupScopeKey(viewsScope)!]: viewsLayout });
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const groupViews: TreeNode = { id: `${config.id}:app:__views`, label: "Views", type: "group-views", connectionId: config.id, database: "app" };
+    const database: TreeNode = { id: `${config.id}:app`, label: "app", type: "database", connectionId: config.id, database: "app", children: [groupViews] };
+    store.treeNodes[0]!.isExpanded = true;
+    store.treeNodes[0]!.children!.push(database);
+    expect(store.tableVGroupLayoutFor(groupViews)).toEqual(viewsLayout);
+    expect(store.tableVGroupLayoutFor(database)).toBeUndefined();
+  });
+
+  it("keeps projected view groups through the setChildren reload path", async () => {
+    const api = await import("@/lib/backend/api");
+    const { tableVGroupScopeKey } = await import("@/lib/table/tableVGroup");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const config: ConnectionConfig = { id: "pg-view-1", name: "PG", db_type: "postgresql", host: "127.0.0.1", port: 5432, username: "u", password: "", database: "app" };
+    const viewsScope = { connectionId: config.id, database: "app", objectType: "views" as const };
+    const viewsLayout = { version: 1, enabled: true, groups: [{ id: "vg", name: "支付视图", collapsed: false }], order: [{ type: "group" as const, id: "vg", children: [{ type: "table" as const, name: "v_pay" }] }] };
+    vi.mocked(api.loadConnections).mockResolvedValue([config]);
+    vi.mocked(api.loadTableVGroups).mockResolvedValue({ [tableVGroupScopeKey(viewsScope)!]: viewsLayout });
+    const store = useConnectionStore();
+    await store.initFromDisk();
+    const groupViews: TreeNode = { id: `${config.id}:app:__views`, label: "Views", type: "group-views", connectionId: config.id, database: "app", children: [], isExpanded: true };
+    const database: TreeNode = { id: `${config.id}:app`, label: "app", type: "database", connectionId: config.id, database: "app", children: [groupViews], isExpanded: true };
+    vi.mocked(api.listTables).mockResolvedValue([
+      { name: "v_pay", table_type: "VIEW", schema: "public", comment: null },
+      { name: "v_other", table_type: "VIEW", schema: "public", comment: null },
+    ]);
+    store.connectedIds = new Set([config.id]);
+    store.treeNodes[0]!.isExpanded = true;
+    store.treeNodes[0]!.children!.push(database);
+
+    await store.refreshTreeNode(groupViews);
+
+    // setChildren 必须用解析后的 views scope 投影：分组顶置、成员重挂、非成员原位
+    const labels = groupViews.children?.map((node) => node.label) ?? [];
+    expect(labels[0]).toBe("支付视图");
+    expect(groupViews.children![0]!.type).toBe("table-vgroup");
+    expect(groupViews.children![0]!.children?.map((node) => node.label)).toEqual(["v_pay"]);
+    expect(labels).toContain("v_other");
   });
 });

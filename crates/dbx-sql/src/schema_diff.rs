@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use log;
 use rayon::prelude::*;
@@ -3995,16 +3995,38 @@ fn is_postgres_family_ddl(db_type: DatabaseType) -> bool {
     )
 }
 
-fn postgres_index_column_sql(column: &str, is_expression: Option<bool>, db_type: DatabaseType) -> String {
-    // Expression/functional index key parts (e.g. from pg_get_indexdef) arrive as raw
-    // expression text, not a plain column name; quoting the whole expression as an
-    // identifier turns it into a literal column reference that doesn't exist (#6295).
+/// One PostgreSQL index key part for DDL: the key text plus its operator class
+/// and, for B-tree keys, the explicit ordering.
+///
+/// Expression/functional index key parts (e.g. from pg_get_indexdef) arrive as raw
+/// expression text, not a plain column name; quoting the whole expression as an
+/// identifier turns it into a literal column reference that doesn't exist (#6295).
+///
+/// `pg_index.indoption` carries bit 0 = DESC and bit 1 = NULLS FIRST per key.
+/// Dropping it silently rebuilt `col DESC NULLS LAST` as a plain ASC key (#8559
+/// fixed exactly this for data transfer; the sync DDL kept losing it, #9988).
+/// Only B-tree keys carry meaningful flags, so other access methods keep the
+/// bare key text - same rule as the transfer path.
+fn postgres_index_column_sql(
+    column: &str,
+    is_expression: Option<bool>,
+    opclass: Option<&str>,
+    key_options: Option<i16>,
+    db_type: DatabaseType,
+) -> String {
     let trimmed = column.trim();
-    let is_expression = is_expression.unwrap_or(false);
-    if is_expression {
-        trimmed.to_string()
-    } else {
-        quote_id(column, db_type)
+    let base = if is_expression.unwrap_or(false) { trimmed.to_string() } else { quote_id(column, db_type) };
+    let with_opclass = match opclass.filter(|opclass| !opclass.is_empty()) {
+        Some(opclass) => format!("{base} {opclass}"),
+        None => base,
+    };
+    match key_options {
+        Some(options) => format!(
+            "{with_opclass} {} NULLS {}",
+            if options & 1 != 0 { "DESC" } else { "ASC" },
+            if options & 2 != 0 { "FIRST" } else { "LAST" }
+        ),
+        None => with_opclass,
     }
 }
 
@@ -4030,7 +4052,19 @@ pub fn create_index_sql(table_name: &str, index: &IndexInfo, db_type: DatabaseTy
             if db_type == DatabaseType::Mysql {
                 mysql_index_column_sql(column)
             } else if is_postgres_family_ddl(db_type) {
-                postgres_index_column_sql(column, index.key_is_expression.get(i).copied(), db_type)
+                let opclass = index.column_opclasses.get(i).and_then(|opclass| opclass.as_deref());
+                let key_options = index
+                    .index_type
+                    .as_deref()
+                    .filter(|index_type| index_type.trim().eq_ignore_ascii_case("btree"))
+                    .and_then(|_| index.key_options.get(i).copied());
+                postgres_index_column_sql(
+                    column,
+                    index.key_is_expression.get(i).copied(),
+                    opclass,
+                    key_options,
+                    db_type,
+                )
             } else {
                 quote_id(column, db_type)
             }
@@ -5047,6 +5081,17 @@ fn sqlserver_native_function_sql(definition: &str, qualified_name: &str, is_modi
     Some(format!("{verb} {qualified_name}{};", &definition_after_verb[arguments_start..]))
 }
 
+/// PostgreSQL-family drivers read routines through `pg_get_functiondef`, which already
+/// returns a complete `CREATE OR REPLACE FUNCTION name(args) ...` statement. Keep that
+/// header verb and only swap in the target-qualified name.
+fn native_create_routine_sql(definition: &str, qualified_name: &str) -> Option<String> {
+    let trimmed = definition.trim().trim_end_matches(';').trim_end();
+    let prefix = Regex::new(r"(?i)^CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b").ok()?.find(trimmed)?;
+    let definition_after_verb = trimmed[prefix.end()..].trim_start();
+    let arguments_start = definition_after_verb.find('(')?;
+    Some(format!("{} {qualified_name}{};", prefix.as_str(), &definition_after_verb[arguments_start..]))
+}
+
 fn generate_create_table_sql(
     name: &str,
     columns: &[ColumnDiff],
@@ -5514,6 +5559,153 @@ pub fn generate_schema_sync_sql_plan(
     SchemaSyncSqlPlan { sync_sql, rollback_sync_sql, rollback_completeness, missing_rollback_objects }
 }
 
+/// Names of the objects a diff's own statements reference.
+///
+/// Foreign keys are read from the side that owns the definition: an `added`
+/// object only has the source side, a `removed` object only the target side.
+/// View definitions have no foreign keys, so their DDL is scanned for table
+/// references — the same fallback `DependencyGraph::build_*` uses.
+fn diff_referenced_objects(diff: &TableDiff, known: &HashSet<&str>) -> Vec<String> {
+    fn push_unique(names: &mut Vec<String>, name: &str) {
+        if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+    }
+
+    let mut names: Vec<String> = Vec::new();
+    for foreign_key in diff.foreign_keys.as_deref().unwrap_or_default() {
+        let info = match diff.diff_type.as_str() {
+            "removed" => foreign_key.target.as_ref().or(foreign_key.source.as_ref()),
+            _ => foreign_key.source.as_ref().or(foreign_key.target.as_ref()),
+        };
+        if let Some(info) = info {
+            push_unique(&mut names, info.ref_table.as_str());
+        }
+    }
+
+    if diff.object_type.as_deref() == Some("view") {
+        if let Some(ddl) = diff.ddl.as_deref().or(diff.target_ddl.as_deref()) {
+            // Identifier quoting would hide the reference from the keyword scan.
+            let unquoted: String = ddl.chars().filter(|ch| !matches!(ch, '`' | '"' | '[' | ']')).collect();
+            for name in extract_ddl_references(&unquoted, known) {
+                push_unique(&mut names, name.as_str());
+            }
+        }
+    }
+
+    names
+}
+
+/// Orders table diffs so the generated script runs top-to-bottom on the target.
+///
+/// A `CREATE TABLE` fails when its foreign key points at a table that does not
+/// exist yet, and a `DROP TABLE` fails while another table still references it.
+/// Comparison order comes from the object list (alphabetical), so a child table
+/// can precede its parent: the batch then aborts halfway and the target ends up
+/// partially synced (#9761). Parents are therefore emitted before the tables
+/// that reference them, and dropped after them.
+///
+/// Only diffs with a real dependency move; entries without one keep their
+/// relative order, so plans without dependencies are unchanged.
+fn order_diffs_for_execution(diffs: &[TableDiff]) -> Vec<&TableDiff> {
+    let mut added: HashMap<&str, usize> = HashMap::new();
+    let mut removed: HashMap<&str, usize> = HashMap::new();
+    for (index, diff) in diffs.iter().enumerate() {
+        match diff.diff_type.as_str() {
+            "added" => {
+                added.insert(diff.name.as_str(), index);
+            }
+            "removed" => {
+                removed.insert(diff.name.as_str(), index);
+            }
+            _ => {}
+        }
+    }
+    if added.is_empty() && removed.is_empty() {
+        return diffs.iter().collect();
+    }
+
+    let known: HashSet<&str> = diffs.iter().map(|diff| diff.name.as_str()).collect();
+    let references: Vec<Vec<String>> = diffs.iter().map(|diff| diff_referenced_objects(diff, &known)).collect();
+
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); diffs.len()];
+    let mut in_degree = vec![0usize; diffs.len()];
+    let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
+    let mut add_edge = |from: usize, to: usize, successors: &mut Vec<Vec<usize>>, in_degree: &mut Vec<usize>| {
+        if from != to && seen_edges.insert((from, to)) {
+            successors[from].push(to);
+            in_degree[to] += 1;
+        }
+    };
+
+    for (index, diff) in diffs.iter().enumerate() {
+        match diff.diff_type.as_str() {
+            // Parents before children.
+            "added" => {
+                for dependency in &references[index] {
+                    if let Some(&parent) = added.get(dependency.as_str()) {
+                        add_edge(parent, index, &mut successors, &mut in_degree);
+                    }
+                }
+            }
+            // Children before parents, so no table is dropped while still referenced.
+            "removed" => {
+                for dependency in &references[index] {
+                    if let Some(&parent) = removed.get(dependency.as_str()) {
+                        add_edge(index, parent, &mut successors, &mut in_degree);
+                    }
+                }
+            }
+            // Modified tables emit `ALTER TABLE ... ADD/DROP FOREIGN KEY` inline,
+            // so an FK added on a modified table still needs the referenced
+            // table's CREATE first, and an FK dropped on a modified table must
+            // run before the referenced table's DROP.
+            _ => {
+                for foreign_key in diff.foreign_keys.as_deref().unwrap_or_default() {
+                    let info = foreign_key.source.as_ref().or(foreign_key.target.as_ref());
+                    let Some(info) = info else { continue };
+                    match foreign_key.diff_type.as_str() {
+                        "added" => {
+                            if let Some(&parent) = added.get(info.ref_table.as_str()) {
+                                add_edge(parent, index, &mut successors, &mut in_degree);
+                            }
+                        }
+                        "removed" => {
+                            if let Some(&parent) = removed.get(info.ref_table.as_str()) {
+                                add_edge(index, parent, &mut successors, &mut in_degree);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let mut ready: BTreeSet<usize> = (0..diffs.len()).filter(|index| in_degree[*index] == 0).collect();
+    let mut ordered: Vec<usize> = Vec::with_capacity(diffs.len());
+    let mut placed = vec![false; diffs.len()];
+    while let Some(&index) = ready.iter().next() {
+        ready.remove(&index);
+        ordered.push(index);
+        placed[index] = true;
+        for &next in &successors[index] {
+            in_degree[next] -= 1;
+            if in_degree[next] == 0 {
+                ready.insert(next);
+            }
+        }
+    }
+    // A dependency cycle cannot be ordered; keep the caller's order for it.
+    for (index, was_placed) in placed.iter().enumerate() {
+        if !was_placed {
+            ordered.push(index);
+        }
+    }
+
+    ordered.into_iter().map(|index| &diffs[index]).collect()
+}
+
 fn generate_schema_sync_sql_inner(
     diffs: &[TableDiff],
     function_diffs: &[FunctionDiff],
@@ -5548,7 +5740,7 @@ fn generate_schema_sync_sql_inner(
         diff_type == "added"
     });
 
-    for diff in diffs {
+    for diff in order_diffs_for_execution(diffs) {
         let target_name = target_table_name(diff);
         let table = qualified_name(target_name, db_type, schema);
 
@@ -6015,6 +6207,13 @@ fn generate_schema_sync_sql_inner(
                                     continue;
                                 }
                             }
+                            if db_type != DatabaseType::SqlServer {
+                                let name = qualified_name(&diff.name, db_type, schema);
+                                if let Some(sql) = native_create_routine_sql(&source.definition, &name) {
+                                    lines.push(sql);
+                                    continue;
+                                }
+                            }
                             let create_kw = if db_type == DatabaseType::SqlServer && diff.diff_type == "modified" {
                                 "ALTER FUNCTION"
                             } else if profile.create_function_or_replace {
@@ -6193,6 +6392,7 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            metadata_capabilities: None,
             enum_values: None,
             character_set: None,
             collation: None,
@@ -8353,6 +8553,139 @@ mod tests {
     }
 
     #[test]
+    fn postgres_sync_index_ddl_keeps_key_order_opclass_and_full_expression() {
+        // Regression for #9988: `pg_index.indoption` (bit 0 = DESC, bit 1 = NULLS FIRST)
+        // and `pg_index.indclass` were dropped by the sync DDL, so a published index came
+        // back as plain ASC keys with default null ordering. The expression key part is
+        // also asserted verbatim - the driver used to return it truncated to 63 bytes
+        // because `COALESCE(name, text)` resolves to `name` (see postgres.rs).
+        let expression_key_part =
+            "(((category)::text = ANY ((ARRAY['industrial'::character varying, 'macro'::character varying])::text[])))";
+        let new_index = index(IndexInfo {
+            name: "index_repro_rank".to_string(),
+            columns: vec![
+                "((has_current_analysis AND (NOT dirty) AND researchable))".to_string(),
+                "researchable".to_string(),
+                expression_key_part.to_string(),
+                "((new_events_24h > 0))".to_string(),
+                "evidence_count".to_string(),
+                "material_at".to_string(),
+                "topic_id".to_string(),
+            ],
+            is_unique: false,
+            is_primary: false,
+            filter: Some("(NOT suppressed)".to_string()),
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![true, false, true, true, false, false, false],
+            column_opclasses: vec![None, None, None, None, None, None, Some("pg_catalog.text_pattern_ops".to_string())],
+            key_options: vec![3, 3, 3, 3, 3, 3, 3],
+            constraint_backed: false,
+        });
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "index_repro".to_string(),
+                target_name: None,
+                columns: None,
+                indexes: Some(vec![IndexDiff {
+                    diff_type: "added".to_string(),
+                    name: new_index.name.clone(),
+                    source: Some(new_index),
+                    target: None,
+                    changes: vec![],
+                }]),
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            None,
+            &[],
+        );
+
+        assert!(
+            sql.contains(
+                "CREATE INDEX \"index_repro_rank\" ON \"public\".\"index_repro\" USING btree (((has_current_analysis AND (NOT dirty) AND researchable)) DESC NULLS FIRST, \"researchable\" DESC NULLS FIRST"
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(&format!("{expression_key_part} DESC NULLS FIRST")), "{sql}");
+        assert!(sql.contains("\"topic_id\" pg_catalog.text_pattern_ops DESC NULLS FIRST"), "{sql}");
+        assert!(sql.contains("WHERE (NOT suppressed);"), "{sql}");
+    }
+
+    #[test]
+    fn postgres_sync_index_ddl_keeps_non_btree_keys_bare() {
+        // `indoption` is only meaningful for B-tree keys, so a GIN index must not gain
+        // `ASC NULLS LAST` suffixes even when the introspection reports the flags.
+        let new_index = index(IndexInfo {
+            name: "idx_payload_gin".to_string(),
+            columns: vec!["payload".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![Some("public.gin_trgm_ops".to_string())],
+            key_options: vec![0],
+            constraint_backed: false,
+        });
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "events".to_string(),
+                target_name: None,
+                columns: None,
+                indexes: Some(vec![IndexDiff {
+                    diff_type: "added".to_string(),
+                    name: new_index.name.clone(),
+                    source: Some(new_index),
+                    target: None,
+                    changes: vec![],
+                }]),
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            None,
+            &[],
+        );
+
+        assert!(sql.contains("USING gin (\"payload\" public.gin_trgm_ops)"), "{sql}");
+        assert!(!sql.contains("NULLS LAST"), "{sql}");
+        assert!(!sql.contains("NULLS FIRST"), "{sql}");
+    }
+
+    #[test]
     fn quotes_real_columns_whose_names_contain_expression_like_characters() {
         // PR #6312 review: a quoted column identifier can legitimately contain whitespace,
         // `(`, or `::` (e.g. PostgreSQL metadata returning the ordinary column name
@@ -8900,6 +9233,7 @@ mod tests {
                     numeric_precision: None,
                     numeric_scale: None,
                     character_maximum_length: None,
+                    metadata_capabilities: None,
                     enum_values: None,
                     character_set: None,
                     collation: None,
@@ -12096,6 +12430,7 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            metadata_capabilities: None,
             enum_values: None,
             character_set: None,
             collation: None,
@@ -12113,6 +12448,7 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            metadata_capabilities: None,
             enum_values: None,
             character_set: None,
             collation: None,
@@ -13770,6 +14106,51 @@ mod tests {
     }
 
     #[test]
+    fn postgres_function_sync_reuses_native_functiondef_header_once() {
+        let function = |arguments: &str, definition: &str| FunctionDiff {
+            diff_type: "added".into(),
+            name: "armor".into(),
+            source: Some(FunctionInfo {
+                name: "armor".into(),
+                function_type: "FUNCTION".into(),
+                data_type: "text".into(),
+                definition: definition.into(),
+                arguments: arguments.into(),
+            }),
+            target: None,
+            changes: vec![],
+        };
+        let diffs = [
+            function(
+                "bytea",
+                "CREATE OR REPLACE FUNCTION armor(bytea)\n RETURNS text\n LANGUAGE c\n IMMUTABLE PARALLEL SAFE STRICT\nAS '$libdir/pgcrypto', $function$pg_armor$function$\n",
+            ),
+            function(
+                "bytea, text[], text[]",
+                "CREATE OR REPLACE FUNCTION armor(bytea, text[], text[])\n RETURNS text\n LANGUAGE c\nAS '$libdir/pgcrypto', $function$pg_armor$function$\n",
+            ),
+        ];
+
+        let sql = generate_schema_sync_sql(
+            &[],
+            &diffs,
+            &[],
+            &[],
+            &[],
+            DatabaseType::Postgres,
+            Some("public"),
+            false,
+            None,
+            &[],
+        );
+
+        assert_eq!(sql.matches("CREATE OR REPLACE FUNCTION").count(), 2, "{sql}");
+        assert!(sql.contains("CREATE OR REPLACE FUNCTION \"public\".\"armor\"(bytea)\n RETURNS text"), "{sql}");
+        assert!(sql.contains("CREATE OR REPLACE FUNCTION \"public\".\"armor\"(bytea, text[], text[])\n"), "{sql}");
+        assert!(sql.contains("$function$pg_armor$function$;"), "{sql}");
+    }
+
+    #[test]
     fn mysql_skips_function_sequence_when_templates_absent() {
         let fn_diff = FunctionDiff {
             diff_type: "added".into(),
@@ -13787,5 +14168,221 @@ mod tests {
         let sql = generate_schema_sync_sql(&[], &[fn_diff], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
         assert!(sql.contains("-- Skip function f1"), "{sql}");
         assert!(!sql.contains("CREATE FUNCTION"), "{sql}");
+    }
+
+    fn added_table_diff(name: &str) -> TableDiff {
+        TableDiff {
+            diff_type: "added".into(),
+            object_type: Some("table".into()),
+            name: name.into(),
+            ddl: Some(format!("CREATE TABLE `{name}` (\n  `id` int NOT NULL\n)")),
+            ..Default::default()
+        }
+    }
+
+    fn added_table_diff_referencing(name: &str, parent: &str) -> TableDiff {
+        TableDiff {
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "added".into(),
+                name: format!("fk_{name}"),
+                source: Some(ForeignKeyInfo {
+                    name: format!("fk_{name}"),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: parent.into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                target: None,
+                changes: Vec::new(),
+            }]),
+            ..added_table_diff(name)
+        }
+    }
+
+    fn removed_table_diff_referencing(name: &str, parent: &str) -> TableDiff {
+        TableDiff {
+            diff_type: "removed".into(),
+            object_type: Some("table".into()),
+            name: name.into(),
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "removed".into(),
+                name: format!("fk_{name}"),
+                source: None,
+                target: Some(ForeignKeyInfo {
+                    name: format!("fk_{name}"),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: parent.into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                changes: Vec::new(),
+            }]),
+            target_ddl: Some(format!("CREATE TABLE `{name}` (`id` int NOT NULL, `parent_id` int)")),
+            ..Default::default()
+        }
+    }
+
+    fn statement_position(sql: &str, marker: &str) -> usize {
+        sql.find(marker).unwrap_or_else(|| panic!("missing {marker} in:\n{sql}"))
+    }
+
+    #[test]
+    fn added_foreign_key_child_is_deployed_after_its_parent() {
+        let diffs = vec![added_table_diff_referencing("child9761", "parent9761"), added_table_diff("parent9761")];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Create table: parent9761")
+                < statement_position(&sql, "-- Create table: child9761"),
+            "parents must be created before the tables that reference them:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn removed_foreign_key_child_is_dropped_before_its_parent() {
+        let diffs = vec![
+            removed_table_diff_referencing("zzz_child9761", "aaa_parent9761"),
+            TableDiff {
+                diff_type: "removed".into(),
+                object_type: Some("table".into()),
+                name: "aaa_parent9761".into(),
+                target_ddl: Some("CREATE TABLE `aaa_parent9761` (`id` int NOT NULL)".into()),
+                ..Default::default()
+            },
+        ];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, true, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Drop table: zzz_child9761")
+                < statement_position(&sql, "-- Drop table: aaa_parent9761"),
+            "referencing tables must be dropped first:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn added_view_is_created_after_the_table_it_reads() {
+        let view = TableDiff {
+            diff_type: "added".into(),
+            object_type: Some("view".into()),
+            name: "aaa_view9761".into(),
+            ddl: Some("CREATE VIEW `aaa_view9761` AS SELECT `id` FROM `zzz_table9761`".into()),
+            ..Default::default()
+        };
+        let diffs = vec![view, added_table_diff("zzz_table9761")];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Create table: zzz_table9761")
+                < statement_position(&sql, "-- Create view: aaa_view9761"),
+            "views must be created after the tables they read:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn independent_diffs_keep_their_original_statement_order() {
+        let diffs = vec![added_table_diff("bbb9761"), added_table_diff("aaa9761"), added_table_diff("ccc9761")];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Create table: bbb9761") < statement_position(&sql, "-- Create table: aaa9761")
+                && statement_position(&sql, "-- Create table: aaa9761")
+                    < statement_position(&sql, "-- Create table: ccc9761"),
+            "plans without dependencies must keep the caller's order:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn modified_table_fk_added_to_new_table_waits_for_its_create() {
+        let modified = TableDiff {
+            diff_type: "modified".into(),
+            object_type: Some("table".into()),
+            name: "aaa_child_mod9761".into(),
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "added".into(),
+                name: "fk_aaa_child_mod9761".into(),
+                source: Some(ForeignKeyInfo {
+                    name: "fk_aaa_child_mod9761".into(),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: "zzz_parent9761".into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                target: None,
+                changes: Vec::new(),
+            }]),
+            ..Default::default()
+        };
+        let diffs = vec![modified, added_table_diff("zzz_parent9761")];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Create table: zzz_parent9761")
+                < statement_position(&sql, "ALTER TABLE `aaa_child_mod9761` ADD CONSTRAINT"),
+            "an ALTER on a modified table adding an FK to a new table must follow that table's CREATE:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn modified_table_fk_dropped_runs_before_referenced_table_drop() {
+        let modified = TableDiff {
+            diff_type: "modified".into(),
+            object_type: Some("table".into()),
+            name: "aaa_child_mod9761".into(),
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "removed".into(),
+                name: "fk_aaa_child_mod9761".into(),
+                source: None,
+                target: Some(ForeignKeyInfo {
+                    name: "fk_aaa_child_mod9761".into(),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: "zzz_parent9761".into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                changes: Vec::new(),
+            }]),
+            ..Default::default()
+        };
+        let removed_parent = TableDiff {
+            diff_type: "removed".into(),
+            object_type: Some("table".into()),
+            name: "zzz_parent9761".into(),
+            ..Default::default()
+        };
+        let diffs = vec![modified, removed_parent];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "ALTER TABLE `aaa_child_mod9761` DROP FOREIGN KEY")
+                < statement_position(&sql, "-- Drop table: zzz_parent9761"),
+            "an ALTER dropping an FK must run before the referenced table's DROP:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn circular_foreign_keys_still_emit_every_create_statement() {
+        let diffs = vec![
+            added_table_diff_referencing("loop_a9761", "loop_b9761"),
+            added_table_diff_referencing("loop_b9761", "loop_a9761"),
+        ];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(sql.contains("-- Create table: loop_a9761"), "{sql}");
+        assert!(sql.contains("-- Create table: loop_b9761"), "{sql}");
     }
 }

@@ -1,4 +1,5 @@
 import { ref, watch } from "vue";
+import type { SqlFilePreview } from "@/lib/backend/api";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
@@ -61,6 +62,7 @@ const dataCompareSessionId = ref<string | null>(null);
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
 const sqlFilePrefillFilePath = ref("");
+const sqlFilePrefillPreview = ref<SqlFilePreview>();
 const diagramPrefillConnectionId = ref("");
 const diagramPrefillDatabase = ref("");
 const diagramPrefillSchema = ref("");
@@ -195,6 +197,7 @@ export function useDialogSources() {
           sqlFilePrefillConnectionId.value = v.connectionId;
           sqlFilePrefillDatabase.value = v.database;
           sqlFilePrefillFilePath.value = v.filePath ?? "";
+          sqlFilePrefillPreview.value = v.preview;
           showSqlFileDialog.value = true;
           connectionStore.sqlFileSource = null;
         }
@@ -207,7 +210,10 @@ export function useDialogSources() {
     // when stale (they only preselect dropdowns), but a stale path triggers an
     // async file read + preview render — a visible side effect.
     watch(showSqlFileDialog, (open) => {
-      if (!open) sqlFilePrefillFilePath.value = "";
+      if (!open) {
+        sqlFilePrefillFilePath.value = "";
+        sqlFilePrefillPreview.value = undefined;
+      }
     });
 
     watch(
@@ -577,6 +583,7 @@ export function useDialogSources() {
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
     sqlFilePrefillFilePath,
+    sqlFilePrefillPreview,
     diagramPrefillConnectionId,
     diagramPrefillDatabase,
     diagramPrefillSchema,

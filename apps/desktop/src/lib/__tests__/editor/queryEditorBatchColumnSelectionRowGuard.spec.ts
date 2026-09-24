@@ -9,10 +9,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // completion row other than the checkbox itself used to fall through to
 // CodeMirror's own list-item click handler, which applied that single row
 // as the completion and silently discarded every other checked field. See
-// onBatchColumnSelectionRowGuard in QueryEditor.vue.
+// onBatchColumnSelectionRowGuard in useQueryEditorBatchSelection.ts.
 // happy-dom's global URL polyfill rejects the file: scheme, so resolve the
 // path with Node's own path/url helpers instead of `new URL(..., import.meta.url)`.
-const queryEditorSource = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../../components/editor/QueryEditor.vue"), "utf8");
+const queryEditorSource = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../../components/editor/useQueryEditorBatchSelection.ts"), "utf8");
 
 function extractFunction(name: string): string {
   const start = queryEditorSource.indexOf(`function ${name}(`);

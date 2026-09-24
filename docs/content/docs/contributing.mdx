@@ -242,8 +242,9 @@ Documentation is the easiest first contribution. Every language uses the same ba
 ```text
 docs/content/docs/example.mdx
 docs/content/docs/example.cn.mdx
-docs/content/docs/example.tr.mdx
 ```
+
+Docs site languages follow `docs/lib/i18n.ts` and `docs/scripts/languages.mjs` (currently `en` / `cn`).
 
 Start the docs site:
 
@@ -264,7 +265,6 @@ Open the local address printed in the terminal. When adding a page, also registe
 ```text
 docs/content/docs/meta.json
 docs/content/docs/meta.cn.json
-docs/content/docs/meta.tr.json
 ```
 
 Run the fast content check and then the full documentation build before submitting:

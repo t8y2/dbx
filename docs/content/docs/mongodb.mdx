@@ -68,6 +68,10 @@ The grid expands common fields into columns and supports:
 
 Collections with very different document shapes are better handled in the full-document view so hidden fields are not overlooked.
 
+### Query Result Editing
+
+A query tab result grid is editable when a single `find` or `findOne` runs without a projection and returns `_id`. There you can edit fields and delete rows, review the pending `updateOne` and `deleteOne` statements before saving, and the grid reloads after a deletion. Inserting rows is not available; use `insertOne` or the document browser instead. Aggregations, projected queries, and multi-command scripts stay read-only because their rows cannot be mapped back to single documents.
+
 ## JSON Document Editing
 
 Document details can switch between a field tree and full JSON source:

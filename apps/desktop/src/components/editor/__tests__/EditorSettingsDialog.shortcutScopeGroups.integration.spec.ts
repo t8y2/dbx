@@ -6,13 +6,12 @@ import { createPinia } from "pinia";
 import { DEFAULT_EDITOR_SETTINGS } from "@/stores/settingsStore";
 import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
 
-// Behaviour proof for the scope-grouping / two-tier conflict work, on top of the
-// source-contract spec (EditorSettingsDialog.shortcutScopeGroups.spec.ts). The
+// Behaviour proof for the scope-grouping / two-tier conflict work. The
 // load-bearing claim is the tier split:
 //   · L1 same-scope duplicate -> blocking (red pill, footer reason, Apply gate)
 //   · L2 cross-scope overlap  -> informational only (amber pill, never blocking)
-// The source spec pins the wiring; this one drives the real rendered controls so
-// a wrong tier can't hide behind a passing string assertion.
+// This drives the real rendered controls so a wrong tier can't hide behind a
+// passing string assertion.
 
 const hoisted = vi.hoisted(() => ({ shortcuts: {} as Record<string, string> }));
 

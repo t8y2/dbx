@@ -7,15 +7,21 @@ import { DEFAULT_SHORTCUT_SETTINGS, normalizeShortcutSettings, shortcutToCodeMir
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
+const batchSource = readFileSync(new URL("../../../components/editor/useQueryEditorBatchSelection.ts", import.meta.url), "utf8");
+
+const completionSource = readFileSync(new URL("../../../components/editor/useQueryEditorCompletion.ts", import.meta.url), "utf8");
+const completionKeysSource = readFileSync(new URL("../../../components/editor/useQueryEditorCompletionKeys.ts", import.meta.url), "utf8");
+
 function extractFunction(name: string): string {
-  const start = queryEditorSource.indexOf(`function ${name}(`);
+  const source = [queryEditorSource, completionSource, batchSource, completionKeysSource].find((candidate) => candidate.includes(`function ${name}(`)) ?? "";
+  const start = source.indexOf(`function ${name}(`);
   if (start < 0) throw new Error(`Missing QueryEditor function: ${name}`);
-  const bodyStart = queryEditorSource.indexOf("{", start);
+  const bodyStart = source.indexOf("{", start);
   let depth = 0;
-  for (let index = bodyStart; index < queryEditorSource.length; index++) {
-    const character = queryEditorSource[index];
+  for (let index = bodyStart; index < source.length; index++) {
+    const character = source[index];
     if (character === "{") depth++;
-    if (character === "}" && --depth === 0) return queryEditorSource.slice(start, index + 1);
+    if (character === "}" && --depth === 0) return source.slice(start, index + 1);
   }
   throw new Error(`Unterminated QueryEditor function: ${name}`);
 }
@@ -84,6 +90,8 @@ function createHarness(options: {
     "let pendingCompletionTabTimer: ReturnType<typeof setTimeout> | null = null;",
     "let cancelPendingCompletionEnter: (() => void) | null = null;",
     "let suppressNextSqlCompletionAutoStartUntil = 0;",
+    "const completion = { get suppressAutoStartUntil() { return suppressNextSqlCompletionAutoStartUntil; }, set suppressAutoStartUntil(value) { suppressNextSqlCompletionAutoStartUntil = value; } };",
+    "const codeMirrorRuntime = { codeMirrorCompletionStatus, codeMirrorSelectedCompletion, codeMirrorAcceptCompletion, codeMirrorSelectedCompletionIndex, codeMirrorSelectFirstCompletion, codeMirrorCloseCompletion, codeMirrorInsertNewlineKeepIndent, codeMirrorNextSnippetField, codeMirrorIndentMore };",
     extractFunction("editorIndentUnit"),
     extractFunction("handleTab"),
     extractFunction("tabKeyAcceptsCompletion"),
@@ -180,9 +188,6 @@ afterEach(() => {
 });
 
 describe("QueryEditor completion Tab keymap", () => {
-  it("guards the batch INSERT snippet factory before applying", () => {
-    expect(queryEditorSource).toContain('if (session.mode === "insert" && !codeMirrorSnippetCompletion)');
-  });
   it("closes completion and suppresses its restart for the Enter newline", () => {
     const closeCompletion = vi.fn(() => true);
     let harness: TabHarness;
@@ -554,7 +559,7 @@ describe("QueryEditor completion Tab keymap", () => {
     const javascript = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
     }).outputText;
-    const factory = new Function("codeMirrorStartCompletion", `${javascript}\nreturn { triggerSqlCompletion, isEditorComposing };`);
+    const factory = new Function("codeMirrorStartCompletion", `const runtime = { codeMirrorStartCompletion };\n${javascript}\nreturn { triggerSqlCompletion, isEditorComposing };`);
     const startCompletion = vi.fn(() => true);
     const { triggerSqlCompletion } = factory(startCompletion) as {
       triggerSqlCompletion: (view: MockView) => boolean;

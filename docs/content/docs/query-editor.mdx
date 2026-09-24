@@ -141,6 +141,8 @@ Explain Plan accepts query-like SQL that is safe to analyze, such as `SELECT`, `
 
 ## Query History
 
+In **Settings → Data → Query history retention**, choose **200**, **1000** (default), **5000**, **10000**, or **Unlimited**. The limit is shared by all connections and execution sources, including MCP. A lower limit takes effect the next time a history entry is recorded: older entries beyond the limit are deleted. Raising the limit does not recover deleted entries. History page sizes remain unchanged.
+
 Query history stores executed SQL per connection with time and context. You can:
 
 - Filter by date range

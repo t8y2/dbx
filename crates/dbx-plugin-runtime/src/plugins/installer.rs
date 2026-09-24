@@ -3,6 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine;
 use chrono::Utc;
@@ -554,10 +555,10 @@ impl PluginPackageInstaller {
         } else {
             None
         };
-        if let Err(error) = std::fs::rename(&package_dir, &version_dir) {
+        if let Err(error) = rename_with_transient_lock_retry(&package_dir, &version_dir) {
             let mut message = format!("Failed to store plugin '{}' version {}: {error}", manifest.id, version);
             if let Some(backup) = &replaced_version_dir {
-                if let Err(restore) = std::fs::rename(backup, &version_dir) {
+                if let Err(restore) = rename_with_transient_lock_retry(backup, &version_dir) {
                     message.push_str(&format!("; previous copy kept at {}: {restore}", backup.display()));
                 }
             }
@@ -600,7 +601,7 @@ impl PluginPackageInstaller {
             let _ = std::fs::remove_dir_all(&version_dir);
             let mut message = error;
             if let Some(backup) = &replaced_version_dir {
-                if let Err(restore) = std::fs::rename(backup, &version_dir) {
+                if let Err(restore) = rename_with_transient_lock_retry(backup, &version_dir) {
                     message.push_str(&format!("; previous copy kept at {}: {restore}", backup.display()));
                 }
             }
@@ -1059,6 +1060,34 @@ fn open_install_lock(root_dir: &Path) -> Result<File, String> {
         .map_err(|error| error.to_string())
 }
 
+// Antivirus scanners briefly hold handles on freshly extracted plugin binaries, which fails
+// directory renames with ERROR_ACCESS_DENIED (5) or ERROR_SHARING_VIOLATION (32); the scan
+// normally finishes well inside this retry window.
+const TRANSIENT_LOCK_RETRY_DELAYS: [Duration; 3] =
+    [Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
+
+fn rename_with_transient_lock_retry(src: &Path, dst: &Path) -> std::io::Result<()> {
+    retry_transient_lock(&TRANSIENT_LOCK_RETRY_DELAYS, || std::fs::rename(src, dst))
+}
+
+fn retry_transient_lock<T>(
+    delays: &[Duration],
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    for delay in delays {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if cfg!(windows) && is_windows_lock_error(&error) => std::thread::sleep(*delay),
+            Err(error) => return Err(error),
+        }
+    }
+    operation()
+}
+
+fn is_windows_lock_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32))
+}
+
 fn make_backend_executable(path: &Option<PathBuf>) -> Result<(), String> {
     #[cfg(unix)]
     if let Some(path) = path {
@@ -1170,15 +1199,17 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{Cursor, Write};
     use std::path::Path;
+    use std::time::Duration;
 
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
     use zip::write::SimpleFileOptions;
 
     use super::{
-        is_activation_record_file, read_install_identity, sha256_hex, validate_package_expectation,
-        PluginInstallPolicy, PluginPackageExpectation, PluginPackageInstaller, PluginSignatureStatus, PluginTrustStore,
-        ACTIVATIONS_DIR, PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE, VERSIONS_DIR,
+        is_activation_record_file, read_install_identity, retry_transient_lock, sha256_hex,
+        validate_package_expectation, PluginInstallPolicy, PluginPackageExpectation, PluginPackageInstaller,
+        PluginSignatureStatus, PluginTrustStore, ACTIVATIONS_DIR, PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE,
+        VERSIONS_DIR,
     };
     use crate::plugins::{PluginManifest, PluginRegistry};
 
@@ -2000,5 +2031,66 @@ mod tests {
             zip.finish().unwrap();
         }
         output.into_inner()
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn transient_lock_retry_recovers_from_windows_lock_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for code in [5, 32] {
+            let attempts = AtomicUsize::new(0);
+            let result = retry_transient_lock(&[Duration::ZERO, Duration::ZERO, Duration::ZERO], || {
+                if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(std::io::Error::from_raw_os_error(code))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_ok());
+            assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn transient_lock_retry_returns_last_error_after_exhausting_delays() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: std::io::Result<()> = retry_transient_lock(&[Duration::ZERO], || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::from_raw_os_error(5))
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(5));
+    }
+
+    #[test]
+    fn transient_lock_retry_does_not_retry_other_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: std::io::Result<()> = retry_transient_lock(&[Duration::ZERO; 3], || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::from_raw_os_error(2))
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn transient_lock_retry_treats_windows_lock_codes_as_final_on_unix() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Raw code 5 on Unix is EIO, not a Windows lock error, so the retry gate must leave it final.
+        let attempts = AtomicUsize::new(0);
+        let result: std::io::Result<()> = retry_transient_lock(&[Duration::ZERO; 3], || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::from_raw_os_error(5))
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(5));
     }
 }

@@ -3538,15 +3538,25 @@ esac"#,
         );
         for (name, contents) in &sql_parts {
             assert!(!contents.is_empty(), "{name} must not be empty");
-            // Every non-blank line must be a complete statement -- the part
-            // boundary may only land between the fallback arm's per-batch
-            // writes, never inside a statement.
+            // The part boundary may only land between the fallback arm's
+            // per-batch writes, never inside a statement. A batched INSERT now
+            // spans several lines (one tuple per line, issue #9814), so walk
+            // each part statement by statement instead of line by line: every
+            // statement must start at a line beginning and every part must end
+            // on a closed statement.
+            let mut inside_statement = false;
             for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+                let trimmed = line.trim();
+                if trimmed.starts_with("--") {
+                    continue;
+                }
                 assert!(
-                    line.trim_start().starts_with("INSERT INTO") && line.trim_end().ends_with(';'),
-                    "{name} has a malformed line from a mid-statement cut"
+                    inside_statement || trimmed.starts_with("INSERT INTO"),
+                    "{name} has a malformed line from a mid-statement cut: {line}"
                 );
+                inside_statement = !trimmed.ends_with(';');
             }
+            assert!(!inside_statement, "{name} ends inside a statement");
         }
         // All 300 rows must be present across the parts: every row value is
         // `(n, 'xxxx…')`, so one `, '` occurrence per row.

@@ -27,7 +27,7 @@ import type { TransferTask, TransferTaskConfig } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { transferDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
-import { decodeTransferDatabaseOption, encodeTransferDatabaseOptions, isSameTransferDatabase, isTransferDatabaseSelected, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
+import { decodeTransferDatabaseOption, encodeTransferDatabaseOptions, formatTransferEndpointLabel, isSameTransferDatabase, isTransferDatabaseSelected, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
 import { formatDatabaseLabel } from "@/lib/database/defaultDatabase";
 import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
@@ -142,6 +142,10 @@ const showCrossFamilyViewHint = computed(() => {
   if (!allowed.includes("VIEW")) return false;
   return !isSameTransferFamily(transferDatabaseTypeForConnection(sourceConfig), transferDatabaseTypeForConnection(targetConfig)) && (selectedObjects.value.VIEW?.size ?? 0) > 0;
 });
+// 「批量录入」允许的 schema.table / db.table 前缀：取当前源已选的 catalog / 库 / schema，
+// 便于用户从其他工具粘贴带前缀的对象名；全为空时前端退化为只按对象名匹配。
+const objectQualifiers = computed(() => [sourceCatalog.value, sourceDatabase.value, sourceSchema.value].filter((value) => value.trim().length > 0));
+
 const pendingSourceSchemaPrefill = ref("");
 const pendingSelectedTablesPrefill = ref<string[] | null>(null);
 // Pending object selection for saved-task loading (covers all object kinds,
@@ -1046,8 +1050,8 @@ function transferStrategyLabel(request: api.TransferRequest): string {
 const confirmationSummary = computed(() => {
   const request = confirmationRequest.value;
   if (!request) return "";
-  const source = `${getConnectionName(request.sourceConnectionId)}.${request.sourceDatabase}.${request.sourceSchema}`;
-  const target = `${getConnectionName(request.targetConnectionId)}.${request.targetDatabase}.${request.targetSchema}`;
+  const source = formatTransferEndpointLabel(getConnectionName(request.sourceConnectionId), request.sourceDatabase, request.sourceSchema, request.sourceCatalog);
+  const target = formatTransferEndpointLabel(getConnectionName(request.targetConnectionId), request.targetDatabase, request.targetSchema, request.targetCatalog);
   const count = request.tables.length + request.objects.reduce((total, selection) => total + selection.names.length, 0);
   return t("transfer.startConfirmMessage", { source, target, count });
 });
@@ -1320,7 +1324,7 @@ async function saveConfigTask() {
               <div v-if="(!loadingObjects && !sourceConnectionId) || !sourceDatabase" class="text-xs text-muted-foreground py-4 text-center">
                 {{ t("transfer.selectSourceFirst") }}
               </div>
-              <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1" />
+              <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" :qualifiers="objectQualifiers" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1" />
               <div v-if="showCrossFamilyViewHint" class="mt-1.5 rounded-md border border-amber-300/40 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
                 {{ t("transfer.crossFamilyViewHint") }}
               </div>

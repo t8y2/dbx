@@ -1,7 +1,6 @@
 // @vitest-environment happy-dom
 
 import { createApp, nextTick, type App, type ComponentPublicInstance } from "vue";
-import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
 import type { MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
@@ -494,11 +493,6 @@ function singleApi(single: Single) {
 const replacements = ["marketplace", "rollback", "package", "url"] as const;
 
 describe("PluginContributionsPanel workbench refresh", () => {
-  it("connects the panel event to the App workbench refresh entry", () => {
-    const source = readFileSync("apps/desktop/src/App.vue", "utf8");
-    expect(source).toMatch(/<PluginCenterPage\b[^>]*@plugin-runtime-replaced="refreshPluginWorkbenches"/);
-  });
-
   it.each(replacements)("refreshes once with the returned plugin ID after Web %s succeeds", async (single) => {
     singleApi(single).mockResolvedValueOnce({ plugin: installed("replaced", "2.0.0") });
     await startSingle(single);

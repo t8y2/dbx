@@ -58,6 +58,8 @@ docker compose up -d --pull always
 | `DBX_PASSWORD` | Not set | Access password for the DBX Web login page. Set a strong value for server deployments. |
 | `DBX_DISABLE_PASSWORD` | `false` | Disables login protection when set to `true`. Do not use this on an untrusted network. |
 | `DBX_DATA_DIR` | `/app/data` | Directory containing the DBX database, plugins, drivers, and other persistent data. |
+| `DBX_SECRET_KEY_FILE` | Not set | Optional external key file. Takes precedence over the managed data-directory key. |
+| `DBX_SECRET_KEY` | Not set | Optional key supplied by a secret manager. Used when no key file is configured. |
 | `DBX_PORT` | `4224` | HTTP port inside the container. |
 | `DBX_PUBLIC_BASE_PATH` | `/` | URL prefix for reverse-proxy deployments, for example `/dbx`. |
 | `DBX_WEB_MCP_TOKEN` | Not set | Enables native Streamable HTTP MCP with this bearer token. Keep it secret. |
@@ -65,7 +67,27 @@ docker compose up -d --pull always
 | `DBX_WEB_MCP_ALLOWED_HOSTS` | Not set | Required when native MCP is enabled. Comma-separated public Host authorities, including ports when present. |
 | `DBX_WEB_MCP_ALLOWED_ORIGINS` | Not set | Comma-separated browser Origins allowed to call native MCP. Optional for non-browser MCP clients. |
 
-Persist `/app/data` with a named volume or bind mount. Removing this data removes saved connections and other DBX application data.
+Persist `/app/data` with a named volume or bind mount. DBX creates `/app/data/.dbx/secret.key` on the first sensitive write or data migration. Back up this file together with `/app/data/dbx.db`; losing it makes existing encrypted credentials unreadable. A key stored in the same volume does not protect against disclosure of the entire volume.
+
+For production, an external Docker Secret can replace the managed key:
+
+```yaml
+services:
+  dbx:
+    image: t8y2/dbx:latest
+    environment:
+      DBX_SECRET_KEY_FILE: /run/secrets/dbx_secret_key
+    secrets:
+      - dbx_secret_key
+    volumes:
+      - dbx-data:/app/data
+
+secrets:
+  dbx_secret_key:
+    file: ./dbx_secret_key
+```
+
+Create the external key once, keep it stable across upgrades, and never replace it while encrypted data exists.
 
 ## Native HTTP MCP
 

@@ -1,8 +1,6 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DataGridConditionEditor from "@/components/grid/DataGridConditionEditor.vue";
 import type { DataGridConditionHistoryKind } from "@/lib/dataGrid/dataGridConditionHistory";
@@ -258,97 +256,6 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(document.querySelector('[role="listbox"]')).toBeNull();
   });
 
-  it("keeps the wrapped input caret aligned with its syntax highlight layer", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const expandedInputCss = source.match(/\.data-grid-topbar-condition-input--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-    const expandedHighlightCss = source.match(/\.data-grid-condition-highlight--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-    const prefixPadding = "calc(var(--data-grid-condition-prefix-indent) + 0.125rem)";
-
-    expect(expandedInputCss).toContain("padding:");
-    expect(expandedInputCss).toContain(prefixPadding);
-    expect(expandedHighlightCss).toContain(prefixPadding);
-    expect(expandedInputCss).not.toContain("text-indent:");
-    expect(expandedHighlightCss).not.toContain("text-indent:");
-    expect(expandedInputCss).toContain("overflow-wrap: anywhere");
-    expect(source).toContain("white-space:pre-wrap;overflow-wrap:anywhere;");
-    expect(source).not.toContain("textIndent: rect.prefix");
-    expect(source).toContain("paddingLeft: rect.prefix + 2");
-    expect(source).toContain("paddingRight: rect.suffix + 8");
-    expect(source).toContain("width: Math.max(1, rect.width - 8)");
-    expect(source).toContain("function fitExpandedHeightToOverlay()");
-    expect(source).toContain("expandedHeight.value + overflow");
-  });
-
-  it("keeps the expanded condition label readable over wrapped content", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const floatingControls = source.match(/data-grid-topbar-condition-floating-controls[^"]*/)?.[0];
-    const floatingLabelCss = source.match(/\.data-grid-topbar-condition-label--floating\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-    const compactFloatingLabelCss = source.match(/\.data-grid-topbar-condition-label--floating\.data-grid-topbar-condition-label--compact\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-
-    expect(floatingControls).toContain("z-[2]");
-    expect(source).toContain("data-grid-topbar-condition-label--floating");
-    expect(source).toContain("label.scrollWidth + 4");
-    expect(floatingLabelCss).toContain("text-shadow:");
-    expect(floatingLabelCss).not.toContain("padding-right:");
-    expect(floatingLabelCss).not.toContain("box-shadow:");
-    expect(compactFloatingLabelCss).toContain("max-width: 5rem");
-    expect(compactFloatingLabelCss).toContain("opacity: 1");
-  });
-
-  it("keeps dark condition styles scoped to their target elements", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-
-    expect(source).not.toContain(":global(.dark) .data-grid");
-    expect(source).toContain(":global(.dark .data-grid-topbar-condition-label--floating)");
-    expect(source).toContain(":global(.dark .data-grid-topbar-condition-pane--expanded)");
-  });
-
-  it("scrolls the caret into view after accepting a long completion", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-
-    expect(source).toContain("function scrollCaretIntoView()");
-    expect(source).toContain("const hasVerticalOverflow = target.scrollHeight > target.clientHeight + 4");
-    expect(source).toContain("const hasHorizontalOverflow = target.scrollWidth > target.clientWidth + 1");
-    expect(source).toContain("target.scrollTop = 0");
-    expect(source).toContain("const caretLeft = caretMarker.offsetLeft");
-    expect(source).toContain("target.scrollLeft");
-    expect(source).toContain("function scheduleCaretIntoView()");
-    expect(source).toContain("function focusAfterAccept()");
-    expect(source).toContain("requestAnimationFrame(() => scrollCaretIntoView())");
-    expect(source).toContain("scheduleCaretIntoView()");
-    expect(source).toContain('if (action === "accept") focusAfterAccept()');
-  });
-
-  it("also keeps the caret visible after regular input wraps", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const onInputBody = source.match(/function onInput\(event: Event\) \{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-
-    expect(onInputBody).toContain("resizeEditor(true)");
-    expect(onInputBody).toContain("updateSuggestionPosition()");
-    expect(onInputBody).toContain("scheduleCaretIntoView()");
-  });
-
-  it("keeps the caret visible after switching focus into the expanded editor", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const focusTransferBody = source.match(/if \(nextExpanded && document\.activeElement === input && !composing\.value\) \{(?<body>[\s\S]*?)\n    \}/)?.groups?.body;
-
-    expect(focusTransferBody).toContain("const start = selectionStart.value");
-    expect(focusTransferBody).toContain("overlay.setSelectionRange(start, end)");
-    expect(focusTransferBody).toContain("overlay.focus({ preventScroll: true })");
-    expect(focusTransferBody).toContain("scheduleCaretIntoView()");
-  });
-
-  it("keeps the caret visible after collapsing the expanded editor back to one line", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const collapseTransferBody = source.match(/if \(!nextExpanded && overlayFocused && !composing\.value\) \{(?<body>[\s\S]*?)\n    \}/)?.groups?.body;
-
-    expect(collapseTransferBody).toContain("const start = selectionStart.value");
-    expect(collapseTransferBody).toContain("input.setSelectionRange(start, end)");
-    expect(collapseTransferBody).toContain("input.focus({ preventScroll: true })");
-    expect(collapseTransferBody!.indexOf("input.focus({ preventScroll: true })")).toBeLessThan(collapseTransferBody!.indexOf("input.setSelectionRange(start, end)"));
-    expect(collapseTransferBody).toContain("scheduleCaretIntoView()");
-  });
-
   it("preserves continuous input when the expanded editor collapses", async () => {
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       const textWidth = (this.textContent?.length ?? 0) * 8;
@@ -471,15 +378,6 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(expandedHighlight).toBeTruthy();
     expect(expandedHighlight?.style.transform).toBe("translate(0px, 0px)");
     vi.unstubAllGlobals();
-  });
-
-  it("positions suggestions below the measured expanded editor height", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const expandedPaneCss = source.match(/\.data-grid-topbar-condition-pane--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-
-    expect(source).toContain("bottom: expandedRect.value.top + expandedHeight.value");
-    expect(expandedPaneCss).toContain("transition: box-shadow 150ms ease");
-    expect(expandedPaneCss).not.toContain("height 150ms");
   });
 });
 

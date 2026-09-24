@@ -22,8 +22,3 @@ export function mongoCollectionSupportsIndexes(collectionKind?: string): boolean
 export function supportsMongoIndexMutations(connection?: MongoConnectionProfile, collectionKind?: string): boolean {
   return supportsMongoAllDriverMutations(connection) && mongoCollectionSupportsIndexes(collectionKind);
 }
-
-/** Capabilities which require the native Rust MongoDB driver. */
-export function supportsNativeMongoDriverMutations(connection?: MongoConnectionProfile): boolean {
-  return supportsMongoAllDriverMutations(connection) && !isMongoLegacyDriverProfile(connection?.driver_profile);
-}

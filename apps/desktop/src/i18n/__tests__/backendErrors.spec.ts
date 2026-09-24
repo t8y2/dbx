@@ -284,6 +284,31 @@ describe("backend error translation", () => {
     expect(sanitizeBackendErrorMessage(message)).toBe(message);
   });
 
+  test("hides internal Agent error data that precedes appended fallback context", () => {
+    const t = translatorFor("zh-CN");
+    const message =
+      'Agent RPC error (-1): ORA-12514: TNS:listener does not currently know of service requested in connect descriptor\nDBX_AGENT_ERROR_DATA:{"category":null,"retryable":null,"sessionDisposition":null,"stage":null,"operationOutcome":null,"agentSessionId":null}\n\nFallback with alternate Oracle descriptor failed: Agent RPC error (-1): ORA-12505';
+    const expected = "Agent RPC error (-1): ORA-12514: TNS:listener does not currently know of service requested in connect descriptor\n\nFallback with alternate Oracle descriptor failed: Agent RPC error (-1): ORA-12505";
+
+    expect(sanitizeBackendErrorMessage(message)).toBe(expected);
+    expect(formatError(new Error(message))).toBe(expected);
+    expect(translateBackendError(t, message)).toBe(expected);
+  });
+
+  test("hides nested Agent error data inside fallback context", () => {
+    const message = 'native wire version error\nDBX_AGENT_ERROR_DATA:{"category":"connection"}\n\nFallback with MongoDB (Legacy) driver failed: Agent RPC error (-1): handshake rejected\nDBX_AGENT_ERROR_DATA:{"agentSessionId":"session-1"}';
+    const expected = "native wire version error\n\nFallback with MongoDB (Legacy) driver failed: Agent RPC error (-1): handshake rejected";
+
+    expect(sanitizeBackendErrorMessage(message)).toBe(expected);
+  });
+
+  test("keeps invalid internal-looking data while hiding valid payloads after it", () => {
+    const message = 'database returned\nDBX_AGENT_ERROR_DATA:not-json\n\nFallback failed: Agent RPC error (-1): closed\nDBX_AGENT_ERROR_DATA:{"agentSessionId":"session-1"}';
+    const expected = "database returned\nDBX_AGENT_ERROR_DATA:not-json\n\nFallback failed: Agent RPC error (-1): closed";
+
+    expect(sanitizeBackendErrorMessage(message)).toBe(expected);
+  });
+
   test("strips the SQL error-position transport suffix from raw messages", () => {
     const message = 'ERROR: relation "missing" does not exist\nDBX_SQL_ERROR_POSITION:15';
     const expected = 'ERROR: relation "missing" does not exist';

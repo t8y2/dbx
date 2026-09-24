@@ -33,7 +33,7 @@ import {
   type MongoIndexSpecSnapshot,
 } from "@/lib/sidebar/mongoCollectionMutation";
 import { elasticsearchClearIndexPreview, isElasticsearchProtocolIndex, isPartialElasticsearchClear, notifyElasticsearchIndexCleared } from "@/lib/sidebar/elasticsearchIndexActions";
-import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
+import { supportsMongoAllDriverMutations, supportsMongoIndexMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
@@ -121,10 +121,6 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     return !!node.connectionId && supportsMongoAllDriverMutations(connectionStore.getConfig(node.connectionId));
   }
 
-  function usesNativeMongoDriver(node: Pick<TreeNode, "connectionId">): boolean {
-    return !!node.connectionId && supportsNativeMongoDriverMutations(connectionStore.getConfig(node.connectionId));
-  }
-
   function canMutateMongoIndexes(node: TreeNode): boolean {
     return !!node.connectionId && supportsMongoIndexMutations(connectionStore.getConfig(node.connectionId), mongoCollectionKindFromNode(node));
   }
@@ -150,7 +146,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   }
 
   function canRenameMongoCollectionNode(node: TreeNode): boolean {
-    return canMutateMilvusCollectionNode(node) || (canMutateMongoCollectionNode(node) && usesNativeMongoDriver(node) && isRenamableMongoCollection(node.label, mongoCollectionKindFromNode(node)));
+    return canMutateMilvusCollectionNode(node) || (canMutateMongoCollectionNode(node) && isRenamableMongoCollection(node.label, mongoCollectionKindFromNode(node)));
   }
 
   function canCloneMongoCollectionNode(node: TreeNode): boolean {

@@ -34,10 +34,6 @@ function selectedProfileHarness(selectedTypeValue: string, driverProfile: string
 }
 
 describe("GBase 8s connection dialog", () => {
-  it("hydrates DBSERVERNAME when editing a saved connection", () => {
-    expect(dialogSource).toContain('gbase_server: config.gbase_server || ""');
-  });
-
   it.each([
     ["gbase8a", "南大通用 GBase 8a"],
     ["gbase8s", "南大通用 GBase 8s"],

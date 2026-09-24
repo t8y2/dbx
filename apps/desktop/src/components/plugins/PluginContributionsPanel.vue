@@ -18,6 +18,7 @@ import { loadPinnedPluginIds, savePinnedPluginIds, sortPluginsPinnedFirst } from
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { physicalDropPositionInsideRect } from "@/lib/ai/aiAttachments";
 import { createFrontendPluginRegistry, pluginConnectionProviderIcon } from "@/lib/plugins/frontendPlugin";
+import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
 import {
   beaconPluginInstall,
   buildInstalledUpdateIndex,
@@ -135,6 +136,8 @@ const selectedEntry = computed(() => connectionProviders.value.find((entry) => e
 const selectedDefinition = computed(() => definitions.value.find((definition) => definition.plugin.manifest.id === selectedPluginId.value) || null);
 const selectedWorkbenches = computed(() => registry.value.listWorkbenches().filter((entry) => entry.plugin.manifest.id === selectedPluginId.value));
 const selectedFilesystems = computed(() => registry.value.listFilesystemProviders().filter((entry) => entry.plugin.manifest.id === selectedPluginId.value));
+// PR-A4: plugins declaring commands drive their quick entries via commands (workbench opens route to the command; the SFTP browse entry is retired).
+const selectedHasCommands = computed(() => registry.value.listCommands().some((entry) => entry.plugin.manifest.id === selectedPluginId.value));
 const providerConnections = computed(() => {
   const entry = selectedEntry.value;
   if (!entry) return [];
@@ -294,6 +297,7 @@ async function installMarketplaceListing(listing: MarketplacePluginListing, opti
     // installed list); notifyComponentUpdatesChanged drives the App-level update-center badge.
     notifyComponentPluginsUpdated();
     notifyComponentUpdatesChanged();
+    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
     selectPlugin(result.plugin.manifest.id);
   } catch (cause) {
     toast(translateBackendError(t, cause), 8000);
@@ -320,6 +324,7 @@ function reportBatchSummary(outcome: { succeeded: unknown[]; failed: { name: str
 async function refreshAfterBatch() {
   try {
     installedPlugins.value = await api.listPlugins();
+    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
   } catch (cause) {
     error.value = [error.value, t("pluginPlatform.batchRefreshFailed", { error: cause instanceof Error ? cause.message : String(cause) })].filter(Boolean).join("\n");
   }
@@ -610,6 +615,14 @@ async function openFilesystem(pluginId: string, providerId: string, label: strin
 }
 
 function openWorkbench(pluginId: string, contributionId: string, label: string) {
+  // PR-A4: when the plugin declares a command targeting this workbench, the entry opens through it
+  // host-authored context — the SSH plugin lands directly in the local terminal); otherwise the legacy behavior applies.
+  const command = registry.value.findCommandTargetingWorkbench(pluginId, contributionId);
+  if (command) {
+    const result = executePluginCommand(registry.value, queryStore, pluginId, command.id);
+    if (result.error) toast(result.error, 5000);
+    return;
+  }
   const connection = selectedConnection.value;
   queryStore.openPluginWorkbench(pluginId, contributionId, {
     title: connection?.name || label,
@@ -666,6 +679,7 @@ async function finishInstall(result: PluginInstallResult) {
   notifyComponentPluginsUpdated();
   installedPlugins.value = await api.listPlugins();
   notifyComponentUpdatesChanged();
+  window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
   selectPlugin(result.plugin.manifest.id);
   activeSection.value = "installed";
 }
@@ -813,6 +827,7 @@ async function rollbackSelectedPlugin() {
     clearPluginIconCache();
     installedPlugins.value = await api.listPlugins();
     notifyComponentUpdatesChanged();
+    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
     selectPlugin(result.plugin.manifest.id);
   } catch (cause) {
     toast(translateBackendError(t, cause), 8000);
@@ -828,6 +843,7 @@ async function uninstallSelectedPlugin() {
   try {
     installedPlugins.value = await api.uninstallPlugin(definition.plugin.manifest.id);
     notifyComponentUpdatesChanged();
+    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
     clearPluginIconCache();
     toast(t("pluginPlatform.uninstallSuccess", { name: definition.plugin.manifest.name }));
     selectFirstProvider();
@@ -1341,7 +1357,7 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
 
-                <div v-if="selectedFilesystems.length" class="space-y-2">
+                <div v-if="selectedFilesystems.length && !selectedHasCommands" class="space-y-2">
                   <div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">{{ t("pluginPlatform.filesystemProviders") }}</div>
                   <div v-for="entry in selectedFilesystems" :key="entry.contribution.id" class="flex items-center justify-between gap-3 rounded-lg border p-3">
                     <div>

@@ -1,4 +1,4 @@
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 
 export interface MultiDbExecutionTarget {
   connectionId: string;
@@ -43,6 +43,8 @@ export interface MultiDbTargetExecutionResult {
   errorMessage?: string;
   durationMs?: number;
   transaction?: MultiDbManualTransaction;
+  /** Result produced on this target; feeds the merged multi-source view. */
+  result?: QueryResult;
 }
 
 export interface SqlExecutionTargetValidation {

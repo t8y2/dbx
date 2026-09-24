@@ -554,6 +554,7 @@ fn clickhouse_object_statistics_from_row(row: &[serde_json::Value], database: &s
         schema: Some(database.to_string()),
         estimated_rows: json_value_as_i64(row.get(1)),
         total_bytes: json_value_as_i64(row.get(2)),
+        ..Default::default()
     })
 }
 

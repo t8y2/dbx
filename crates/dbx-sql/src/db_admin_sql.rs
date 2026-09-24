@@ -241,6 +241,8 @@ pub struct CopyTableDataSqlOptions {
     #[serde(default)]
     pub sqlserver_identity_insert: bool,
     #[serde(default)]
+    pub dameng_identity_insert: bool,
+    #[serde(default)]
     pub normalize_new_target_name: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
@@ -796,7 +798,12 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
         format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
     } else {
-        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
+        // `WHERE 1=0` rather than `WHERE 0`: PostgreSQL-family engines (HighGo, Kingbase,
+        // Vastbase, ...) and DuckDB require a boolean in WHERE and reject a bare integer
+        // with "argument of WHERE must be type boolean, not type integer" (#9950).
+        // `1=0` is a valid false predicate in every dialect, including the permissive
+        // MySQL/SQLite-style engines that also accepted `0`.
+        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0;")
     };
 
     let mut comment_sql = Vec::new();
@@ -810,13 +817,16 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
             ));
         }
     }
-    if options.database_type == Some(DatabaseType::Dameng) {
+    if let Some(database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase)) = options.database_type {
         comment_sql.extend(options.column_comments.iter().filter_map(|column| {
             if column.comment.trim().is_empty() {
                 return None;
             }
             let column_name = quote_table_identifier(options.database_type, &column.name);
-            Some(format!("COMMENT ON COLUMN {target}.{column_name} IS {}", quote_sql_string(&column.comment)))
+            Some(format!(
+                "COMMENT ON COLUMN {target}.{column_name} IS {}",
+                quote_duplicate_table_comment(database_type, &column.comment)
+            ))
         }));
     }
 
@@ -895,7 +905,10 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
     let insert_sql = format!(
         "INSERT INTO {target} ({target_column_list}){postgres_override} SELECT {source_column_list} FROM {source};"
     );
-    if options.sqlserver_identity_insert && options.database_type == Some(DatabaseType::SqlServer) {
+    let needs_identity_insert = (options.sqlserver_identity_insert
+        && options.database_type == Some(DatabaseType::SqlServer))
+        || (options.dameng_identity_insert && options.database_type == Some(DatabaseType::Dameng));
+    if needs_identity_insert {
         return format!("SET IDENTITY_INSERT {target} ON;\n{insert_sql}\nSET IDENTITY_INSERT {target} OFF;");
     }
     insert_sql
@@ -1099,6 +1112,7 @@ fn supports_duplicate_table_comment(database_type: DatabaseType) -> bool {
             | DatabaseType::Kwdb
             | DatabaseType::OpenGauss
             | DatabaseType::Dameng
+            | DatabaseType::Vastbase
     )
 }
 
@@ -2264,6 +2278,182 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_table_structure_vastbase_preserves_table_and_column_comments() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Vastbase),
+            schema: Some("业\"务".to_string()),
+            source_name: "订\"单".to_string(),
+            target_name: "订\"单_副本".to_string(),
+            table_comment: Some("  客户's;订单  ".to_string()),
+            column_comments: vec![
+                DuplicateTableColumnComment { name: "备\"注".to_string(), comment: "用户's;备注".to_string() },
+                DuplicateTableColumnComment {
+                    name: "路径".to_string(), comment: "C:\\订单\n明细\t'".to_string()
+                },
+                DuplicateTableColumnComment { name: "空".to_string(), comment: String::new() },
+                DuplicateTableColumnComment { name: "空白".to_string(), comment: " \t\n ".to_string() },
+            ],
+            primary_key_columns: vec!["编号".to_string()],
+            primary_key_constraint_name: Some("PK_副本".to_string()),
+            identifier_quote: Some("\"".to_string()),
+        });
+        let expected_statements = vec![
+            "CREATE TABLE \"业\"\"务\".\"订\"\"单_副本\" AS SELECT * FROM \"业\"\"务\".\"订\"\"单\" WHERE 1=0",
+            "COMMENT ON TABLE \"业\"\"务\".\"订\"\"单_副本\" IS '  客户''s;订单  '",
+            "COMMENT ON COLUMN \"业\"\"务\".\"订\"\"单_副本\".\"备\"\"注\" IS '用户''s;备注'",
+            "COMMENT ON COLUMN \"业\"\"务\".\"订\"\"单_副本\".\"路径\" IS E'C:\\\\订单\\n明细\\t\\''",
+        ];
+        assert_eq!(sql, format!("{};", expected_statements.join(";\n")));
+        assert_eq!(crate::sql::split_sql_statements_for_database(&sql, DatabaseType::Vastbase), expected_statements);
+    }
+
+    #[test]
+    fn duplicate_table_structure_vastbase_comments_are_independent_and_optional() {
+        for table_comment in [None, Some(""), Some(" \t\n "), Some("表注释"), Some("路径\\'\n归档")] {
+            for column_comment in [None, Some(""), Some(" \t\n "), Some("字段注释")] {
+                for schema in [None, Some("")] {
+                    let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                        database_type: Some(DatabaseType::Vastbase),
+                        schema: schema.map(str::to_string),
+                        source_name: "source".to_string(),
+                        target_name: "copy".to_string(),
+                        table_comment: table_comment.map(str::to_string),
+                        column_comments: column_comment
+                            .map(|comment| DuplicateTableColumnComment {
+                                name: "note".to_string(),
+                                comment: comment.to_string(),
+                            })
+                            .into_iter()
+                            .collect(),
+                        primary_key_columns: vec![],
+                        primary_key_constraint_name: None,
+                        identifier_quote: None,
+                    });
+                    let mut expected = "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;".to_string();
+                    match table_comment {
+                        Some("表注释") => expected.push_str("\nCOMMENT ON TABLE \"copy\" IS '表注释';"),
+                        Some("路径\\'\n归档") => {
+                            expected.push_str("\nCOMMENT ON TABLE \"copy\" IS E'路径\\\\\\'\\n归档';")
+                        }
+                        _ => {}
+                    }
+                    if column_comment == Some("字段注释") {
+                        expected.push_str("\nCOMMENT ON COLUMN \"copy\".\"note\" IS '字段注释';");
+                    }
+                    assert_eq!(sql, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_table_structure_comments_keep_other_dialects_unchanged() {
+        for (database_type, expected) in [
+            (
+                Some(DatabaseType::Postgres),
+                "CREATE TABLE \"copy\" (LIKE \"source\" INCLUDING ALL);\nCOMMENT ON TABLE \"copy\" IS '表注释';",
+            ),
+            (Some(DatabaseType::Mysql), "CREATE TABLE `copy` LIKE `source`;"),
+            (Some(DatabaseType::Highgo), "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
+            (Some(DatabaseType::Kingbase), "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
+            (Some(DatabaseType::DuckDb), "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
+            (None, "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
+        ] {
+            assert_eq!(
+                build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                    database_type,
+                    schema: None,
+                    source_name: "source".to_string(),
+                    target_name: "copy".to_string(),
+                    table_comment: Some("表注释".to_string()),
+                    column_comments: vec![DuplicateTableColumnComment {
+                        name: "note".to_string(),
+                        comment: "字段注释".to_string(),
+                    }],
+                    primary_key_columns: vec![],
+                    primary_key_constraint_name: None,
+                    identifier_quote: None,
+                }),
+                expected,
+                "{database_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_table_data_vastbase_keeps_insert_and_target_quoting() {
+        for normalize_new_target_name in [false, true] {
+            for columns in [None, Some(vec![]), Some(vec!["编\"号".to_string(), "备注".to_string()])] {
+                let expected = if columns.as_ref().is_some_and(|columns| !columns.is_empty()) {
+                    "INSERT INTO \"业\"\"务\".\"订\"\"单_副本\" (\"编\"\"号\", \"备注\") SELECT \"编\"\"号\", \"备注\" FROM \"业\"\"务\".\"订\"\"单\";"
+                } else {
+                    "INSERT INTO \"业\"\"务\".\"订\"\"单_副本\" SELECT * FROM \"业\"\"务\".\"订\"\"单\";"
+                };
+                assert_eq!(
+                    build_copy_table_data_sql(CopyTableDataSqlOptions {
+                        database_type: Some(DatabaseType::Vastbase),
+                        schema: Some("业\"务".to_string()),
+                        source_name: "订\"单".to_string(),
+                        target_name: "订\"单_副本".to_string(),
+                        columns,
+                        postgres_overriding_system_value: false,
+                        sqlserver_identity_insert: false,
+                        dameng_identity_insert: false,
+                        normalize_new_target_name,
+                        identifier_quote: Some("\"".to_string()),
+                    }),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_table_structure_uses_boolean_false_predicate_for_pg_family_fallbacks() {
+        // Regression for #9950: the generic fallback used `WHERE 0`. PostgreSQL-family
+        // engines require a boolean there, so cloning a HighGo/Kingbase/Vastbase table
+        // failed with "argument of WHERE must be type boolean, not type integer".
+        for database_type in [
+            DatabaseType::Highgo,
+            DatabaseType::Kingbase,
+            DatabaseType::Vastbase,
+            DatabaseType::DuckDb,
+            DatabaseType::Sqlite,
+        ] {
+            assert_eq!(
+                build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                    database_type: Some(database_type),
+                    schema: Some("public".to_string()),
+                    source_name: "users".to_string(),
+                    target_name: "users_copy".to_string(),
+                    table_comment: None,
+                    column_comments: vec![],
+                    primary_key_columns: vec![],
+                    primary_key_constraint_name: None,
+                    identifier_quote: None,
+                }),
+                "CREATE TABLE \"public\".\"users_copy\" AS SELECT * FROM \"public\".\"users\" WHERE 1=0;",
+                "{database_type:?}"
+            );
+        }
+        // MySQL keeps the LIKE form, so the shared fallback must not have swallowed it.
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                schema: None,
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+                primary_key_columns: vec![],
+                primary_key_constraint_name: None,
+                identifier_quote: None,
+            }),
+            "CREATE TABLE `users_copy` LIKE `users`;"
+        );
+    }
+
+    #[test]
     fn builds_duplicate_table_structure_sql() {
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
@@ -2554,6 +2744,7 @@ mod tests {
                 columns: None,
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+                dameng_identity_insert: false,
                 normalize_new_target_name: false,
                 identifier_quote: None,
             }),
@@ -2568,6 +2759,7 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+                dameng_identity_insert: false,
                 normalize_new_target_name: false,
                 identifier_quote: None,
             }),
@@ -2582,6 +2774,7 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: true,
                 sqlserver_identity_insert: false,
+            dameng_identity_insert: false,
                 normalize_new_target_name: false,
                 identifier_quote: None,
             }),
@@ -2596,11 +2789,40 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: true,
+            dameng_identity_insert: false,
                 normalize_new_target_name: false,
                 identifier_quote: None,
             }),
             "SET IDENTITY_INSERT [dbo].[users_copy] ON;\nINSERT INTO [dbo].[users_copy] ([id], [name]) SELECT [id], [name] FROM [dbo].[users];\nSET IDENTITY_INSERT [dbo].[users_copy] OFF;"
         );
+        {
+            let dameng = build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
+                schema: Some("DCSS".to_string()),
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                columns: Some(vec!["id".to_string(), "name".to_string()]),
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+                dameng_identity_insert: true,
+                normalize_new_target_name: false,
+                identifier_quote: None,
+            });
+            assert!(dameng.starts_with("SET IDENTITY_INSERT "), "dameng copy should enable identity insert: {dameng}");
+            assert!(dameng.ends_with("OFF;"), "dameng copy should disable identity insert: {dameng}");
+            assert!(
+                dameng.contains("INSERT INTO ") && dameng.contains(" SELECT "),
+                "dameng copy should carry an INSERT..SELECT: {dameng}"
+            );
+            // Dameng rejects assigning an identity column unless a column list is specified.
+            assert!(
+                dameng.contains("(\"id\", \"name\")")
+                    || dameng.contains("(`id`, `name`)")
+                    || dameng.contains("(id, name)")
+                    || dameng.contains("([id], [name])"),
+                "dameng copy must use an explicit column list: {dameng}"
+            );
+        }
         assert_eq!(
             build_copy_table_data_sql(CopyTableDataSqlOptions {
                 database_type: Some(DatabaseType::Dameng),
@@ -2610,6 +2832,7 @@ mod tests {
                 columns: None,
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+                dameng_identity_insert: false,
                 normalize_new_target_name: true,
                 identifier_quote: None,
             }),
@@ -2624,6 +2847,7 @@ mod tests {
                 columns: None,
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+                dameng_identity_insert: false,
                 normalize_new_target_name: false,
                 identifier_quote: None,
             }),
@@ -2638,6 +2862,7 @@ mod tests {
                 columns: Some(vec!["user_id".to_string(), "userName".to_string(), "order total".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+            dameng_identity_insert: false,
                 normalize_new_target_name: true,
                 identifier_quote: None,
             }),
@@ -2652,6 +2877,7 @@ mod tests {
                 columns: Some(vec!["user_id".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
+                dameng_identity_insert: false,
                 normalize_new_target_name: false,
                 identifier_quote: None,
             }),
@@ -2711,6 +2937,7 @@ mod tests {
             columns: Some(vec!["user_id".to_string(), "userName".to_string()]),
             postgres_overriding_system_value: false,
             sqlserver_identity_insert: false,
+            dameng_identity_insert: false,
             normalize_new_target_name: true,
             identifier_quote: None,
         });

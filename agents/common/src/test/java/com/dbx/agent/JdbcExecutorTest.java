@@ -120,6 +120,26 @@ class JdbcExecutorTest {
     }
 
     @Test
+    void executeCountsRowRetrievalInExecutionTime() {
+        // `stmt.execute()` returns before the rows are consumed, so a driver
+        // that only timed that call reported a handful of milliseconds for a
+        // statement whose fetch took seconds. Row retrieval has to be part of
+        // the duration the caller waited for.
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(true, -1, null, new AtomicInteger(), slowResultSet(30L), null),
+            "SELECT * FROM slow_table",
+            "",
+            schema -> ""
+        );
+
+        assertEquals(Arrays.asList(Arrays.asList(1, "Ada"), Arrays.asList(2, "Grace")), result.getRows());
+        assertTrue(
+            result.getExecution_time_ms() >= 25L,
+            "row retrieval must count toward execution_time_ms but was " + result.getExecution_time_ms() + "ms"
+        );
+    }
+
+    @Test
     void executeReturnsMultipleStatementWarningsForNoResultStatements() {
         SQLWarning first = new SQLWarning("identity value is 443", "S0003", 7998);
         first.setNextWarning(new SQLWarning("DBCC execution completed", "S0001", 2528));
@@ -430,6 +450,69 @@ class JdbcExecutorTest {
 
     private static Object currentCell(Object[][] rows, int rowIndex, int columnIndex) {
         return rows[rowIndex][columnIndex - 1];
+    }
+
+    /** Result set whose cursor advances slowly, emulating a remote fetch. */
+    private static ResultSet slowResultSet(long perRowDelayMs) {
+        Object[][] rows = {
+            {1, "Ada"},
+            {2, "Grace"}
+        };
+        String[] labels = {"id", "name"};
+        int[] sqlTypes = {Types.INTEGER, Types.VARCHAR};
+        String[] typeNames = {"INTEGER", "VARCHAR"};
+        AtomicInteger cursor = new AtomicInteger(-1);
+
+        InvocationHandler metaHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "getColumnCount":
+                    return labels.length;
+                case "getColumnLabel":
+                    return labels[(Integer) args[0] - 1];
+                case "getColumnType":
+                    return sqlTypes[(Integer) args[0] - 1];
+                case "getColumnTypeName":
+                    return typeNames[(Integer) args[0] - 1];
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        ResultSetMetaData metadata = (ResultSetMetaData) Proxy.newProxyInstance(
+            ResultSetMetaData.class.getClassLoader(),
+            new Class<?>[]{ResultSetMetaData.class},
+            metaHandler
+        );
+
+        InvocationHandler resultSetHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "getMetaData":
+                    return metadata;
+                case "next":
+                    int nextIndex = cursor.incrementAndGet();
+                    if (nextIndex >= rows.length) {
+                        return false;
+                    }
+                    Thread.sleep(perRowDelayMs);
+                    return true;
+                case "getObject":
+                case "getInt":
+                case "getString":
+                    Object cell = currentCell(rows, cursor.get(), (Integer) args[0]);
+                    if (method.getName().equals("getInt")) {
+                        return ((Number) cell).intValue();
+                    }
+                    return method.getName().equals("getObject") ? cell : String.valueOf(cell);
+                case "wasNull":
+                    return false;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        return (ResultSet) Proxy.newProxyInstance(
+            ResultSet.class.getClassLoader(),
+            new Class<?>[]{ResultSet.class},
+            resultSetHandler
+        );
     }
 
     private static ResultSet resultSet(Object objectValue, StringSupplier stringSupplier, boolean wasNull) {

@@ -32,6 +32,8 @@ public final class AgentProtocol {
     public static final String METHOD_LIST_CONSTRAINTS = "list_constraints";
     public static final String METHOD_LIST_PARTITIONS = "list_partitions";
     public static final String METHOD_LIST_SUBPARTITIONS = "list_subpartitions";
+    public static final String METHOD_GET_TABLE_PARTITION_STATUS = "get_table_partition_status";
+    public static final String METHOD_GET_TABLE_PARTITIONING = "get_table_partitioning";
     public static final String METHOD_EXECUTE_QUERY = "execute_query";
     public static final String METHOD_EXECUTE_QUERY_PAGE = "execute_query_page";
     public static final String METHOD_FETCH_QUERY_PAGE = "fetch_query_page";
@@ -207,6 +209,8 @@ public final class AgentProtocol {
         METHOD_LIST_CONSTRAINTS,
         METHOD_LIST_PARTITIONS,
         METHOD_LIST_SUBPARTITIONS,
+        METHOD_GET_TABLE_PARTITION_STATUS,
+        METHOD_GET_TABLE_PARTITIONING,
         METHOD_EXECUTE_QUERY,
         METHOD_EXECUTE_QUERY_PAGE,
         METHOD_FETCH_QUERY_PAGE,

@@ -71,7 +71,7 @@ import {
   stringifyDocumentStoreValue,
   documentStoreValueForGrid,
 } from "@/lib/app/documentJsonValues";
-import { applyDocumentStoreIdentityPlan, formatMeilisearchDocumentOperationPreview, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
+import { applyDocumentStoreIdentityPlan, formatMeilisearchDocumentOperationPreview, formatSolrDocumentOperationPreview, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
 import { restoreDocumentBrowserState, saveDocumentBrowserState, type DocumentBrowserDataSnapshot } from "@/lib/tabs/documentBrowserStateCache";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
@@ -145,7 +145,7 @@ const DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT = 10_000;
 // stores (DynamoDB/Elasticsearch) cannot resume a page without their cursor
 // stacks, and infinite scroll always restarts from the first segment.
 const restoredDocumentBrowserState = props.stateKey ? restoreDocumentBrowserState(props.stateKey) : undefined;
-const skipBasedDocumentStore = documentStoreProviderFor(props.databaseType).kind === "mongodb" || documentStoreProviderFor(props.databaseType).kind === "meilisearch";
+const skipBasedDocumentStore = ["mongodb", "meilisearch", "solr"].includes(documentStoreProviderFor(props.databaseType).kind);
 const restoresSkipBasedPage = !!restoredDocumentBrowserState && !settingsStore.editorSettings.infiniteScroll && skipBasedDocumentStore;
 
 const documents = ref<JsonRecord[]>([]);
@@ -466,6 +466,12 @@ function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
   });
 }
 const elasticsearchGridColumnTypes = computed(() => elasticsearchGridColumnTypesFor(lastGridColumns.value));
+const solrSchemaFields = ref<ColumnInfo[]>([]);
+const solrFieldTypes = computed(() => new Map(solrSchemaFields.value.map((field) => [field.name, field.data_type])));
+function solrGridColumnTypesFor(columns: readonly string[]): string[] {
+  return columns.map((column) => (column === "_id" ? "string" : (solrFieldTypes.value.get(column) ?? "")));
+}
+const solrGridColumnTypes = computed(() => solrGridColumnTypesFor(lastGridColumns.value));
 const dynamodbTableDescription = ref<DynamoDbTableDescription | null>(null);
 const dynamodbIndexName = ref("__table__");
 const dynamodbPageCursors = ref<Array<string | undefined>>([undefined]);
@@ -536,6 +542,9 @@ const deleteDetails = computed(() => {
       });
     }
     const displayId = mongoDocumentIdForGrid(id);
+    if (props.databaseType === "solr") {
+      return `Solr core: ${props.collection}\nDocument _id: ${String(displayId)}`;
+    }
     if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch") {
       const product = props.databaseType === "easysearch" ? "Easysearch" : props.databaseType === "meilisearch" ? "Meilisearch" : "Elasticsearch";
       return `${product} index: ${props.collection}\nDocument _id: ${String(displayId)}`;
@@ -608,7 +617,7 @@ function commitLoadedDocuments(nextDocuments: JsonRecord[], nextCopyDocuments: J
 
 const gridResult = computed<QueryResult>(() => {
   const docs = documents.value;
-  const columnTypes = documentStoreProvider.value.kind === "elasticsearch" ? elasticsearchGridColumnTypes.value : lastGridColumnTypes.value;
+  const columnTypes = documentStoreProvider.value.kind === "elasticsearch" ? elasticsearchGridColumnTypes.value : documentStoreProvider.value.kind === "solr" ? solrGridColumnTypes.value : lastGridColumnTypes.value;
   if (!docs.length) {
     return {
       columns: lastGridColumns.value,
@@ -637,7 +646,7 @@ const gridResult = computed<QueryResult>(() => {
 
 async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
   const kind = documentStoreProvider.value.kind;
-  if (kind !== "mongodb" && kind !== "dynamodb" && kind !== "elasticsearch") return undefined;
+  if (kind !== "mongodb" && kind !== "dynamodb" && kind !== "elasticsearch" && kind !== "solr") return undefined;
 
   const connectionId = props.connectionId;
   const database = props.database;
@@ -673,7 +682,7 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
         }
       }
 
-      if ((kind === "mongodb" || kind === "elasticsearch") && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
+      if ((kind === "mongodb" || kind === "elasticsearch" || kind === "solr") && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
       onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
 
       if (kind === "dynamodb" || kind === "elasticsearch") {
@@ -705,7 +714,7 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
 
   const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
   if (result.columns.length === 0) result.columns = gridResult.value.columns;
-  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : undefined;
+  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : kind === "solr" ? solrGridColumnTypesFor(result.columns) : undefined;
   result.affected_rows = exportedDocuments.length;
   result.truncated = (kind === "dynamodb" || kind === "elasticsearch") && !!cursor && exportedDocuments.length >= rowLimit;
   result.has_more = result.truncated;
@@ -717,9 +726,18 @@ const elasticsearchFilterFieldNames = computed(() => {
   const names = [...elasticsearchMappingFields.value.map((field) => field.name), ...gridResult.value.columns, "_id", "_routing"];
   return [...new Set(names.filter(Boolean))];
 });
+const solrFilterFieldNames = computed(() => {
+  const names = [...solrSchemaFields.value.map((field) => field.name), ...gridResult.value.columns, "_id"];
+  return [...new Set(names.filter(Boolean))];
+});
 const documentFilterFieldTree = computed<DocumentFieldPathNode[]>(() => {
   if (documentStoreProvider.value.kind === "elasticsearch") {
     return elasticsearchFieldPathTreeFromFieldNames(elasticsearchFilterFieldNames.value, elasticsearchFieldTypes.value);
+  }
+  if (documentStoreProvider.value.kind === "solr") {
+    // Schema fields give the filter builder a complete field list even before
+    // any document page has loaded; unknown Solr types stay leaf-selectable.
+    return elasticsearchFieldPathTreeFromFieldNames(solrFilterFieldNames.value, solrFieldTypes.value);
   }
   const tree = documentFieldPathTreeFromDocuments(documents.value);
   if (tree.length > 0) return tree;
@@ -1395,12 +1413,16 @@ async function applyDocumentStructuredFilters() {
   applyFilter();
 }
 
-async function loadElasticsearchMappingFields() {
-  if (documentStoreProvider.value.kind !== "elasticsearch") return;
+async function loadDocumentStoreSchemaFields() {
+  const kind = documentStoreProvider.value.kind;
+  if (kind !== "elasticsearch" && kind !== "solr") return;
   try {
-    elasticsearchMappingFields.value = (await api.getColumns(props.connectionId, props.database, "", props.collection)) ?? [];
+    const fields = (await api.getColumns(props.connectionId, props.database, "", props.collection)) ?? [];
+    if (kind === "elasticsearch") elasticsearchMappingFields.value = fields;
+    else solrSchemaFields.value = fields;
   } catch {
-    elasticsearchMappingFields.value = [];
+    if (kind === "elasticsearch") elasticsearchMappingFields.value = [];
+    else solrSchemaFields.value = [];
   }
 }
 
@@ -1687,9 +1709,9 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
         const sourceDocument = documents.value[rowIdx];
         if (!sourceDocument) continue;
         const documentId = sourceDocument._id ?? id;
-        const updated = buildPathIdentityUpdatedDocument(sourceDocument, dirtyCols, columns, "meilisearch");
-        const writeDocument = prepareDocumentStoreWriteDocument(updated, { kind: "meilisearch", mode: "update" });
-        stmts.push(formatMeilisearchDocumentOperationPreview({ action: "update", index: coll, id: documentId, document: writeDocument }));
+        const updated = buildPathIdentityUpdatedDocument(sourceDocument, dirtyCols, columns, kind === "solr" ? "solr" : "meilisearch");
+        const writeDocument = prepareDocumentStoreWriteDocument(updated, { kind: kind === "solr" ? "solr" : "meilisearch", mode: "update" });
+        stmts.push(kind === "solr" ? formatSolrDocumentOperationPreview({ action: "update", core: coll, id: documentId, document: writeDocument }) : formatMeilisearchDocumentOperationPreview({ action: "update", index: coll, id: documentId, document: writeDocument }));
       }
     } else {
       const updateDoc = buildMongoUpdateDocument(dirtyCols, columns, documents.value[rowIdx]);
@@ -1707,7 +1729,7 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
         continue;
       }
       if (!isEs) {
-        stmts.push(formatMeilisearchDocumentOperationPreview({ action: "delete", index: coll, id: documents.value[rowIdx]?._id ?? id }));
+        stmts.push(kind === "solr" ? formatSolrDocumentOperationPreview({ action: "delete", core: coll, id: documents.value[rowIdx]?._id ?? id }) : formatMeilisearchDocumentOperationPreview({ action: "delete", index: coll, id: documents.value[rowIdx]?._id ?? id }));
         continue;
       }
       const routing = documentRoutingFromGridRow(row, columns);
@@ -1730,8 +1752,8 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
       }
       if (!isEs) {
         const idValue = idColIdx >= 0 ? newRow[idColIdx] : null;
-        const id = idValue === null || idValue === undefined || idValue === "" ? undefined : parseDocumentStoreInputValue(idValue, "meilisearch");
-        stmts.push(formatMeilisearchDocumentOperationPreview({ action: id === undefined ? "insert" : "upsert", index: coll, id, document: doc }));
+        const id = idValue === null || idValue === undefined || idValue === "" ? undefined : parseDocumentStoreInputValue(idValue, kind === "solr" ? "solr" : "meilisearch");
+        stmts.push(kind === "solr" ? formatSolrDocumentOperationPreview({ action: id === undefined ? "insert" : "upsert", core: coll, id, document: doc }) : formatMeilisearchDocumentOperationPreview({ action: id === undefined ? "insert" : "upsert", index: coll, id, document: doc }));
         continue;
       }
       const id = idColIdx >= 0 ? documentIdFromGridValue(newRow[idColIdx]) : null;
@@ -1917,7 +1939,7 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
     if (documentLoadExecutionId.value !== executionId) return;
     if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;
     const nextDocuments =
-      storeKind === "elasticsearch" && result.raw_documents?.length === result.documents.length
+      (storeKind === "elasticsearch" || storeKind === "solr") && result.raw_documents?.length === result.documents.length
         ? result.raw_documents.map((raw, index) => {
             try {
               return asRecord(parseJsonPreservingLargeNumbers(raw));
@@ -1997,7 +2019,7 @@ async function countExactDocumentTotal(): Promise<number | undefined> {
     paginationTotal.value = totals.paginationTotal;
     return exactCount;
   }
-  const exactCount = request.storeKind === "dynamodb" ? await api.documentCountDocuments(request.connectionId, request.collection, request.filter) : await api.mongoCountDocuments(request.connectionId, request.database, request.collection, request.filter, "accurate");
+  const exactCount = request.storeKind === "dynamodb" || request.storeKind === "solr" ? await api.documentCountDocuments(request.connectionId, request.collection, request.filter) : await api.mongoCountDocuments(request.connectionId, request.database, request.collection, request.filter, "accurate");
   if (!isCurrentDocumentQueryTotalCountRequest(request)) return undefined;
   if (!Number.isFinite(exactCount) || exactCount < 0) {
     throw new Error("invalid count");
@@ -2633,9 +2655,9 @@ onMounted(async () => {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
   await loadDynamoDbTableDescription();
-  // Mapping metadata enriches the filter builder, but it must not delay the
-  // first page of documents when the mapping endpoint is slow.
-  void loadElasticsearchMappingFields();
+  // Schema metadata enriches the filter builder, but it must not delay the
+  // first page of documents when the schema endpoint is slow.
+  void loadDocumentStoreSchemaFields();
   // A restored snapshot already holds the rows the last load produced, so a tab
   // switch must not re-issue the collection query (#8679). Refresh and every
   // mutation path still force a real load.

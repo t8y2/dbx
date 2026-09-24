@@ -702,7 +702,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
     <Teleport to="body">
       <div v-if="historyPreview" class="pointer-events-none fixed z-[140] rounded-md bg-foreground shadow-xl" :style="previewStyle">
         <span class="absolute h-3 w-3 rotate-45 bg-foreground" :class="historyPreview.side === 'left' ? '-left-1.5' : '-right-1.5'" :style="previewArrowStyle" />
-        <div class="max-h-[min(320px,calc(100vh-16px))] overflow-auto rounded-md px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-background">{{ historyPreview.value }}</div>
+        <div class="max-h-[min(320px,calc(100vh-16px))] overflow-auto rounded-md px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-background-solid">{{ historyPreview.value }}</div>
       </div>
     </Teleport>
   </div>

@@ -42,7 +42,7 @@ async function saveSchemaCacheSafe(cacheKey: string, payload: unknown): Promise<
   }
 }
 
-export type ObjectMetadataFacet = "columns" | "indexes" | "foreign-keys" | "constraints" | "triggers" | "comment" | "owner";
+export type ObjectMetadataFacet = "columns" | "indexes" | "foreign-keys" | "constraints" | "triggers" | "partitions" | "comment" | "owner";
 
 function cacheSegment(value: string | undefined): string {
   return encodeURIComponent(value ?? "");

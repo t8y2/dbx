@@ -17,7 +17,7 @@ import { contributorsFromActivity } from "@/lib/contributors";
 import { getAppVersion } from "@/lib/appVersion";
 import { fetchLatestReleaseInfo } from "@/lib/latestRelease";
 import { buildMetadata, getHtmlLang } from "@/lib/metadata";
-import { buildSoftwareApplicationStructuredData } from "@/lib/structuredData";
+import { buildSoftwareApplicationStructuredData, serializeStructuredData } from "@/lib/structuredData";
 import { ArrowRight, Bot, Database, FileCode, GitCompare, Network, Search, Shield, Table, Terminal, Zap } from "lucide-react";
 import { resolveLang, type DocsLang } from "@/lib/i18n";
 
@@ -448,11 +448,11 @@ const i18nText = {
 const landingMeta = {
   en: {
     title: "DBX - 25 MB to manage 90+ databases!",
-    description: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
+    description: "Manage MySQL, PostgreSQL, SQLite, Redis and 90+ data systems with DBX, a free open-source database client. Desktop, Docker self-hosting, optional AI and MCP.",
   },
   cn: {
     title: "DBX - 25MB，管理90+种数据库！",
-    description: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
+    description: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 90+ 种数据系统，提供 SQL 编辑、可选 AI 助手、MCP 和 Docker 自托管，覆盖 Windows、macOS 与 Linux。",
   },
 };
 
@@ -564,7 +564,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
 
   return (
     <main className="landing" lang={getHtmlLang(l)}>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(softwareStructuredData) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeStructuredData(softwareStructuredData) }} />
       {/* 漫游星空背景层：铺满整个深色着陆页，克制不抢焦点 */}
       <Starfield />
       {/* Nav */}

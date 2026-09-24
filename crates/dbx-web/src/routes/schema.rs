@@ -462,6 +462,15 @@ fn should_cache_columns(client_session_id: Option<&str>) -> bool {
     client_session_id.is_none()
 }
 
+pub async fn get_plugin_table_metadata(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<dbx_core::schema::plugin_metadata::PluginTableContext>,
+) -> Result<Json<dbx_core::schema::plugin_metadata::PluginTableMetadata>, AppError> {
+    let result =
+        dbx_core::schema::plugin_metadata::get_table_metadata(&state.app, request).await.map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn list_columns(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -698,6 +707,19 @@ pub async fn get_table_partition_status(
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
     dbx_core::schema::table_partition_status_core(&state.app, &q.connection_id, database, schema, table)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+pub async fn get_table_partitioning(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::db::PgTablePartitioning>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    dbx_core::schema::get_table_partitioning_core(&state.app, &q.connection_id, database, schema, table)
         .await
         .map(Json)
         .map_err(AppError::from)

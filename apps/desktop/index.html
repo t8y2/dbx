@@ -18,6 +18,35 @@
       html.dark #root {
         background-color: rgb(19 20 22);
       }
+
+      #startup-loading {
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+        align-items: center;
+        justify-content: center;
+        color: #6b7280;
+        font: 13px system-ui, sans-serif;
+      }
+
+      #startup-loading::before {
+        width: 22px;
+        height: 22px;
+        margin-bottom: 12px;
+        border: 2px solid rgba(107, 114, 128, 0.22);
+        border-top-color: currentColor;
+        border-radius: 999px;
+        content: "";
+        animation: dbx-startup-spin 0.8s linear infinite;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #startup-loading::before { animation: none; }
+      }
+
+      @keyframes dbx-startup-spin {
+        to { transform: rotate(360deg); }
+      }
     </style>
     <script data-dbx-startup-theme>
       (() => {
@@ -69,20 +98,7 @@
   </head>
   <body>
     <div id="root">
-      <style>
-        #root:empty {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          height: 100vh;
-          font-family: system-ui, sans-serif;
-          color: #888;
-          font-size: 13px;
-        }
-        #root:empty::after {
-          content: "Loading…";
-        }
-      </style>
+      <div id="startup-loading" role="status" aria-live="polite">Loading…</div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

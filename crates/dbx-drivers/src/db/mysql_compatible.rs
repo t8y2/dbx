@@ -218,6 +218,7 @@ pub async fn get_columns_show_from(
                     .and_then(|c| c.split_once('_').map(|(charset, _)| charset.to_string()))
                     .filter(|s| !s.is_empty()),
                 collation,
+                metadata_capabilities: None,
             })
         })
         .collect())

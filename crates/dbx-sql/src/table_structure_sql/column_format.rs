@@ -254,6 +254,12 @@ fn manticore_column_type(column: &EditableStructureColumn) -> String {
 
 pub(super) fn normalize_column_data_type(dialect: StructureDialect, data_type: &str) -> String {
     let trimmed = data_type.trim();
+    #[cfg(feature = "duckdb-sidecar")]
+    if dialect == StructureDialect::DuckDb {
+        if let Some(normalized) = normalize_duckdb_type_modifiers(trimmed) {
+            return normalized;
+        }
+    }
     let Some(open_index) = trimmed.find('(') else {
         return trimmed.to_string();
     };
@@ -298,6 +304,99 @@ pub(super) fn normalize_column_data_type(dialect: StructureDialect, data_type: &
     }
 
     trimmed.to_string()
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+fn normalize_duckdb_type_modifiers(data_type: &str) -> Option<String> {
+    let (raw_base, remainder) = data_type.split_once('(')?;
+    let (raw_params, suffix) = remainder.split_once(')')?;
+    let params = raw_params.trim();
+    if params.is_empty() || params.contains('(') {
+        return None;
+    }
+    let mut base_type = raw_base.trim().to_string();
+    let suffix = suffix.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !suffix.is_empty() {
+        if !matches!(base_type.to_ascii_lowercase().as_str(), "time" | "timestamp")
+            || !matches!(suffix.to_ascii_lowercase().as_str(), "with time zone" | "without time zone")
+        {
+            return None;
+        }
+        base_type.push(' ');
+        base_type.push_str(&suffix);
+    }
+    let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "tinyint"
+            | "int1"
+            | "smallint"
+            | "int2"
+            | "short"
+            | "int16"
+            | "integer"
+            | "int"
+            | "int4"
+            | "signed"
+            | "integral"
+            | "int32"
+            | "bigint"
+            | "int8"
+            | "long"
+            | "oid"
+            | "int64"
+            | "hugeint"
+            | "int128"
+            | "utinyint"
+            | "uint8"
+            | "usmallint"
+            | "uint16"
+            | "uinteger"
+            | "uint32"
+            | "ubigint"
+            | "uint64"
+            | "uhugeint"
+            | "uint128"
+            | "real"
+            | "float4"
+            | "double"
+            | "double precision"
+            | "float8"
+            | "boolean"
+            | "bool"
+            | "logical"
+            | "blob"
+            | "bytea"
+            | "binary"
+            | "varbinary"
+            | "bit"
+            | "bitstring"
+            | "varint"
+            | "bignum"
+            | "date"
+            | "time"
+            | "time without time zone"
+            | "time with time zone"
+            | "timetz"
+            | "timestamptz"
+            | "timestamp with time zone"
+            | "timestamp_s"
+            | "timestamp_ms"
+            | "timestamp_ns"
+            | "uuid"
+            | "guid"
+            | "json"
+            | "interval"
+    ) {
+        return Some(base_type);
+    }
+    if normalized == "float"
+        && (!params.bytes().all(|byte| byte.is_ascii_digit())
+            || !params.parse::<u64>().is_ok_and(|precision| (1..=53).contains(&precision)))
+    {
+        return Some(base_type);
+    }
+    None
 }
 
 fn is_oracle_lengthless_type(base_type: &str) -> bool {
@@ -532,4 +631,189 @@ pub(super) fn is_mysql_timestamp_type(data_type: &str) -> bool {
         None => trimmed,
     };
     base_type.eq_ignore_ascii_case("timestamp")
+}
+
+#[cfg(all(test, feature = "duckdb-sidecar"))]
+mod duckdb_type_parameter_tests {
+    use super::*;
+    use crate::table_structure_sql::{build_create_table_sql, build_table_structure_change_sql};
+
+    #[test]
+    fn removes_unsupported_scalar_modifiers() {
+        for base_type in [
+            "TINYINT",
+            "INT1",
+            "SMALLINT",
+            "INT2",
+            "SHORT",
+            "INT16",
+            "INTEGER",
+            "INT",
+            "INT4",
+            "SIGNED",
+            "INTEGRAL",
+            "INT32",
+            "BIGINT",
+            "INT8",
+            "LONG",
+            "OID",
+            "INT64",
+            "HUGEINT",
+            "INT128",
+            "UTINYINT",
+            "UINT8",
+            "USMALLINT",
+            "UINT16",
+            "UINTEGER",
+            "UINT32",
+            "UBIGINT",
+            "UINT64",
+            "UHUGEINT",
+            "UINT128",
+            "REAL",
+            "FLOAT4",
+            "DOUBLE",
+            "DOUBLE PRECISION",
+            "FLOAT8",
+            "BOOLEAN",
+            "BOOL",
+            "LOGICAL",
+            "BLOB",
+            "BYTEA",
+            "BINARY",
+            "VARBINARY",
+            "BIT",
+            "BITSTRING",
+            "VARINT",
+            "BIGNUM",
+            "DATE",
+            "TIME",
+            "TIME WITHOUT TIME ZONE",
+            "TIME WITH TIME ZONE",
+            "TIMETZ",
+            "TIMESTAMPTZ",
+            "TIMESTAMP WITH TIME ZONE",
+            "TIMESTAMP_S",
+            "TIMESTAMP_MS",
+            "TIMESTAMP_NS",
+            "UUID",
+            "GUID",
+            "JSON",
+            "INTERVAL",
+        ] {
+            for params in ["11", "10,2"] {
+                let data_type = format!("{base_type}({params})");
+                assert_eq!(normalize_column_data_type(StructureDialect::DuckDb, &data_type), base_type);
+            }
+        }
+        assert_eq!(normalize_column_data_type(StructureDialect::DuckDb, "  integer (11)  "), "integer");
+        assert_eq!(
+            normalize_column_data_type(StructureDialect::DuckDb, "TIMESTAMP(6) WITH TIME ZONE"),
+            "TIMESTAMP WITH TIME ZONE"
+        );
+        assert_eq!(
+            normalize_column_data_type(StructureDialect::DuckDb, "TIME(6) WITHOUT TIME ZONE"),
+            "TIME WITHOUT TIME ZONE"
+        );
+    }
+
+    #[test]
+    fn preserves_float_mantissa_bits_and_drops_invalid_float_parameters() {
+        for precision in ["1", "24", "25", "53"] {
+            let data_type = format!("FLOAT({precision})");
+            assert_eq!(normalize_column_data_type(StructureDialect::DuckDb, &data_type), data_type);
+        }
+        for invalid in ["0", "54", "-1", "1.5", "10,2", "abc", "999999999999999999999999"] {
+            assert_eq!(normalize_column_data_type(StructureDialect::DuckDb, &format!("FLOAT({invalid})")), "FLOAT");
+        }
+    }
+
+    #[test]
+    fn preserves_supported_compound_unknown_and_other_dialect_types() {
+        for data_type in [
+            "INTEGER",
+            "DECIMAL(10,2)",
+            "NUMERIC(38,0)",
+            "DEC(12,3)",
+            "VARCHAR(255)",
+            "CHAR(1)",
+            "BPCHAR(20)",
+            "CHARACTER VARYING(20)",
+            "CHARACTER(20)",
+            "TEXT(20)",
+            "STRING(20)",
+            "NVARCHAR(20)",
+            "TIMESTAMP(9)",
+            "DATETIME(3)",
+            "TIMESTAMP_US(3)",
+            "TIMESTAMP(3) WITHOUT TIME ZONE",
+            "DECIMAL(10,2)[]",
+            "INTEGER[3]",
+            "INTEGER(11)[]",
+            "STRUCT(id INTEGER, price DECIMAL(10,2))",
+            "MAP(VARCHAR, DECIMAL(10,2))",
+            "UNION(id INTEGER, name VARCHAR)",
+            "ENUM('a', 'b')",
+            "custom_type(10)",
+            "main.INTEGER(11)",
+            "\"INTEGER\"(11)",
+            "INTEGER(",
+            "INTEGER()",
+            "INTEGER(11) trailing",
+            "DECIMAL(39,0)",
+            "VARCHAR(-1)",
+        ] {
+            assert_eq!(normalize_column_data_type(StructureDialect::DuckDb, data_type), data_type);
+        }
+        for dialect in [StructureDialect::Mysql, StructureDialect::Postgres, StructureDialect::Sqlite] {
+            for data_type in ["INTEGER(11)", "FLOAT(10,2)", "DECIMAL(10,2)", "VARCHAR(255)"] {
+                assert_eq!(normalize_column_data_type(dialect, data_type), data_type);
+            }
+        }
+    }
+
+    #[test]
+    fn normalizes_create_and_add_column_save_paths() {
+        let options: TableStructureSqlOptions = serde_json::from_value(serde_json::json!({
+            "databaseType": "duckdb", "tableName": "issue_9980",
+            "columns": [
+                {"id": "new:id", "name": "id", "dataType": "INTEGER(11)", "isNullable": true},
+                {"id": "new:ratio", "name": "ratio", "dataType": "FLOAT(10,2)", "isNullable": true},
+                {"id": "new:amount", "name": "amount", "dataType": "DECIMAL(10,2)", "isNullable": true},
+                {"id": "new:label", "name": "label", "dataType": "VARCHAR(255)", "isNullable": true}
+            ]
+        }))
+        .unwrap();
+        let created = build_create_table_sql(options.clone());
+        assert!(created.warnings.is_empty(), "{:?}", created.warnings);
+        assert_eq!(created.statements, vec![
+            "CREATE TABLE \"issue_9980\" (\n  \"id\" INTEGER,\n  \"ratio\" FLOAT,\n  \"amount\" DECIMAL(10,2),\n  \"label\" VARCHAR(255)\n);"
+        ]);
+        let altered = build_table_structure_change_sql(options);
+        assert!(altered.warnings.is_empty(), "{:?}", altered.warnings);
+        assert_eq!(
+            altered.statements,
+            vec![
+                "ALTER TABLE \"issue_9980\" ADD COLUMN \"id\" INTEGER;",
+                "ALTER TABLE \"issue_9980\" ADD COLUMN \"ratio\" FLOAT;",
+                "ALTER TABLE \"issue_9980\" ADD COLUMN \"amount\" DECIMAL(10,2);",
+                "ALTER TABLE \"issue_9980\" ADD COLUMN \"label\" VARCHAR(255);",
+            ]
+        );
+    }
+
+    #[test]
+    fn retains_existing_column_edit_boundary() {
+        let options = serde_json::from_value(serde_json::json!({
+            "databaseType": "duckdb", "tableName": "issue_9980",
+            "column": {
+                "id": "existing:id", "name": "id", "dataType": "INTEGER(11)", "isNullable": true,
+                "original": {"name": "id", "data_type": "SMALLINT", "is_nullable": true, "column_default": null}
+            }
+        }))
+        .unwrap();
+        let altered = crate::table_structure_sql::build_single_column_alter_sql(options);
+        assert!(altered.statements.is_empty());
+        assert_eq!(altered.warnings, vec!["Editing existing columns is not supported for duckdb yet."]);
+    }
 }

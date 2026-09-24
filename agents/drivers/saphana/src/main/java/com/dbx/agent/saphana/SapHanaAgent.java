@@ -25,6 +25,11 @@ public final class SapHanaAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    protected boolean includeColumnCommentsInTableDdl() {
+        return true;
+    }
+
+    @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         String normalizedType = objectType == null ? "" : objectType.trim().toUpperCase(Locale.ROOT);
         if (!"PROCEDURE".equals(normalizedType)) {

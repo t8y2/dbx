@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { computed, createApp, nextTick, type App } from "vue";
+import { createPinia } from "pinia";
 import MultiDbExecuteDialog from "../MultiDbExecuteDialog.vue";
 import type { MultiDbExecutionAdapter } from "@/composables/useMultiDbExecution";
 
@@ -37,6 +38,7 @@ async function openDialog(executeTarget: MultiDbExecutionAdapter["executeTarget"
   const root = document.createElement("div");
   document.body.append(root);
   app = createApp(MultiDbExecuteDialog, { open: true, "onUpdate:open": onOpenChange, sql: "INSERT INTO t VALUES (1)", sourceTabId: "source", databaseType: "oceanbase-oracle", initialTargets: [{ connectionId: "test", database: "test" }], launchId: 1, initialManualTransaction: true, executeTarget });
+  app.use(createPinia());
   app.mount(root);
   await flushPromises();
   const checkbox = document.querySelector<HTMLInputElement>('input[type="checkbox"]');

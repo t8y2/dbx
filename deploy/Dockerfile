@@ -115,6 +115,7 @@ COPY --from=backend /out/${TARGETPLATFORM}/dbx-web /usr/local/bin/
 COPY --from=frontend /app/dist /app/static
 ENV DBX_STATIC_DIR=/app/static
 ENV DBX_DATA_DIR=/app/data
+ENV DBX_BACKUP_ROOT=/app/backups
 ENV DBX_JAVA_BIN=/usr/bin/java
 EXPOSE 4224
 CMD ["dbx-web"]

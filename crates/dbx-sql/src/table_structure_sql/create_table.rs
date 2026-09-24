@@ -23,7 +23,20 @@ fn is_sqlite_integer_family_type(data_type: &str) -> bool {
         .any(|candidate| normalized == *candidate || normalized.starts_with(&format!("{candidate}(")))
 }
 
-pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    build_create_table_sql_with_partition_clause(options, None)
+}
+
+/// Shared implementation for plain and partitioned `CREATE TABLE`.
+///
+/// `partition_clause` is a ready-made `PARTITION BY ...` body (no leading
+/// keyword), appended to the `CREATE TABLE` statement. Keeping it as a separate
+/// entry point means `build_create_table_sql`'s signature — used from ~160 call
+/// sites and integration tests — stays unchanged.
+pub(super) fn build_create_table_sql_with_partition_clause(
+    mut options: TableStructureSqlOptions,
+    partition_clause: Option<String>,
+) -> TableStructureSqlResult {
     let capabilities;
     let dialect;
     if options.is_gaussdb_m_mode {
@@ -177,7 +190,12 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
         column_definitions.push(format!("PRIMARY KEY ({pk_list})"));
     }
 
-    statements.push(format!("CREATE TABLE {table} (\n  {}\n);", column_definitions.join(",\n  ")));
+    let create_table = format!("CREATE TABLE {table} (\n  {}\n)", column_definitions.join(",\n  "));
+    let create_table = match partition_clause {
+        Some(clause) => format!("{create_table} {clause}"),
+        None => create_table,
+    };
+    statements.push(format!("{create_table};"));
 
     if let Some(engine) = options.mysql_engine.as_deref().map(str::trim).filter(|engine| !engine.is_empty()) {
         if let Some(statement) = statements.last_mut() {

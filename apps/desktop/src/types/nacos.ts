@@ -465,6 +465,8 @@ export interface NacosConfigUpsert extends NacosConfigKey {
   appName?: string;
   desc?: string;
   tags?: string;
+  /** Publish only while the server still holds this MD5. */
+  casMd5?: string;
 }
 
 export interface NacosConfigHistoryQuery extends NacosConfigKey {

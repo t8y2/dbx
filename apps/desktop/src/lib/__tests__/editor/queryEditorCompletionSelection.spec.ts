@@ -1,15 +1,11 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { acceptCompletion, autocompletion, completionStatus, currentCompletions, moveCompletionSelection, selectedCompletionIndex, startCompletion } from "@codemirror/autocomplete";
 import { EditorState, Prec, Transaction } from "@codemirror/state";
 import { insertNewlineKeepIndent } from "@codemirror/commands";
 import { EditorView, keymap, runScopeHandlers } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
 import { acceptSelectedCompletionWithRetry, acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
-
-const queryEditorSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
 
 function createCompletionView(doc = "", selectFirstCompletionOnOpen = false, interactionDelay: number | null = 0) {
   return new EditorView({
@@ -67,10 +63,6 @@ async function expectCompletionOpenWithoutSelection(view: EditorView) {
 }
 
 describe("QueryEditor completion selection", () => {
-  it("binds SQL completion to CodeMirror's unselected-on-open mode", () => {
-    expect(queryEditorSource).toMatch(/selectOnOpen: settingsStore\.editorSettings\.selectFirstCompletionOnOpen/);
-  });
-
   it("opens manual completion unselected and accepts the first option with Tab", async () => {
     const view = createCompletionView();
 

@@ -122,9 +122,13 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  * `mqtt`) belong to the same group: brokers have no SQL engine, and their
  * workbench is the MQ/MQTT admin tab. The sidebar entry used to open a plain
  * SQL editor against a broker (issue #8415).
+ *
+ * Meilisearch exposes its own index search and management workspaces rather
+ * than a general-purpose SQL query surface, so the generic sidebar action is
+ * hidden there as well (issue #9609).
  */
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt" && dbType !== "meilisearch" && dbType !== "salesforce";
 }
 
 /**
@@ -194,6 +198,11 @@ export function supportsSchemaDiagram(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "diagram");
 }
 
+/** Relational engines that can list tables and columns. Independent of diagram support. */
+export function supportsDataDictionary(dbType?: DatabaseType): boolean {
+  return supportsDatabaseFeature(dbType, "metadataBrowse");
+}
+
 export function supportsDatabaseSearch(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "schemaSearch");
 }
@@ -246,7 +255,9 @@ export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, 
 }
 
 export function supportsTableTruncate(dbType?: DatabaseType): boolean {
-  return !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "influxdb3" && dbType !== "victoriametrics" && dbType !== "manticoresearch";
+  return (
+    !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "influxdb3" && dbType !== "victoriametrics" && dbType !== "manticoresearch" && dbType !== "salesforce"
+  );
 }
 
 export function supportsTableVacuum(dbType?: DatabaseType): boolean {

@@ -6,12 +6,11 @@ import { createPinia } from "pinia";
 import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 
-// Reviewer follow-up to the source-contract spec
-// (EditorSettingsDialog.shortcutResetEditState.spec.ts): prove the actual UI
-// state transition for #9066 — entering a shortcut row's capture state and
-// clicking restore-defaults must return the row to its initial pill display,
-// for both the per-tab footer button and the About tab's full reset (whose
-// click path is reachable because the capture state survives tab switches).
+// Proves the actual UI state transition for #9066 — entering a shortcut row's
+// capture state and clicking restore-defaults must return the row to its
+// initial pill display, for both the per-tab footer button and the About tab's
+// full reset (whose click path is reachable because the capture state survives
+// tab switches).
 
 vi.mock("vue-i18n", async () => {
   const { ref } = await import("vue");

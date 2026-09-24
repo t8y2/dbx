@@ -8,6 +8,7 @@ function setup(node: Partial<TreeNode>, options: { treeNodes?: TreeNode[]; selec
   const activeNode = shallowRef({ id: "n-1", label: "node", children: [], ...node } as TreeNode);
   const connectionStore = {
     docsSource: null as unknown,
+    dataDictionarySource: null as unknown,
     diagramSource: null as unknown,
     databaseExportSource: null as unknown,
     mongoImportSource: undefined as unknown,
@@ -26,6 +27,53 @@ function setup(node: Partial<TreeNode>, options: { treeNodes?: TreeNode[]; selec
   });
   return { connectionStore, runtime };
 }
+
+describe("useSidebarTreeToolRuntime openDataDictionary", () => {
+  it("documents every schema when invoked on a database node", () => {
+    const { connectionStore, runtime } = setup({ type: "database", label: "shop", connectionId: "conn-1", database: "shop" });
+
+    runtime.openDataDictionary();
+
+    expect(connectionStore.dataDictionarySource).toEqual({ connectionId: "conn-1", database: "shop", schema: undefined });
+  });
+
+  it("narrows to a schema node", () => {
+    const { connectionStore, runtime } = setup({ type: "schema", label: "public", connectionId: "conn-1", database: "shop", schema: "public" });
+
+    runtime.openDataDictionary();
+
+    expect(connectionStore.dataDictionarySource).toEqual({ connectionId: "conn-1", database: "shop", schema: "public" });
+  });
+
+  it("exports the selected same-schema tables and views", () => {
+    const publicUsers: TreeNode = { id: "t1", label: "users", type: "table", connectionId: "c1", database: "db", schema: "public" };
+    const publicOrders: TreeNode = { id: "t2", label: "orders", type: "table", connectionId: "c1", database: "db", schema: "public" };
+    const publicView: TreeNode = { id: "v1", label: "active_users", type: "view", connectionId: "c1", database: "db", schema: "public" };
+    const salesUsers: TreeNode = { id: "t3", label: "users", type: "table", connectionId: "c1", database: "db", schema: "sales" };
+    const group: TreeNode = { id: "group", label: "Tables", type: "group-tables", children: [publicUsers, publicOrders, publicView, salesUsers] };
+    const { connectionStore, runtime } = setup(publicUsers, {
+      treeNodes: [group],
+      selectedTreeNodeIds: [publicOrders.id, publicUsers.id, publicView.id, salesUsers.id],
+    });
+
+    runtime.openDataDictionary();
+
+    expect(connectionStore.dataDictionarySource).toEqual({
+      connectionId: "c1",
+      database: "db",
+      schema: "public",
+      tableNames: ["users", "orders", "active_users"],
+    });
+  });
+
+  it("does nothing when the node carries no database", () => {
+    const { connectionStore, runtime } = setup({ type: "connection", label: "local", connectionId: "conn-1" });
+
+    runtime.openDataDictionary();
+
+    expect(connectionStore.dataDictionarySource).toBeNull();
+  });
+});
 
 describe("useSidebarTreeToolRuntime openDocs", () => {
   it("documents the whole database when invoked on a database node", () => {

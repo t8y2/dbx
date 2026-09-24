@@ -10,6 +10,17 @@ const mocks = vi.hoisted(() => ({
   subscribePluginEvents: vi.fn(),
   repushPluginConnection: vi.fn(),
   reopenPluginConnection: vi.fn(),
+  openPluginLocalFile: vi.fn(),
+  readPluginLocalFileChunk: vi.fn(),
+  writePluginLocalFileChunk: vi.fn(),
+  closePluginLocalFile: vi.fn(),
+}));
+
+vi.mock("@/lib/backend/tauri", () => ({
+  openPluginLocalFile: mocks.openPluginLocalFile,
+  readPluginLocalFileChunk: mocks.readPluginLocalFileChunk,
+  writePluginLocalFileChunk: mocks.writePluginLocalFileChunk,
+  closePluginLocalFile: mocks.closePluginLocalFile,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -131,5 +142,58 @@ describe("PluginWorkbenchHost initialization", () => {
     reinit.resolve();
     await vi.waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
     expect(postMessage.mock.calls[0]?.[0]).toMatchObject({ type: "init" });
+  });
+
+  it("claims OS drops over its iframe and forwards opened handles to the plugin", async () => {
+    const { frame, postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
+    // The Rust registry hands out uuid strings; the `t` prefix stays opaque.
+    mocks.openPluginLocalFile.mockResolvedValue({ handleId: "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81", name: "a.txt", size: 3, contentType: "text/plain", write: false });
+
+    const claimed = !document.dispatchEvent(
+      new CustomEvent("dbx:tauri-file-drop", {
+        detail: { type: "drop", paths: ["/tmp/a.txt"], position: { x: 200, y: 200 } },
+        cancelable: true,
+      }),
+    );
+
+    expect(claimed).toBe(true);
+    await vi.waitFor(() => {
+      const posted = postMessage.mock.calls.map(([message]) => message as Record<string, unknown>);
+      expect(posted.some((message) => message.type === "filedrop" && (message.files as Array<Record<string, unknown>>)?.some((file) => file.handleId === "t0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81" && file.name === "a.txt"))).toBe(true);
+    });
+    expect(mocks.openPluginLocalFile).toHaveBeenCalledWith("sample", "/tmp/a.txt", false);
+    elementFromPoint.mockRestore();
+  });
+
+  it("leaves drops outside the iframe to the host fallback", async () => {
+    const { postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(document.body);
+
+    const claimed = !document.dispatchEvent(
+      new CustomEvent("dbx:tauri-file-drop", {
+        detail: { type: "drop", paths: ["/tmp/a.txt"], position: { x: 200, y: 200 } },
+        cancelable: true,
+      }),
+    );
+
+    expect(claimed).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(mocks.openPluginLocalFile).not.toHaveBeenCalled();
+    elementFromPoint.mockRestore();
+  });
+
+  it("reports drag enter/leave state while the pointer is over the iframe", async () => {
+    const { frame, postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
+    const payload = (type: "enter" | "leave") => new CustomEvent("dbx:tauri-file-drop", { detail: { type, position: { x: 10, y: 10 } }, cancelable: true });
+
+    document.dispatchEvent(payload("enter"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "dragstate", active: true }), "*");
+
+    document.dispatchEvent(payload("leave"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "dragstate", active: false }), "*");
+    elementFromPoint.mockRestore();
   });
 });

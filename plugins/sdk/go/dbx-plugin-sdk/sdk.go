@@ -409,3 +409,28 @@ const (
 	frameKindJSON   = 0
 	frameKindBinary = 1
 )
+
+// DataDirEnvVar is the environment variable the host sets on every sidecar,
+// pointing at this plugin's persistent data directory.
+const DataDirEnvVar = "DBX_PLUGIN_DATA_DIR"
+
+// DataDir returns the plugin's persistent data directory from the host
+// environment. It returns "" when the plugin does not run under a host that
+// provides one (unit tests, standalone binaries).
+func DataDir() string {
+	return os.Getenv(DataDirEnvVar)
+}
+
+// EnsureDataDir returns the plugin's persistent data directory, creating it if
+// needed, so the first write does not have to mkdir first. It returns an error
+// when no directory was provided by the host.
+func EnsureDataDir() (string, error) {
+	dir := DataDir()
+	if dir == "" {
+		return "", errors.New("plugin data directory is not set; running outside a DBX host")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}

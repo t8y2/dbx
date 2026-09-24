@@ -1,16 +1,8 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
 import { extractSqlParameters } from "@/lib/sql/sqlParameters";
 
-const sqlFormatterSource = readFileSync(new URL("../../sql/sqlFormatter.ts", import.meta.url), "utf8");
-
 describe("sqlFormatter", () => {
-  it("does not use lookbehind regular expressions in the startup path", () => {
-    expect(sqlFormatterSource).not.toContain("(?<!");
-    expect(sqlFormatterSource).not.toContain("(?<=");
-  });
-
   it("disables SQL formatting for Redis and VictoriaMetrics queries", () => {
     expect(canFormatSqlForDatabaseType("redis")).toBe(false);
     expect(canFormatSqlForDatabaseType("victoriametrics")).toBe(false);

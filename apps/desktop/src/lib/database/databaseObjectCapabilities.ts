@@ -33,7 +33,7 @@ const VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VI
 
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
 const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];
-const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"];
+const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];
 const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"];
 const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
 const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "xugu"]);
@@ -100,6 +100,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["influxdb3", ["TABLE"]],
   ["victoriametrics", ["TABLE"]],
   ["hbase", ["TABLE"]],
+  ["salesforce", ["TABLE"]],
   ["questdb", ["TABLE", "VIEW", "MATERIALIZED_VIEW"]],
   ["manticoresearch", ["TABLE", "FUNCTION"]],
   ["databend", ["TABLE", "VIEW", "PROCEDURE"]],

@@ -11,7 +11,7 @@ use rustls::server::ParsedCertificate;
 use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::future::Future;
@@ -33,12 +33,13 @@ use crate::execution::{await_stream_with_progress_timeout, DbOperationBudget, St
 use crate::models::connection::DatabaseType;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
-    ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
-    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, ConstraintInfo,
-    CustomTypeDdl, CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember,
-    CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo,
-    ObjectInfo, ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo,
-    SpatialColumnBuilder, TableInfo, TriggerInfo,
+    ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
+    CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
+    CompletionAssistantResponse, ConstraintInfo, CustomTypeDdl, CustomTypeDetails, CustomTypeDomainConstraint,
+    CustomTypeKind, CustomTypeMember, CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, EventTriggerInfo,
+    ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo, PgPartitionBound,
+    PgPartitionKind, PgPartitionNode, PgTablePartitioning, QueryMessage, QueryResult, RuleInfo, SchemaInfo,
+    SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 
 pub const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -1959,6 +1960,8 @@ async fn execute_select_prepared(
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
+        query_timings_ms: None,
         truncated,
         session_id: None,
         has_more: false,
@@ -2054,6 +2057,8 @@ async fn execute_select_text(
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
+        query_timings_ms: None,
         truncated,
         session_id: None,
         has_more: false,
@@ -3949,6 +3954,390 @@ pub async fn get_table_partition_key(pool: &Pool, schema: &str, table: &str) -> 
     Ok(get_table_partition_info(pool, schema, table).await?.key)
 }
 
+/// The partitioning strategy of a single PostgreSQL partitioned parent, read
+/// from `pg_partitioned_table` so expression keys and multi-column keys come
+/// back structured instead of as concatenated `pg_get_partkeydef` text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresPartitionStrategy {
+    pub kind: PgPartitionKind,
+    pub key_definition: String,
+    /// Key columns, in key order. Empty for a pure-expression key.
+    pub columns: Vec<String>,
+    /// `pg_get_expr(partexprs)` text, set only for expression keys.
+    pub expression: Option<String>,
+}
+
+fn postgres_partition_strategy_sql() -> &'static str {
+    "SELECT p.partstrat::text, \
+            pg_catalog.pg_get_partkeydef(c.oid) AS key_def, \
+            COALESCE(ARRAY( \
+              SELECT a.attname::text \
+              FROM unnest(p.partattrs) WITH ORDINALITY AS u(attnum, ord) \
+              JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = u.attnum \
+              WHERE u.attnum > 0 \
+              ORDER BY u.ord \
+            ), '{}') AS key_columns, \
+            pg_catalog.pg_get_expr(p.partexprs, c.oid) AS key_expression \
+     FROM pg_catalog.pg_partitioned_table p \
+     JOIN pg_catalog.pg_class c ON c.oid = p.partrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2"
+}
+
+/// Pre-10 servers have no `pg_partitioned_table`; return no row so the caller
+/// sees `None` (the relation is a plain table there).
+fn postgres_partition_strategy_compat_sql() -> &'static str {
+    "SELECT NULL::text, NULL::text, '{}'::text[], NULL::text WHERE false"
+}
+
+pub async fn get_table_partition_strategy(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<Option<PostgresPartitionStrategy>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
+    let rows = query_with_compat_fallback(
+        "get_table_partition_strategy",
+        &[postgres_partition_strategy_sql(), postgres_partition_strategy_compat_sql()],
+        |sql| postgres_query_cached(&client, sql, &params),
+    )
+    .await?;
+    Ok(rows.first().and_then(|row| {
+        let strategy = row.try_get::<_, Option<String>>(0).ok().flatten()?;
+        let kind = pg_partition_kind_from_strategy(&strategy)?;
+        let key_definition = row.try_get::<_, Option<String>>(1).ok().flatten().unwrap_or_default();
+        let columns = row.try_get::<_, Option<Vec<String>>>(2).ok().flatten().unwrap_or_default();
+        let expression = row.try_get::<_, Option<String>>(3).ok().flatten().filter(|value| !value.trim().is_empty());
+        Some(PostgresPartitionStrategy { kind, key_definition, columns, expression })
+    }))
+}
+
+/// `pg_partitioned_table.partstrat`: `r` = range, `l` = list, `h` = hash.
+pub fn pg_partition_kind_from_strategy(strategy: &str) -> Option<PgPartitionKind> {
+    match strategy.trim() {
+        "r" => Some(PgPartitionKind::Range),
+        "l" => Some(PgPartitionKind::List),
+        "h" => Some(PgPartitionKind::Hash),
+        _ => None,
+    }
+}
+
+/// Derives the strategy kind from `pg_get_partkeydef` output (`RANGE (col)`, …).
+/// Used for descendants in a partition tree, where the full strategy query is
+/// unnecessary (the kind is the only thing a nested node needs to render).
+pub fn pg_partition_kind_from_keydef(definition: &str) -> Option<PgPartitionKind> {
+    let definition = definition.trim_start();
+    let head = definition.split(|ch: char| ch.is_whitespace() || ch == '(').next()?;
+    match head.to_ascii_uppercase().as_str() {
+        "RANGE" => Some(PgPartitionKind::Range),
+        "LIST" => Some(PgPartitionKind::List),
+        "HASH" => Some(PgPartitionKind::Hash),
+        _ => None,
+    }
+}
+
+/// Parses the text PostgreSQL renders for `pg_get_expr(relpartbound, oid, true)`.
+///
+/// Returns `None` for an unrecognized shape so callers can fall back to the raw
+/// definition. Recognized forms:
+///   * `DEFAULT`
+///   * `FOR VALUES FROM (...) TO (...)` — RANGE, including `MINVALUE`/`MAXVALUE`
+///   * `FOR VALUES IN (...)` — LIST
+///   * `FOR VALUES WITH (MODULUS n, REMAINDER m)` — HASH (the catalog renders
+///     this lowercase, e.g. `modulus 2, remainder 0`)
+///
+/// Values are kept as SQL literal text so they round-trip byte-for-byte.
+pub fn parse_pg_partition_bound(definition: &str) -> Option<PgPartitionBound> {
+    let definition = definition.trim();
+    if definition.eq_ignore_ascii_case("DEFAULT") {
+        return Some(PgPartitionBound::Default);
+    }
+    let rest = strip_ascii_prefix_ci(definition, "FOR VALUES")?.trim_start();
+    if let Some(body) = strip_ascii_prefix_ci(rest, "FROM") {
+        let (from, after_from) = take_paren_group(body.trim_start())?;
+        let after_from = strip_ascii_prefix_ci(after_from.trim_start(), "TO")?;
+        let (to, _) = take_paren_group(after_from.trim_start())?;
+        return Some(PgPartitionBound::Range { from: split_bound_items(&from), to: split_bound_items(&to) });
+    }
+    if let Some(body) = strip_ascii_prefix_ci(rest, "IN") {
+        let (values, _) = take_paren_group(body.trim_start())?;
+        return Some(PgPartitionBound::List { values: split_bound_items(&values) });
+    }
+    if let Some(body) = strip_ascii_prefix_ci(rest, "WITH") {
+        let (options, _) = take_paren_group(body.trim_start())?;
+        let mut modulus = None;
+        let mut remainder = None;
+        for option in split_top_level_commas(&options) {
+            let mut parts = option.split_whitespace();
+            let key = parts.next()?.to_ascii_lowercase();
+            let value: i32 = parts.next()?.parse().ok()?;
+            match key.as_str() {
+                "modulus" => modulus = Some(value),
+                "remainder" => remainder = Some(value),
+                _ => {}
+            }
+        }
+        return Some(PgPartitionBound::Hash { modulus: modulus?, remainder: remainder? });
+    }
+    None
+}
+
+/// Case-insensitive prefix strip that also requires a token boundary, so
+/// `IN` never matches the start of `INTO` and `TO` never matches `TOAST`.
+fn strip_ascii_prefix_ci<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = input.get(..prefix.len())?;
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let rest = &input[prefix.len()..];
+    match rest.chars().next() {
+        None => Some(rest),
+        Some(ch) if ch.is_whitespace() || ch == '(' => Some(rest),
+        _ => None,
+    }
+}
+
+/// Splits `( ... )` off the front of `input`, honoring single quotes, double
+/// quotes, `''` escapes, and nested parentheses. Returns the inner text and
+/// the remainder after the closing paren.
+fn take_paren_group(input: &str) -> Option<(String, &str)> {
+    let input = input.trim_start();
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut close_index = None;
+    let mut chars = input.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && chars.peek().map(|(_, next)| *next) == Some('\'') {
+                    chars.next();
+                    continue;
+                }
+                in_single = !in_single;
+            }
+            '"' if !in_single => in_double = !in_double,
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
+                depth -= 1;
+                if depth == 0 {
+                    close_index = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close_index = close_index?;
+    Some((input[1..close_index].to_string(), &input[close_index + 1..]))
+}
+
+fn split_bound_items(input: &str) -> Vec<String> {
+    split_top_level_commas(input).into_iter().filter(|item| !item.is_empty()).collect()
+}
+
+/// Splits on top-level commas only; commas inside quotes, nested parentheses,
+/// or `''` escapes stay in the item.
+fn split_top_level_commas(input: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && chars.peek() == Some(&'\'') {
+                    current.push('\'');
+                    current.push('\'');
+                    chars.next();
+                    continue;
+                }
+                in_single = !in_single;
+                current.push(ch);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                current.push(ch);
+            }
+            '(' if !in_single && !in_double => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_single && !in_double => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if !in_single && !in_double && depth == 0 => {
+                items.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    items.push(current.trim().to_string());
+    items
+}
+
+/// Cheap per-relation size/count estimates for a set of relation oids.
+/// Best-effort: an empty map on failure just means the UI omits the columns.
+fn postgres_partition_relation_stats_sql() -> &'static str {
+    "SELECT c.oid::bigint, \
+            CASE WHEN c.relkind = 'f' THEN NULL ELSE c.reltuples::bigint END, \
+            CASE WHEN c.relkind = 'f' THEN NULL ELSE pg_catalog.pg_total_relation_size(c.oid) END \
+     FROM pg_catalog.pg_class c \
+     WHERE c.oid::bigint = ANY($1)"
+}
+
+pub async fn get_partition_relation_stats(
+    pool: &Pool,
+    oids: &[i64],
+) -> Result<HashMap<i64, (Option<i64>, Option<i64>)>, String> {
+    if oids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let owned: Vec<i64> = oids.to_vec();
+    let rows = postgres_query_cached(&client, postgres_partition_relation_stats_sql(), &[&owned])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let oid = row.try_get::<_, i64>(0).ok()?;
+            let rows = row.try_get::<_, Option<i64>>(1).ok().flatten().filter(|value| *value >= 0);
+            let bytes = row.try_get::<_, Option<i64>>(2).ok().flatten().filter(|value| *value >= 0);
+            Some((oid, (rows, bytes)))
+        })
+        .collect())
+}
+
+/// `current_setting('server_version_num')` as an integer (e.g. 140019 for
+/// 14.19), or `None` when the server does not report it.
+pub async fn get_server_version_num(pool: &Pool) -> Result<Option<i32>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, "SELECT current_setting('server_version_num')::int", &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.first().and_then(|row| row.try_get::<_, i32>(0).ok()))
+}
+
+/// Full structured partitioning view of one relation, rooted at it. Returns a
+/// default (all-false/empty) value for a plain, non-partitioned table.
+pub async fn get_table_partitioning(pool: &Pool, schema: &str, table: &str) -> Result<PgTablePartitioning, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let tree = fetch_postgres_partition_tree(pool, schema, table).await?;
+    let tree_oids: HashSet<i64> = tree.iter().map(|node| node.oid).collect();
+    // The requested relation is the root: the only tree node whose parent (if
+    // any) is not also in this tree. An empty tree means the relation is not a
+    // table/partition at all (view, sequence, missing).
+    let Some(root) = tree.iter().find(|node| !node.parent_oid.is_some_and(|parent| tree_oids.contains(&parent))) else {
+        return Ok(PgTablePartitioning::default());
+    };
+    let is_partitioned = root.partition_info.key.is_some();
+    let is_partition = root.partition_info.is_partition;
+    if !is_partitioned && !is_partition {
+        return Ok(PgTablePartitioning::default());
+    }
+
+    let strategy =
+        if is_partitioned { get_table_partition_strategy(pool, &root.schema, &root.table).await? } else { None };
+
+    let oids: Vec<i64> = tree.iter().map(|node| node.oid).collect();
+    let stats = get_partition_relation_stats(pool, &oids).await.unwrap_or_default();
+
+    let nodes_by_oid: HashMap<i64, &PostgresPartitionTreeNode> = tree.iter().map(|node| (node.oid, node)).collect();
+    let mut children_by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
+    for node in &tree {
+        if let Some(parent_oid) = node.parent_oid {
+            if tree_oids.contains(&parent_oid) {
+                children_by_parent.entry(parent_oid).or_default().push(node.oid);
+            }
+        }
+    }
+    for child_oids in children_by_parent.values_mut() {
+        child_oids.sort_by(|left, right| {
+            let left = nodes_by_oid.get(left).map(|node| node.table.as_str()).unwrap_or_default();
+            let right = nodes_by_oid.get(right).map(|node| node.table.as_str()).unwrap_or_default();
+            left.cmp(right)
+        });
+    }
+
+    let mut visited: HashSet<i64> = HashSet::new();
+    visited.insert(root.oid);
+    let partitions = build_partition_nodes(root.oid, &nodes_by_oid, &children_by_parent, &stats, &mut visited);
+    let default_partition =
+        partitions.iter().find(|node| node.bound == Some(PgPartitionBound::Default)).map(|node| node.name.clone());
+    // Best effort: a missing version just hides the CONCURRENTLY option.
+    let server_version_num = get_server_version_num(pool).await.unwrap_or(None);
+
+    Ok(PgTablePartitioning {
+        is_partitioned,
+        is_partition,
+        parent: match (root.partition_info.parent_schema.as_deref(), root.partition_info.parent_table.as_deref()) {
+            (Some(schema), Some(table)) => Some(format!("{schema}.{table}")),
+            _ => None,
+        },
+        parent_schema: root.partition_info.parent_schema.clone(),
+        parent_table: root.partition_info.parent_table.clone(),
+        own_bound: root.partition_info.bound.as_deref().and_then(parse_pg_partition_bound),
+        strategy: strategy.as_ref().map(|strategy| strategy.kind),
+        key_definition: strategy
+            .as_ref()
+            .map(|strategy| strategy.key_definition.clone())
+            .or_else(|| root.partition_info.key.clone()),
+        key_columns: strategy.as_ref().map(|strategy| strategy.columns.clone()).unwrap_or_default(),
+        key_expression: strategy.and_then(|strategy| strategy.expression),
+        default_partition,
+        partitions,
+        server_version_num,
+    })
+}
+
+/// Recursively materializes the children of `parent_oid`. `visited` guards
+/// against a corrupted catalog (or a non-PostgreSQL fork) whose `pg_inherits`
+/// data forms a cycle, which would otherwise recurse forever.
+fn build_partition_nodes(
+    parent_oid: i64,
+    nodes_by_oid: &HashMap<i64, &PostgresPartitionTreeNode>,
+    children_by_parent: &HashMap<i64, Vec<i64>>,
+    stats: &HashMap<i64, (Option<i64>, Option<i64>)>,
+    visited: &mut HashSet<i64>,
+) -> Vec<PgPartitionNode> {
+    let Some(child_oids) = children_by_parent.get(&parent_oid) else {
+        return Vec::new();
+    };
+    let mut nodes = Vec::with_capacity(child_oids.len());
+    for child_oid in child_oids {
+        if !visited.insert(*child_oid) {
+            continue;
+        }
+        let Some(node) = nodes_by_oid.get(child_oid) else {
+            continue;
+        };
+        let children = build_partition_nodes(*child_oid, nodes_by_oid, children_by_parent, stats, visited);
+        let (row_estimate, total_bytes) = stats.get(child_oid).copied().unwrap_or((None, None));
+        let bound_definition = node.partition_info.bound.clone();
+        let strategy = node.partition_info.key.as_deref().and_then(pg_partition_kind_from_keydef);
+        nodes.push(PgPartitionNode {
+            schema: node.schema.clone(),
+            name: node.table.clone(),
+            strategy,
+            key_definition: node.partition_info.key.clone(),
+            bound: bound_definition.as_deref().and_then(parse_pg_partition_bound),
+            bound_definition,
+            is_leaf: children.is_empty(),
+            row_estimate,
+            total_bytes,
+            children,
+        });
+    }
+    nodes
+}
+
 /// Classifies one row of `postgres_table_partition_local_objects_sql` (or its
 /// `_for_relations` sibling, which has the same `object_kind`/`object_name`/
 /// `object_type` columns plus a leading `relid`) into `entry`. Shared so a
@@ -4325,6 +4714,7 @@ fn column_info_from_row_offset(row: &Row, offset: usize) -> ColumnInfo {
         numeric_scale: row.try_get::<_, Option<i32>>(offset + 8).ok().flatten(),
         character_maximum_length: row.try_get::<_, Option<i32>>(offset + 9).ok().flatten(),
         enum_values: parse_enum_values_from_row(row, offset + 10),
+        metadata_capabilities: Some(ColumnMetadataCapabilities::all_supported()),
         ..Default::default()
     }
 }
@@ -4396,9 +4786,13 @@ fn postgres_indexes_for_relations_query_tiers() -> [&'static str; 2] {
 // (schema, table) pair. Not merged into a shared fragment for the same
 // reason as the columns queries above — an alias would need renaming to
 // line up, and result columns are read positionally.
+// `COALESCE(a.attname::text, pg_get_indexdef(...))` keeps the cast: a bare
+// `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
+// expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
+// becomes invalid SQL (#9988).
 fn postgres_indexes_for_relations_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
-             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
+             array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
              array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
@@ -4428,7 +4822,7 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
 fn postgres_indexes_for_relations_compat_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
              ARRAY( \
-               SELECT COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
+               SELECT COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
                  ON a.attrelid = t.oid \
@@ -6856,6 +7250,7 @@ pub async fn list_object_statistics(pool: &Pool, schema: &str) -> Result<Vec<Obj
             schema: Some(schema.to_string()),
             estimated_rows: row.try_get::<_, i64>(1).ok(),
             total_bytes: row.try_get::<_, i64>(2).ok(),
+            ..Default::default()
         })
         .collect())
 }
@@ -7232,6 +7627,7 @@ fn redshift_columns_from_query_result(result: QueryResult) -> Vec<ColumnInfo> {
                 numeric_scale: query_result_i32(&row, 5),
                 character_maximum_length: query_result_i32(&row, 6),
                 enum_values: None,
+                metadata_capabilities: Some(ColumnMetadataCapabilities::all_supported()),
                 ..Default::default()
             })
         })
@@ -7606,6 +8002,8 @@ pub async fn execute_query_with_max_rows(
                 rows: vec![],
                 affected_rows: affected,
                 execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -8432,6 +8830,8 @@ async fn execute_query_with_max_rows_inner(
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -8456,8 +8856,12 @@ async fn execute_query_with_max_rows_inner(
 
 // Sibling of `postgres_indexes_for_relations_sql` (~line 3288), for a single
 // (schema, table) instead of a batch of oids — see the note there.
+// `COALESCE(a.attname::text, pg_get_indexdef(...))` keeps the cast: a bare
+// `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
+// expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
+// becomes invalid SQL (#9988).
 const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
-             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
+             array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
              array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
@@ -8486,7 +8890,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
 // 3312) — see the note on `POSTGRES_INDEXES_SQL` above.
 const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              ARRAY( \
-               SELECT COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
+               SELECT COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
                  ON a.attrelid = t.oid \
@@ -9352,6 +9756,84 @@ pub async fn list_available_extensions(pool: &Pool) -> Result<Vec<ExtensionInfo>
             version: pg_row_try_string(row, 1),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
             schema: None,
+        })
+        .collect())
+}
+
+fn postgres_event_trigger_catalog_exists_sql() -> &'static str {
+    "SELECT EXISTS ( \
+       SELECT 1 FROM pg_catalog.pg_class c \
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+       WHERE n.nspname = 'pg_catalog' AND c.relname = 'pg_event_trigger' \
+     )"
+}
+
+async fn postgres_event_trigger_catalog_exists(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let row = postgres_query_one_cached(client, postgres_event_trigger_catalog_exists_sql(), &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(pg_row_try_bool(&row, 0).unwrap_or(false))
+}
+
+fn postgres_event_triggers_sql() -> &'static str {
+    "SELECT e.evtname, \
+       e.evtevent, \
+       COALESCE(r.rolname, '') AS owner, \
+       COALESCE(format('%I.%I(%s)', pn.nspname, p.proname, pg_get_function_identity_arguments(p.oid)), '') AS function, \
+       e.evtenabled::text AS enabled, \
+       e.evttags AS tags, \
+       obj_description(e.oid, 'pg_event_trigger') AS comment, \
+       pg_get_eventtriggerdef(e.oid) AS source \
+     FROM pg_catalog.pg_event_trigger e \
+     LEFT JOIN pg_catalog.pg_roles r ON r.oid = e.evtowner \
+     LEFT JOIN pg_catalog.pg_proc p ON p.oid = e.evtfoid \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace \
+     ORDER BY e.evtname"
+}
+
+fn postgres_event_triggers_sourceless_sql() -> &'static str {
+    "SELECT e.evtname, \
+       e.evtevent, \
+       COALESCE(r.rolname, '') AS owner, \
+       COALESCE(format('%I.%I(%s)', pn.nspname, p.proname, pg_get_function_arguments(p.oid)), '') AS function, \
+       e.evtenabled::text AS enabled, \
+       e.evttags AS tags, \
+       obj_description(e.oid, 'pg_event_trigger') AS comment, \
+       NULL::text AS source \
+     FROM pg_catalog.pg_event_trigger e \
+     LEFT JOIN pg_catalog.pg_roles r ON r.oid = e.evtowner \
+     LEFT JOIN pg_catalog.pg_proc p ON p.oid = e.evtfoid \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace \
+     ORDER BY e.evtname"
+}
+
+/// Lists PostgreSQL event triggers (`pg_event_trigger`). Event triggers are
+/// database-level objects, so the query takes no schema parameter. Stripped
+/// PostgreSQL-compatible kernels that lack the catalog report an empty list,
+/// and servers that expose the catalog without `pg_get_eventtriggerdef` fall
+/// back to a sourceless listing so the trigger identity is still visible.
+pub async fn list_event_triggers(pool: &Pool) -> Result<Vec<EventTriggerInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    if !postgres_event_trigger_catalog_exists(&client).await.unwrap_or(false) {
+        return Ok(Vec::new());
+    }
+    let rows = match postgres_query_cached(&client, postgres_event_triggers_sql(), &[]).await {
+        Ok(rows) => rows,
+        Err(primary_error) => postgres_query_cached(&client, postgres_event_triggers_sourceless_sql(), &[])
+            .await
+            .map_err(|fallback_error| format!("{primary_error}; sourceless fallback failed: {fallback_error}"))?,
+    };
+    Ok(rows
+        .iter()
+        .map(|row| EventTriggerInfo {
+            name: pg_row_try_string(row, 0),
+            event: pg_row_try_string(row, 1),
+            owner: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+            function: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
+            enabled: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
+            tags: row.try_get::<_, Option<Vec<String>>>(5).ok().flatten(),
+            comment: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
+            source: row.try_get::<_, Option<String>>(7).ok().flatten().filter(|s| !s.is_empty()),
         })
         .collect())
 }
@@ -12820,6 +13302,23 @@ mod tests {
     }
 
     #[test]
+    fn postgres_index_queries_cast_attname_to_text() {
+        // Regression for #9988: `COALESCE(a.attname, pg_get_indexdef(...))` resolves to the
+        // `name` type, so PostgreSQL silently truncated an expression key part to 63 bytes
+        // (NAMEDATALEN - 1). The rebuilt CREATE INDEX then failed with a syntax error and the
+        // whole publish transaction rolled back.
+        for sql in [
+            POSTGRES_INDEXES_SQL,
+            POSTGRES_INDEXES_COMPAT_SQL,
+            postgres_indexes_for_relations_sql(),
+            postgres_indexes_for_relations_compat_sql(),
+        ] {
+            assert!(sql.contains("COALESCE(a.attname::text, pg_get_indexdef("), "{sql}");
+            assert!(!sql.contains("COALESCE(a.attname, pg_get_indexdef("), "{sql}");
+        }
+    }
+
+    #[test]
     fn postgres_column_metadata_marks_only_owned_integer_sequence_defaults_as_serial() {
         let modern_sql = [POSTGRES_COLUMNS_SQL, postgres_columns_for_relations_sql()];
         let compat_sql = [POSTGRES_COLUMNS_COMPAT_SQL, postgres_columns_for_relations_compat_sql()];
@@ -13997,6 +14496,8 @@ mod tests {
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -14755,5 +15256,88 @@ mod tests {
         let visible_sql = postgres_schema_infos_sql(true);
         assert!(!visible_sql.contains("NOT IN"));
         assert!(!visible_sql.contains("NOT LIKE"));
+    }
+
+    #[test]
+    fn pg_partition_kind_from_strategy_maps_catalog_letters() {
+        assert_eq!(pg_partition_kind_from_strategy("r"), Some(PgPartitionKind::Range));
+        assert_eq!(pg_partition_kind_from_strategy("l"), Some(PgPartitionKind::List));
+        assert_eq!(pg_partition_kind_from_strategy("h"), Some(PgPartitionKind::Hash));
+        assert_eq!(pg_partition_kind_from_strategy("x"), None);
+    }
+
+    #[test]
+    fn pg_partition_kind_from_keydef_uses_the_leading_keyword() {
+        assert_eq!(pg_partition_kind_from_keydef("RANGE (sold_on)"), Some(PgPartitionKind::Range));
+        assert_eq!(pg_partition_kind_from_keydef("LIST (region)"), Some(PgPartitionKind::List));
+        assert_eq!(pg_partition_kind_from_keydef("HASH (id)"), Some(PgPartitionKind::Hash));
+        assert_eq!(pg_partition_kind_from_keydef("RANGE (abs(v))"), Some(PgPartitionKind::Range));
+        assert_eq!(pg_partition_kind_from_keydef("UNKNOWN (x)"), None);
+    }
+
+    #[test]
+    fn parse_pg_partition_bound_reads_range_bounds() {
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"),
+            Some(PgPartitionBound::Range {
+                from: vec!["'2024-01-01'".to_string()],
+                to: vec!["'2025-01-01'".to_string()],
+            })
+        );
+        // MINVALUE / MAXVALUE are keywords, kept verbatim without quoting.
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES FROM (MINVALUE) TO (0)"),
+            Some(PgPartitionBound::Range { from: vec!["MINVALUE".to_string()], to: vec!["0".to_string()] })
+        );
+        // Multi-column range keeps each tuple position separate.
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES FROM ('a', 'a') TO ('b', MAXVALUE)"),
+            Some(PgPartitionBound::Range {
+                from: vec!["'a'".to_string(), "'a'".to_string()],
+                to: vec!["'b'".to_string(), "MAXVALUE".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_pg_partition_bound_reads_list_and_hash_and_default() {
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES IN ('a', 'b')"),
+            Some(PgPartitionBound::List { values: vec!["'a'".to_string(), "'b'".to_string()] })
+        );
+        // The catalog renders hash options lowercase.
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES WITH (modulus 2, remainder 1)"),
+            Some(PgPartitionBound::Hash { modulus: 2, remainder: 1 })
+        );
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES WITH (MODULUS 4, REMAINDER 3)"),
+            Some(PgPartitionBound::Hash { modulus: 4, remainder: 3 })
+        );
+        assert_eq!(parse_pg_partition_bound("DEFAULT"), Some(PgPartitionBound::Default));
+        assert_eq!(parse_pg_partition_bound(" default "), Some(PgPartitionBound::Default));
+    }
+
+    #[test]
+    fn parse_pg_partition_bound_keeps_commas_inside_quotes_and_calls() {
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES IN ('a,b', 'c')"),
+            Some(PgPartitionBound::List { values: vec!["'a,b'".to_string(), "'c'".to_string()] })
+        );
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES FROM (lower('A''B')) TO (lower('C'))"),
+            Some(PgPartitionBound::Range {
+                from: vec!["lower('A''B')".to_string()],
+                to: vec!["lower('C')".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_pg_partition_bound_rejects_unrecognized_input() {
+        assert_eq!(parse_pg_partition_bound(""), None);
+        assert_eq!(parse_pg_partition_bound("NOT A BOUND"), None);
+        // `IN` must not match the start of `INTO`.
+        assert_eq!(parse_pg_partition_bound("FOR VALUES INTO (1)"), None);
     }
 }

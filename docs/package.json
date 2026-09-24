@@ -6,9 +6,11 @@
     "dev": "next dev",
     "preview": "node scripts/preview-server.mjs",
     "content:check": "node scripts/verify-doc-content.mjs",
-    "prebuild": "node scripts/verify-doc-content.mjs",
+    "seo:test": "node --test scripts/seo.test.mjs",
+    "seo:check": "node scripts/verify-seo.mjs",
+    "prebuild": "pnpm seo:test && node scripts/verify-doc-content.mjs",
     "build": "next build",
-    "postbuild": "node scripts/generate-sitemap.mjs && node scripts/verify-static-export.mjs",
+    "postbuild": "node scripts/generate-sitemap.mjs && node scripts/verify-static-export.mjs && node scripts/verify-seo.mjs",
     "contributors:update": "node scripts/update-contributors.mjs",
     "start": "next start",
     "postinstall": "fumadocs-mdx"

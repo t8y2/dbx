@@ -1,6 +1,6 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { getSqlCompletionContext, isOracleSystemValueName } from "@/lib/sql/sqlCompletion";
-import { executableStatementRanges, isOraclePlSqlStatement, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRanges, keepsOracleStyleBlockTogether, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { DBX_TDENGINE_TBNAME_COLUMN, isTdengineStableTableType } from "@/lib/table/tableEditing";
 import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
 
@@ -31,12 +31,34 @@ export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRange
   const selected: SqlTextRange[] = [];
   const seen = new Set<string>();
   for (const statement of statements) {
-    if (isOraclePlSqlStatement(statement.sql, databaseType, parameterOptions)) continue;
+    if (keepsOracleStyleBlockTogether(statement.sql, databaseType, parameterOptions)) continue;
     if (!visibleRanges.some((visibleRange) => rangesIntersect(statement, visibleRange))) continue;
     const key = `${statement.from}:${statement.to}`;
     if (seen.has(key)) continue;
     seen.add(key);
     selected.push({ from: statement.from, to: statement.to, sql: sql.slice(statement.from, statement.to) });
+  }
+  return selected;
+}
+
+/**
+ * SQL Server routine definition batches (`CREATE/ALTER PROCEDURE | FUNCTION`) are
+ * deliberately excluded from reference diagnostics: the MsSql grammar in the
+ * analyzer cannot parse the parameter list, and metadata checks inside a routine
+ * body (temp tables, table variables) would report noise (see
+ * `isSqlServerRoutineDefinitionBatch`). That suppression also dropped the
+ * *syntax* errors of the body, so a routine that does not even compile looked
+ * clean (issue #9315). Callers use these ranges to run the routine-only syntax
+ * rules that survive the suppression, while reference diagnostics stay off.
+ */
+export function sqlServerRoutineDefinitionRangesForViewport(sql: string, visibleRanges: readonly SqlSemanticDiagnosticVisibleRange[]): SqlTextRange[] {
+  if (visibleRanges.length === 0) return [];
+
+  const selected: SqlTextRange[] = [];
+  for (const batch of sqlServerBatchRanges(sql)) {
+    if (!isSqlServerRoutineDefinitionBatch(batch.sql)) continue;
+    if (!visibleRanges.some((visibleRange) => rangesIntersect(batch, visibleRange))) continue;
+    selected.push(batch);
   }
   return selected;
 }
@@ -439,6 +461,7 @@ export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, opt
     options.databaseType === "elasticsearch" ||
     options.databaseType === "easysearch" ||
     options.databaseType === "meilisearch" ||
+    options.databaseType === "solr" ||
     options.databaseType === "qdrant" ||
     options.databaseType === "milvus" ||
     options.databaseType === "weaviate" ||
@@ -459,6 +482,7 @@ export function isSqlSemanticDiagnosticInputContext(sql: string, cursor: number,
     options.databaseType === "elasticsearch" ||
     options.databaseType === "easysearch" ||
     options.databaseType === "meilisearch" ||
+    options.databaseType === "solr" ||
     options.databaseType === "qdrant" ||
     options.databaseType === "milvus" ||
     options.databaseType === "weaviate" ||

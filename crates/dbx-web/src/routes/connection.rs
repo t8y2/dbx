@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use dbx_core::connection::{
@@ -13,6 +13,10 @@ use dbx_core::nacos::config::{
 };
 use dbx_core::runtime_config::{
     release_runtime_config_on_disconnect, should_retain_runtime_config, TEST_PROBE_ID_PREFIX,
+};
+use dbx_core::salesforce_oauth::{
+    device_authorization_request, device_poll, password_grant_token, refresh_access_token, SfDeviceAuthorization,
+    SfDevicePoll, SfOauthParams, SfRefreshedToken, SfTokenSet,
 };
 use dbx_core::session_credentials::{PurposeSessionCredentialWriteToken, SessionCredentialWriteToken};
 use serde::{Deserialize, Serialize};
@@ -104,6 +108,15 @@ pub struct ConnectRequest {
 pub struct DisconnectRequest {
     pub connection_id: String,
     pub client_attempt: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrewarmConnectionRequest {
+    pub connection_id: String,
+    pub database: Option<String>,
+    pub catalog: Option<String>,
+    pub client_session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -273,8 +286,8 @@ async fn run_temporary_connection_test(
 
     if config.db_type == DatabaseType::Plugin {
         let result = async {
-            let (host, port) = app.connection_host_port(&temp_id, &config).await?;
-            app.plugin_host.test_connection(&config, &host, port).await
+            let endpoint = app.plugin_connection_endpoint(&temp_id, &config).await?;
+            app.plugin_host.test_connection(&config, &endpoint.host, endpoint.port, endpoint.proxy).await
         }
         .await;
         app.reset_connection_transport_for_config(&temp_id, &config).await;
@@ -392,6 +405,11 @@ pub async fn connect_db(
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
     let config = body.config;
+    // 演示模式：只允许连接已保存的连接，端点身份以存储为准，防止伪造 body
+    // 配置把服务器拨向任意主机（见 demo 模块）。
+    if state.demo_mode {
+        crate::demo::ensure_demo_connect_allowed(&state.app, &config).await.map_err(AppError::forbidden)?;
+    }
     if config.db_type == dbx_core::models::connection::DatabaseType::Sqlite {
         dbx_core::db::sqlite::validate_persistent_attachments(
             &config.host,
@@ -428,7 +446,7 @@ pub async fn connect_db(
     app.configs.write().await.insert(connection_id.clone(), runtime_config);
 
     if config.db_type == dbx_core::models::connection::DatabaseType::Plugin {
-        let (host, port) = match app.connection_host_port(&connection_id, &config).await {
+        let endpoint = match app.plugin_connection_endpoint(&connection_id, &config).await {
             Ok(endpoint) => endpoint,
             Err(error) => {
                 app.reset_connection_transport_for_config(&connection_id, &config).await;
@@ -441,14 +459,15 @@ pub async fn connect_db(
             rollback_session_credential_writes(app, &session_credential_writes);
             return Err(AppError::from(error));
         }
-        let handle = match app.plugin_host.connect_connection(&config, &host, port).await {
-            Ok(handle) => handle,
-            Err(error) => {
-                app.reset_connection_transport_for_config(&connection_id, &config).await;
-                rollback_session_credential_writes(app, &session_credential_writes);
-                return Err(AppError::from(error));
-            }
-        };
+        let handle =
+            match app.plugin_host.connect_connection(&config, &endpoint.host, endpoint.port, endpoint.proxy).await {
+                Ok(handle) => handle,
+                Err(error) => {
+                    app.reset_connection_transport_for_config(&connection_id, &config).await;
+                    rollback_session_credential_writes(app, &session_credential_writes);
+                    return Err(AppError::from(error));
+                }
+            };
         let pool = PoolKind::PluginConnection(handle);
         if let Err(error) =
             app.insert_connection_pool_for_attempt(&connection_id, attempt, connection_id.clone(), pool, &config).await
@@ -598,6 +617,21 @@ pub async fn check_connection_health(
     Json(body): Json<DisconnectRequest>,
 ) -> Result<Json<()>, AppError> {
     state.app.check_connection_health(&body.connection_id).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn prewarm_connection(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<PrewarmConnectionRequest>,
+) -> Result<Json<()>, AppError> {
+    let database = body.database.as_deref().filter(|value| !value.is_empty());
+    let catalog = body.catalog.as_deref().filter(|value| !value.is_empty());
+    let client_session_id = body.client_session_id.as_deref().filter(|value| !value.is_empty());
+    state
+        .app
+        .prewarm_connection_pool(&body.connection_id, database, catalog, client_session_id)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -833,6 +867,87 @@ async fn remove_connection_pools_for_connection_ids(state: &WebState, connection
     for connection_id in connection_ids {
         state.app.remove_connection_pools_detached(connection_id).await;
     }
+}
+
+// ── Salesforce OAuth ──────────────────────────────────────────────
+//
+// Web mode does not have a system browser opener; the browser flow is refused
+// with a clear message pointing users at the device flow which works fine
+// headless. The device flow endpoints proxy directly into dbx-drivers.
+
+pub async fn salesforce_oauth_browser_authorize(
+    State(_state): State<Arc<WebState>>,
+    Json(_body): Json<SalesforceOauthParamsRequest>,
+) -> Result<Json<SfTokenSet>, AppError> {
+    Err(AppError::from("Browser OAuth is not available in web mode. Use the device code flow instead.".to_string()))
+}
+
+pub async fn salesforce_oauth_device_start(
+    State(_state): State<Arc<WebState>>,
+    Json(body): Json<SalesforceOauthParamsRequest>,
+) -> Result<Json<SfDeviceAuthorization>, AppError> {
+    device_authorization_request(&body.params).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn salesforce_oauth_device_poll(
+    State(_state): State<Arc<WebState>>,
+    Json(body): Json<SalesforceDevicePollRequest>,
+) -> Result<Json<SfDevicePoll>, AppError> {
+    device_poll(&body.params, &body.device_code, body.interval_secs).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn salesforce_oauth_refresh(
+    State(_state): State<Arc<WebState>>,
+    Json(body): Json<SalesforceRefreshRequest>,
+) -> Result<Json<SfRefreshedToken>, AppError> {
+    refresh_access_token(&body.params, &body.refresh_token).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn salesforce_oauth_password_login(
+    State(_state): State<Arc<WebState>>,
+    Json(body): Json<SalesforcePasswordLoginRequest>,
+) -> Result<Json<SfTokenSet>, AppError> {
+    password_grant_token(&body.params, &body.username, &body.password).await.map(Json).map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+pub struct SalesforceOauthParamsRequest {
+    pub params: SfOauthParams,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforceDevicePollRequest {
+    pub params: SfOauthParams,
+    #[serde(rename = "deviceCode")]
+    pub device_code: String,
+    #[serde(rename = "intervalSecs")]
+    pub interval_secs: u64,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforceRefreshRequest {
+    pub params: SfOauthParams,
+    #[serde(rename = "refreshToken")]
+    pub refresh_token: String,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforcePasswordLoginRequest {
+    pub params: SfOauthParams,
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforceCurrentUserQuery {
+    pub connection_id: String,
+}
+
+pub async fn salesforce_current_user(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SalesforceCurrentUserQuery>,
+) -> Result<Json<dbx_core::connection::SalesforceCurrentUser>, AppError> {
+    state.app.salesforce_current_user(&q.connection_id).await.map(Json).map_err(AppError::from)
 }
 
 #[cfg(test)]

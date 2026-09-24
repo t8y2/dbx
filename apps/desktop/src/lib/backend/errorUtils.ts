@@ -40,26 +40,89 @@ export const MANUAL_TRANSACTION_SESSION_EXPIRED_CODE = "DBX-TXN-1001";
 
 const MAX_FALLBACK_CHARS = 64 * 1024;
 const MAX_ERROR_PARSE_DEPTH = 16;
+// The Agent transport appends its structured payload behind this marker. It is
+// not always the last thing in the message: callers append human-readable
+// fallback context after it, so the payload has to be stripped wherever it sits.
 const AGENT_RPC_ERROR_DATA_MARKER = "\nDBX_AGENT_ERROR_DATA:";
 // Rust-side transport suffix carrying a driver cursor position. It is stripped
 // before a structured envelope is built, but metadata/catalog errors can surface
 // as raw strings, so strip it here so it never reaches the UI.
 const SQL_ERROR_POSITION_MARKER_PATTERN = /\nDBX_SQL_ERROR_POSITION:\d+/g;
 
-export function sanitizeBackendErrorMessage(message: string): string {
-  const withoutPositionMarker = message.replace(SQL_ERROR_POSITION_MARKER_PATTERN, "");
-  const markerIndex = withoutPositionMarker.lastIndexOf(AGENT_RPC_ERROR_DATA_MARKER);
-  if (markerIndex < 0) return withoutPositionMarker;
-
-  const rawData = withoutPositionMarker.slice(markerIndex + AGENT_RPC_ERROR_DATA_MARKER.length).trim();
+function isInternalAgentErrorData(source: string): boolean {
   try {
-    const data: unknown = JSON.parse(rawData);
-    if (!data || typeof data !== "object" || Array.isArray(data)) return withoutPositionMarker;
+    const data: unknown = JSON.parse(source);
+    return Boolean(data) && typeof data === "object" && !Array.isArray(data);
   } catch {
-    return withoutPositionMarker;
+    return false;
+  }
+}
+
+/**
+ * Exclusive end offset of the JSON object literal starting at `start`, or
+ * `null` when no complete object follows.
+ */
+function jsonObjectEnd(source: string, start: number): number | null {
+  if (source[start] !== "{") return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Removes every internal Agent payload, wherever the marker appears. Trailing
+ * text that follows a payload is kept: callers use it to append fallback
+ * context such as the alternate Oracle descriptor failure.
+ */
+function stripAgentErrorMessageData(message: string): string {
+  let stripped = "";
+  let cursor = 0;
+  let droppedToEnd = false;
+
+  while (cursor < message.length) {
+    const markerIndex = message.indexOf(AGENT_RPC_ERROR_DATA_MARKER, cursor);
+    if (markerIndex < 0) break;
+
+    const dataStart = markerIndex + AGENT_RPC_ERROR_DATA_MARKER.length;
+    const leadingWhitespace = message.slice(dataStart).search(/\S/);
+    const objectStart = leadingWhitespace < 0 ? -1 : dataStart + leadingWhitespace;
+    const objectEnd = objectStart < 0 ? null : jsonObjectEnd(message, objectStart);
+    if (objectEnd === null || !isInternalAgentErrorData(message.slice(objectStart, objectEnd))) {
+      // Not internal data (for example a database message that mentions the
+      // marker): keep the text as-is and continue looking behind it.
+      stripped += message.slice(cursor, dataStart);
+      cursor = dataStart;
+      continue;
+    }
+
+    stripped += message.slice(cursor, markerIndex);
+    cursor = objectEnd;
+    droppedToEnd = message.slice(objectEnd).trim().length === 0;
   }
 
-  return withoutPositionMarker.slice(0, markerIndex).trimEnd();
+  const result = stripped + message.slice(cursor);
+  return droppedToEnd ? result.trimEnd() : result;
+}
+
+export function sanitizeBackendErrorMessage(message: string): string {
+  return stripAgentErrorMessageData(message.replace(SQL_ERROR_POSITION_MARKER_PATTERN, ""));
 }
 
 function isBackendError(value: unknown): value is BackendError {

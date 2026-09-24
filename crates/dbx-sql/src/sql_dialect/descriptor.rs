@@ -14,6 +14,7 @@ pub enum DialectKind {
     ManticoreSearch,
     Informix,
     Questdb,
+    Soql,
     Unsupported,
 }
 
@@ -35,6 +36,7 @@ impl DialectKind {
             DialectKind::ManticoreSearch => Some(DatabaseType::ManticoreSearch),
             DialectKind::Informix => Some(DatabaseType::Informix),
             DialectKind::Questdb => Some(DatabaseType::Questdb),
+            DialectKind::Soql => Some(DatabaseType::Salesforce),
             DialectKind::Unsupported => None,
         }
     }
@@ -52,6 +54,7 @@ impl DialectKind {
             DialectKind::ManticoreSearch => "manticoresearch",
             DialectKind::Informix => "informix",
             DialectKind::Questdb => "questdb",
+            DialectKind::Soql => "soql",
             DialectKind::Unsupported => "unsupported",
         }
     }
@@ -79,6 +82,7 @@ impl DialectKind {
             "manticoresearch" => Some(DialectKind::ManticoreSearch),
             "informix" => Some(DialectKind::Informix),
             "questdb" => Some(DialectKind::Questdb),
+            "soql" | "salesforce" => Some(DialectKind::Soql),
             _ => None,
         }
     }
@@ -585,6 +589,14 @@ impl DialectCapabilityDescriptor {
                 supports_partitioning: true,
                 ..Default::default()
             },
+            DialectKind::Soql => Self {
+                dialect: DialectKind::Soql,
+                flags: 0,
+                max_identifier_length: 40,
+                max_columns_per_table: 500,
+                max_query_size_bytes: 20_000,
+                ..Default::default()
+            },
             DialectKind::Unsupported => Self::default(),
         }
     }
@@ -941,10 +953,23 @@ impl DialectInfo {
 
     pub fn all() -> Vec<Self> {
         use DialectKind::*;
-        vec![Mysql, Postgres, Sqlite, DuckDb, SqlServer, Oracle, H2, ClickHouse, ManticoreSearch, Informix, Questdb]
-            .into_iter()
-            .map(Self::for_kind)
-            .collect()
+        vec![
+            Mysql,
+            Postgres,
+            Sqlite,
+            DuckDb,
+            SqlServer,
+            Oracle,
+            H2,
+            ClickHouse,
+            ManticoreSearch,
+            Informix,
+            Questdb,
+            Soql,
+        ]
+        .into_iter()
+        .map(Self::for_kind)
+        .collect()
     }
 }
 
@@ -974,6 +999,7 @@ mod tests {
             (DatabaseType::ManticoreSearch, DialectKind::ManticoreSearch),
             (DatabaseType::Informix, DialectKind::Informix),
             (DatabaseType::Questdb, DialectKind::Questdb),
+            (DatabaseType::Salesforce, DialectKind::Soql),
             (DatabaseType::Redis, DialectKind::Unsupported),
             (DatabaseType::MongoDb, DialectKind::Unsupported),
         ];
@@ -1001,6 +1027,7 @@ mod tests {
             DialectKind::ManticoreSearch,
             DialectKind::Informix,
             DialectKind::Questdb,
+            DialectKind::Soql,
         ] {
             let db_type = kind.to_database_type().unwrap();
             let back = DialectKind::from_database_type(db_type);
@@ -1023,6 +1050,7 @@ mod tests {
             DialectKind::ManticoreSearch,
             DialectKind::Informix,
             DialectKind::Questdb,
+            DialectKind::Soql,
             DialectKind::Unsupported,
         ] {
             let desc = DialectCapabilityDescriptor::for_dialect(*kind);

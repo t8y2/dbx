@@ -42,7 +42,7 @@ function modelDialog(): Component {
   return defineComponent({
     inheritAttrs: false,
     setup(_, { attrs, slots }) {
-      return () => (attrs.open ? h("div", attrs, slots.default?.()) : null);
+      return () => (attrs.open ? h("div", { ...attrs, "data-test-dialog": "true" }, slots.default?.()) : null);
     },
   });
 }
@@ -163,7 +163,7 @@ afterEach(() => {
 });
 
 describe("DatabaseUserAdmin MySQL grant loading", () => {
-  it("syncs privilege buttons and grant option from loaded SHOW GRANTS rows", async () => {
+  it("syncs the grant option from loaded SHOW GRANTS rows and renders the database scope editor", async () => {
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.executeQuery.mockResolvedValueOnce({ columns: ["user", "host", "plugin"], rows: [["root", "%", "mysql_native_password"]] }).mockResolvedValueOnce({ columns: ["Grants for root@%"], rows: [["GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION"]] });
 
@@ -175,12 +175,12 @@ describe("DatabaseUserAdmin MySQL grant loading", () => {
     await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(2));
     await nextTick();
 
-    const privilegeButton = Array.from(root.querySelectorAll("button")).find((button) => button.textContent?.trim() === "INSERT");
     const grantOptionLabel = Array.from(root.querySelectorAll("label")).find((label) => label.textContent?.includes("userAdmin.grantOption"));
     const grantOptionInput = grantOptionLabel?.querySelector<HTMLInputElement>('input[type="checkbox"]');
 
-    expect(privilegeButton?.className).toContain("border-primary");
     expect(grantOptionInput?.checked).toBe(true);
+    // MySQL 的权限编辑改为按数据库/表配置授权范围（与新增用户一致），固定的权限按钮由范围编辑器取代
+    expect(root.querySelector('input[placeholder="userAdmin.searchDatabase"]')).not.toBeNull();
   });
 
   it("falls back to the current Doris user when SHOW ALL GRANTS requires GRANT_PRIV", async () => {
@@ -219,6 +219,12 @@ function findButton(text: string): HTMLButtonElement | undefined {
   return Array.from(root?.querySelectorAll("button") ?? []).find((button) => button.textContent?.trim() === text);
 }
 
+// 权限编辑面板与新增用户弹窗复用同一个授权范围编辑器，断言弹窗内的控件时需要限定在弹窗范围内
+function findDialogButton(text: string): HTMLButtonElement | undefined {
+  const dialog = root?.querySelector('[data-test-dialog="true"]');
+  return Array.from(dialog?.querySelectorAll("button") ?? []).find((button) => button.textContent?.trim() === text);
+}
+
 describe("DatabaseUserAdmin MySQL create-user table grants", () => {
   it("loads tables, requires a selection, and previews only the selected table grant", async () => {
     mocks.ensureConnected.mockResolvedValue(undefined);
@@ -237,26 +243,85 @@ describe("DatabaseUserAdmin MySQL create-user table grants", () => {
 
     findButton("userAdmin.newUser")?.click();
     await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledWith("native-mysql"));
-    await nextTick();
-    findButton("scope_test")?.click();
+    await vi.waitFor(() => expect(findDialogButton("scope_test")).toBeDefined());
+    findDialogButton("scope_test")?.click();
     const password = root.querySelector<HTMLInputElement>('[data-password-input="true"]');
     password!.value = "test-password";
     password!.dispatchEvent(new Event("input", { bubbles: true }));
     await nextTick();
 
-    findButton("userAdmin.specificTables")?.click();
+    findDialogButton("userAdmin.specificTables")?.click();
     await vi.waitFor(() => expect(mocks.listTables).toHaveBeenCalledWith("native-mysql", "scope_test", ""));
     await nextTick();
-    expect(findButton("userAdmin.previewSql")?.disabled).toBe(true);
+    expect(findDialogButton("userAdmin.previewSql")?.disabled).toBe(true);
 
-    findButton("allowed_table")?.click();
+    findDialogButton("allowed_table")?.click();
     await nextTick();
-    expect(findButton("userAdmin.previewSql")?.disabled).toBe(false);
-    findButton("userAdmin.previewSql")?.click();
+    expect(findDialogButton("userAdmin.previewSql")?.disabled).toBe(false);
+    findDialogButton("userAdmin.previewSql")?.click();
 
     await vi.waitFor(() => expect(root?.textContent).toContain("GRANT SELECT, SHOW VIEW ON `scope_test`.`allowed_table` TO 'app_user'@'%';"));
     expect(root.textContent).not.toContain("ON `scope_test`.*");
     expect(root.textContent).not.toContain("`blocked_table`");
+  });
+});
+
+describe("DatabaseUserAdmin MySQL privilege editing", () => {
+  it("previews one grant per selected table for the selected user", async () => {
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["user", "host", "plugin"], rows: [["root", "%", "caching_sha2_password"]] }).mockResolvedValueOnce({ columns: ["Grants"], rows: [["GRANT SELECT ON *.* TO 'root'@'%'"]] });
+    mocks.listDatabases.mockResolvedValue([{ name: "scope_test" }]);
+    mocks.listTables.mockResolvedValue([
+      { name: "allowed_table", table_type: "BASE TABLE" },
+      { name: "blocked_table", table_type: "BASE TABLE" },
+    ]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: nativeMysqlConnection });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(findButton("scope_test")).toBeDefined());
+
+    findButton("scope_test")?.click();
+    await nextTick();
+    findButton("userAdmin.specificTables")?.click();
+    await vi.waitFor(() => expect(mocks.listTables).toHaveBeenCalledWith("native-mysql", "scope_test", ""));
+    await nextTick();
+
+    findButton("allowed_table")?.click();
+    findButton("blocked_table")?.click();
+    await nextTick();
+    findButton("userAdmin.grant")?.click();
+
+    await vi.waitFor(() => expect(root?.textContent).toContain("GRANT SELECT, SHOW VIEW ON `scope_test`.`allowed_table` TO 'root'@'%';"));
+    expect(root?.textContent).toContain("GRANT SELECT, SHOW VIEW ON `scope_test`.`blocked_table` TO 'root'@'%';");
+  });
+});
+
+describe("DatabaseUserAdmin MySQL global scope", () => {
+  it("grants the global scope through the fixed entry and hides table scope", async () => {
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["user", "host", "plugin"], rows: [["root", "%", "caching_sha2_password"]] }).mockResolvedValueOnce({ columns: ["Grants"], rows: [["GRANT SELECT ON *.* TO 'root'@'%'"]] });
+    mocks.listDatabases.mockResolvedValue([{ name: "scope_test" }]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: nativeMysqlConnection });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(findButton("userAdmin.globalScope")).toBeDefined());
+
+    findButton("userAdmin.globalScope")?.click();
+    await nextTick();
+
+    // 全局作用域没有表级粒度，不应出现表范围控件
+    expect(findButton("userAdmin.specificTables")).toBeUndefined();
+
+    findButton("userAdmin.grant")?.click();
+
+    await vi.waitFor(() => expect(root?.textContent).toContain("GRANT SELECT, SHOW VIEW ON *.* TO 'root'@'%';"));
+    expect(root?.textContent).not.toContain("ON `scope_test`.*");
   });
 });
 

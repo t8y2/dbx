@@ -484,6 +484,7 @@ mod tests {
                     McpDatabasePolicy { database_name: "aa".to_string(), read_only: false, allow_dangerous_sql: true },
                     McpDatabasePolicy { database_name: "aaa".to_string(), read_only: true, allow_dangerous_sql: false },
                 ],
+                allow_salesforce_dml: false,
             }],
             ..Default::default()
         };
@@ -520,6 +521,7 @@ mod tests {
                         read_only: false,
                         allow_dangerous_sql: true,
                     }],
+                    allow_salesforce_dml: false,
                 }],
                 ..Default::default()
             })

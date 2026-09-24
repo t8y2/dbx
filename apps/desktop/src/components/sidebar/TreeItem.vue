@@ -74,7 +74,11 @@ import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage
 import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { isTableVGroupGroupableRowType, selectedTableVGroupMoveTargets, tableVGroupIdFromNodeId } from "@/lib/table/tableVGroup";
+import { findTreeNodeById } from "@/lib/sql/newQueryContext";
+import { resolveTableVGroupDropTarget, setTableVGroupDropTargetNodeId, tableVGroupDropTargetNodeId } from "@/lib/sidebar/sidebarTableVGroupDrag";
 import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentation";
+import { redactConnectionStringSecrets } from "@/lib/connection/connectionStringRedaction";
 import { isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { encodeSpannerResourcePath } from "@/lib/connection/spannerResourcePath";
 import { hexToRgba } from "@/lib/common/color";
@@ -248,6 +252,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return null;
     case "connection-group":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-amber-500" };
+    case "table-vgroup":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-emerald-500" };
     case "database":
       return { icon: Database, colorClass: "text-yellow-500" };
     case "tablespace":
@@ -411,11 +417,15 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "group-extensions":
       return { icon: Package, colorClass: "text-violet-500" };
+    case "group-event-triggers":
+      return { icon: Package, colorClass: "text-violet-500" };
     case "group-tablespaces":
       return { icon: Database, colorClass: "text-orange-500" };
     case "group-datafiles":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-slate-500" };
     case "extension":
+      return { icon: Package, colorClass: "text-violet-400" };
+    case "event-trigger":
       return { icon: Package, colorClass: "text-violet-400" };
     case "load-more":
       return { icon: Plus, colorClass: "text-primary" };
@@ -511,10 +521,6 @@ function isLocalFileConnection(config: Pick<ConnectionConfig, "db_type" | "port"
   return config.db_type === "sqlite" || config.db_type === "duckdb" || config.db_type === "access" || (config.db_type === "h2" && config.port === 0);
 }
 
-function redactedConnectionString(value: string): string {
-  return value.replace(/(:\/\/[^/\s:@?#;]+):([^@\s/?#;]+)@/g, "$1:***@").replace(/([?&;](?:password|pwd|pass|token|secret|key)=)[^&;]*/gi, "$1***");
-}
-
 function hostForDisplay(host: string): string {
   if (!host.includes(":") || host.startsWith("[") || host.includes("://") || host.includes(",")) return host;
   return `[${host}]`;
@@ -529,11 +535,11 @@ function tooltipDatabaseValue(config: ConnectionConfig): string {
 
 function connectionTooltipUrl(config: ConnectionConfig): string {
   const explicit = cleanTooltipValue(config.connection_string);
-  if (explicit) return redactedConnectionString(explicit);
+  if (explicit) return redactConnectionStringSecrets(explicit);
 
   const host = cleanTooltipValue(config.host);
   if (!host) return "";
-  if (host.includes("://")) return redactedConnectionString(host);
+  if (host.includes("://")) return redactConnectionStringSecrets(host);
 
   if (isLocalFileConnection(config)) {
     if (config.db_type === "access") return `jdbc:ucanaccess://${host}`;
@@ -549,7 +555,7 @@ function connectionTooltipUrl(config: ConnectionConfig): string {
   const path = database ? `/${encodedDatabase}` : "";
   const params = cleanTooltipValue(config.url_params);
   const query = params ? (params.startsWith("?") ? params : `?${params}`) : "";
-  return redactedConnectionString(`${scheme}://${userInfo}${hostForDisplay(host)}${port}${path}${query}`);
+  return redactConnectionStringSecrets(`${scheme}://${userInfo}${hostForDisplay(host)}${port}${path}${query}`);
 }
 
 const detailTooltip = computed(() => {
@@ -633,10 +639,12 @@ const detailTooltip = computed(() => {
       ],
     };
   }
-  const comment = node.type === "column" && node.meta && "comment" in node.meta ? (node.meta as ColumnInfo).comment : node.comment;
-  if (!comment || (node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column")) return null;
+  const column = node.type === "column" ? (node.meta as ColumnInfo | undefined) : undefined;
+  const comment = column && "comment" in column ? column.comment : node.comment;
+  if ((!comment && !column) || (node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column")) return null;
   const rows: DetailTooltipRow[] = [
     { label: t("connection.name"), value: visibleLabel(node) },
+    ...(column ? [{ label: t("structureEditor.nullable"), value: t(column.is_nullable ? "structureEditor.nullable" : "structureEditor.notNull") }] : []),
     { label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true },
   ].filter((row) => row.value);
   return { rows };
@@ -1075,7 +1083,11 @@ const renameInput = ref("");
 
 const renameInputRef = ref<HTMLInputElement>();
 
+/** Snapshot of the row being renamed: reprojecting the tree mid-rename recycles activeNode. */
+const renameTargetNode = shallowRef<TreeNode | null>(null);
+
 function startRenameGroup() {
+  renameTargetNode.value = activeNode.value;
   renameInput.value = activeNode.value.label;
   isRenamingGroup.value = true;
   emit("rename-started");
@@ -1105,6 +1117,7 @@ watch(
     if (activeNode.value.type === "connection-group") startRenameGroup();
     else if (activeNode.value.type === "saved-sql-file") startRenameSavedSql();
     else if (activeNode.value.type === "connection") startRenameConnection();
+    else if (activeNode.value.type === "table-vgroup") startRenameGroup();
   },
   { immediate: true },
 );
@@ -1126,11 +1139,17 @@ function finishRenameGroup() {
   // groups (issue #681).
   if (!isRenamingGroup.value) return;
   isRenamingGroup.value = false;
+  const target = renameTargetNode.value ?? activeNode.value;
+  renameTargetNode.value = null;
   const trimmed = renameInput.value.trim();
   // An empty name cancels the rename and keeps the group as-is — never delete
   // here. Deleting a group is done explicitly via the context menu (issue #681).
-  if (!trimmed || trimmed === activeNode.value.label) return;
-  connectionStore.renameConnectionGroup(activeNode.value.id, trimmed);
+  if (!trimmed || trimmed === target.label) return;
+  if (target.type === "table-vgroup" && target.vgroupId) {
+    connectionStore.renameTableVGroup(target, target.vgroupId, trimmed);
+    return;
+  }
+  connectionStore.renameConnectionGroup(target.id, trimmed);
 }
 
 async function finishRenameSavedSql() {
@@ -1193,6 +1212,19 @@ const {
     return;
   }
 
+  if (dragState.draggedType === "table-vgroup") {
+    const draggedGroupId = tableVGroupIdFromNodeId(draggedId);
+    const targetGroupId = tableVGroupIdFromNodeId(targetId);
+    // 落点回调是模块级单例，activeNode 未必是同容器的落点行，须用 targetId 现查。
+    const targetNode = findTreeNodeById(connectionStore.treeNodes, targetId);
+    if (draggedGroupId && targetGroupId && targetNode) connectionStore.reorderTableVGroupEntry(targetNode, draggedGroupId, targetGroupId, position);
+    return;
+  }
+
+  // 分组行只在拖动分组自身时才是合法落点：否则 targetId 不在侧边栏布局里，
+  // reorderSidebarEntries 找不到目标会把连接追加到根列表末尾。
+  if (tableVGroupIdFromNodeId(targetId)) return;
+
   // If the grabbed row is part of a multi-selection, move all selected rows
   // together; otherwise just the grabbed one (issue #681).
   const selected = connectionStore.selectedTreeNodeIds;
@@ -1202,7 +1234,7 @@ const {
 
 const canReorderTreeNode = computed(() => {
   if (props.reorderDisabled) return false;
-  return activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
+  return activeNode.value.type === "connection" || activeNode.value.type === "connection-group" || activeNode.value.type === "table-vgroup";
 });
 
 function isPinnedOrderDrag(): boolean {
@@ -1211,7 +1243,7 @@ function isPinnedOrderDrag(): boolean {
 
 const dragVisual = computed(() => {
   const targetId = isPinnedOrderDrag() ? pinnedSortKey() : activeNode.value.id;
-  const isDropTarget = isPinnedOrderDrag() ? connectionStore.isPinnedTreeNodeReorderTarget(pinnedSortKey()) : activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
+  const isDropTarget = isPinnedOrderDrag() ? connectionStore.isPinnedTreeNodeReorderTarget(pinnedSortKey()) : activeNode.value.type === "connection" || activeNode.value.type === "connection-group" || activeNode.value.type === "table-vgroup";
 
   return {
     isDropTarget,
@@ -1346,6 +1378,11 @@ function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
 
 function startTableReferenceDrag(payload: QueryEditorTableReferencePayload) {
   draggingTableReferencePayload = payload;
+  // 分组成员名单按可分组行类型收集（表/视图/物化视图/过程/函数/触发器/序列等）；
+  // 无匹配容器的行由 scope 解析兜底拒绝，不会产生隐形脏数据。
+  vgroupDragTableNames = selectedTableVGroupMoveTargets(activeNode.value, selectedTreeNodesInVisibleOrder())
+    .filter((node) => isTableVGroupGroupableRowType(node.type))
+    .map((node) => node.label);
   setActiveTableReferencePayload(payload);
   document.getSelection()?.removeAllRanges();
   referenceDragFeedback = beginTableReferenceDragFeedback(tableReferenceDragLabel(payload));
@@ -1355,11 +1392,22 @@ function finishTableReferenceDrag() {
   clearActiveTableReferencePayload(draggingTableReferencePayload);
   pendingTableReferenceDrag = null;
   draggingTableReferencePayload = null;
+  vgroupDragTableNames = [];
+  setTableVGroupDropTargetNodeId(null);
   referenceDragFeedback?.end();
   referenceDragFeedback = null;
   window.dispatchEvent(createTableReferenceDragEndEvent());
   document.removeEventListener("mousemove", onTableReferenceMouseMove, true);
   document.removeEventListener("mouseup", onTableReferenceMouseUp, true);
+}
+
+/** 本次拖拽要移动进分组的表名（拖拽开始时按选中区解析，见 startTableReferenceDrag）。 */
+let vgroupDragTableNames: string[] = [];
+
+function tableVGroupDropTargetFor(payload: QueryEditorTableReferencePayload, event: MouseEvent) {
+  if (!vgroupDragTableNames.length) return null;
+  // 拖拽源是树行（多选同类型），落点解析按行类别过滤跨类别容器。
+  return resolveTableVGroupDropTarget(event.clientX, event.clientY, connectionStore.treeNodes, { ...payload, objectType: activeNode.value.type });
 }
 
 function onTableReferenceMouseMove(event: MouseEvent) {
@@ -1374,6 +1422,7 @@ function onTableReferenceMouseMove(event: MouseEvent) {
     event.preventDefault();
     document.getSelection()?.removeAllRanges();
     referenceDragFeedback?.update(event.clientX, event.clientY);
+    setTableVGroupDropTargetNodeId(tableVGroupDropTargetFor(draggingTableReferencePayload, event)?.node.id ?? null);
     // 仅查询编辑器消费 hover 光标线事件；AI 面板不监听。命中判定含覆盖层拦截时的几何回退。
     if (isOverSqlEditorTarget(event.clientX, event.clientY)) {
       window.dispatchEvent(createTableReferenceHoverEvent({ clientX: event.clientX, clientY: event.clientY }));
@@ -1385,15 +1434,20 @@ function onTableReferenceMouseUp(event: MouseEvent) {
   const payload = draggingTableReferencePayload;
   if (payload) {
     suppressNextTableReferenceClick = true;
-    const target = document.elementFromPoint(event.clientX, event.clientY);
-    if (target instanceof Element && target.closest(`[data-query-editor-root], ${AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR}`)) {
-      window.dispatchEvent(
-        createTableReferenceDropEvent({
-          payload,
-          clientX: event.clientX,
-          clientY: event.clientY,
-        }),
-      );
+    const dropTarget = tableVGroupDropTargetFor(payload, event);
+    if (dropTarget) {
+      for (const tableName of vgroupDragTableNames) connectionStore.moveTableToVGroup(dropTarget.node, tableName, dropTarget.groupId, activeNode.value.type);
+    } else {
+      const target = document.elementFromPoint(event.clientX, event.clientY);
+      if (target instanceof Element && target.closest(`[data-query-editor-root], ${AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR}`)) {
+        window.dispatchEvent(
+          createTableReferenceDropEvent({
+            payload,
+            clientX: event.clientX,
+            clientY: event.clientY,
+          }),
+        );
+      }
     }
   }
   finishTableReferenceDrag();
@@ -1566,7 +1620,6 @@ function onKeydown(event: KeyboardEvent) {
           rowWidthClass,
           {
             'group/sidebar-row': true,
-            'ring-1 ring-primary/50 bg-primary/5': dragVisual.showInside,
             'opacity-50': dragVisual.dragging,
             'tree-item-connection-tint': connectionColor,
             'hover:bg-accent': node.type !== 'connection',
@@ -1574,6 +1627,7 @@ function onKeydown(event: KeyboardEvent) {
             'tree-item-active': selectionVisual.rowSelected,
             'tree-item-active--selection-set': selectionVisual.usesSelectionSetHighlight && selectionVisual.rowSelected,
             'tree-item-highlight': highlighted,
+            'ring-1 ring-primary/50 bg-primary/5': dragVisual.showInside || tableVGroupDropTargetNodeId === node.id,
           },
         ]"
         :tabindex="selectionVisual.selected || selectionVisual.multiSelected ? 0 : -1"
@@ -1644,6 +1698,14 @@ function onKeydown(event: KeyboardEvent) {
               ]"
               >{{ visibleLabel(node) }}</span
             >
+            <span
+              v-if="node.type === 'column' && node.meta"
+              class="shrink-0 rounded px-1 text-[10px] leading-4"
+              :class="(node.meta as ColumnInfo).is_nullable ? 'text-muted-foreground bg-muted/50' : 'text-amber-700 bg-amber-500/10 dark:text-amber-300'"
+              :title="t((node.meta as ColumnInfo).is_nullable ? 'structureEditor.nullable' : 'structureEditor.notNull')"
+            >
+              {{ t((node.meta as ColumnInfo).is_nullable ? "structureEditor.nullable" : "structureEditor.notNull") }}
+            </span>
             <button v-if="node.type === 'oracle-db-links'" class="ml-auto rounded p-0.5 text-muted-foreground hover:bg-muted" :aria-label="t('databaseLinks.manage')" :title="t('databaseLinks.manage')" @click.stop="showDatabaseLinks = true" @dblclick.stop>
               <TableProperties class="h-3.5 w-3.5" />
             </button>

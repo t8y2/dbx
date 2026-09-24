@@ -9,7 +9,7 @@
 import type { SqlTextSpan } from "@/types/database";
 import type { SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
 import { resolveRedisCommandSpec } from "@/lib/redis/redisCommandTable";
-import { tokenizeRedisLine } from "@/lib/redis/redisCommandTokenizer";
+import { isRedisCommentLine, tokenizeRedisLine } from "@/lib/redis/redisCommandTokenizer";
 
 export { tokenizeRedisLine, type RedisArgvResult, type RedisArgvToken } from "@/lib/redis/redisCommandTokenizer";
 
@@ -47,9 +47,7 @@ export function buildRedisSyntaxDiagnostics(source: string): SqlSemanticDiagnost
     const rawLine = lines[lineIndex];
     const lineNo = lineIndex + 1; // 1-based line number for SqlTextSpan
     if (!rawLine || !rawLine.trim()) continue;
-    // Skip comment-ish lines (Redis has no official comments, but `#`/`--` are
-    // commonly used by users as notes).
-    if (/^\s*(#|--)/.test(rawLine)) continue;
+    if (isRedisCommentLine(rawLine)) continue;
 
     const { argv, unclosedQuote, unclosedQuoteStart } = tokenizeRedisLine(rawLine);
 

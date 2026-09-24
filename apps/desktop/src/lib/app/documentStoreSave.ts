@@ -14,6 +14,13 @@ export function formatMeilisearchDocumentOperationPreview(options: { action: "in
   return lines.join("\n");
 }
 
+export function formatSolrDocumentOperationPreview(options: { action: "insert" | "upsert" | "update" | "delete"; core: string; id?: unknown; document?: Record<string, unknown> }): string {
+  const lines = [`DBX SOLR ${options.action.toUpperCase()} DOCUMENT`, `core: ${JSON.stringify(options.core)}`];
+  if (options.id !== undefined) lines.push(`id: ${stringifyDocumentStoreValue(options.id, "solr")}`);
+  if (options.document) lines.push("document:", stringifyDocumentStoreValue(options.document, "solr", 2));
+  return lines.join("\n");
+}
+
 /**
  * Write a document body under a known identity.
  * - `put`: Elasticsearch index-by-id / Mongo update-by-id (identity via path, not body).

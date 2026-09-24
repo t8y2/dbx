@@ -193,6 +193,7 @@ pub async fn execute_multi(
     use_transaction: Option<bool>,
     continue_on_error: Option<bool>,
     execution_mode: Option<dbx_core::query::QueryExecutionMode>,
+    preserve_explicit_transaction: Option<bool>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, BackendError> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -232,33 +233,36 @@ pub async fn execute_multi(
         schema
     );
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            row_offset,
-            max_result_bytes,
-            result_key_columns: result_key_columns.unwrap_or_default(),
-            table_data_preview: table_data_preview.unwrap_or(false),
-            catalog,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            await_cancel_completion: false,
-            execution_id,
-            use_transaction,
-            continue_on_error: continue_on_error.unwrap_or(false),
-            execution_mode: execution_mode.unwrap_or_default(),
-        },
-        progress,
-    )
+    let result = dbx_core::query::batch_progress::with_coalesced_execute_multi_progress(progress, |progress| {
+        dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
+            &state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            cancel_token,
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                row_offset,
+                max_result_bytes,
+                result_key_columns: result_key_columns.unwrap_or_default(),
+                table_data_preview: table_data_preview.unwrap_or(false),
+                catalog,
+                result_session_id,
+                client_session_id,
+                timeout_secs,
+                await_cancel_completion: false,
+                execution_id,
+                use_transaction,
+                continue_on_error: continue_on_error.unwrap_or(false),
+                execution_mode: execution_mode.unwrap_or_default(),
+                preserve_explicit_transaction: preserve_explicit_transaction.unwrap_or(false),
+            },
+            progress,
+        )
+    })
     .await;
     match &result {
         Ok(results) => log::info!(
@@ -345,9 +349,18 @@ pub async fn execute_batch(
     statements: Vec<String>,
     schema: Option<String>,
     timeout_secs: Option<u64>,
+    use_transaction: Option<bool>,
 ) -> Result<db::QueryResult, String> {
-    dbx_core::query::execute_statements(&state, &connection_id, &database, &statements, schema.as_deref(), timeout_secs)
-        .await
+    dbx_core::query::execute_statements_with_transaction_option(
+        &state,
+        &connection_id,
+        &database,
+        &statements,
+        schema.as_deref(),
+        use_transaction == Some(true),
+        timeout_secs,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -781,6 +794,21 @@ pub fn build_create_table_sql(
 }
 
 #[tauri::command]
+pub fn build_create_partitioned_table_sql(
+    options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    partitioning: dbx_core::table_structure_sql::TablePartitionDefinition,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+    Ok(dbx_core::table_structure_sql::build_create_partitioned_table_sql(options, partitioning))
+}
+
+#[tauri::command]
+pub fn build_table_partition_operation_sql(
+    options: dbx_core::table_structure_sql::TablePartitionSqlOptions,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+    Ok(dbx_core::table_structure_sql::build_table_partition_operation_sql(options))
+}
+
+#[tauri::command]
 pub fn build_single_column_alter_sql(
     options: dbx_core::table_structure_sql::SingleColumnAlterSqlOptions,
 ) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
@@ -948,8 +976,27 @@ pub async fn get_explain_info(
         schema.as_deref(),
         &sql,
         mode.as_deref(),
+        None,
     )
     .await
+}
+
+#[tauri::command]
+pub async fn get_plugin_plan_capabilities(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::query::plugin_plan::PluginPlanCapabilities, String> {
+    dbx_core::query::plugin_plan::plugin_plan_capabilities(&state, &connection_id).await
+}
+
+/// Read-only estimated plan acquisition for the plugin Host API. The request
+/// carries the original SQL only; the host generates and owns the EXPLAIN.
+#[tauri::command]
+pub async fn get_plugin_estimated_plan(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    request: dbx_core::query::plugin_plan::PluginPlanRequest,
+) -> Result<dbx_core::query::plugin_plan::PluginPlanResult, String> {
+    dbx_core::query::plugin_plan::explain_estimated_plan(&state, request).await
 }
 
 #[tauri::command]

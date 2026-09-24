@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { issueRedirectPath, pluginDetailShellRequest, sanitizeReturnTo, signPayload, staticAssetCacheControl, verifySignedPayload } from "../worker";
+
+test("plugin detail shell routes are routed to the worker before static 404 handling", () => {
+  const wrangler = JSON.parse(readFileSync(new URL("../wrangler.json", import.meta.url), "utf8"));
+  const runWorkerFirst: string[] = wrangler.assets.run_worker_first;
+  for (const prefix of ["/cn/plugins", "/en/plugins"]) {
+    assert.ok(
+      runWorkerFirst.includes(`${prefix}/*`),
+      `${prefix}/* missing from run_worker_first; the asset layer would serve the static 404 before the worker shell fallback runs`,
+    );
+  }
+});
 
 test("signed OAuth payloads round-trip and reject tampering", async () => {
   const signed = await signPayload({ login: "dbx-user" }, "test-secret");

@@ -1,6 +1,7 @@
 package com.dbx.agent;
 
 import com.google.gson.JsonArray;
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
@@ -34,6 +35,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CommonJavaCompatibilityTest {
+    @Test
+    void emitsOptionalServerAuditTimeWithoutLeakingCursorBookkeeping() {
+        Gson gson = new Gson();
+        QueryPageResult page = new QueryPageResult();
+        assertFalse(gson.toJsonTree(page).getAsJsonObject().has("server_execute_time_us"));
+        page.setServer_execute_time_us(370L);
+        page.setCursor_rows_read(500);
+        assertEquals(370L, gson.toJsonTree(page).getAsJsonObject().get("server_execute_time_us").getAsLong());
+        assertFalse(gson.toJsonTree(page).getAsJsonObject().has("cursor_rows_read"));
+    }
+
     @Test
     void definesSharedAgentProtocolContract() {
         assertEquals("handshake", AgentProtocol.METHOD_HANDSHAKE);

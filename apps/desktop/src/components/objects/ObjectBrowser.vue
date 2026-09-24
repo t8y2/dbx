@@ -24,6 +24,7 @@ import {
   Eraser,
   Eye,
   FileCode,
+  FileText,
   Info,
   GripVertical,
   KeyRound,
@@ -69,16 +70,19 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
+import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, PgTablePartitioning, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
-import { supportsAiAssistantContext, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
+import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { PARTITION_TREE_INDENT_PX } from "@/lib/table/pgPartitionPresentation";
 import {
   buildDropObjectSql,
   buildDropTableSql,
@@ -118,11 +122,12 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { formatSidebarTableNamesForCopy, type SidebarTableCopyTarget } from "@/lib/sidebar/sidebarTableNameCopy";
 import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
@@ -144,6 +149,7 @@ import {
   initialObjectBrowserSortDirection,
   objectBrowserRowLegacyPinnedTreeNodeIds,
   objectBrowserRowMatchesPinnedTreeNode,
+  groupObjectBrowserRows,
   objectBrowserRowPinnedTreeNodeIdentity,
   sortObjectBrowserRows,
   summarizeObjectBrowserSearch,
@@ -152,7 +158,7 @@ import {
   type ObjectBrowserSortDirection,
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
-import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, singleClickRowAction, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
 import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
@@ -245,7 +251,11 @@ const eventEditorKey = computed(() =>
   }),
 );
 // Table info panel state
-const tableInfoTab = ref<TableInfoTab>("ddl");
+const tableInfoTab = ref<TableInfoTab>("info");
+const tableOverviewStats = ref<ObjectStatistics | null>(null);
+const tableOverviewComment = ref<string | null>(null);
+const tableOverviewLoading = ref(false);
+const tableOverviewLoaded = ref(false);
 const tableColumns = ref<ColumnInfo[]>([]);
 const tableColumnsLoading = ref(false);
 const tableColumnsLoaded = ref(false);
@@ -265,16 +275,25 @@ const tableTriggersLoaded = ref(false);
 const tableConstraints = ref<ConstraintInfo[]>([]);
 const tableConstraintsLoading = ref(false);
 const tableConstraintsLoaded = ref(false);
+const tablePartitions = ref<PgTablePartitioning | null>(null);
+const tablePartitionsLoading = ref(false);
+const tablePartitionsLoaded = ref(false);
+// Only tables that actually are partitioned get the Partitions tab; the cheap
+// partition-status probe decides before the full tree is fetched.
+const tableIsPartitioned = ref(false);
+const tablePartitionStatusResolved = ref(false);
 // The Constraints tab hides foreign keys when the dedicated Foreign Keys tab
 // is also shown, mirroring DataGrid/TableStructureEditor.
 const tableConstraintsForTab = computed(() => constraintsForConstraintsTab(tableConstraints.value, tableMetadataCapabilities.value.foreignKeys));
 const tableInfoSearchQuery = ref("");
 const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
 const activeTableInfoLoading = computed(() => {
+  if (tableInfoTab.value === "info") return tableOverviewLoading.value;
   if (tableInfoTab.value === "ddl") return tableDdlLoading.value;
   if (tableInfoTab.value === "columns") return tableColumnsLoading.value;
   if (tableInfoTab.value === "indexes") return tableIndexesLoading.value;
   if (tableInfoTab.value === "foreignKeys") return tableForeignKeysLoading.value;
+  if (tableInfoTab.value === "partitions") return tablePartitionsLoading.value;
   return tableInfoTab.value === "triggers" && tableTriggersLoading.value;
 });
 const SIDE_PANEL_MIN_WIDTH = 280;
@@ -290,10 +309,15 @@ const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
 const isMongodb = computed(() => props.connection.db_type === "mongodb");
-const supportsObjectRowStats = computed(() => !isMongodb.value);
-const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value && !isMongodb.value);
+// Victoria Metrics reports series instead of rows and has no byte size to show;
+// every other engine (MongoDB collections included, via `collStats`) fills both
+// the row and size columns.
+const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value);
+// The batch table toolbar (export/copy/truncate/empty/drop selected) is SQL-only:
+// MongoDB collections are not dropped or truncated through it.
+const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value);
 const showTableStatistics = computed(() => objectFilter.value === "all" || objectFilter.value === "tables");
-const showObjectRowStats = computed(() => supportsObjectRowStats.value && showTableStatistics.value);
+const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 
@@ -386,6 +410,7 @@ const objectCounts = computed(() => countObjectBrowserRowsByFilter(rows.value));
 const objectSearchSummary = computed(() => summarizeObjectBrowserSearch(rows.value, search.value));
 const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tableStructureDatabaseType.value));
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
+const canOpenDataDictionary = computed(() => !!props.database && supportsDataDictionary(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
 const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(props.connection) && supportsTableVacuum(effectiveDatabaseType.value));
@@ -619,17 +644,14 @@ const gridTemplateColumns = computed(() => {
 const objectGridMinWidth = computed(() => {
   return objectBrowserColumns.value.reduce((total, key) => total + objectColumnWidths.value[key], 0) + Math.max(0, objectBrowserColumns.value.length - 1) * 12 + 24;
 });
-const partitionRowsByParentId = computed(() => {
-  const groups = new Map<string, ObjectBrowserRow[]>();
-  for (const row of rows.value) {
-    if (!row.partitionParentId) continue;
-    const group = groups.get(row.partitionParentId) ?? [];
-    group.push(row);
-    groups.set(row.partitionParentId, group);
-  }
-  return groups;
-});
-const filteredRows = computed(() => groupedFilteredRows());
+
+const groupedRows = computed(() => groupedFilteredRows());
+const filteredRows = computed(() => groupedRows.value.rows);
+
+/** Nesting level of a partition row (0 for a top-level object). */
+function partitionRowDepth(row: ObjectBrowserRow): number {
+  return groupedRows.value.depths.get(row.id) ?? 0;
+}
 const selectableRows = computed(() => rows.value.filter((row) => row.type === "TABLE"));
 
 // ---- Grid (tile) view virtualization ----
@@ -919,32 +941,13 @@ function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
 }
 
 function groupedFilteredRows() {
-  const query = search.value.trim();
-  const candidateRows = rows.value.filter(rowMatchesObjectFilter);
-  const candidateIds = new Set(candidateRows.map((row) => row.id));
-  const matchingRows = objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter);
-  const matchingIds = new Set(matchingRows.map((row) => row.id));
-  const parentIdsWithMatchingPartitions = new Set(matchingRows.flatMap((row) => (row.partitionParentId ? [row.partitionParentId] : [])));
-  const rootRows = candidateRows.filter((row) => {
-    if (row.partitionParentId) return false;
-    if (!query) return true;
-    return matchingIds.has(row.id) || parentIdsWithMatchingPartitions.has(row.id);
+  return groupObjectBrowserRows({
+    rows: rows.value.filter(rowMatchesObjectFilter),
+    matchingRows: objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter),
+    query: search.value.trim(),
+    expandedPartitionParentIds: expandedPartitionParentIds.value,
+    sortRows: sortObjectBrowserRowsWithPins,
   });
-  const sortedRoots = sortObjectBrowserRowsWithPins(rootRows);
-  const result: ObjectBrowserRow[] = [];
-
-  for (const row of sortedRoots) {
-    result.push(row);
-    const partitions = partitionRowsByParentId.value.get(row.id)?.filter((partition) => candidateIds.has(partition.id));
-    if (!partitions?.length) continue;
-    const parentMatches = matchingIds.has(row.id);
-    const shouldShowPartitions = expandedPartitionParentIds.value.has(row.id) || !!query;
-    if (!shouldShowPartitions) continue;
-    const visiblePartitions = query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id)) : partitions;
-    result.push(...sortObjectBrowserRowsWithPins(visiblePartitions));
-  }
-
-  return result;
 }
 
 function iconClass(type: ObjectBrowserRow["type"]) {
@@ -1010,6 +1013,9 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
     case "open-source":
       void (row.type === "EVENT" ? openEventEditor(row) : openSource(row));
       break;
+    case "open-source-tab":
+      openSourceTab(row);
+      break;
   }
 }
 
@@ -1036,13 +1042,18 @@ function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
   if (row.type === "TABLE") tableSelectionAnchorId.value = row.id;
   const activation = settingsStore.editorSettings.sidebarActivation;
   const { action, isDouble } = resolveRowClickAction(row, event.detail, activation, effectiveDatabaseType.value);
-  // Double click: cancel any pending single-click and fire immediately
+  // Double click: cancel any pending single-click and fire immediately. When
+  // the row's single/double actions are identical (e.g. SEQUENCE → open-source),
+  // this gesture's first click already ran it — re-executing would toggle the
+  // just-opened side panel back off (or emit open-table twice for MongoDB).
   if (isDouble) {
     if (singleClickTimer) {
       clearTimeout(singleClickTimer);
       singleClickTimer = null;
     }
-    executeRowAction(row, action);
+    if (action !== singleClickRowAction(row, effectiveDatabaseType.value)) {
+      executeRowAction(row, action);
+    }
     return;
   }
   // Single click: defer when the row has a distinct double-click action so a
@@ -1064,6 +1075,7 @@ type TableInfoTabItem = { id: TableInfoTab; label: string; icon: Component; coun
 
 const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
   const tabs: TableInfoTabItem[] = [];
+  tabs.push({ id: "info", label: t("grid.tableInfoOverview"), icon: Info });
   if (tableMetadataCapabilities.value.ddl) {
     tabs.push({ id: "ddl", label: "DDL", icon: Code2 });
   }
@@ -1082,6 +1094,9 @@ const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
   if (tableMetadataCapabilities.value.triggers) {
     tabs.push({ id: "triggers", label: t("grid.tableInfoTriggers"), icon: RotateCcw, count: tableTriggers.value.length });
   }
+  if (tableMetadataCapabilities.value.partitions && tableIsPartitioned.value) {
+    tabs.push({ id: "partitions", label: t("structureEditor.partitions"), icon: Network, count: tablePartitions.value?.partitions.length });
+  }
   return tabs;
 });
 
@@ -1090,6 +1105,31 @@ const tableInfoTabListStyle = computed(() => ({
 }));
 
 const filteredTableColumns = computed(() => filterObjectBrowserTableColumns(tableColumns.value, tableInfoSearchQuery.value));
+const tableOverviewRows = computed(() => {
+  const stats = tableOverviewStats.value;
+  const rows = [
+    { label: t("common.table"), value: sidePanelRow.value?.name ?? "" },
+    { label: t("common.schema"), value: sidePanelRow.value?.schema || selectedSchema.value || props.database },
+    { label: t("common.database"), value: props.database },
+    { label: t("structureEditor.comment"), value: tableOverviewComment.value ?? "" },
+    { label: t("grid.tableInfoEstimatedRows"), value: formatObjectBrowserCount(stats?.estimated_rows) },
+    { label: t("grid.tableInfoTotalSize"), value: formatObjectBrowserBytes(stats?.total_bytes) },
+    { label: t("grid.tableInfoDataLength"), value: formatObjectBrowserBytes(stats?.data_length) },
+    { label: t("grid.tableInfoEngine"), value: stats?.engine ?? "" },
+    { label: t("grid.tableInfoCreatedAt"), value: stats?.created_at ?? "" },
+    { label: t("grid.tableInfoUpdatedAt"), value: stats?.updated_at ?? "" },
+    { label: t("grid.tableInfoCollation"), value: stats?.collation ?? "" },
+    { label: t("grid.tableInfoRowFormat"), value: stats?.row_format ?? "" },
+    { label: t("grid.tableInfoAvgRowLength"), value: formatObjectBrowserBytes(stats?.avg_row_length) },
+    { label: t("grid.tableInfoMaxDataLength"), value: formatObjectBrowserBytes(stats?.max_data_length) },
+    { label: t("grid.tableInfoCheckTime"), value: stats?.check_time ?? "" },
+    { label: t("grid.tableInfoIndexLength"), value: formatObjectBrowserBytes(stats?.index_length) },
+    { label: t("grid.tableInfoAutoIncrement"), value: stats?.auto_increment ?? "" },
+    { label: t("grid.tableInfoDataFree"), value: formatObjectBrowserBytes(stats?.data_free) },
+  ];
+  const query = tableInfoSearchQuery.value.trim().toLowerCase();
+  return rows.filter((row) => row.value && (!query || row.label.toLowerCase().includes(query) || row.value.toLowerCase().includes(query)));
+});
 
 const filteredTableIndexes = computed(() => {
   if (!tableInfoSearchQuery.value) return tableIndexes.value;
@@ -1138,11 +1178,19 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   sidePanelGuard.bump();
   // Reset state
   tableColumns.value = [];
+  tableOverviewStats.value = null;
+  tableOverviewComment.value = null;
+  tableOverviewLoaded.value = false;
   rawTableDdlContent.value = "";
   tableIndexes.value = [];
   tableForeignKeys.value = [];
   tableTriggers.value = [];
   tableConstraints.value = [];
+  tablePartitions.value = null;
+  tablePartitionsLoaded.value = false;
+  tablePartitionsLoading.value = false;
+  tableIsPartitioned.value = false;
+  tablePartitionStatusResolved.value = false;
   tableColumnsLoaded.value = false;
   tableDdlLoaded.value = false;
   tableIndexesLoaded.value = false;
@@ -1150,22 +1198,47 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   tableTriggersLoaded.value = false;
   tableConstraintsLoaded.value = false;
   tableInfoSearchQuery.value = "";
-  // Determine initial tab: explicit request > previously activated
+  // Determine initial tab: explicit request > previously activated. Resolve the
+  // partition status first so a persisted `partitions` tab is not rejected (and
+  // overwritten) before the probe lands.
+  await probeTablePartitionStatus();
   const firstTab = initialTab ?? tableInfoTab.value;
   await selectTableInfoTab(firstTab);
 }
 
 async function selectTableInfoTab(tab: TableInfoTab) {
+  // The panel can be re-selected (or restored) without `openTableInfo`, so make
+  // sure the partition status has been probed before the tab list is consulted.
+  if (!tablePartitionStatusResolved.value) await probeTablePartitionStatus();
   const nextTab = tableInfoTabs.value.some((item) => item.id === tab) ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
   tableInfoTab.value = nextTab;
   tableInfoSearchQuery.value = "";
-  if (nextTab === "ddl") await fetchTableDdl();
+  if (nextTab === "info") await fetchTableOverview();
+  else if (nextTab === "ddl") await fetchTableDdl();
   else if (nextTab === "columns") await fetchTableColumns();
   else if (nextTab === "indexes") await fetchTableIndexes();
   else if (nextTab === "foreignKeys") await fetchTableForeignKeys();
   else if (nextTab === "constraints") await fetchTableConstraints();
   else if (nextTab === "triggers") await fetchTableTriggers();
+  else if (nextTab === "partitions") await fetchTablePartitions();
+}
+
+async function fetchTableOverview(force = false) {
+  const row = sidePanelRow.value;
+  if (!row || (!force && tableOverviewLoaded.value)) return;
+  const epoch = sidePanelGuard.capture();
+  const schema = row.schema || selectedSchema.value || props.database;
+  tableOverviewLoading.value = true;
+  try {
+    const [statistics, comment] = await Promise.all([api.listObjectStatistics(props.connection.id, props.database, schema).catch(() => [] as ObjectStatistics[]), api.getTableComment(props.connection.id, props.database, schema, row.name, props.catalog).catch(() => null)]);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableOverviewStats.value = findTableStatistics(statistics, row.name, schema) ?? null;
+    tableOverviewComment.value = comment;
+    tableOverviewLoaded.value = true;
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tableOverviewLoading.value = false;
+  }
 }
 
 function tableMetadataRequest(row: ObjectBrowserRow): ObjectDdlRequest {
@@ -1189,7 +1262,7 @@ async function fetchTableDdl(force = settingsStore.editorSettings.refreshDdlOnOp
     const { ddl } = await loadObjectDdl(tableMetadataRequest(row), { force });
     if (sidePanelGuard.isStale(epoch)) return;
     const formatDialect = sqlFormatDialectForDbType(effectiveDatabaseType.value);
-    const unqualified = omitDdlDatabaseQualifier(ddl, formatDialect, effectiveDatabaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
+    const unqualified = applyDdlDatabaseQualifier(ddl, formatDialect, effectiveDatabaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
     rawTableDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
     loadedSuccessfully = true;
   } catch (e: any) {
@@ -1299,6 +1372,53 @@ async function fetchTableTriggers(force = false) {
   }
 }
 
+async function probeTablePartitionStatus() {
+  const row = sidePanelRow.value;
+  if (!row || !tableMetadataCapabilities.value.partitions) {
+    tableIsPartitioned.value = false;
+    tablePartitionStatusResolved.value = true;
+    return;
+  }
+  const epoch = sidePanelGuard.capture();
+  try {
+    const request = tableMetadataRequest(row);
+    const status = await api.getTablePartitionStatus(request.connectionId, request.database, request.schema || request.database, request.tableName);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableIsPartitioned.value = status.isPartitionedParent || status.isPartition;
+  } catch {
+    // Fail closed: hide the tab rather than offering one that cannot load.
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableIsPartitioned.value = false;
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tablePartitionStatusResolved.value = true;
+  }
+}
+
+async function fetchTablePartitions(force = false) {
+  const row = sidePanelRow.value;
+  if (!row || (tablePartitionsLoaded.value && !force)) return;
+  const epoch = sidePanelGuard.capture();
+  tablePartitionsLoading.value = true;
+  let loadedSuccessfully = false;
+  try {
+    const request = tableMetadataRequest(row);
+    // Live catalog read: partition metadata has no persisted cache facet.
+    const value = await api.getTablePartitioning(request.connectionId, request.database, request.schema || request.database, request.tableName);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tablePartitions.value = value;
+    loadedSuccessfully = true;
+  } catch (error) {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tablePartitions.value = null;
+    toast(translateBackendError(t, error), 5000);
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) {
+      tablePartitionsLoaded.value = loadedSuccessfully;
+      tablePartitionsLoading.value = false;
+    }
+  }
+}
+
 async function fetchTableConstraints(force = false) {
   const row = sidePanelRow.value;
   if (!row || (tableConstraintsLoaded.value && !force)) return;
@@ -1324,10 +1444,19 @@ async function fetchTableConstraints(force = false) {
 }
 
 async function refreshActiveTableInfo() {
+  if (sidePanelMode.value === "source") {
+    await refreshActiveSource();
+    return;
+  }
   if (sidePanelMode.value !== "table-info" || !sidePanelRow.value) return;
   sidePanelGuard.bump();
 
-  if (tableInfoTab.value === "ddl") {
+  if (tableInfoTab.value === "info") {
+    tableOverviewStats.value = null;
+    tableOverviewComment.value = null;
+    tableOverviewLoaded.value = false;
+    await fetchTableOverview(true);
+  } else if (tableInfoTab.value === "ddl") {
     rawTableDdlContent.value = "";
     tableDdlLoaded.value = false;
     await fetchTableDdl(true);
@@ -1351,6 +1480,10 @@ async function refreshActiveTableInfo() {
     tableTriggers.value = [];
     tableTriggersLoaded.value = false;
     await fetchTableTriggers(true);
+  } else if (tableInfoTab.value === "partitions") {
+    tablePartitions.value = null;
+    tablePartitionsLoaded.value = false;
+    await fetchTablePartitions(true);
   }
 }
 
@@ -1431,15 +1564,38 @@ function openTableStructureEditor() {
   queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, tableInfoTab.value, undefined, props.catalog);
 }
 
+/**
+ * Double-clicking a routine opens its source as an editable query tab
+ * (issue #10202), the same container the sidebar and editor navigation use.
+ * The store owns connection setup, source loading and tab de-duplication, so
+ * this path deliberately does not fall back to the side panel.
+ */
+function openSourceTab(row: ObjectBrowserRow) {
+  queryStore.openObjectSourceTabPending({
+    connectionId: props.connection.id,
+    database: props.database,
+    title: `Source - ${row.displayName || row.name}`,
+    schema: row.schema || selectedSchema.value || props.database,
+    catalog: props.catalog,
+    initialEditing: true,
+    request: { name: row.name, objectType: row.type as ObjectSourceKind, signature: row.signature ?? undefined },
+  });
+}
+
 async function openSource(row: ObjectBrowserRow) {
   // Toggle off if clicking the same source row
   if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "source") {
     closeSidePanel();
     return;
   }
+  await loadSourcePanel(row);
+}
+
+async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditing?: boolean }) {
   // Starting a different object must invalidate slower source requests before
   // any state is reset, otherwise an old response can populate the new row.
   const epoch = sidePanelGuard.start();
+  const preserveEditing = options?.preserveEditing === true && sourceEditing.value;
   sidePanelRow.value = row;
   sidePanelMode.value = "source";
   sourceRow.value = row;
@@ -1457,7 +1613,7 @@ async function openSource(row: ObjectBrowserRow) {
   try {
     const result = await api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
     if (sidePanelGuard.isStale(epoch)) return;
-    sourceCanEdit.value = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type);
+    sourceCanEdit.value = result.editable !== false && !["TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type) && (row.type !== "SEQUENCE" || effectiveDatabaseType.value === "oceanbase-oracle");
     const editable = sourceCanEdit.value
       ? await api.buildEditableObjectSource({
           databaseType: effectiveDatabaseType.value,
@@ -1471,9 +1627,11 @@ async function openSource(row: ObjectBrowserRow) {
     // Viewing database source must preserve its original whitespace and comments;
     // formatting remains an explicit editor action instead of altering it on open.
     sourceEditableText.value = editable;
-    sourceContent.value = editable;
+    sourceContent.value = row.type === "SEQUENCE" ? result.source : editable;
     sourceDraft.value = editable;
-    sourceEditing.value = sourceCanEdit.value;
+    // Fresh open always enters edit when allowed; refresh preserves prior edit mode.
+    const enterEditing = sourceCanEdit.value && row.type !== "SEQUENCE" && (options?.preserveEditing ? preserveEditing : true);
+    sourceEditing.value = enterEditing;
     if (!sourceCanEdit.value && row.type !== "SEQUENCE") {
       toast(t("objects.sourceReadOnly"), 3000);
     }
@@ -1483,6 +1641,13 @@ async function openSource(row: ObjectBrowserRow) {
   } finally {
     if (sidePanelGuard.isFresh(epoch)) sourceLoading.value = false;
   }
+}
+
+async function refreshActiveSource() {
+  const row = sourceRow.value || (sidePanelMode.value === "source" ? sidePanelRow.value : null);
+  if (!row || sidePanelMode.value !== "source") return;
+  if (sourceEditing.value && !window.confirm(t("objects.refreshDiscardConfirm"))) return;
+  await loadSourcePanel(row, { preserveEditing: true });
 }
 
 function openEventEditor(row: ObjectBrowserRow) {
@@ -1829,6 +1994,15 @@ function openDataCompare(row: ObjectBrowserRow) {
     database: props.database,
     schema: row.schema || selectedSchema.value,
     tableName: row.type === "TABLE" ? row.name : undefined,
+  };
+}
+
+function openDataDictionary(row: ObjectBrowserRow) {
+  connectionStore.dataDictionarySource = {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: row.schema || selectedSchema.value,
+    tableNames: [row.name],
   };
 }
 
@@ -2331,7 +2505,29 @@ async function confirmDuplicateStructure() {
   }
 }
 
-function copySelectedTablesToClipboard() {
+function objectBrowserTableNamesCopyText(rows: readonly ObjectBrowserRow[]): string {
+  const targets = rows.map(
+    (row) =>
+      ({
+        id: row.name,
+        label: row.name,
+        type: "table",
+        connectionId: props.connection.id,
+        database: props.database,
+        catalog: props.catalog,
+        schema: row.schema || selectedSchema.value || undefined,
+      }) as SidebarTableCopyTarget,
+  );
+  return formatSidebarTableNamesForCopy(targets, {
+    separator: settingsStore.editorSettings.sidebarCopyTableNameSeparator,
+    includeSchema: settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema,
+    databaseType: effectiveDatabaseType.value,
+    driverProfile: props.connection.driver_profile,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+  });
+}
+
+async function copySelectedTablesToClipboard() {
   const selectedRows = selectedTableRows.value;
   if (selectedRows.length === 0) return;
   connectionStore.treeClipboard = {
@@ -2344,7 +2540,12 @@ function copySelectedTablesToClipboard() {
       tableComment: row.comment,
     })),
   };
-  toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
+  try {
+    await copyToClipboard(objectBrowserTableNamesCopyText(selectedRows));
+    toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function canPasteTableClipboard(): boolean {
@@ -2445,7 +2646,7 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
     if (selectedTableCount.value === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    copySelectedTablesToClipboard();
+    void copySelectedTablesToClipboard();
     return;
   }
   if (eventTargetAllowsAppClipboardShortcut(event, "v")) {
@@ -2935,7 +3136,7 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    if (props.connection.db_type !== "mongodb") void loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -3260,6 +3461,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     exportDataSubmenu(item),
     { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
     ...tableClipboardMenuItems(item),
@@ -3288,6 +3490,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     exportDataSubmenu(item),
     { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
     {
       label: t("contextMenu.dropView"),
@@ -3388,8 +3591,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           {{ props.database }}
         </span>
       </div>
-      <div class="flex min-w-24 flex-1 items-center gap-2">
-        <div class="relative min-w-0 flex-1">
+      <div class="flex flex-1 items-center gap-2">
+        <div class="relative min-w-[6rem] flex-1">
           <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input v-model="search" data-object-search-input class="h-7 pl-8 pr-6 text-xs" :placeholder="isMongodb ? t('objects.searchCollections') : t('objects.search')" @keydown="onSearchKeydown" />
           <button v-if="search" type="button" class="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('common.clear')" @click="clearObjectSearch">
@@ -3397,7 +3600,14 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           </button>
         </div>
         <div v-if="showObjectFilter && showInlineObjectFilter" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
-          <button v-for="filter in objectFilters" :key="filter" type="button" class="h-6 rounded-sm px-2 text-xs text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': objectFilter === filter }" @click="selectObjectFilter(filter)">
+          <button
+            v-for="filter in objectFilters"
+            :key="filter"
+            type="button"
+            class="h-6 shrink-0 whitespace-nowrap rounded-sm px-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            :class="{ 'bg-background text-foreground shadow-sm': objectFilter === filter }"
+            @click="selectObjectFilter(filter)"
+          >
             {{ filterLabel(filter) }}
           </button>
         </div>
@@ -3491,23 +3701,23 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
         {{ t("objects.selectedTables", { count: selectedTableCount }) }}
       </div>
-      <Button v-if="supportsObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
+      <Button v-if="supportsBatchTableActions" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
         <Upload class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.exportSelected") }}
       </Button>
-      <Button v-if="supportsObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
+      <Button v-if="supportsBatchTableActions" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
         <Clipboard class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.copyTableSelected") }}
       </Button>
-      <Button v-if="supportsObjectSizeStats && supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
+      <Button v-if="supportsBatchTableActions && supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
         <Scissors class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.truncateSelected") }}
       </Button>
-      <Button v-if="supportsObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
+      <Button v-if="supportsBatchTableActions" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
         <Eraser class="mr-1.5 h-3.5 w-3.5" />
         {{ t("contextMenu.batchEmpty", { count: selectedTableCount }) }}
       </Button>
-      <Button v-if="supportsObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
+      <Button v-if="supportsBatchTableActions" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
         <Trash2 class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.dropSelected") }}
       </Button>
@@ -3648,6 +3858,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     <Square v-else class="h-3.5 w-3.5" />
                   </button>
                   <div class="flex min-w-0 items-center gap-2">
+                    <span v-if="partitionRowDepth(item) > 0" :data-partition-depth="partitionRowDepth(item)" :style="{ width: `${partitionRowDepth(item) * PARTITION_TREE_INDENT_PX}px` }" class="h-5 shrink-0" aria-hidden="true" />
                     <button
                       v-if="item.partitionCount"
                       type="button"
@@ -3658,7 +3869,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <ChevronDown v-if="isPartitionParentExpanded(item)" class="h-3.5 w-3.5" />
                       <ChevronRight v-else class="h-3.5 w-3.5" />
                     </button>
-                    <span v-else-if="item.partitionParentId" class="ml-4 h-5 w-5 shrink-0" />
+                    <span v-else-if="item.partitionParentId" class="h-5 w-5 shrink-0" />
                     <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
                     <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
                     <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
@@ -3802,7 +4013,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div v-if="tableInfoTab === 'ddl' && effectiveDatabaseType === 'oceanbase-oracle'" class="border-b px-3 py-2">
             <DdlStorageToggle :database-type="effectiveDatabaseType" :disabled="tableDdlLoading" />
           </div>
-          <div v-if="tableInfoTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
+          <div v-if="tableInfoTab === 'info'" class="flex-1 min-h-0 overflow-auto">
+            <div v-if="tableOverviewLoading" class="h-full flex items-center justify-center"><Loader2 class="w-4 h-4 animate-spin text-muted-foreground" /></div>
+            <div v-else-if="tableInfoSearchQuery && tableOverviewRows.length === 0" class="p-6 text-center text-xs text-muted-foreground">{{ t("grid.tableInfoNoResults") }}</div>
+            <div v-else class="divide-y">
+              <div v-for="row in tableOverviewRows" :key="row.label" class="flex items-baseline gap-3 px-3 py-2 text-xs">
+                <span class="w-24 shrink-0 text-muted-foreground">{{ row.label }}</span>
+                <span class="min-w-0 flex-1 select-text break-words font-mono text-[11px]" :title="row.value">{{ row.value }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="tableInfoTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
             <div v-if="tableColumnsLoading" class="h-full flex items-center justify-center">
               <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
             </div>
@@ -3926,6 +4147,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </div>
             </div>
           </div>
+          <TablePartitionsPanel v-else-if="tableInfoTab === 'partitions'" :partitioning="tablePartitions" :loading="tablePartitionsLoading" :error="''" :search-query="tableInfoSearchQuery" />
           <pre
             v-else-if="tableInfoTab === 'ddl' && !tableDdlLoading"
             ref="tableInfoDdlPreRef"
@@ -3964,6 +4186,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </Button>
             <Button v-if="!sourceEditing && sourceCanEdit" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
               <PencilLine class="h-3 w-3" />
+            </Button>
+            <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="sourceLoading || sourceSaving" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="refreshActiveSource">
+              <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': sourceLoading }" />
             </Button>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSource">
               <X class="h-3 w-3" />

@@ -6,12 +6,33 @@ const PANEL_MIN_WIDTH = 240;
 const DEFAULT_PANEL_MAX_WIDTH = 800;
 type PanelMaxWidth = number | ((handle: HTMLElement | null) => number);
 
+/** Vertical tab rails size via width + flex-basis; sidebar/AI panels only need width. */
+const TAB_NAV_PANEL_SELECTOR = "[data-workspace-tab-navigation], [data-special-page-navigation]";
+const RESIZE_PANEL_SELECTOR = `${TAB_NAV_PANEL_SELECTOR}, [data-app-sidebar]`;
+
 function restoredPanelWidth(storageKey: string, fallback: number): number {
   return Math.max(PANEL_MIN_WIDTH, Number(safeLocalStorageGet(storageKey)) || fallback);
 }
 
+/**
+ * Prefer the layout-owning panel root over the handle's immediate parent.
+ * Vertical tab handles live inside a nested `.app-tab-bar`, while width is
+ * owned by `[data-workspace-tab-navigation]` / `[data-special-page-navigation]`.
+ */
+function resolveResizePanel(handle: HTMLElement | null): HTMLElement | null {
+  return handle?.closest(RESIZE_PANEL_SELECTOR) ?? handle?.parentElement ?? null;
+}
+
+function applyPanelWidth(panel: HTMLElement | null, width: number) {
+  if (!panel) return;
+  panel.style.setProperty("width", `${width}px`);
+  if (panel.matches(TAB_NAV_PANEL_SELECTOR)) {
+    panel.style.setProperty("flex", `0 0 ${width}px`);
+  }
+}
+
 function availableAiPanelMaxWidth(handle: HTMLElement | null) {
-  const panel = handle?.parentElement;
+  const panel = resolveResizePanel(handle);
   const flexibleContent = panel?.previousElementSibling as HTMLElement | null;
   if (!panel || !flexibleContent) return DEFAULT_PANEL_MAX_WIDTH;
 
@@ -49,11 +70,11 @@ export function usePanelResize() {
       document.body.append(resizeOverlay);
       const resolvedMaxWidth = typeof maxWidth === "function" ? maxWidth(resizeHandle) : maxWidth;
       const upperBound = Number.isFinite(resolvedMaxWidth) ? Math.max(PANEL_MIN_WIDTH, resolvedMaxWidth) : DEFAULT_PANEL_MAX_WIDTH;
-      const renderedWidth = resizeHandle?.parentElement?.getBoundingClientRect().width;
+      const panelElement = resolveResizePanel(resizeHandle);
+      const renderedWidth = panelElement?.getBoundingClientRect().width;
       const requestedStartWidth = typeof renderedWidth === "number" && Number.isFinite(renderedWidth) && renderedWidth > 0 ? renderedWidth : widthRef.value;
       const startWidth = Math.max(PANEL_MIN_WIDTH, Math.min(upperBound, requestedStartWidth));
       widthRef.value = startWidth;
-      const panelElement = resizeHandle?.parentElement;
       let currentWidth = startWidth;
       let rafId: number | null = null;
 
@@ -63,12 +84,12 @@ export function usePanelResize() {
         // happy-dom unit tests assert styles synchronously (no frame advance),
         // so apply immediately under the test mode instead of via rAF.
         if (import.meta.env.MODE === "test") {
-          panelElement?.style.setProperty("width", `${currentWidth}px`);
+          applyPanelWidth(panelElement, currentWidth);
           return;
         }
         if (rafId !== null) return;
         rafId = requestAnimationFrame(() => {
-          panelElement?.style.setProperty("width", `${currentWidth}px`);
+          applyPanelWidth(panelElement, currentWidth);
           rafId = null;
         });
       };
@@ -78,7 +99,7 @@ export function usePanelResize() {
           cancelAnimationFrame(rafId);
           rafId = null;
         }
-        panelElement?.style.setProperty("width", `${currentWidth}px`);
+        applyPanelWidth(panelElement, currentWidth);
         document.removeEventListener("pointermove", onPointerMove);
         document.removeEventListener("pointerup", finishResize);
         document.removeEventListener("pointercancel", finishResize);

@@ -10,18 +10,21 @@ import {
   resultGridCacheKey,
   resultGridColumnWidthCacheKey,
   resultGridInstanceKey,
+  resultRunItems,
   resultSourceRange,
   statementExecutionMarkers,
   tabColorStyle,
   tabDatabaseIconType,
   tabDisplayTitle,
+  tabDisplayTitles,
+  syncTabTitleNumbers,
   tabIconClass,
   tabTooltipLines,
   tabularResultItems,
   dirtyTabTitleStyle,
 } from "@/lib/tabs/tabPresentation";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
-import type { ConnectionConfig, QueryResult, QueryTab } from "@/types/database";
+import type { ConnectionConfig, QueryResult, QueryResultRun, QueryTab } from "@/types/database";
 
 const translations: Record<string, string> = {
   "tabs.tooltipConnection": "Connection:",
@@ -93,6 +96,13 @@ describe("query result SQL selection", () => {
 
     expect(queryResultBaseSql(tab)).toBe("SELECT * FROM dbo.second");
     expect(queryResultExecutionSql(tab)).toBe("SELECT * FROM dbo.second ORDER BY id DESC");
+  });
+
+  it("uses lastExecutedSql when a data tab has no editor SQL", () => {
+    const tab = queryTab({ mode: "data", sql: "", lastExecutedSql: "SELECT * FROM users", result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } });
+
+    expect(queryResultBaseSql(tab)).toBe("SELECT * FROM users");
+    expect(queryResultExecutionSql(tab)).toBe("SELECT * FROM users");
   });
 });
 
@@ -167,6 +177,51 @@ describe("query result labels", () => {
     expect(item?.label).toBeUndefined();
     expect(item?.title).toBe("SELECT 1");
   });
+
+  it("shows only the object name when result set names exclude the database", () => {
+    const results = [
+      {
+        columns: ["id"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceLabel: "cosimulation2.0.data_monitor",
+        sourceQualifier: "cosimulation2.0",
+        sourceName: "data_monitor",
+        sourceStatement: "SELECT * FROM data_monitor",
+      },
+    ];
+
+    const [withDatabase] = tabularResultItems(results);
+    const [withoutDatabase] = tabularResultItems(results, { includeSourceDatabase: false });
+
+    expect(withDatabase?.label).toBe("cosimulation2.0.data_monitor");
+    expect(withoutDatabase?.label).toBe("data_monitor");
+    expect(withoutDatabase?.displayLabel).toBe("data_monitor");
+    // 完整名称（含库名）仍保留在悬浮提示中
+    expect(withoutDatabase?.title).toBe("cosimulation2.0.data_monitor");
+  });
+
+  it("keeps a custom result name even when the database is hidden", () => {
+    const [item] = tabularResultItems(
+      [
+        {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+          sourceLabel: "My weekly report",
+          sourceQualifier: "app",
+          sourceName: "users",
+          sourceStatement: "SELECT * FROM users",
+        },
+      ],
+      { includeSourceDatabase: false },
+    );
+
+    expect(item?.label).toBe("My weekly report");
+    expect(item?.title).toBe("My weekly report");
+  });
 });
 
 describe("query result grid identity", () => {
@@ -183,7 +238,135 @@ describe("query result grid identity", () => {
   });
 });
 
+describe("result run labels", () => {
+  // 与 store 真实创建批次的方式保持一致：默认标题是 `Run N`，只有重命名/多库执行才标记 customTitle
+  const run = (id: string, sequence: number, result?: QueryResult, overrides: Partial<QueryResultRun> = {}): QueryResultRun => ({ id, title: `Run ${sequence}`, sequence, sql: "SELECT * FROM users", createdAt: sequence, result, ...overrides });
+  const sourceResult = (label: string, qualifier: string, name: string): QueryResult => ({ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceLabel: label, sourceQualifier: qualifier, sourceName: name }) as QueryResult;
+
+  it("names result runs after their source table instead of the run ordinal", () => {
+    const items = resultRunItems(
+      queryTab({
+        resultRuns: [run("run-1", 1, sourceResult("app.users", "app", "users")), run("run-2", 2, sourceResult("app.orders", "app", "orders"))],
+      }) as QueryTab,
+    );
+
+    expect(items.map((item) => item.sourceLabel)).toEqual(["app.users", "app.orders"]);
+  });
+
+  it("suffixes repeated sources and follows the database-name setting", () => {
+    const tab = queryTab({
+      resultRuns: [run("run-1", 1, sourceResult("cosimulation2.0.users", "cosimulation2.0", "users")), run("run-2", 2, sourceResult("cosimulation2.0.users", "cosimulation2.0", "users")), run("run-3", 3)],
+    }) as QueryTab;
+
+    expect(resultRunItems(tab).map((item) => item.sourceLabel)).toEqual(["cosimulation2.0.users", "cosimulation2.0.users (2)", undefined]);
+    expect(resultRunItems(tab, { includeSourceDatabase: false }).map((item) => item.sourceLabel)).toEqual(["users", "users (2)", undefined]);
+  });
+
+  it("keeps a renamed run title ahead of the source label", () => {
+    const items = resultRunItems(queryTab({ resultRuns: [run("run-1", 1, sourceResult("app.users", "app", "users"), { title: "报表", customTitle: true })] }) as QueryTab);
+
+    expect(items[0]?.title).toBe("报表");
+    expect(items[0]?.sourceLabel).toBe("app.users");
+  });
+
+  it("replaces the default Run N title with the source label", () => {
+    const items = resultRunItems(queryTab({ resultRuns: [run("run-1", 1, sourceResult("app.users", "app", "users"))] }) as QueryTab);
+
+    expect(items[0]?.title).toBe("");
+    expect(items[0]?.sourceLabel).toBe("app.users");
+  });
+
+  it("falls back to the run SQL for runs created before source labels were stored", () => {
+    const items = resultRunItems(queryTab({ resultRuns: [run("run-1", 1)] }) as QueryTab, { database: "cosimulation2.0", databaseType: "mysql" });
+
+    expect(items[0]?.sourceLabel).toBe("cosimulation2.0.users");
+  });
+});
+
 describe("tab group presentation", () => {
+  // 编号由 store 在标签列表变化时分配，渲染函数只读结果；这里把两步串起来，
+  // 与真实调用顺序保持一致（#9938）。
+  const titlesWithNumbers = (tabs: QueryTab[]) => {
+    syncTabTitleNumbers(tabs, translate);
+    return tabDisplayTitles(tabs, translate);
+  };
+
+  it("numbers colliding query tab titles so several tabs stay distinguishable", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" }), queryTab({ id: "tab-3" })];
+
+    const titles = titlesWithNumbers(tabs);
+    expect([...titles.values()]).toEqual(["PostgreSQL@db 1", "PostgreSQL@db 2", "PostgreSQL@db 3"]);
+  });
+
+  it("keeps the remaining numbers when a tab in the middle is closed", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" }), queryTab({ id: "tab-3" })];
+    titlesWithNumbers(tabs);
+
+    const titles = titlesWithNumbers(tabs.filter((tab) => tab.id !== "tab-2"));
+    expect(titles.get("tab-1")).toBe("PostgreSQL@db 1");
+    expect(titles.get("tab-3")).toBe("PostgreSQL@db 3");
+  });
+
+  it("keeps the number on the last surviving tab of a closed group", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" })];
+    titlesWithNumbers(tabs);
+
+    expect(titlesWithNumbers([tabs[0]!]).get("tab-1")).toBe("PostgreSQL@db 1");
+  });
+
+  it("continues after the highest number still in use when a new tab opens", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" }), queryTab({ id: "tab-3" })];
+    titlesWithNumbers(tabs);
+
+    const next = [...tabs.filter((tab) => tab.id !== "tab-2"), queryTab({ id: "tab-4" })];
+    const titles = titlesWithNumbers(next);
+    expect(titles.get("tab-1")).toBe("PostgreSQL@db 1");
+    expect(titles.get("tab-3")).toBe("PostgreSQL@db 3");
+    expect(titles.get("tab-4")).toBe("PostgreSQL@db 4");
+  });
+
+  it("drops the number of a tab whose title stops colliding", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" })];
+    titlesWithNumbers(tabs);
+
+    tabs[1]!.database = "other";
+    const titles = titlesWithNumbers(tabs);
+    expect(titles.get("tab-1")).toBe("PostgreSQL@db 1");
+    expect(titles.get("tab-2")).toBe("PostgreSQL@other");
+  });
+
+  it("leaves tab titles untouched while they are unique", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2", database: "other" }), queryTab({ id: "tab-3", customTitle: true, title: "orders.sql", savedSqlId: "sql-1" })];
+
+    const titles = titlesWithNumbers(tabs);
+    expect(titles.get("tab-1")).toBe("PostgreSQL@db");
+    expect(titles.get("tab-2")).toBe("PostgreSQL@other");
+    expect(titles.get("tab-3")).toBe("orders.sql");
+  });
+
+  it("numbers duplicate custom titles in strip order and skips preview tabs", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig, { id: "conn-preview", name: "[Preview] PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1", customTitle: true, title: "orders.sql", savedSqlId: "sql-1" }), queryTab({ id: "tab-preview", connectionId: "conn-preview" }), queryTab({ id: "tab-2", customTitle: true, title: "orders.sql", savedSqlId: "sql-2" })];
+
+    const titles = titlesWithNumbers(tabs);
+    expect(titles.get("tab-1")).toBe("orders.sql 1");
+    expect(titles.get("tab-2")).toBe("orders.sql 2");
+    expect(titles.get("tab-preview")).toBe("SQL");
+  });
+
   it("does not expose the internal objects mode in object browser tab titles", () => {
     const store = useConnectionStore();
     store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
@@ -228,6 +411,24 @@ describe("tab group presentation", () => {
       { label: "Group:", value: "Project / Staging" },
       { label: "Database:", value: "app" },
     ]);
+  });
+
+  it("omits the database row from tooltips for connections without a database target", () => {
+    const store = useConnectionStore();
+    store.sidebarLayout = {
+      groups: [],
+      order: [{ type: "connection", id: "conn-1" }],
+    };
+
+    for (const dbType of ["dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "weaviate", "chromadb", "etcd", "zookeeper", "nacos", "consul", "mq", "mqtt", "victoriametrics"] as const) {
+      store.connections = [{ id: "conn-1", name: "Local", db_type: dbType, database: "default" } as ConnectionConfig];
+
+      const lines = tabTooltipLines(queryTab({ database: "default" }), translate);
+
+      expect(lines, dbType).toContainEqual({ label: "Connection:", value: "Local" });
+      expect(lines, dbType).toContainEqual({ label: "Group:", value: "Ungrouped" });
+      expect(lines, dbType).not.toContainEqual({ label: "Database:", value: "default" });
+    }
   });
 
   it("labels a top-level connection as ungrouped", () => {

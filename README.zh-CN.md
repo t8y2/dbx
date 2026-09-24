@@ -103,13 +103,13 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
-        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">
+        <img src="docs/public/sponsors/aicodemirror-card.png" alt="AICodeMirror" width="175" />
       </a>
     </td>
     <td>
-      UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
-      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
+      感谢 AICodeMirror 赞助了本项目！AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级高并发、极速开票、7×24 专属技术支持。Claude Code / Codex / Gemini 官方渠道低至 3.8 / 0.2 / 0.9 折，充值更有折上折！AICodeMirror 为 DBX 用户提供了特别福利，通过此链接注册的用户，可享受首充 8 折，企业客户最高可享 7.5 折！
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">访问 AICodeMirror</a>
     </td>
   </tr>
   <tr>
@@ -121,6 +121,17 @@
     <td>
       HuaLongAI（华龙算力）是面向重度 AI 开发者的模型 API 中转服务商，主营 Codex 与 Claude 系列模型，100% 官方源直供、不掺假；计费透明，Token 级账单可逐笔核验，支持企业合同与发票。
       <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">访问 HuaLongAI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
+        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      </a>
+    </td>
+    <td>
+      UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
     </td>
   </tr>
   <tr>
@@ -350,10 +361,15 @@ flatpak install flatpark com.dbxio.dbx
 
 ## 自托管 (Docker)
 
+关闭桌面应用或浏览器后继续定时备份，参见[后台数据库备份](docs/background-database-backups.md)，其中包含 Windows、macOS、Linux 自启动及容器备份卷的配置说明。
+
 DBX 提供 Web 版本，可通过 Docker 部署。示例使用 `latest` 标签以拉取当前发布版本。
 
 ```bash
-docker run -d --pull=always --name dbx -p 4224:4224 -v dbx-data:/app/data t8y2/dbx:latest
+# 默认将密钥保存在持久化的 /app/data 数据卷中。
+docker run -d --pull=always --name dbx -p 4224:4224 \
+  -v dbx-data:/app/data \
+  t8y2/dbx:latest
 ```
 
 这里使用跨平台的 `dbx-data` 命名卷。中国大陆用户可选用 CNB 镜像
@@ -381,7 +397,20 @@ services:
 
 volumes:
   dbx-data:
+
 ```
+
+连接、插件、AI 和 Tunnel 凭据写入 `dbx.db` 前会加密。桌面端使用本机凭据存储（macOS Keychain、Windows Credential Manager 或 Linux Secret Service）。Web/Docker 与直接运行 `dbx-web` 默认使用同一套数据目录托管密钥：`${DBX_DATA_DIR}/.dbx/secret.key`。只有在开始迁移或第一次写入敏感字段时才创建密钥；普通 Docker 部署只需持久化 `/app/data`，并且必须将 `.dbx/secret.key` 与 `dbx.db` 一起备份。该密钥不能防护整个数据卷被复制或泄露。
+
+生产环境可以使用 Docker/Kubernetes Secret 覆盖托管策略：设置 `DBX_SECRET_KEY_FILE`，或由密钥管理系统提供 `DBX_SECRET_KEY`。显式密钥优先，已有密文使用期间不能轮换。密钥不可用时，业务 API 保持阻塞，浏览器显示数据安全升级页面。直接运行二进制时设置 `DBX_DATA_DIR=/var/lib/dbx`，即可使用 `/var/lib/dbx/.dbx/secret.key`。
+
+升级包含历史明文凭据的版本时，桌面端和 Web 会在进入主界面前显示 **数据安全升级向导**。点击 **开始迁移** 后，软件会创建权限受限的备份，迁移旧数据库和 JSON 凭据，并验证密文可读取。失败时保留原始数据和备份，根据向导提示修复后点击 **重试**。成功页面会显示备份路径。确认连接可用后，可点击 **删除迁移备份**，二次确认后删除迁移备份目录和本次迁移生成的旧 JSON `.bak` 文件；其他备份不会删除。没有历史数据的新用户检查后直接进入主界面。
+
+本机 CLI 和独立 MCP 可以复用同一设备已有的平台凭据存储，也可以读取显式配置的 `DBX_SECRET_KEY_FILE` 或 `DBX_SECRET_KEY`。它们不会在启动检查时创建密钥，也不会自动迁移历史数据。遇到 `DATA_MIGRATION_REQUIRED` 时，请先使用桌面端或 Web 打开同一数据目录，完成升级向导。没有平台凭据存储的无界面主机应配置持久化密钥。
+
+跨设备导出使用独立的同步口令，导出包不包含本地存储密钥。直接复制 `dbx.db` 不能作为跨平台同步方式，因为本机平台密钥不会随数据库移动。请使用加密导出/导入，让目标设备使用自己的本地密钥保存凭据。
+
+完整的设计、迁移状态、实现模块、排障和测试说明请参阅：[DBX 数据安全升级与迁移](docs/data-security-migration.zh-CN.md)。
 
 如需通过 nginx 等反向代理发布到 `/dbx` 这类子路径下，设置运行时上下文路径，并将同一前缀代理到容器：
 

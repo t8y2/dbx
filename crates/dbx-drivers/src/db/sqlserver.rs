@@ -1,8 +1,8 @@
 use crate::execution::MAX_ROWS;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
-    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, LinkedServerInfo, ObjectStatistics, QueryMessage, QueryResult,
-    SpatialColumnBuilder, TableInfo, TriggerInfo,
+    ColumnInfo, ConstraintInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, LinkedServerInfo, ObjectStatistics,
+    QueryMessage, QueryResult, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 use futures::{FutureExt, TryStreamExt};
 use sqlparser::ast::{Expr, Ident, ObjectNamePart, OrderByKind, SelectItem, SetExpr, Statement, TableFactor, Value};
@@ -310,23 +310,84 @@ pub async fn connect_with_port_explicit(
         Err(encrypted_error) => {
             try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
                 .await
-                .map_err(|plain_error| {
-                    if is_sqlserver_tls_handshake_error(&encrypted_error) {
-                        format!(
-                        "{encrypted_error}\n\nThis may be caused by an old SQL Server TLS/encryption configuration. \
-                         If you are connecting to SQL Server 2008/2008 R2/2012 or another legacy instance, \
-                         try SQL Server legacy compatibility mode. It first behaves like encrypt=false and, \
-                         when explicitly enabled, DBX can also fall back to the SQL Server legacy compatibility \
-                         driver for TLS 1.0 encrypted transport. Only use this mode on trusted networks, VPNs, \
-                         or SSH tunnels.\n\n\
-                         Automatic native legacy fallback also failed: {plain_error}"
-                    )
-                    } else {
-                        plain_error
-                    }
-                })
+                .map_err(|fallback_errors| sqlserver_connect_failure_message(&encrypted_error, &fallback_errors))
         }
     }
+}
+
+const SQLSERVER_LEGACY_TLS_HINT: &str = "This may be caused by an old SQL Server TLS/encryption configuration. \
+     If you are connecting to SQL Server 2008/2008 R2/2012 or another legacy instance, \
+     try SQL Server legacy compatibility mode. It first behaves like encrypt=false and, \
+     when explicitly enabled, DBX can also fall back to the SQL Server legacy compatibility \
+     driver for TLS 1.0 encrypted transport. Only use this mode on trusted networks, VPNs, \
+     or SSH tunnels.";
+
+/// Login/catalog error numbers reported by the server itself. They mean the TDS transport was
+/// established, so the actionable fix is the login or the configured database, not TLS.
+const SQLSERVER_LOGIN_OR_CATALOG_ERROR_NUMBERS: [u32; 8] = [4060, 18452, 18456, 18470, 18486, 18487, 18488, 18489];
+
+fn sqlserver_legacy_fallback_summary(errors: &[(&'static str, String)]) -> String {
+    errors.iter().map(|(label, error)| format!("{label} failed: {error}")).collect::<Vec<_>>().join("\n")
+}
+
+/// Extracts the error number from a driver message such as
+/// `... on server dbx executing on line 1 (code: 4060, state: 1, class: 11)`.
+fn sqlserver_error_number(error: &str) -> Option<u32> {
+    let lower = error.to_ascii_lowercase();
+    let rest = lower.split_once("(code:")?.1;
+    let digits = rest.trim_start().chars().take_while(char::is_ascii_digit).collect::<String>();
+    digits.parse().ok()
+}
+
+fn is_sqlserver_login_or_catalog_error(error: &str) -> bool {
+    if sqlserver_error_number(error).is_some_and(|code| SQLSERVER_LOGIN_OR_CATALOG_ERROR_NUMBERS.contains(&code)) {
+        return true;
+    }
+    let lower = error.to_ascii_lowercase();
+    [
+        "login failed",
+        "cannot open database",
+        "not allowed to access",
+        "is not able to access the database",
+        "token error",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// Builds the final `connect` error for the encryption cascade.
+///
+/// A fallback that reached the login/catalog stage proves the transport works without modern
+/// encryption, so that error is the real cause and belongs on the first line: the TLS hint would
+/// otherwise send users to their TLS configuration while the actual failure is a database that
+/// cannot be opened (issue: SQL Server 2014 with a saved database that no longer exists).
+fn sqlserver_connect_failure_message(encrypted_error: &str, fallback_errors: &[(&'static str, String)]) -> String {
+    let legacy_summary = sqlserver_legacy_fallback_summary(fallback_errors);
+    if let Some((label, error)) =
+        fallback_errors.iter().rev().find(|(_, error)| is_sqlserver_login_or_catalog_error(error))
+    {
+        let mut message = error.clone();
+        if is_sqlserver_tls_handshake_error(encrypted_error) {
+            message.push_str(&format!(
+                "\n\nDBX reached the server through the SQL Server legacy compatibility fallbacks ({label}), \
+                 so this failure is not caused by TLS/encryption settings. Check the database name, the login, \
+                 and its permissions for this connection; enable SQL Server legacy compatibility mode to skip \
+                 the failing encrypted handshake.\n\nInitial encrypted connection failed with: {encrypted_error}"
+            ));
+        }
+        return message;
+    }
+    if is_sqlserver_login_or_catalog_error(encrypted_error) {
+        return format!(
+            "{encrypted_error}\n\nThe SQL Server legacy compatibility fallbacks also failed:\n{legacy_summary}"
+        );
+    }
+    if is_sqlserver_tls_handshake_error(encrypted_error) {
+        return format!(
+            "{encrypted_error}\n\n{SQLSERVER_LEGACY_TLS_HINT}\n\nAutomatic native legacy fallback also failed: {legacy_summary}"
+        );
+    }
+    legacy_summary
 }
 
 async fn try_connect_legacy_sqlserver_encryption(
@@ -337,16 +398,16 @@ async fn try_connect_legacy_sqlserver_encryption(
     pass: &str,
     database: Option<&str>,
     timeout: Duration,
-) -> Result<SqlServerClient, String> {
+) -> Result<SqlServerClient, Vec<(&'static str, String)>> {
     let mut errors = Vec::new();
     for (label, encryption) in SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS {
         match try_connect(host, port, port_explicit, user, pass, database, encryption, timeout).await {
             Ok(client) => return Ok(client),
-            Err(error) => errors.push(format!("{label} failed: {error}")),
+            Err(error) => errors.push((label, error)),
         }
     }
 
-    Err(errors.join("\n"))
+    Err(errors)
 }
 
 pub fn sqlserver_native_encryption_disabled(url_params: Option<&str>) -> bool {
@@ -695,6 +756,8 @@ fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -758,15 +821,18 @@ async fn collect_first_result_limited(
     restore_sqlserver_blank_column_names(&mut columns, sql);
     restore_sqlserver_unsafe_column_types(&mut column_types, query);
 
+    let (spatial_columns, spatial_values) = spatial_values_builder.finish_with_values(spatial_values);
     Ok(QueryResult {
         columns,
         column_types,
         column_sortables: vec![],
-        spatial_columns: spatial_values_builder.finish(),
+        spatial_columns,
         spatial_values,
         rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
+        query_timings_ms: None,
         truncated,
         session_id: None,
         has_more: false,
@@ -1686,6 +1752,8 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
             rows: result.rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: result.truncated,
             session_id: None,
             has_more: false,
@@ -1744,6 +1812,8 @@ fn push_sqlserver_ordered_events(
                         rows: vec![],
                         affected_rows,
                         execution_time_ms: start.elapsed().as_millis(),
+                        server_execute_time_us: None,
+                        query_timings_ms: None,
                         truncated: false,
                         session_id: None,
                         has_more: false,
@@ -1968,9 +2038,7 @@ fn sqlserver_cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
         return super::safe_i64_to_json(v);
     }
     if let Ok(Some(v)) = <f32 as FromSql>::from_sql(cell) {
-        return serde_json::Number::from_f64(v as f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null);
+        return serde_json::Value::from(v);
     }
     if let Ok(Some(v)) = <f64 as FromSql>::from_sql(cell) {
         return serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null);
@@ -2369,11 +2437,74 @@ pub async fn completion_assistant_search(
             }
         })
         .collect::<Vec<_>>();
-    Ok(crate::types::CompletionAssistantResponse {
-        incomplete: candidates.len() >= limit,
-        candidates,
-        fallback_used: false,
-    })
+    // Dedup only shrinks the list, so completeness must be judged on the raw
+    // candidate count: a result that hit the server-side TOP (limit) must stay
+    // incomplete even if the translation below collapses duplicates.
+    let incomplete = candidates.len() >= limit;
+    let candidates = normalize_sqlserver_completion_candidates(candidates);
+    Ok(crate::types::CompletionAssistantResponse { incomplete, candidates, fallback_used: false })
+}
+
+/// Rewrites the raw catalog names of a completion response into names the user
+/// can actually write, and drops the duplicates that translation can create.
+fn normalize_sqlserver_completion_candidates(
+    candidates: Vec<crate::types::CompletionAssistantCandidate>,
+) -> Vec<crate::types::CompletionAssistantCandidate> {
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .map(|mut candidate| {
+            candidate.name = sqlserver_original_temp_table_name(&candidate.name).to_string();
+            candidate
+        })
+        // One internal temp table per module can share the same visible name, so
+        // the translated candidates must not repeat it.
+        .filter(|candidate| {
+            // The schema carries the namespace for table/view/routine candidates
+            // (their parent fields are empty); leaving it out would collapse
+            // same-named objects from different schemas into one candidate.
+            seen.insert((
+                format!("{:?}", candidate.kind),
+                candidate.schema.clone(),
+                candidate.name.clone(),
+                candidate.parent_schema.clone(),
+                candidate.parent_name.clone(),
+            ))
+        })
+        .collect()
+}
+
+/// SQL Server stores a temp table that is created inside a module (stored
+/// procedure, trigger, function) under a mangled name: the original name is
+/// padded with underscores to 116 characters and a 12-character hex stamp is
+/// appended, so `#orders` becomes `#orders___...___0000000BFC4EE` (128
+/// characters). Only the original name can be referenced from SQL, so
+/// completion has to translate the internal name back instead of offering a
+/// name the user cannot type or reuse (#9854). Temp table names are limited to
+/// 116 characters, so a 128-character `#`-prefixed name is always SQL Server's
+/// internal form; `##` global temp tables keep their name unchanged.
+fn sqlserver_original_temp_table_name(name: &str) -> &str {
+    const INTERNAL_TEMP_TABLE_NAME_CHARS: usize = 128;
+    const TEMP_TABLE_NAME_MAX_CHARS: usize = 116;
+
+    if !name.starts_with('#') || name.starts_with("##") {
+        return name;
+    }
+    let chars = name.char_indices().collect::<Vec<_>>();
+    if chars.len() != INTERNAL_TEMP_TABLE_NAME_CHARS {
+        return name;
+    }
+    let (padded_end, _) = chars[TEMP_TABLE_NAME_MAX_CHARS];
+    let stamp = &name[padded_end..];
+    if !stamp.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return name;
+    }
+    let original = name[..padded_end].trim_end_matches('_');
+    if original.len() > 1 {
+        original
+    } else {
+        name
+    }
 }
 
 fn sqlserver_completion_candidate_kind(object_type: &str) -> crate::types::CompletionAssistantCandidateKind {
@@ -2771,6 +2902,7 @@ pub async fn list_object_statistics(
                 .ok()
                 .flatten()
                 .or_else(|| row.try_get::<i32, _>(2).ok().flatten().map(i64::from)),
+            ..Default::default()
         })
         .filter(|stat| !stat.name.is_empty())
         .collect())
@@ -3011,18 +3143,7 @@ pub async fn list_foreign_keys(
     schema: &str,
     table: &str,
 ) -> Result<Vec<ForeignKeyInfo>, String> {
-    let sql = format!(
-        "SELECT fk.name, c.name, SCHEMA_NAME(rt.schema_id), rt.name, rc.name \
-         FROM sys.foreign_keys fk \
-         JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id \
-         JOIN sys.columns c ON fkc.parent_object_id = c.object_id AND fkc.parent_column_id = c.column_id \
-         JOIN sys.tables rt ON fkc.referenced_object_id = rt.object_id \
-         JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id \
-         WHERE fk.parent_object_id = OBJECT_ID('{s}.{t}') \
-         ORDER BY fk.name, fkc.constraint_column_id",
-        s = schema.replace('\'', "''"),
-        t = table.replace('\'', "''")
-    );
+    let sql = sqlserver_foreign_keys_sql(schema, table);
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows
@@ -3033,10 +3154,66 @@ pub async fn list_foreign_keys(
             ref_schema: Some(row.get::<&str, _>(2).unwrap_or("").to_string()),
             ref_table: row.get::<&str, _>(3).unwrap_or("").to_string(),
             ref_column: row.get::<&str, _>(4).unwrap_or("").to_string(),
-            on_update: None,
-            on_delete: None,
+            on_update: sqlserver_referential_action_from_row(row, 6),
+            on_delete: sqlserver_referential_action_from_row(row, 5),
         })
         .collect())
+}
+
+fn sqlserver_foreign_keys_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT fk.name, c.name, SCHEMA_NAME(rt.schema_id), rt.name, rc.name, \
+         fk.delete_referential_action, fk.update_referential_action \
+         FROM sys.foreign_keys fk \
+         JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id \
+         JOIN sys.columns c ON fkc.parent_object_id = c.object_id AND fkc.parent_column_id = c.column_id \
+         JOIN sys.tables rt ON fkc.referenced_object_id = rt.object_id \
+         JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id \
+         WHERE fk.parent_object_id = OBJECT_ID('{s}.{t}') \
+         ORDER BY fk.name, fkc.constraint_column_id",
+        s = schema.replace('\'', "''"),
+        t = table.replace('\'', "''")
+    )
+}
+
+/// `sys.foreign_keys.delete_referential_action` and `update_referential_action`
+/// are `tinyint`. tiberius picks the integer width from the received byte length
+/// rather than the declared type, so those columns arrive as `ColumnData::U8` and
+/// `row.get::<i32, _>` panics on the failed conversion (the whole process aborts
+/// under `panic = "abort"`). Read through the narrow integer widths instead.
+fn sqlserver_referential_action_from_row(row: &Row, index: usize) -> Option<String> {
+    sqlserver_referential_action(sqlserver_narrow_i32(
+        row.try_get::<i32, _>(index),
+        row.try_get::<i16, _>(index),
+        row.try_get::<u8, _>(index),
+    ))
+}
+
+/// Collapses the `int` / `smallint` / `tinyint` reads of one column into a single
+/// value. A failed or null conversion falls through to the narrower widths, so
+/// `tinyint` columns (decoded as `U8`) are read correctly instead of panicking.
+fn sqlserver_narrow_i32(
+    as_i32: tiberius::Result<Option<i32>>,
+    as_i16: tiberius::Result<Option<i16>>,
+    as_u8: tiberius::Result<Option<u8>>,
+) -> i32 {
+    as_i32
+        .ok()
+        .flatten()
+        .or_else(|| as_i16.ok().flatten().map(i32::from))
+        .or_else(|| as_u8.ok().flatten().map(i32::from))
+        .unwrap_or(0)
+}
+
+/// sys.foreign_keys referential actions: 0 = NO ACTION (default, omitted),
+/// 1 = CASCADE, 2 = SET NULL, 3 = SET DEFAULT.
+fn sqlserver_referential_action(code: i32) -> Option<String> {
+    match code {
+        1 => Some("CASCADE".to_string()),
+        2 => Some("SET NULL".to_string()),
+        3 => Some("SET DEFAULT".to_string()),
+        _ => None,
+    }
 }
 
 pub async fn get_table_comment(
@@ -3104,6 +3281,118 @@ fn sqlserver_triggers_sql(schema: &str, table: &str) -> String {
          ORDER BY t.name",
         s = schema.replace('\'', "''"),
         t = table.replace('\'', "''")
+    )
+}
+
+pub async fn list_constraints(
+    client: &mut SqlServerClient,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ConstraintInfo>, String> {
+    let sql = sqlserver_constraints_sql(schema, table);
+    let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
+    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let columns = row.get::<&str, _>(3).unwrap_or("");
+            let ref_columns = row.get::<&str, _>(6).unwrap_or("");
+            ConstraintInfo {
+                name: row.get::<&str, _>(0).unwrap_or("").to_string(),
+                constraint_type: row.get::<&str, _>(1).unwrap_or("").to_string(),
+                definition: row.get::<&str, _>(2).unwrap_or("").to_string(),
+                columns: sqlserver_split_name_list(columns),
+                ref_schema: row.get::<&str, _>(4).filter(|value| !value.is_empty()).map(str::to_string),
+                ref_table: row.get::<&str, _>(5).filter(|value| !value.is_empty()).map(str::to_string),
+                ref_columns: sqlserver_split_name_list(ref_columns),
+                match_type: None,
+                on_update: row.get::<&str, _>(7).filter(|value| !value.is_empty()).map(str::to_string),
+                on_delete: row.get::<&str, _>(8).filter(|value| !value.is_empty()).map(str::to_string),
+                deferrable: false,
+                initially_deferred: false,
+                enabled: row.get::<bool, _>(9).unwrap_or(true),
+                valid: row.get::<bool, _>(10).unwrap_or(true),
+            }
+        })
+        .collect())
+}
+
+fn sqlserver_split_name_list(value: &str) -> Vec<String> {
+    value.split(',').filter(|name| !name.is_empty()).map(|name| name.to_string()).collect()
+}
+
+/// One row per constraint (PK / UNIQUE / FOREIGN KEY / CHECK / DEFAULT) for a table.
+///
+/// `sys.key_constraints` and `sys.foreign_keys` are keyed by their backing index
+/// and constraint object respectively, so the participating columns are
+/// aggregated with the same `FOR XML PATH('')` trick the index listing uses.
+fn sqlserver_constraints_sql(schema: &str, table: &str) -> String {
+    let object_id = sqlserver_object_id_expression(schema, table);
+    let key_columns = "STUFF((SELECT ',' + c2.name \
+                FROM sys.index_columns ic2 \
+                JOIN sys.columns c2 ON c2.object_id = ic2.object_id AND c2.column_id = ic2.column_id \
+                WHERE ic2.object_id = kc.parent_object_id AND ic2.index_id = kc.unique_index_id AND ic2.is_included_column = 0 \
+                ORDER BY ic2.key_ordinal \
+                FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, '')";
+    let foreign_key_columns = "STUFF((SELECT ',' + pc2.name \
+                FROM sys.foreign_key_columns fkc2 \
+                JOIN sys.columns pc2 ON pc2.object_id = fkc2.parent_object_id AND pc2.column_id = fkc2.parent_column_id \
+                WHERE fkc2.constraint_object_id = fk.object_id \
+                ORDER BY fkc2.constraint_column_id \
+                FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, '')";
+    let foreign_key_ref_columns = "STUFF((SELECT ',' + rc2.name \
+                FROM sys.foreign_key_columns fkc2 \
+                JOIN sys.columns rc2 ON rc2.object_id = fkc2.referenced_object_id AND rc2.column_id = fkc2.referenced_column_id \
+                WHERE fkc2.constraint_object_id = fk.object_id \
+                ORDER BY fkc2.constraint_column_id \
+                FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, '')";
+    format!(
+        "SELECT c.constraint_name, c.constraint_type, c.definition, c.constraint_columns, \
+         c.ref_schema, c.ref_table, c.ref_columns, c.on_update, c.on_delete, c.is_enabled, c.is_valid \
+         FROM ( \
+         SELECT kc.name AS constraint_name, \
+            CASE WHEN kc.type = 'PK' THEN N'PRIMARY KEY' ELSE N'UNIQUE' END AS constraint_type, \
+            CAST(N'' AS NVARCHAR(MAX)) AS definition, \
+            {key_columns} AS constraint_columns, \
+            CAST(NULL AS NVARCHAR(128)) AS ref_schema, \
+            CAST(NULL AS NVARCHAR(128)) AS ref_table, \
+            CAST(N'' AS NVARCHAR(MAX)) AS ref_columns, \
+            CAST(NULL AS NVARCHAR(60)) AS on_update, \
+            CAST(NULL AS NVARCHAR(60)) AS on_delete, \
+            CAST(CASE WHEN i.is_disabled = 1 THEN 0 ELSE 1 END AS bit) AS is_enabled, \
+            CAST(1 AS bit) AS is_valid \
+         FROM sys.key_constraints kc \
+         JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id \
+         WHERE kc.parent_object_id = {object_id} \
+         UNION ALL \
+         SELECT fk.name, N'FOREIGN KEY', CAST(N'' AS NVARCHAR(MAX)), {foreign_key_columns}, \
+            SCHEMA_NAME(rt.schema_id), rt.name, {foreign_key_ref_columns}, \
+            CASE fk.update_referential_action WHEN 1 THEN N'CASCADE' WHEN 2 THEN N'SET NULL' WHEN 3 THEN N'SET DEFAULT' ELSE N'NO ACTION' END, \
+            CASE fk.delete_referential_action WHEN 1 THEN N'CASCADE' WHEN 2 THEN N'SET NULL' WHEN 3 THEN N'SET DEFAULT' ELSE N'NO ACTION' END, \
+            CAST(CASE WHEN fk.is_disabled = 1 THEN 0 ELSE 1 END AS bit), \
+            CAST(CASE WHEN fk.is_not_trusted = 1 THEN 0 ELSE 1 END AS bit) \
+         FROM sys.foreign_keys fk \
+         JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id \
+         WHERE fk.parent_object_id = {object_id} \
+         UNION ALL \
+         SELECT cc.name, N'CHECK', cc.definition, ISNULL(c.name, N''), \
+            CAST(NULL AS NVARCHAR(128)), CAST(NULL AS NVARCHAR(128)), CAST(N'' AS NVARCHAR(MAX)), \
+            CAST(NULL AS NVARCHAR(60)), CAST(NULL AS NVARCHAR(60)), \
+            CAST(CASE WHEN cc.is_disabled = 1 THEN 0 ELSE 1 END AS bit), \
+            CAST(CASE WHEN cc.is_not_trusted = 1 THEN 0 ELSE 1 END AS bit) \
+         FROM sys.check_constraints cc \
+         LEFT JOIN sys.columns c ON c.object_id = cc.parent_object_id AND c.column_id = cc.parent_column_id \
+         WHERE cc.parent_object_id = {object_id} \
+         UNION ALL \
+         SELECT dc.name, N'DEFAULT', dc.definition, ISNULL(c.name, N''), \
+            CAST(NULL AS NVARCHAR(128)), CAST(NULL AS NVARCHAR(128)), CAST(N'' AS NVARCHAR(MAX)), \
+            CAST(NULL AS NVARCHAR(60)), CAST(NULL AS NVARCHAR(60)), \
+            CAST(1 AS bit), CAST(1 AS bit) \
+         FROM sys.default_constraints dc \
+         LEFT JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id \
+         WHERE dc.parent_object_id = {object_id} \
+         ) c \
+         ORDER BY c.constraint_name",
     )
 }
 
@@ -3257,6 +3546,8 @@ async fn execute_query_with_max_rows_inner(
                 rows: vec![],
                 affected_rows: result.rows_affected().iter().sum::<u64>(),
                 execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -3302,6 +3593,8 @@ pub async fn execute_batch_with_max_rows_metadata(
                 rows: vec![],
                 affected_rows: result.rows_affected().iter().sum::<u64>(),
                 execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -3396,6 +3689,8 @@ pub async fn execute_simple_batch_with_max_rows_metadata(
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -3674,17 +3969,18 @@ mod tests {
         requires_simple_query_batch, restore_sqlserver_blank_column_names, restore_sqlserver_legacy_probe_output_names,
         restore_sqlserver_spatial_column_types, restore_sqlserver_unsafe_column_types, server_messages_query_result,
         sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
-        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_done_trace_event,
-        sqlserver_filter_definition_error, sqlserver_hidden_schema_names, sqlserver_indexes_sql,
-        sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce,
-        sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
-        sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_query_messages,
-        sqlserver_query_transport_for_engine_edition, sqlserver_query_transport_for_request,
-        sqlserver_schema_name_predicate, sqlserver_spatial_marker, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_triggers_sql,
-        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet,
-        SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_completion_assistant_sql, sqlserver_constraints_sql, sqlserver_dml_output_returns_rows,
+        sqlserver_done_trace_event, sqlserver_filter_definition_error, sqlserver_foreign_keys_sql,
+        sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
+        sqlserver_legacy_probe_with_nonce, sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql,
+        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_narrow_i32, sqlserver_probe_explicit_alias,
+        sqlserver_query_messages, sqlserver_query_transport_for_engine_edition, sqlserver_query_transport_for_request,
+        sqlserver_referential_action, sqlserver_schema_name_predicate, sqlserver_spatial_marker,
+        sqlserver_split_name_list, sqlserver_supports_session_database_switch, sqlserver_table_comment_sql,
+        sqlserver_table_objects_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
+        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
+        SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn,
+        SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -3821,6 +4117,8 @@ mod tests {
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -3845,6 +4143,8 @@ mod tests {
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 1,
+                server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -3864,6 +4164,8 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)]],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4146,6 +4448,94 @@ mod tests {
         ));
         assert!(super::is_sqlserver_tls_handshake_error("TLS handshake failed: unexpected EOF"));
         assert!(!super::is_sqlserver_tls_handshake_error("SQL Server connection failed: Login failed for user"));
+    }
+
+    #[test]
+    fn sqlserver_login_error_detection_covers_server_codes_and_messages() {
+        assert!(super::is_sqlserver_login_or_catalog_error(
+            "SQL Server connection failed: Token error: 'Cannot open database \"cwxt2025\" requested by the login. \
+             The login failed.' on server dbx executing  on line 1 (code: 4060, state: 1, class: 11)"
+        ));
+        assert!(super::is_sqlserver_login_or_catalog_error(
+            "SQL Server connection failed: Login failed for user 'sa'. (code: 18456, state: 1, class: 14)"
+        ));
+        assert!(super::is_sqlserver_login_or_catalog_error("Login failed for user 'readonly'."));
+        // Localized server text (zh-CN) keeps no english needle, so "token error" has to carry it.
+        assert!(super::is_sqlserver_login_or_catalog_error(
+            "SQL Server connection failed: Token error: '\u{65e0}\u{6cd5}\u{6253}\u{5f00}\u{767b}\u{5f55}\u{6240}\u{8bf7}\u{6c42}\u{7684}\u{6570}\u{636e}\u{5e93} \"cwxt2025\"\u{3002}\u{767b}\u{5f55}\u{5931}\u{8d25}\u{3002}'"
+        ));
+        assert!(!super::is_sqlserver_login_or_catalog_error(
+            "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+        ));
+        assert!(!super::is_sqlserver_login_or_catalog_error("SQL Server connection timed out (30s)"));
+    }
+
+    #[test]
+    fn sqlserver_login_failure_outranks_the_legacy_tls_hint() {
+        // The reported case: the encrypted handshake fails, but the no-encryption fallback reaches
+        // the login stage and the server rejects the configured database (4060). The catalog error is
+        // the actionable one and must not be buried under the TLS hint. The same instance reports the
+        // server text in its own language (zh-CN here), so both spellings have to win.
+        let encrypted_error =
+            "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof";
+        let catalog_failures = [
+            "SQL Server connection failed: Token error: 'Cannot open database \"cwxt2025\" requested by the login. \
+             The login failed.' on server dbx executing  on line 1 (code: 4060, state: 1, class: 11)",
+            "SQL Server connection failed: Token error: '\u{65e0}\u{6cd5}\u{6253}\u{5f00}\u{767b}\u{5f55}\u{6240}\u{8bf7}\u{6c42}\u{7684}\u{6570}\u{636e}\u{5e93} \"cwxt2025\"\u{3002}\u{767b}\u{5f55}\u{5931}\u{8d25}\u{3002}' on server iZw1wl8nyooomlZ executing  on line 1 (code: 4060, state: 1, class: 11)",
+        ];
+
+        for catalog_failure in catalog_failures {
+            let fallback_errors = vec![
+                ("login-only encryption", encrypted_error.to_string()),
+                ("no-encryption compatibility fallback", catalog_failure.to_string()),
+            ];
+
+            let message = super::sqlserver_connect_failure_message(encrypted_error, &fallback_errors);
+
+            assert!(message.starts_with(catalog_failure), "{message}");
+            assert!(message.contains("not caused by TLS/encryption settings"));
+            assert!(message.contains("Initial encrypted connection failed with:"));
+            assert!(!message.contains("This may be caused by an old SQL Server TLS/encryption configuration"));
+        }
+    }
+
+    #[test]
+    fn sqlserver_initial_login_failure_keeps_its_priority_over_fallback_transport_errors() {
+        let login_error =
+            "SQL Server connection failed: Login failed for user 'sa'. (code: 18456, state: 1, class: 14)";
+        let fallback_errors = vec![
+            (
+                "login-only encryption",
+                "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+                    .to_string(),
+            ),
+            (
+                "no-encryption compatibility fallback",
+                "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+                    .to_string(),
+            ),
+        ];
+
+        let message = super::sqlserver_connect_failure_message(login_error, &fallback_errors);
+
+        assert!(message.starts_with("SQL Server connection failed: Login failed for user 'sa'."));
+        assert!(message.contains("legacy compatibility fallbacks also failed"));
+    }
+
+    #[test]
+    fn sqlserver_all_tls_failures_keep_the_legacy_compatibility_hint() {
+        let encrypted_error =
+            "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof";
+        let fallback_errors = vec![
+            ("login-only encryption", encrypted_error.to_string()),
+            ("no-encryption compatibility fallback", encrypted_error.to_string()),
+        ];
+
+        let message = super::sqlserver_connect_failure_message(encrypted_error, &fallback_errors);
+
+        assert!(message.starts_with(encrypted_error));
+        assert!(message.contains("This may be caused by an old SQL Server TLS/encryption configuration"));
+        assert!(message.contains("Automatic native legacy fallback also failed:"));
     }
 
     #[test]
@@ -4524,6 +4914,97 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_foreign_keys_sql_selects_referential_actions_and_escapes_names() {
+        let sql = sqlserver_foreign_keys_sql("d'bo", "t'able");
+
+        assert!(sql.contains("fk.delete_referential_action"));
+        assert!(sql.contains("fk.update_referential_action"));
+        assert!(sql.contains("sys.foreign_keys fk"));
+        assert!(sql.contains("OBJECT_ID('d''bo.t''able')"));
+        assert!(sql.contains("ORDER BY fk.name, fkc.constraint_column_id"));
+    }
+
+    #[test]
+    fn sqlserver_tinyint_referential_actions_decode_as_u8_not_i32() {
+        // sys.foreign_keys.delete_referential_action / update_referential_action
+        // are tinyint, and tiberius derives the integer width from the received
+        // byte length rather than the declared type, so the value arrives as
+        // ColumnData::U8.
+        let tinyint = ColumnData::U8(Some(1));
+
+        assert_eq!(<u8 as tiberius::FromSql>::from_sql(&tinyint).unwrap(), Some(1));
+        // row.get::<i32, _>() panics on this conversion error, which aborts the
+        // release build (`panic = "abort"`), so the reader must tolerate the
+        // narrow widths instead.
+        assert!(<i32 as tiberius::FromSql>::from_sql(&tinyint).is_err());
+        assert!(<i16 as tiberius::FromSql>::from_sql(&tinyint).is_err());
+    }
+
+    #[test]
+    fn sqlserver_narrow_i32_falls_back_to_tinyint_without_panicking() {
+        let conversion_error: tiberius::Result<Option<i32>> =
+            <i32 as tiberius::FromSql>::from_sql(&ColumnData::U8(Some(1)));
+        assert!(conversion_error.is_err());
+
+        // A tinyint CASCADE arrives as U8 while the wider reads fail; the value
+        // must survive instead of aborting the process.
+        let cascade: tiberius::Result<Option<i16>> = <i16 as tiberius::FromSql>::from_sql(&ColumnData::U8(Some(1)));
+        let as_u8: tiberius::Result<Option<u8>> = <u8 as tiberius::FromSql>::from_sql(&ColumnData::U8(Some(1)));
+        assert_eq!(sqlserver_narrow_i32(conversion_error, cascade, as_u8), 1);
+    }
+
+    #[test]
+    fn sqlserver_narrow_i32_prefers_wider_widths_and_defaults_to_zero() {
+        assert_eq!(sqlserver_narrow_i32(Ok(Some(2)), Ok(Some(9)), Ok(Some(9))), 2);
+        assert_eq!(sqlserver_narrow_i32(Ok(None), Ok(Some(3)), Ok(Some(9))), 3);
+        // Null or unreadable values fall back to 0, which maps to no action.
+        assert_eq!(sqlserver_narrow_i32(Ok(None), Ok(None), Ok(None)), 0);
+        assert_eq!(
+            sqlserver_narrow_i32(
+                Err(tiberius::error::Error::Conversion("boom".into())),
+                Err(tiberius::error::Error::Conversion("boom".into())),
+                Err(tiberius::error::Error::Conversion("boom".into()))
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn sqlserver_referential_action_maps_tinyint_codes() {
+        assert_eq!(sqlserver_referential_action(0), None);
+        assert_eq!(sqlserver_referential_action(1).as_deref(), Some("CASCADE"));
+        assert_eq!(sqlserver_referential_action(2).as_deref(), Some("SET NULL"));
+        assert_eq!(sqlserver_referential_action(3).as_deref(), Some("SET DEFAULT"));
+        assert_eq!(sqlserver_referential_action(4), None);
+    }
+
+    #[test]
+    fn sqlserver_constraints_sql_unions_every_constraint_catalog() {
+        let sql = sqlserver_constraints_sql("d'bo", "t'able");
+
+        assert!(sql.contains("sys.key_constraints"));
+        assert!(sql.contains("sys.foreign_keys"));
+        assert!(sql.contains("sys.check_constraints"));
+        assert!(sql.contains("sys.default_constraints"));
+        assert!(sql.contains("UNION ALL"));
+        // Participating columns are aggregated with the same FOR XML trick the
+        // index listing uses; SQL Server has no string_agg on 2008-era servers.
+        assert!(sql.contains("FOR XML PATH(''), TYPE"));
+        assert!(!sql.contains("STRING_AGG"));
+        // The constraint order is stable so the tab does not reshuffle per refresh.
+        assert!(sql.contains("ORDER BY c.constraint_name"));
+        // Literals stay escaped through the shared object-id helper.
+        assert!(sql.contains("OBJECT_ID(QUOTENAME(N'd''bo') + N'.' + QUOTENAME(N't''able'))"));
+    }
+
+    #[test]
+    fn sqlserver_split_name_list_drops_trailing_empty_entries() {
+        assert_eq!(sqlserver_split_name_list(""), Vec::<String>::new());
+        assert_eq!(sqlserver_split_name_list("id"), vec!["id".to_string()]);
+        assert_eq!(sqlserver_split_name_list("id,code"), vec!["id".to_string(), "code".to_string()]);
+    }
+
+    #[test]
     fn sqlserver_metadata_sql_escapes_literals() {
         let columns_sql = sqlserver_columns_sql("d'bo", "t'able");
         let indexes_sql = sqlserver_indexes_sql("d'bo", "t'able");
@@ -4590,6 +5071,8 @@ mod tests {
             rows: vec![vec![serde_json::json!("app_user"), serde_json::json!("8")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4813,6 +5296,94 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_completion_translates_mangled_temp_table_names() {
+        let mangled = |original: &str, stamp: &str| {
+            let padded = 116usize.saturating_sub(original.chars().count());
+            format!("{original}{}{stamp}", "_".repeat(padded))
+        };
+
+        let orders = mangled("#orders", "000000BFC4EE");
+        assert_eq!(orders.chars().count(), 128);
+        assert_eq!(super::sqlserver_original_temp_table_name(&orders), "#orders");
+
+        let unicode_orders = mangled("#订单明细", "00000000000A");
+        assert_eq!(unicode_orders.chars().count(), 128);
+        assert_eq!(super::sqlserver_original_temp_table_name(&unicode_orders), "#订单明细");
+
+        // Global temp tables keep their name, so the translation must not touch them.
+        assert_eq!(super::sqlserver_original_temp_table_name("##orders"), "##orders");
+        // Ordinary temp tables and regular objects are returned unchanged.
+        assert_eq!(super::sqlserver_original_temp_table_name("#orders"), "#orders");
+        assert_eq!(super::sqlserver_original_temp_table_name("dbo.orders"), "dbo.orders");
+        // A 128-character name without the trailing hex stamp is not SQL Server's
+        // internal temp table form and must survive untouched.
+        let padded_without_stamp = format!("#{}{}", "o".repeat(115), "_".repeat(12));
+        assert_eq!(padded_without_stamp.chars().count(), 128);
+        assert_eq!(super::sqlserver_original_temp_table_name(&padded_without_stamp), padded_without_stamp);
+        let non_temp = mangled("orders", "000000BFC4EE");
+        assert_eq!(non_temp.chars().count(), 128);
+        assert_eq!(super::sqlserver_original_temp_table_name(&non_temp), non_temp);
+    }
+
+    #[test]
+    fn sqlserver_completion_normalizes_temp_table_candidates() {
+        let mangled = |original: &str, stamp: &str| {
+            let padded = 116usize.saturating_sub(original.chars().count());
+            format!("{original}{}{stamp}", "_".repeat(padded))
+        };
+        let candidate = |name: &str| crate::types::CompletionAssistantCandidate {
+            name: name.to_string(),
+            kind: crate::types::CompletionAssistantCandidateKind::Table,
+            database: Some("master".to_string()),
+            schema: Some("dbo".to_string()),
+            parent_schema: None,
+            parent_name: None,
+            comment: None,
+            data_type: None,
+            signature: None,
+        };
+
+        // Two modules creating the same temp table produce two internal names that
+        // must collapse into the one name the user can reference.
+        let normalized = super::normalize_sqlserver_completion_candidates(vec![
+            candidate(&mangled("#ypsl_py", "00000000000D")),
+            candidate(&mangled("#ypsl_py", "000000BFC4EE")),
+            candidate("#ypsl_py_extra"),
+            candidate("dbo.orders"),
+        ]);
+
+        assert_eq!(
+            normalized.iter().map(|candidate| candidate.name.as_str()).collect::<Vec<_>>(),
+            vec!["#ypsl_py", "#ypsl_py_extra", "dbo.orders"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_completion_keeps_same_named_tables_from_different_schemas() {
+        let candidate = |schema: &str, name: &str| crate::types::CompletionAssistantCandidate {
+            name: name.to_string(),
+            kind: crate::types::CompletionAssistantCandidateKind::Table,
+            database: Some("master".to_string()),
+            schema: Some(schema.to_string()),
+            parent_schema: None,
+            parent_name: None,
+            comment: None,
+            data_type: None,
+            signature: None,
+        };
+
+        let normalized = super::normalize_sqlserver_completion_candidates(vec![
+            candidate("dbo", "orders"),
+            candidate("sales", "orders"),
+            candidate("dbo", "orders"),
+        ]);
+
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized[0].schema.as_deref(), Some("dbo"));
+        assert_eq!(normalized[1].schema.as_deref(), Some("sales"));
+    }
+
+    #[test]
     fn sqlserver_completion_assistant_generates_scoped_search_masks() {
         assert_eq!(super::completion_like_pattern("Temp", Some(&CompletionAssistantMatchMode::Prefix)), "Temp%");
         assert_eq!(super::completion_like_pattern("Temp", Some(&CompletionAssistantMatchMode::Contains)), "%Temp%");
@@ -4892,6 +5463,105 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_real_cells_use_shortest_round_trip_numbers() {
+        for (value, expected) in [
+            (18.2_f32, "18.2"),
+            (18.3, "18.3"),
+            (59.3, "59.3"),
+            (4.6, "4.6"),
+            (-18.2, "-18.2"),
+            (-59.3, "-59.3"),
+            (18.5, "18.5"),
+            (1.2345678, "1.2345678"),
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0e-20, "1e-20"),
+            (1.0e20, "1e+20"),
+        ] {
+            let converted = sqlserver_cell_to_json(&ColumnData::F32(Some(value)));
+            assert!(converted.is_number(), "{value}: {converted:?}");
+            assert_eq!(converted.to_string(), expected, "{value}");
+            assert_eq!(serde_json::from_value::<f32>(converted).unwrap().to_bits(), value.to_bits());
+        }
+    }
+
+    #[test]
+    fn sqlserver_real_cells_preserve_extremes_and_subnormals() {
+        for value in [
+            f32::MIN,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            f32::from_bits(0x007f_ffff),
+            f32::from_bits(0x3f80_0001),
+        ] {
+            let converted = sqlserver_cell_to_json(&ColumnData::F32(Some(value)));
+            assert!(converted.is_number(), "{value}: {converted:?}");
+            let serialized = converted.to_string();
+            assert_eq!(serialized.parse::<f32>().unwrap().to_bits(), value.to_bits());
+            assert_eq!((converted.as_f64().unwrap() as f32).to_bits(), value.to_bits());
+            assert_eq!(serde_json::from_str::<f32>(&serialized).unwrap().to_bits(), value.to_bits());
+        }
+    }
+
+    #[test]
+    fn sqlserver_real_and_float_null_and_non_finite_cells_remain_null() {
+        assert_eq!(sqlserver_cell_to_json(&ColumnData::F32(None)), serde_json::Value::Null);
+        assert_eq!(sqlserver_cell_to_json(&ColumnData::F64(None)), serde_json::Value::Null);
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(sqlserver_cell_to_json(&ColumnData::F32(Some(value))), serde_json::Value::Null);
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(sqlserver_cell_to_json(&ColumnData::F64(Some(value))), serde_json::Value::Null);
+        }
+    }
+
+    #[test]
+    fn sqlserver_float_cells_keep_double_precision() {
+        for value in [
+            18.200000762939453_f64,
+            18.299999237060547,
+            59.29999923706055,
+            4.599999904632568,
+            1.2345678901234567,
+            -1.2345678901234567,
+            0.0,
+            -0.0,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::from_bits(1),
+        ] {
+            let converted = sqlserver_cell_to_json(&ColumnData::F64(Some(value)));
+            assert_eq!(converted, serde_json::json!(value));
+            assert_eq!(converted.as_f64().unwrap().to_bits(), value.to_bits());
+        }
+    }
+
+    #[test]
+    fn sqlserver_real_conversion_keeps_other_cell_types_unchanged() {
+        for (cell, expected) in [
+            (ColumnData::I16(Some(-18)), serde_json::json!(-18)),
+            (ColumnData::I32(Some(59)), serde_json::json!(59)),
+            (ColumnData::I64(Some(9_007_199_254_740_991)), serde_json::json!(9_007_199_254_740_991_i64)),
+            (ColumnData::I64(Some(i64::MAX)), serde_json::json!(i64::MAX.to_string())),
+            (ColumnData::I32(None), serde_json::Value::Null),
+            (ColumnData::String(Some(Cow::Borrowed("18.200000762939453"))), serde_json::json!("18.200000762939453")),
+            (ColumnData::String(None), serde_json::Value::Null),
+            (ColumnData::Bit(Some(true)), serde_json::json!(true)),
+            (ColumnData::Bit(None), serde_json::Value::Null),
+            (
+                ColumnData::Numeric(Some(tiberius::numeric::Numeric::new_with_scale(18200, 3))),
+                serde_json::json!("18.200"),
+            ),
+            (ColumnData::Numeric(None), serde_json::Value::Null),
+        ] {
+            assert_eq!(sqlserver_cell_to_json(&cell), expected, "{cell:?}");
+        }
+    }
+
+    #[test]
     fn sqlserver_numeric_cells_with_scale_over_28_do_not_panic() {
         // NUMERIC(38, 29) with data used to abort the app: rust_decimal caps scale at 28 (issue #3648).
         let cell = ColumnData::Numeric(Some(tiberius::numeric::Numeric::new_with_scale(5, 29)));
@@ -4962,6 +5632,8 @@ mod tests {
             rows: vec![vec![serde_json::json!(42), serde_json::json!(101)]],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,

@@ -362,6 +362,8 @@ fn query_result(
         rows: result.rows,
         affected_rows,
         execution_time_ms,
+        server_execute_time_us: None,
+        query_timings_ms: None,
         truncated,
         session_id: None,
         has_more: false,

@@ -165,6 +165,21 @@ export const SQL_SEMANTIC_DIALECTS: Record<string, SqlSemanticDialectAdapter> = 
       return parts.length >= 1 ? "schema" : "unknown";
     },
   },
+  // SOQL: identifiers are never quoted, field names are case-insensitive, there are
+  // no table aliases or projection aliases, and a qualifier is a relationship path
+  // segment (Account.Owner) that always resolves to a related sObject ("table").
+  soql: {
+    id: "soql",
+    identifierQuotes: [],
+    supportsAsForTableAlias: false,
+    projectionAliasVisibility: { where: false, groupBy: false, having: false, orderBy: false },
+    normalizeIdentifier: (identifier) => identifier.toLowerCase(),
+    quoteIdentifier: (identifier) => identifier,
+    qualifierRole(_parts, context) {
+      if (context === "column") return "table";
+      return "unknown";
+    },
+  },
 };
 
 export function sqlReferenceAnalysisDialectFor(options: { databaseType?: DatabaseType; identifierQuote?: string; fallbackDialect: string }): string {
@@ -174,7 +189,8 @@ export function sqlReferenceAnalysisDialectFor(options: { databaseType?: Databas
   return options.fallbackDialect;
 }
 
-export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris" }): SqlSemanticDialectAdapter {
+export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris" | "soql" }): SqlSemanticDialectAdapter {
+  if (options.databaseType === "salesforce") return SQL_SEMANTIC_DIALECTS.soql;
   if (options.databaseType === "clickhouse") return SQL_SEMANTIC_DIALECTS.clickhouse;
   // Doris/StarRocks connections ride the editor's MySQL fallback dialect (codeMirrorSqlDialect maps
   // them to "mysql"), so the explicit-dialect branch below would otherwise mask the doris adapter
@@ -222,6 +238,6 @@ export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; di
  * "generic" default), matching tokenizeSqlSemantic's default and preserving the behavior callers
  * had before dialect-aware scanning existed.
  */
-export function resolveSqlDialectId(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris" }): string {
+export function resolveSqlDialectId(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris" | "soql" }): string {
   return options.databaseType || options.dialect ? sqlSemanticDialectFor(options).id : "mysql";
 }

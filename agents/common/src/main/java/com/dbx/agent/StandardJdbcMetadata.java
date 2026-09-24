@@ -436,7 +436,7 @@ public final class StandardJdbcMetadata {
         int limit
     ) throws Exception {
         String[] tableTypes = getDriverTableTypes(meta, profile);
-        try (ResultSet rs = meta.getTables(catalog, blankToNull(schema), completionPattern(request), tableTypes)) {
+        try (ResultSet rs = meta.getTables(catalog, blankToNull(schema), completionPattern(meta, request), tableTypes)) {
             while (rs.next() && result.size() < limit) {
                 String name = rs.getString("TABLE_NAME");
                 String type = normalizeTableType(rs.getString("TABLE_TYPE"));
@@ -471,7 +471,7 @@ public final class StandardJdbcMetadata {
         if (table == null || table.trim().isEmpty()) {
             return;
         }
-        try (ResultSet rs = meta.getColumns(catalog, blankToNull(schema), table, completionPattern(request))) {
+        try (ResultSet rs = meta.getColumns(catalog, blankToNull(schema), table, completionPattern(meta, request))) {
             while (rs.next() && result.size() < limit) {
                 String name = rs.getString("COLUMN_NAME");
                 if (!completionNameMatches(name, request)) {
@@ -509,12 +509,12 @@ public final class StandardJdbcMetadata {
         return request.getSchema();
     }
 
-    private static String completionPattern(CompletionAssistantRequest request) {
+    private static String completionPattern(DatabaseMetaData meta, CompletionAssistantRequest request) {
         String mask = request.getMask();
         if (mask.trim().isEmpty()) {
             return "%";
         }
-        String escaped = mask.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        String escaped = escapeSchemaPattern(meta, mask, true);
         if (request.getMatch_mode() == CompletionAssistantMatchMode.CONTAINS) {
             return "%" + escaped + "%";
         }

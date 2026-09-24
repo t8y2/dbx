@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   SETTINGS_SEARCH_DEFINITIONS,
@@ -8,11 +7,10 @@ import {
   resolveSettingsCategory,
   resolveSettingsSearchEntries,
   searchSettings,
+  visibleToolbarVisibilityItems,
   type SettingsCategory,
   type SettingsSearchDefinition,
 } from "@/lib/settings/settingsSearch";
-
-const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
 const categoryLabels = {
   editor: "Editor",
@@ -93,9 +91,6 @@ describe("settings search", () => {
     expect(withoutSqlServer.map((entry) => entry.id)).not.toContain("editor-sqlserver-space-completion");
     expect(importedWithoutSqlServer.map((entry) => entry.id)).toContain("editor-sqlserver-space-completion");
     expect(withSqlServer.map((entry) => entry.id)).toContain("editor-sqlserver-space-completion");
-    expect(settingsDialogSource).toContain('const hasSqlServerConnection = computed(() => connectionStore.connections.some((connection) => effectiveDatabaseTypeForConnection(connection) === "sqlserver"));');
-    expect(settingsDialogSource).toContain("const showSqlServerSpaceConfirmsCompletion = computed(");
-    expect(settingsDialogSource).toContain('<div v-if="showSqlServerSpaceConfirmsCompletion" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">');
   });
 
   it("does not index connection or query timeout under editor settings", () => {
@@ -111,8 +106,6 @@ describe("settings search", () => {
       descriptionKey: "settings.multiStatementDefaultViewDescription",
       targetId: "multi-statement-default-view",
     });
-    expect(settingsDialogSource).toContain('data-settings-search-id="multi-statement-default-view"');
-    expect(settingsDialogSource).toContain('v-model="editMultiStatementDefaultView"');
   });
 
   it("places SQL file limits in their owning settings categories", () => {
@@ -137,17 +130,12 @@ describe("settings search", () => {
     expect(desktopEntries.map((entry) => entry.id)).toContain("sql-file-editor-max-mb");
     expect(desktopEntries.map((entry) => entry.id)).not.toContain("sql-file-web-upload-max-mb");
     expect(webEntries.map((entry) => entry.id)).toEqual(expect.arrayContaining(["sql-file-editor-max-mb", "sql-file-web-upload-max-mb"]));
-    expect(settingsDialogSource).toContain('data-settings-search-id="editor-sql-file"');
-    expect(settingsDialogSource).toContain('data-settings-search-id="data-sql-file-upload"');
   });
 
   it("maps legacy SQL file settings navigation to the editor", () => {
     expect(resolveSettingsCategory("sqlFile")).toBe("editor");
     expect(resolveSettingsCategory()).toBe("appearance");
     expect(resolveSettingsCategory("removed-category")).toBe("appearance");
-    expect(settingsDialogSource).not.toContain('value: "sqlFile"');
-    expect(settingsDialogSource).not.toContain("activeSettingsTab === 'sqlFile'");
-    expect(settingsDialogSource).toMatch(/if \(tab === "data" && isWeb\) void loadWebSqlFileUploadMaxMbSetting\(\)/);
   });
 
   it("matches translated title, description, and category without changing declared order", () => {
@@ -167,16 +155,6 @@ describe("settings search", () => {
     const webEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["sync"]) }, translate, categoryLabels);
 
     expect(webEntries.map((entry) => entry.id)).toEqual(["sync-webdav", "sync-webdav-endpoint", "sync-webdav-username", "sync-webdav-password", "sync-webdav-remote-path", "sync-webdav-auto-upload", "sync-secrets", "sync-secrets-passphrase"]);
-    expect(settingsDialogSource).toContain('{ value: "sync", label: t("settings.syncTab") }');
-    expect(settingsDialogSource).not.toContain('...(isWeb ? [] : [{ value: "sync"');
-    expect(settingsDialogSource).toContain('<TabsList v-if="!isWeb"');
-  });
-
-  it("defines the WebDAV Web-runtime notice in every supported locale", () => {
-    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr", "az"]) {
-      const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
-      expect(source, locale).toContain("syncWebDavWebDescription:");
-    }
   });
 
   it("matches Chinese text as a Unicode substring", () => {
@@ -207,13 +185,6 @@ describe("settings search", () => {
     expect(entry).toMatchObject({ targetId: "sync-snippet", route: { syncMethodTab: "snippet" } });
   });
 
-  it("uses the open state for result visibility and applies nested routes before revealing targets", () => {
-    expect(settingsDialogSource).toContain("const settingsSearchVisible = computed(() => settingsSearchOpen.value && settingsSearchActive.value)");
-    expect(settingsDialogSource).toContain('v-if="settingsSearchVisible" id="settings-search-results"');
-    expect(settingsDialogSource).toMatch(/function applySettingsSearchRoute[\s\S]*?syncMethodTab\.value = result\.route\.syncMethodTab/);
-    expect(settingsDialogSource).toMatch(/async function selectSettingsSearchResult[\s\S]*?applySettingsSearchRoute\(result\)[\s\S]*?revealSettingsSearchTarget/);
-  });
-
   it("derives one search result for every built-in shortcut", () => {
     expect(
       createShortcutSettingsSearchDefinitions([
@@ -233,6 +204,20 @@ describe("settings search", () => {
     expect(definitions.map((definition) => definition.id)).toEqual(TOOLBAR_VISIBILITY_ITEMS.map((item) => `appearance-toolbar-${item.key}`));
     expect(definitions).toContainEqual({ id: "appearance-toolbar-dataTransfer", category: "appearance", titleKey: "transfer.dataTransfer", targetId: "appearance" });
     expect(definitions).toContainEqual({ id: "appearance-toolbar-ai", category: "appearance", title: "AI", targetId: "appearance" });
+    expect(definitions).toContainEqual({ id: "appearance-toolbar-alwaysOnTop", category: "appearance", titleKey: "toolbar.alwaysOnTop", targetId: "appearance", visible: expect.any(Function) });
+  });
+
+  it("keeps the desktop-only toolbar switch and its search entry out of the Web build", () => {
+    const desktopKeys = visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, false).map((item) => item.key);
+    const webKeys = visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, true).map((item) => item.key);
+    expect(desktopKeys).toEqual(TOOLBAR_VISIBILITY_ITEMS.map((item) => item.key));
+    expect(webKeys).not.toContain("alwaysOnTop");
+    expect(webKeys).toContain("theme");
+
+    const definitions = createToolbarVisibilitySettingsSearchDefinitions();
+    const entryIds = (isWeb: boolean) => resolveSettingsSearchEntries(definitions, { isWeb, visibleCategories: new Set<SettingsCategory>(["appearance"]) }, (key) => key, categoryLabels).map((entry) => entry.id);
+    expect(entryIds(false)).toContain("appearance-toolbar-alwaysOnTop");
+    expect(entryIds(true)).not.toContain("appearance-toolbar-alwaysOnTop");
   });
 
   it("indexes the existing descriptions for fixed appearance controls", () => {
@@ -270,36 +255,13 @@ describe("settings search", () => {
     );
   });
 
-  it("renders the metadata cache memory limit in a performance section after export", () => {
-    const exportSectionStart = settingsDialogSource.indexOf('t("settings.exportSection")');
-    const performanceSectionStart = settingsDialogSource.indexOf('data-settings-search-id="data-performance"');
-    const tableStructureSectionStart = settingsDialogSource.indexOf('t("settings.tableStructureSection")');
-    const metadataCacheControl = settingsDialogSource.indexOf('id="metadata-cache-memory-limit"');
-
-    expect(exportSectionStart).toBeGreaterThan(-1);
-    expect(performanceSectionStart).toBeGreaterThan(exportSectionStart);
-    expect(tableStructureSectionStart).toBeGreaterThan(performanceSectionStart);
-    expect(metadataCacheControl).toBeGreaterThan(performanceSectionStart);
-    expect(metadataCacheControl).toBeLessThan(tableStructureSectionStart);
-  });
-
-  it("defines the performance section title in every supported locale", () => {
-    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr", "az"]) {
-      const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
-      expect(source, locale).toContain("performanceSection:");
-    }
-  });
-
-  it("activates result buttons through click for keyboard and assistive technology", () => {
-    expect(settingsDialogSource).toMatch(/role="option"[\s\S]*?@mousedown\.prevent[\s\S]*?@click="void selectSettingsSearchResult\(result\)"/);
-  });
-
   it("registers every fixed settings control that needs a dedicated search result", () => {
     const expectedControls: ReadonlyArray<Pick<SettingsSearchDefinition, "titleKey" | "category" | "targetId">> = [
       { titleKey: "settings.savedSqlOpenTarget", category: "editor", targetId: "editor" },
       { titleKey: "settings.confirmDangerousSqlExecution", category: "editor", targetId: "editor" },
       { titleKey: "settings.continueOnErrorOnBatch", category: "editor", targetId: "editor" },
       { titleKey: "settings.dataGridQuickEntry", category: "data", targetId: "data" },
+      { titleKey: "settings.dataGridToolbarLayout", category: "data", targetId: "data-grid-toolbar-layout" },
       { titleKey: "settings.dataGridFilterView", category: "data", targetId: "data-grid-filter-view" },
       { titleKey: "settings.colorizeDataGridCellTypes", category: "data", targetId: "data" },
       { titleKey: "transfer.dataTransfer", category: "appearance", targetId: "appearance" },

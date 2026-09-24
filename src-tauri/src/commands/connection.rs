@@ -1035,6 +1035,28 @@ pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Opti
     state.storage.load_sidebar_layout().await
 }
 
+#[tauri::command]
+pub async fn save_table_vgroups(
+    state: State<'_, Arc<AppState>>,
+    scope_key: String,
+    layout: serde_json::Value,
+) -> Result<(), String> {
+    state.storage.save_table_vgroups(&scope_key, &layout).await
+}
+
+#[tauri::command]
+pub async fn load_table_vgroups(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    state.storage.load_table_vgroups().await
+}
+
+#[tauri::command]
+pub async fn delete_table_vgroups_for_connection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<(), String> {
+    state.storage.delete_table_vgroups_for_connection(&connection_id).await
+}
+
 fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqlite::SqliteExtensionSpec> {
     db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
         .into_iter()
@@ -1146,8 +1168,13 @@ async fn test_connection_with_info_inner(
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
-    let (host, port) = state.connection_host_port(connection_id, &config).await?;
-    let probe_result = probe_connection_endpoint(&config, &host, port).await;
+    let endpoint = state.plugin_connection_endpoint(connection_id, &config).await?;
+    let (host, port) = (endpoint.host.clone(), endpoint.port);
+    let runtime_proxy = endpoint.proxy;
+    // SOCKS-routed plugin tests dial through the route themselves; probing the
+    // logical endpoint (possibly empty host/port) would mislead.
+    let probe_result =
+        if runtime_proxy.is_some() { Ok(()) } else { probe_connection_endpoint(&config, &host, port).await };
     let url = connection_url_for_endpoint(&config, &host, port);
     let target = redacted_connection_url_for_endpoint(&config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
@@ -1155,7 +1182,7 @@ async fn test_connection_with_info_inner(
     let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&config, &host, port);
     log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
     if config.db_type == DatabaseType::Plugin {
-        let result = state.plugin_host.test_connection(&config, &host, port).await;
+        let result = state.plugin_host.test_connection(&config, &host, port, runtime_proxy).await;
         if has_transport_layers {
             state.reset_connection_transport_for_config(&tunnel_id, &config).await;
         }
@@ -1417,6 +1444,17 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::Salesforce => {
+                let client = db::salesforce_driver::SfClient::from_config(
+                    &url,
+                    Some(&config.password),
+                    config.external_config.as_ref(),
+                    connect_timeout,
+                )?;
+                db::salesforce_driver::SfClient::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Easysearch => {
                 let mut client = db::easysearch_driver::EasysearchClient::from_config(
                     &url,
@@ -1431,6 +1469,23 @@ async fn test_connection_with_info_inner(
                     Some(config.client_key_path.as_str()),
                 )?;
                 db::easysearch_driver::test_connection(&mut client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
+            DatabaseType::Solr => {
+                let mut client = db::solr_driver::SolrClient::from_config(
+                    &url,
+                    Some(&config.username),
+                    Some(&config.password),
+                    config.ssl,
+                    config.url_params.as_deref(),
+                    config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(config.ca_cert_path.as_str()),
+                    Some(config.client_cert_path.as_str()),
+                    Some(config.client_key_path.as_str()),
+                )?;
+                db::solr_driver::test_connection(&mut client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
             }
@@ -1700,7 +1755,9 @@ pub async fn connect_db(
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
 
-    let (host, port) = state.connection_host_port(&id, &db_config).await?;
+    let endpoint = state.plugin_connection_endpoint(&id, &db_config).await?;
+    let (host, port) = (endpoint.host, endpoint.port);
+    let runtime_proxy = endpoint.proxy;
     if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
         state.reset_connection_transport_for_config(&id, &db_config).await;
         return Err(err);
@@ -1876,6 +1933,16 @@ pub async fn connect_db(
             db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Elasticsearch(client)
         }
+        DatabaseType::Salesforce => {
+            let client = db::salesforce_driver::SfClient::from_config(
+                &url,
+                Some(&db_config.password),
+                db_config.external_config.as_ref(),
+                connect_timeout,
+            )?;
+            db::salesforce_driver::SfClient::test_connection(&client, connect_timeout).await?;
+            PoolKind::Salesforce(client)
+        }
         DatabaseType::Easysearch => {
             let mut client = db::easysearch_driver::EasysearchClient::from_config(
                 &url,
@@ -1891,6 +1958,22 @@ pub async fn connect_db(
             )?;
             db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Easysearch(client)
+        }
+        DatabaseType::Solr => {
+            let mut client = db::solr_driver::SolrClient::from_config(
+                &url,
+                Some(&db_config.username),
+                Some(&db_config.password),
+                db_config.ssl,
+                db_config.url_params.as_deref(),
+                db_config.external_config.as_ref(),
+                connect_timeout,
+                Some(db_config.ca_cert_path.as_str()),
+                Some(db_config.client_cert_path.as_str()),
+                Some(db_config.client_key_path.as_str()),
+            )?;
+            db::solr_driver::test_connection(&mut client, connect_timeout).await?;
+            PoolKind::Solr(client)
         }
         DatabaseType::Meilisearch => {
             let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
@@ -2060,9 +2143,9 @@ pub async fn connect_db(
         DatabaseType::Mqtt => {
             return Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string());
         }
-        DatabaseType::Plugin => {
-            PoolKind::PluginConnection(state.plugin_host.connect_connection(&db_config, &host, port).await?)
-        }
+        DatabaseType::Plugin => PoolKind::PluginConnection(
+            state.plugin_host.connect_connection(&db_config, &host, port, runtime_proxy).await?,
+        ),
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 
@@ -2204,6 +2287,27 @@ pub async fn refresh_connections(state: State<'_, Arc<AppState>>) -> Result<(), 
 #[tauri::command]
 pub async fn check_connection_health(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
     state.check_connection_health(&connection_id).await
+}
+
+/// Warm the driver and connection pool for a connection a tab is opening, so the
+/// first Run does not pay pool creation, tunnel setup, or external-driver (JDBC
+/// agent) startup while the user waits. Never removes an existing pool.
+#[tauri::command]
+pub async fn prewarm_connection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+    catalog: Option<String>,
+    client_session_id: Option<String>,
+) -> Result<(), String> {
+    state
+        .prewarm_connection_pool(
+            &connection_id,
+            database.as_deref().filter(|value| !value.is_empty()),
+            catalog.as_deref().filter(|value| !value.is_empty()),
+            client_session_id.as_deref().filter(|value| !value.is_empty()),
+        )
+        .await
 }
 
 #[tauri::command]

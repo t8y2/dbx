@@ -145,12 +145,63 @@ pub struct ExtensionInfo {
     pub schema: Option<String>,
 }
 
+/// A PostgreSQL event trigger (`pg_event_trigger`). Event triggers fire on DDL
+/// commands at the database level, independent of any schema. This is distinct
+/// from MySQL events (`MysqlEventInfo`) and per-table triggers (`TriggerInfo`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventTriggerInfo {
+    pub name: String,
+    /// DDL event: ddl_command_start | ddl_command_end | sql_drop | table_rewrite.
+    pub event: String,
+    /// Owner role name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// `schema.function(args)` executed by the trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    /// Session replica status char: O | A | R | D.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<String>,
+    /// Command tags in the WHEN clause (NULL = all tags).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// `pg_get_eventtriggerdef` reconstruction of the CREATE statement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectStatistics {
     pub name: String,
     pub schema: Option<String>,
     pub estimated_rows: Option<i64>,
     pub total_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_row_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_data_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_increment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_free: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,6 +232,26 @@ pub struct ObjectSource {
     pub editable: Option<bool>,
 }
 
+/// Provenance for structured metadata fields that are optional in [`ColumnInfo`].
+/// This stays internal to the metadata mapping path and is not serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnMetadataCapabilities {
+    pub default: bool,
+    pub length: bool,
+    pub precision: bool,
+    pub scale: bool,
+}
+
+impl ColumnMetadataCapabilities {
+    pub const fn all_supported() -> Self {
+        Self { default: true, length: true, precision: true, scale: true }
+    }
+
+    pub const fn default_only() -> Self {
+        Self { default: true, length: false, precision: false, scale: false }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ColumnInfo {
     pub name: String,
@@ -203,6 +274,8 @@ pub struct ColumnInfo {
     pub character_set: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collation: Option<String>,
+    #[serde(skip)]
+    pub metadata_capabilities: Option<ColumnMetadataCapabilities>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,10 +418,13 @@ impl SpatialColumnBuilder {
         }
     }
 
-    pub fn finish(self) -> Vec<SpatialColumn> {
+    fn finish(self) -> Vec<SpatialColumn> {
         self.columns.into_iter().map(|(column_index, srid)| SpatialColumn { column_index, srid }).collect()
     }
 
+    /// Drivers collect one SRID slot per cell while streaming rows; a result
+    /// without spatial columns drops that all-`None` matrix instead of sending
+    /// it to every consumer.
     pub fn finish_with_values(
         self,
         spatial_values: Vec<Vec<Option<u32>>>,
@@ -429,6 +505,13 @@ pub struct QueryResult {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub affected_rows: u64,
     pub execution_time_ms: u128,
+    /// OceanBase SQL Audit EXECUTE_TIME in microseconds. Absent when the
+    /// completed statement cannot be correlated to one audit row.
+    #[serde(default)]
+    pub server_execute_time_us: Option<u64>,
+    /// Optional measured query phases in milliseconds; absent on older agents.
+    #[serde(default)]
+    pub query_timings_ms: Option<std::collections::BTreeMap<String, f64>>,
     #[serde(default)]
     pub truncated: bool,
     #[serde(default)]
@@ -469,6 +552,8 @@ impl Serialize for QueryResult {
             + usize::from(!self.spatial_columns.is_empty())
             + usize::from(!self.spatial_values.is_empty())
             + usize::from(self.elasticsearch_raw_body.is_some())
+            + usize::from(self.server_execute_time_us.is_some())
+            + usize::from(self.query_timings_ms.is_some())
             + usize::from(!self.messages.is_empty());
         let mut state = serializer.serialize_struct("QueryResult", field_count)?;
         state.serialize_field("columns", &self.columns)?;
@@ -483,6 +568,12 @@ impl Serialize for QueryResult {
         state.serialize_field("rows", &JsSafeRows(&self.rows))?;
         state.serialize_field("affected_rows", &self.affected_rows)?;
         state.serialize_field("execution_time_ms", &self.execution_time_ms)?;
+        if let Some(server_execute_time_us) = &self.server_execute_time_us {
+            state.serialize_field("server_execute_time_us", server_execute_time_us)?;
+        }
+        if let Some(timings) = &self.query_timings_ms {
+            state.serialize_field("query_timings_ms", timings)?;
+        }
         state.serialize_field("truncated", &self.truncated)?;
         state.serialize_field("session_id", &self.session_id)?;
         state.serialize_field("has_more", &self.has_more)?;
@@ -705,6 +796,100 @@ pub struct SubpartitionInfo {
     pub value: String,
     pub partition_type: String,
     pub partition_key: String,
+}
+
+/// PostgreSQL declarative partitioning strategy (`pg_partitioned_table.partstrat`:
+/// `r` = range, `l` = list, `h` = hash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PgPartitionKind {
+    Range,
+    List,
+    Hash,
+}
+
+/// Structured form of a partition's `pg_get_expr(relpartbound)` definition.
+///
+/// Values are kept as SQL literal text (`'2024-01-01'`, `1`, `MINVALUE`,
+/// `MAXVALUE`, `'a'`) so the UI can round-trip exactly what PostgreSQL
+/// reported without re-typing or re-quoting them client-side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PgPartitionBound {
+    Range { from: Vec<String>, to: Vec<String> },
+    List { values: Vec<String> },
+    Hash { modulus: i32, remainder: i32 },
+    Default,
+}
+
+/// One relation in a PostgreSQL partition hierarchy, as returned by
+/// `get_table_partitioning_core`. `children` is nested to the same depth as
+/// the catalog's partition tree (PG supports multi-level partitioning).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PgPartitionNode {
+    pub schema: String,
+    pub name: String,
+    /// Set only when this node is itself a partitioned parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<PgPartitionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_definition: Option<String>,
+    /// This node's own partition bound (set for every non-root node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<PgPartitionBound>,
+    /// Raw `pg_get_expr(relpartbound)` text; retained as a display fallback
+    /// when `bound` could not be parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_definition: Option<String>,
+    #[serde(default)]
+    pub is_leaf: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_estimate: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<i64>,
+    #[serde(default)]
+    pub children: Vec<PgPartitionNode>,
+}
+
+/// Structured partitioning view of one PostgreSQL relation, used by the table
+/// structure editor's "Partitions" tab. Works for the partitioned parent
+/// (`is_partitioned`), for a member partition (`is_partition`), and reports
+/// the whole subtree rooted at the requested relation either way.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PgTablePartitioning {
+    pub is_partitioned: bool,
+    pub is_partition: bool,
+    /// Display form `"schema.table"` of the owning parent, when this relation
+    /// is itself a partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Parent parts, kept separate so a dotted identifier cannot be mis-split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_bound: Option<PgPartitionBound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<PgPartitionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_definition: Option<String>,
+    #[serde(default)]
+    pub key_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_expression: Option<String>,
+    /// Name of the default partition, when the parent has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_partition: Option<String>,
+    /// Descendant partitions (the root itself is not included).
+    #[serde(default)]
+    pub partitions: Vec<PgPartitionNode>,
+    /// Server version (`current_setting('server_version_num')`), used by the UI
+    /// to gate `DETACH PARTITION CONCURRENTLY` (PostgreSQL 14+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version_num: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1100,6 +1285,8 @@ mod tests {
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -1204,6 +1391,19 @@ mod tests {
         assert!(serialized.get("elasticsearch_raw_body").is_none());
         assert!(serialized.get("messages").is_none());
         assert_eq!(serialized["session_id"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn query_result_server_execution_microseconds_survive_agent_and_ui_wire() {
+        let mut result = bigint_result_sample();
+        let without_audit = serde_json::to_value(&result).unwrap();
+        assert!(without_audit.get("server_execute_time_us").is_none());
+        assert_eq!(serde_json::from_value::<super::QueryResult>(without_audit).unwrap().server_execute_time_us, None);
+
+        result.server_execute_time_us = Some(370);
+        let audited = serde_json::to_value(&result).unwrap();
+        assert_eq!(audited["server_execute_time_us"], 370);
+        assert_eq!(serde_json::from_value::<super::QueryResult>(audited).unwrap().server_execute_time_us, Some(370));
     }
 
     /// Numeric cells nested inside JSON-typed columns must not lose precision

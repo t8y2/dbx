@@ -2,14 +2,18 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineComponent, h, nextTick, reactive } from "vue";
+import { createPinia } from "pinia";
 
 const mocks = vi.hoisted(() => ({
   store: null as any,
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({
-  useI18n: () => ({ t: (key: string) => key }),
+// PR-A4: AppSidebar now pulls useQueryStore/useI18n chains through
+// chains, so partially mock vue-i18n here while keeping the other exports (e.g. createI18n).
+vi.mock("vue-i18n", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("vue-i18n")>()),
+  useI18n: () => ({ t: (key: string) => key, locale: { value: "en" } }),
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -172,6 +176,7 @@ async function mountSidebar() {
       setup: () => () => h(AppSidebar, { sidebarWidth: 260 }),
     }),
   );
+  app.use(createPinia());
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
   await nextTick();

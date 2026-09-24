@@ -9,6 +9,27 @@ export type DataGridLocalFilterOption = {
   value: CellValue;
 };
 
+export type DataGridLocalFilterSort = {
+  field: "value" | "count";
+  direction: "asc" | "desc";
+};
+
+function compareLocalFilterValues(a: DataGridLocalFilterOption, b: DataGridLocalFilterOption): number {
+  if (a.value === null && b.value !== null) return -1;
+  if (a.value !== null && b.value === null) return 1;
+  return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" });
+}
+
+export function sortDataGridLocalFilterOptions(options: readonly DataGridLocalFilterOption[], sort: DataGridLocalFilterSort): DataGridLocalFilterOption[] {
+  const direction = sort.direction === "asc" ? 1 : -1;
+  return [...options].sort((a, b) => {
+    if (sort.field === "count") {
+      return ((a.count ?? 0) - (b.count ?? 0)) * direction || compareLocalFilterValues(a, b);
+    }
+    return compareLocalFilterValues(a, b) * direction;
+  });
+}
+
 export function dataGridLocalFilterKey(value: CellValue): string {
   if (value === null) return "__dbx_null__";
   if (typeof value === "boolean") return `bool:${value}`;
@@ -62,14 +83,7 @@ export function buildDataGridLocalFilterOptions<TRow>({
     addValue(row[columnIndex] ?? null);
   }
 
-  return [...byKey.values()].sort((a, b) => {
-    if (a.value === null && b.value !== null) return -1;
-    if (a.value !== null && b.value === null) return 1;
-    return a.label.localeCompare(b.label, undefined, {
-      numeric: true,
-      sensitivity: "base",
-    });
-  });
+  return sortDataGridLocalFilterOptions([...byKey.values()], { field: "value", direction: "asc" });
 }
 
 export function restoreDataGridLocalColumnFilters(serialized: SerializedDataGridLocalColumnFilters | undefined, columnCount: number, currentColumns?: readonly string[], serializedColumns?: readonly string[]): Record<number, Set<string>> {

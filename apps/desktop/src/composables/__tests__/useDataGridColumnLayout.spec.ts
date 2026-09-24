@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { effectScope, nextTick, ref } from "vue";
+import { effectScope, nextTick, ref, watch } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dataGridColumnOffsets, dataGridHorizontalColumnWindow, useDataGridColumnLayout, useDataGridColumnLayoutState, type ColumnHeaderReferenceDragController } from "@/composables/useDataGridColumnLayout";
 import { columnHeaderDragAutoScrollDelta, columnHeaderDropTargetIndex } from "@/lib/dataGrid/dataGridColumnHeaderInteraction";
@@ -38,6 +38,45 @@ describe("useDataGridColumnLayout", () => {
       beforeWidth: 0,
       afterWidth: 0,
     });
+  });
+
+  it("keeps rendered columns stable while scrolling inside the same buffered window", async () => {
+    const scrollLeft = ref(100);
+    const columnNames = ref(Array.from({ length: 40 }, (_, index) => `column_${index}`));
+    const visibleColumnIndexes = ref(columnNames.value.map((_, index) => index));
+    const renderedColumnWidths = ref(columnNames.value.map(() => 100));
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames,
+        visibleColumnIndexes,
+        renderedColumnWidths,
+        scrollLeft,
+        viewportWidth: ref(500),
+        rowNumberWidth: ref(40),
+      }),
+    )!;
+
+    const firstWindow = layout.horizontalColumnWindow.value;
+    const firstColumns = layout.renderedGridColumns.value;
+    const renderedColumnUpdates = vi.fn();
+    const stopWatching = watch(layout.renderedGridColumns, renderedColumnUpdates, { flush: "sync" });
+
+    for (let position = 101; position <= 140; position += 1) scrollLeft.value = position;
+    await nextTick();
+
+    expect(layout.horizontalColumnWindow.value).toBe(firstWindow);
+    expect(layout.renderedGridColumns.value).toBe(firstColumns);
+    expect(renderedColumnUpdates).not.toHaveBeenCalled();
+
+    scrollLeft.value = 1_500;
+    await nextTick();
+
+    expect(layout.horizontalColumnWindow.value).not.toBe(firstWindow);
+    expect(layout.renderedGridColumns.value).not.toBe(firstColumns);
+    expect(renderedColumnUpdates).toHaveBeenCalledTimes(1);
+    stopWatching();
+    scope.stop();
   });
 
   it("accelerates column drag scrolling toward the viewport edges", () => {

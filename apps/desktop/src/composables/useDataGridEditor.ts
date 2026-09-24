@@ -87,6 +87,22 @@ export interface CustomSaveHandler {
   targetLabel?: string;
 }
 
+/**
+ * Summary handed to `confirmSaveRequest` so an engine whose writes cannot be
+ * rolled back (Salesforce REST: one record per request, no transactions) can
+ * show the operator exactly what is about to happen before anything is sent.
+ */
+export interface DataGridSaveConfirmationRequest {
+  /** Rows with edited cells (one write per row). */
+  updates: number;
+  inserts: number;
+  deletes: number;
+  /** Save target name (table / sObject), when known. */
+  targetLabel?: string;
+  /** The statements about to be executed — for Salesforce these are `DBX SALESFORCE DML` pseudo-commands. */
+  statements: string[];
+}
+
 export interface UseDataGridEditorOptions {
   result: ComputedRef<{ columns: string[]; rows: CellValue[][] }>;
   editable: ComputedRef<boolean | undefined>;
@@ -109,6 +125,7 @@ export interface UseDataGridEditorOptions {
   onExecuteSql: ComputedRef<((sql: string) => Promise<void>) | undefined>;
   customSaveHandler?: ComputedRef<CustomSaveHandler | undefined>;
   manualTransactionSessionId?: ComputedRef<string | undefined>;
+  ensureManualTransactionSession?: ComputedRef<(() => Promise<string>) | undefined>;
   onManualTransactionMutation?: () => void;
   sql: ComputedRef<string | undefined>;
   searchText: Ref<string>;
@@ -118,6 +135,14 @@ export interface UseDataGridEditorOptions {
   rowStatusFilter: Ref<RowStatusFilter>;
   dataGridQuickEntryEnabled?: ComputedRef<boolean>;
   confirmDangerousRowDeletion?: ComputedRef<boolean>;
+  /**
+   * Optional operator review before a save is executed. Return `false` to cancel:
+   * the pending edits stay in the grid and nothing is sent. Engines whose writes
+   * cannot be rolled back (Salesforce REST) use this; auto-save never bypasses it.
+   */
+  confirmSaveRequest?: ComputedRef<((request: DataGridSaveConfirmationRequest) => Promise<boolean>) | undefined>;
+  /** `生成 SQL 时包含数据库名` — qualify saved tables with their database. */
+  includeDatabaseNameInSaveSql?: ComputedRef<boolean>;
   initialEditColumn?: ComputedRef<number>;
   /** Converts a grid value to the text presented by the cell editor. */
   cellEditorText?: (value: CellValue, columnIndex: number) => string;
@@ -245,6 +270,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     rowStatusFilter,
     dataGridQuickEntryEnabled = computed(() => false),
     confirmDangerousRowDeletion = computed(() => true),
+    includeDatabaseNameInSaveSql = computed(() => false),
     initialEditColumn,
     cellEditorText,
     normalizeEditorInput,
@@ -1571,6 +1597,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows: [...snapshot.dirtyRows.entries()].map(([rowIndex, changes]) => [rowIndex, [...changes.entries()]] as [number, Array<[number, CellValue]>]),
       deletedRows: [...snapshot.deletedRows],
       newRows: snapshot.newRows,
+      includeDatabaseName: includeDatabaseNameInSaveSql.value,
     };
   }
 
@@ -1598,9 +1625,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   // A keyless save can only be trusted once the server confirms that each
   // predicate it sends addresses a single physical row; the loaded page cannot
   // see rows outside it. Returns the error to fail with, or undefined to allow.
-  async function verifyKeylessGuards(guards: DataGridSaveGuard[], executionSchema?: string) {
+  async function verifyKeylessGuards(guards: DataGridSaveGuard[], executionSchema?: string, txnSessionId = manualTransactionSessionId.value) {
     if (!guards.length) return undefined;
-    const txnSessionId = manualTransactionSessionId.value;
     // Without a connection to count against there is no way to verify the
     // predicate, and an unverified keyless write is exactly what must not run.
     if (!hasBackendSaveTarget.value) return KEYLESS_GUARD_UNVERIFIED_ERROR;
@@ -1948,8 +1974,19 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
     const rollbackStmts = preparedSave?.rollbackStatements ?? [];
+    let txnSessionId = manualTransactionSessionId.value;
+    if (options.ensureManualTransactionSession?.value && hasBackendSaveTarget.value) {
+      try {
+        txnSessionId = await options.ensureManualTransactionSession.value();
+        if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
+      } catch (error) {
+        saveError.value = normalizeDataGridSaveError(databaseType.value, error);
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+    }
     try {
-      const guardError = await verifyKeylessGuards(preparedSave?.keylessGuards ?? [], preparedSave?.executionSchema);
+      const guardError = await verifyKeylessGuards(preparedSave?.keylessGuards ?? [], preparedSave?.executionSchema, txnSessionId);
       if (guardError) {
         saveError.value = guardError;
         await finishInterruptedSaveChanges(snapshot);
@@ -1979,6 +2016,28 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         return;
       }
     }
+    // Engines without transactional rollback (Salesforce: one REST call per record,
+    // a failure leaves earlier records applied) let the host review the operation
+    // list first. Auto-save never writes without that review, matching the
+    // production-database interlock above.
+    const confirmSaveRequest = options.confirmSaveRequest?.value;
+    if (confirmSaveRequest) {
+      if (saveOptions.autoSave) {
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+      const saveConfirmed = await confirmSaveRequest({
+        updates: snapshot.dirtyRows.size,
+        inserts: snapshot.newRows.length,
+        deletes: snapshot.deletedRows.size,
+        targetLabel: tableMeta.value?.tableName,
+        statements: stmts,
+      });
+      if (!saveConfirmed) {
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+    }
     if (!editable.value || stmtOptions?.tableMeta !== tableMeta.value) {
       await finishInterruptedSaveChanges(snapshot);
       return;
@@ -1991,10 +2050,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       statements: stmts,
       rollbackStatements: rollbackStmts,
     });
-    if (manualTransactionSessionId.value && hasBackendSaveTarget.value) {
+    if (txnSessionId && hasBackendSaveTarget.value) {
       options.onManualTransactionMutation?.();
       try {
-        const results = await api.executeInManualTransaction(manualTransactionSessionId.value, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema);
+        const results = await api.executeInManualTransaction(txnSessionId, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema);
         apiResult = {
           affected_rows: results.reduce((total, result) => total + (result.affected_rows ?? 0), 0),
         };
@@ -2038,7 +2097,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     applyDirtyRowsToResult(snapshot);
     options.onResultPayloadMutated?.();
     let savedRowsRefreshed = false;
-    if (!joinedWriteTargets.value?.length && !manualTransactionSessionId.value && !shouldReloadAfterSave && snapshot.dirtyRows.size > 0 && options.refreshSavedRows) {
+    if (!joinedWriteTargets.value?.length && !txnSessionId && !shouldReloadAfterSave && snapshot.dirtyRows.size > 0 && options.refreshSavedRows) {
       try {
         savedRowsRefreshed = await options.refreshSavedRows({
           dirtyRows: snapshot.dirtyRows,

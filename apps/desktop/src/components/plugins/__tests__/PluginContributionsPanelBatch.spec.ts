@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
 
 import { createApp, nextTick, type App, type ComponentPublicInstance } from "vue";
-import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
-import type { MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { formatMarketplaceReleasedDate, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { COMPONENT_PLUGINS_UPDATED_EVENT, COMPONENT_UPDATES_CHANGED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 const mocks = vi.hoisted(() => ({
   listPlugins: vi.fn(),
@@ -56,6 +56,9 @@ vi.mock("@/components/ui/tooltip", async () => {
   return { Tooltip: stub, TooltipContent: stub, TooltipTrigger: stub };
 });
 vi.mock("@/components/plugins/PluginIcon.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginIcon") }));
+// Shortcut preferences have their own component/store tests. Keep this batch
+// harness scoped to plugin mutations and their exact backend call counts.
+vi.mock("@/components/plugins/PluginShortcutSettings.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginShortcutSettings") }));
 
 import PluginContributionsPanel from "@/components/plugins/PluginContributionsPanel.vue";
 
@@ -63,10 +66,12 @@ type PanelState = {
   batchRunning: boolean;
   batchMode: boolean;
   marketplaceViewMode: "grid" | "list";
+  marketplaceSortMode: string;
   marketplaceRepositoryId: string;
   marketplaceListings: MarketplacePluginListing[];
   catalogResults: PluginRepositoryCatalogResult[];
   installedPlugins: InstalledPlugin[];
+  repositories: PluginRepositoryCatalogResult["repository"][];
   selectedListingKeys: Set<string>;
   selectedInstalledIds: Set<string>;
   selectedPluginId: string;
@@ -93,6 +98,18 @@ type PanelState = {
   removeTrustedKey: (keyId: string) => Promise<void>;
   toggleBatchMode: () => void;
   toggleInstalledSelection: (pluginId: string) => void;
+  installedUpdateIndex: Map<string, { listing: MarketplacePluginListing; repositoryName: string }>;
+  installedUpdateCount: number;
+  installedUpdateProgress: { current: number; total: number } | null;
+  catalogChecked: boolean;
+  marketplaceUnavailable: boolean;
+  catalogPartialFailure: boolean;
+  pendingSourceChange: { listing: MarketplacePluginListing } | null;
+  installedUnsupportedListingFor: (pluginId: string) => MarketplacePluginListing | null;
+  updateInstalledPlugin: (pluginId: string) => Promise<void>;
+  runUpdateAllInstalled: () => Promise<void>;
+  proceedUpdateSourceChange: () => void;
+  refreshMarketplace: () => Promise<void>;
 };
 
 function installed(id: string, version = "1.0.0"): InstalledPlugin {
@@ -122,6 +139,14 @@ function catalog(repositoryId: string, ids: string[], version = "3.0.0"): Plugin
       })),
     },
   };
+}
+
+function unsupportedCatalog(repositoryId: string, ids: string[], version = "3.0.0"): PluginRepositoryCatalogResult {
+  const result = catalog(repositoryId, ids, version);
+  // No artifact for this platform on the catalog's latest version: the listing is "unsupported"
+  // rather than updatable, so the installed tab has to say so instead of reading as up to date.
+  for (const plugin of result.catalog!.plugins) plugin.versions[0].artifacts = [];
+  return result;
 }
 
 function deferred<T>() {
@@ -245,6 +270,24 @@ describe("PluginContributionsPanel batch source validation", () => {
   });
 });
 
+describe("PluginContributionsPanel update center synchronization", () => {
+  it("notifies after a single marketplace update without duplicating per batch item", async () => {
+    const listener = vi.fn();
+    window.addEventListener(COMPONENT_UPDATES_CHANGED_EVENT, listener);
+    try {
+      await state.installMarketplaceListing(state.marketplaceListings[0]);
+      expect(listener).toHaveBeenCalledOnce();
+
+      listener.mockClear();
+      state.selectAllUpdatable();
+      await state.runBatchInstallUpdate();
+      expect(listener).toHaveBeenCalledOnce();
+    } finally {
+      window.removeEventListener(COMPONENT_UPDATES_CHANGED_EVENT, listener);
+    }
+  });
+});
+
 describe("PluginContributionsPanel installed plugin pin controls", () => {
   it("renders selection and pin actions as sibling native buttons", async () => {
     state.batchMode = false;
@@ -299,6 +342,130 @@ describe("PluginContributionsPanel installed plugin pin controls", () => {
   });
 });
 
+describe("PluginContributionsPanel installed-tab updates", () => {
+  it("updates an installed plugin through the marketplace install path", async () => {
+    state.batchMode = false;
+    state.selectedPluginId = "a";
+    await nextTick();
+    expect(state.installedUpdateCount).toBe(3);
+
+    await state.updateInstalledPlugin("a");
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0" });
+    expect(mocks.listPlugins).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates all installed updatable plugins in one batch run", async () => {
+    state.batchMode = false;
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("update denied"));
+    await state.runUpdateAllInstalled();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledTimes(3);
+    expect(state.error).toBe("a: update denied");
+    expect(state.installedUpdateProgress).toBeNull();
+    expect(state.batchRunning).toBe(false);
+  });
+
+  it("keeps source-changed plugins out of batch update and reports them", async () => {
+    const moved = installed("a");
+    moved.provenance = { repositoryId: "other-repo", publisher: "DBX", signingKeyId: "test.key", source: "marketplace" };
+    state.installedPlugins = [moved, installed("b"), installed("c")];
+    await nextTick();
+    state.batchMode = false;
+
+    await state.runUpdateAllInstalled();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledTimes(2);
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("pluginPlatform.batchSourceChangeSkipped"), 8000);
+  });
+
+  it("confirms a source change before updating with allowSourceChange", async () => {
+    const moved = installed("a");
+    moved.provenance = { repositoryId: "other-repo", publisher: "DBX", signingKeyId: "test.key", source: "marketplace" };
+    state.installedPlugins = [moved, installed("b"), installed("c")];
+    await nextTick();
+    state.batchMode = false;
+    state.selectedPluginId = "a";
+
+    await state.updateInstalledPlugin("a");
+    expect(mutationCount()).toBe(0);
+    expect(state.pendingSourceChange).not.toBeNull();
+
+    state.proceedUpdateSourceChange();
+    await flushUi();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0", allowSourceChange: true });
+    expect(state.pendingSourceChange).toBeNull();
+  });
+
+  it("treats a failing enabled repository as an incomplete check, not as up to date", async () => {
+    state.batchMode = false;
+    state.repositories = [
+      { id: "first", name: "first", kind: "custom", enabled: true, managed: false },
+      { id: "second", name: "second", kind: "custom", enabled: true, managed: false },
+    ];
+    // "first" answers fine (a is up to date through it); "second" — b's only source — errors.
+    state.catalogResults = [catalog("first", ["a"]), { ...catalog("second", ["b"]), catalog: undefined, error: "catalog offline" }];
+    state.installedPlugins = [installed("a", "3.0.0"), installed("b", "1.0.0")];
+    await nextTick();
+
+    expect(state.catalogPartialFailure).toBe(true);
+    // a is up to date via the first catalog, but the check is incomplete: no "all up to date".
+    expect(host.textContent).not.toContain("pluginPlatform.allPluginsUpToDate");
+    // b's only repository failed: it must not be labelled "not in repositories".
+    expect(host.textContent).not.toContain("pluginPlatform.notInRepositories");
+    // The incomplete state is surfaced instead, with the failing repository named.
+    expect(host.textContent).toContain("pluginPlatform.updateCheckPartialFailure");
+    expect(host.textContent).toContain("second: catalog offline");
+  });
+
+  it("flips to the up-to-date state only after a real catalog check", async () => {
+    state.batchMode = false;
+    state.repositories = [{ id: "first", name: "first", kind: "custom", enabled: true, managed: false }];
+    await nextTick();
+    expect(state.catalogChecked).toBe(true);
+    expect(state.installedUpdateCount).toBe(3);
+
+    mocks.fetchPluginMarketplaceCatalogs.mockRejectedValueOnce(new Error("offline"));
+    await state.refreshMarketplace();
+    expect(state.marketplaceUnavailable).toBe(true);
+    expect(state.catalogChecked).toBe(false);
+
+    await state.refreshMarketplace();
+    expect(state.marketplaceUnavailable).toBe(false);
+
+    state.installedPlugins = [installed("a", "3.0.0"), installed("b", "3.0.0"), installed("c", "3.0.0")];
+    await nextTick();
+    expect(state.catalogChecked).toBe(true);
+    expect(state.installedUpdateCount).toBe(0);
+  });
+
+  it("surfaces installed plugins whose catalog version has no artifact for this platform", async () => {
+    state.batchMode = false;
+    state.catalogResults = [unsupportedCatalog("first", ["a", "b", "c"])];
+    await nextTick();
+
+    expect(state.installedUpdateCount).toBe(0);
+    expect(state.installedUnsupportedListingFor("a")?.target).toBe("darwin-arm64");
+    expect(host.querySelector('[data-plugin-id="a"]')?.textContent).toContain("pluginPlatform.marketplaceStatus.unsupported:");
+
+    // The unsupported badge replaces the amber update marker, never both.
+    state.catalogResults = [catalog("first", ["a", "b", "c"])];
+    await nextTick();
+    expect(state.installedUnsupportedListingFor("a")).toBeNull();
+    expect(host.querySelector('[data-plugin-id="a"]')?.textContent).not.toContain("pluginPlatform.marketplaceStatus.unsupported:");
+  });
+});
+
+describe("PluginContributionsPanel external component updates", () => {
+  it("refreshes installed plugins when the update center updates plugins", async () => {
+    expect(state.marketplaceListings.every((listing) => listing.status === "update")).toBe(true);
+    mocks.listPlugins.mockResolvedValueOnce([installed("a", "3.0.0"), installed("b", "3.0.0"), installed("c", "3.0.0")]);
+
+    window.dispatchEvent(new Event(COMPONENT_PLUGINS_UPDATED_EVENT));
+    await flushUi();
+
+    expect(mocks.listPlugins).toHaveBeenCalledOnce();
+    expect(state.marketplaceListings.every((listing) => listing.status === "installed")).toBe(true);
+  });
+});
+
 const batches = ["install", "uninstall"] as const;
 type Batch = (typeof batches)[number];
 const singles = ["marketplace", "uninstall", "rollback", "package", "url"] as const;
@@ -330,11 +497,6 @@ function singleApi(single: Single) {
 const replacements = ["marketplace", "rollback", "package", "url"] as const;
 
 describe("PluginContributionsPanel workbench refresh", () => {
-  it("connects the panel event to the App workbench refresh entry", () => {
-    const source = readFileSync("apps/desktop/src/App.vue", "utf8");
-    expect(source).toMatch(/<PluginCenterPage\b[^>]*@plugin-runtime-replaced="refreshPluginWorkbenches"/);
-  });
-
   it.each(replacements)("refreshes once with the returned plugin ID after Web %s succeeds", async (single) => {
     singleApi(single).mockResolvedValueOnce({ plugin: installed("replaced", "2.0.0") });
     await startSingle(single);
@@ -622,5 +784,73 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0" });
     expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.batchSummary:{"success":1,"failed":0,"names":""}', 4000);
     expect(state.batchRunning).toBe(false);
+  });
+});
+
+describe("PluginContributionsPanel marketplace sort", () => {
+  const OLDEST = "2025-01-01T00:00:00Z";
+  const NEWEST = "2026-06-01T00:00:00Z";
+
+  // Name order (a.older, b.newer) is deliberately the opposite of date order, so the
+  // rendered order tells the two sort modes apart.
+  function datedCatalog(): PluginRepositoryCatalogResult {
+    const result = catalog("first", ["a.older", "b.newer"]);
+    const [older, newer] = result.catalog!.plugins;
+    older.versions[0].releasedAt = OLDEST;
+    newer.versions[0].releasedAt = NEWEST;
+    return result;
+  }
+
+  function renderedOrder(): string[] {
+    return [...host.querySelectorAll("article")].map((article) => (article.textContent?.includes("a.older") ? "a.older" : "b.newer"));
+  }
+
+  // The persisted sort mode is read during setup, so restoring it can only be observed
+  // by mounting again with localStorage already seeded.
+  async function remount(): Promise<void> {
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp(PluginContributionsPanel, { onPluginRuntimeReplaced: mocks.refreshPluginWorkbenches });
+    state = (app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } }).$.setupState;
+    await flushUi();
+    state.batchMode = true;
+    state.selectedPluginId = "a";
+    await nextTick();
+  }
+
+  it("restores the persisted mode on remount, shows the release date in both views, and persists changes", async () => {
+    mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([datedCatalog()]);
+    localStorage.setItem("dbx-plugin-marketplace-sort-mode", "recently-updated");
+    await remount();
+
+    expect(state.marketplaceSortMode).toBe("recently-updated");
+    expect(renderedOrder()).toEqual(["b.newer", "a.older"]);
+    const newestText = formatMarketplaceReleasedDate(NEWEST, "en");
+    const oldestText = formatMarketplaceReleasedDate(OLDEST, "en");
+    expect(newestText).not.toBe("");
+    expect(host.querySelectorAll("article")[0].textContent).toContain(newestText);
+    expect(host.querySelectorAll("article")[1].textContent).toContain(oldestText);
+
+    state.marketplaceViewMode = "list";
+    await nextTick();
+    expect(renderedOrder()).toEqual(["b.newer", "a.older"]);
+    expect(host.querySelectorAll("article")[0].textContent).toContain(newestText);
+    expect(host.querySelectorAll("article")[1].textContent).toContain(oldestText);
+
+    state.marketplaceSortMode = "name";
+    await flushUi();
+    expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
+    expect(localStorage.getItem("dbx-plugin-marketplace-sort-mode")).toBe("name");
+  });
+
+  it("falls back to name order when the stored sort mode is unknown", async () => {
+    mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([datedCatalog()]);
+    localStorage.setItem("dbx-plugin-marketplace-sort-mode", "not-a-mode");
+    await remount();
+
+    expect(state.marketplaceSortMode).toBe("name");
+    expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
   });
 });

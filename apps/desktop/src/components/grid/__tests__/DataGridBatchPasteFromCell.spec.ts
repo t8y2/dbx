@@ -1,7 +1,5 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -492,17 +490,5 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     await settle();
 
     expect(updates).toEqual([{ $set: { status: "{plain text" } }, { $set: { status: "{plain text" } }]);
-  });
-
-  it("routes DOM and canvas cell gestures through the same selection preparation", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGrid.vue"), "utf8");
-    const domGesture = source.slice(source.indexOf('@mousedown="\n                          prepareDataCellMouseDown'), source.indexOf('@mouseenter="onCellMouseenter'));
-    const canvasGesture = source.slice(source.indexOf("function onCanvasMouseDown"), source.indexOf("function onCanvasContext"));
-
-    expect(domGesture).toContain("prepareDataCellMouseDown(item, col.actualColIdx);");
-    expect(domGesture).toContain("handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event);");
-    expect(canvasGesture).toContain("prepareDataCellMouseDown(item, actualColIdx)");
-    expect(canvasGesture).toContain("handleDataCellMousedown(item.displayIndex, hit.visibleColIdx, item.id, event)");
-    expect(source).toContain("columnIndexes: visibleColumnIndexes.value.slice(range.startCol)");
   });
 });

@@ -5,7 +5,7 @@ use super::{
 };
 use crate::data_grid_sql::{
     build_column_predicate, build_data_grid_copy_insert_statement, build_data_grid_copy_update_statements,
-    data_grid_qualified_table_name, format_grid_sql_literal_with_identifier_quote, is_auto_generated_column,
+    data_grid_generated_table_name, format_grid_sql_literal_with_identifier_quote, is_auto_generated_column,
     is_grid_insert_omitted_column, is_non_identity_generated_column, supports_relational_copy_predicates,
     DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridTableMeta,
 };
@@ -121,6 +121,7 @@ pub(super) fn write_sql_updates(
         columns: data.columns,
         source_columns: Some(data.source_columns),
         rows: data.rows,
+        include_database_name: context.request.options.sql.include_database_name,
     });
     if statements.len() != context.request.rows.len() {
         return Err(DataGridExtractError::new(
@@ -371,13 +372,14 @@ pub(super) fn write_sql_select(
         ));
     }
 
-    let table = data_grid_qualified_table_name(
+    let table = data_grid_generated_table_name(
         context.request.database_type,
         table_meta.catalog.as_deref(),
         table_meta.schema.as_deref(),
         table_meta.database.as_deref(),
         &table_meta.table_name,
         context.request.identifier_quote.as_deref(),
+        context.request.options.sql.include_database_name,
     );
 
     if context.request.selection_kind == super::DataGridSelectionKind::Cells {

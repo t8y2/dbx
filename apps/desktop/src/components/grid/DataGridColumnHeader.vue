@@ -88,7 +88,7 @@ const emit = defineEmits<{
         </span>
         <template #content>
           <div class="dbx-column-info-tooltip grid min-w-56 grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 px-3 py-2">
-            <span class="text-background/70">{{ columnNameLabel }}</span>
+            <span class="text-background-solid/70">{{ columnNameLabel }}</span>
             <span class="flex min-w-0 items-center gap-2">
               <span class="min-w-0 flex-1 truncate font-mono">{{ name }}</span>
               <button data-column-header-copy-name type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/10" :title="copyColumnNameLabel" @click.stop="emit('copyName')">
@@ -96,19 +96,19 @@ const emit = defineEmits<{
               </button>
             </span>
             <template v-if="tooltipColumnType ?? columnType">
-              <span class="text-background/70">{{ columnTypeLabel }}</span>
+              <span class="text-background-solid/70">{{ columnTypeLabel }}</span>
               <span :class="typeClass">{{ tooltipColumnType ?? columnType }}</span>
             </template>
             <template v-if="tooltipColumnComment ?? columnComment">
-              <span class="text-background/70">{{ columnCommentLabel }}</span>
+              <span class="text-background-solid/70">{{ columnCommentLabel }}</span>
               <span>{{ tooltipColumnComment ?? columnComment }}</span>
             </template>
             <template v-if="columnNullability">
-              <span class="text-background/70">{{ nullableLabel }}</span>
+              <span class="text-background-solid/70">{{ nullableLabel }}</span>
               <span>{{ columnNullability === "nullable" ? yesLabel : noLabel }}</span>
             </template>
             <template v-if="columnIndexKind && columnIndexKind !== 'none'">
-              <span class="text-background/70">{{ columnIndexLabel }}</span>
+              <span class="text-background-solid/70">{{ columnIndexLabel }}</span>
               <span class="flex items-center gap-1">
                 <KeyRound v-if="columnIndexKind === 'primary'" class="h-3 w-3" :class="columnIndexColorClass(columnIndexKind)" />
                 <Hash v-else class="h-3 w-3" :class="columnIndexColorClass(columnIndexKind)" />

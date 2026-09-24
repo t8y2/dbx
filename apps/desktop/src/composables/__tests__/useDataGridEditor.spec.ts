@@ -948,16 +948,20 @@ describe("useDataGridEditor saveChanges reload", () => {
       currentPage?: Ref<number>;
       prepareFullReload?: () => void;
       customSaveHandler?: { save: ReturnType<typeof vi.fn> };
+      confirmSaveRequest?: (request: import("@/composables/useDataGridEditor").DataGridSaveConfirmationRequest) => Promise<boolean>;
       manualTransactionSessionId?: string;
+      ensureManualTransactionSession?: () => Promise<string>;
       refreshSavedRows?: ReturnType<typeof vi.fn>;
       onManualTransactionMutation?: ReturnType<typeof vi.fn>;
       connectionId?: string;
+      databaseType?: import("@/types/database").DatabaseType;
       primaryKeys?: string[];
       onExecuteSql?: (sql: string) => Promise<void>;
     } = {},
   ) {
     const emit = vi.fn();
     const currentPage = options.currentPage ?? ref(1);
+    const ensureManualTransactionSession = ref(options.ensureManualTransactionSession);
     const result = ref<{ columns: string[]; rows: CellValue[][] }>({
       columns: ["id", "status"],
       rows: [
@@ -969,7 +973,7 @@ describe("useDataGridEditor saveChanges reload", () => {
     const editor = useDataGridEditor({
       result: computed(() => result.value),
       editable: computed(() => true),
-      databaseType: computed(() => "mysql"),
+      databaseType: computed(() => options.databaseType ?? "mysql"),
       connectionId: computed(() => ("connectionId" in options ? options.connectionId : "connection-1")),
       database: computed(() => "app"),
       tableMeta: computed(() => ({
@@ -984,7 +988,9 @@ describe("useDataGridEditor saveChanges reload", () => {
       joinedWriteTargets: computed(() => options.joinedWriteTargets),
       onExecuteSql: computed(() => options.onExecuteSql),
       customSaveHandler: computed(() => options.customSaveHandler),
+      confirmSaveRequest: computed(() => options.confirmSaveRequest),
       manualTransactionSessionId: computed(() => options.manualTransactionSessionId),
+      ensureManualTransactionSession: computed(() => ensureManualTransactionSession.value),
       onManualTransactionMutation: options.onManualTransactionMutation,
       sql: computed(() => undefined),
       searchText: ref(""),
@@ -1001,7 +1007,7 @@ describe("useDataGridEditor saveChanges reload", () => {
       refreshSavedRows: options.refreshSavedRows,
       emit,
     });
-    return { editor, emit, currentPage };
+    return { editor, emit, currentPage, ensureManualTransactionSession };
   }
 
   // https://github.com/t8y2/dbx/issues/8321: without a primary key the row is
@@ -1146,6 +1152,53 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(mocks.executeBatch).not.toHaveBeenCalled();
     expect(refreshSavedRows).not.toHaveBeenCalled();
     expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("starts a manual transaction before saving an existing result grid", async () => {
+    const statement = "UPDATE orders_test SET status='shipped' WHERE id=1";
+    const ensureManualTransactionSession = vi.fn().mockResolvedValue("txn-grid-1");
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [statement], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockResolvedValue([{ affected_rows: 1 }]);
+
+    const { editor, ensureManualTransactionSession: transactionMode } = createSaveTestEditor();
+    transactionMode.value = ensureManualTransactionSession;
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+
+    expect(ensureManualTransactionSession).toHaveBeenCalledOnce();
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledWith("txn-grid-1", statement, "app", undefined);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("checks a keyless edit on the newly opened manual transaction session", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE orders_test SET status='shipped' WHERE status = 'pending'"],
+      rollbackStatements: [],
+      keylessGuards: [keylessGuard],
+    });
+    mocks.executeInManualTransaction.mockResolvedValueOnce([{ columns: ["matches"], rows: [[1]] }]).mockResolvedValueOnce([{ affected_rows: 1 }]);
+    const { editor } = createSaveTestEditor({ primaryKeys: [], ensureManualTransactionSession: vi.fn().mockResolvedValue("txn-grid-2") });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+
+    expect(mocks.executeInManualTransaction.mock.calls[0]?.[0]).toBe("txn-grid-2");
+    expect(mocks.executeInManualTransaction.mock.calls[0]?.[1]).toBe(keylessGuard.sql);
+    expect(mocks.executeInManualTransaction.mock.calls[1]?.[0]).toBe("txn-grid-2");
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps edits pending if a manual transaction cannot start", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=1"], rollbackStatements: [] });
+    const ensureManualTransactionSession = vi.fn().mockRejectedValue(new Error("BEGIN failed"));
+    const { editor } = createSaveTestEditor({ ensureManualTransactionSession });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+
+    expect(editor.saveError.value).toContain("BEGIN failed");
+    expect(editor.dirtyRows.value.get(0)?.get(1)).toBe("shipped");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
   });
 
   it("marks the manual transaction dirty before a result-grid mutation can fail", async () => {
@@ -1339,6 +1392,62 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(customSave).toHaveBeenCalledTimes(1);
     expect(prepareFullReload).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalledWith("reload", expect.anything());
+  });
+
+  // Engines that cannot roll a partial batch back (Salesforce: one REST call per
+  // record) hand the operation list to the host for review before it is written.
+  it("summarizes inserts, updates and deletes for the host save confirmation and writes once accepted", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["stmt-1", "stmt-2", "stmt-3"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 1 });
+    const confirmSaveRequest = vi.fn().mockResolvedValue(true);
+
+    const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    editor.addRows(1);
+    editor.deletedRows.value.add(1);
+
+    await editor.saveChanges();
+
+    expect(confirmSaveRequest).toHaveBeenCalledTimes(1);
+    expect(confirmSaveRequest.mock.calls[0]?.[0]).toMatchObject({
+      updates: 1,
+      inserts: 1,
+      deletes: 1,
+      targetLabel: "orders_test",
+      statements: ["stmt-1", "stmt-2", "stmt-3"],
+    });
+    expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).toBeFalsy();
+  });
+
+  it("keeps every edit staged and reports no error when the host declines the save", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["stmt-1"], rollbackStatements: [] });
+    const confirmSaveRequest = vi.fn().mockResolvedValue(false);
+
+    const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(confirmSaveRequest).toHaveBeenCalledTimes(1);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.dirtyRows.value.get(0)?.get(1)).toBe("shipped");
+    expect(editor.isSaving.value).toBe(false);
+    expect(editor.saveError.value).toBeFalsy();
+  });
+
+  it("never writes an auto-save past a required confirmation", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["stmt-1"], rollbackStatements: [] });
+    const confirmSaveRequest = vi.fn().mockResolvedValue(true);
+
+    const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges({ autoSave: true });
+
+    expect(confirmSaveRequest).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.dirtyRows.value.get(0)?.get(1)).toBe("shipped");
   });
 });
 

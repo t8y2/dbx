@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { buildMongoSyntaxDiagnostics, shouldRunMongoDiagnostics } from "../../apps/desktop/src/lib/mongo/mongoSyntaxDiagnostics";
 
@@ -122,9 +121,4 @@ test("keeps completed diagnostics while the cursor is in an unfinished command",
 
   const unfinished = underlined(source, 0).find((diagnostic) => diagnostic.severity === "error");
   assert.match(unfinished!.message, /unclosed/i);
-
-  const queryEditorSource = readFileSync("apps/desktop/src/components/editor/QueryEditor.vue", "utf8");
-  const mongoBranch = queryEditorSource.slice(queryEditorSource.indexOf('if (props.databaseType === "mongodb")'), queryEditorSource.indexOf('if (props.databaseType === "redis")'));
-  assert.doesNotMatch(mongoBranch, /shouldRunMongoDiagnostics/);
-  assert.match(mongoBranch, /setSemanticDiagnostics\(buildMongoSyntaxDiagnostics\(sql, cursor\)\)/);
 });

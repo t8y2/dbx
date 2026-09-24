@@ -27,6 +27,11 @@ const metadata = {
 };
 const plan = (files, options = {}) => planCi({ files, metadata, root, ...options });
 const groups = (result) => result.rust_matrix.include.map((entry) => entry.group);
+// Keep the gate fixtures in sync with ci-gate.mjs routedJobs. Both Windows jobs
+// share the windows_win7_bundle routing output.
+const routedJobs = { frontend: "frontend", packages: "packages", "github-scripts": "github_scripts",
+  "windows-standard-check": "windows_win7_bundle", "windows-win7-bundle": "windows_win7_bundle",
+  "duckdb-windows-driver": "duckdb_windows", jdbc: "jdbc", "offline-jdbc-release": "offline_jdbc", "nix-packaging": "nix" };
 
 test("foundation changes select transitive consumers and standalone DuckDB", () => {
   const result = plan(["crates/dbx-types/src/lib.rs"]);
@@ -101,6 +106,21 @@ for (const driver of ["duckdb", "tdengine", ...goAgents.map((entry) => entry.dri
   });
 }
 
+test("known JDBC driver changes only select Java agent tests", () => {
+  const result = plan(["agents/drivers/oceanbase-oracle/src/main/java/Agent.java"], {
+    agentsChanged: true,
+    javaDrivers: ["oceanbase-oracle", "dameng"],
+  });
+  assert.equal(result.rust, false);
+  assert.equal(result.agents, true);
+  assert.equal(result.agent_java, true);
+  assert.equal(result.agent_go.include.length, 0);
+  assert.equal(result.agent_rust.include.length, 0);
+  assert.equal(result.agent_integration.include.length, 0);
+  assert.equal(result.duckdb_changed, false);
+  assert.equal(result.fast, true);
+});
+
 test("shared Agent inputs and unknown native modules never silently lose coverage", () => {
   for (const file of ["agents/common/src/main/java/Protocol.java", "agents/scripts/validate_agents.py", "agents/build.gradle",
     "agents/drivers/new-driver/main.go", "crates/dbx-drivers/assets/agent-protocol-v2.json", ".github/workflows/agents-release.yml"]) {
@@ -134,6 +154,7 @@ test("test groups partition every current workspace package exactly once", () =>
 test("workspace Cargo flags preserve full versus fast coverage and strict clippy", () => {
   for (const mode of ["fast", "full"]) {
     const command = rustCommand("test", "workspace", mode);
+    assert.deepEqual(command.slice(0, 3), ["nextest", "run", "--no-fail-fast"]);
     const features = command.at(-1).split(",");
     assert.ok(command.includes("--workspace"));
     assert.ok(command.includes("--locked"));
@@ -142,10 +163,28 @@ test("workspace Cargo flags preserve full versus fast coverage and strict clippy
       assert.equal(features.includes(`${pkg}/system-fonts`), mode === "full");
     }
     assert.deepEqual(rustCommand("clippy", "workspace", mode).slice(-3), ["--", "-D", "warnings"]);
+    assert.equal(rustCommand("clippy", "workspace", mode)[0], "clippy");
   }
   for (const group of Object.keys(rustGroups)) assert.ok(rustCommand("test", group, "fast").includes("--package"));
   assert.throws(() => rustCommand("test", "unknown", "full"));
   assert.throws(() => rustCommand("clippy", "foundation", "full"));
+});
+
+test("nextest, doctests and coverage select identical packages and features in every Rust lane", () => {
+  for (const group of ["workspace", ...Object.keys(rustGroups)]) {
+    for (const mode of ["fast", "full"]) {
+      const nextest = rustCommand("test", group, mode);
+      const doctest = rustCommand("doctest", group, mode);
+      assert.deepEqual(nextest.slice(0, 3), ["nextest", "run", "--no-fail-fast"]);
+      assert.deepEqual(doctest, ["test", "--doc", ...nextest.slice(3)]);
+      assert.deepEqual(rustCommand("tree", group, mode), ["tree", ...nextest.slice(3)]);
+      assert.ok(nextest.includes("--no-default-features"));
+      assert.ok(nextest.includes("--locked"));
+    }
+  }
+  assert.throws(() => rustCommand("doctest", "unknown", "full"));
+  assert.throws(() => rustCommand("doctest", "workspace", "unknown"));
+  assert.throws(() => rustCommand("unknown", "workspace", "full"));
 });
 
 function results(files) {
@@ -179,6 +218,22 @@ test("gates accept only successful selected jobs and intentionally skipped unsel
   assert.ok(gateFailures({ changes: { result: "success", outputs: { plan: "null" } } }, "rust").length);
 });
 
+test("the frontend gate checks every selected frontend job", () => {
+  const needs = results(["docs/README.md"]);
+  needs.changes.outputs.frontend = "true";
+  for (const job of ["frontend-checks", "frontend-typecheck", "frontend-test"]) {
+    needs[job] = { result: "success" };
+  }
+  assert.deepEqual(gateFailures(needs, "frontend"), []);
+  needs["frontend-test"].result = "failure";
+  assert.ok(gateFailures(needs, "frontend").length);
+  needs.changes.outputs.frontend = "false";
+  for (const job of ["frontend-checks", "frontend-typecheck", "frontend-test"]) {
+    needs[job] = { result: "skipped" };
+  }
+  assert.deepEqual(gateFailures(needs, "frontend"), []);
+});
+
 test("git diff routing includes both sides of renames, deleted files, and unusual filenames", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "dbx-ci-plan-"));
   const git = (...args) => execFileSync("git", args, { cwd: directory, encoding: "utf8", stdio: "pipe" }).trim();
@@ -198,20 +253,39 @@ test("git diff routing includes both sides of renames, deleted files, and unusua
 
 test("the final gate rejects absent routing outputs and skipped selected jobs", () => {
   const needs = results(["docs/README.md"]);
-  const routed = { frontend: "frontend", packages: "packages", "github-scripts": "github_scripts",
-    "windows-win7-bundle": "windows_win7_bundle", "duckdb-windows-driver": "duckdb_windows", jdbc: "jdbc",
-    "offline-jdbc-release": "offline_jdbc", "nix-packaging": "nix" };
   needs.rust = needs.agents = { result: "success" };
-  for (const [job, output] of Object.entries(routed)) {
+  for (const [job, output] of Object.entries(routedJobs)) {
     needs[job] = { result: "skipped" };
     needs.changes.outputs[output] = "false";
   }
   assert.deepEqual(gateFailures(needs, "all"), []);
+  needs["windows-standard-check"].result = "failure";
+  assert.ok(gateFailures(needs, "all").length);
+  needs["windows-standard-check"].result = "skipped";
   needs.changes.outputs.frontend = "true";
   assert.ok(gateFailures(needs, "all").length);
   needs.frontend.result = "success";
   assert.deepEqual(gateFailures(needs, "all"), []);
   delete needs.changes.outputs.nix;
+  assert.ok(gateFailures(needs, "all").length);
+});
+
+test("the final gate requires both Windows jobs when the bundle routing is selected", () => {
+  const needs = results(["docs/README.md"]);
+  needs.rust = needs.agents = { result: "success" };
+  for (const [job, output] of Object.entries(routedJobs)) {
+    needs[job] = { result: "skipped" };
+    needs.changes.outputs[output] = "false";
+  }
+  needs.changes.outputs.windows_win7_bundle = "true";
+  needs["windows-standard-check"].result = "success";
+  needs["windows-win7-bundle"].result = "success";
+  assert.deepEqual(gateFailures(needs, "all"), []);
+
+  needs["windows-standard-check"].result = "skipped";
+  assert.ok(gateFailures(needs, "all").length);
+  needs["windows-standard-check"].result = "success";
+  needs["windows-win7-bundle"].result = "skipped";
   assert.ok(gateFailures(needs, "all").length);
 });
 

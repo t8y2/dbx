@@ -1,7 +1,7 @@
 import { computed, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { isDangerousSql, requiresDatabaseSelection, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
+import { isDangerousSql, requiresDatabaseSelection, snapshotResultForMerge, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -1540,6 +1540,33 @@ SELECT @value AS Message;`;
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1", skipRedisSafetyCheck: false, openInNewResultTab: true });
   });
 
+  it("executes Redis batches with comment lines when the dangerous-command guard is on by default", async () => {
+    const sql = "# warm the cache\nGET user:1\n-- then ping\nPING";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("0"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("redis"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    // A comment line never reaches the safety pre-scan, so a safe batch is not
+    // blocked by the fail-closed classifier.
+    expect(execution.showDangerDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledTimes(1);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1", skipRedisSafetyCheck: false });
+  });
+
   it("distinguishes read-only and mutating Meilisearch REST requests", () => {
     expect(isDangerousSql("GET /health", "meilisearch")).toBe(false);
     expect(isDangerousSql('POST /indexes/movies/documents/fetch\n{"limit":10}', "meilisearch")).toBe(false);
@@ -1583,5 +1610,37 @@ SELECT @value AS Message;`;
     productionSafetyStore.confirm();
     await pendingExecution;
     expect(executeCurrentSql).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("snapshotResultForMerge", () => {
+  it("stays intact after the store releases the live payload in place", () => {
+    const live = {
+      columns: ["id", "amount"],
+      rows: [
+        [1, 10],
+        [2, 20],
+      ],
+      column_types: ["INT", "DECIMAL"],
+      affected_rows: 2,
+      execution_time_ms: 5,
+    };
+    const snapshot = snapshotResultForMerge(live as never)!;
+
+    // Mirrors queryStore.releaseResultObjectPayload: the arrays the merged view
+    // reads are detached, so clearing the live result must not empty them.
+    live.columns = [];
+    live.rows = [];
+
+    expect(snapshot.columns).toEqual(["id", "amount"]);
+    expect(snapshot.rows).toEqual([
+      [1, 10],
+      [2, 20],
+    ]);
+    expect(snapshot.column_types).toEqual(["INT", "DECIMAL"]);
+  });
+
+  it("passes undefined through", () => {
+    expect(snapshotResultForMerge(undefined)).toBeUndefined();
   });
 });

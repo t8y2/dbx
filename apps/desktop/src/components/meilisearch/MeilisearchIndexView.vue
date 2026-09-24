@@ -1,18 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import dayjs from "dayjs";
-import relativeTime from "dayjs/plugin/relativeTime";
-import "dayjs/locale/zh-cn";
-import "dayjs/locale/zh-tw";
-import "dayjs/locale/az";
-import "dayjs/locale/es";
-import "dayjs/locale/it";
-import "dayjs/locale/ja";
-import "dayjs/locale/ko";
-import "dayjs/locale/pt-br";
-import "dayjs/locale/tr";
-import { Copy, FileText, ListChecks, Settings } from "@lucide/vue";
+import { Copy, FileText, ListChecks, RefreshCcw, Settings } from "@lucide/vue";
+import { Button } from "@/components/ui/button";
 import * as api from "@/lib/backend/api";
 import type { MeilisearchIndexOverview } from "@/lib/backend/tauri";
 import { formatBytes } from "@/lib/database/serverMetrics";
@@ -21,20 +11,7 @@ import { useTabUiState } from "@/lib/tabs/tabUiState";
 import MeilisearchDocumentsPage from "./MeilisearchDocumentsPage.vue";
 import MeilisearchSettingsPage from "./MeilisearchSettingsPage.vue";
 import MeilisearchTasksPage from "./MeilisearchTasksPage.vue";
-
-dayjs.extend(relativeTime);
-
-const DAYJS_LOCALES: Record<string, string> = {
-  az: "az",
-  "zh-CN": "zh-cn",
-  "zh-TW": "zh-tw",
-  "pt-BR": "pt-br",
-  es: "es",
-  it: "it",
-  ja: "ja",
-  ko: "ko",
-  tr: "tr",
-};
+import { formatMeilisearchTaskDateTime } from "@/types/meilisearchManagement";
 
 const props = defineProps<{
   connectionId: string;
@@ -50,6 +27,8 @@ const { toast } = useToast();
 
 const activeSection = ref<ActiveSection>(restoredUiState.activeSection ?? "documents");
 const overview = ref<MeilisearchIndexOverview | null>(null);
+const refreshing = ref(false);
+let refreshRequestId = 0;
 
 trackUiState(() => ({ activeSection: activeSection.value }));
 
@@ -62,16 +41,20 @@ const navSections = computed<Array<{ value: ActiveSection; label: string; icon: 
 const updatedAtLabel = computed(() => {
   const value = overview.value?.updatedAt;
   if (!value) return "-";
-  return dayjs(value)
-    .locale(DAYJS_LOCALES[locale.value] ?? "en")
-    .fromNow();
+  return formatMeilisearchTaskDateTime(value, locale.value);
 });
 
-async function refreshStats() {
+async function refreshStats(notifyOnError = false) {
+  const requestId = ++refreshRequestId;
+  refreshing.value = true;
   try {
-    overview.value = await api.meilisearchGetIndexOverview(props.connectionId, props.index);
-  } catch {
+    const nextOverview = await api.meilisearchGetIndexOverview(props.connectionId, props.index);
+    if (requestId === refreshRequestId) overview.value = nextOverview;
+  } catch (cause: any) {
     // Overview is best-effort; the tab still works without it.
+    if (requestId === refreshRequestId && notifyOnError) toast(cause?.message || String(cause), 5000);
+  } finally {
+    if (requestId === refreshRequestId) refreshing.value = false;
   }
 }
 
@@ -93,9 +76,14 @@ onMounted(() => {
 <template>
   <div class="h-full flex overflow-hidden">
     <!-- Left column: index meta + navigation -->
-    <nav class="w-44 shrink-0 border-r flex flex-col gap-1 overflow-y-auto p-2">
+    <nav class="w-44 shrink-0 select-none border-r flex flex-col gap-1 overflow-y-auto p-2">
       <div class="px-1 pb-2">
-        <div class="truncate text-sm font-semibold text-foreground" :title="index">{{ index }}</div>
+        <div class="flex items-center gap-1">
+          <div class="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" :title="index">{{ index }}</div>
+          <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="refreshing" :title="t('meilisearch.refresh')" :aria-label="t('meilisearch.refresh')" @click="refreshStats(true)">
+            <RefreshCcw class="h-3.5 w-3.5" :class="{ 'animate-spin': refreshing }" />
+          </Button>
+        </div>
         <div v-if="overview?.isIndexing" class="mt-0.5 text-xs text-primary">{{ t("meilisearch.isIndexing") }}</div>
       </div>
 
@@ -126,8 +114,17 @@ onMounted(() => {
           <div class="text-muted-foreground">{{ t("meilisearch.documentCountLabel") }}</div>
           <div class="mt-0.5 tabular-nums text-foreground/80">{{ overview ? overview.numberOfDocuments : "-" }}</div>
         </div>
-        <div v-if="overview?.databaseSize != null">
-          <div class="text-muted-foreground">{{ t("meilisearch.databaseSize") }}</div>
+        <div v-if="overview?.documentSize != null">
+          <div class="text-muted-foreground">{{ t("meilisearch.documentSize") }}</div>
+          <div class="mt-0.5 tabular-nums text-foreground/80">{{ formatBytes(overview.documentSize) }}</div>
+        </div>
+        <div v-if="overview?.avgDocumentSize != null">
+          <div class="text-muted-foreground">{{ t("meilisearch.avgDocumentSize") }}</div>
+          <div class="mt-0.5 tabular-nums text-foreground/80">{{ formatBytes(overview.avgDocumentSize) }}</div>
+        </div>
+        <!-- Older servers report no per-index size; label the instance-wide number so it is not read as this index's size. -->
+        <div v-else-if="overview?.databaseSize != null">
+          <div class="text-muted-foreground">{{ t("meilisearch.instanceDatabaseSize") }}</div>
           <div class="mt-0.5 tabular-nums text-foreground/80">{{ formatBytes(overview.databaseSize) }}</div>
         </div>
       </div>

@@ -184,7 +184,7 @@ A web button can link to the protocol directly:
 <a href="dbx://open">Open in DBX</a>
 ```
 
-Use `dbx://connection/new` to open the new connection dialog with connection fields prefilled.
+Use `dbx://connection/new` without an `id` to open the new connection dialog with connection fields prefilled.
 
 DSN mode:
 
@@ -229,6 +229,36 @@ open 'dbx://connection/new?type=r-nacos&url=http%3A%2F%2F127.0.0.1%3A8848%2Fnaco
 ```
 
 `nacos` is an alias for `nacos-v2`, and `rnacos` is an alias for `r-nacos`. In URL mode, service endpoint paths are preserved; top-level `host`, `port`, `user`, `password`, and `ssl` fields override values from `url`. For Consul, `password` is the ACL token. Nacos requires `user` when `password` is present. Omitting `v` or using `v=1` selects the current deep-link protocol; other versions are rejected.
+
+### Update a saved connection by ID
+
+Add `id` to the same `dbx://connection/new` route to open an existing saved connection for editing. For example, a bastion host can provide fresh credentials for a saved connection:
+
+```bash
+open 'dbx://connection/new?id=saved-connection-id&user=fresh-sso-token&password=fresh-sso-token'
+```
+
+Replace `saved-connection-id` with the connection ID returned by the MCP `dbx_list_connections` tool. Matching uses the ID, never the display name. The CLI command `dbx connections list --json` currently lists names and endpoints but does not return connection IDs.
+
+Receiving an update link only opens a prefilled edit dialog. Review the changes and click **Save** to persist them under the same connection ID and sidebar group. The link does not automatically save, test, or connect to the database. Canceling leaves the saved connection unchanged. An update is rejected if the ID is empty or unknown, the target is a one-time connection, or another connection dialog is already open; it never falls back to creating a connection.
+
+Updates support saved, field-based connections using the built-in MySQL, PostgreSQL, or SQL Server profile. Connections with a nonempty `connection_string` are not supported by this update flow. Only explicitly supplied fields change:
+
+| Parameter | Update behavior |
+| --- | --- |
+| `name`, `host` | Replace the current value; empty values are rejected |
+| `port` | Replace the port with an integer from 1 to 65535 |
+| `user`, `password` | Prefill credentials without trimming whitespace; an empty value clears the field |
+| `database`, `url_params` | Replace the current value; an empty value clears the field |
+| `ssl` | Update the SSL switch; effective TLS behavior follows the driver and URL parameters |
+
+Omitted fields retain their saved values, including port and SSL settings. To clear a field, include the parameter with an empty value, such as `database=&url_params=`. URL-encode parameter values; for example, use `%2B` for a literal `+` in a password.
+
+The usual Save behavior still applies, including credential sanitization and the connection’s Save password setting.
+
+Besides `id` and the fields above, only the optional protocol version `v=1` is accepted. Update links reject `type`, `url`, `one_time` (including `one_time=false`), unknown parameters, and duplicate parameter keys. They cannot change the driver profile or request automatic actions.
+
+Saving a refreshed SSO credential does not extend its lifetime. MCP can discover the saved profile, but it establishes its own database session and still needs a valid credential; the update does not transfer the desktop's active session to MCP.
 
 <Callout type="info">Before testing system-level `dbx://` launches, install and open DBX Desktop once so the operating system can register the URL scheme. On macOS, use `open 'dbx://open'` or `open 'dbx://connection/new?...'` to test it.</Callout>
 

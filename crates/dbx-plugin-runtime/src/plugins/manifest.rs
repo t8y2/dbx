@@ -8,10 +8,15 @@ pub const SUPPORTED_PLUGIN_MANIFEST_VERSION: u32 = 1;
 /// Host API version the host advertises at `plugin/initialize`.
 ///
 /// 1.1 adds the plugin-initiated `host/requestUserInput` method (see
-/// `plugins/runtime.rs`). It is additive: 1.0 plugins keep working, and a
-/// plugin that wants the capability must check the advertised version (or the
-/// `host.requestUserInput` entry in `host.features`) before calling it.
-pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.1.0";
+/// `plugins/runtime.rs`). 1.2 adds the plugin-initiated plan Host API
+/// (`host.getPlanCapabilities` / `host.explainPlan`). 1.3 adds read-only table
+/// schema metadata (`host.getTableMetadata` behind `host.schema:read`) and the
+/// plugin-initiated clipboard Host API (`host.clipboardRead` behind the
+/// `host.clipboard:read` permission; clipboard writes reuse the existing
+/// ungated `host.copy`). All are additive: older plugins keep working, and a
+/// plugin that wants a capability must check the advertised version (or the
+/// matching `capabilities` / `host.features` entry) before calling it.
+pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.3.0";
 /// Capabilities the host advertises to a plugin backend at `plugin/initialize`.
 pub const SUPPORTED_PLUGIN_HOST_FEATURES: &[&str] = &["host.requestUserInput"];
 pub const SUPPORTED_PLUGIN_PROTOCOL_VERSION: u32 = 1;
@@ -19,7 +24,17 @@ pub const PLUGIN_CONNECTION_TEST_METHOD: &str = "connection/test";
 pub const PLUGIN_CONNECTION_CONNECT_METHOD: &str = "connection/connect";
 pub const PLUGIN_CONNECTION_DISCONNECT_METHOD: &str = "connection/disconnect";
 pub const PLUGIN_CONNECTION_ACTION_METHOD: &str = "connection/action";
-pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &["host.events", "host.binary", "host.workbench", "host.filesystem"];
+pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
+    "host.events",
+    "host.binary",
+    "host.workbench",
+    "host.filesystem",
+    "host.plans:read",
+    "host.schema:read",
+    "host.storage",
+    "host.ai",
+    "host.clipboard:read",
+];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
 /// the sandbox CSP or enumerate large origin lists.
@@ -230,6 +245,8 @@ pub enum PluginContribution {
     FilesystemProvider(PluginFilesystemProviderContribution),
     ContextMenu(PluginContextMenuContribution),
     ResultView(PluginResultViewContribution),
+    Command(PluginCommandContribution),
+    Menus(PluginMenusContribution),
 }
 
 impl PluginContribution {
@@ -240,6 +257,8 @@ impl PluginContribution {
             Self::FilesystemProvider(contribution) => &contribution.id,
             Self::ContextMenu(contribution) => &contribution.id,
             Self::ResultView(contribution) => &contribution.id,
+            Self::Command(contribution) => &contribution.id,
+            Self::Menus(contribution) => &contribution.id,
         }
     }
 }
@@ -560,6 +579,14 @@ pub struct PluginConnectionProviderContribution {
     pub capabilities: Vec<PluginConnectionCapability>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<PluginConnectionActionContribution>,
+    /// Providers whose targets have multiple reachable endpoints (Kafka
+    /// bootstrap + advertised listeners) declare this flag so the host hands
+    /// them a SOCKS5 `runtime.proxy` route instead of a static tunnel, which
+    /// can only reach a single endpoint. Without the flag, transport layers
+    /// keep today's static-tunnel behavior (fine for single-endpoint
+    /// providers such as SSH or LDAP, which declare binding host/port fields).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub proxy_route: bool,
 }
 
 impl PluginConnectionProviderContribution {
@@ -636,9 +663,9 @@ pub struct PluginWorkbenchContribution {
     pub icon: Option<String>,
 }
 
-/// Native context-menu entry contributed to DBX surfaces. v1 targets the
-/// saved-connection sidebar menu; clicks are dispatched to the plugin backend
-/// as `contextMenu/<id>` requests.
+/// Native context-menu entry contributed to DBX surfaces. Legacy entries
+/// dispatch `contextMenu/<id>` to the plugin backend; declarative actions are
+/// handled directly by the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginContextMenuContribution {
@@ -648,9 +675,27 @@ pub struct PluginContextMenuContribution {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// Menu surface the item belongs to; currently only `connection`.
+    /// Menu surface the item belongs to: `connection` or `table`.
     #[serde(default)]
     pub menu: String,
+    /// Optional host-handled action. When absent, the legacy backend entrypoint is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<PluginContextMenuAction>,
+}
+
+/// Actions that the host can perform directly for a context-menu contribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum PluginContextMenuAction {
+    OpenWorkbench(PluginContextMenuOpenWorkbenchAction),
+}
+
+/// Narrow context-menu form of the shared `open-workbench` target contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginContextMenuOpenWorkbenchAction {
+    /// Workbench contribution of the SAME plugin (dangling references are rejected during validation).
+    pub workbench: String,
 }
 
 /// Plugin-rendered visualization surface for query results. Selecting the view
@@ -664,6 +709,171 @@ pub struct PluginResultViewContribution {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+}
+
+/// Stable sidebar/menu group word list (HOST_PLUGIN_UI_SPEC §5.2). Values
+/// outside this list fail manifest validation instead of being ignored.
+pub const PLUGIN_MENU_GROUPS: &[&str] = &["navigation", "primary", "secondary", "destructive"];
+
+/// Upper bound for one `menus` contribution; keeps registry scans and sidebar
+/// surfaces bounded regardless of what a manifest declares.
+pub const PLUGIN_MENUS_ITEMS_MAX: usize = 64;
+
+/// Upper bound of clauses per enablement/when group.
+pub const PLUGIN_CONDITION_CLAUSES_MAX: usize = 16;
+
+/// Upper bound for one command's `context` JSON payload (serialized size).
+pub const PLUGIN_COMMAND_CONTEXT_MAX_BYTES: usize = 64 * 1024;
+
+/// Reserved context-key word list for condition evaluation (HOST_PLUGIN_UI_SPEC §5.3 v1). Values outside the
+/// list fail the whole manifest validation — never silently ignored.
+pub const PLUGIN_CONDITION_KEYS: &[&str] = &["connection.state", "object.type", "surface", "readOnly"];
+
+/// Single command condition clause (shared by enablement/when). `value` is a string for equals/notEquals
+/// string and a string array for oneOf.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandConditionClause {
+    pub key: String,
+    pub operator: PluginConditionOperator,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginConditionOperator {
+    #[serde(rename = "equals")]
+    Equals,
+    #[serde(rename = "notEquals")]
+    NotEquals,
+    #[serde(rename = "oneOf")]
+    OneOf,
+}
+
+/// enablement/when condition group: implicit AND within `all`; absent field defaults to true.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandEnablement {
+    #[serde(default)]
+    pub all: Vec<PluginCommandConditionClause>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCommandPresentation {
+    #[default]
+    Tab,
+    /// Opens the command in the host's global bottom dock (BottomDock,
+    /// HOST_PLUGIN_UI_SPEC §8.3). Tab and panel instances can coexist: the
+    /// reuse key includes the presentation.
+    Panel,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCommandReuse {
+    #[default]
+    Singleton,
+    New,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCommandRestore {
+    #[default]
+    None,
+}
+
+/// v1 ships exactly one command action: opening a declared workbench. The
+/// workbench reference is resolved against the same plugin's contributions and
+/// the context payload is opaque JSON placed under `context.plugin` by the
+/// host (HOST_PLUGIN_UI_SPEC §4.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum PluginCommandAction {
+    OpenWorkbench(PluginOpenWorkbenchAction),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginOpenWorkbenchAction {
+    /// Workbench contribution of the SAME plugin (dangling references are
+    /// rejected during validation).
+    pub workbench: String,
+    #[serde(default)]
+    pub presentation: PluginCommandPresentation,
+    #[serde(default)]
+    pub reuse: PluginCommandReuse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_key: Option<String>,
+    #[serde(default)]
+    pub restore: PluginCommandRestore,
+    /// Opaque plugin payload; served to the workbench under `context.plugin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+    /// Generic launch-options extension point: a sidecar method the host calls
+    /// (POST-less invoke, empty params) to fetch dynamic launch entries —
+    /// `{ "entries": [{ "label": string, "description"?: string, "context"?: object }] }`.
+    /// The host renders them as picker items and opens one panel per selection
+    /// with the returned context merged into the host-authored context; the
+    /// host never interprets the entries' business meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_action: Option<String>,
+    /// When true, the host also offers the plugin's own saved connections
+    /// (read-only, secret-free list) as launch targets for this command.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub connection_targets: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandContribution {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub action: PluginCommandAction,
+    /// Executable condition (defaults to true); the host must re-evaluate it against the current context snapshot before running the command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enablement: Option<PluginCommandEnablement>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PluginMenuLocation {
+    #[serde(rename = "commandPalette")]
+    CommandPalette,
+    #[serde(rename = "appToolbar")]
+    AppToolbar,
+    #[serde(rename = "appSidebar")]
+    AppSidebar,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMenuItem {
+    pub location: PluginMenuLocation,
+    /// Short command id of the SAME plugin (cross-plugin references rejected).
+    pub command: String,
+    pub group: String,
+    pub order: i64,
+    /// Toolbar entries default to hidden; sidebar entries default to visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_visible: Option<bool>,
+    /// Placement visibility condition (defaults to true); evaluated independently from command.enablement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<PluginCommandEnablement>,
+}
+
+/// Declared placement of plugin commands across host surfaces. Entry labels
+/// always come from the referenced command — the menus contribution itself
+/// carries no display text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMenusContribution {
+    pub id: String,
+    #[serde(default)]
+    pub items: Vec<PluginMenuItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1001,6 +1211,13 @@ fn validate_engine_requirement(label: &str, requirement: &str, actual: &str, err
     if requirement.trim().is_empty() {
         return;
     }
+    // An empty installed version means the host could not identify itself (the
+    // standalone MCP binary and CLI are versioned independently from the DBX
+    // app). The requirement is unverifiable there, not unsatisfied, so skip it
+    // instead of failing every plugin (#9595).
+    if actual.trim().is_empty() {
+        return;
+    }
     let requirement = match VersionReq::parse(requirement.trim()) {
         Ok(requirement) => requirement,
         Err(error) => {
@@ -1033,6 +1250,10 @@ fn validate_contributions(
     let mut filesystem_provider_ids = HashSet::new();
     let mut workbench_references = Vec::new();
     let mut filesystem_references = Vec::new();
+    let mut context_menu_workbench_references = Vec::new();
+    let mut command_ids = HashSet::new();
+    let mut command_workbench_references = Vec::new();
+    let mut menu_command_references = Vec::new();
 
     for (index, contribution) in contributions.iter().enumerate() {
         let id = contribution.id();
@@ -1112,13 +1333,16 @@ fn validate_contributions(
             PluginContribution::ContextMenu(menu) => {
                 validate_required_text(&menu.label, &format!("Context menu '{id}' label"), errors);
                 validate_declared_icon(plugin_dir, &format!("Context menu '{id}' icon"), menu.icon.as_deref(), errors);
-                if menu.menu != "connection" {
+                if menu.menu != "connection" && menu.menu != "table" {
                     errors.push(format!(
-                        "Context menu '{id}' declares unsupported menu '{}'; only 'connection' is available",
+                        "Context menu '{id}' declares unsupported menu '{}'; only 'connection' and 'table' are available",
                         menu.menu
                     ));
                 }
-                if !has_backend {
+                if let Some(PluginContextMenuAction::OpenWorkbench(action)) = &menu.action {
+                    validate_optional_reference(Some(action.workbench.as_str()), "workbench", id, errors);
+                    context_menu_workbench_references.push((id.to_string(), action.workbench.clone()));
+                } else if !has_backend {
                     errors.push(format!("Context menu contribution '{id}' requires a backend entrypoint"));
                 }
             }
@@ -1165,6 +1389,73 @@ fn validate_contributions(
                     errors.push(format!("Filesystem provider '{id}' requires a backend entrypoint"));
                 }
             }
+            PluginContribution::Command(command) => {
+                validate_required_text(&command.label, &format!("Command '{id}' label"), errors);
+                validate_declared_icon(plugin_dir, &format!("Command '{id}' icon"), command.icon.as_deref(), errors);
+                if valid_identifier(id) {
+                    command_ids.insert(id.to_string());
+                }
+                if !has_ui {
+                    errors.push(format!("Command contribution '{id}' requires a UI entrypoint"));
+                }
+                validate_command_enablement(command.enablement.as_ref(), &format!("Command '{id}' enablement"), errors);
+                match &command.action {
+                    PluginCommandAction::OpenWorkbench(action) => {
+                        validate_optional_reference(Some(action.workbench.as_str()), "workbench", id, errors);
+                        command_workbench_references.push((id.to_string(), action.workbench.clone()));
+                        if let Some(options_action) = &action.options_action {
+                            if !valid_sidecar_method(options_action) {
+                                errors.push(format!("Command '{id}' has an invalid options_action '{options_action}'"));
+                            }
+                        }
+                        if let Some(context) = &action.context {
+                            let context_bytes = serde_json::to_vec(context)
+                                .map_or(PLUGIN_COMMAND_CONTEXT_MAX_BYTES + 1, |bytes| bytes.len());
+                            if context_bytes > PLUGIN_COMMAND_CONTEXT_MAX_BYTES {
+                                errors.push(format!(
+                                    "Command '{id}' context exceeds the {PLUGIN_COMMAND_CONTEXT_MAX_BYTES}-byte limit"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            PluginContribution::Menus(menus) => {
+                if menus.items.len() > PLUGIN_MENUS_ITEMS_MAX {
+                    errors.push(format!(
+                        "Menus contribution '{id}' declares {} items; at most {PLUGIN_MENUS_ITEMS_MAX} are allowed",
+                        menus.items.len()
+                    ));
+                }
+                let mut seen_placements = HashSet::new();
+                for item in &menus.items {
+                    if !PLUGIN_MENU_GROUPS.contains(&item.group.as_str()) {
+                        errors.push(format!(
+                            "Menus contribution '{id}' uses group '{}' outside the host word list ({})",
+                            item.group,
+                            PLUGIN_MENU_GROUPS.join(", ")
+                        ));
+                    }
+                    if item.location == PluginMenuLocation::CommandPalette && item.default_visible.is_some() {
+                        errors.push(format!(
+                            "Menus contribution '{id}' sets default_visible on a commandPalette placement; the command palette has no visibility toggle"
+                        ));
+                    }
+                    if !seen_placements.insert((item.location, item.command.clone())) {
+                        errors.push(format!(
+                            "Menus contribution '{id}' declares placement {:?} for command '{}' more than once",
+                            item.location, item.command
+                        ));
+                    }
+                    validate_command_enablement(
+                        item.when.as_ref(),
+                        &format!("Menus '{id}' item '{}' when", item.command),
+                        errors,
+                    );
+                    validate_optional_reference(Some(item.command.as_str()), "command", id, errors);
+                    menu_command_references.push((id.to_string(), item.command.clone()));
+                }
+            }
         }
     }
 
@@ -1178,6 +1469,83 @@ fn validate_contributions(
             errors.push(format!(
                 "Connection provider '{provider}' references missing filesystem provider '{filesystem_provider}'"
             ));
+        }
+    }
+    for (menus, command) in menu_command_references {
+        if !command_ids.contains(&command) {
+            errors.push(format!("Menus contribution '{menus}' references missing command '{command}'"));
+        }
+    }
+    for (context_menu, workbench) in context_menu_workbench_references {
+        if !workbench_ids.contains(&workbench) {
+            errors.push(format!("Context menu '{context_menu}' references missing workbench '{workbench}'"));
+        }
+    }
+    for (command, workbench) in command_workbench_references {
+        if !workbench_ids.contains(&workbench) {
+            errors.push(format!("Command '{command}' references missing workbench '{workbench}'"));
+        }
+    }
+}
+
+/// Sidecar method names look like `<domain>/<action>[/<sub>]` (lower-case
+/// words, digits, `-`, `_`, `.` separated by `/`), e.g. `local/shells/list`.
+fn valid_sidecar_method(value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 || value.starts_with('/') || value.ends_with('/') || value.contains("//") {
+        return false;
+    }
+    value.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment.chars().next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+            && segment.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '-' | '_' | '.')
+            })
+    })
+}
+
+/// enablement/when group validation: keys/operators must be in the v1 word lists, value shape must match the operator
+/// and a non-empty string array for oneOf; the clause count is bounded.
+fn validate_command_enablement(enablement: Option<&PluginCommandEnablement>, label: &str, errors: &mut Vec<String>) {
+    let Some(enablement) = enablement else {
+        return;
+    };
+    if enablement.all.len() > PLUGIN_CONDITION_CLAUSES_MAX {
+        errors.push(format!(
+            "{label} declares {} conditions; at most {PLUGIN_CONDITION_CLAUSES_MAX} are allowed",
+            enablement.all.len()
+        ));
+    }
+    for clause in &enablement.all {
+        if !PLUGIN_CONDITION_KEYS.contains(&clause.key.as_str()) {
+            errors.push(format!(
+                "{label} uses key '{}' outside the host word list ({})",
+                clause.key,
+                PLUGIN_CONDITION_KEYS.join(", ")
+            ));
+        }
+        let value_is_scalar = clause.value.as_str().is_some() || clause.value.is_boolean();
+        let value_is_string_array = clause
+            .value
+            .as_array()
+            .is_some_and(|values| !values.is_empty() && values.iter().all(|value| value.is_string()));
+        match clause.operator {
+            PluginConditionOperator::Equals | PluginConditionOperator::NotEquals => {
+                // §5.3 examples include booleans (readOnly notEquals true) — any scalar works.
+                if !value_is_scalar {
+                    errors.push(format!(
+                        "{label} condition '{}' requires a string or boolean value for equals/notEquals",
+                        clause.key
+                    ));
+                }
+            }
+            PluginConditionOperator::OneOf => {
+                if !value_is_string_array {
+                    errors.push(format!(
+                        "{label} condition '{}' requires a non-empty string array value for oneOf",
+                        clause.key
+                    ));
+                }
+            }
         }
     }
 }
@@ -1465,10 +1833,301 @@ fn valid_locale_tag(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions,
-        PluginConnectionActionContribution, PluginConnectionProviderContribution, PluginFormFieldBinding,
-        PluginManifest,
+        parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions, validate_contributions,
+        PluginCommandAction, PluginCommandContribution, PluginCommandPresentation, PluginCommandRestore,
+        PluginCommandReuse, PluginConnectionActionContribution, PluginConnectionProviderContribution,
+        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMenuItem, PluginMenuLocation,
+        PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
+        SUPPORTED_PLUGIN_PERMISSIONS,
     };
+
+    fn context_menu_manifest(menu: &str) -> Result<(tempfile::TempDir, PluginManifest), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let binary_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&binary_dir)?;
+        let executable = binary_dir.join("example");
+        std::fs::write(&executable, b"example")?;
+        let manifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "backend": { "executable": "bin/example" } },
+            "contributions": [{
+                "type": "context-menu",
+                "id": "io.dbx.example.inspect",
+                "label": "Inspect",
+                "menu": menu
+            }]
+        }))?;
+        Ok((dir, manifest))
+    }
+
+    #[test]
+    fn command_and_menus_contributions_parse_the_frozen_contract() {
+        let command: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "command",
+            "id": "open-local-terminal",
+            "label": "Local terminal",
+            "icon": "assets/local-terminal.svg",
+            "action": {
+                "type": "open-workbench",
+                "workbench": "io.dbx.ssh.workbench",
+                "presentation": "tab",
+                "reuse": "singleton",
+                "instance_key": "local-terminal",
+                "restore": "none",
+                "context": { "plugin": { "mode": "local-terminal" } }
+            }
+        }))
+        .unwrap();
+        assert!(matches!(command, PluginContribution::Command(_)));
+
+        // contract defaults: presentation=tab, reuse=singleton, restore=none.
+        let command: PluginCommandContribution = serde_json::from_value(serde_json::json!({
+            "id": "open-thing",
+            "label": "Open",
+            "action": { "type": "open-workbench", "workbench": "wb" }
+        }))
+        .unwrap();
+        // v1 ships exactly one action type, so this pattern always matches.
+        let PluginCommandAction::OpenWorkbench(action) = command.action;
+        assert_eq!(action.workbench, "wb");
+        assert_eq!(action.presentation, PluginCommandPresentation::Tab);
+        assert_eq!(action.reuse, PluginCommandReuse::Singleton);
+        assert_eq!(action.restore, PluginCommandRestore::None);
+
+        // the frozen §11 placement vocabulary keeps the original camelCase values.
+        let menus: PluginMenusContribution = serde_json::from_value(serde_json::json!({
+            "id": "entrypoints",
+            "items": [
+                { "location": "commandPalette", "command": "open-thing", "group": "primary", "order": 100 },
+                { "location": "appToolbar", "command": "open-thing", "group": "navigation", "order": 100, "default_visible": false },
+                { "location": "appSidebar", "command": "open-thing", "group": "primary", "order": 100, "default_visible": true }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(menus.items.len(), 3);
+        assert_eq!(menus.items[0].location, PluginMenuLocation::CommandPalette);
+        assert_eq!(menus.items[1].location, PluginMenuLocation::AppToolbar);
+        assert_eq!(menus.items[2].location, PluginMenuLocation::AppSidebar);
+
+        // unknown contribution types, placements and enum values all reject.
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({ "type": "view", "id": "x" })).is_err());
+        assert!(serde_json::from_value::<PluginMenuItem>(serde_json::json!({
+            "location": "statusBar", "command": "x", "group": "primary", "order": 1
+        }))
+        .is_err());
+        let panel: PluginCommandAction = serde_json::from_value(serde_json::json!({
+            "type": "open-workbench", "workbench": "wb", "presentation": "panel"
+        }))
+        .unwrap();
+        assert!(matches!(
+            panel,
+            PluginCommandAction::OpenWorkbench(PluginOpenWorkbenchAction {
+                presentation: PluginCommandPresentation::Panel,
+                ..
+            })
+        ));
+        let rpc: Result<PluginCommandAction, _> = serde_json::from_value(serde_json::json!({
+            "type": "invoke-sidecar", "method": "x"
+        }));
+        assert!(rpc.is_err(), "RPC actions are outside the v1 contract");
+    }
+
+    #[test]
+    fn command_launch_extension_fields_parse_and_validate() {
+        let plugin_dir = std::env::temp_dir();
+        let workbench = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "workbench", "id": "sample.main", "label": "Sample"
+        }))
+        .unwrap();
+        let command = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "action": {
+                "type": "open-workbench", "workbench": "sample.main",
+                "presentation": "panel",
+                "options_action": "local/terminal/launch-options",
+                "connection_targets": true
+            }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&workbench), false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench, command], false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // options_action 方法名非法拒收。
+        let bad = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "action": { "type": "open-workbench", "workbench": "sample.main", "options_action": "local terminal" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("invalid options_action")), "{errors:?}");
+    }
+
+    #[test]
+    fn command_enablement_and_menu_when_parse_and_validate() {
+        let plugin_dir = std::env::temp_dir();
+        let workbench = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "workbench", "id": "sample.main", "label": "Sample"
+        }))
+        .unwrap();
+        let command = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "enablement": { "all": [ { "key": "surface", "operator": "equals", "value": "tab" } ] },
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))
+        .unwrap();
+        let menus = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "menus", "id": "entrypoints",
+            "items": [
+                { "location": "commandPalette", "command": "cmd", "group": "primary", "order": 100,
+                  "when": { "all": [ { "key": "connection.state", "operator": "oneOf", "value": ["connected", "reconnecting"] } ] } }
+            ]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench, command, menus], false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // keys outside the word list reject.
+        let bad_key = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "enablement": { "all": [ { "key": "custom.thing", "operator": "equals", "value": "x" } ] },
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad_key], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("outside the host word list")), "{errors:?}");
+
+        // value shapes that mismatch the operator reject (oneOf needs a non-empty string array).
+        let bad_value = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "menus", "id": "entrypoints",
+            "items": [
+                { "location": "appToolbar", "command": "cmd", "group": "primary", "order": 100,
+                  "when": { "all": [ { "key": "surface", "operator": "oneOf", "value": "tab" } ] } }
+            ]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad_value], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("non-empty string array")), "{errors:?}");
+
+        // clause-count cap rejects 20 valid surface clauses.
+        let clauses: Vec<serde_json::Value> =
+            (0..20).map(|_| serde_json::json!({ "key": "surface", "operator": "equals", "value": "tab" })).collect();
+        let too_many = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "enablement": { "all": clauses },
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[too_many], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("at most 16 are allowed")), "{errors:?}");
+    }
+
+    #[test]
+    fn command_and_menus_validation_rejects_dangling_and_off_wordlist_values() {
+        let plugin_dir = std::env::temp_dir();
+
+        // valid minimal set: command + workbench + menus -> zero errors.
+        let valid = vec![
+            serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "workbench", "id": "io.dbx.ssh.workbench", "label": "SSH"
+            }))
+            .unwrap(),
+            serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "command", "id": "open-local-terminal", "label": "Local terminal",
+                "action": { "type": "open-workbench", "workbench": "io.dbx.ssh.workbench" }
+            }))
+            .unwrap(),
+            serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "menus", "id": "entrypoints",
+                "items": [
+                    { "location": "appSidebar", "command": "open-local-terminal", "group": "primary", "order": 100 }
+                ]
+            }))
+            .unwrap(),
+        ];
+        let mut errors = Vec::new();
+        validate_contributions(&valid, false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        // dangling command references reject.
+        let dangling = vec![serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "menus", "id": "entrypoints",
+            "items": [{ "location": "appSidebar", "command": "missing", "group": "primary", "order": 100 }]
+        }))
+        .unwrap()];
+        let mut errors = Vec::new();
+        validate_contributions(&dangling, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("references missing command 'missing'")), "{errors:?}");
+
+        // dangling command workbench references reject.
+        let dangling = vec![serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "action": { "type": "open-workbench", "workbench": "missing.workbench" }
+        }))
+        .unwrap()];
+        let mut errors = Vec::new();
+        validate_contributions(&dangling, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("references missing workbench")), "{errors:?}");
+
+        // groups outside the word list reject; default_visible on commandPalette rejects.
+        let menus: PluginMenusContribution = serde_json::from_value(serde_json::json!({
+            "id": "entrypoints",
+            "items": [
+                { "location": "appSidebar", "command": "cmd", "group": "vendor-custom", "order": 100 },
+                { "location": "commandPalette", "command": "cmd", "group": "primary", "order": 100, "default_visible": true }
+            ]
+        }))
+        .unwrap();
+        let contributions = vec![PluginContribution::Menus(menus)];
+        let mut errors = Vec::new();
+        validate_contributions(&contributions, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("outside the host word list")), "{errors:?}");
+        assert!(errors.iter().any(|error| error.contains("no visibility toggle")), "{errors:?}");
+
+        // command contexts over 64 KiB reject.
+        let big: PluginCommandContribution = serde_json::from_value(serde_json::json!({
+            "id": "cmd", "label": "C",
+            "action": { "type": "open-workbench", "workbench": "wb", "context": { "blob": "x".repeat(70_000) } }
+        }))
+        .unwrap();
+        let contributions = vec![PluginContribution::Command(big)];
+        let mut errors = Vec::new();
+        validate_contributions(&contributions, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("exceeds the 65536-byte limit")), "{errors:?}");
+    }
+
+    #[test]
+    fn connection_provider_proxy_route_defaults_false_and_parses() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "database_type": "sample",
+            "fields": []
+        }))
+        .unwrap();
+        assert!(!provider.proxy_route);
+
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "database_type": "sample",
+            "fields": [],
+            "proxy_route": true
+        }))
+        .unwrap();
+        assert!(provider.proxy_route);
+    }
 
     #[test]
     fn parses_only_strict_https_network_permissions() {
@@ -1507,6 +2166,251 @@ mod tests {
         std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
         let compatibility = manifest.compatibility(dir.path(), "0.1.0");
         assert!(compatibility.errors.iter().any(|error| error.contains("host.network:http://api.vendor.com")));
+    }
+
+    #[test]
+    fn accepts_read_only_host_permissions_and_still_rejects_unknown_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "permissions": ["host.plans:read", "host.schema:read"]
+        }))
+        .unwrap();
+        let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+
+        // Both the plan and schema metadata APIs are read-only; execute/write
+        // scopes must not be declared as substitutes.
+        for permission in [
+            "host.plans:execute",
+            "host.plans",
+            "host.plans:read:all",
+            "host.plan:read",
+            "host.schema:write",
+            "host.schema",
+        ] {
+            let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+                "manifest_version": 1,
+                "id": "io.dbx.example",
+                "name": "Example",
+                "version": "1.0.0",
+                "publisher": "example",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+                "permissions": [permission]
+            }))
+            .unwrap();
+            let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+            assert!(!compatibility.compatible, "{permission} must stay unsupported");
+            assert!(
+                compatibility.errors.iter().any(|error| error.contains(permission)),
+                "{permission}: {:?}",
+                compatibility.errors
+            );
+        }
+    }
+
+    /// The published schema is the editor/CI contract for the same enum; a
+    /// permission added to one side only would let a manifest pass an editor
+    /// check and fail installation (or the reverse).
+    #[test]
+    fn manifest_schema_permission_enum_matches_supported_permissions() {
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("plugins")
+            .join("manifest.schema.json");
+        let schema: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&schema_path).unwrap()).unwrap();
+        let declared = schema["properties"]["permissions"]["items"]["anyOf"][0]["enum"]
+            .as_array()
+            .expect("permissions.items.anyOf[0].enum must be an array")
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(declared, SUPPORTED_PLUGIN_PERMISSIONS.iter().map(|value| value.to_string()).collect::<Vec<_>>());
+    }
+
+    /// The reason for the 1.3.0 bump: `engines.host_api` is how a plugin states
+    /// "I need the schema metadata API" or "I need clipboard reads", so the
+    /// advertised version has to satisfy `^1.3` while a floor this host cannot
+    /// meet stays rejected.
+    #[test]
+    fn host_api_advertises_the_floor_a_schema_metadata_plugin_declares() {
+        let advertised = semver::Version::parse(SUPPORTED_PLUGIN_HOST_API_VERSION)
+            .expect("the advertised Host API version must be semver");
+        assert!(
+            semver::VersionReq::parse("^1.3").unwrap().matches(&advertised),
+            "the host must satisfy the schema metadata API floor it asks plugins to declare"
+        );
+        assert!(
+            semver::VersionReq::parse("^1.3").unwrap().matches(&advertised),
+            "the host must satisfy the clipboard-read floor it asks plugins to declare"
+        );
+
+        for requirement in ["^1.0", "^1.1", "^1.2", "^1.3", ">=1.1.0, <2.0.0"] {
+            assert!(host_api_requirement_errors(requirement).is_empty(), "{requirement} must be satisfiable");
+        }
+        for requirement in [">=1.4.0", "^2.0"] {
+            assert!(!host_api_requirement_errors(requirement).is_empty(), "{requirement} must be rejected");
+        }
+    }
+
+    /// A minimal v1 manifest declaring `host.plans:read`, so the compatibility
+    /// result isolates `engines.host_api`.
+    fn host_api_requirement_errors(requirement: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": requirement },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "permissions": ["host.plans:read"]
+        }))
+        .unwrap();
+        manifest.compatibility(dir.path(), "0.1.0").errors
+    }
+
+    #[test]
+    fn accepts_connection_and_table_context_menu_targets() -> Result<(), Box<dyn std::error::Error>> {
+        for menu in ["connection", "table"] {
+            let (dir, manifest) = context_menu_manifest(menu)?;
+            let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+            assert!(compatibility.compatible, "{menu}: {:?}", compatibility.errors);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parses_and_accepts_declarative_context_menu_workbench_without_backend() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let plugin_dir = tempfile::tempdir()?;
+        let workbench: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "workbench",
+            "id": "sample.main",
+            "label": "Sample"
+        }))?;
+        let context_menu: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.open",
+            "label": "Open Sample",
+            "menu": "connection",
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))?;
+
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench, context_menu], false, true, plugin_dir.path(), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_dangling_and_invalid_context_menu_actions() -> Result<(), Box<dyn std::error::Error>> {
+        let plugin_dir = tempfile::tempdir()?;
+        let dangling: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.open",
+            "label": "Open Missing",
+            "menu": "table",
+            "action": { "type": "open-workbench", "workbench": "sample.missing" }
+        }))?;
+        let mut errors = Vec::new();
+        validate_contributions(&[dangling], false, true, plugin_dir.path(), &mut errors);
+        assert!(errors.iter().any(|error| error.contains("Context menu 'sample.open' references missing workbench 'sample.missing'")), "{errors:?}");
+        assert!(!errors.iter().any(|error| error.contains("requires a backend entrypoint")), "{errors:?}");
+
+        let unknown_action = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.open",
+            "label": "Open",
+            "menu": "connection",
+            "action": { "type": "invoke-sidecar", "method": "contextMenu/sample.open" }
+        }));
+        assert!(unknown_action.is_err());
+
+        let command_only_fields = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.open",
+            "label": "Open",
+            "menu": "connection",
+            "action": { "type": "open-workbench", "workbench": "sample.main", "presentation": "panel" }
+        }));
+        assert!(command_only_fields.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_context_menu_still_requires_a_backend_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+        let plugin_dir = tempfile::tempdir()?;
+        let legacy: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.legacy",
+            "label": "Legacy",
+            "menu": "connection"
+        }))?;
+
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&legacy), false, false, plugin_dir.path(), &mut errors);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error == "Context menu contribution 'sample.legacy' requires a backend entrypoint"),
+            "{errors:?}"
+        );
+
+        let mut errors = Vec::new();
+        validate_contributions(&[legacy], true, false, plugin_dir.path(), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unsupported_context_menu_targets() -> Result<(), Box<dyn std::error::Error>> {
+        let (dir, manifest) = context_menu_manifest("schema")?;
+        let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(!compatibility.compatible);
+        assert!(compatibility.errors.iter().any(|error| {
+            error == "Context menu 'io.dbx.example.inspect' declares unsupported menu 'schema'; only 'connection' and 'table' are available"
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_schema_context_menu_enum_matches_runtime_targets() {
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("plugins")
+            .join("manifest.schema.json");
+        let schema: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&schema_path).unwrap()).unwrap();
+        let declared = schema["$defs"]["contextMenuContribution"]["properties"]["menu"]["enum"]
+            .as_array()
+            .expect("contextMenuContribution.menu.enum must be an array")
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(declared, ["connection", "table"]);
+        assert_eq!(
+            schema["$defs"]["contextMenuContribution"]["properties"]["action"]["$ref"],
+            "#/$defs/contextMenuAction"
+        );
+        assert_eq!(schema["$defs"]["contextMenuAction"]["properties"]["type"]["const"], "open-workbench");
+        assert_eq!(schema["$defs"]["contextMenuAction"]["required"], serde_json::json!(["type", "workbench"]));
     }
 
     #[test]
@@ -1578,6 +2482,34 @@ mod tests {
 
         assert!(compatibility.compatible, "{:?}", compatibility.errors);
         assert_eq!(manifest.localizations["zh-CN"].name.as_deref(), Some("本地化插件"));
+    }
+
+    #[test]
+    fn compatibility_skips_dbx_engine_gate_for_unknown_host_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=999.0.0", "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "permissions": ["host.events"]
+        }))
+        .unwrap();
+
+        // A standalone host reports no app version: the requirement is
+        // unverifiable there, not unsatisfied (#9595).
+        let compatibility = manifest.compatibility(dir.path(), "");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+
+        // A host that knows the app version keeps enforcing the gate.
+        let compatibility = manifest.compatibility(dir.path(), "0.6.16");
+        assert!(!compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(compatibility.errors.iter().any(|error| error.contains(">=999.0.0")), "{:?}", compatibility.errors);
     }
 
     #[test]

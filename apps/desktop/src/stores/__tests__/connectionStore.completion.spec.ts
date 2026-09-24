@@ -678,6 +678,59 @@ describe("connectionStore completion assistant", () => {
     ]);
   });
 
+  it("maps global OceanBase Oracle tables with safe qualification and schema priority", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "ORDERS", kind: "table", schema: "DWD", data_type: "TABLE" },
+        { name: "ORDERS", kind: "table", schema: "STAGING", data_type: "TABLE" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listTables: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+
+    const tables = await store.listCompletionTables("oceanbase-oracle-1", "OBORCL", "ORD", 20, "DWD", true, "DWD");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "DWD", parent_schema: null, global_search: true, mask: "ORD" }));
+    expect(tables).toEqual([expect.objectContaining({ name: "ORDERS", schema: "DWD", applyName: "ORDERS", boost: 2400 }), expect.objectContaining({ name: "ORDERS", schema: "STAGING", applyName: "STAGING.ORDERS", boost: 0 })]);
+  });
+
+  it("scopes OceanBase Oracle table completion when a schema qualifier is present", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { schema?: string | null; parent_schema?: string | null }) => ({
+      candidates: request.parent_schema?.toLowerCase() === "staging" ? [{ name: "ORDERS", kind: "table", schema: "STAGING", data_type: "TABLE" }] : [],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listTables: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+
+    const tables = await store.listCompletionTables("oceanbase-oracle-1", "OBORCL", "", 20, "staging", false, "DWD");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "staging", parent_schema: "staging", global_search: false, mask: "" }));
+    expect(tables).toEqual([expect.objectContaining({ name: "ORDERS", schema: "STAGING", applyName: "ORDERS", boost: 2400 })]);
+  });
+
   it("lets Oracle resolve CURRENT_SCHEMA for unqualified column completion", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [],

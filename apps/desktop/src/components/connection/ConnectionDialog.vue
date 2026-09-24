@@ -1639,7 +1639,9 @@ function resetSalesforceOAuthFields(externalConfig?: unknown, fallbackPassword?:
   salesforceOauthRunning.value = false;
   salesforceOauthError.value = "";
   salesforceOauthSuccess.value = "";
-  salesforceOauthPreviouslyAuthorized.value = !!(auth?.refreshToken || auth?.authorizedAt || auth?.clientId);
+  // A Client ID alone only means the form was filled in, not that anybody ever
+  // signed in; claiming "authorized" from it showed a false reassurance banner.
+  salesforceOauthPreviouslyAuthorized.value = !!(auth?.refreshToken || auth?.authorizedAt);
   salesforceDevicePhase.value = "idle";
   salesforceDeviceUserCode.value = "";
   salesforceDeviceVerificationUri.value = "";
@@ -6962,7 +6964,7 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="connection" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
-                <div v-if="!isPluginConnection && !isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul' && form.db_type !== 'mq'" class="grid grid-cols-4 items-center gap-4">
+                <div v-if="!isPluginConnection && !isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul' && form.db_type !== 'mq' && form.db_type !== 'salesforce'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
                     <Input v-model="connectionUrlInput" class="flex-1" :placeholder="connectionUrlPlaceholder" @keydown.enter.prevent="applyConnectionUrl" />
@@ -8399,13 +8401,6 @@ function openExternalUrl(url: string) {
                         <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceInstanceUrlHint") }}</p>
                       </div>
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
-                      <span />
-                      <label class="col-span-3 flex items-center gap-2 text-sm">
-                        <input type="checkbox" v-model="form.ssl" />
-                        <span>{{ t("connection.sslEnable") }}</span>
-                      </label>
-                    </div>
 
                     <!-- Authentication mode picker -->
                     <div class="grid grid-cols-4 items-center gap-4">
@@ -8500,16 +8495,18 @@ function openExternalUrl(url: string) {
                         </Label>
                         <div class="col-span-3 space-y-1.5">
                           <Input v-model="salesforceClientId" :placeholder="t('connection.salesforceClientIdPlaceholder')" :disabled="salesforceOauthRunning" autocomplete="off" />
-                          <p class="text-xs leading-5 text-muted-foreground">
+                          <!-- The callback URL only matters for the browser redirect flow; the
+                               other two modes never see one, so keep it out of their way. -->
+                          <p v-if="salesforceAuthMode === 'oauth'" class="text-xs leading-5 text-muted-foreground">
                             {{ t("connection.salesforceClientIdHint", { callbackUrl: SALESFORCE_OAUTH_CALLBACK_URL }) }}
                           </p>
+                          <p v-else class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceClientIdHintShared") }}</p>
                         </div>
                       </div>
-                      <div class="grid grid-cols-4 items-start gap-4">
+                      <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.salesforceClientSecret") }}</Label>
                         <div class="col-span-3 space-y-1.5">
                           <PasswordInput v-model="salesforceClientSecret" :placeholder="t('connection.salesforceClientSecretPlaceholder')" :disabled="salesforceOauthRunning" autocomplete="new-password" />
-                          <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceClientSecretHint") }}</p>
                         </div>
                       </div>
 
@@ -8568,6 +8565,10 @@ function openExternalUrl(url: string) {
                             </Button>
                           </div>
                         </div>
+                        <div class="grid grid-cols-4 items-start gap-4">
+                          <span />
+                          <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforcePasswordRopcNote") }}</p>
+                        </div>
                       </template>
 
                       <!-- Device-code flow -->
@@ -8580,6 +8581,10 @@ function openExternalUrl(url: string) {
                               {{ t("connection.salesforceDeviceGetCode") }}
                             </Button>
                           </div>
+                        </div>
+                        <div v-if="salesforceDevicePhase === 'idle' || salesforceDevicePhase === 'error'" class="grid grid-cols-4 items-start gap-4">
+                          <span />
+                          <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceDeviceFlowNote") }}</p>
                         </div>
 
                         <template v-if="salesforceDevicePhase === 'polling'">

@@ -229,4 +229,38 @@ describe("ConnectionDialog Salesforce username-password mode", () => {
     await settle();
     expect(passwordTab!.getAttribute("aria-pressed")).toBe("true");
   });
+
+  it("shows each mode only the guidance that applies to it", async () => {
+    const bodyText = () => document.body.textContent ?? "";
+
+    // Token mode carries no Connected App at all: neither client-ID hint renders,
+    // and Salesforce has no TLS toggle (the driver always speaks HTTPS).
+    await mountDialog(salesforceConnection());
+    expect(bodyText()).not.toContain("The Connected App consumer key.");
+    expect(bodyText()).not.toContain("Create a Connected App in Salesforce Setup");
+    expect(bodyText()).not.toContain("Enable encrypted connection");
+
+    const passwordTab = findModeButton("Username & Password");
+    passwordTab!.click();
+    await settle();
+    expect(bodyText()).toContain("The Connected App consumer key.");
+    expect(bodyText()).toContain("No callback URL needed");
+    expect(bodyText()).not.toContain("Create a Connected App in Salesforce Setup");
+
+    const deviceTab = findModeButton("Device Code");
+    deviceTab!.click();
+    await settle();
+    expect(bodyText()).toContain("If requesting the code fails");
+    expect(bodyText()).not.toContain("No callback URL needed");
+  });
+
+  it("reserves the callback-URL guidance for browser OAuth", async () => {
+    await mountDialog(salesforceConnection({ external_config: { auth: { mode: "oauth", environment: "sandbox", clientId: "consumer-key" } } } as Partial<ConnectionConfig>));
+    await settle();
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Create a Connected App in Salesforce Setup");
+    expect(text).not.toContain("The Connected App consumer key.");
+    expect(text).not.toContain("If requesting the code fails");
+  });
 });

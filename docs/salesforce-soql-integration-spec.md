@@ -155,6 +155,10 @@ capabilities 覆盖（MVP）：
 - 列类型用 field type（string/int/double/date/datetime/boolean/reference/picklist/…）填充 `column_types`。
 - **分页**：首批 ≤2000 行；`nextRecordsUrl` 映射到 `has_more=true` + `session_id`（存 QueryLocator），复用现有游标分页机制。UI 提供「加载更多」而非默认全量拉取（配额保护）。
 - **compound fields**（Name/Address）：默认展平为子字段列；查询里直接 select compound 字段时按返回 JSON 展平。
+  - 已实现：`parse_describe_columns` 直接过滤 SOQL 无法投影的 describe 字段——compound `address`/`location`（子字段 `BillingStreet` 等本身就在 describe 里，展平即「只保留子字段」）与 `accessible=false`（无 FLS 读权限，SOQL 报 INVALID_FIELD）。这两类字段只要出现在 SELECT 列表里就会让**整条查询**失败，因此不能进网格投影，也不进补全列表。
+- **数据网格 SQL 构建**（右键对象 →「查看数据」）：走 `build_table_data_select_sql` 的 Salesforce 专用分支 `build_salesforce_table_select_sql`，不能复用 ANSI 形状。SOQL 三处差异：无 `SELECT *`、无定界标识符（`FROM "Account"` 报 MALFORMED_QUERY，双引号在 SOQL 里是字符串字面量）、无尾分号。投影优先用 describe 字段名逐个列出（任意页大小都合法）；拿不到字段列表时退回 `FIELDS(ALL)`，并把 LIMIT 压到 ≤200（Salesforce 对 `FIELDS(*)` 的硬性上限）。`OFFSET` 上限 2000，超出直接透传给 org 报错而不静默改页。
+  - 前端配套：`requiresEagerTableMetadataForDataOpen()` 把 salesforce 与 mysql/postgres 一并列入「必须先拿到列再建 SQL」，否则列列表为空只能走 200 行上限的 `FIELDS(ALL)` 兜底。`quoteTableIdentifier` 对 salesforce 原样返回，与 Rust 侧 `quote_table_identifier` 对齐（网格排序/筛选也走它）。
+- **表数据 CSV 导出**：`export_table_data_csv_core` 对 Salesforce 显式拒绝（不写文件）。该路径用 `LIMIT <page_size> OFFSET <n>` 翻页、以「短页」为终止条件，两个前提在 SOQL 下都不成立（单批 ≤2000 行、`OFFSET` ≤2000），首页永远看起来是短页，结果是**静默截断**的 CSV。正确实现要跟随 QueryLocator（`fetch_more`）翻页，与网格「加载更多」一致；该入口目前没有 UI 调用方，故先拒绝并提示改用「执行 SOQL → 导出结果集」。
 - **reference 字段**：显示 Id；用户在补全引导下自行写 relationship 查询取 Name。
 - **queryAll**（回收站）：编辑器工具栏开关，切 `/queryAll` 端点。Phase 2+。
 - **错误映射**：API errorCode → 用户可读信息（MALFORMED_QUERY=语法错误+原文、INVALID_FIELD=字段不存在/无 FLS 权限、INSUFFICIENT_ACCESS、REQUEST_LIMIT_EXCEEDED=当日 API 配额耗尽提示）。governor limit 错误必须明确归因到 Salesforce 侧，避免用户误判为 DBX bug。

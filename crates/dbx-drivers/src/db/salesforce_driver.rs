@@ -750,6 +750,27 @@ fn parse_sobject_list(value: &Value) -> Vec<SfSObjectEntry> {
         .unwrap_or_default()
 }
 
+/// Whether a describe field entry can be named in a SOQL `SELECT` list.
+///
+/// Two kinds of describe entry cannot, and Salesforce rejects the *whole* query
+/// for either one:
+///
+/// * Compound `address` / `location` fields (`BillingAddress`, `Location__c`) are
+///   metadata containers. SOQL projects their sub-fields instead — `BillingStreet`,
+///   `BillingLatitude`, … — which describe already returns as separate entries, so
+///   flattening to the sub-fields (spec §7) loses nothing.
+/// * Fields the running user has no FLS read access to (`accessible: false`) are
+///   invisible to SOQL, which answers `INVALID_FIELD`. `FIELDS(ALL)` skips them for
+///   the same reason, so an explicit projection has to match. A missing flag means
+///   the org did not report FLS at all: keep the field.
+fn is_soql_projectable_field(field: &Value) -> bool {
+    let field_type = string_field(field, "type").to_ascii_lowercase();
+    if matches!(field_type.as_str(), "address" | "location") {
+        return false;
+    }
+    field.get("accessible").and_then(Value::as_bool).unwrap_or(true)
+}
+
 fn parse_describe_columns(describe: &Value) -> Vec<ColumnInfo> {
     describe
         .get("fields")
@@ -757,6 +778,10 @@ fn parse_describe_columns(describe: &Value) -> Vec<ColumnInfo> {
         .map(|fields| {
             fields
                 .iter()
+                // This list feeds the data grid's explicit SOQL projection and the
+                // editor's field completion, so a name SOQL cannot project must not
+                // appear: one bad field fails the whole query rather than one column.
+                .filter(|field| is_soql_projectable_field(field))
                 .map(|field| {
                     let name = string_field(field, "name");
                     let label = string_field(field, "label");
@@ -1279,6 +1304,27 @@ mod tests {
         assert_eq!(columns[2].numeric_scale, Some(2));
         let extra: Value = serde_json::from_str(columns[1].extra.as_ref().unwrap()).unwrap();
         assert_eq!(extra["updateable"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn describe_columns_omit_fields_soql_cannot_project() {
+        // The grid projects describe fields by name, and SOQL fails the whole query
+        // on a field it cannot select. Compound address/location fields and
+        // FLS-hidden fields are both invisible to a SELECT list; their sub-fields
+        // (`BillingStreet`, …) arrive as separate describe entries and are kept.
+        let describe = serde_json::json!({
+            "fields": [
+                {"name": "Id", "type": "id", "accessible": true},
+                {"name": "BillingAddress", "type": "address", "accessible": true},
+                {"name": "BillingStreet", "type": "textarea", "compoundFieldName": "BillingAddress", "accessible": true},
+                {"name": "Site", "type": "location", "accessible": true},
+                {"name": "Secret__c", "type": "string", "accessible": false},
+                // No `accessible` flag at all: the org did not report FLS, keep it.
+                {"name": "Legacy__c", "type": "string"}
+            ]
+        });
+        let names: Vec<String> = parse_describe_columns(&describe).iter().map(|column| column.name.clone()).collect();
+        assert_eq!(names, vec!["Id", "BillingStreet", "Legacy__c"]);
     }
 
     #[test]

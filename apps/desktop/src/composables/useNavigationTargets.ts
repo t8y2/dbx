@@ -3,7 +3,7 @@ import { connectionObjectTreeNodeSchema, effectiveDatabaseTypeForConnection, met
 import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
 import { canApplyDataTabMetadata, canReuseActiveMongoTab, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
-import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { editableRowIdentifierColumns, physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
@@ -179,7 +179,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       return;
     }
     let eagerMetadata: Awaited<ReturnType<typeof loadTableMetadata>> | undefined;
-    if (effectiveDbType === "mysql" || effectiveDbType === "postgres" || (settingsStore.editorSettings.tableOpenSortMode ?? "none") !== "none") {
+    if (requiresEagerTableMetadataForDataOpen(effectiveDbType) || (settingsStore.editorSettings.tableOpenSortMode ?? "none") !== "none") {
       try {
         eagerMetadata = await loadTableMetadata({
           connectionId: target.connectionId,

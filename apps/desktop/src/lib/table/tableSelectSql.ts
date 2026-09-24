@@ -89,6 +89,10 @@ function sqlStatementSpans(sql: string, dialectId: string): Array<{ start: numbe
 export function quoteTableIdentifier(databaseType: DatabaseType | undefined, name: string): string {
   if ((databaseType === "gaussdb" || databaseType === "opengauss") && isExplicitlyQuotedSqlIdentifier(name)) return name;
   if (databaseType === "iotdb") return name;
+  // SOQL has no delimited identifiers — `"Account"` is a string literal there and
+  // `SELECT * FROM "Account"` fails with MALFORMED_QUERY. Mirrors the Rust
+  // `quote_table_identifier` so a grid ORDER BY / filter matches what the backend builds.
+  if (databaseType === "salesforce") return name;
   // JDBC connections use the driver-reported identifier quote string
   // (DatabaseMetaData.getIdentifierQuoteString()) — pass through unquoted.
   if (databaseType === "jdbc") return name;
@@ -425,6 +429,21 @@ export function metricRangeQuery(metricName: string, lookback = "1h"): string {
 export function normalizeWhereInput(whereInput?: string): string {
   const withoutSemicolon = whereInput?.trim().replace(/;+$/, "").trim() ?? "";
   return withoutSemicolon.replace(/^where\b/i, "").trim();
+}
+
+/**
+ * Database types whose data-preview SQL cannot be built without a column list,
+ * so the columns must be awaited before the statement is generated rather than
+ * refreshed in the background.
+ *
+ * * MySQL / PostgreSQL: the large-value preview projection is derived from the
+ *   column types and primary keys.
+ * * Salesforce: SOQL has no `SELECT *`. With no known fields the backend builder
+ *   falls back to the `FIELDS(ALL)` selector, which the org only accepts with
+ *   `LIMIT 200` or less — awaiting the describe keeps every page size working.
+ */
+export function requiresEagerTableMetadataForDataOpen(databaseType: DatabaseType | undefined): boolean {
+  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "salesforce";
 }
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {

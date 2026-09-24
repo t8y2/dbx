@@ -15,7 +15,7 @@
 //! transparent token refresh — every request funnels through `api_send` /
 //! `api_get_conditional`, both of which retry once after a refresh on 401.
 
-use reqwest::{Client as HttpClient, Method, StatusCode};
+use reqwest::{Client as HttpClient, Method, StatusCode, Url};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -421,13 +421,32 @@ impl SfClient {
     /// Fetch the next page using a QueryLocator URL returned as `session_id`.
     pub async fn fetch_more(&self, cursor: &str) -> Result<QueryResult, String> {
         let started = Instant::now();
-        let url = if cursor.starts_with("http://") || cursor.starts_with("https://") {
-            cursor.to_string()
-        } else {
-            format!("{}{}", self.instance_url, cursor)
-        };
+        let url = self.resolve_cursor_url(cursor)?;
         let value = self.api_get(&url).await?;
         Ok(parse_soql_response(value, started.elapsed().as_millis(), SALESFORCE_MAX_ROWS_PER_BATCH))
+    }
+
+    /// Resolve a QueryLocator cursor to a request URL. Salesforce returns
+    /// `nextRecordsUrl` as an absolute URL on the org's own host; relative
+    /// cursors are resolved against the instance. An absolute cursor pointing
+    /// at any other origin would receive this connection's bearer token, so it
+    /// is refused instead of followed.
+    fn resolve_cursor_url(&self, cursor: &str) -> Result<String, String> {
+        let trimmed = cursor.trim();
+        if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+            return Ok(format!("{}{}", self.instance_url, trimmed));
+        }
+        let instance =
+            Url::parse(&self.instance_url).map_err(|error| format!("Salesforce instance URL is invalid: {error}"))?;
+        let absolute =
+            Url::parse(trimmed).map_err(|error| format!("Salesforce query cursor is not a valid URL: {error}"))?;
+        if absolute.origin() != instance.origin() {
+            return Err(format!(
+                "Salesforce query cursor points outside the connected org ({}) and was not followed",
+                absolute.host_str().unwrap_or_default()
+            ));
+        }
+        Ok(trimmed.to_string())
     }
 
     /// sObject listing (queryable ones are the "tables" of the org).
@@ -1502,6 +1521,45 @@ mod tests {
             SfClient::from_config("acme.my.salesforce.com", Some("tok"), None, Duration::from_secs(5)).unwrap();
         assert_eq!(client.instance_url(), "https://acme.my.salesforce.com");
         assert_eq!(client.api_base(), "https://acme.my.salesforce.com/services/data/v62.0");
+    }
+
+    #[test]
+    fn query_cursors_resolve_only_against_the_connected_org() {
+        let client =
+            SfClient::from_config("acme--qas1.sandbox.my.salesforce.com", Some("tok"), None, Duration::from_secs(5))
+                .unwrap();
+
+        // Relative cursors (and Salesforce's own absolute nextRecordsUrl) resolve as before.
+        assert_eq!(
+            client.resolve_cursor_url("/services/data/v62.0/query/01g-2000").unwrap(),
+            "https://acme--qas1.sandbox.my.salesforce.com/services/data/v62.0/query/01g-2000"
+        );
+        assert_eq!(
+            client
+                .resolve_cursor_url("https://acme--qas1.sandbox.my.salesforce.com/services/data/v62.0/query/01g-2000")
+                .unwrap(),
+            "https://acme--qas1.sandbox.my.salesforce.com/services/data/v62.0/query/01g-2000"
+        );
+        // Host casing and the explicit default port are still the same origin.
+        assert_eq!(
+            client
+                .resolve_cursor_url(
+                    "https://ACME--qas1.sandbox.my.salesforce.com:443/services/data/v62.0/query/01g-2000"
+                )
+                .unwrap(),
+            "https://ACME--qas1.sandbox.my.salesforce.com:443/services/data/v62.0/query/01g-2000"
+        );
+
+        // A cursor pointing anywhere else would carry the bearer token with it.
+        let foreign = client.resolve_cursor_url("https://collector.example.com/records");
+        assert!(foreign.is_err(), "foreign-origin cursor must be refused");
+        assert!(foreign.unwrap_err().contains("outside the connected org"));
+        // Plain HTTP is never the same origin as the HTTPS instance URL.
+        assert!(client
+            .resolve_cursor_url("http://acme--qas1.sandbox.my.salesforce.com/services/data/v62.0/query/01g-2000")
+            .is_err());
+        // A same-host cursor on a different port is a different origin.
+        assert!(client.resolve_cursor_url("https://acme--qas1.sandbox.my.salesforce.com:8443/query/01g-2000").is_err());
     }
 
     #[test]

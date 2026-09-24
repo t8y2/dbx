@@ -1840,12 +1840,20 @@ async fn do_execute_typed(
             // (`preserve_explicit_transaction`) or a later execution already
             // decided to keep this one.
             if p.is_client_session_pool() {
+                // A truncated or failed result, or result sets still pending
+                // behind the one that was read, may leave the last status packet
+                // short of the end, so only a complete response can prove that
+                // the cleanup `ROLLBACK` is unnecessary.
+                let status_is_final = *mode == crate::connection::MysqlMode::Normal
+                    && statement_result.as_ref().is_ok_and(|result| !result.truncated)
+                    && db::mysql::last_ok_ends_response(&conn);
                 let transaction = settle_mysql_auto_commit_transaction_boxed(
                     state,
                     pool_key,
                     &mut conn,
                     options.preserve_explicit_transaction,
                     crate::query_execution_sql::mysql_statement_opens_explicit_transaction(sql),
+                    status_is_final,
                 )
                 .await;
                 match transaction {
@@ -3908,6 +3916,26 @@ fn decide_mysql_auto_commit_transaction(
     MysqlAutoCommitDecision { preserve: false, rollback }
 }
 
+/// Whether the cleanup `ROLLBACK` after an execution would be a server no-op.
+///
+/// Every final status packet carries `SERVER_STATUS_IN_TRANS`, and MariaDB
+/// Connector/J skips `ROLLBACK`/`COMMIT` on the same flag. DBX only relies on it
+/// when the packet provably closes the execution (`status_is_final`: a native
+/// MySQL-mode connection whose response was read to the end without an error,
+/// so neither an earlier command's packet nor a pending result set is left
+/// behind) and the batch did not open a transaction itself. A batch with
+/// `BEGIN` keeps the historical cleanup, so a server or proxy that never
+/// reports the flag cannot leave the user's transaction open.
+fn mysql_cleanup_rollback_is_noop(
+    status_is_final: bool,
+    explicit_start_in_batch: bool,
+    status: Option<db::mysql::MySqlSessionStatus>,
+) -> bool {
+    status_is_final
+        && !explicit_start_in_batch
+        && status.is_some_and(|status| !status.in_transaction && status.autocommit)
+}
+
 /// Type-erased entry point for [`settle_mysql_auto_commit_transaction`].
 ///
 /// `do_execute_typed` is one of the largest async fns in the crate and is
@@ -3922,8 +3950,16 @@ fn settle_mysql_auto_commit_transaction_boxed<'a>(
     conn: &'a mut mysql_async::Conn,
     allow_preserve: bool,
     explicit_start_in_batch: bool,
+    status_is_final: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<MysqlAutoCommitTransaction, String>> + Send + 'a>> {
-    Box::pin(settle_mysql_auto_commit_transaction(state, pool_key, conn, allow_preserve, explicit_start_in_batch))
+    Box::pin(settle_mysql_auto_commit_transaction(
+        state,
+        pool_key,
+        conn,
+        allow_preserve,
+        explicit_start_in_batch,
+        status_is_final,
+    ))
 }
 
 /// Settles the open transaction of a tab-scoped MySQL connection after an
@@ -3938,6 +3974,7 @@ async fn settle_mysql_auto_commit_transaction(
     conn: &mut mysql_async::Conn,
     allow_preserve: bool,
     explicit_start_in_batch: bool,
+    status_is_final: bool,
 ) -> Result<MysqlAutoCommitTransaction, String> {
     let already_preserved = state.has_preserved_explicit_transaction(pool_key).await;
     let mut status = db::mysql::session_status_from_last_ok(conn);
@@ -3953,9 +3990,12 @@ async fn settle_mysql_auto_commit_transaction(
         return Ok(MysqlAutoCommitTransaction::Preserved);
     }
     state.clear_preserved_explicit_transaction(pool_key).await;
-    // Historical cleanup: `ROLLBACK` is a server no-op when no transaction is
-    // open, and releases the read view when one is.
-    db::mysql::rollback_open_transaction(conn).await?;
+    // Historical cleanup: `ROLLBACK` releases the read view of a transaction
+    // that is still open. Skip the round trip only when the final status
+    // packet proves nothing is open.
+    if !mysql_cleanup_rollback_is_noop(status_is_final, explicit_start_in_batch, status) {
+        db::mysql::rollback_open_transaction(conn).await?;
+    }
     Ok(match decision.rollback {
         MysqlAutoCommitRollback::Explicit => MysqlAutoCommitTransaction::RolledBackExplicit,
         MysqlAutoCommitRollback::SessionAutocommit => MysqlAutoCommitTransaction::RolledBackSessionAutocommit,
@@ -4061,15 +4101,22 @@ async fn execute_multi_mysql(
     // tab, making the tab read stale rows until disconnect. Closing any open
     // transaction before returning the connection restores the auto-commit
     // contract, unless the tab keeps explicit user transactions open
-    // (`preserve_explicit_transaction`); ROLLBACK on an already-committed/
-    // implicit transaction is a server no-op, and a failure here only discards
-    // this connection.
+    // (`preserve_explicit_transaction`). The ROLLBACK round trip is skipped when
+    // the final status packet proves nothing is open, and a failure here only
+    // discards this connection.
     {
         let tab_scoped = pool.is_client_session_pool();
-        let explicit_start_in_batch = tab_scoped
-            && statements
-                .iter()
-                .any(|statement| crate::query_execution_sql::mysql_statement_opens_explicit_transaction(statement));
+        let explicit_start_in_batch = statements
+            .iter()
+            .any(|statement| crate::query_execution_sql::mysql_statement_opens_explicit_transaction(statement));
+        // An error, a truncated result, or result sets still pending may leave
+        // the last status packet short of the end, so only a batch whose
+        // response was read completely can prove that the cleanup `ROLLBACK`
+        // is unnecessary.
+        let status_is_final = mode == crate::connection::MysqlMode::Normal
+            && error_action.is_none()
+            && results.iter().all(|result| !result.execution_error && !result.result.truncated)
+            && db::mysql::last_ok_ends_response(&conn);
         let rollback_started_at = std::time::Instant::now();
         let transaction = if tab_scoped {
             settle_mysql_auto_commit_transaction(
@@ -4078,8 +4125,15 @@ async fn execute_multi_mysql(
                 &mut conn,
                 options.preserve_explicit_transaction,
                 explicit_start_in_batch,
+                status_is_final,
             )
             .await
+        } else if mysql_cleanup_rollback_is_noop(
+            status_is_final,
+            explicit_start_in_batch,
+            db::mysql::session_status_from_last_ok(&conn),
+        ) {
+            Ok(MysqlAutoCommitTransaction::None)
         } else {
             db::mysql::rollback_open_transaction(&mut conn).await.map(|()| MysqlAutoCommitTransaction::None)
         };
@@ -12000,6 +12054,22 @@ for line in sys.stdin:
         let unknown_without_opener = decide_mysql_auto_commit_transaction(true, false, false, None);
         assert!(!unknown_without_opener.preserve);
         assert_eq!(unknown_without_opener.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_cleanup_rollback_is_skipped_only_when_the_final_status_proves_nothing_is_open() {
+        assert!(mysql_cleanup_rollback_is_noop(true, false, Some(mysql_status(false, true))));
+
+        // A transaction is open, or auto-commit is off: the cleanup must run.
+        assert!(!mysql_cleanup_rollback_is_noop(true, false, Some(mysql_status(true, true))));
+        assert!(!mysql_cleanup_rollback_is_noop(true, false, Some(mysql_status(false, false))));
+        // The last statement failed, so no status packet is cached.
+        assert!(!mysql_cleanup_rollback_is_noop(true, false, None));
+        // A truncated or failed result may leave an earlier command's packet.
+        assert!(!mysql_cleanup_rollback_is_noop(false, false, Some(mysql_status(false, true))));
+        // A batch that opened a transaction keeps the cleanup even when the
+        // server reports nothing open, in case it never sets the flag.
+        assert!(!mysql_cleanup_rollback_is_noop(true, true, Some(mysql_status(false, true))));
     }
 
     #[test]

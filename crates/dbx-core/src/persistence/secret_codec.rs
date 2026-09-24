@@ -16,7 +16,9 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine as _;
 
 const PREFIX: &str = "dbxenc1";
+#[cfg(feature = "os-keyring")]
 const KEYRING_SERVICE: &str = "com.dbx.app.secret-store.v1";
+#[cfg(feature = "os-keyring")]
 const KEYRING_USER: &str = "local-data-encryption-key";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +248,7 @@ impl SecretCodec {
     }
 }
 
+#[cfg(feature = "os-keyring")]
 fn platform_keyring_codec(allow_create: bool) -> Option<SecretCodec> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()?;
     match entry.get_password() {
@@ -261,6 +264,13 @@ fn platform_keyring_codec(allow_create: bool) -> Option<SecretCodec> {
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
     entry.set_password(&encoded).ok()?;
     Some(SecretCodec::new(key))
+}
+
+#[cfg(not(feature = "os-keyring"))]
+fn platform_keyring_codec(_allow_create: bool) -> Option<SecretCodec> {
+    // Cross/server builds compile without the OS keyring backend; the managed
+    // .dbx/secret.key file remains the key material source.
+    None
 }
 
 fn create_managed_key(path: &std::path::Path) -> Result<SecretCodec, String> {

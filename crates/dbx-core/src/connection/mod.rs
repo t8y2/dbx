@@ -4044,8 +4044,14 @@ impl AppState {
                             true
                         }
                         Ok(mut conn) => {
+                            // The probe runs no statement, so a shared pool can take
+                            // the connection back without COM_RESET_CONNECTION and the
+                            // setup replay, and a connection verified moments ago (by
+                            // this probe or the checkout that follows it) is not
+                            // pinged again.
+                            conn.reset_connection(false);
                             let timeout = crate::db::connection_timeout();
-                            match tokio::time::timeout(timeout, conn.ping()).await {
+                            match tokio::time::timeout(timeout, db::mysql::verify_pooled_conn(&pool, &mut conn)).await {
                                 Ok(Ok(())) => false,
                                 Ok(Err(err)) => {
                                     log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
@@ -5906,8 +5912,14 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
 async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) -> Result<(), KeepaliveError> {
     match target {
         KeepaliveTarget::Mysql(pool) => {
+            // The checkout health check is the keepalive round trip: it pings
+            // the idle connection (unless it was verified moments ago) and
+            // replaces it when it died. A ping leaves no session state behind,
+            // so return the connection without the COM_RESET_CONNECTION and
+            // setup replay a shared pool would run.
             let mut conn = db::mysql::get_conn_with_health_check(pool).await?;
-            conn.ping().await.map_err(|error| KeepaliveError::Legacy(error.to_string()))
+            conn.reset_connection(false);
+            Ok(())
         }
         KeepaliveTarget::Postgres(pool) => {
             let client = pool.get().await.map_err(|e| format!("PostgreSQL pool error: {e}"))?;

@@ -820,11 +820,12 @@ async fn collect_first_result_limited(
     restore_sqlserver_blank_column_names(&mut columns, sql);
     restore_sqlserver_unsafe_column_types(&mut column_types, query);
 
+    let (spatial_columns, spatial_values) = spatial_values_builder.finish_with_values(spatial_values);
     Ok(QueryResult {
         columns,
         column_types,
         column_sortables: vec![],
-        spatial_columns: spatial_values_builder.finish(),
+        spatial_columns,
         spatial_values,
         rows,
         affected_rows: 0,

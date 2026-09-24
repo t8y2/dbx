@@ -105,7 +105,7 @@ export interface ContentAreaSurfaceEmits {
   objectBrowserSearchChange: [tabId: string, query: string];
   objectBrowserFilterChange: [tabId: string, filter: ObjectBrowserFilter];
   addObjectTableToAi: [tabId: string, tables: Array<{ name: string; schema?: string }>];
-  structureEditorSaved: [tabId: string, commentChanged: boolean];
+  structureEditorSaved: [tabId: string, commentChanged: boolean, createdTableName?: string];
   structureEditorClose: [tabId: string];
   previewStatement: [tabId: string, range: StatementRange | null];
   focusStatement: [tabId: string, range: StatementRange | null];

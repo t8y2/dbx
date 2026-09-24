@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.6.20"
+version = "0.6.21"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -13,9 +13,10 @@ name = "dbx_lib"
 crate-type = ["rlib"]
 
 [features]
-default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts"]
+default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts", "os-keyring"]
 custom-protocol = ["tauri/custom-protocol"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
+os-keyring = ["dbx-core/os-keyring"]
 dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]

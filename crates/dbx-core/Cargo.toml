@@ -15,6 +15,9 @@ sqlite-multiple-ciphers = ["dbx-drivers/sqlite-multiple-ciphers"]
 # (dbx-cli, dbx-mcp); do not combine with the cipher features.
 sqlite-bundled = ["rusqlite/bundled", "dbx-drivers/sqlite-bundled"]
 openapi = ["dbx-types/openapi", "dbx-sql/openapi"]
+# OS keyring storage for the secret-store key material (macOS/Windows keychain,
+# Linux dbus Secret Service with persistent fallback). Desktop only.
+os-keyring = ["dep:keyring", "keyring/linux-native-sync-persistent"]
 system-fonts = ["font-kit"]
 
 [dependencies]
@@ -64,7 +67,11 @@ aes-gcm = "0.10"
 aes = "0.8"
 cbc = "0.1"
 argon2 = "0.5"
-keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
+# The Linux dbus Secret Service backend (linux-native-sync-persistent) pulls
+# libdbus-sys, whose pkg-config build script cannot cross-compile (musl static
+# browser, docker zigbuild). It stays opt-in so server/cross builds skip it and
+# fall back to the managed .dbx/secret.key file.
+keyring = { version = "3.6.3", default-features = false, optional = true, features = ["apple-native", "windows-native", "crypto-rust"] }
 sha2 = "0.10"
 async-trait = "0.1"
 bytes = "1"

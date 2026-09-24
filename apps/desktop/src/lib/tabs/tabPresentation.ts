@@ -631,6 +631,9 @@ export function tabIconClass(tab: QueryTab): string {
   if (tab.mode === "mongo") return "text-green-400";
   if (tab.mode === "vector") return "text-cyan-400";
   if (tab.mode === "structure") return "text-blue-500";
+  // query 的图标是数据库品牌 logo（TabModeIcon），不吃文字颜色；回退的
+  // Database 图标自带 text-blue-400，与 mq 模式同样返回空串。
+  if (tab.mode === "query") return "";
   return "text-blue-600 dark:text-blue-400";
 }
 

@@ -27,6 +27,7 @@ const createError = ref("");
 const createUid = ref("");
 const createPrimaryKey = ref("");
 const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
+let loadRequestId = 0;
 
 const stats = computed(() => overview.value?.stats.data ?? null);
 const cards = computed(() => [
@@ -44,15 +45,24 @@ function sectionLabel(section?: OverviewSection<unknown>): string {
 }
 
 async function load() {
+  const requestId = ++loadRequestId;
   loading.value = true;
   error.value = "";
   try {
-    overview.value = await api.meilisearchGetSystemOverview(props.connectionId);
+    const result = await api.meilisearchGetSystemOverview(props.connectionId);
+    if (requestId !== loadRequestId) return;
+    overview.value = result;
   } catch (cause: any) {
+    if (requestId !== loadRequestId) return;
     error.value = cause?.message || String(cause);
   } finally {
-    loading.value = false;
+    if (requestId === loadRequestId) loading.value = false;
   }
+}
+
+function refresh() {
+  if (loading.value) return;
+  void load();
 }
 
 function openCreate() {
@@ -95,7 +105,7 @@ onMounted(() => void load());
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto p-4">
+  <div class="h-full select-none overflow-y-auto p-4">
     <div class="mb-4 flex items-center justify-between">
       <div>
         <h2 class="text-base font-semibold">{{ t("meilisearch.overview") }}</h2>
@@ -103,7 +113,7 @@ onMounted(() => void load());
       </div>
       <div class="flex items-center gap-2">
         <Button size="sm" variant="outline" :disabled="readOnly" @click="openCreate"><Plus class="mr-1 h-3.5 w-3.5" />{{ t("meilisearch.createIndex") }}</Button>
-        <Button size="sm" variant="outline" :disabled="loading" @click="load"><RefreshCcw class="mr-1 h-3.5 w-3.5" />{{ t("meilisearch.refresh") }}</Button>
+        <Button size="sm" variant="outline" :disabled="loading" @click="refresh"><RefreshCcw class="mr-1 h-3.5 w-3.5" />{{ t("meilisearch.refresh") }}</Button>
       </div>
     </div>
     <QueryLoadingState v-if="loading && !overview" class="py-12" />
@@ -180,11 +190,11 @@ onMounted(() => void load());
         <div class="grid gap-3 text-xs">
           <label class="grid gap-1"
             ><span class="font-medium">{{ t("meilisearch.uid") }}</span
-            ><Input v-model="createUid" :disabled="createWorking" :placeholder="t('meilisearch.createIndexUidPlaceholder')"
+            ><Input v-model="createUid" class="select-text" :disabled="createWorking" :placeholder="t('meilisearch.createIndexUidPlaceholder')"
           /></label>
           <label class="grid gap-1"
             ><span class="font-medium">{{ t("meilisearch.primaryKey") }}</span
-            ><Input v-model="createPrimaryKey" :disabled="createWorking" :placeholder="t('meilisearch.createIndexPrimaryKeyPlaceholder')" /><span class="text-[11px] text-muted-foreground">{{ t("meilisearch.createIndexPrimaryKeyHelp") }}</span></label
+            ><Input v-model="createPrimaryKey" class="select-text" :disabled="createWorking" :placeholder="t('meilisearch.createIndexPrimaryKeyPlaceholder')" /><span class="text-[11px] text-muted-foreground">{{ t("meilisearch.createIndexPrimaryKeyHelp") }}</span></label
           >
           <ErrorBanner v-if="createError" :message="createError" />
         </div>

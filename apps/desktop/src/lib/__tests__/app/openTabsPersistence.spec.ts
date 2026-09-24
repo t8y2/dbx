@@ -62,6 +62,13 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.objectSource).toBeUndefined();
   });
 
+  it("preserves the DDL viewer identity needed for read-only tabs", () => {
+    const ddlViewer = { schema: "public", tableName: "users", objectType: "VIEW" as const, formatDialect: "postgres" as const };
+    const [restored] = roundTrip([queryTab({ sourceView: true, ddlViewer, sql: "CREATE VIEW users AS SELECT 1" })]);
+
+    expect(restored.ddlViewer).toEqual(ddlViewer);
+  });
+
   it("does not persist a pending object-source tab without its in-flight request", () => {
     const pending = queryTab({
       id: "pending-source",

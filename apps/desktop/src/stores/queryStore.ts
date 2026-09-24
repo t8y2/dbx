@@ -69,7 +69,9 @@ import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, tableMetadataToDataTabMeta, updateCachedTableMetadataType, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
+import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
+import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint, jdbcConnectionUsesDriverRowOffset, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -160,6 +162,8 @@ export interface EditorWorkspacePersistState {
   orientation: "vertical" | "horizontal";
   sizes: number[];
 }
+
+export type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryWriteTargets" | "queryEditabilityReason" | "tableMeta" | "resultColumnComments" | "queryDisplaySourceColumns">;
 
 interface BatchSqlResumeOptions {
   batch: BatchSqlExecution;
@@ -649,6 +653,32 @@ function annotateQueryResultSource(result: QueryResult, sourceStatement: string,
   const label = databaseType ? queryResultSourceLabel(sourceStatement, { database, databaseType }) : undefined;
   if (label) result.sourceLabel = label;
   return result;
+}
+
+export function canonicalizeQueryResultSourceLabel(currentLabel: string, sourceStatement: string, tableMeta: { tableName: string; schema?: string; database?: string }, options: { database?: string; databaseType?: DatabaseType } = {}): string | undefined {
+  const canonicalTableName = tableMeta.tableName?.trim();
+  if (!canonicalTableName) return undefined;
+
+  const autoLabel = queryResultSourceLabel(sourceStatement, options);
+  if (!autoLabel || autoLabel.toLowerCase() !== currentLabel.toLowerCase()) {
+    return undefined;
+  }
+
+  const lastDot = currentLabel.lastIndexOf(".");
+  if (lastDot < 0) {
+    return canonicalTableName;
+  }
+
+  const existingQualifier = currentLabel.slice(0, lastDot);
+  const lowerQualifier = existingQualifier.toLowerCase();
+  let qualifier = existingQualifier;
+  if (tableMeta.schema?.trim() && tableMeta.schema.trim().toLowerCase() === lowerQualifier) {
+    qualifier = tableMeta.schema.trim();
+  } else if (tableMeta.database?.trim() && tableMeta.database.trim().toLowerCase() === lowerQualifier) {
+    qualifier = tableMeta.database.trim();
+  }
+
+  return `${qualifier}.${canonicalTableName}`;
 }
 
 function elasticsearchHttpErrorStatus(result: QueryResult): number | undefined {
@@ -3020,6 +3050,67 @@ export const useQueryStore = defineStore("query", () => {
     tab.sourceView = true;
     markTabClean(tab);
     clearObjectSourceLoad(tab);
+  }
+
+  /**
+   * 「先出 tab 再加载」（issue #9387）：为 pending 的 DDL 新标签取回 DDL 并回填。
+   * 加载在 store 侧进行，不依赖该 tab 是否处于激活状态；失败就地写入
+   * `ddlLoad.error`，由编辑区渲染错误 + Retry，而不是弹 toast。
+   */
+  async function loadDdlViewerTab(id: string) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    const request = tab?.ddlLoad;
+    const ddlViewer = tab?.ddlViewer;
+    if (!tab || !request || !ddlViewer || !tab.connectionId) return;
+    const { connectionId } = tab;
+    const { database } = tab;
+    const settingsStore = useSettingsStore();
+    try {
+      const connectionStore = useConnectionStore();
+      const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId));
+      const { ddl } = await loadObjectDdl(
+        {
+          connectionId,
+          database,
+          schema: ddlViewer.schema || database,
+          tableName: ddlViewer.tableName,
+          objectType: ddlViewer.objectType,
+          catalog: tab.catalog,
+        },
+        // 与弹框打开一致：默认优先使用缓存，开启「每次打开时刷新」才强制重查
+        { force: settingsStore.editorSettings.refreshDdlOnOpen },
+      );
+      const displayed = await formatDdlForDisplay(
+        ddl,
+        {
+          dialect: ddlViewer.formatDialect ?? "generic",
+          databaseType,
+          database,
+          catalog: tab.catalog,
+          includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+          excludeDdlStorage: settingsStore.editorSettings.excludeDdlStorage,
+        },
+        settingsStore.editorSettings.sqlFormatter,
+      );
+      // 加载期间 tab 被关掉，或 pending 状态已被一次重试取代：静默丢弃这次结果
+      const current = tabs.value.find((candidate) => candidate.id === id);
+      if (current?.ddlLoad !== request) return;
+      updateSql(id, displayed);
+      markTabClean(current);
+      current.ddlLoad = undefined;
+    } catch (e: any) {
+      const failed = tabs.value.find((candidate) => candidate.id === id);
+      if (failed?.ddlLoad === request) failed.ddlLoad = { startedAt: Date.now(), error: e?.message || String(e) };
+    }
+  }
+
+  /** 就地重试失败的 DDL 加载；已完成加载的 DDL 标签走编辑区工具栏的刷新。 */
+  function retryDdlViewerTab(id: string) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.ddlLoad) return;
+    tab.ddlLoad = { startedAt: Date.now() };
+    void loadDdlViewerTab(id);
   }
 
   function showExecutedQueryResults(connectionId: string, database: string, sql: string, queryResults: QueryResult[]) {
@@ -5600,8 +5691,6 @@ export const useQueryStore = defineStore("query", () => {
     return producedResult;
   }
 
-  type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryWriteTargets" | "queryEditabilityReason" | "tableMeta" | "resultColumnComments" | "queryDisplaySourceColumns">;
-
   type LoadedEditableSource = {
     source: EditableQuerySource;
     analysis: EditableQueryInfo;
@@ -5710,7 +5799,7 @@ export const useQueryStore = defineStore("query", () => {
     return databaseType !== "oracle" || !!loaded.tableMeta.tableType?.trim();
   }
 
-  function applyQueryMetadataPatch(tab: QueryTab, patch: QueryMetadataPatch) {
+  function applyQueryMetadataPatch(tab: QueryTab, patch: QueryMetadataPatch, databaseType?: DatabaseType, database?: string) {
     tab.queryAnalysis = patch.queryAnalysis;
     tab.querySourceColumns = patch.querySourceColumns;
     tab.queryWriteTargets = patch.queryWriteTargets;
@@ -5719,6 +5808,18 @@ export const useQueryStore = defineStore("query", () => {
     tab.tableMeta = patch.tableMeta;
     tab.resultColumnComments = patch.resultColumnComments;
     tab.queryDisplaySourceColumns = patch.queryDisplaySourceColumns;
+
+    if (patch.tableMeta?.tableName && tab.result?.sourceStatement && tab.result.sourceLabel) {
+      const nextLabel = canonicalizeQueryResultSourceLabel(tab.result.sourceLabel, tab.result.sourceStatement, patch.tableMeta, {
+        database: database ?? tab.database,
+        databaseType,
+      });
+      if (nextLabel) {
+        tab.result.sourceLabel = nextLabel;
+        const matching = tab.results?.find((result) => result === tab.result);
+        if (matching) matching.sourceLabel = nextLabel;
+      }
+    }
   }
 
   function resolveEditableSourceMetadataTarget(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, executionDatabase: string): EditableSourceMetadataTarget {
@@ -6331,7 +6432,7 @@ export const useQueryStore = defineStore("query", () => {
       }
       const current = tabs.value.find((t) => t.id === tabId);
       if (patch && current?.result === result) {
-        applyQueryMetadataPatch(current, patch);
+        applyQueryMetadataPatch(current, patch, databaseType, executionDatabase);
         syncActiveResultRunFromDisplayed(current);
         queryExecutionLog("info", "metadata:done", { traceId, elapsed: elapsed() });
       } else {
@@ -9093,6 +9194,8 @@ export const useQueryStore = defineStore("query", () => {
     openObjectSourceTabPending,
     retryObjectSourceTab,
     refreshObjectSourceTab,
+    loadDdlViewerTab,
+    retryDdlViewerTab,
     showExecutedQueryResults,
     focusGroup,
     activateTab,
@@ -9248,6 +9351,7 @@ export const useQueryStore = defineStore("query", () => {
     countTabResultRows,
     buildQueryResultExportRequest,
     exportQuerySqlDirect,
+    applyQueryMetadataPatch,
     getResourceLifecycleDiagnostics: () => resourceLifecycleDiagnostics(tabs.value),
     notifyConnectionMayBeLost,
   };

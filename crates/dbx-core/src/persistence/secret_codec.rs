@@ -20,6 +20,12 @@ const PREFIX: &str = "dbxenc1";
 const KEYRING_SERVICE: &str = "com.dbx.app.secret-store.v1";
 #[cfg(feature = "os-keyring")]
 const KEYRING_USER: &str = "local-data-encryption-key";
+// Secret Service attribute layout written by the keyring crate (the desktop
+// writer): target is always present and defaults to "default"; entries from
+// older keyring versions may lack it, so lookups fall back to the two-attribute
+// search.
+#[cfg(all(feature = "os-keyring", target_os = "linux"))]
+const KEYRING_TARGET: &str = "default";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretKeyPolicy {
@@ -131,7 +137,7 @@ impl SecretCodec {
         platform_provider: F,
     ) -> Result<SecretKeyResolution, String>
     where
-        F: FnOnce(bool) -> Option<SecretCodec>,
+        F: FnOnce(bool) -> Result<Option<SecretCodec>, String>,
     {
         let compatibility_error = if let Some(path) = compatibility_path.as_ref().filter(|path| path.exists()) {
             match Self::read_key_file(path, false) {
@@ -141,8 +147,16 @@ impl SecretCodec {
         } else {
             None
         };
-        if let Some(codec) = platform_provider(allow_create) {
-            return Ok(SecretKeyResolution { codec, source: SecretKeySource::PlatformStore });
+        // A keychain item that exists but cannot be read must not silently
+        // fall through to provisioning a brand-new key, which would strand the
+        // existing ciphertext behind the wrong key.
+        match platform_provider(allow_create) {
+            Ok(Some(codec)) => return Ok(SecretKeyResolution { codec, source: SecretKeySource::PlatformStore }),
+            Ok(None) => {}
+            Err(detail) => return Err(detail),
+        }
+        if let Some(error) = compatibility_error {
+            return Err(error);
         }
         if allow_create {
             if let Some(path) = compatibility_path {
@@ -150,7 +164,7 @@ impl SecretCodec {
                 return Ok(SecretKeyResolution { codec, source: SecretKeySource::ManagedDataDir });
             }
         }
-        compatibility_error.map_or_else(|| Err("KEY_PROVIDER_UNAVAILABLE".to_string()), Err)
+        Err("KEY_PROVIDER_UNAVAILABLE".to_string())
     }
 
     /// Read an explicitly configured key, then an existing compatibility key
@@ -248,29 +262,89 @@ impl SecretCodec {
     }
 }
 
-#[cfg(feature = "os-keyring")]
-fn platform_keyring_codec(allow_create: bool) -> Option<SecretCodec> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()?;
+#[cfg(all(feature = "os-keyring", any(target_os = "macos", target_os = "windows")))]
+fn platform_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+        .map_err(|error| format!("keyring entry unavailable: {error}"))?;
     match entry.get_password() {
-        Ok(value) => return SecretCodec::from_key_material(value.trim()).ok(),
+        Ok(value) => return Ok(SecretCodec::from_key_material(value.trim()).ok()),
         Err(keyring::Error::NoEntry) => {}
-        Err(_) => return None,
+        // Distinguish a present-but-unreadable keychain item (ACL denial,
+        // locked keychain) from a missing one: callers surface this class in
+        // diagnostics instead of the generic provider-unavailable code.
+        Err(error) => return Err(format!("KEYRING_ACCESS_FAILED: {error}")),
     }
     if !allow_create {
-        return None;
+        return Ok(None);
     }
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
-    entry.set_password(&encoded).ok()?;
-    Some(SecretCodec::new(key))
+    entry.set_password(&encoded).map_err(|error| format!("KEYRING_WRITE_FAILED: {error}"))?;
+    Ok(Some(SecretCodec::new(key)))
+}
+
+#[cfg(all(feature = "os-keyring", target_os = "linux"))]
+fn platform_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, String> {
+    use secret_service::{blocking::SecretService, EncryptionType};
+    use std::collections::HashMap;
+
+    // A missing session bus (headless server/container) means the provider is
+    // absent rather than broken; return None so callers fall back to the
+    // managed .dbx/secret.key file exactly as before.
+    let service = match SecretService::connect(EncryptionType::Dh) {
+        Ok(service) => service,
+        Err(_) => return Ok(None),
+    };
+    let collection = match service.get_default_collection() {
+        Ok(collection) => collection,
+        Err(_) => return Ok(None),
+    };
+    let mut attributes = HashMap::new();
+    attributes.insert("target", KEYRING_TARGET);
+    attributes.insert("service", KEYRING_SERVICE);
+    attributes.insert("username", KEYRING_USER);
+    let mut found = collection
+        .search_items(attributes)
+        .map_err(|error| format!("KEYRING_ACCESS_FAILED: secret search failed: {error}"))?;
+    if found.is_empty() {
+        let mut legacy = HashMap::new();
+        legacy.insert("service", KEYRING_SERVICE);
+        legacy.insert("username", KEYRING_USER);
+        found = collection
+            .search_items(legacy)
+            .map_err(|error| format!("KEYRING_ACCESS_FAILED: secret search failed: {error}"))?;
+    }
+    let item = found.into_iter().next();
+    match item {
+        Some(item) => {
+            let secret =
+                item.get_secret().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret read failed: {error}"))?;
+            let material = String::from_utf8(secret).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
+            Ok(SecretCodec::from_key_material(material.trim()).ok())
+        }
+        None if allow_create => {
+            let mut key = [0u8; 32];
+            OsRng.fill_bytes(&mut key);
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
+            let mut created = HashMap::new();
+            created.insert("target", KEYRING_TARGET);
+            created.insert("service", KEYRING_SERVICE);
+            created.insert("username", KEYRING_USER);
+            collection
+                .create_item("DBX secret-store key", created, encoded.as_bytes(), true, "text/plain")
+                .map_err(|error| format!("KEYRING_WRITE_FAILED: {error}"))?;
+            Ok(Some(SecretCodec::new(key)))
+        }
+        None => Ok(None),
+    }
 }
 
 #[cfg(not(feature = "os-keyring"))]
-fn platform_keyring_codec(_allow_create: bool) -> Option<SecretCodec> {
+fn platform_keyring_codec(_allow_create: bool) -> Result<Option<SecretCodec>, String> {
     // Cross/server builds compile without the OS keyring backend; the managed
     // .dbx/secret.key file remains the key material source.
-    None
+    Ok(None)
 }
 
 fn create_managed_key(path: &std::path::Path) -> Result<SecretCodec, String> {
@@ -524,7 +598,7 @@ mod tests {
         let path = directory.path().join("secret.key");
         let result = SecretCodec::resolve_platform_default(Some(path.clone()), false, |allow_create| {
             assert!(!allow_create);
-            None
+            Ok(None)
         });
         assert!(matches!(result, Err(error) if error == "KEY_PROVIDER_UNAVAILABLE"));
         assert!(!path.exists());
@@ -536,7 +610,7 @@ mod tests {
         let path = directory.path().join("secret.key");
         let created = SecretCodec::resolve_platform_default(Some(path.clone()), true, |allow_create| {
             assert!(allow_create);
-            None
+            Ok(None)
         })
         .unwrap();
         let envelope = created.codec.encrypt("connection", "password", "secret").unwrap();
@@ -556,7 +630,7 @@ mod tests {
         let path = directory.path().join("secret.key");
         std::fs::write(&path, "\n").unwrap();
         for allow_create in [false, true] {
-            let result = SecretCodec::resolve_platform_default(Some(path.clone()), allow_create, |_| None);
+            let result = SecretCodec::resolve_platform_default(Some(path.clone()), allow_create, |_| Ok(None));
             assert!(matches!(result, Err(error) if error == "SECRET_KEY_INVALID"));
             assert_eq!(std::fs::read_to_string(&path).unwrap(), "\n");
         }
@@ -569,7 +643,7 @@ mod tests {
         std::fs::write(&compatibility_path, "\n").unwrap();
 
         let resolution = SecretCodec::resolve_platform_default(Some(compatibility_path), false, |_| {
-            Some(SecretCodec::new([9u8; 32]))
+            Ok(Some(SecretCodec::new([9u8; 32])))
         })
         .unwrap();
 

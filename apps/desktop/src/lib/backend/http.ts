@@ -3655,6 +3655,10 @@ export async function redisDeleteKeys(connectionId: string, db: number, keyRaws:
   return post("/api/redis/delete-keys", { connectionId, db, keyRaws });
 }
 
+export async function redisDeleteKeysByPattern(connectionId: string, db: number, pattern: string): Promise<number> {
+  return post("/api/redis/delete-keys-by-pattern", { connectionId, db, pattern });
+}
+
 export async function redisFlushDb(connectionId: string, db: number): Promise<void> {
   return post("/api/redis/flush-db", { connectionId, db });
 }

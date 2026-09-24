@@ -5473,6 +5473,8 @@ export default withEnglishFallback({
     deleteKey: "Elimina chiave",
     deleteGroupDetails: "{target}\n{count} chiavi",
     deleteLoadedSearchKeysDetails: "{target}\n{count} chiavi corrispondenti caricate",
+    deleteGroupSubtreeDetails: "{target}\nVerranno eliminate tutte le chiavi di questo gruppo ({count} caricate)",
+    deleteGroupSubtreeSuccess: "Eliminate {count} chiavi",
     batchExpiry: "Imposta scadenza",
     batchExpiryTitle: "Scadenza in blocco",
     batchExpirySelected: "{count} chiavi selezionate",

@@ -3867,6 +3867,40 @@ where
     cmd.query_async(con).await.map_err(|e| e.to_string())
 }
 
+/// `SCAN COUNT` hint used by [`delete_keys_by_pattern`]; large enough to keep
+/// the cycle count low, small enough that one cycle stays cheap on the server.
+pub const DELETE_KEYS_BY_PATTERN_SCAN_COUNT: usize = 500;
+/// Upper bound on the keys carried by a single `DEL` command.
+const DELETE_KEYS_BY_PATTERN_DELETE_BATCH: usize = 512;
+
+/// Deletes every key matching `pattern` with repeated `SCAN` + `DEL` cycles.
+///
+/// A group in the key browser is a key *prefix*: the loaded rows are only the
+/// part of that subtree the browser has scanned so far, so deleting just those
+/// rows leaves the rest of the subtree behind. `KEYS` or one oversized `DEL`
+/// would block the server for a large subtree, so keys are discovered with one
+/// `SCAN` cycle at a time and deleted in bounded batches.
+pub async fn delete_keys_by_pattern<C>(con: &mut C, pattern: &str, scan_count: usize) -> Result<u64, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let count = scan_count.max(1);
+    let mut cursor = 0u64;
+    let mut deleted = 0u64;
+    loop {
+        let page = scan_keys_batch_inner(con, cursor, pattern, count, 1, false, false).await?;
+        let keys: Result<Vec<Vec<u8>>, String> =
+            page.keys.iter().map(|key| redis_key_raw_to_bytes(&key.key_raw)).collect();
+        for batch in keys?.chunks(DELETE_KEYS_BY_PATTERN_DELETE_BATCH) {
+            deleted += delete_keys(con, batch).await?;
+        }
+        cursor = page.cursor;
+        if cursor == 0 {
+            return Ok(deleted);
+        }
+    }
+}
+
 pub async fn load_more_collection<C>(
     con: &mut C,
     key: &[u8],

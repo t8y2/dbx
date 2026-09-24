@@ -5991,6 +5991,8 @@ export default withEnglishFallback({
     deleteKey: "删除 key",
     deleteGroupDetails: "{target}\n{count} 个 key",
     deleteLoadedSearchKeysDetails: "{target}\n已加载的 {count} 个匹配 key",
+    deleteGroupSubtreeDetails: "{target}\n将删除该分组下的全部 key（已加载 {count} 个）",
+    deleteGroupSubtreeSuccess: "已删除 {count} 个 key",
     batchExpiry: "设置过期时间",
     batchExpiryTitle: "批量设置过期时间",
     batchExpirySelected: "已选择 {count} 个 key",

@@ -6018,6 +6018,8 @@ export default {
     deleteKey: "Delete key",
     deleteGroupDetails: "{target}\n{count} keys",
     deleteLoadedSearchKeysDetails: "{target}\n{count} loaded matching keys",
+    deleteGroupSubtreeDetails: "{target}\nAll keys under this group will be deleted ({count} loaded)",
+    deleteGroupSubtreeSuccess: "Deleted {count} keys",
     batchExpiry: "Set expiry",
     batchExpiryTitle: "Batch expiration",
     batchExpirySelected: "Selected {count} keys",

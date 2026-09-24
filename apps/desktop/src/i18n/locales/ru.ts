@@ -6494,6 +6494,8 @@ export default withEnglishFallback({
     deleteKey: "Удалить ключ",
     deleteGroupDetails: "{target}\n{count} ключей",
     deleteLoadedSearchKeysDetails: "{target}\n{count} загруженных совпадающих ключей",
+    deleteGroupSubtreeDetails: "{target}\nБудут удалены все ключи этой группы (загружено {count})",
+    deleteGroupSubtreeSuccess: "Удалено ключей: {count}",
     batchExpiry: "Задать срок действия",
     batchExpiryTitle: "Пакетное истечение",
     batchExpirySelected: "Выбрано {count} ключей",

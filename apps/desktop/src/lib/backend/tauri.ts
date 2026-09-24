@@ -3385,6 +3385,10 @@ export async function redisDeleteKeys(connectionId: string, db: number, keyRaws:
   return invoke("redis_delete_keys", { connectionId, db, keyRaws });
 }
 
+export async function redisDeleteKeysByPattern(connectionId: string, db: number, pattern: string): Promise<number> {
+  return invoke("redis_delete_keys_by_pattern", { connectionId, db, pattern });
+}
+
 export async function redisFlushDb(connectionId: string, db: number): Promise<void> {
   return invoke("redis_flush_db", { connectionId, db });
 }

@@ -600,6 +600,7 @@ export const redisSetExpireAt = forward("redisSetExpireAt");
 export const redisSetKeysTtl = forward("redisSetKeysTtl");
 export const redisSetKeysExpireAt = forward("redisSetKeysExpireAt");
 export const redisDeleteKeys = forward("redisDeleteKeys");
+export const redisDeleteKeysByPattern = forward("redisDeleteKeysByPattern");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
 export const redisLoadMore = forward("redisLoadMore");

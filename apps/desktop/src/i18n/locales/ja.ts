@@ -5500,6 +5500,8 @@ export default withEnglishFallback({
     deleteKey: "キーを削除",
     deleteGroupDetails: "{target}\n{count}個のキー",
     deleteLoadedSearchKeysDetails: "{target}\n読み込み済みの一致キー {count} 件",
+    deleteGroupSubtreeDetails: "{target}\nこのグループ配下のキーをすべて削除します（読み込み済み {count} 件）",
+    deleteGroupSubtreeSuccess: "{count} 件のキーを削除しました",
     batchExpiry: "有効期限を設定",
     batchExpiryTitle: "有効期限の一括設定",
     batchExpirySelected: "{count} 件のキーを選択中",

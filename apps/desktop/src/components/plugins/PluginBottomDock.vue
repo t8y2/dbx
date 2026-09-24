@@ -332,6 +332,18 @@ function hideDock() {
   setDockVisible(false);
 }
 
+// Maximize and collapse are mutually exclusive dock states (the height style
+// reads maximized first): collapsing while maximized used to hide the content
+// behind a stuck 80vh frame ("only the content hid, the dock didn't move").
+function toggleDockMaximize() {
+  if (!maximized.value) collapsed.value = false;
+  setDockMaximized(!maximized.value);
+}
+function toggleDockCollapse() {
+  if (!collapsed.value) setDockMaximized(false);
+  collapsed.value = !collapsed.value;
+}
+
 // Drag the top edge to resize the height (min 140px, up to the shared maximize
 // bound). Dragging always exits maximized/collapsed: the start height is the
 // currently rendered pixel height, so the transition is seamless. The
@@ -400,7 +412,20 @@ const onPlusMenuOutsidePointerDown = (event: PointerEvent) => {
   if (plusOpen.value && root && !root.contains(event.target as Node)) closePlusMenu();
 };
 window.addEventListener("pointerdown", onPlusMenuOutsidePointerDown, true);
-onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutsidePointerDown, true));
+// Plugin terminal panels live in cross-document iframes: a click inside one
+// never reaches the host window's pointerdown closer above, but it does move
+// focus out of the host document — close on blur. Escape covers keyboard users.
+const onPlusMenuWindowBlur = () => closePlusMenu();
+const onPlusMenuKeydown = (event: KeyboardEvent) => {
+  if (plusOpen.value && event.key === "Escape") closePlusMenu();
+};
+window.addEventListener("blur", onPlusMenuWindowBlur);
+window.addEventListener("keydown", onPlusMenuKeydown, true);
+onScopeDispose(() => {
+  window.removeEventListener("pointerdown", onPlusMenuOutsidePointerDown, true);
+  window.removeEventListener("blur", onPlusMenuWindowBlur);
+  window.removeEventListener("keydown", onPlusMenuKeydown, true);
+});
 </script>
 
 <template>
@@ -474,14 +499,14 @@ onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutside
       </div>
       <Tooltip :delay-duration="200">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-7 w-7" :title="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" :aria-label="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" @click="setDockMaximized(!maximized)">
+          <Button variant="ghost" size="icon" class="h-7 w-7" :title="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" :aria-label="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" @click="toggleDockMaximize">
             <Minimize2 v-if="maximized" class="h-3.5 w-3.5" />
             <Maximize2 v-else class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ maximized ? t("pluginDock.restore") : t("pluginDock.maximize") }}</TooltipContent>
       </Tooltip>
-      <Button variant="ghost" size="icon" class="h-7 w-7" :title="collapsed ? t('pluginDock.expand') : t('pluginDock.collapse')" :aria-label="collapsed ? t('pluginDock.expand') : t('pluginDock.collapse')" @click="collapsed = !collapsed">
+      <Button variant="ghost" size="icon" class="h-7 w-7" :title="collapsed ? t('pluginDock.expand') : t('pluginDock.collapse')" :aria-label="collapsed ? t('pluginDock.expand') : t('pluginDock.collapse')" @click="toggleDockCollapse">
         <ChevronUp v-if="collapsed" class="h-3.5 w-3.5" />
         <ChevronDown v-else class="h-3.5 w-3.5" />
       </Button>

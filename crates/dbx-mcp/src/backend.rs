@@ -697,6 +697,24 @@ impl LocalBackend {
         let storage = Storage::open_unmigrated(path).await?.with_secret_key_creation(false);
         let migration = storage.inspect_data_migration().await?;
         if !migration.is_ready() {
+            // The migration wizard may have already completed on Desktop with
+            // the key provisioned in the OS keychain, which a keyring-less
+            // CLI/MCP build cannot read. Pointing those users back at the
+            // wizard loops forever, so separate the two failure shapes.
+            let migration_data_remaining = migration.database_plaintext_count > 0
+                || migration.sync_credential_count > 0
+                || migration.legacy_json_files.iter().any(|file| file.exists);
+            if !migration_data_remaining && !migration.key_provider_available {
+                return Err(format!(
+                    "SECRET_KEY_UNAVAILABLE: this process cannot read the DBX data encryption key ({}). \
+                     If the data security upgrade was completed in DBX Desktop, its key may live in the OS \
+                     keychain: use an MCP/CLI build with OS keychain support, or expose the key to headless \
+                     tools via the DBX_SECRET_KEY_FILE / DBX_SECRET_KEY environment variables. Otherwise open \
+                     DBX Desktop or Web to complete the data security upgrade first.",
+                    migration.error_code.as_deref().unwrap_or("KEY_PROVIDER_UNAVAILABLE")
+                )
+                .into());
+            }
             return Err("DATA_MIGRATION_REQUIRED: open DBX Desktop or Web to complete the data security upgrade".into());
         }
         let configs = storage.load_connections().await?;

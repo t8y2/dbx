@@ -76,8 +76,8 @@ async function diagnostic() {
 }
 </script>
 <template>
-  <main class="fixed inset-0 z-[1000] flex items-center justify-center bg-background/95 p-6" role="dialog" aria-modal="true">
-    <section class="w-full max-w-2xl rounded-xl border bg-card p-8 shadow-2xl">
+  <main class="fixed inset-0 z-[1000] flex items-center justify-center overflow-y-auto bg-background/95 p-4 sm:p-6" role="dialog" aria-modal="true">
+    <section class="my-auto w-full max-w-2xl rounded-xl border bg-card p-8 shadow-2xl">
       <div class="mb-8 flex items-start justify-between gap-4">
         <div>
           <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">{{ t("migration.eyebrow") }}</p>

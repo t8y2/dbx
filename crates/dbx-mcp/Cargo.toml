@@ -1,6 +1,6 @@
 [package]
 name = "dbx-mcp"
-version = "0.4.93"
+version = "0.4.95"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -9,6 +9,11 @@ default = ["duckdb-sidecar", "mq-admin", "sqlite-bundled"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-bundled = ["dbx-core/sqlite-bundled"]
+# Native macOS/Windows builds enable this so CLI/MCP can read the OS
+# keychain key Desktop provisioned during the data security upgrade; the
+# Linux zigbuild legs cannot link the dbus Secret Service backend and keep
+# falling back to the managed .dbx/secret.key file.
+os-keyring = ["dbx-core/os-keyring"]
 transaction-test-hooks = []
 
 [[bin]]

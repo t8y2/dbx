@@ -73,6 +73,34 @@ describe("document store structured filters", () => {
     });
   });
 
+  it("matches substrings that are not valid values of the column's own type", () => {
+    // Regression for #10056: the typed parse ran before the operator was known, so searching a
+    // JSON/number/date/boolean column for text threw and the Apply click did nothing.
+    const samples: Array<[string, unknown]> = [
+      ["json object", { a: 1, b: "abc" }],
+      ["number", 42],
+      ["int64", { $numberLong: "42" }],
+      ["date", { $date: "2026-01-01T00:00:00Z" }],
+      ["boolean", true],
+    ];
+    for (const [label, sampleValue] of samples) {
+      for (const mode of ["like", "not-like", "begins-with", "ends-with"] as const) {
+        const rule = { id: mode, fieldName: "MessageText", mode, rawValue: "abc", conjunction: "AND" as const };
+        expect(() => buildDocumentFilterCondition(rule, { kind: "mongodb", sampleValue }), `${mode} on ${label}`).not.toThrow();
+        expect(buildDocumentFilterCondition(rule, { kind: "mongodb", sampleValue }), `${mode} on ${label}`).not.toBeNull();
+      }
+    }
+
+    // A JSON column is matched as text, like any other non-numeric column.
+    expect(buildDocumentFilterCondition({ id: "contains", fieldName: "MessageText", mode: "like", rawValue: "abc", conjunction: "AND" }, { kind: "mongodb", sampleValue: { a: 1 } })).toEqual({
+      MessageText: { $regex: "abc", $options: "i" },
+    });
+
+    // Operators that genuinely need a typed value still reject text that is not one.
+    expect(() => buildDocumentFilterCondition({ id: "eq", fieldName: "age", mode: "equals", rawValue: "abc", conjunction: "AND" }, { kind: "mongodb", sampleValue: 28 })).toThrow(/number/);
+    expect(() => buildDocumentFilterCondition({ id: "gt", fieldName: "age", mode: "greater-than", rawValue: "abc", conjunction: "AND" }, { kind: "mongodb", sampleValue: 28 })).toThrow(/number/);
+  });
+
   it("keeps the MongoDB _id sample for automatic type inference", () => {
     const tree = documentFieldPathTreeFromDocuments([{ _id: "001", name: "Alice" }]);
 

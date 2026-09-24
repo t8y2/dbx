@@ -542,21 +542,24 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
   // Range and list predicates parse their raw input inside their own case, so the
   // single-value parse must not run for them (it would reject "18, 30" as a number).
   const parsesSingleValue = documentFilterModeNeedsValue(rule.mode) && !documentFilterModeUsesList(rule.mode) && !documentFilterModeUsesRange(rule.mode);
-  const value = parsesSingleValue ? parseDocumentFilterValue(rule.rawValue, { ...options, valueType: rule.valueType }) : null;
+  // Substring predicates match against the text the user typed, so the typed parse stays lazy:
+  // coercing "abc" to the column's own type (number, date, boolean, or a JSON object) throws,
+  // and that error reached the filter bar as an Apply click that appeared to do nothing.
+  const typedValue = () => (parsesSingleValue ? parseDocumentFilterValue(rule.rawValue, { ...options, valueType: rule.valueType }) : null);
   const textValue = parsesSingleValue ? String(parseDocumentFilterValue(rule.rawValue)) : "";
   switch (rule.mode) {
     case "equals":
-      return { [rule.fieldName]: value };
+      return { [rule.fieldName]: typedValue() };
     case "not-equals":
-      return { [rule.fieldName]: { $ne: value } };
+      return { [rule.fieldName]: { $ne: typedValue() } };
     case "like":
-      if (options.kind === "dynamodb") return { [rule.fieldName]: { $contains: value } };
+      if (options.kind === "dynamodb") return { [rule.fieldName]: { $contains: typedValue() } };
       if (options.kind === "mongodb" && mongoFilterValueIsNumeric(rule.valueType, options.sampleValue)) {
         return mongoNumericContainsCondition(rule.fieldName, textValue);
       }
       return { [rule.fieldName]: { $regex: escapeRegexLiteral(textValue), $options: "i" } };
     case "not-like":
-      if (options.kind === "dynamodb") return { [rule.fieldName]: { $notContains: value } };
+      if (options.kind === "dynamodb") return { [rule.fieldName]: { $notContains: typedValue() } };
       if (options.kind === "mongodb" && mongoFilterValueIsNumeric(rule.valueType, options.sampleValue)) {
         return mongoNumericContainsCondition(rule.fieldName, textValue, true);
       }
@@ -569,13 +572,13 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
       return { [rule.fieldName]: { $regex: pattern, $options: "i" } };
     }
     case "greater-than":
-      return { [rule.fieldName]: { $gt: value } };
+      return { [rule.fieldName]: { $gt: typedValue() } };
     case "greater-than-or-equal":
-      return { [rule.fieldName]: { $gte: value } };
+      return { [rule.fieldName]: { $gte: typedValue() } };
     case "less-than":
-      return { [rule.fieldName]: { $lt: value } };
+      return { [rule.fieldName]: { $lt: typedValue() } };
     case "less-than-or-equal":
-      return { [rule.fieldName]: { $lte: value } };
+      return { [rule.fieldName]: { $lte: typedValue() } };
     case "in":
     case "not-in": {
       if (!mongoDocumentFilterKind(options)) return null;

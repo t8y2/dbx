@@ -1522,18 +1522,29 @@ async fn verify_pool_connection_with_setup_fallback(
         )?;
         // The rung without dbx's built-in statement is the reliable one, and it reports the
         // value the server uses. The literal rung that follows cannot express the standard
-        // `greatest(...)` guard, so it may only be applied when the server is below dbx's
-        // floor; a server configured higher keeps its own value (issue #9412).
-        let verified = if mode == MySqlSetupMode::Compatible && retries_literal_floor {
-            verify_pool_connection_reporting_group_concat_max_len(&ladder_pool, timeout).await.map(Some)
+        // `greatest(...)` guard, so it may only be applied when the server *reports* a value
+        // below dbx's floor; a server configured higher keeps its own value (issue #9412),
+        // and a value the server did not report is kept as it is instead of guessed at.
+        let reports_server_value = mode == MySqlSetupMode::Compatible && retries_literal_floor;
+        let verified = if reports_server_value {
+            verify_pool_connection_reporting_group_concat_max_len(&ladder_pool, timeout).await
         } else {
             verify_pool_connection(&ladder_pool, timeout).await.map(|()| None)
         };
         match verified {
-            Ok(None) => return Ok(ladder_pool),
-            Ok(Some(current)) if !mysql_literal_floor_is_needed(current) => {
+            // Every rung but the value-reporting one only has to connect.
+            Ok(None) if !reports_server_value => return Ok(ladder_pool),
+            Ok(None) => {
                 log::info!(
-                    "MySQL server reports group_concat_max_len = {current:?}, which is not below dbx's {} floor; \
+                    "MySQL server did not report group_concat_max_len; keeping the server value rather than \
+                     applying dbx's {} floor",
+                    MYSQL_GROUP_CONCAT_MAX_LEN
+                );
+                return Ok(ladder_pool);
+            }
+            Ok(Some(current)) if !mysql_literal_floor_is_needed(Some(current)) => {
+                log::info!(
+                    "MySQL server reports group_concat_max_len = {current}, which is not below dbx's {} floor; \
                      keeping the server value",
                     MYSQL_GROUP_CONCAT_MAX_LEN
                 );
@@ -1564,10 +1575,11 @@ async fn verify_pool_connection_with_setup_fallback(
 /// Whether dbx's literal floor still raises the value the server reports.
 ///
 /// The literal form has no `greatest(...)` guard, so it may only be applied when the
-/// server's own value is below the floor; otherwise it would lower a server that is
-/// deliberately configured higher (issue #9412).
+/// server *reports* a value below the floor: a server that is deliberately configured
+/// higher keeps its own value (issue #9412), and a value the server did not report is kept
+/// as it is rather than guessed at.
 fn mysql_literal_floor_is_needed(current: Option<u64>) -> bool {
-    current.is_none_or(|value| value < MYSQL_GROUP_CONCAT_MAX_LEN)
+    current.is_some_and(|value| value < MYSQL_GROUP_CONCAT_MAX_LEN)
 }
 
 /// Verifies the pool and, on that same connection, reports the `group_concat_max_len` the
@@ -1575,7 +1587,7 @@ fn mysql_literal_floor_is_needed(current: Option<u64>) -> bool {
 ///
 /// Read during the verification so the probe does not cost a second connection. `Ok(None)`
 /// means the connection itself is fine but the server could not answer (a dialect without
-/// the variable), which keeps the caller's previous behaviour.
+/// the variable); the caller then keeps the server value instead of applying dbx's floor.
 async fn verify_pool_connection_reporting_group_concat_max_len(
     pool: &MySqlPool,
     timeout: Duration,
@@ -8901,8 +8913,9 @@ mod tests {
         // Below the floor (the 1024 default of StarRocks/Doris/KunDB) it still helps.
         assert!(mysql_literal_floor_is_needed(Some(MYSQL_GROUP_CONCAT_MAX_LEN - 1)));
         assert!(mysql_literal_floor_is_needed(Some(1024)));
-        // An unreadable value keeps the previous behaviour of applying dbx's floor.
-        assert!(mysql_literal_floor_is_needed(None));
+        // A value the server did not report is kept as well: guessing that it is low enough
+        // could lower a server configured higher than dbx's floor.
+        assert!(!mysql_literal_floor_is_needed(None));
     }
 
     #[test]

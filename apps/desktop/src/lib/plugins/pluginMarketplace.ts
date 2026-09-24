@@ -3,6 +3,8 @@ import { uuid } from "@/lib/common/utils";
 
 export type MarketplacePluginStatus = "install" | "installed" | "update" | "unsupported";
 
+export type MarketplacePluginSortMode = "name" | "recently-updated" | "recently-listed" | "updates-first";
+
 export const UNIVERSAL_PLUGIN_TARGET = "universal";
 
 export interface MarketplacePluginListing {
@@ -16,6 +18,9 @@ export interface MarketplacePluginListing {
   installed?: InstalledPlugin;
   verified: boolean;
   status: MarketplacePluginStatus;
+  // releasedAt of the catalog's latestVersion entry, when provided; shown on the card
+  // next to the version badge so time-based sort modes have a visible key.
+  latestVersionReleasedAt?: string;
 }
 
 /**
@@ -51,6 +56,7 @@ export function buildMarketplacePluginListings(results: readonly PluginRepositor
           installed,
           verified: plugin.verified && listingRepositoryCanVerify(result.repository),
           status,
+          latestVersionReleasedAt: latestVersion?.releasedAt || undefined,
         };
       }),
     )
@@ -161,6 +167,38 @@ export function filterMarketplacePluginListings(listings: readonly MarketplacePl
     if (!normalizedQuery) return true;
     return [listing.plugin.id, listing.name, listing.description, listing.plugin.publisher, listing.repository.name, ...listing.plugin.tags].join("\n").toLocaleLowerCase().includes(normalizedQuery);
   });
+}
+
+// "Recently updated" scans EVERY version: third-party catalogs are not required to keep
+// latestVersion at the newest date (the official store satisfies that today, but nothing
+// enforces it), so the explicit max/min beats trusting the latestVersion entry. Listings
+// without any parsable releasedAt get -Infinity and sink below all dated ones.
+function listingReleaseTime(listing: MarketplacePluginListing, pick: (times: number[]) => number): number {
+  const times = listing.plugin.versions.map((version) => Date.parse(version.releasedAt || "")).filter((time) => !Number.isNaN(time));
+  return times.length ? pick(times) : Number.NEGATIVE_INFINITY;
+}
+
+// Copies before sorting: the builder output is also consumed elsewhere (batch selection,
+// the installed-tab update index) and must keep its name order there.
+export function sortMarketplacePluginListings(listings: readonly MarketplacePluginListing[], mode: MarketplacePluginSortMode): MarketplacePluginListing[] {
+  const byName = (left: MarketplacePluginListing, right: MarketplacePluginListing) => left.name.localeCompare(right.name);
+  if (mode === "name") return [...listings].sort(byName);
+  if (mode === "updates-first") {
+    return [...listings].sort((left, right) => {
+      const updatable = (listing: MarketplacePluginListing) => (listing.status === "update" ? 0 : 1);
+      if (updatable(left) !== updatable(right)) return updatable(left) - updatable(right);
+      return listingReleaseTime(right, (times) => Math.max(...times)) - listingReleaseTime(left, (times) => Math.max(...times)) || byName(left, right);
+    });
+  }
+  const pick = mode === "recently-listed" ? (times: number[]) => Math.min(...times) : (times: number[]) => Math.max(...times);
+  return [...listings].sort((left, right) => listingReleaseTime(right, pick) - listingReleaseTime(left, pick) || byName(left, right));
+}
+
+export function formatMarketplaceReleasedDate(releasedAt: string | undefined, locale: string): string {
+  if (!releasedAt) return "";
+  const date = new Date(releasedAt);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(locale.replace("_", "-"), { dateStyle: "medium" }).format(date);
 }
 
 function marketplacePluginLocalization(plugin: PluginMarketplacePlugin, locale: string): { name: string; description: string } {

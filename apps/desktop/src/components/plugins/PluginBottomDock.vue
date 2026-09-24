@@ -493,7 +493,13 @@ onScopeDispose(() => window.removeEventListener("blur", onPlusMenuWindowBlur));
             <Plus class="h-4 w-4" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" :side-offset="4" class="max-h-[50vh] w-64" data-plugin-dock-plus-menu>
+        <!-- sideFlip=false pins the menu below the "+": the dock panel body
+             below it is the intended scroll area, so flipping upward over the
+             workbench (the default when the panel is short) reads as the menu
+             "growing from the mouse". Cross-axis shift stays on, so the menu
+             still hugs the window edge instead of overflowing it; height
+             follows the popper's available space below the trigger. -->
+        <DropdownMenuContent align="start" :side-offset="4" :side-flip="false" class="max-h-(--reka-dropdown-menu-content-available-height) w-64" data-plugin-dock-plus-menu>
           <!-- Generic list filter (appears only for long lists): the host filters
                by label without knowing what the entries mean. -->
           <input v-if="plusItemCount > PLUS_FILTER_THRESHOLD" v-model="plusFilter" class="mb-1 w-full rounded-md border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary/40" :placeholder="t('pluginDock.filter')" spellcheck="false" @keydown.stop />

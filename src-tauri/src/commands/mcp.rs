@@ -1583,6 +1583,13 @@ mod tests {
         }
     }
 
+    /// Mirrors a real pnpm 10 global installation: shims in `pnpm-home`, packages in
+    /// the `<global>/5/.pnpm` virtual store.
+    ///
+    /// Detection resolves launchers through `canonical_runtime_path`, so anything read
+    /// back from a fixture has to be canonicalized before comparing: on hosts where the
+    /// temporary directory is reached through a symlink (macOS `/var` -> `/private/var`,
+    /// Windows junctions) the raw fixture path never matches the detected one.
     fn pnpm_fixture(launcher_name: &str, launcher: &str) -> PnpmFixture {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1884,7 +1891,7 @@ mod tests {
                 ref command_path,
                 ref pnpm_home,
                 ref global_dir,
-            } if command_path == &fixture.pnpm_path
+            } if command_path == &canonical_runtime_path(&fixture.pnpm_path).unwrap()
                 && pnpm_home == &canonical_runtime_path(&fixture.pnpm_home).unwrap()
                 && global_dir == &canonical_runtime_path(&fixture.global_dir).unwrap()
         ));
@@ -2445,7 +2452,7 @@ mod tests {
                 ref command_path,
                 ref pnpm_home,
                 ref global_dir,
-            } if command_path == &fixture.pnpm_path
+            } if command_path == &canonical_runtime_path(&fixture.pnpm_path).unwrap()
                 && pnpm_home == &canonical_runtime_path(&fixture.pnpm_home).unwrap()
                 && global_dir == &canonical_runtime_path(&fixture.global_dir).unwrap()
         ));
@@ -2682,27 +2689,33 @@ mod tests {
         assert_eq!(installation.package_version, "0.4.71");
         assert_eq!(probed.update_command(), super::MCP_PNPM_UPDATE_COMMAND);
         assert_eq!(probed.uninstall_command(), super::MCP_PNPM_UNINSTALL_COMMAND);
+        // Detection canonicalizes the launcher directory, so the reported launcher,
+        // `PNPM_HOME`, `PATH`, and `--global-dir` values are all resolved paths; the
+        // expectations have to go through the same canonicalization.
+        let pnpm_path = canonical_runtime_path(&fixture.pnpm_path).unwrap();
+        let pnpm_home = canonical_runtime_path(&fixture.pnpm_home).unwrap();
+        let global_dir = canonical_runtime_path(&fixture.global_dir).unwrap();
         assert!(matches!(
             installation.package_manager,
-            McpPackageManager::Pnpm { ref command_path, .. } if command_path == &fixture.pnpm_path
+            McpPackageManager::Pnpm { ref command_path, .. } if command_path == &pnpm_path
         ));
         let update_output = probed.install_or_update().unwrap();
         assert!(update_output.success);
         let pnpm_log = std::fs::read_to_string(&pnpm_log_path).unwrap();
         assert!(pnpm_log.contains("ARGS=update -g @dbx-app/mcp-server --global-dir"));
-        assert!(pnpm_log.contains(fixture.global_dir.to_string_lossy().as_ref()));
+        assert!(pnpm_log.contains(global_dir.to_string_lossy().as_ref()));
         assert!(!pnpm_log.contains("--registry"));
-        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", fixture.pnpm_home.display())));
-        assert!(pnpm_log.contains(&format!("PATH={}", fixture.pnpm_home.display())));
+        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", pnpm_home.display())));
+        assert!(pnpm_log.contains(&format!("PATH={}", pnpm_home.display())));
         assert!(pnpm_log.contains(bin_dir.to_string_lossy().as_ref()));
 
         let uninstall_output = probed.uninstall().unwrap();
         assert!(uninstall_output.success);
         let pnpm_log = std::fs::read_to_string(&pnpm_log_path).unwrap();
         assert!(pnpm_log.contains("ARGS=remove -g @dbx-app/mcp-server --global-dir"));
-        assert!(pnpm_log.contains(fixture.global_dir.to_string_lossy().as_ref()));
-        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", fixture.pnpm_home.display())));
-        assert!(pnpm_log.contains(&format!("PATH={}", fixture.pnpm_home.display())));
+        assert!(pnpm_log.contains(global_dir.to_string_lossy().as_ref()));
+        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", pnpm_home.display())));
+        assert!(pnpm_log.contains(&format!("PATH={}", pnpm_home.display())));
     }
 
     #[cfg(windows)]

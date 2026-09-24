@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,7 +12,21 @@ export function changedPaths(base, root) {
   }).split("\0").filter(Boolean);
 }
 
-export function planCi({ files, metadata, root, eventName = "pull_request", rustChanged = false, agentsChanged = false }) {
+export function knownJavaDrivers(root, nativeDrivers) {
+  try {
+    const driversRoot = path.join(root, "agents/drivers");
+    return readdirSync(driversRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory()
+        && existsSync(path.join(driversRoot, entry.name, "build.gradle"))
+        && !nativeDrivers.includes(entry.name))
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+export function planCi({ files, metadata, root, eventName = "pull_request", rustChanged = false, agentsChanged = false, javaDrivers }) {
   const unknownDiff = files === null;
   files ??= [];
   const packages = metadata.packages.filter((pkg) => metadata.workspace_members.includes(pkg.id));
@@ -49,12 +63,17 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     .filter(([, names]) => names.some((name) => affected.has(name)))
     .map(([group]) => ({ group }));
   const nativeDrivers = [...goAgents.map((agent) => agent.driver), ...rustAgents];
+  const jdbcDrivers = javaDrivers ?? knownJavaDrivers(root, nativeDrivers);
   const nativeChanges = new Set(nativeDrivers.filter((driver) => files.some((file) => file.startsWith(`agents/drivers/${driver}/`))));
+  const javaDriverChanges = jdbcDrivers.some((driver) => files.some((file) => file.startsWith(`agents/drivers/${driver}/`)));
+  // Driver-scoped JDBC/Go/Rust trees are not "shared Agent inputs". Unknown
+  // agents/drivers/<name>/ paths still fail open to full coverage below.
   const sharedAgents = ciChanged || sharedRust || files.some((file) => file.startsWith("agents/")
-    && !nativeDrivers.some((driver) => file.startsWith(`agents/drivers/${driver}/`)))
+    && !nativeDrivers.some((driver) => file.startsWith(`agents/drivers/${driver}/`))
+    && !jdbcDrivers.some((driver) => file.startsWith(`agents/drivers/${driver}/`)))
     || files.some((file) => file.startsWith(".github/scripts/bump-agent-versions.") || file === ".github/workflows/agents-release.yml"
       || file === "crates/dbx-drivers/assets/agent-protocol-v2.json");
-  const allAgents = sharedAgents || (agentsChanged && nativeChanges.size === 0);
+  const allAgents = sharedAgents || (agentsChanged && nativeChanges.size === 0 && !javaDriverChanges);
   if (allAgents) {
     for (const driver of nativeDrivers) nativeChanges.add(driver);
   }
@@ -62,8 +81,8 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
   const goMatrix = goAgents.filter((agent) => nativeChanges.has(agent.driver));
   const nativeRustMatrix = rustAgents.filter((driver) => nativeChanges.has(driver)).map((driver) => ({ driver }));
   const liveMatrix = integrationCases.filter((entry) => nativeChanges.has(entry.driver));
-  const java = allAgents;
-  const agents = agentsChanged || sharedAgents || nativeChanges.size > 0;
+  const java = allAgents || javaDriverChanges;
+  const agents = agentsChanged || sharedAgents || nativeChanges.size > 0 || javaDriverChanges;
   return {
     rust, rust_full: full, rust_matrix: { include: rustMatrix }, rust_groups_known: !unknownMember,
     affected_packages: [...affected].sort(),

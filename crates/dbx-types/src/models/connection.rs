@@ -1125,6 +1125,7 @@ impl ConnectionConfig {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }
+            DatabaseType::Salesforce => salesforce_instance_url(raw_host, self.ssl, port),
             DatabaseType::Dameng => format!("dm://{host}:{port}{db_part}"),
             DatabaseType::Kingbase => format!("kingbase://{host}:{port}{db_part}"),
             DatabaseType::Highgo => format!("highgo://{host}:{port}{db_part}"),
@@ -1310,6 +1311,7 @@ impl ConnectionConfig {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }
+            DatabaseType::Salesforce => salesforce_instance_url(raw_host, self.ssl, port),
             DatabaseType::Dameng => {
                 format!("dm://{}:{}@{host}:{port}{db_part}", username, password)
             }
@@ -2602,6 +2604,19 @@ fn bracket_ipv6(host: &str) -> String {
     } else {
         host.to_string()
     }
+}
+
+/// Salesforce connections store the org instance in `host`: either a full URL
+/// (`https://acme.my.salesforce.com`) or a bare hostname. The access token
+/// lives in the password field and never appears in the URL, so the redacted
+/// and full forms are identical.
+fn salesforce_instance_url(raw_host: &str, ssl: bool, port: u16) -> String {
+    let trimmed = raw_host.trim().trim_end_matches('/');
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    let scheme = if ssl { "https" } else { "http" };
+    format!("{scheme}://{}:{port}", bracket_ipv6(trimmed))
 }
 
 /// Returns `true` when `host` contains two or more comma-separated entries

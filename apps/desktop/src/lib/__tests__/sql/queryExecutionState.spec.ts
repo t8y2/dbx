@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isActiveResultLoading, type QueryResultLoadingStateLike } from "@/lib/sql/queryExecutionState";
+import { canCancelQueryExecution, isActiveResultLoading, shouldShowCancelAction, type QueryResultLoadingStateLike } from "@/lib/sql/queryExecutionState";
 
 function state(overrides: Partial<QueryResultLoadingStateLike> = {}): QueryResultLoadingStateLike {
   return {
@@ -31,5 +31,28 @@ describe("active query result loading", () => {
 
   it("keeps legacy unscoped executions conservative", () => {
     expect(isActiveResultLoading(state({ isExecuting: true, activeResultRunId: "run-a" }))).toBe(true);
+  });
+});
+
+describe("stop action visibility", () => {
+  it("hides the action when nothing is running", () => {
+    expect(shouldShowCancelAction(state())).toBe(false);
+    expect(shouldShowCancelAction(state({ executionId: "exec-1" }))).toBe(false);
+  });
+
+  it("hides the action while an execution has no cancellable id yet", () => {
+    expect(shouldShowCancelAction(state({ isExecuting: true }))).toBe(false);
+  });
+
+  it("keeps the action visible while a cancel request is in flight", () => {
+    const cancelling = state({ isExecuting: true, executionId: "exec-1", isCancelling: true });
+    expect(shouldShowCancelAction(cancelling)).toBe(true);
+    // The button must switch to its cancelling state instead of being pressable again.
+    expect(canCancelQueryExecution(cancelling)).toBe(false);
+  });
+
+  it("allows only one cancel request for an idle execution", () => {
+    expect(shouldShowCancelAction(state({ isExecuting: true, executionId: "exec-1" }))).toBe(true);
+    expect(canCancelQueryExecution(state({ isExecuting: true, executionId: "exec-1" }))).toBe(true);
   });
 });

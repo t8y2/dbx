@@ -27,6 +27,10 @@ pub const MQTT_AUTH_PASSWORD_KEY: &str = "mqtt.auth.password";
 pub const CASSANDRA_TLS_SECRET_PREFIX: &str = "cassandra.tls.";
 pub const CASSANDRA_TRUSTSTORE_PASSWORD_KEY: &str = "cassandra.tls.truststore_password";
 pub const CASSANDRA_KEYSTORE_PASSWORD_KEY: &str = "cassandra.tls.keystore_password";
+pub const SALESFORCE_AUTH_SECRET_PREFIX: &str = "salesforce.auth.";
+pub const SALESFORCE_AUTH_CLIENT_SECRET_KEY: &str = "salesforce.auth.client_secret";
+pub const SALESFORCE_AUTH_REFRESH_TOKEN_KEY: &str = "salesforce.auth.refresh_token";
+pub const SALESFORCE_AUTH_PASSWORD_KEY: &str = "salesforce.auth.password";
 pub const PLUGIN_CONNECTION_SECRET_PREFIX: &str = "plugin_connection.";
 
 /// Storage-level secret key for one plugin connection field: namespaced under
@@ -127,6 +131,7 @@ pub fn save_connections_to_file(
         persist_mq_token_signing_secret(store, config)?;
         persist_mqtt_auth_secrets(store, config)?;
         persist_cassandra_tls_secrets(store, config)?;
+        persist_salesforce_auth_secrets(store, config)?;
         delete_secret_prefix(store, &config.id, PLUGIN_CONNECTION_SECRET_PREFIX)?;
         for (key, secret) in &config.connection_secrets {
             persist_secret(store, &config.id, &plugin_connection_secret_key(key)?, secret)?;
@@ -201,6 +206,7 @@ pub fn load_connections_from_file(
         hydrate_mq_token_signing_secret(store, config, &mut needs_rewrite)?;
         hydrate_mqtt_auth_secrets(store, config, &mut needs_rewrite)?;
         hydrate_cassandra_tls_secrets(store, config, &mut needs_rewrite)?;
+        hydrate_salesforce_auth_secrets(store, config, &mut needs_rewrite)?;
         let plugin_secret_keys = config.connection_secrets.keys().cloned().collect::<Vec<_>>();
         for key in plugin_secret_keys {
             let storage_key = plugin_connection_secret_key(&key)?;
@@ -394,6 +400,7 @@ fn delete_removed_connection_secrets(
         delete_secret_prefix(store, &config.id, MQ_TOKEN_SIGNING_SECRET_PREFIX)?;
         delete_secret_prefix(store, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
         delete_secret_prefix(store, &config.id, CASSANDRA_TLS_SECRET_PREFIX)?;
+        delete_secret_prefix(store, &config.id, SALESFORCE_AUTH_SECRET_PREFIX)?;
     }
     Ok(())
 }
@@ -653,6 +660,96 @@ fn cassandra_tls_object_mut(
     value?.get_mut("tls")?.as_object_mut()
 }
 
+// ── Salesforce OAuth 密钥持久化 ─────────────────────────────────
+//
+// Persist semantics (mirrors MQ's replace_mq_auth_secret):
+//   1. Incoming empty/missing + secret already stored → preserve existing secret.
+//   2. Incoming non-empty → overwrite.
+//   3. external_config.auth block absent (user switched off OAuth) → delete both secrets.
+// This is required because the frontend edits an existing connection with the
+// sensitive fields blanked out — an empty value must not clobber the stored secret.
+
+fn persist_salesforce_auth_secrets(store: &dyn ConnectionSecretStore, config: &ConnectionConfig) -> Result<(), String> {
+    if config.db_type != DatabaseType::Salesforce {
+        delete_secret_prefix(store, &config.id, SALESFORCE_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
+
+    let Some(auth) = salesforce_auth_object(config.external_config.as_ref()) else {
+        delete_secret_prefix(store, &config.id, SALESFORCE_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    };
+
+    replace_salesforce_auth_secret(store, &config.id, SALESFORCE_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")?;
+    replace_salesforce_auth_secret(store, &config.id, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, auth, "refreshToken")?;
+    replace_salesforce_auth_secret(store, &config.id, SALESFORCE_AUTH_PASSWORD_KEY, auth, "password")?;
+
+    Ok(())
+}
+
+fn replace_salesforce_auth_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    key: &str,
+    auth: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), String> {
+    let current = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty());
+    let existing = if current.is_none() { store.get_secret(connection_id, key)? } else { None };
+    // Per-key delete: we only manage the exact key we own, so two parallel
+    // replace calls don't wipe each other out.
+    store.delete_secret(connection_id, key)?;
+    match current {
+        Some(secret) => store.set_secret(connection_id, key, secret),
+        None => match existing {
+            Some(secret) => store.set_secret(connection_id, key, &secret),
+            None => Ok(()),
+        },
+    }
+}
+
+fn hydrate_salesforce_auth_secrets(
+    store: &dyn ConnectionSecretStore,
+    config: &mut ConnectionConfig,
+    needs_rewrite: &mut bool,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::Salesforce {
+        return Ok(());
+    }
+
+    let Some(auth) = salesforce_auth_object_mut(config.external_config.as_mut()) else {
+        return Ok(());
+    };
+
+    hydrate_json_secret(store, &config.id, SALESFORCE_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret", needs_rewrite)?;
+    hydrate_json_secret(store, &config.id, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, auth, "refreshToken", needs_rewrite)?;
+    hydrate_json_secret(store, &config.id, SALESFORCE_AUTH_PASSWORD_KEY, auth, "password", needs_rewrite)?;
+
+    Ok(())
+}
+
+fn scrub_salesforce_auth_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::Salesforce {
+        return;
+    }
+    let Some(auth) = salesforce_auth_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    scrub_json_secret(auth, "clientSecret");
+    scrub_json_secret(auth, "refreshToken");
+    scrub_json_secret(auth, "password");
+}
+
+fn salesforce_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("auth")?.as_object()
+}
+
+fn salesforce_auth_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("auth")?.as_object_mut()
+}
+
 // ── MQTT 密钥持久化 ──────────────────────────────────────────────
 
 fn persist_mqtt_auth_secrets(store: &dyn ConnectionSecretStore, config: &ConnectionConfig) -> Result<(), String> {
@@ -845,6 +942,7 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
             scrub_mq_token_signing_secret(&mut config);
             scrub_mqtt_auth_secrets(&mut config);
             scrub_cassandra_tls_secrets(&mut config);
+            scrub_salesforce_auth_secrets(&mut config);
             scrub_plugin_connection_secrets(&mut config);
             config
         })

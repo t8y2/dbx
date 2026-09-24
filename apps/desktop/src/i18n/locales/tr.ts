@@ -1,5 +1,6 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/tr";
+import { dataDictionaryTr as dataDictionary } from "./dataDictionaryMessages";
 import { consulTrMessages } from "./consulTr";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementTr } from "./meilisearchManagement";
@@ -82,6 +83,19 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  pluginPlatform: {
+    shortcutsPluginCenter: "Eklenti merkezinin yanında (açılır menü)",
+    shortcutsToolbar: "Güncelle düğmesinin solunda (kayan)",
+    shortcutsToolbarCount: "Görünür simge sayısı",
+    shortcutsToolbarHint: "0 tüm girişleri menüye taşır. Alan daraldığında diğerleri de menüye taşınır.",
+    shortcutsMore: "Diğer eklenti kısayolları ({count})",
+    shortcutsLeftTop: "Sol · Üst",
+    shortcutsLeftBottom: "Sol · Alt",
+    shortcutsRightTop: "Sağ · Üst",
+    shortcutsRightBottom: "Sağ · Alt",
+    shortcutsVisiblePlugins: "Görünür eklentiler",
+    shortcutsResize: "Yüksekliği ayarlamak için sürükleyin; otomatik yükseklik için çift tıklayın",
+  },
   cellTransform: {
     title: "Dönüştürme önizlemesi",
     description: "Geçerli değeri görüntülemek veya kopyalamak için dönüştürür. Özgün değer ve düzenleme taslağı değişmez.",
@@ -165,6 +179,7 @@ export default withEnglishFallback({
     name: "DBX",
   },
   docs,
+  dataDictionary,
   auth: {
     rateLimited: "Lütfen {seconds} sn sonra tekrar deneyin",
     setupTitle: "Erişim parolası oluştur",
@@ -410,6 +425,11 @@ export default withEnglishFallback({
     exitAndUpdate: "Çık ve Güncelle",
     dockerUsersRun: "Docker kullanıcıları güncellemek için",
     toUpdate: "komutunu çalıştırmalı",
+    historyTab: "Eski sürümler",
+    historyHint: "Eski bir sürüme dönmeden önce verilerinizi yedekleyin. Eski sürümler, yeni sürümlerle oluşturulan verileri veya kimlik bilgilerini okuyamayabilir.",
+    historyPublishedOn: "{date} tarihinde yayınlandı",
+    historyLoadFailed: "Eski sürümler yüklenemedi. Lütfen daha sonra tekrar deneyin.",
+    historyLoadMore: "Daha fazla yükle",
   },
   sidebar: {
     connections: "BAĞLANTILAR",
@@ -2792,8 +2812,11 @@ export default withEnglishFallback({
     builtinProviders: "Yerleşik destek",
     partnerProviders: "Premium sponsorlar",
     jalapenoSponsored: "1 $ ücretsiz kredi",
+    hualongSponsored: "1 $ ücretsiz kredi",
+    aicodemirrorSponsored: "¥8 ücretsiz kredi",
     jalapenoDescription: "🎉 Önde gelen ekiplerin güvendiği kurumsal düzeyde yapay zekâ artık sizin için de kullanılabilir! En yeni modelleri %50 indirimle deneyin ve daha çok yükleme yaptıkça daha çok bonus kredi kazanın!",
     hualongDescription: "🐉 Yoğun yapay zekâ geliştiricileri için resmî kaynak aktarıcı! Codex/Claude serisi %100 resmî kaynak, doğrulanabilir belirteç düzeyinde fatura, kurumsal sözleşme ve fatura. \n🎉DBX&HUALONG promosyon koduyla kayıt olun, 1$ kredi kazanın!",
+    aicodemirrorDescription: "⚡ AICodeMirror, kurumsal düzeyde eşzamanlılık, hızlı faturalandırma ve 7×24 özel destek sunar; yeni kullanıcılar ¥8 ücretsiz kredi ve ilk yüklemede %20 indirim kazanır.",
     visitPartner: "İş ortağının web sitesini ziyaret et",
     getApiKey: "API anahtarı al",
     providerStatusActive: "Etkin",
@@ -3849,7 +3872,20 @@ export default withEnglishFallback({
     loadMore: "Daha fazla yükle...",
     objectBrowser: "Nesne Gezgininde Gözat ({count})",
     extensions: "Uzantılar",
+    eventTriggers: "Olay tetikleyicileri",
   },
+  eventTrigger: {
+    detailsTitle: "Olay tetikleyici ayrıntıları",
+    viewDetails: "Ayrıntıları gör",
+    name: "Ad",
+    event: "Olay",
+    owner: "Sahip",
+    function: "Fonksiyon",
+    enabled: "Etkin",
+    tags: "Etiketler",
+    definition: "Tanım",
+  },
+
   extension: {
     manageTitle: "Uzantıları Yönet",
     installTitle: "Uzantı Kur",
@@ -5546,7 +5582,7 @@ export default withEnglishFallback({
     sortDesc: "Azalan",
     limit: "Sınır",
     offset: "Konum",
-    resultSummary: "Yaklaşık {count} sonuç · {time} ms",
+    resultSummary: "Yaklaşık {count} sonuç · {duration}",
     viewJson: "JSON",
     viewTable: "Tablo",
     viewGrid: "Izgara",
@@ -7161,6 +7197,8 @@ export default withEnglishFallback({
     showColumnTypesInHeaderDescription: "Her sütunun veri türünü doğrudan ızgara sütun adlarının altında göster.",
     showColumnHeaderTooltips: "Sütun başlığı ipuçları",
     showColumnHeaderTooltipsDescription: "Sonuç ızgarasında sütun başlıklarının üzerine gelindiğinde ayrıntı ipuçlarını göster. Açılır ipuçlarını durdurmak için kapatın.",
+    showResultSourceDatabase: "Sonuç adlarında veritabanı adını göster",
+    showResultSourceDatabaseDescription: "Kapalıyken sonuç sekmeleri yalnızca tablo adını gösterir; tam ad (veritabanı adı dahil) ipucunda görünmeye devam eder.",
     dataGridShowTransposeFieldMetadata: "Devrik görünümde alan meta verisini göster",
     dataGridShowTransposeFieldMetadataDescription: "Etkin sütun türlerini ve açıklamalarını devrik görünümde ayrı satırlarda göster. Bu, satır yüksekliğini artırır.",
     colorizeDataGridCellTypes: "Veri tablosu değerlerini renklendir",
@@ -7993,6 +8031,10 @@ export default withEnglishFallback({
     mcpConnectionPolicyReadOnly: "Salt okunur",
     mcpConnectionPolicySafeWrite: "Güvenli yazmalara izin ver",
     mcpConnectionPolicyHighRiskWrite: "Yüksek riskli işlemlere izin ver",
+    mcpConnectionPolicyAllowSalesforceDml: "DML'ye izin ver",
+    mcpConnectionPolicyAllowSalesforceDmlHint:
+      "Bir yapay zekâ aracısının iki adımlı onay (önce hazırla, sonra uygula) ile bu kuruluştaki tek tek Salesforce kayıtlarını oluşturmasına, güncellemesine veya silmesine izin verir. Salt okunur modlar bu anahtarı yok sayar. Salesforce yazmaları geri alınamaz.",
+    mcpConnectionPolicyAllowSalesforceDmlReadOnlyBlocked: "Bu bağlantı salt okunur olduğundan Salesforce DML devre dışı kalır. Önce yazmaya izin veren bir çalıştırma modu seçin.",
     mcpToolPermissionsTitle: "MCP araç yetkileri",
     mcpToolPermissionsDescription: "Yalnızca ihtiyacınız olan MCP araçlarını açın. Seçim kaldırıldığında, araç tanımlarını önbelleğe almış olsalar bile istemciler sunucu tarafından reddedilir.",
     mcpToolListConnections: "Bağlantıları listele",
@@ -8010,6 +8052,9 @@ export default withEnglishFallback({
     mcpToolRollbackTransaction: "İşlemi geri al",
     mcpToolCloseSession: "Sorgu oturumunu kapat",
     mcpToolExecuteRedisCommand: "Redis komutunu çalıştır",
+    mcpToolSalesforceCurrentUser: "Salesforce geçerli kullanıcısı",
+    mcpToolSalesforcePrepareWrite: "Salesforce yazmasını hazırla",
+    mcpToolSalesforceApplyWrite: "Salesforce yazmasını uygula",
     mcpToolPeekMessages: "Kafka mesajlarını oku",
     mcpToolSendMessage: "Mesaj kuyruğu mesajı gönder",
     mcpToolAddConnection: "Bağlantı ekle",

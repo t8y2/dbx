@@ -21,6 +21,13 @@ use data_grid_tdengine_sql::{
     validate_tdengine_existing_rows, validate_tdengine_inserted_rows,
 };
 
+#[path = "data_grid_salesforce_sql.rs"]
+mod data_grid_salesforce_sql;
+use data_grid_salesforce_sql::{
+    build_salesforce_data_grid_rollback_statements, build_salesforce_data_grid_save_statements,
+    validate_salesforce_id_column,
+};
+
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{
     firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id,
@@ -1195,6 +1202,9 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
 }
 
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if let Some(error) = validate_salesforce_id_column(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_iotdb_existing_rows(options) {
         return Some(error);
     }
@@ -1461,6 +1471,9 @@ fn build_data_grid_save_statements(
     if options.database_type == Some(DatabaseType::Tdengine) {
         return build_tdengine_data_grid_save_statements(options);
     }
+    if options.database_type == Some(DatabaseType::Salesforce) {
+        return build_salesforce_data_grid_save_statements(options);
+    }
     if uses_iotdb_table_model_save(options) {
         return build_iotdb_data_grid_save_statements(options);
     }
@@ -1655,6 +1668,9 @@ fn build_data_grid_rollback_statements(
     }
     if options.database_type == Some(DatabaseType::Tdengine) {
         return build_tdengine_data_grid_rollback_statements(options);
+    }
+    if options.database_type == Some(DatabaseType::Salesforce) {
+        return build_salesforce_data_grid_rollback_statements(options);
     }
     if uses_iotdb_table_model_save(options) {
         return build_iotdb_data_grid_rollback_statements(options);

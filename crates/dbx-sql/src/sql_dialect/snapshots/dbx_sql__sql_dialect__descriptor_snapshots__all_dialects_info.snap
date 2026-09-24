@@ -426,5 +426,25 @@ expression: all
     "supports_full_text_index": false,
     "supports_spatial_index": false,
     "supports_transactional_ddl": false
+  },
+  {
+    "kind": "soql",
+    "label": "soql",
+    "capabilities": [],
+    "max_identifier_length": 40,
+    "supports_schemas": false,
+    "supports_catalogs": false,
+    "max_columns_per_table": 500,
+    "supports_json_type": true,
+    "supports_array_type": false,
+    "supports_enum_type": false,
+    "supports_uuid_type": false,
+    "supports_auto_increment": false,
+    "supports_identity_columns": false,
+    "supports_sequences": false,
+    "supports_partitioning": false,
+    "supports_full_text_index": false,
+    "supports_spatial_index": false,
+    "supports_transactional_ddl": false
   }
 ]

@@ -113,6 +113,24 @@ function structuredSqlError(detail = "duplicate key") {
 }
 
 describe("queryStore multi-statement errors", () => {
+  it.each(["oracle", "oceanbase-oracle"])("preserves the intended offset timing scope for %s", async (dbType) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "timing-offset", name: "Timing", db_type: dbType, database: "APP", query_timeout_secs: 30 });
+    mocks.analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({ sqlToExecute: options.sql, pageSql: options.sql, pageLimit: options.pagination.limit, pageOffset: options.pagination.offset, countSql: undefined, useAgentResultSession: true }));
+    const timed = true;
+    mocks.executeMulti
+      .mockResolvedValueOnce([{ columns: ["VALUE"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 12, session_id: "offset-page", has_more: true, ...(timed ? { query_timings_ms: { agent_total: 10 } } : {}) }])
+      .mockResolvedValueOnce([{ columns: ["VALUE"], rows: [[3], [4]], affected_rows: 0, execution_time_ms: 34, has_more: false, ...(timed ? { query_timings_ms: { agent_total: 30 } } : {}) }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("timing-offset", "APP", "Query", "query", "APP");
+    await store.executeTabSql(tabId, "SELECT VALUE FROM T", { pagination: { limit: 2, offset: 2 } });
+    const result = store.tabs.find((item) => item.id === tabId)!.result!;
+    expect(result.rows).toEqual([[3], [4]]);
+    expect(result.execution_time_ms).toBe(timed ? 46 : 34);
+    expect(result.query_timings_ms).toEqual(timed ? { agent_total: 40 } : undefined);
+    expect(result.timing_page_count).toBe(timed ? 2 : undefined);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.defaultAutoKeepResults = false;
@@ -160,7 +178,7 @@ describe("queryStore multi-statement errors", () => {
     });
   });
 
-  it.each(["oceanbase-oracle", "mysql"] as const)("measures complete result wait only for a single %s query result", async (databaseType) => {
+  it.each(["oceanbase-oracle", "oracle", "mysql", "postgres", "sqlite", "sqlserver", "db2"] as const)("measures complete result wait only for a single %s query result", async (databaseType) => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "timing-1",
       name: "Timing",
@@ -183,7 +201,7 @@ describe("queryStore multi-statement errors", () => {
       await execution;
       const result = store.tabs.find((item) => item.id === tabId)?.result;
       expect(result?.execution_time_ms).toBe(12);
-      expect(result?.client_request_wait_ms).toBe(databaseType === "oceanbase-oracle" ? 45 : undefined);
+      expect(result?.client_request_wait_ms).toBe(45);
     } finally {
       vi.restoreAllMocks();
     }

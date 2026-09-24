@@ -27,7 +27,7 @@ export function elasticsearchRestRequestRanges(sql: string, databaseType?: Datab
   return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
-const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "neo4j", "victoriametrics"]);
+const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "neo4j", "victoriametrics", "salesforce"]);
 
 export function supportsExecutionTargetPicker(databaseType?: DatabaseType): boolean {
   return !!databaseType && (databaseType === "redis" || isHttpJsonRestDatabaseType(databaseType) || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
@@ -1229,6 +1229,11 @@ function softStatementKeywordAt(sql: string, pos: number, databaseType?: Databas
   // COMMENT is also a common column name. Only COMMENT ON starts a standalone
   // SQL command; otherwise a line-start projection column must stay in SELECT.
   if (keyword === "COMMENT" && nextSqlWord(sql, pos + match[0].length, databaseType, parameterOptions) !== "ON") return null;
+  // `WITH (` is a SQL Server table hint (`FROM t WITH (NOLOCK)`), not a CTE
+  // opener — CTEs are always `WITH name AS (` / `WITH RECURSIVE name AS (`.
+  // Formatters break table hints onto their own line; without this, the
+  // following statement loses its run target (#10098).
+  if (keyword === "WITH" && nextNonWhitespaceChar(sql, pos + match[0].length) === "(") return null;
   return softStatementStartKeywords(databaseType).has(keyword) ? keyword : null;
 }
 

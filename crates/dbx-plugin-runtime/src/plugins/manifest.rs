@@ -10,10 +10,12 @@ pub const SUPPORTED_PLUGIN_MANIFEST_VERSION: u32 = 1;
 /// 1.1 adds the plugin-initiated `host/requestUserInput` method (see
 /// `plugins/runtime.rs`). 1.2 adds the plugin-initiated plan Host API
 /// (`host.getPlanCapabilities` / `host.explainPlan`). 1.3 adds read-only table
-/// schema metadata (`host.getTableMetadata`). All are additive: older plugins
-/// keep working, and a plugin that wants either capability must check the
-/// advertised version (or the matching `capabilities` / `host.features`
-/// entry) before calling it.
+/// schema metadata (`host.getTableMetadata` behind `host.schema:read`) and the
+/// plugin-initiated clipboard Host API (`host.clipboardRead` behind the
+/// `host.clipboard:read` permission; clipboard writes reuse the existing
+/// ungated `host.copy`). All are additive: older plugins keep working, and a
+/// plugin that wants a capability must check the advertised version (or the
+/// matching `capabilities` / `host.features` entry) before calling it.
 pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.3.0";
 /// Capabilities the host advertises to a plugin backend at `plugin/initialize`.
 pub const SUPPORTED_PLUGIN_HOST_FEATURES: &[&str] = &["host.requestUserInput"];
@@ -31,6 +33,7 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
     "host.schema:read",
     "host.storage",
     "host.ai",
+    "host.clipboard:read",
 ];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
@@ -660,9 +663,9 @@ pub struct PluginWorkbenchContribution {
     pub icon: Option<String>,
 }
 
-/// Native context-menu entry contributed to DBX surfaces. v1 targets the
-/// saved-connection and table sidebar menus; clicks are dispatched to the
-/// plugin backend as `contextMenu/<id>` requests.
+/// Native context-menu entry contributed to DBX surfaces. Legacy entries
+/// dispatch `contextMenu/<id>` to the plugin backend; declarative actions are
+/// handled directly by the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginContextMenuContribution {
@@ -675,6 +678,24 @@ pub struct PluginContextMenuContribution {
     /// Menu surface the item belongs to: `connection` or `table`.
     #[serde(default)]
     pub menu: String,
+    /// Optional host-handled action. When absent, the legacy backend entrypoint is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<PluginContextMenuAction>,
+}
+
+/// Actions that the host can perform directly for a context-menu contribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum PluginContextMenuAction {
+    OpenWorkbench(PluginContextMenuOpenWorkbenchAction),
+}
+
+/// Narrow context-menu form of the shared `open-workbench` target contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginContextMenuOpenWorkbenchAction {
+    /// Workbench contribution of the SAME plugin (dangling references are rejected during validation).
+    pub workbench: String,
 }
 
 /// Plugin-rendered visualization surface for query results. Selecting the view
@@ -1229,6 +1250,7 @@ fn validate_contributions(
     let mut filesystem_provider_ids = HashSet::new();
     let mut workbench_references = Vec::new();
     let mut filesystem_references = Vec::new();
+    let mut context_menu_workbench_references = Vec::new();
     let mut command_ids = HashSet::new();
     let mut command_workbench_references = Vec::new();
     let mut menu_command_references = Vec::new();
@@ -1317,7 +1339,10 @@ fn validate_contributions(
                         menu.menu
                     ));
                 }
-                if !has_backend {
+                if let Some(PluginContextMenuAction::OpenWorkbench(action)) = &menu.action {
+                    validate_optional_reference(Some(action.workbench.as_str()), "workbench", id, errors);
+                    context_menu_workbench_references.push((id.to_string(), action.workbench.clone()));
+                } else if !has_backend {
                     errors.push(format!("Context menu contribution '{id}' requires a backend entrypoint"));
                 }
             }
@@ -1449,6 +1474,11 @@ fn validate_contributions(
     for (menus, command) in menu_command_references {
         if !command_ids.contains(&command) {
             errors.push(format!("Menus contribution '{menus}' references missing command '{command}'"));
+        }
+    }
+    for (context_menu, workbench) in context_menu_workbench_references {
+        if !workbench_ids.contains(&workbench) {
+            errors.push(format!("Context menu '{context_menu}' references missing workbench '{workbench}'"));
         }
     }
     for (command, workbench) in command_workbench_references {
@@ -1811,11 +1841,12 @@ mod tests {
         SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
-    fn context_menu_manifest(menu: &str) -> (tempfile::TempDir, PluginManifest) {
-        let dir = tempfile::tempdir().unwrap();
-        let executable = dir.path().join("bin").join("example");
-        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        std::fs::write(&executable, b"example").unwrap();
+    fn context_menu_manifest(menu: &str) -> Result<(tempfile::TempDir, PluginManifest), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let binary_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&binary_dir)?;
+        let executable = binary_dir.join("example");
+        std::fs::write(&executable, b"example")?;
         let manifest = serde_json::from_value(serde_json::json!({
             "manifest_version": 1,
             "id": "io.dbx.example",
@@ -1830,9 +1861,8 @@ mod tests {
                 "label": "Inspect",
                 "menu": menu
             }]
-        }))
-        .unwrap();
-        (dir, manifest)
+        }))?;
+        Ok((dir, manifest))
     }
 
     #[test]
@@ -2211,8 +2241,9 @@ mod tests {
     }
 
     /// The reason for the 1.3.0 bump: `engines.host_api` is how a plugin states
-    /// "I need the schema metadata API", so the advertised version has to
-    /// satisfy `^1.3` while a floor this host cannot meet stays rejected.
+    /// "I need the schema metadata API" or "I need clipboard reads", so the
+    /// advertised version has to satisfy `^1.3` while a floor this host cannot
+    /// meet stays rejected.
     #[test]
     fn host_api_advertises_the_floor_a_schema_metadata_plugin_declares() {
         let advertised = semver::Version::parse(SUPPORTED_PLUGIN_HOST_API_VERSION)
@@ -2220,6 +2251,10 @@ mod tests {
         assert!(
             semver::VersionReq::parse("^1.3").unwrap().matches(&advertised),
             "the host must satisfy the schema metadata API floor it asks plugins to declare"
+        );
+        assert!(
+            semver::VersionReq::parse("^1.3").unwrap().matches(&advertised),
+            "the host must satisfy the clipboard-read floor it asks plugins to declare"
         );
 
         for requirement in ["^1.0", "^1.1", "^1.2", "^1.3", ">=1.1.0, <2.0.0"] {
@@ -2251,22 +2286,107 @@ mod tests {
     }
 
     #[test]
-    fn accepts_connection_and_table_context_menu_targets() {
+    fn accepts_connection_and_table_context_menu_targets() -> Result<(), Box<dyn std::error::Error>> {
         for menu in ["connection", "table"] {
-            let (dir, manifest) = context_menu_manifest(menu);
+            let (dir, manifest) = context_menu_manifest(menu)?;
             let compatibility = manifest.compatibility(dir.path(), "0.1.0");
             assert!(compatibility.compatible, "{menu}: {:?}", compatibility.errors);
         }
+        Ok(())
     }
 
     #[test]
-    fn rejects_unsupported_context_menu_targets() {
-        let (dir, manifest) = context_menu_manifest("schema");
+    fn parses_and_accepts_declarative_context_menu_workbench_without_backend() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let plugin_dir = tempfile::tempdir()?;
+        let workbench: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "workbench",
+            "id": "sample.main",
+            "label": "Sample"
+        }))?;
+        let context_menu: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.open",
+            "label": "Open Sample",
+            "menu": "connection",
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))?;
+
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench, context_menu], false, true, plugin_dir.path(), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_dangling_and_invalid_context_menu_actions() -> Result<(), Box<dyn std::error::Error>> {
+        let plugin_dir = tempfile::tempdir()?;
+        let dangling: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.open",
+            "label": "Open Missing",
+            "menu": "table",
+            "action": { "type": "open-workbench", "workbench": "sample.missing" }
+        }))?;
+        let mut errors = Vec::new();
+        validate_contributions(&[dangling], false, true, plugin_dir.path(), &mut errors);
+        assert!(errors.iter().any(|error| error.contains("Context menu 'sample.open' references missing workbench 'sample.missing'")), "{errors:?}");
+        assert!(!errors.iter().any(|error| error.contains("requires a backend entrypoint")), "{errors:?}");
+
+        let unknown_action = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.open",
+            "label": "Open",
+            "menu": "connection",
+            "action": { "type": "invoke-sidecar", "method": "contextMenu/sample.open" }
+        }));
+        assert!(unknown_action.is_err());
+
+        let command_only_fields = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.open",
+            "label": "Open",
+            "menu": "connection",
+            "action": { "type": "open-workbench", "workbench": "sample.main", "presentation": "panel" }
+        }));
+        assert!(command_only_fields.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_context_menu_still_requires_a_backend_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
+        let plugin_dir = tempfile::tempdir()?;
+        let legacy: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.legacy",
+            "label": "Legacy",
+            "menu": "connection"
+        }))?;
+
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&legacy), false, false, plugin_dir.path(), &mut errors);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error == "Context menu contribution 'sample.legacy' requires a backend entrypoint"),
+            "{errors:?}"
+        );
+
+        let mut errors = Vec::new();
+        validate_contributions(&[legacy], true, false, plugin_dir.path(), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unsupported_context_menu_targets() -> Result<(), Box<dyn std::error::Error>> {
+        let (dir, manifest) = context_menu_manifest("schema")?;
         let compatibility = manifest.compatibility(dir.path(), "0.1.0");
         assert!(!compatibility.compatible);
         assert!(compatibility.errors.iter().any(|error| {
             error == "Context menu 'io.dbx.example.inspect' declares unsupported menu 'schema'; only 'connection' and 'table' are available"
         }));
+        Ok(())
     }
 
     #[test]
@@ -2285,6 +2405,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(declared, ["connection", "table"]);
+        assert_eq!(
+            schema["$defs"]["contextMenuContribution"]["properties"]["action"]["$ref"],
+            "#/$defs/contextMenuAction"
+        );
+        assert_eq!(schema["$defs"]["contextMenuAction"]["properties"]["type"]["const"], "open-workbench");
+        assert_eq!(schema["$defs"]["contextMenuAction"]["required"], serde_json::json!(["type", "workbench"]));
     }
 
     #[test]

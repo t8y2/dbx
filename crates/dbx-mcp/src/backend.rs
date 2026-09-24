@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use dbx_core::{
     agent_events::{ToolCall, ToolResult},
     agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
-    connection::{connection_configs_pool_equivalent, AppState, ConnectionLifecycleSnapshot},
+    connection::{connection_configs_pool_equivalent, AppState, ConnectionLifecycleSnapshot, SalesforceCurrentUser},
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     history::HistoryEntry,
     mcp_policy::{connection_group_paths, McpConnectionGroupPath},
@@ -87,6 +87,9 @@ fn effective_mcp_policy_with_legacy_allow_writes(
         for rule in &mut policy.connection_policies {
             rule.read_only = true;
             rule.allow_dangerous_sql = false;
+            // An unconfirmed CLI run must not reach Salesforce DML either: the
+            // connection opt-in is a write permission like any other here.
+            rule.allow_salesforce_dml = false;
             rule.execution_mode_configured = true;
             rule.execution_mode_policy_version = Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION);
             for database_policy in &mut rule.database_policies {
@@ -389,6 +392,14 @@ pub trait DbxBackend: Send + Sync {
     ) -> Result<dbx_core::db::QueryResult, String> {
         let _ = (connection, database, command);
         Err("MongoDB shell commands are not supported by this backend.".to_string())
+    }
+    /// Connected-user identity for a Salesforce connection: who a write would be
+    /// attributed to, plus the profile's "Modify All Data" flag. Salesforce has
+    /// no session-scoped identity, so this reads the pool's cached user info and
+    /// creates the pool when the MCP process is still cold.
+    async fn salesforce_current_user(&self, connection: &ConnectionConfig) -> Result<SalesforceCurrentUser, String> {
+        let _ = connection;
+        Err("Salesforce identity is not supported by this backend.".to_string())
     }
     /// Release the connection pool pinned by an MCP session (`client_session_id`).
     async fn close_client_session(
@@ -1253,6 +1264,19 @@ impl DbxBackend for LocalBackend {
         dbx_core::mongo_ops::execute_mongo_command_core(&self.state, &connection.id, database, command, 100).await
     }
 
+    async fn salesforce_current_user(&self, connection: &ConnectionConfig) -> Result<SalesforceCurrentUser, String> {
+        if connection.db_type != DatabaseType::Salesforce {
+            return Err("Not a Salesforce connection".to_string());
+        }
+        // The identity is the pool's cached connected-user record, so a cold MCP
+        // process has to establish the connection first — the same thing the
+        // metadata paths above do before reading pool state.
+        if self.state.pool_handle(&connection.id).await.is_none() {
+            self.state.get_or_create_pool(&connection.id, None).await?;
+        }
+        self.state.salesforce_current_user(&connection.id).await
+    }
+
     async fn close_client_session(
         &self,
         connection_id: &str,
@@ -1836,6 +1860,19 @@ impl DbxBackend for WebBackend {
         .json()
         .await
         .map_err(|error| format!("Invalid Redis command response: {error}"))
+    }
+
+    async fn salesforce_current_user(&self, connection: &ConnectionConfig) -> Result<SalesforceCurrentUser, String> {
+        self.ensure_connected(connection).await?;
+        self.request(
+            reqwest::Method::GET,
+            &format!("/api/salesforce/current-user?connection_id={}", url_encode(&connection.id)),
+            None,
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid Salesforce identity response: {error}"))
     }
 
     async fn execute_mongo_command(
@@ -2459,6 +2496,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         affected_rows,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -2682,6 +2720,35 @@ mod tests {
         // Unset env var leaves the policy as-is.
         assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), None).read_only);
         assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), None).read_only);
+    }
+
+    #[test]
+    fn legacy_read_only_also_revokes_the_salesforce_dml_opt_in() {
+        // DBX_MCP_ALLOW_WRITES=0 marks an unconfirmed CLI run. The Salesforce DML
+        // opt-in is a write permission like any other, so it must be withdrawn
+        // with the rest — an opted-in connection must not become writable just
+        // because the org speaks REST instead of SQL.
+        let mut state = policy_state(true, false);
+        state.connection_policies = vec![dbx_core::storage::McpConnectionPolicy {
+            connection_id: "sfdc".to_string(),
+            read_only: false,
+            allow_dangerous_sql: true,
+            execution_mode_configured: false,
+            execution_mode_policy_version: None,
+            database_scope: dbx_core::storage::McpDatabaseScope::All,
+            allowed_databases: Vec::new(),
+            database_policies: Vec::new(),
+            allow_salesforce_dml: true,
+        }];
+
+        let forced = effective_mcp_policy_with_legacy_allow_writes(state.clone(), Some(false));
+        assert!(forced.read_only);
+        assert!(!forced.connection_policies[0].allow_salesforce_dml);
+        assert!(!forced.connection_policies[0].allow_dangerous_sql);
+
+        // Without the env override the stored opt-in survives untouched.
+        let untouched = effective_mcp_policy_with_legacy_allow_writes(state, None);
+        assert!(untouched.connection_policies[0].allow_salesforce_dml);
     }
 
     #[test]

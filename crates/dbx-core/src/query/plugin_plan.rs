@@ -25,8 +25,8 @@ use crate::connection::AppState;
 use crate::db::QueryResult;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::{
-    build_explain_sql, estimated_plan_format, supports_explain_plan, EstimatedPlanFormat, ExplainFormat,
-    ExplainSqlOptions,
+    build_explain_sql, estimated_plan_strategy, supports_explain_plan, EstimatedPlanAcquisition, EstimatedPlanFormat,
+    EstimatedPlanStrategy, ExplainFormat, ExplainSqlOptions,
 };
 
 use super::{execute_sql_statement_with_options_typed, QueryExecutionMode, QueryExecutionOptions};
@@ -166,33 +166,35 @@ pub async fn explain_estimated_plan(state: &AppState, request: PluginPlanRequest
     let config = connection_config(state, &request.connection_id).await?;
     require_open_connection(state, &request.connection_id).await?;
     let database_type = explain_database_type(&config);
-    if !supports_explain_plan(Some(database_type)) {
-        return Err(unsupported_dialect_message(database_type));
-    }
+    let strategy =
+        estimated_plan_strategy(Some(database_type)).ok_or_else(|| unsupported_dialect_message(database_type))?;
 
     let timeout_secs = plugin_plan_timeout_secs(request.timeout_ms, &config);
-    let (plan_text, rows_truncated) = if uses_driver_native_plan(database_type) {
-        // Dameng and Oracle hand back a native plan listing from their driver;
-        // Oracle's `EXPLAIN PLAN FOR` alone only fills `PLAN_TABLE`. This reuses
-        // the core the AI and command explain paths already use, pinned to
-        // `mode = "explain"` so Dameng autotrace stays unreachable.
-        let text = get_agent_explain_info_core(
-            state,
-            &request.connection_id,
-            request.database.as_deref(),
-            request.schema.as_deref(),
-            &request.sql,
-            Some(AGENT_EXPLAIN_MODE),
-            Some(timeout_secs),
-        )
-        .await?;
-        (text, false)
-    } else {
-        native_estimated_plan(state, &request, database_type, timeout_secs).await?
+    let (plan_text, rows_truncated) = match strategy.acquisition() {
+        EstimatedPlanAcquisition::DriverNative => {
+            // Dameng and Oracle hand back a native plan listing from their driver;
+            // Oracle's `EXPLAIN PLAN FOR` alone only fills `PLAN_TABLE`. This reuses
+            // the core the AI and command explain paths already use, pinned to
+            // `mode = "explain"` so Dameng autotrace stays unreachable.
+            let text = get_agent_explain_info_core(
+                state,
+                &request.connection_id,
+                request.database.as_deref(),
+                request.schema.as_deref(),
+                &request.sql,
+                Some(AGENT_EXPLAIN_MODE),
+                Some(timeout_secs),
+            )
+            .await?;
+            (text, false)
+        }
+        EstimatedPlanAcquisition::GeneratedSql | EstimatedPlanAcquisition::SqlServerShowPlanSession => {
+            native_estimated_plan(state, &request, database_type, strategy, timeout_secs).await?
+        }
     };
 
     let plan_text = non_empty_plan_text(plan_text)?;
-    let mut payload = finalize_plan_payload(database_type, plan_text)?;
+    let mut payload = finalize_plan_payload(strategy.format(), plan_text)?;
     if rows_truncated {
         payload.truncated = true;
         payload.warnings.push(WARNING_PLAN_ROWS_TRUNCATED.to_string());
@@ -208,16 +210,11 @@ pub async fn explain_estimated_plan(state: &AppState, request: PluginPlanRequest
     })
 }
 
-/// Dialects whose plan comes from the driver/oracle-side native plan listing
-/// instead of a generated `EXPLAIN` statement.
-fn uses_driver_native_plan(database_type: DatabaseType) -> bool {
-    matches!(database_type, DatabaseType::Dameng | DatabaseType::Oracle)
-}
-
 async fn native_estimated_plan(
     state: &AppState,
     request: &PluginPlanRequest,
     database_type: DatabaseType,
+    strategy: EstimatedPlanStrategy,
     timeout_secs: u64,
 ) -> Result<(String, bool), String> {
     let built = build_explain_sql(ExplainSqlOptions {
@@ -235,8 +232,14 @@ async fn native_estimated_plan(
         return Err("The host did not build an EXPLAIN statement".to_string());
     };
 
-    if database_type == DatabaseType::SqlServer {
-        return sqlserver_estimated_plan(state, request, timeout_secs).await;
+    match strategy.acquisition() {
+        EstimatedPlanAcquisition::GeneratedSql => {}
+        EstimatedPlanAcquisition::SqlServerShowPlanSession => {
+            return sqlserver_estimated_plan(state, request, timeout_secs).await;
+        }
+        EstimatedPlanAcquisition::DriverNative => {
+            return Err("Driver-native plans must use the shared driver explain path".to_string());
+        }
     }
 
     let database = request.database.as_deref().unwrap_or_default();
@@ -364,8 +367,8 @@ fn non_empty_plan_text(text: String) -> Result<String, String> {
 /// Decodes the acquired text into the shape advertised by `format`, downgrades
 /// an unparseable JSON answer to text instead of lying about it, and enforces
 /// the payload cap.
-fn finalize_plan_payload(database_type: DatabaseType, text: String) -> Result<PlanPayload, String> {
-    let mut format = estimated_plan_format(Some(database_type));
+fn finalize_plan_payload(plan_format: EstimatedPlanFormat, text: String) -> Result<PlanPayload, String> {
+    let mut format = plan_format;
     let mut warnings = Vec::new();
     let mut raw_plan = Value::String(text);
 
@@ -657,14 +660,14 @@ mod tests {
     #[test]
     fn parses_json_plans_and_downgrades_other_payloads_to_text() {
         let payload =
-            finalize_plan_payload(DatabaseType::Postgres, r#"[{"Plan": {"Node Type": "Seq Scan"}}]"#.to_string())
+            finalize_plan_payload(EstimatedPlanFormat::Json, r#"[{"Plan": {"Node Type": "Seq Scan"}}]"#.to_string())
                 .unwrap();
         assert_eq!(payload.format, EstimatedPlanFormat::Json);
         assert_eq!(payload.raw_plan[0]["Plan"]["Node Type"], Value::String("Seq Scan".to_string()));
         assert!(!payload.truncated);
         assert!(payload.warnings.is_empty());
 
-        let payload = finalize_plan_payload(DatabaseType::Postgres, "Seq Scan on users".to_string()).unwrap();
+        let payload = finalize_plan_payload(EstimatedPlanFormat::Json, "Seq Scan on users".to_string()).unwrap();
         assert_eq!(payload.format, EstimatedPlanFormat::Text);
         assert_eq!(payload.raw_plan, Value::String("Seq Scan on users".to_string()));
         assert_eq!(payload.warnings, vec![WARNING_PLAN_NOT_JSON.to_string()]);
@@ -672,12 +675,12 @@ mod tests {
 
     #[test]
     fn keeps_text_and_xml_plans_as_strings() {
-        let text = finalize_plan_payload(DatabaseType::Oracle, "1 #NSET2: [0, 1, 0]".to_string()).unwrap();
+        let text = finalize_plan_payload(EstimatedPlanFormat::Text, "1 #NSET2: [0, 1, 0]".to_string()).unwrap();
         assert_eq!(text.format, EstimatedPlanFormat::Text);
         assert_eq!(text.raw_plan, Value::String("1 #NSET2: [0, 1, 0]".to_string()));
 
         let xml =
-            finalize_plan_payload(DatabaseType::SqlServer, "<ShowPlanXML><BatchSequence/></ShowPlanXML>".to_string())
+            finalize_plan_payload(EstimatedPlanFormat::Xml, "<ShowPlanXML><BatchSequence/></ShowPlanXML>".to_string())
                 .unwrap();
         assert_eq!(xml.format, EstimatedPlanFormat::Xml);
         assert_eq!(xml.raw_plan, Value::String("<ShowPlanXML><BatchSequence/></ShowPlanXML>".to_string()));
@@ -687,7 +690,7 @@ mod tests {
     #[test]
     fn truncates_oversized_text_plans_and_rejects_oversized_json_plans() {
         let oversized = "x".repeat(MAX_PLUGIN_PLAN_BYTES + 1_024);
-        let payload = finalize_plan_payload(DatabaseType::Doris, oversized.clone()).unwrap();
+        let payload = finalize_plan_payload(EstimatedPlanFormat::Text, oversized.clone()).unwrap();
         assert!(payload.truncated);
         assert_eq!(payload.warnings, vec![WARNING_PLAN_TRUNCATED.to_string()]);
         let Value::String(text) = &payload.raw_plan else {
@@ -698,7 +701,7 @@ mod tests {
 
         // A JSON document must not be handed over half-parsed.
         let oversized_json = format!(r#"[{{"Plan": "{}"}}]"#, "y".repeat(MAX_PLUGIN_PLAN_BYTES + 1_024));
-        let error = finalize_plan_payload(DatabaseType::Postgres, oversized_json).unwrap_err();
+        let error = finalize_plan_payload(EstimatedPlanFormat::Json, oversized_json).unwrap_err();
         assert!(error.contains("host limit"), "{error}");
     }
 
@@ -758,15 +761,23 @@ mod tests {
     }
 
     #[test]
-    fn plans_native_dialects_through_the_driver_and_the_rest_through_explain_sql() {
-        assert!(uses_driver_native_plan(DatabaseType::Dameng));
-        assert!(uses_driver_native_plan(DatabaseType::Oracle));
+    fn plugin_acquisition_paths_match_estimated_plan_strategy() {
+        use EstimatedPlanAcquisition::{DriverNative, GeneratedSql, SqlServerShowPlanSession};
 
-        for database_type in
-            [DatabaseType::Postgres, DatabaseType::Mysql, DatabaseType::SqlServer, DatabaseType::OceanbaseOracle]
-        {
-            assert!(!uses_driver_native_plan(database_type));
-            assert!(supports_explain_plan(Some(database_type)));
+        for (database_type, expected_acquisition) in [
+            (DatabaseType::Mysql, GeneratedSql),
+            (DatabaseType::Doris, GeneratedSql),
+            (DatabaseType::Postgres, GeneratedSql),
+            (DatabaseType::Questdb, GeneratedSql),
+            (DatabaseType::Dameng, DriverNative),
+            (DatabaseType::Oracle, DriverNative),
+            (DatabaseType::OceanbaseOracle, GeneratedSql),
+            (DatabaseType::SqlServer, SqlServerShowPlanSession),
+        ] {
+            let strategy = estimated_plan_strategy(Some(database_type))
+                .unwrap_or_else(|| panic!("{database_type:?} must have an acquisition strategy"));
+            assert!(supports_explain_plan(Some(database_type)), "{database_type:?}");
+            assert_eq!(strategy.acquisition(), expected_acquisition, "{database_type:?}");
         }
     }
 
@@ -853,15 +864,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capabilities_report_doris_for_the_mysql_doris_profile() {
-        let mut doris = config(DatabaseType::Mysql, 30);
-        doris.driver_profile = Some("doris".to_string());
-        let (state, _dir) = saved_connection_state(std::slice::from_ref(&doris)).await;
-        open_connection(&state, &doris.id).await;
+    async fn capabilities_resolve_mysql_profiles_before_selecting_plan_strategy() {
+        let cases = [
+            ("mysql-doris", Some("doris"), "doris"),
+            ("mysql-selectdb", Some("selectdb"), "doris"),
+            ("mysql-native", None, "mysql"),
+            ("mysql-profile", Some("mysql"), "mysql"),
+            ("mysql-starrocks", Some("starrocks"), "mysql"),
+        ];
+        let configs = cases
+            .iter()
+            .map(|(id, profile, _)| {
+                let mut config = config_for(DatabaseType::Mysql, id, 30);
+                config.driver_profile = profile.map(|profile| profile.to_string());
+                config
+            })
+            .collect::<Vec<_>>();
+        let (state, _dir) = saved_connection_state(&configs).await;
 
-        let capabilities = plugin_plan_capabilities(&state, &doris.id).await.unwrap();
-        let capabilities = serde_json::to_value(capabilities).unwrap();
-        assert_eq!(capabilities["dbType"], "doris");
-        assert!(capabilities["supports"]["estimatedPlan"].as_bool().unwrap_or_default());
+        for ((_, _, expected_db_type), config) in cases.iter().zip(configs.iter()) {
+            open_connection(&state, &config.id).await;
+            let capabilities = plugin_plan_capabilities(&state, &config.id)
+                .await
+                .unwrap_or_else(|error| panic!("capabilities should be available for {}: {error}", config.id));
+            assert_eq!(capabilities.db_type, *expected_db_type, "{}", config.id);
+            assert!(capabilities.supports.estimated_plan, "{}", config.id);
+        }
     }
 }

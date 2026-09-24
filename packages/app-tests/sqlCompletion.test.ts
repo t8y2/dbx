@@ -2821,6 +2821,43 @@ test("prioritizes current Oracle schema tables and safely qualifies other schema
   );
 });
 
+test("prioritizes current OceanBase Oracle schema tables and safely qualifies other schemas", () => {
+  const sql = "select * from orders";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "ORDERS", schema: "STAGING", type: "table", applyName: "STAGING.ORDERS", boost: 0 },
+      { name: "ORDERS", schema: "DWD", type: "table", applyName: "ORDERS", boost: 2400 },
+    ],
+    columnsByTable,
+    databaseType: "oceanbase-oracle",
+    currentSchema: "DWD",
+  });
+  const matches = items.filter((item) => item.label === "ORDERS");
+
+  assert.deepEqual(
+    matches.map((item) => item.apply),
+    ["ORDERS", "STAGING.ORDERS"],
+  );
+});
+
+test("qualifies OceanBase Oracle tables outside the current schema without applyName", () => {
+  const sql = "select * from orders";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "ORDERS", schema: "STAGING", type: "table", boost: 0 },
+      { name: "ORDERS", schema: "DWD", type: "table", boost: 2400 },
+    ],
+    columnsByTable,
+    databaseType: "oceanbase-oracle",
+    currentSchema: "DWD",
+  });
+
+  assert.deepEqual(
+    items.filter((item) => item.label === "ORDERS").map((item) => item.apply),
+    ["ORDERS", "STAGING.ORDERS"],
+  );
+});
+
 test("does not duplicate an Oracle schema qualifier when applying a scoped table", () => {
   const sql = "select * from COMM.DEPT_D";
   const items = buildSqlCompletionItems(sql, sql.length, {

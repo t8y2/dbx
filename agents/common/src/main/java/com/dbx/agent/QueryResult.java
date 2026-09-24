@@ -18,6 +18,7 @@ public final class QueryResult {
     private long affected_rows;
     private long execution_time_ms;
     private Long server_execute_time_us;
+    private java.util.Map<String, Double> query_timings_ms;
     private boolean truncated;
 
     public QueryResult() {
@@ -84,6 +85,10 @@ public final class QueryResult {
     public long getExecution_time_ms() {
         return execution_time_ms;
     }
+
+    public java.util.Map<String, Double> getQuery_timings_ms() { return query_timings_ms; }
+
+    public void setQuery_timings_ms(java.util.Map<String, Double> value) { query_timings_ms = value; }
 
     public Long getServer_execute_time_us() {
         return server_execute_time_us;

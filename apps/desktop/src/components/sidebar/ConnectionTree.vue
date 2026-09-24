@@ -9,6 +9,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { ColumnInfo, ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
+import { listEventTriggers } from "@/lib/backend/api";
 import {
   filterLocallySearchedTables,
   createSidebarSearchSubtreePreserver,
@@ -68,6 +69,7 @@ import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import SidebarTableVGroupDialog from "./SidebarTableVGroupDialog.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
 import ExtensionDetailsDialog from "@/components/objects/ExtensionDetailsDialog.vue";
+import EventTriggerDetailsDialog from "@/components/objects/EventTriggerDetailsDialog.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -133,6 +135,8 @@ const sidebarInstallExtensionTarget = ref<TreeNode | null>(null);
 const sidebarInstallExtensionDialogRef = ref<InstanceType<typeof InstallExtensionDialog> | null>(null);
 const sidebarExtensionDetailsTarget = ref<TreeNode | null>(null);
 const sidebarExtensionDetailsDialogRef = ref<InstanceType<typeof ExtensionDetailsDialog> | null>(null);
+const sidebarEventTriggerDetailsTarget = ref<TreeNode | null>(null);
+const sidebarEventTriggerDetailsDialogRef = ref<InstanceType<typeof EventTriggerDetailsDialog> | null>(null);
 const sidebarTreeRuntimeHostRef = ref<SidebarTreeRuntimeHostInstance | null>(null);
 const sidebarTreeRuntime = createSidebarTreeRuntime();
 const sidebarTreeRuntimeInitialNode: TreeNode = { id: "__sidebar-runtime__", label: "", type: "connection-group" };
@@ -2038,6 +2042,25 @@ async function openSidebarExtensionDetails(node: TreeNode) {
   sidebarExtensionDetailsDialogRef.value?.show();
 }
 
+async function openSidebarEventTriggerDetails(node: TreeNode) {
+  sidebarEventTriggerDetailsTarget.value = createSidebarActionTarget(node);
+  await nextTick();
+  sidebarEventTriggerDetailsDialogRef.value?.show();
+  // 打开详情时静默拉取最新事件触发器数据，只更新当前节点的 meta 与对话框，
+  // 不重建整个侧边栏列表（避免每次打开都强制刷新触发器列表）。
+  if (!node.connectionId || !node.database) return;
+  try {
+    const triggers = await listEventTriggers(node.connectionId, node.database);
+    const fresh = triggers.find((et) => et.name === node.label);
+    if (fresh) {
+      node.meta = fresh;
+      sidebarEventTriggerDetailsTarget.value = createSidebarActionTarget({ ...node, meta: fresh });
+    }
+  } catch {
+    // 拉取失败时保留首次打开的缓存值。
+  }
+}
+
 function beginSidebarAction(): number {
   sidebarActionGeneration += 1;
   sidebarDdlOpen.value = false;
@@ -2557,6 +2580,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       @open-dialog-controller="updateSidebarTreeItemDialogController"
       @open-install-extension="openSidebarInstallExtension"
       @open-extension-details="openSidebarExtensionDetails"
+      @open-event-trigger-details="openSidebarEventTriggerDetails"
     />
     <div class="connection-tree-search sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
@@ -2884,6 +2908,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
     <SidebarTableVGroupDialog @created="focusCreatedTableVGroup" />
     <InstallExtensionDialog v-if="sidebarInstallExtensionTarget" ref="sidebarInstallExtensionDialogRef" :node="sidebarInstallExtensionTarget" @close="refreshSidebarActionTarget" @changed="refreshSidebarActionTarget" />
     <ExtensionDetailsDialog v-if="sidebarExtensionDetailsTarget" ref="sidebarExtensionDetailsDialogRef" :node="sidebarExtensionDetailsTarget" />
+    <EventTriggerDetailsDialog v-if="sidebarEventTriggerDetailsTarget" ref="sidebarEventTriggerDetailsDialogRef" :node="sidebarEventTriggerDetailsTarget" />
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t("sidebar.noConnections") }}
     </div>

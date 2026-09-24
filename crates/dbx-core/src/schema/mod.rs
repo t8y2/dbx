@@ -676,6 +676,12 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         if let Some(client) = extract_pool!(pool_handle.as_ref(), VictoriaMetrics) {
             return db::victoriametrics_driver::list_databases(&client).await;
         }
+        if let Some(client) = extract_pool!(pool_handle.as_ref(), Salesforce) {
+            // singleDatabase trait: the whole org is one synthesized database
+            // node; sObjects are listed as its tables.
+            let name = client.org_display_name().await;
+            return Ok(vec![db::DatabaseInfo { name, ..Default::default() }]);
+        }
         try_sqlserver!(pool_handle, list_databases);
         if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let is_mongo = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb);
@@ -2683,6 +2689,10 @@ async fn list_tables_once(
             .await
             .map(|names| collection_names_to_tables(names, "INDEX"))
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
+        PoolKind::Salesforce(client) => db::salesforce_driver::SfClient::list_tables(client)
+            .await
+            .map(|names| collection_names_to_tables(names, "SOBJECT"))
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::HBase(client) => db::hbase_driver::list_tables(client, database)
             .await
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
@@ -3215,6 +3225,7 @@ mod tests {
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4086,6 +4097,7 @@ done
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4114,6 +4126,7 @@ done
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4139,6 +4152,7 @@ done
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4168,6 +4182,7 @@ done
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4196,6 +4211,7 @@ done
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5167,6 +5183,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 1,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5216,6 +5233,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 1,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5421,6 +5439,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5440,6 +5459,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5477,6 +5497,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5672,6 +5693,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5778,6 +5800,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -7456,6 +7479,9 @@ async fn get_columns_core_for_session_inner_with_pool(
             PoolKind::Meilisearch(client) => {
                 db::meilisearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::Salesforce(client) => {
+                db::salesforce_driver::SfClient::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::HBase(client) => {
                 db::hbase_driver::get_columns(client, database, table).await.map(deduplicate_column_infos)
             }
@@ -8329,6 +8355,41 @@ pub async fn list_extensions_core(
 
         match &pool {
             PoolKind::Postgres(p) => db::postgres::list_extensions(p, schema).await,
+            _ => Ok(vec![]),
+        }
+    })
+    .await
+}
+
+pub async fn list_event_triggers_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<db::EventTriggerInfo>, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let db_config = connection_config(state, connection_id).await;
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            let pool_handle = state.pool_handle(&pool_key).await;
+            if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+                return kingbase::list_event_triggers(client, database, agent_metadata_timeout(db_config.as_ref()))
+                    .await;
+            }
+        }
+
+        // HighGo, Vastbase, and other PostgreSQL-compatible catalogs exposed
+        // through Agent pools still ship pg_event_trigger natively, so reuse
+        // the native metadata fallback used for extension metadata.
+        if let Some(config) = agent_postgres_extension_fallback_config(db_config.as_ref()) {
+            if let Some(pool) = native_postgres_metadata_pool(state, connection_id, database, config).await? {
+                return db::postgres::list_event_triggers(&pool).await;
+            }
+        }
+
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+
+        match &pool {
+            PoolKind::Postgres(p) => db::postgres::list_event_triggers(p).await,
             _ => Ok(vec![]),
         }
     })

@@ -106,6 +106,21 @@ for (const driver of ["duckdb", "tdengine", ...goAgents.map((entry) => entry.dri
   });
 }
 
+test("known JDBC driver changes only select Java agent tests", () => {
+  const result = plan(["agents/drivers/oceanbase-oracle/src/main/java/Agent.java"], {
+    agentsChanged: true,
+    javaDrivers: ["oceanbase-oracle", "dameng"],
+  });
+  assert.equal(result.rust, false);
+  assert.equal(result.agents, true);
+  assert.equal(result.agent_java, true);
+  assert.equal(result.agent_go.include.length, 0);
+  assert.equal(result.agent_rust.include.length, 0);
+  assert.equal(result.agent_integration.include.length, 0);
+  assert.equal(result.duckdb_changed, false);
+  assert.equal(result.fast, true);
+});
+
 test("shared Agent inputs and unknown native modules never silently lose coverage", () => {
   for (const file of ["agents/common/src/main/java/Protocol.java", "agents/scripts/validate_agents.py", "agents/build.gradle",
     "agents/drivers/new-driver/main.go", "crates/dbx-drivers/assets/agent-protocol-v2.json", ".github/workflows/agents-release.yml"]) {

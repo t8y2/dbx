@@ -124,7 +124,7 @@ DBX has two separate key boundaries:
 | Local Secret Store key | Encrypts secrets in the local `dbx.db`                  | Platform credential store, managed data-dir key, or explicit environment key | No                                                     |
 | Sync passphrase        | Encrypts the sensitive part of an export/import package | Entered by the user for that package                                         | Only as the package protection, never as the local key |
 
-The managed data-directory key is created only when migration or a sensitive write needs it. Back up it with `dbx.db`. A key stored in the same volume protects the database contents at rest, but it does not protect a stolen copy of the entire volume.
+The managed data-directory key is created only when migration or a sensitive write needs it. Back it up with `dbx.db`. A key stored in the same volume protects the database contents at rest, but it does not protect a stolen copy of the entire volume.
 
 If the database already contains encrypted values, using a new key makes them unreadable. Restore the original key instead of creating another one.
 

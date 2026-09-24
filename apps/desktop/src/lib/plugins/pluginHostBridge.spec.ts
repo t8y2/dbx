@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { reactive, readonly } from "vue";
-import { PluginHostBridge, pluginSandboxDocument, pluginSdkSource } from "./pluginHostBridge";
+import { PLUGIN_CLIPBOARD_AUDIT_CAPACITY, PluginHostBridge, clipboardReadGateAllows, createClipboardReadGate, pluginSandboxDocument, pluginSdkSource, recordClipboardRead } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginResultViewContribution, PluginWorkbenchContribution } from "@/types/database";
 
 function plugin(permissions: string[] = [], contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
@@ -1038,6 +1038,197 @@ describe("PluginHostBridge", () => {
     } as MessageEvent);
     await vi.waitFor(() => expect(messages).toHaveLength(1));
     expect(messages[0]).toMatchObject({ id: "nocopy", error: "Host clipboard is unavailable" });
+  });
+
+  it("serves host.clipboardRead only with the declared host.clipboard:read permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const clipboardRead = vi.fn().mockResolvedValue("pasted text");
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Without the permission the read is refused before the host clipboard is touched.
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+    });
+    denied.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "read-denied", method: "host.clipboardRead" },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(clipboardRead).not.toHaveBeenCalled();
+    expect(messages[0]).toMatchObject({ id: "read-denied", error: "Plugin has not declared permission 'host.clipboard:read'" });
+
+    // With the permission (and session consent granted) the call is scoped to
+    // the owning plugin and unwraps to { text }.
+    const allowed = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    allowed.sendInit();
+    expect((messages[1] as { capabilities?: { clipboardRead?: boolean } }).capabilities?.clipboardRead).toBe(true);
+    send(allowed, "read-ok", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "read-ok")).toBe(true));
+    expect(clipboardRead).toHaveBeenCalledWith("sample");
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(byId.get("read-ok")).toMatchObject({ id: "read-ok", result: { text: "pasted text" } });
+  });
+
+  it("rejects host.clipboardRead when the host cannot read the clipboard and caps oversized reads", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Legacy or web host: no clipboardRead in the API surface.
+    const noRead = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(noRead, "read-missing", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "read-missing", error: "Host clipboard read is unavailable" });
+
+    // An oversized clipboard read is clamped to the bridge payload bound.
+    const clipboardRead = vi.fn().mockResolvedValue("x".repeat(2 * 1024 * 1024 + 1));
+    const clamping = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(clamping, "read-huge", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "read-huge")).toBe(true));
+    expect(clipboardRead).toHaveBeenCalled();
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    const result = (byId.get("read-huge") as { result?: { text?: string } }).result;
+    expect(result?.text).toHaveLength(2 * 1024 * 1024);
+  });
+
+  it("asks session consent before the first clipboard read and remembers a denial for the bridge lifetime", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Denial on the consent prompt: the read rejects and the host clipboard is never touched.
+    const clipboardRead = vi.fn().mockResolvedValue("secret");
+    const deny = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(false),
+    });
+    send(deny, "consent-denied", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-denied")).toBe(true));
+    expect(clipboardRead).not.toHaveBeenCalled();
+    const denialById = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(denialById.get("consent-denied")).toMatchObject({ id: "consent-denied", error: "Clipboard read was denied for this plugin session" });
+    expect(deny.clipboardAudit).toEqual([{ at: expect.any(Number), outcome: "denied", length: 0 }]);
+
+    // A denial is remembered: a second read rejects without asking again.
+    const confirm = (deny as unknown as { api: { confirmClipboardRead: ReturnType<typeof vi.fn> } }).api.confirmClipboardRead;
+    send(deny, "consent-denied-2", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-denied-2")).toBe(true));
+    expect(confirm).toHaveBeenCalledTimes(1);
+
+    // Consent: the read proceeds, and later reads skip the prompt for the session.
+    const allow = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(allow, "consent-1", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-1" && (message as { result?: { text?: string } }).result).valueOf()).toBe(true));
+    // The rate gate demands PLUGIN_CLIPBOARD_READ_MIN_INTERVAL_MS between reads.
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    send(allow, "consent-2", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-2" && (message as { result?: { text?: string } }).result).valueOf()).toBe(true));
+    const allowConfirm = (allow as unknown as { api: { confirmClipboardRead: ReturnType<typeof vi.fn> } }).api.confirmClipboardRead;
+    expect(allowConfirm).toHaveBeenCalledTimes(1);
+    // Shared mock: the deny bridge never reached the clipboard, the allow bridge read twice.
+    expect(clipboardRead).toHaveBeenCalledTimes(2);
+    expect(readTextFromSharedBridgeAudit(allow)).toEqual(["granted", "granted"]);
+  });
+
+  function readTextFromSharedBridgeAudit(bridge: PluginHostBridge) {
+    return bridge.clipboardAudit.map((entry) => entry.outcome);
+  }
+
+  it("denies clipboard reads on hosts without a consent surface and rate-limits repeated reads", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // No consent surface: deny rather than silently allow (option-a hardening).
+    const noSurface = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead: vi.fn().mockResolvedValue("secret"),
+    });
+    send(noSurface, "no-surface", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "no-surface")).toBe(true));
+    const noSurfaceById = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(noSurfaceById.get("no-surface")).toMatchObject({ error: "Clipboard read was denied for this plugin session" });
+
+    // Rate gate: two back-to-back reads — the second is refused with a retry hint
+    // and recorded as rate-limited without touching the clipboard.
+    const clipboardRead = vi.fn().mockResolvedValue("text");
+    const readBridge = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(readBridge, "rate-1", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "rate-1" && (message as { result?: unknown }).result).valueOf()).toBe(true));
+    send(readBridge, "rate-2", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "rate-2")).toBe(true));
+    const rateById = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(String((rateById.get("rate-2") as { error?: string }).error)).toContain("rate limit");
+    expect(readBridge.clipboardAudit.map((entry) => entry.outcome)).toEqual(["granted", "rate-limited"]);
+    expect(clipboardRead).toHaveBeenCalledTimes(1);
+  });
+
+  it("caps the clipboard read audit trail and exposes the pure rate helpers", () => {
+    expect(PLUGIN_CLIPBOARD_AUDIT_CAPACITY).toBeLessThanOrEqual(500);
+    const gate = createClipboardReadGate();
+    for (let index = 0; index < PLUGIN_CLIPBOARD_AUDIT_CAPACITY + 20; index += 1) {
+      recordClipboardRead(gate, index * 10_000, "granted", index);
+    }
+    expect(gate.audit).toHaveLength(PLUGIN_CLIPBOARD_AUDIT_CAPACITY);
+    expect(gate.audit[0].length).toBe(20);
+    // Exactly one read per min interval passes; within the window the gate refuses.
+    expect(clipboardReadGateAllows(gate, gate.audit[PLUGIN_CLIPBOARD_AUDIT_CAPACITY - 1].at + 999)).toBe(false);
+    expect(clipboardReadGateAllows(gate, gate.audit[PLUGIN_CLIPBOARD_AUDIT_CAPACITY - 1].at + 1_000)).toBe(true);
+    // A fresh gate (never read) always allows the first read.
+    expect(clipboardReadGateAllows(createClipboardReadGate(), 0)).toBe(true);
+  });
+
+  it("exposes the sandbox clipboard namespace mapping writeText to host.copy and readText to host.clipboardRead", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("clipboard: Object.freeze({");
+    expect(source).toContain("writeText: (text) => request('host.copy', { text })");
+    expect(source).toContain("request('host.clipboardRead')");
   });
 
   it("routes host.storage through the owning plugin, caps values, and needs the declared permission", async () => {

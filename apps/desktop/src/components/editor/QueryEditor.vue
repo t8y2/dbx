@@ -139,7 +139,9 @@ import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionReferenced
 const props = defineProps<QueryEditorProps>();
 
 function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
-  return props.syntaxDialect === "clickhouse" ? props.dialect : (props.syntaxDialect ?? props.dialect);
+  // clickhouse and soql ride the SQL editor but have no matching behavior dialect;
+  // fall back to the connection's dialect (undefined for Salesforce).
+  return props.syntaxDialect === "clickhouse" || props.syntaxDialect === "soql" ? props.dialect : (props.syntaxDialect ?? props.dialect);
 }
 
 function queryEditorSelectionLanguage(): "sql" | "text" {

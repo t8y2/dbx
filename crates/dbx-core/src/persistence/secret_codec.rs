@@ -493,16 +493,19 @@ fn default_key_path() -> Option<std::path::PathBuf> {
     {
         return Some(std::env::temp_dir().join("dbx-test-secret.key"));
     }
-    #[cfg(target_os = "macos")]
-    if let Ok(home) = std::env::var("HOME") {
-        return Some(std::path::PathBuf::from(home).join("Library/Application Support/dbx/secret.key"));
+    #[cfg(not(test))]
+    {
+        #[cfg(target_os = "macos")]
+        if let Ok(home) = std::env::var("HOME") {
+            return Some(std::path::PathBuf::from(home).join("Library/Application Support/dbx/secret.key"));
+        }
+        if let Ok(config) = std::env::var("XDG_CONFIG_HOME") {
+            return Some(std::path::PathBuf::from(config).join("dbx/secret.key"));
+        }
+        std::env::var_os("APPDATA").map(std::path::PathBuf::from).map(|path| path.join("dbx/secret.key")).or_else(
+            || std::env::var_os("HOME").map(std::path::PathBuf::from).map(|path| path.join(".config/dbx/secret.key")),
+        )
     }
-    if let Ok(config) = std::env::var("XDG_CONFIG_HOME") {
-        return Some(std::path::PathBuf::from(config).join("dbx/secret.key"));
-    }
-    std::env::var_os("APPDATA").map(std::path::PathBuf::from).map(|path| path.join("dbx/secret.key")).or_else(|| {
-        std::env::var_os("HOME").map(std::path::PathBuf::from).map(|path| path.join(".config/dbx/secret.key"))
-    })
 }
 
 fn aad(namespace: &str, key: &str) -> String {

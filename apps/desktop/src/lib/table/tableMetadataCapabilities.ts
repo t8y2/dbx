@@ -90,6 +90,15 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     triggers: false,
     ddl: false,
   },
+  // A Salesforce object only has describe metadata: the driver lists fields, and
+  // there is no index, foreign key, trigger or DDL surface behind an SObject, so
+  // those structure tabs would render permanently empty.
+  salesforce: {
+    indexes: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
   hbase: {
     indexes: false,
     foreignKeys: false,

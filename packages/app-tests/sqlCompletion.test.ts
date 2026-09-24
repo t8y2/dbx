@@ -2093,6 +2093,24 @@ test("auto-opens column completion immediately after condition context whitespac
   }
 });
 
+test("auto-opens column completion after SELECT and UPDATE column-list keywords", () => {
+  const cases = [
+    { sql: "SELECT  FROM public.users", cursor: "SELECT ".length },
+    { sql: "UPDATE public.users SET  WHERE id = 1", cursor: "UPDATE public.users SET ".length },
+  ];
+
+  for (const { sql, cursor } of cases) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, cursor), true, sql);
+    const items = buildSqlCompletionItems(sql, cursor, { tables, columnsByTable });
+    assert.ok(
+      items.some((item) => item.type === "column" && item.label === "id"),
+      sql,
+    );
+  }
+
+  assert.equal(shouldAutoOpenSqlCompletion("SELECT ", "SELECT ".length), false);
+});
+
 test("does not auto-open column completion immediately after comparison operators", () => {
   for (const sql of ["SELECT * FROM public.users WHERE id>", "SELECT * FROM public.users WHERE id> ", "SELECT * FROM public.users WHERE id = "]) {
     assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), false, sql);

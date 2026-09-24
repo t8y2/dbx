@@ -69,7 +69,7 @@ test("core owns application orchestration in real business directories", () => {
     assert.ok(existsSync(path.join(root, "crates/dbx-core/src", name)), `missing owned business source: ${name}`);
   }
   const rootSources = readdirSync(path.join(root, "crates/dbx-core/src")).filter((name) => name.endsWith(".rs"));
-  assert.deepEqual(rootSources, ["lib.rs"]);
+  assert.deepEqual(rootSources, ["cc_switch.rs", "lib.rs"]);
   assert.match(read("crates/dbx-core/src/ai/mod.rs"), /pub use dbx_ai_provider::ai::\*/);
   assert.match(read("crates/dbx-core/src/db/mod.rs"), /pub use crate::data::cloudflare_d1/);
   assert.ok(!existsSync(path.join(root, "crates/dbx-core/build.rs")));

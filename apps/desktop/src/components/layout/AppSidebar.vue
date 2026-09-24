@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { Upload, Download, ArrowDownUp, FolderPlus, FolderOpen, RefreshCw, ChevronsLeft, ChevronsDownUp, Trash2, FolderInput, Check, Minus, Square, X } from "@lucide/vue";
+import { Upload, Download, ArrowDownUp, FolderPlus, FolderOpen, RefreshCw, ChevronsLeft, ChevronsDownUp, Trash2, FolderInput, Square, SquareDot, SquareCheck, Unplug, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
 import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut } from "@/lib/sidebar/sidebarConnectionMultiSelect";
+import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
@@ -65,7 +66,7 @@ const selectedConnectionIds = computed(() => (connectionStore.connectionMultiSel
 const selectedConnectionCount = computed(() => selectedConnectionIds.value.length);
 const showConnectionMultiSelectToolbar = computed(() => connectionStore.connectionMultiSelectActive && selectedConnectionCount.value > 0);
 const allConnectionsSelected = computed(() => allConnectionIds.value.length > 0 && selectedConnectionCount.value === allConnectionIds.value.length);
-const selectAllIcon = computed(() => (allConnectionsSelected.value ? Check : selectedConnectionCount.value > 0 ? Minus : Square));
+const selectAllIcon = computed(() => (allConnectionsSelected.value ? SquareCheck : selectedConnectionCount.value > 0 ? SquareDot : Square));
 const selectAllLabel = computed(() => (allConnectionsSelected.value ? t("connectionGroup.deselectAllConnections") : t("connectionGroup.selectAllConnections")));
 const moveGroupItems = computed(() => [
   ...connectionGroupDestinationRows(connectionStore.sidebarLayout).map((group) => ({
@@ -166,6 +167,26 @@ async function confirmDeleteSelectedConnections() {
   }
 }
 
+const selectedConnectedCount = computed(() => selectedConnectionIds.value.filter((id) => connectionStore.connectedIds.has(id)).length);
+
+async function closeSelectedConnections() {
+  // Disconnect only the connected ones; the selection is kept so further
+  // batches can be closed without re-selecting.
+  const ids = selectedConnectionIds.value.filter((id) => connectionStore.connectedIds.has(id));
+  if (ids.length === 0) return;
+  const result = await disconnectSidebarConnections(ids, (connectionId) => connectionStore.disconnect(connectionId));
+  if (!result.failed) {
+    toast(t("connection.disconnectedSelected", { count: ids.length }), 2000);
+    return;
+  }
+  if (result.succeeded > 0) {
+    toast(t("connection.disconnectSelectedPartial", { succeeded: result.succeeded, failed: result.failed }), 5000);
+    return;
+  }
+  const message = result.firstError instanceof Error ? result.firstError.message : String(result.firstError);
+  toast(t("connection.saveFailed", { message }), 5000);
+}
+
 function moveSelectedConnectionsToGroup(value: string) {
   const groupId = value === UNGROUPED_GROUP_VALUE ? null : value;
   const ids = selectedConnectionIds.value;
@@ -250,6 +271,13 @@ defineExpose({ focusSearch, locateTabInSidebar });
                 align="end"
                 @update:model-value="moveSelectedConnectionsToGroup"
               />
+            </span>
+          </LightTooltip>
+          <LightTooltip :text="t('contextMenu.closeSelectedConnections', { count: selectedConnectedCount })" side="bottom" :delay="0" :close-delay="0" nowrap>
+            <span class="inline-flex">
+              <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="selectedConnectedCount === 0" @click="closeSelectedConnections">
+                <Unplug class="h-3 w-3" />
+              </Button>
             </span>
           </LightTooltip>
           <LightTooltip :text="t('contextMenu.deleteSelectedConnections', { count: selectedConnectionCount })" side="bottom" :delay="0" :close-delay="0" nowrap>

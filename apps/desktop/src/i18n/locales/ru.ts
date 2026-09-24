@@ -278,6 +278,8 @@ export default withEnglishFallback({
     workbenchUnavailableFallback: "Рабочая среда плагина недоступна",
     pluginIncompatible: "Плагин несовместим",
     loadingTitle: "Загрузка {title}",
+    clipboardReadConsent: "«{name}» запрашивает чтение системного буфера обмена. Его рабочая область получит текущее содержимое буфера обмена (возможно, содержащее скопированные вами пароли или токены). Разрешить чтение в этом запуске?",
+    clipboardReadConsentTitle: "Запрос на чтение буфера обмена",
   },
   auth: {
     rateLimited: "Повторите попытку через {seconds} с",

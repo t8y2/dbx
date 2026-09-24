@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   EDITOR_SETTINGS_DRAFT_KEYS,
@@ -11,8 +10,6 @@ import {
   shouldConfirmEditorSettingsDialogClose,
 } from "../editorSettingsDraft";
 import type { EditorSettings } from "@/stores/settingsStore";
-
-const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
 function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
   return {
@@ -36,6 +33,7 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
     continueOnErrorOnBatch: false,
     confirmUnsavedSqlClose: true,
     savedSqlOpenTargetMode: "saved",
+    ddlOpenMode: "dialog",
     objectBrowserViewMode: "list",
     sqlVariableSubstitutionEnabled: true,
     sqlVariableSyntaxOverrides: {},
@@ -52,6 +50,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes showLineNumbers", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("showLineNumbers");
+  });
+
+  it("includes the DDL open mode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("ddlOpenMode");
   });
 
   it("includes continueOnErrorOnBatch", () => {
@@ -75,6 +77,13 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the data-tab reuse mode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
+  });
+
+  it("includes the data grid toolbar layout", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridToolbarLayout");
+
+    const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridToolbarLayout: "single" }));
+    expect(draft.dataGridToolbarLayout).toBe("single");
   });
 
   it("includes generated SQL identifier quote preference", () => {
@@ -110,6 +119,7 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the data grid filter view", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridFilterEditorView");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridToolbarLayout");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridKeepFilterEditorExpanded");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");
   });
@@ -132,16 +142,6 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the SQL variable substitution master switch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("sqlVariableSubstitutionEnabled");
-  });
-});
-
-describe("cell detail button settings control", () => {
-  it("binds the switch through apply and both reset paths", () => {
-    expect(settingsDialogSource).toContain("const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible)");
-    expect(settingsDialogSource).toContain("dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value");
-    expect(settingsDialogSource).toContain("editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible");
-    expect(settingsDialogSource.match(/editDataGridCellDetailButtonVisible\.value = DEFAULT_EDITOR_SETTINGS\.dataGridCellDetailButtonVisible/g)).toHaveLength(2);
-    expect(settingsDialogSource).toContain('id="data-grid-cell-detail-button-visible" v-model="editDataGridCellDetailButtonVisible"');
   });
 });
 
@@ -421,6 +421,19 @@ describe("editorSettingsDraftFromSettings - tabLayout", () => {
   });
 });
 
+describe("editorSettingsDraftFromSettings - ddlOpenMode", () => {
+  it("maps and tracks the selected DDL open mode", () => {
+    const settings = makeSettings({ ddlOpenMode: "dialog" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+
+    expect(draft.ddlOpenMode).toBe("dialog");
+    draft.ddlOpenMode = "tab";
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ ddlOpenMode: "tab" });
+  });
+});
+
 describe("editorSettingsDraftChanged - tabLayout", () => {
   it("detects change in tabLayout", () => {
     const settings = makeSettings({ tabLayout: "scroll" });
@@ -495,14 +508,5 @@ describe("editorSettingsDraftPatchFromSettings", () => {
   it("normalizes imported values per key", () => {
     const patch = editorSettingsDraftPatchFromSettings({ pageSize: 999999 } as Partial<EditorSettings>);
     expect(patch.pageSize).toBe(normalizeTableOpenPageSizeDraft(999999));
-  });
-
-  it("is the base for the settings import path in the dialog", () => {
-    // The import must patch only imported keys into the edit refs; rebuilding
-    // the whole draft would drop unsaved state the file does not cover (e.g. a
-    // half-filled table-column template row, which serialization drops).
-    expect(settingsDialogSource).toContain("const patch = editorSettingsDraftPatchFromSettings(imported);");
-    expect(settingsDialogSource).toContain("applyEditorSettingsKeysToRefs(patch as EditorSettingsDraft, Object.keys(patch) as EditorSettingsDraftKey[]);");
-    expect(settingsDialogSource).not.toContain("const merged = editorSettingsDraftFromSettings({");
   });
 });

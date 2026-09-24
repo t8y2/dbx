@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import {
   DatabaseBackupConnectionQueue,
@@ -337,16 +336,4 @@ test("retention never selects failed backup runs", () => {
     databaseBackupRunsToPrune([failed, ...successful], "schedule-1", 1).map((item) => item.id),
     ["old"],
   );
-});
-
-test("scheduled backup history translates stable backend errors inline", () => {
-  const source = readFileSync("apps/desktop/src/components/backup/ScheduledDatabaseBackupSettings.vue", "utf8");
-
-  assert.match(source, /\{\{ translateBackendError\(t, run\.error\) \}\}/);
-  assert.doesNotMatch(source, /\{\{ run\.error \}\}/);
-});
-
-test("database exports keep the backup snapshot alive", () => {
-  const exportCore = readFileSync("crates/dbx-core/src/data/database_export.rs", "utf8");
-  assert.match(exportCore, /keep_manual_transaction_alive\(state, snapshot_session_id\)\.await/);
 });

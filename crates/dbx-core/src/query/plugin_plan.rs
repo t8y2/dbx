@@ -851,4 +851,17 @@ mod tests {
             unsupported_dialect_message(DatabaseType::Redis)
         );
     }
+
+    #[tokio::test]
+    async fn capabilities_report_doris_for_the_mysql_doris_profile() {
+        let mut doris = config(DatabaseType::Mysql, 30);
+        doris.driver_profile = Some("doris".to_string());
+        let (state, _dir) = saved_connection_state(std::slice::from_ref(&doris)).await;
+        open_connection(&state, &doris.id).await;
+
+        let capabilities = plugin_plan_capabilities(&state, &doris.id).await.unwrap();
+        let capabilities = serde_json::to_value(capabilities).unwrap();
+        assert_eq!(capabilities["dbType"], "doris");
+        assert!(capabilities["supports"]["estimatedPlan"].as_bool().unwrap_or_default());
+    }
 }

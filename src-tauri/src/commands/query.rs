@@ -233,34 +233,36 @@ pub async fn execute_multi(
         schema
     );
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            row_offset,
-            max_result_bytes,
-            result_key_columns: result_key_columns.unwrap_or_default(),
-            table_data_preview: table_data_preview.unwrap_or(false),
-            catalog,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            await_cancel_completion: false,
-            execution_id,
-            use_transaction,
-            continue_on_error: continue_on_error.unwrap_or(false),
-            execution_mode: execution_mode.unwrap_or_default(),
-            preserve_explicit_transaction: preserve_explicit_transaction.unwrap_or(false),
-        },
-        progress,
-    )
+    let result = dbx_core::query::batch_progress::with_coalesced_execute_multi_progress(progress, |progress| {
+        dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
+            &state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            cancel_token,
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                row_offset,
+                max_result_bytes,
+                result_key_columns: result_key_columns.unwrap_or_default(),
+                table_data_preview: table_data_preview.unwrap_or(false),
+                catalog,
+                result_session_id,
+                client_session_id,
+                timeout_secs,
+                await_cancel_completion: false,
+                execution_id,
+                use_transaction,
+                continue_on_error: continue_on_error.unwrap_or(false),
+                execution_mode: execution_mode.unwrap_or_default(),
+                preserve_explicit_transaction: preserve_explicit_transaction.unwrap_or(false),
+            },
+            progress,
+        )
+    })
     .await;
     match &result {
         Ok(results) => log::info!(

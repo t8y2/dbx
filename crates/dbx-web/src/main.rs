@@ -1,4 +1,5 @@
 mod auth;
+mod demo;
 mod error;
 mod routes;
 mod sse;
@@ -386,11 +387,14 @@ async fn serve() {
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
 
+    let demo_mode = demo::demo_mode_from_env();
+
     let migration_ready = storage_migration_ready(&app_state).await;
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
         public_base_path: public_base_path.clone(),
+        demo_mode,
         password_disabled,
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
@@ -1247,6 +1251,7 @@ async fn serve() {
 
     let api = add_mq_routes(api)
         .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate))
+        .layer(middleware::from_fn_with_state(web_state.clone(), demo::demo_mode_gate))
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
 
@@ -1277,6 +1282,9 @@ async fn serve() {
         tracing::info!("Password protection is disabled");
     } else if std::env::var("DBX_PASSWORD").is_ok() {
         tracing::info!("Password protection is enabled");
+    }
+    if demo_mode {
+        tracing::info!("Demo mode is enabled: connection/plugin/AI mutations are blocked");
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");

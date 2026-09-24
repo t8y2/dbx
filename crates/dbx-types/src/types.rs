@@ -391,10 +391,13 @@ impl SpatialColumnBuilder {
         }
     }
 
-    pub fn finish(self) -> Vec<SpatialColumn> {
+    fn finish(self) -> Vec<SpatialColumn> {
         self.columns.into_iter().map(|(column_index, srid)| SpatialColumn { column_index, srid }).collect()
     }
 
+    /// Drivers collect one SRID slot per cell while streaming rows; a result
+    /// without spatial columns drops that all-`None` matrix instead of sending
+    /// it to every consumer.
     pub fn finish_with_values(
         self,
         spatial_values: Vec<Vec<Option<u32>>>,

@@ -401,6 +401,11 @@ pub async fn connect_db(
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
     let config = body.config;
+    // 演示模式：只允许连接已保存的连接，端点身份以存储为准，防止伪造 body
+    // 配置把服务器拨向任意主机（见 demo 模块）。
+    if state.demo_mode {
+        crate::demo::ensure_demo_connect_allowed(&state.app, &config).await.map_err(AppError::forbidden)?;
+    }
     if config.db_type == dbx_core::models::connection::DatabaseType::Sqlite {
         dbx_core::db::sqlite::validate_persistent_attachments(
             &config.host,

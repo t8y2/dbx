@@ -33,6 +33,8 @@ pub struct WebState {
     pub data_dir: PathBuf,
     pub public_base_path: String,
     pub password_disabled: bool,
+    /// `DBX_DEMO_MODE`：公网演示部署的封锁开关（见 `demo` 模块）。
+    pub demo_mode: bool,
     pub password_hash: RwLock<Option<String>>,
     pub sessions: RwLock<HashSet<String>>,
     pub sse_channels: RwLock<HashMap<String, broadcast::Sender<String>>>,
@@ -61,6 +63,7 @@ impl WebState {
             data_dir,
             public_base_path: "/".to_string(),
             password_disabled: false,
+            demo_mode: false,
             password_hash: RwLock::new(None),
             sessions: RwLock::new(HashSet::new()),
             sse_channels: RwLock::new(HashMap::new()),

@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   defaultAutoKeepResults: false,
+  continueOnErrorOnBatch: false,
   analyzeEditableQueryEditability: vi.fn(),
   cancelQuery: vi.fn(),
   closeClientConnectionSession: vi.fn(),
@@ -44,7 +45,7 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { autoCalculateTotalRows: false, pageSize: 100, continueOnErrorOnBatch: false, defaultAutoKeepResults: mocks.defaultAutoKeepResults },
+    editorSettings: { autoCalculateTotalRows: false, pageSize: 100, continueOnErrorOnBatch: mocks.continueOnErrorOnBatch, defaultAutoKeepResults: mocks.defaultAutoKeepResults },
   }),
 }));
 
@@ -115,6 +116,7 @@ describe("queryStore multi-statement errors", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.defaultAutoKeepResults = false;
+    mocks.continueOnErrorOnBatch = false;
     vi.unstubAllGlobals();
     mocks.tabResultSnapshots.clear();
     installLocalStorage();
@@ -494,6 +496,52 @@ describe("queryStore multi-statement errors", () => {
       { columns: ["COUNT(*)"], rows: [[2]], affected_rows: 0, execution_time_ms: 2, statement_index: 3 },
     ]);
     await execution;
+  });
+
+  it("settles the statements between coalesced progress events without overwriting a failure", async () => {
+    mocks.continueOnErrorOnBatch = true;
+    const pendingExecution = deferred<any[]>();
+    let reportProgress!: (progress: any) => void;
+    mocks.executeMultiWithProgress.mockImplementationOnce((_connectionId, _database, _sql, onProgress) => {
+      reportProgress = onProgress;
+      return pendingExecution.promise;
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const sql = Array.from({ length: 6 }, (_, index) => `INSERT INTO t VALUES (${index + 1});`).join("\n");
+    const tabId = store.createTab("mysql-1", "app", "Query", "query", undefined, sql);
+    const batch = () => store.tabs.find((item) => item.id === tabId)?.batchSqlExecution;
+
+    const execution = store.executeTabSql(tabId, sql);
+    await vi.waitFor(() => expect(batch()?.items[0]?.status).toBe("running"));
+    const executionId = store.tabs.find((item) => item.id === tabId)!.executionId!;
+    const report = (statementIndex: number, success: boolean) =>
+      reportProgress({
+        executionId,
+        statementIndex,
+        completed: statementIndex + 1,
+        total: 6,
+        success,
+        executionTimeMs: 1,
+        affectedRows: success ? 1 : 0,
+        error: success ? undefined : structuredSqlError(),
+      });
+
+    report(1, true);
+    expect(batch()).toMatchObject({ completed: 2, items: [{ status: "success" }, { status: "success" }, { status: "running" }, { status: "pending" }, { status: "pending" }, { status: "pending" }] });
+    report(3, false);
+    expect(batch()).toMatchObject({ completed: 4, items: [{ status: "success" }, { status: "success" }, { status: "success" }, { status: "error" }, { status: "running" }, { status: "pending" }] });
+    report(5, true);
+    expect(batch()).toMatchObject({ completed: 6, items: [{ status: "success" }, { status: "success" }, { status: "success" }, { status: "error" }, { status: "success" }, { status: "success" }] });
+
+    pendingExecution.resolve(
+      Array.from({ length: 6 }, (_, index) =>
+        index === 3 ? { columns: ["Error"], rows: [["duplicate key"]], affected_rows: 0, execution_time_ms: 1, statement_index: index, execution_error: true, error: structuredSqlError() } : { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1, statement_index: index },
+      ),
+    );
+    await execution;
+
+    expect(batch()).toMatchObject({ completed: 6, items: [{ status: "success" }, { status: "success" }, { status: "success" }, { status: "error" }, { status: "success" }, { status: "success" }] });
   });
 
   it("records a top-level batch failure on the current statement", async () => {

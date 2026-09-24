@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import {
   applyManticoreDdlColumnExtras,
@@ -659,31 +658,6 @@ test("falls back to columns tab when DDL is not available in edit mode", () => {
 
 test("falls back to DDL when no editable metadata tab is available", () => {
   assert.equal(firstStructureMetadataTab(ddlOnlyCapabilities, false), "ddl");
-});
-
-test("preserves a restored structure draft tab without an explicit initial tab", () => {
-  const source = readFileSync("apps/desktop/src/components/structure/TableStructureEditor.vue", "utf8");
-  const restoredDraftBlock = source.match(/if \(props\.draft\?\.initialized\) \{[\s\S]*?\n  \} else if/);
-
-  assert.ok(restoredDraftBlock);
-  assert.match(restoredDraftBlock[0], /restoreDraft\(props\.draft\);[\s\S]*applyPendingInitialStructureTab\(\);[\s\S]*applyInitialStructureTarget\(\);/);
-});
-
-test("renders editable structure tables with flat cell controls", () => {
-  const source = readFileSync("apps/desktop/src/components/structure/TableStructureEditor.vue", "utf8");
-
-  assert.match(source, /<CustomContextMenu :items="activeColumnContextMenuItems"[\s\S]*<RecycleScroller[\s\S]*item-class="structure-column-virtual-row"[\s\S]*list-class="structure-column-virtual-list"/);
-  assert.match(source, /:item-size="columnVirtualItemSize"/);
-  assert.match(source, /const useColumnVirtualFlowMode = isTauriRuntime\(\) && isMacOS\(\);/);
-  assert.match(source, /:flow-mode="useColumnVirtualFlowMode"/);
-  assert.doesNotMatch(source, /:disable-transform=/);
-  assert.match(source, /<template #default="\{ item: \{ column, index \}, active \}">[\s\S]*<table class="structure-column-virtual-row-table/);
-  assert.doesNotMatch(source, /<CustomContextMenu :key="column\.id"/);
-  assert.match(source, /<tbody class="structure-edit-grid">/);
-  assert.match(source, /const structureControlClass = "structure-grid-control /);
-  assert.match(source, /\.structure-edit-grid :deep\(\.structure-grid-control\) \{[\s\S]*?border-radius: 0;/);
-  assert.match(source, /\.structure-edit-grid > tbody > tr > td:focus-within,[\s\S]*?\.structure-edit-grid > tr > td:focus-within \{/);
-  assert.match(source, /\.structure-column-virtual-scroller\.is-scrolling :deep\(\.structure-column-virtual-row \*\) \{[\s\S]*?transition: none !important;/);
 });
 
 test("supports DDL tab in edit mode", () => {

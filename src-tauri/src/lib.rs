@@ -726,6 +726,7 @@ enum LocaleFamily {
     Spanish,
     Italian,
     Portuguese,
+    Russian,
     Turkish,
 }
 
@@ -758,6 +759,8 @@ fn locale_family(locale: &str) -> LocaleFamily {
         LocaleFamily::Italian
     } else if is_language("pt") {
         LocaleFamily::Portuguese
+    } else if is_language("ru") {
+        LocaleFamily::Russian
     } else {
         LocaleFamily::English
     }
@@ -774,6 +777,7 @@ fn tray_menu_labels_for_locale(locale: &str) -> (&'static str, &'static str) {
         LocaleFamily::Italian => ("Mostra DBX", "Esci da DBX"),
         LocaleFamily::Turkish => ("DBX'i Göster", "DBX'ten Çık"),
         LocaleFamily::Portuguese => ("Mostrar DBX", "Sair do DBX"),
+        LocaleFamily::Russian => ("Показать DBX", "Выйти из DBX"),
         LocaleFamily::English => ("Show DBX", "Quit DBX"),
     }
 }
@@ -791,6 +795,7 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
         LocaleFamily::Italian => "Copia informazioni",
         LocaleFamily::Turkish => "Destek bilgilerini kopyala",
         LocaleFamily::Portuguese => "Copiar informações",
+        LocaleFamily::Russian => "Копировать сведения о поддержке",
         LocaleFamily::English => "Copy Support Info",
     }
 }
@@ -807,6 +812,7 @@ fn app_menu_close_tab_label(locale: &str) -> &'static str {
         LocaleFamily::Italian => "Chiudi scheda",
         LocaleFamily::Turkish => "Sekmeyi kapat",
         LocaleFamily::Portuguese => "Fechar aba",
+        LocaleFamily::Russian => "Закрыть вкладку",
         LocaleFamily::English => "Close Tab",
     }
 }
@@ -822,6 +828,7 @@ fn app_menu_quit_label(locale: &str, app_name: &str) -> String {
         LocaleFamily::Italian => format!("Esci da {app_name}"),
         LocaleFamily::Turkish => format!("{app_name} Uygulamasından Çık"),
         LocaleFamily::Portuguese => format!("Sair do {app_name}"),
+        LocaleFamily::Russian => format!("Выйти из {app_name}"),
         LocaleFamily::English => format!("Quit {app_name}"),
     }
 }
@@ -1034,6 +1041,7 @@ mod tests {
         assert_eq!(tray_menu_labels_for_locale("it-IT"), ("Mostra DBX", "Esci da DBX"));
         assert_eq!(tray_menu_labels_for_locale("pt-BR"), ("Mostrar DBX", "Sair do DBX"));
         assert_eq!(tray_menu_labels_for_locale("tr-TR"), ("DBX'i Göster", "DBX'ten Çık"));
+        assert_eq!(tray_menu_labels_for_locale("ru-RU"), ("Показать DBX", "Выйти из DBX"));
         assert_eq!(tray_menu_labels_for_locale("en-US"), ("Show DBX", "Quit DBX"));
         // Unknown and empty locales fall back to English; "ita" must not match "it".
         assert_eq!(tray_menu_labels_for_locale("ita"), ("Show DBX", "Quit DBX"));
@@ -1047,6 +1055,7 @@ mod tests {
         assert_eq!(app_menu_quit_label("ja-JP", "DBX"), "DBXを終了");
         assert_eq!(app_menu_quit_label("ko-KR", "DBX"), "DBX 종료");
         assert_eq!(app_menu_quit_label("tr-TR", "DBX"), "DBX Uygulamasından Çık");
+        assert_eq!(app_menu_quit_label("ru-RU", "DBX"), "Выйти из DBX");
         assert_eq!(app_menu_quit_label("az-AZ", "DBX"), "DBX-dən çıx");
         assert_eq!(app_menu_quit_label("en-US", "DBX"), "Quit DBX");
         assert_eq!(app_menu_quit_label("", "DBX"), "Quit DBX");
@@ -1054,6 +1063,7 @@ mod tests {
         assert_eq!(app_menu_copy_support_info_label("zh-TW"), "複製支援資訊");
         assert_eq!(app_menu_copy_support_info_label("ko-KR"), "지원 정보 복사");
         assert_eq!(app_menu_copy_support_info_label("tr-TR"), "Destek bilgilerini kopyala");
+        assert_eq!(app_menu_copy_support_info_label("ru-RU"), "Копировать сведения о поддержке");
         assert_eq!(app_menu_copy_support_info_label("az-AZ"), "Dəstək məlumatlarını kopyala");
         assert_eq!(app_menu_copy_support_info_label("en-US"), "Copy Support Info");
         assert_eq!(app_menu_close_tab_label("zh-CN"), "关闭标签页");

@@ -242,6 +242,8 @@ pub enum PluginContribution {
     FilesystemProvider(PluginFilesystemProviderContribution),
     ContextMenu(PluginContextMenuContribution),
     ResultView(PluginResultViewContribution),
+    Command(PluginCommandContribution),
+    Menus(PluginMenusContribution),
 }
 
 impl PluginContribution {
@@ -252,6 +254,8 @@ impl PluginContribution {
             Self::FilesystemProvider(contribution) => &contribution.id,
             Self::ContextMenu(contribution) => &contribution.id,
             Self::ResultView(contribution) => &contribution.id,
+            Self::Command(contribution) => &contribution.id,
+            Self::Menus(contribution) => &contribution.id,
         }
     }
 }
@@ -686,6 +690,171 @@ pub struct PluginResultViewContribution {
     pub icon: Option<String>,
 }
 
+/// Stable sidebar/menu group word list (HOST_PLUGIN_UI_SPEC §5.2). Values
+/// outside this list fail manifest validation instead of being ignored.
+pub const PLUGIN_MENU_GROUPS: &[&str] = &["navigation", "primary", "secondary", "destructive"];
+
+/// Upper bound for one `menus` contribution; keeps registry scans and sidebar
+/// surfaces bounded regardless of what a manifest declares.
+pub const PLUGIN_MENUS_ITEMS_MAX: usize = 64;
+
+/// Upper bound of clauses per enablement/when group.
+pub const PLUGIN_CONDITION_CLAUSES_MAX: usize = 16;
+
+/// Upper bound for one command's `context` JSON payload (serialized size).
+pub const PLUGIN_COMMAND_CONTEXT_MAX_BYTES: usize = 64 * 1024;
+
+/// Reserved context-key word list for condition evaluation (HOST_PLUGIN_UI_SPEC §5.3 v1). Values outside the
+/// list fail the whole manifest validation — never silently ignored.
+pub const PLUGIN_CONDITION_KEYS: &[&str] = &["connection.state", "object.type", "surface", "readOnly"];
+
+/// Single command condition clause (shared by enablement/when). `value` is a string for equals/notEquals
+/// string and a string array for oneOf.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandConditionClause {
+    pub key: String,
+    pub operator: PluginConditionOperator,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginConditionOperator {
+    #[serde(rename = "equals")]
+    Equals,
+    #[serde(rename = "notEquals")]
+    NotEquals,
+    #[serde(rename = "oneOf")]
+    OneOf,
+}
+
+/// enablement/when condition group: implicit AND within `all`; absent field defaults to true.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandEnablement {
+    #[serde(default)]
+    pub all: Vec<PluginCommandConditionClause>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCommandPresentation {
+    #[default]
+    Tab,
+    /// Opens the command in the host's global bottom dock (BottomDock,
+    /// HOST_PLUGIN_UI_SPEC §8.3). Tab and panel instances can coexist: the
+    /// reuse key includes the presentation.
+    Panel,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCommandReuse {
+    #[default]
+    Singleton,
+    New,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCommandRestore {
+    #[default]
+    None,
+}
+
+/// v1 ships exactly one command action: opening a declared workbench. The
+/// workbench reference is resolved against the same plugin's contributions and
+/// the context payload is opaque JSON placed under `context.plugin` by the
+/// host (HOST_PLUGIN_UI_SPEC §4.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum PluginCommandAction {
+    OpenWorkbench(PluginOpenWorkbenchAction),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginOpenWorkbenchAction {
+    /// Workbench contribution of the SAME plugin (dangling references are
+    /// rejected during validation).
+    pub workbench: String,
+    #[serde(default)]
+    pub presentation: PluginCommandPresentation,
+    #[serde(default)]
+    pub reuse: PluginCommandReuse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_key: Option<String>,
+    #[serde(default)]
+    pub restore: PluginCommandRestore,
+    /// Opaque plugin payload; served to the workbench under `context.plugin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+    /// Generic launch-options extension point: a sidecar method the host calls
+    /// (POST-less invoke, empty params) to fetch dynamic launch entries —
+    /// `{ "entries": [{ "label": string, "description"?: string, "context"?: object }] }`.
+    /// The host renders them as picker items and opens one panel per selection
+    /// with the returned context merged into the host-authored context; the
+    /// host never interprets the entries' business meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_action: Option<String>,
+    /// When true, the host also offers the plugin's own saved connections
+    /// (read-only, secret-free list) as launch targets for this command.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub connection_targets: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandContribution {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub action: PluginCommandAction,
+    /// Executable condition (defaults to true); the host must re-evaluate it against the current context snapshot before running the command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enablement: Option<PluginCommandEnablement>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PluginMenuLocation {
+    #[serde(rename = "commandPalette")]
+    CommandPalette,
+    #[serde(rename = "appToolbar")]
+    AppToolbar,
+    #[serde(rename = "appSidebar")]
+    AppSidebar,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMenuItem {
+    pub location: PluginMenuLocation,
+    /// Short command id of the SAME plugin (cross-plugin references rejected).
+    pub command: String,
+    pub group: String,
+    pub order: i64,
+    /// Toolbar entries default to hidden; sidebar entries default to visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_visible: Option<bool>,
+    /// Placement visibility condition (defaults to true); evaluated independently from command.enablement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<PluginCommandEnablement>,
+}
+
+/// Declared placement of plugin commands across host surfaces. Entry labels
+/// always come from the referenced command — the menus contribution itself
+/// carries no display text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMenusContribution {
+    pub id: String,
+    #[serde(default)]
+    pub items: Vec<PluginMenuItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginFilesystemProviderContribution {
@@ -1060,6 +1229,9 @@ fn validate_contributions(
     let mut filesystem_provider_ids = HashSet::new();
     let mut workbench_references = Vec::new();
     let mut filesystem_references = Vec::new();
+    let mut command_ids = HashSet::new();
+    let mut command_workbench_references = Vec::new();
+    let mut menu_command_references = Vec::new();
 
     for (index, contribution) in contributions.iter().enumerate() {
         let id = contribution.id();
@@ -1192,6 +1364,73 @@ fn validate_contributions(
                     errors.push(format!("Filesystem provider '{id}' requires a backend entrypoint"));
                 }
             }
+            PluginContribution::Command(command) => {
+                validate_required_text(&command.label, &format!("Command '{id}' label"), errors);
+                validate_declared_icon(plugin_dir, &format!("Command '{id}' icon"), command.icon.as_deref(), errors);
+                if valid_identifier(id) {
+                    command_ids.insert(id.to_string());
+                }
+                if !has_ui {
+                    errors.push(format!("Command contribution '{id}' requires a UI entrypoint"));
+                }
+                validate_command_enablement(command.enablement.as_ref(), &format!("Command '{id}' enablement"), errors);
+                match &command.action {
+                    PluginCommandAction::OpenWorkbench(action) => {
+                        validate_optional_reference(Some(action.workbench.as_str()), "workbench", id, errors);
+                        command_workbench_references.push((id.to_string(), action.workbench.clone()));
+                        if let Some(options_action) = &action.options_action {
+                            if !valid_sidecar_method(options_action) {
+                                errors.push(format!("Command '{id}' has an invalid options_action '{options_action}'"));
+                            }
+                        }
+                        if let Some(context) = &action.context {
+                            let context_bytes = serde_json::to_vec(context)
+                                .map_or(PLUGIN_COMMAND_CONTEXT_MAX_BYTES + 1, |bytes| bytes.len());
+                            if context_bytes > PLUGIN_COMMAND_CONTEXT_MAX_BYTES {
+                                errors.push(format!(
+                                    "Command '{id}' context exceeds the {PLUGIN_COMMAND_CONTEXT_MAX_BYTES}-byte limit"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            PluginContribution::Menus(menus) => {
+                if menus.items.len() > PLUGIN_MENUS_ITEMS_MAX {
+                    errors.push(format!(
+                        "Menus contribution '{id}' declares {} items; at most {PLUGIN_MENUS_ITEMS_MAX} are allowed",
+                        menus.items.len()
+                    ));
+                }
+                let mut seen_placements = HashSet::new();
+                for item in &menus.items {
+                    if !PLUGIN_MENU_GROUPS.contains(&item.group.as_str()) {
+                        errors.push(format!(
+                            "Menus contribution '{id}' uses group '{}' outside the host word list ({})",
+                            item.group,
+                            PLUGIN_MENU_GROUPS.join(", ")
+                        ));
+                    }
+                    if item.location == PluginMenuLocation::CommandPalette && item.default_visible.is_some() {
+                        errors.push(format!(
+                            "Menus contribution '{id}' sets default_visible on a commandPalette placement; the command palette has no visibility toggle"
+                        ));
+                    }
+                    if !seen_placements.insert((item.location, item.command.clone())) {
+                        errors.push(format!(
+                            "Menus contribution '{id}' declares placement {:?} for command '{}' more than once",
+                            item.location, item.command
+                        ));
+                    }
+                    validate_command_enablement(
+                        item.when.as_ref(),
+                        &format!("Menus '{id}' item '{}' when", item.command),
+                        errors,
+                    );
+                    validate_optional_reference(Some(item.command.as_str()), "command", id, errors);
+                    menu_command_references.push((id.to_string(), item.command.clone()));
+                }
+            }
         }
     }
 
@@ -1205,6 +1444,78 @@ fn validate_contributions(
             errors.push(format!(
                 "Connection provider '{provider}' references missing filesystem provider '{filesystem_provider}'"
             ));
+        }
+    }
+    for (menus, command) in menu_command_references {
+        if !command_ids.contains(&command) {
+            errors.push(format!("Menus contribution '{menus}' references missing command '{command}'"));
+        }
+    }
+    for (command, workbench) in command_workbench_references {
+        if !workbench_ids.contains(&workbench) {
+            errors.push(format!("Command '{command}' references missing workbench '{workbench}'"));
+        }
+    }
+}
+
+/// Sidecar method names look like `<domain>/<action>[/<sub>]` (lower-case
+/// words, digits, `-`, `_`, `.` separated by `/`), e.g. `local/shells/list`.
+fn valid_sidecar_method(value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 || value.starts_with('/') || value.ends_with('/') || value.contains("//") {
+        return false;
+    }
+    value.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment.chars().next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+            && segment.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '-' | '_' | '.')
+            })
+    })
+}
+
+/// enablement/when group validation: keys/operators must be in the v1 word lists, value shape must match the operator
+/// and a non-empty string array for oneOf; the clause count is bounded.
+fn validate_command_enablement(enablement: Option<&PluginCommandEnablement>, label: &str, errors: &mut Vec<String>) {
+    let Some(enablement) = enablement else {
+        return;
+    };
+    if enablement.all.len() > PLUGIN_CONDITION_CLAUSES_MAX {
+        errors.push(format!(
+            "{label} declares {} conditions; at most {PLUGIN_CONDITION_CLAUSES_MAX} are allowed",
+            enablement.all.len()
+        ));
+    }
+    for clause in &enablement.all {
+        if !PLUGIN_CONDITION_KEYS.contains(&clause.key.as_str()) {
+            errors.push(format!(
+                "{label} uses key '{}' outside the host word list ({})",
+                clause.key,
+                PLUGIN_CONDITION_KEYS.join(", ")
+            ));
+        }
+        let value_is_scalar = clause.value.as_str().is_some() || clause.value.is_boolean();
+        let value_is_string_array = clause
+            .value
+            .as_array()
+            .is_some_and(|values| !values.is_empty() && values.iter().all(|value| value.is_string()));
+        match clause.operator {
+            PluginConditionOperator::Equals | PluginConditionOperator::NotEquals => {
+                // §5.3 examples include booleans (readOnly notEquals true) — any scalar works.
+                if !value_is_scalar {
+                    errors.push(format!(
+                        "{label} condition '{}' requires a string or boolean value for equals/notEquals",
+                        clause.key
+                    ));
+                }
+            }
+            PluginConditionOperator::OneOf => {
+                if !value_is_string_array {
+                    errors.push(format!(
+                        "{label} condition '{}' requires a non-empty string array value for oneOf",
+                        clause.key
+                    ));
+                }
+            }
         }
     }
 }
@@ -1492,9 +1803,12 @@ fn valid_locale_tag(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions,
-        PluginConnectionActionContribution, PluginConnectionProviderContribution, PluginFormFieldBinding,
-        PluginManifest, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_PERMISSIONS,
+        parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions, validate_contributions,
+        PluginCommandAction, PluginCommandContribution, PluginCommandPresentation, PluginCommandRestore,
+        PluginCommandReuse, PluginConnectionActionContribution, PluginConnectionProviderContribution,
+        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMenuItem, PluginMenuLocation,
+        PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
+        SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
     fn context_menu_manifest(menu: &str) -> (tempfile::TempDir, PluginManifest) {
@@ -1519,6 +1833,250 @@ mod tests {
         }))
         .unwrap();
         (dir, manifest)
+    }
+
+    #[test]
+    fn command_and_menus_contributions_parse_the_frozen_contract() {
+        let command: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "command",
+            "id": "open-local-terminal",
+            "label": "Local terminal",
+            "icon": "assets/local-terminal.svg",
+            "action": {
+                "type": "open-workbench",
+                "workbench": "io.dbx.ssh.workbench",
+                "presentation": "tab",
+                "reuse": "singleton",
+                "instance_key": "local-terminal",
+                "restore": "none",
+                "context": { "plugin": { "mode": "local-terminal" } }
+            }
+        }))
+        .unwrap();
+        assert!(matches!(command, PluginContribution::Command(_)));
+
+        // contract defaults: presentation=tab, reuse=singleton, restore=none.
+        let command: PluginCommandContribution = serde_json::from_value(serde_json::json!({
+            "id": "open-thing",
+            "label": "Open",
+            "action": { "type": "open-workbench", "workbench": "wb" }
+        }))
+        .unwrap();
+        // v1 ships exactly one action type, so this pattern always matches.
+        let PluginCommandAction::OpenWorkbench(action) = command.action;
+        assert_eq!(action.workbench, "wb");
+        assert_eq!(action.presentation, PluginCommandPresentation::Tab);
+        assert_eq!(action.reuse, PluginCommandReuse::Singleton);
+        assert_eq!(action.restore, PluginCommandRestore::None);
+
+        // the frozen §11 placement vocabulary keeps the original camelCase values.
+        let menus: PluginMenusContribution = serde_json::from_value(serde_json::json!({
+            "id": "entrypoints",
+            "items": [
+                { "location": "commandPalette", "command": "open-thing", "group": "primary", "order": 100 },
+                { "location": "appToolbar", "command": "open-thing", "group": "navigation", "order": 100, "default_visible": false },
+                { "location": "appSidebar", "command": "open-thing", "group": "primary", "order": 100, "default_visible": true }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(menus.items.len(), 3);
+        assert_eq!(menus.items[0].location, PluginMenuLocation::CommandPalette);
+        assert_eq!(menus.items[1].location, PluginMenuLocation::AppToolbar);
+        assert_eq!(menus.items[2].location, PluginMenuLocation::AppSidebar);
+
+        // unknown contribution types, placements and enum values all reject.
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({ "type": "view", "id": "x" })).is_err());
+        assert!(serde_json::from_value::<PluginMenuItem>(serde_json::json!({
+            "location": "statusBar", "command": "x", "group": "primary", "order": 1
+        }))
+        .is_err());
+        let panel: PluginCommandAction = serde_json::from_value(serde_json::json!({
+            "type": "open-workbench", "workbench": "wb", "presentation": "panel"
+        }))
+        .unwrap();
+        assert!(matches!(
+            panel,
+            PluginCommandAction::OpenWorkbench(PluginOpenWorkbenchAction {
+                presentation: PluginCommandPresentation::Panel,
+                ..
+            })
+        ));
+        let rpc: Result<PluginCommandAction, _> = serde_json::from_value(serde_json::json!({
+            "type": "invoke-sidecar", "method": "x"
+        }));
+        assert!(rpc.is_err(), "RPC actions are outside the v1 contract");
+    }
+
+    #[test]
+    fn command_launch_extension_fields_parse_and_validate() {
+        let plugin_dir = std::env::temp_dir();
+        let workbench = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "workbench", "id": "sample.main", "label": "Sample"
+        }))
+        .unwrap();
+        let command = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "action": {
+                "type": "open-workbench", "workbench": "sample.main",
+                "presentation": "panel",
+                "options_action": "local/terminal/launch-options",
+                "connection_targets": true
+            }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&workbench), false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench, command], false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // options_action 方法名非法拒收。
+        let bad = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "action": { "type": "open-workbench", "workbench": "sample.main", "options_action": "local terminal" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("invalid options_action")), "{errors:?}");
+    }
+
+    #[test]
+    fn command_enablement_and_menu_when_parse_and_validate() {
+        let plugin_dir = std::env::temp_dir();
+        let workbench = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "workbench", "id": "sample.main", "label": "Sample"
+        }))
+        .unwrap();
+        let command = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "enablement": { "all": [ { "key": "surface", "operator": "equals", "value": "tab" } ] },
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))
+        .unwrap();
+        let menus = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "menus", "id": "entrypoints",
+            "items": [
+                { "location": "commandPalette", "command": "cmd", "group": "primary", "order": 100,
+                  "when": { "all": [ { "key": "connection.state", "operator": "oneOf", "value": ["connected", "reconnecting"] } ] } }
+            ]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench, command, menus], false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // keys outside the word list reject.
+        let bad_key = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "enablement": { "all": [ { "key": "custom.thing", "operator": "equals", "value": "x" } ] },
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad_key], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("outside the host word list")), "{errors:?}");
+
+        // value shapes that mismatch the operator reject (oneOf needs a non-empty string array).
+        let bad_value = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "menus", "id": "entrypoints",
+            "items": [
+                { "location": "appToolbar", "command": "cmd", "group": "primary", "order": 100,
+                  "when": { "all": [ { "key": "surface", "operator": "oneOf", "value": "tab" } ] } }
+            ]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad_value], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("non-empty string array")), "{errors:?}");
+
+        // clause-count cap rejects 20 valid surface clauses.
+        let clauses: Vec<serde_json::Value> =
+            (0..20).map(|_| serde_json::json!({ "key": "surface", "operator": "equals", "value": "tab" })).collect();
+        let too_many = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "enablement": { "all": clauses },
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[too_many], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("at most 16 are allowed")), "{errors:?}");
+    }
+
+    #[test]
+    fn command_and_menus_validation_rejects_dangling_and_off_wordlist_values() {
+        let plugin_dir = std::env::temp_dir();
+
+        // valid minimal set: command + workbench + menus -> zero errors.
+        let valid = vec![
+            serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "workbench", "id": "io.dbx.ssh.workbench", "label": "SSH"
+            }))
+            .unwrap(),
+            serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "command", "id": "open-local-terminal", "label": "Local terminal",
+                "action": { "type": "open-workbench", "workbench": "io.dbx.ssh.workbench" }
+            }))
+            .unwrap(),
+            serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "menus", "id": "entrypoints",
+                "items": [
+                    { "location": "appSidebar", "command": "open-local-terminal", "group": "primary", "order": 100 }
+                ]
+            }))
+            .unwrap(),
+        ];
+        let mut errors = Vec::new();
+        validate_contributions(&valid, false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        // dangling command references reject.
+        let dangling = vec![serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "menus", "id": "entrypoints",
+            "items": [{ "location": "appSidebar", "command": "missing", "group": "primary", "order": 100 }]
+        }))
+        .unwrap()];
+        let mut errors = Vec::new();
+        validate_contributions(&dangling, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("references missing command 'missing'")), "{errors:?}");
+
+        // dangling command workbench references reject.
+        let dangling = vec![serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "action": { "type": "open-workbench", "workbench": "missing.workbench" }
+        }))
+        .unwrap()];
+        let mut errors = Vec::new();
+        validate_contributions(&dangling, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("references missing workbench")), "{errors:?}");
+
+        // groups outside the word list reject; default_visible on commandPalette rejects.
+        let menus: PluginMenusContribution = serde_json::from_value(serde_json::json!({
+            "id": "entrypoints",
+            "items": [
+                { "location": "appSidebar", "command": "cmd", "group": "vendor-custom", "order": 100 },
+                { "location": "commandPalette", "command": "cmd", "group": "primary", "order": 100, "default_visible": true }
+            ]
+        }))
+        .unwrap();
+        let contributions = vec![PluginContribution::Menus(menus)];
+        let mut errors = Vec::new();
+        validate_contributions(&contributions, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("outside the host word list")), "{errors:?}");
+        assert!(errors.iter().any(|error| error.contains("no visibility toggle")), "{errors:?}");
+
+        // command contexts over 64 KiB reject.
+        let big: PluginCommandContribution = serde_json::from_value(serde_json::json!({
+            "id": "cmd", "label": "C",
+            "action": { "type": "open-workbench", "workbench": "wb", "context": { "blob": "x".repeat(70_000) } }
+        }))
+        .unwrap();
+        let contributions = vec![PluginContribution::Command(big)];
+        let mut errors = Vec::new();
+        validate_contributions(&contributions, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("exceeds the 65536-byte limit")), "{errors:?}");
     }
 
     #[test]

@@ -21,6 +21,7 @@ import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { downloadPluginFile, cancelPluginDownload } from "@/lib/plugins/pluginFileDownload";
 import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
+import { getCachedPluginUiHtml, setCachedPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -379,6 +380,20 @@ function createBridge() {
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
+      // PR-A4 generic extension point: a read-only, secret-free, plugin-scoped connection list (for in-panel connection switching).
+      listConnections: (ownerPluginId) => {
+        const providerIds = new Set((props.plugin.manifest.contributions || []).filter((candidate) => candidate.type === "connection-provider").map((candidate) => candidate.id));
+        if (ownerPluginId !== props.plugin.manifest.id) return [];
+        return useConnectionStore()
+          .connections.filter((connection) => providerIds.has(connection.plugin_connection_provider ?? ""))
+          .map((connection) => ({
+            id: connection.id,
+            name: connection.name,
+            providerId: connection.plugin_connection_provider ?? "",
+            connectionType: connection.plugin_connection_type,
+            readOnly: connection.read_only === true,
+          }));
+      },
       // Both plan calls carry the plugin's declared `host.plans:read` gate in the
       // bridge; the backend owns EXPLAIN generation, the timeout, and the plan cap.
       getPlanCapabilities: (connectionId) => api.getPluginPlanCapabilities(connectionId),
@@ -468,19 +483,34 @@ function localUiAssetPath(source: string): string | undefined {
 }
 
 async function inlineLocalUiAssets(html: string, pluginId: string): Promise<{ html: string; entryDirectory: string }> {
+  // Shipped ui builds usually inline every asset into one HTML document.
+  // Parsing and re-serializing a multi-megabyte document is pure overhead when
+  // there is nothing local to inline — pre-check before touching DOMParser.
+  if (!/<script\b[^>]*\bsrc=/i.test(html) && !/<link\b[^>]*rel=["']?stylesheet/i.test(html)) {
+    return { html, entryDirectory: "" };
+  }
   const document = new DOMParser().parseFromString(html, "text/html");
   const resources = [...document.querySelectorAll("script[src], link[rel='stylesheet'][href]")];
   // Dynamic-import chunks and CSS url() references live next to the entry
   // script; its directory is the <base> the sandbox document needs to resolve
   // them through the dbx-plugin scheme.
   let entryDirectory = "";
-  for (const resource of resources) {
-    const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
-    const path = source ? localUiAssetPath(source) : undefined;
-    if (!path) continue;
-    if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
-    const asset = await api.readPluginUiAsset(pluginId, path);
-    const content = new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0)));
+  // Fetch every referenced asset concurrently — these are bridge round-trips
+  // into the sidecar, and panels reopen this path on every workbench (re)load.
+  const fetched = await Promise.all(
+    resources.map((resource) => {
+      const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
+      const path = source ? localUiAssetPath(source) : undefined;
+      if (!path) return Promise.resolve({ resource, content: null });
+      if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
+      return api.readPluginUiAsset(pluginId, path).then((asset) => ({
+        resource,
+        content: new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0))),
+      }));
+    }),
+  );
+  for (const { resource, content } of fetched) {
+    if (content === null) continue;
     if (resource.tagName === "SCRIPT") {
       const script = document.createElement("script");
       for (const attribute of [...resource.attributes]) {
@@ -509,6 +539,8 @@ function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | und
   return entryDirectory ? `${origin}${entryDirectory}/` : origin;
 }
 
+// Inlined plugin ui html per `${pluginId}:${version}` (see loadWorkbench).
+
 async function loadWorkbench() {
   const generation = ++loadGeneration;
   bridge?.dispose();
@@ -518,11 +550,23 @@ async function loadWorkbench() {
   error.value = "";
   try {
     if (!props.plugin.compatibility.compatible) throw new Error((props.plugin.compatibility.errors || []).join("; ") || t("pluginPlatform.pluginIncompatible"));
-    const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
-    if (disposed || generation !== loadGeneration) return;
-    const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
-    const { html, entryDirectory } = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
-    if (disposed || generation !== loadGeneration) return;
+    // The read/decode/inline pipeline over a multi-megabyte ui build dominates
+    // workbench open time; cache the inlined html per plugin id+version so
+    // reopening panels (new dock entries, workbench reloads) skips it. Theme
+    // is applied per load via the sandbox document, so the cache never pins a
+    // stale appearance.
+    const htmlCacheKey = `${props.plugin.manifest.id}:${props.plugin.manifest.version}`;
+    let cachedHtml = getCachedPluginUiHtml(htmlCacheKey);
+    if (!cachedHtml) {
+      const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
+      if (disposed || generation !== loadGeneration) return;
+      const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
+      const inlined = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
+      if (disposed || generation !== loadGeneration) return;
+      cachedHtml = inlined;
+      setCachedPluginUiHtml(htmlCacheKey, cachedHtml);
+    }
+    const { html, entryDirectory } = cachedHtml;
     source.value = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
       baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
     });
@@ -596,9 +640,22 @@ watch(
   () => bridge?.updateTheme(currentBridgeTheme()),
 );
 
+/** §8.3/§7.4 two-phase close: parents await this before removing the entry so
+ * the plugin can release its workbench scope (PTY sessions, subscriptions);
+ * the bridge bounds the wait and resolves false on legacy/hung plugins. */
+function requestClose(): Promise<boolean> {
+  return bridge ? bridge.requestWorkbenchClose() : Promise.resolve(false);
+}
+
+defineExpose({ requestClose });
+
 onBeforeUnmount(() => {
   disposed = true;
   loadGeneration += 1;
+  // Best-effort §8.3 close notice for teardown paths that never called
+  // requestClose (tab closes, plugin reload): the message still goes out, but
+  // delivery of the plugin's cleanup is not guaranteed once the iframe dies.
+  void bridge?.requestWorkbenchClose(0).catch(() => undefined);
   bridge?.dispose();
   bridge = undefined;
   window.removeEventListener("message", onMessage);

@@ -1580,11 +1580,17 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     // without broadly matching user-supplied `cast(` expressions.
     let floor_statement_rejected = lower.contains("group_concat_max_len")
         || compact.contains(&format!("..._len,{MYSQL_GROUP_CONCAT_MAX_LEN})asunsigned)"));
+    // Some TDSQL/TXSQL proxy layers cap the echoed variable name to a fixed
+    // length before wrapping it back in a quote, so the 1193 error reports
+    // `Unknown system variable 'group_concat_'` with `max_len` cut off
+    // (issue #10197). The truncated prefix is specific enough on its own.
+    let proxy_truncated_variable_rejected = lower.contains("unknown system variable 'group_concat_'");
     if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected || setup_argument_rejected))
         || gaea_setup_expression_rejected
         || starrocks_setup_expression_rejected
         || sphinxql_setup_query_rejected
         || gateway_session_variable_rejected
+        || proxy_truncated_variable_rejected
     {
         return Some(MySqlSetupMode::Compatible);
     }
@@ -8634,6 +8640,28 @@ mod tests {
     #[test]
     fn mysql_proxy_parse_tablename_1105_does_not_disable_group_concat() {
         let error = "MySQL connection failed: Server error: `ERROR 07000 (1105): SQL操作失败 (operate fail ) ：解析表名出错 ( parse tablename error ) '";
+
+        assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
+    }
+
+    #[test]
+    fn mysql_tdsql_proxy_truncated_variable_name_retries_without_session_variable() {
+        // A TDSQL/TXSQL proxy in front of the real server truncates the echoed
+        // variable name to a fixed length, so the 1193 error never contains the
+        // full `group_concat_max_len` spelling (issue #10197).
+        let error =
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+        assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None);
+    }
+
+    #[test]
+    fn mysql_tdsql_proxy_truncated_variable_retry_requires_exact_prefix() {
+        let error = "Server error: `ERROR 1193 (HY000): Unknown system variable 'other_var_'";
 
         assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
     }

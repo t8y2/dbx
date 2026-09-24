@@ -178,7 +178,15 @@ async fn serve_embedded_asset(uri: Uri) -> axum::response::Response {
 async fn serve_embedded_index() -> axum::response::Response {
     use axum::http::header;
 
-    let index = EmbeddedStaticAssets::get("index.html").expect("embedded dist must contain index.html");
+    let Some(index) = EmbeddedStaticAssets::get("index.html") else {
+        // Mirrors the disk-based variant, where a missing index.html surfaces
+        // as a 404 from the not-found service instead of crashing the handler.
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(axum::body::Body::from("embedded dist does not contain index.html"))
+            .expect("valid missing index response");
+    };
     axum::response::Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-cache")

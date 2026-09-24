@@ -20,9 +20,7 @@ if "%DBX_DATA_DIR%"=="" (
 
 :: port
 if "%DBX_PORT%"=="" (
-    set PORT=4224
-) else (
-    set PORT=%DBX_PORT%
+    set DBX_PORT=4224
 )
 
 :: base path
@@ -35,9 +33,9 @@ echo %BASE_PATH% | findstr /r "^/" >nul || (
 )
 
 echo DBX_DATA_DIR=%DBX_DATA_DIR%
-echo DBX browser UI: http://127.0.0.1:%PORT%%BASE_PATH%
+echo DBX browser UI: http://127.0.0.1:%DBX_PORT%%BASE_PATH%
 
 cd /d "%ROOT%"
 
 :: 执行程序
-dbx-web.exe %* > NUL
+dbx-web.exe %*

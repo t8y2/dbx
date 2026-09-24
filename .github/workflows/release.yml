@@ -695,8 +695,6 @@ jobs:
             Remove-Item -LiteralPath $workDir -Recurse -Force
           }
 
-
-
   build-windows-7-static-browser:
     needs: release-ready
     runs-on: windows-2022
@@ -706,8 +704,6 @@ jobs:
         include:
           - target: x86_64-win7-windows-msvc
             arch: x86_64
-          #- target: i686-win7-windows-msvc
-          #  arch: i686
     env:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
@@ -734,13 +730,6 @@ jobs:
           toolchain: nightly-2026-07-22
           components: rust-src
 
-
-
-
-      - name: Build frontend
-        run: pnpm build
-
-      
       - name: Install NASM
         run: choco install nasm -y --no-progress
 
@@ -752,9 +741,12 @@ jobs:
         shell: pwsh
         run: |
           cargo build --locked --package dbx-web --release --no-default-features --features embed-static,duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled --target ${{ matrix.target }} -Z build-std=std,panic_abort
-      
-      - name: Upload Windows portable ${{ matrix.arch }} ZIP
 
+      - name: Audit Windows 7 PE imports
+        shell: pwsh
+        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/${{ matrix.target }}/release/dbx-web.exe
+
+      - name: Upload Windows portable ${{ matrix.arch }} ZIP
         timeout-minutes: 20
         shell: pwsh
         env:
@@ -767,37 +759,24 @@ jobs:
           $zipName = "dbx-web_${version}_${arch}-browser-static.zip"
           $zipSha256 = "dbx-web_${version}_${arch}-browser-static.zip.sha256"
           $exePath = "target/${{ matrix.target }}/release/dbx-web.exe"
-          $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx-web" } | Select-Object -First 1).version
 
           if (!(Test-Path $exePath)) {
             Write-Error "Missing Windows executable: $exePath"
             exit 1
           }
-          <#
-          if (!$appVersion -or $appVersion -ne $version) {
-            Write-Error "Release tag version $version does not match the built DBX package version $appVersion"
-            exit 1
-          }
-          #>
 
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
           Copy-Item $exePath (Join-Path $portableDir "dbx-web.exe") -Force
           Copy-Item "LICENSE" (Join-Path $portableDir "LICENSE") -Force
           Copy-Item "README.md" (Join-Path $portableDir "README.md") -Force
           Copy-Item ".github\scripts\start-dbx-web.bat" (Join-Path $portableDir "start.bat") -Force
-          <#
-          Copy-Item "dist" (Join-Path $portableDir "dist") -Recurse  -Force
-          #>
-
 
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
-          
+
           $zip_sha256 = (Get-FileHash -LiteralPath $zipName -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -Path $zipSha256 -Value $zip_sha256 -Encoding utf8NoBOM
 
           gh release upload "${env:GITHUB_REF_NAME}" $zipName $zipSha256 --repo "${env:GITHUB_REPOSITORY}" --clobber
-      
 
   static-browser:
     # Fully static musl builds of the browser (dbx-web) variant. No glibc
@@ -1034,8 +1013,9 @@ jobs:
 
   publish:
     # Keep the release as a draft until every release-blocking platform job passes.
-    # Nix packaging is advisory and runs independently from publication.
-    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, static-browser, build-windows-7-static-browser]
+    # Nix packaging and the Windows 7 static-browser build are advisory and
+    # upload their release assets independently of publication.
+    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, static-browser]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release

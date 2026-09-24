@@ -155,13 +155,16 @@ impl SecretCodec {
             Ok(None) => {}
             Err(detail) => return Err(detail),
         }
+        if let Some(error) = compatibility_error {
+            return Err(error);
+        }
         if allow_create {
             if let Some(path) = compatibility_path {
                 let codec = create_key_file(&path, false)?;
                 return Ok(SecretKeyResolution { codec, source: SecretKeySource::ManagedDataDir });
             }
         }
-        compatibility_error.map_or_else(|| Err("KEY_PROVIDER_UNAVAILABLE".to_string()), Err)
+        Err("KEY_PROVIDER_UNAVAILABLE".to_string())
     }
 
     /// Read an explicitly configured key, then an existing compatibility key
@@ -595,7 +598,7 @@ mod tests {
         let path = directory.path().join("secret.key");
         let result = SecretCodec::resolve_platform_default(Some(path.clone()), false, |allow_create| {
             assert!(!allow_create);
-            None
+            Ok(None)
         });
         assert!(matches!(result, Err(error) if error == "KEY_PROVIDER_UNAVAILABLE"));
         assert!(!path.exists());
@@ -607,7 +610,7 @@ mod tests {
         let path = directory.path().join("secret.key");
         let created = SecretCodec::resolve_platform_default(Some(path.clone()), true, |allow_create| {
             assert!(allow_create);
-            None
+            Ok(None)
         })
         .unwrap();
         let envelope = created.codec.encrypt("connection", "password", "secret").unwrap();
@@ -627,7 +630,7 @@ mod tests {
         let path = directory.path().join("secret.key");
         std::fs::write(&path, "\n").unwrap();
         for allow_create in [false, true] {
-            let result = SecretCodec::resolve_platform_default(Some(path.clone()), allow_create, |_| None);
+            let result = SecretCodec::resolve_platform_default(Some(path.clone()), allow_create, |_| Ok(None));
             assert!(matches!(result, Err(error) if error == "SECRET_KEY_INVALID"));
             assert_eq!(std::fs::read_to_string(&path).unwrap(), "\n");
         }
@@ -640,7 +643,7 @@ mod tests {
         std::fs::write(&compatibility_path, "\n").unwrap();
 
         let resolution = SecretCodec::resolve_platform_default(Some(compatibility_path), false, |_| {
-            Some(SecretCodec::new([9u8; 32]))
+            Ok(Some(SecretCodec::new([9u8; 32])))
         })
         .unwrap();
 

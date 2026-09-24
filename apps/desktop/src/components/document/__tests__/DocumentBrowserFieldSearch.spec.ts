@@ -1052,6 +1052,53 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(JSON.parse(filter)).toEqual({ _id: "1" });
   });
 
+  it("keeps the filter builder open and says why a rejected rule did not apply", async () => {
+    app?.unmount();
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: 1, title: "Numeric id" }],
+      raw_documents: [],
+      total: 1,
+      total_is_exact: true,
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "numeric_ids",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
+
+    const valueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
+    valueInput.value = "abc";
+    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+
+    const callsBeforeApply = backend.documentFindDocuments.mock.calls.length;
+    buttonWithText("grid.applyFilter").click();
+    await flushUi();
+
+    // The shared error banner sits in the document pane, which this popover covers, so the
+    // reason has to appear inside the builder or the click reads as a dead button.
+    expect(document.body.querySelector("[data-document-filter-builder-error]")?.textContent).toContain("number");
+    expect(document.body.querySelector('[data-testid="popover-content"]')).not.toBeNull();
+    expect(backend.documentFindDocuments.mock.calls.length).toBe(callsBeforeApply);
+
+    // Correcting the rule drops the stale message.
+    valueInput.value = "1";
+    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    expect(document.body.querySelector("[data-document-filter-builder-error]")).toBeNull();
+
+    buttonWithText("grid.applyFilter").click();
+    await flushUi();
+    expect(JSON.parse(backend.documentFindDocuments.mock.calls.at(-1)?.[5])).toEqual({ _id: 1 });
+  });
+
   it("exposes the applicable shared table view options", async () => {
     app?.unmount();
     app = createApp(DocumentBrowser, {

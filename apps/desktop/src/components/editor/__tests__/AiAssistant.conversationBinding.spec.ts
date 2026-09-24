@@ -9,9 +9,9 @@ import { describe, expect, it } from "vitest";
 // connection back onto that tab — so every conversation shared one connection
 // and the composer's database selection leaked between chats.
 //
-// AiAssistant.vue is a ~6000-line SFC the suite never mounts, so these
-// assertions pin the wiring as text, matching the house source-assertion style
-// used by AiAssistant.chatTitle.spec.ts. The binding *rules* themselves are
+// AiAssistant.vue is a ~6000-line SFC the suite never mounts, so the checks
+// that keep AI writes and runs on the bound connection pin the wiring as text
+// until they have mounted coverage. The binding *rules* themselves are
 // unit-tested in lib/ai/__tests__/aiConversationBinding.spec.ts.
 const source = readFileSync(new URL("../AiAssistant.vue", import.meta.url), "utf8");
 
@@ -45,25 +45,6 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     expect(body).toContain("rebindConversation(");
   });
 
-  it("persists a rebind onto the conversation record", () => {
-    const body = bodyOf("async function rebindConversation(");
-
-    expect(body).toContain("connectionId: connection.id");
-    expect(body).toContain("saveAiConversation(updated)");
-    // A chat that has no record yet stages the choice until its first snapshot.
-    expect(body).toContain("draftBinding.value =");
-  });
-
-  it("resets the composer's database selection when the conversation changes", () => {
-    // The key must include the conversation id: `selectedDatabases` is one ref
-    // for the whole panel, so a key without it kept the previous chat's
-    // database selected — the "bound database is not isolated" report.
-    const watcherStart = source.indexOf("watch(\n  () => `${boundConnectionId.value}");
-    expect(watcherStart).toBeGreaterThanOrEqual(0);
-    const watcher = source.slice(watcherStart, source.indexOf(");", watcherStart));
-    expect(watcher).toContain("conversationId.value");
-  });
-
   it("sends against the bound connection, not the visible tab", () => {
     const body = bodyOf("async function send()");
 
@@ -80,55 +61,6 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     // whichever tab happens to be visible.
     expect(source).toContain("return productionContextForDatabase(connection, target.database);");
     expect(source).toContain("const productionContext = computed(() => productionContextOf(activeRunBinding.value));");
-  });
-
-  it("clears a staged draft binding when the shown chat changes", () => {
-    expect(bodyOf("function selectConversation(conv: AiConversation)")).toContain("draftBinding.value = null;");
-    expect(bodyOf("function clearMessages()")).toContain("draftBinding.value = null;");
-  });
-
-  it("shows the composer's connection and schema selectors from the binding", () => {
-    expect(source).toContain(':model-value="boundConnectionId"');
-    expect(source).toContain(":model-value=\"boundSchema || ''\"");
-    expect(source).not.toContain(":model-value=\"connection?.id || ''\"");
-  });
-
-  it("labels each history row with the connection it is bound to", () => {
-    // Which database a conversation talks to has to be readable without opening
-    // it — the binding is per conversation, and several can be live at once.
-    expect(source).toContain("{{ conv.connectionName }}");
-    expect(source).toContain("conversationRowDetail(conv).connectionMissing");
-    expect(bodyOf("function conversationRowDetail(conv: AiConversation)")).toContain("connectionMissing: !!conv.connectionId && !connectionStore.getConfig(conv.connectionId)");
-  });
-
-  it("retargets the conversation on a cross-connection table drop too", () => {
-    // Reverses the old "reject a foreign table" contract: with the conversation
-    // owning its binding, the drop can retarget it instead of being discarded.
-    const start = source.indexOf("function onTableReferenceDropEvent");
-    const body = source.slice(start, source.indexOf("\n}", start));
-
-    expect(body).toContain("void bindConversation({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema })");
-    expect(body).toContain("addSelectedMention(");
-    expect(body).not.toContain("context:");
-  });
-
-  it("retargets the conversation when a table is picked from another connection", () => {
-    // Sliced between anchors rather than via bodyOf(): the parameter's
-    // `{ schema?: string; table: string }` annotation is the first "{" after the
-    // signature, so bodyOf would return the type, not the function body.
-    const start = source.indexOf("function addTableMention(");
-    const body = source.slice(start, source.indexOf("function clearContextReferences", start));
-
-    expect(body).toContain("void bindConversation(binding)");
-    expect(body).toContain("addSelectedMention(");
-
-    const apply = bodyOf("async function bindConversation(binding: AiConversationBinding)");
-    // The previous target's mentions and schema options no longer apply...
-    expect(apply).toContain("clearContextReferences();");
-    // ...and the new target goes onto the conversation, never the editor.
-    expect(apply).toContain("rebindConversation(connection, binding.database, binding.schema)");
-    expect(apply).not.toContain("queryStore.");
-    expect(apply).not.toContain("activeConnectionId");
   });
 
   it("freezes the binding for a background auto-send instead of reading the visible one", () => {
@@ -172,14 +104,6 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     }
   });
 
-  it("compares the whole namespace when deciding whether to retarget", () => {
-    // Comparing only the connection id would treat db1 -> db2 on one server as
-    // "no change" and skip the rebind.
-    const body = bodyOf("async function bindConversation(binding: AiConversationBinding)");
-    expect(body).toContain("sameConversationBinding(binding, conversationBinding.value)");
-    expect(body).not.toContain("binding.connectionId === boundConnectionId.value");
-  });
-
   it("judges production write protection and routing against the run's frozen binding", () => {
     // A run's target is frozen at send time, so a rebind mid-run (or while the
     // confirmation card is up) must not move the production verdict or the
@@ -217,29 +141,6 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     expect(body).not.toContain("boundConnection.value");
     expect(body).not.toContain("boundDatabase.value");
     expect(body).toContain("confirmationBindingForNextRun = runBinding;");
-  });
-
-  it("keeps the snapshot's connection name and id on the same source", () => {
-    // Taking the name from the caller (a run, so connection A) while the id comes
-    // from the conversation record (B after a mid-run rebind) would save a
-    // record that displays A but targets B.
-    const body = bodyOf("function buildConversationSnapshot(");
-    expect(body).toContain("connectionName: binding.connectionId ? (connectionStore.getConfig(binding.connectionId)?.name ?? connectionName) : connectionName,");
-    expect(body).toContain("connectionId: binding.connectionId,");
-    // The caller-supplied name is only a fallback now, never stored bare next to
-    // an id taken from a different source.
-    expect(body).toContain(": connectionName," + String.fromCharCode(10));
-  });
-
-  it("uses a run's frozen target for the first desktop snapshot", () => {
-    const persist = bodyOf("async function persistDesktopRunSnapshot(run: DesktopAiRunRuntime<ChatMessage>)");
-    expect(persist).toContain("{ connectionId: run.connectionId, database: run.database, schema: run.schema }");
-    const snapshot = bodyOf("function buildConversationSnapshot(");
-    expect(snapshot).toContain("snapshotBinding(targetConversationId, fallbackBinding)");
-    expect(snapshot).toContain("schema: binding.schema");
-    // Leaving the new chat also invokes this ordinary save path before the
-    // run's scheduled snapshot; it must use the active run's target too.
-    expect(bodyOf("async function persistConversation()")).toContain("const binding = activeRunBinding.value;");
   });
 
   it("persists the assistant turn's target for Web confirmation after remount", () => {

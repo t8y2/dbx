@@ -1,7 +1,10 @@
 package com.dbx.agent.oceanbaseoracle;
 
-import com.dbx.agent.AgentProtocol;
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.CompletionAssistantMatchMode;
+import com.dbx.agent.CompletionAssistantObjectKind;
+import com.dbx.agent.CompletionAssistantRequest;
+import com.dbx.agent.CompletionAssistantResponse;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.MetadataListConstraints;
@@ -137,28 +140,9 @@ class OceanBaseOracleAgentTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> OceanBaseOracleAgent.queryTimeoutSql(-1));
     }
 
-    @Test
-    void readsServerExecutionOnlyFromOneMatchingAuditRow() {
-        List<String> statements = new ArrayList<>();
-        List<String> parameters = new ArrayList<>();
-        List<Integer> maxRows = new ArrayList<>();
-        Assertions.assertEquals(370L, OceanBaseOracleAgent.serverExecuteTimeUs(
-            auditTimingConnection(1, 500, false, statements, parameters, maxRows), 500, 1001
-        ));
-        Assertions.assertEquals(List.of(1001, 1001), maxRows,
-            "trace and audit statements must preserve the target statement's session row limit");
-        Assertions.assertEquals(List.of("trace-1"), parameters);
-        Assertions.assertTrue(statements.get(1).contains("IS_INNER_SQL = 0 AND IS_EXECUTOR_RPC = 0"));
-        Assertions.assertEquals(null, OceanBaseOracleAgent.serverExecuteTimeUs(auditTimingConnection(0, 500, false, new ArrayList<>(), new ArrayList<>(), new ArrayList<>()), 500, 0));
-        Assertions.assertEquals(null, OceanBaseOracleAgent.serverExecuteTimeUs(auditTimingConnection(2, 500, false, new ArrayList<>(), new ArrayList<>(), new ArrayList<>()), 500, 0));
-        Assertions.assertEquals(null, OceanBaseOracleAgent.serverExecuteTimeUs(auditTimingConnection(1, 1, false, new ArrayList<>(), new ArrayList<>(), new ArrayList<>()), 500, 0));
-        Assertions.assertEquals(null, OceanBaseOracleAgent.serverExecuteTimeUs(auditTimingConnection(1, 500, true, new ArrayList<>(), new ArrayList<>(), new ArrayList<>()), 500, 0));
-    }
-
-
     @ParameterizedTest
     @CsvSource({"10, 1000, false", "1, 1000, false", "1, 1, true", "2, 2, false"})
-    void preservesTheCursorStatementLimitWhenSamplingItsTerminalPage(int pageSize, int maxRows, boolean truncated) {
+    void returnsCursorRowsWithoutAdditionalAuditQueries(int pageSize, int maxRows, boolean truncated) {
         List<Integer> auditLimits = new ArrayList<>();
         List<String> auditSql = new ArrayList<>();
         Connection auditConnection = auditTimingConnection(1, 2, false, auditSql, new ArrayList<>(), auditLimits);
@@ -215,12 +199,13 @@ class OceanBaseOracleAgentTest {
         Assertions.assertEquals(truncated, result.getTruncated());
         Assertions.assertEquals(truncated ? List.of(List.of(1)) : List.of(List.of(1), List.of(2)), rows);
         Assertions.assertEquals(0, queryLimit[0], "the paging cap must not change the JDBC statement limit");
-        Assertions.assertEquals(truncated ? List.of() : List.of(0, 0), auditLimits);
-        Assertions.assertEquals(truncated ? null : Long.valueOf(370), result.getServer_execute_time_us());
+        Assertions.assertTrue(auditSql.isEmpty(), "completed queries must not read trace or audit records");
+        Assertions.assertTrue(auditLimits.isEmpty());
+        Assertions.assertNull(result.getServer_execute_time_us());
     }
 
     @Test
-    void doesNotAuditAnOpenCursorAfterAnotherSessionMethodCanReplaceItsTrace() {
+    void finishesCursorWithoutCreatingDiagnosticStatements() {
         int[] row = {-1};
         ResultSetMetaData meta = proxy(ResultSetMetaData.class, (method, args) -> {
             if ("getColumnCount".equals(method.getName())) return 1;
@@ -255,11 +240,11 @@ class OceanBaseOracleAgentTest {
         Assertions.assertTrue(first.getHas_more());
         Assertions.assertEquals(2, statementsCreated[0]);
 
-        agent.beforeAgentMethod(AgentProtocol.METHOD_LIST_TABLES, null);
+
         QueryPageResult last = agent.fetchQueryPage(first.getSession_id(), 1);
         Assertions.assertFalse(last.getHas_more());
         Assertions.assertNull(last.getServer_execute_time_us());
-        Assertions.assertEquals(2, statementsCreated[0], "no LAST_TRACE_ID query may run for an invalidated cursor");
+        Assertions.assertEquals(2, statementsCreated[0], "no diagnostic query may run when the cursor finishes");
     }
 
     @Test
@@ -458,6 +443,64 @@ class OceanBaseOracleAgentTest {
         Assertions.assertEquals("FUNCTION", objects.get(0).getObject_type());
         Assertions.assertTrue(sql.get(0).contains("OBJECT_TYPE IN (?)"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("ROWNUM <= ?"), sql.get(0));
+    }
+
+    @Test
+    void globalCompletionTableSearchOmitsOwnerFilter() {
+        CompletionAssistantRequest request = completionRequest("DWD", null, "STAG", true);
+        OceanBaseOracleAgent.CompletionTablesQuery query = OceanBaseOracleAgent.buildCompletionTablesQuery(request, "DWD", 21);
+
+        Assertions.assertTrue(query.sql.contains("FROM ALL_OBJECTS"), query.sql);
+        Assertions.assertTrue(query.sql.contains("FROM ALL_SYNONYMS"), query.sql);
+        Assertions.assertTrue(query.sql.contains("UPPER(o.OBJECT_NAME) LIKE ?"), query.sql);
+        Assertions.assertFalse(query.sql.contains("UPPER(o.OWNER) = ?"), query.sql);
+        Assertions.assertFalse(query.sql.contains("UPPER(s.OWNER) = ?"), query.sql);
+        Assertions.assertTrue(query.sql.contains("ROWNUM <= ?"), query.sql);
+        Assertions.assertEquals(List.of("STAG%", "STAG%", "DWD", "STAG", 21), query.args);
+    }
+
+    @Test
+    void completionTableSearchFoldsLowercaseMasksForFuzzyMatch() {
+        CompletionAssistantRequest request = completionRequest("dwd", null, "ord", true);
+        setField(request, "match_mode", CompletionAssistantMatchMode.CONTAINS);
+        OceanBaseOracleAgent.CompletionTablesQuery query = OceanBaseOracleAgent.buildCompletionTablesQuery(request, "dwd", 21);
+
+        Assertions.assertTrue(query.sql.contains("UPPER(o.OBJECT_NAME) LIKE ?"), query.sql);
+        Assertions.assertTrue(query.sql.contains("UPPER(OWNER) = ?"), query.sql);
+        Assertions.assertTrue(query.sql.contains("UPPER(OBJECT_NAME) = ?"), query.sql);
+        Assertions.assertFalse(query.sql.contains("LIKE UPPER(?)"), query.sql);
+        Assertions.assertEquals(List.of("%ORD%", "%ORD%", "DWD", "ORD", 21), query.args);
+    }
+
+    @Test
+    void scopedCompletionTableSearchFiltersOwnerCaseInsensitively() {
+        CompletionAssistantRequest request = completionRequest("dwd", "staging", "ord", false);
+        OceanBaseOracleAgent.CompletionTablesQuery query = OceanBaseOracleAgent.buildCompletionTablesQuery(request, "dwd", 21);
+
+        Assertions.assertTrue(query.sql.contains("UPPER(o.OWNER) = ?"), query.sql);
+        Assertions.assertTrue(query.sql.contains("UPPER(s.OWNER) = ?"), query.sql);
+        Assertions.assertEquals(List.of("ORD%", "STAGING", "ORD%", "STAGING", "DWD", "ORD", 21), query.args);
+    }
+
+    @Test
+    void completionAssistantSearchReturnsGlobalTableCandidates() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE", "TARGET_OWNER", "TARGET_NAME"},
+            new Object[][]{
+                {"DWD", "ORDERS", "TABLE", null, null},
+                {"STAGING", "ORDERS", "TABLE", null, null}
+            }
+        )));
+
+        CompletionAssistantResponse response = agent.completionAssistantSearch(completionRequest("DWD", null, "ORD", true));
+
+        Assertions.assertEquals(2, response.getCandidates().size());
+        Assertions.assertEquals("ORDERS", response.getCandidates().get(0).getName());
+        Assertions.assertEquals("DWD", response.getCandidates().get(0).getSchema());
+        Assertions.assertEquals("STAGING", response.getCandidates().get(1).getSchema());
+        Assertions.assertFalse(sql.get(0).contains("UPPER(o.OWNER) = ?"), sql.get(0));
     }
 
     @Test
@@ -1465,6 +1508,33 @@ class OceanBaseOracleAgentTest {
             }
         }
         return null;
+    }
+
+    private static CompletionAssistantRequest completionRequest(
+        String schema,
+        String parentSchema,
+        String mask,
+        boolean globalSearch
+    ) {
+        CompletionAssistantRequest request = new CompletionAssistantRequest();
+        setField(request, "database", "OBORCL");
+        setField(request, "schema", schema);
+        setField(request, "parent_schema", parentSchema);
+        setField(request, "mask", mask);
+        setField(request, "global_search", globalSearch);
+        setField(request, "max_results", 20);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.TABLE, CompletionAssistantObjectKind.VIEW));
+        return request;
+    }
+
+    private static void setField(Object target, String name, Object value) {
+        try {
+            var field = target.getClass().getDeclaredField(name);
+            field.setAccessible(true);
+            field.set(target, value);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static <T> T proxy(Class<T> type, MethodHandler handler) {

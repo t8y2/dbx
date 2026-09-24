@@ -117,6 +117,10 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
     }
     match database_type {
         Some(DatabaseType::Iotdb) => name.to_string(),
+        // SOQL has no delimited identifiers: `SELECT * FROM "Account"` fails with
+        // MALFORMED_QUERY, and double quotes are string literals there. Object and
+        // field API names are always sent bare.
+        Some(DatabaseType::Salesforce) => name.to_string(),
         // JDBC connections use the driver-reported identifier quote string
         // (DatabaseMetaData.getIdentifierQuoteString()) inside the JDBC agent,
         // so the Rust layer passes identifiers through unquoted.

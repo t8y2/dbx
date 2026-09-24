@@ -37,7 +37,7 @@ const props = withDefaults(
     allowedGroupIds: readonly string[];
     allowedConnectionIds: readonly string[] | null;
     groupPolicies?: readonly { groupId: string; readOnly: boolean; allowDangerousSql: boolean }[];
-    connectionPolicies?: readonly { connectionId: string; readOnly: boolean; allowDangerousSql: boolean; executionModeConfigured?: boolean }[];
+    connectionPolicies?: readonly { connectionId: string; readOnly: boolean; allowDangerousSql: boolean; executionModeConfigured?: boolean; allowSalesforceDml?: boolean }[];
     disabled?: boolean;
     busy?: boolean;
   }>(),
@@ -48,6 +48,7 @@ const emit = defineEmits<{
   "update:scope": [value: { allowedGroupIds: string[]; allowedConnectionIds: string[] | null }];
   "set:group-policy": [groupId: string, mode: ExecutionMode | "inherit"];
   "set:connection-policy": [connectionId: string, mode: ExecutionMode | "inherit"];
+  "set:connection-salesforce-dml": [connectionId: string, allowed: boolean];
 }>();
 
 const { t } = useI18n();
@@ -264,6 +265,18 @@ function groupPolicyMode(groupId: string): ExecutionMode | "inherit" {
 function connectionPolicyMode(connectionId: string): ExecutionMode | "inherit" {
   return policyMode(props.connectionPolicies?.find((policy) => policy.connectionId === connectionId));
 }
+
+// Salesforce writes are the one permission that cannot be expressed as an execution
+// mode: SOQL has no write verb, so a DML toggle is the only gate an agent can be given.
+// It is per-connection because it is per-org, and it stays hidden for every other driver.
+function isSalesforceConnection(node: ResourceNode): boolean {
+  return node.type === "connection" && node.connection.db_type === "salesforce";
+}
+
+function connectionAllowsSalesforceDml(connectionId: string): boolean {
+  const policy = props.connectionPolicies?.find((item) => item.connectionId === connectionId);
+  return policy?.allowSalesforceDml === true && policy.readOnly !== true;
+}
 </script>
 
 <template>
@@ -349,6 +362,23 @@ function connectionPolicyMode(connectionId: string): ExecutionMode | "inherit" {
               <SelectItem value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</SelectItem>
             </SelectContent>
           </Select>
+          <label
+            v-if="isSalesforceConnection(node) && (explicitConnectionIds.has(node.id) || Boolean(selectedAncestor(node)))"
+            class="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border bg-background px-1.5 text-[11px]"
+            :class="connectionAllowsSalesforceDml(node.id) ? 'border-primary/50 text-foreground' : 'text-muted-foreground'"
+            :title="t('settings.mcpConnectionPolicyAllowSalesforceDmlHint')"
+          >
+            <input
+              type="checkbox"
+              class="size-3"
+              :checked="connectionAllowsSalesforceDml(node.id)"
+              :disabled="disabled || busy"
+              :aria-label="t('settings.mcpConnectionPolicyAllowSalesforceDml')"
+              @click.stop
+              @change="emit('set:connection-salesforce-dml', node.id, ($event.target as HTMLInputElement).checked)"
+            />
+            {{ t("settings.mcpConnectionPolicyAllowSalesforceDml") }}
+          </label>
           <Badge v-if="selectedAncestor(node)" variant="secondary" class="shrink-0 rounded font-normal">{{ t("settings.mcpResourceScopeInherited", { group: groupLabel(selectedAncestor(node)!) }) }}</Badge>
           <Badge v-else-if="node.type === 'group' && selectedGroupIds.has(node.id)" variant="outline" class="shrink-0 rounded font-normal">{{ t("settings.mcpResourceScopeDynamic") }}</Badge>
           <Badge v-else-if="node.type === 'group' && groupHasSelectedDescendant(node)" variant="secondary" class="shrink-0 rounded font-normal">{{ t("settings.mcpResourceScopePartial") }}</Badge>

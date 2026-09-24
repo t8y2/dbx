@@ -80,6 +80,9 @@ describe("queryStore MongoDB execution summary", () => {
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.result?.rows).toHaveLength(3);
+    expect(tab.result?.client_request_wait_ms).toEqual(expect.any(Number));
+    expect(tab.result?.client_result_ms).toEqual(expect.any(Number));
+    expect(tab.result?.timing_page_count).toBe(1);
     expect(tab.batchSqlExecution).toMatchObject({
       total: 1,
       completed: 1,

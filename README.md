@@ -103,13 +103,13 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
-        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">
+        <img src="docs/public/sponsors/aicodemirror-card.png" alt="AICodeMirror" width="175" />
       </a>
     </td>
     <td>
-      UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
-      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
+      Special thanks to AICodeMirror for sponsoring this project! AICodeMirror provides a high-stability official relay service for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 7×24 dedicated support. Official-channel pricing for Claude Code / Codex / Gemini is as low as 38% / 2% / 9% of list price, with extra discounts on top-ups! AICodeMirror offers a special benefit for DBX users: register through this link to enjoy 20% off your first top-up, and enterprise customers up to 25% off.
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">Visit AICodeMirror</a>
     </td>
   </tr>
   <tr>
@@ -121,6 +121,17 @@
     <td>
       HuaLongAI is a model API relay built for heavy AI developers, offering 100% official-source Codex and Claude models with transparent token-level billing, enterprise contracts, and invoicing.
       <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">Visit HuaLongAI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
+        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      </a>
+    </td>
+    <td>
+      UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
     </td>
   </tr>
   <tr>

@@ -1561,6 +1561,7 @@ mod tests {
             data_dir: dir.clone(),
             public_base_path: "/".to_string(),
             password_disabled: false,
+            demo_mode: false,
             password_hash: RwLock::new(None),
             sessions: RwLock::new(HashSet::new()),
             sse_channels: RwLock::new(HashMap::new()),

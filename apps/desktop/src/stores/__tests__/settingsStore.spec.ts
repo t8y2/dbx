@@ -20,6 +20,13 @@ import type { AiConfigItem } from "@/types/ai";
 import { DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 describe("normalizeEditorSettings", () => {
+  it("defaults DDL viewing to a dialog and preserves the selected open mode", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.ddlOpenMode).toBe("dialog");
+    expect(normalizeEditorSettings({}).ddlOpenMode).toBe("dialog");
+    expect(normalizeEditorSettings({ ddlOpenMode: "tab" }).ddlOpenMode).toBe("tab");
+    expect(normalizeEditorSettings({ ddlOpenMode: "invalid" } as any).ddlOpenMode).toBe("dialog");
+  });
+
   it("keeps automatic DDL refresh disabled unless explicitly enabled", () => {
     expect(normalizeEditorSettings({}).refreshDdlOnOpen).toBe(false);
     expect(normalizeEditorSettings({ refreshDdlOnOpen: true }).refreshDdlOnOpen).toBe(true);
@@ -371,6 +378,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridSearchMode: "invalid" as any }).dataGridSearchMode).toBe("filter");
   });
 
+  it("defaults the data grid row number column to the view position and preserves original row numbers", () => {
+    expect(normalizeEditorSettings({}).dataGridRowNumberMode).toBe("view");
+    expect(normalizeEditorSettings({ dataGridRowNumberMode: "source" }).dataGridRowNumberMode).toBe("source");
+    expect(normalizeEditorSettings({ dataGridRowNumberMode: "invalid" as any }).dataGridRowNumberMode).toBe("view");
+  });
+
   it("defaults the global data grid copy preference and preserves valid choices", () => {
     expect(normalizeEditorSettings({}).dataGridCopyExtractor).toBe("smart");
     expect(normalizeEditorSettings({ dataGridCopyExtractor: "smart" }).dataGridCopyExtractor).toBe("smart");
@@ -684,6 +697,17 @@ describe("normalizeMcpGlobalPolicy", () => {
     expect(policy.connectionPolicies[0].executionModePolicyVersion).toBeNull();
   });
 
+  it("defaults the Salesforce DML opt-in to off and revokes it under read-only", () => {
+    // Policies saved before the switch existed carry no field at all.
+    expect(normalizeMcpGlobalPolicy({ connectionPolicies: [{ connectionId: "sfdc", databaseScope: "all" } as any] }).connectionPolicies[0].allowSalesforceDml).toBe(false);
+
+    expect(normalizeMcpGlobalPolicy({ connectionPolicies: [{ connectionId: "sfdc", allowSalesforceDml: true } as any] }).connectionPolicies[0].allowSalesforceDml).toBe(true);
+
+    expect(normalizeMcpGlobalPolicy({ connectionPolicies: [{ connectionId: "sfdc", readOnly: true, allowSalesforceDml: true } as any] }).connectionPolicies[0].allowSalesforceDml).toBe(false);
+
+    expect(normalizeMcpGlobalPolicy({ connectionPolicies: [{ connectionId: "sfdc", allowSalesforceDml: "yes" } as any] }).connectionPolicies[0].allowSalesforceDml).toBe(false);
+  });
+
   it("round-trips queryTimeoutSecs null, undefined and positive numbers", () => {
     expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: null }).queryTimeoutSecs).toBeNull();
     expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: undefined } as any).queryTimeoutSecs).toBeNull();
@@ -879,6 +903,14 @@ describe("settingsStore AI API key normalization", () => {
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],
+    });
+    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "aicodemirror")).toMatchObject({
+      endpoint: "https://api.aicodemirror.ai/v1",
+      provider: "openai-compatible",
+      authMethod: "bearer",
+      requiresApiKey: true,
+      websiteUrl: "https://www.aicodemirror.ai/register?invitecode=DK44NH",
+      badgeKey: "ai.aicodemirrorSponsored",
     });
   });
 

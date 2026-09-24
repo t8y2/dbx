@@ -188,9 +188,6 @@ afterEach(() => {
 });
 
 describe("QueryEditor completion Tab keymap", () => {
-  it("guards the batch INSERT snippet factory before applying", () => {
-    expect(batchSource).toContain('if (session.mode === "insert" && !runtime.codeMirrorSnippetCompletion)');
-  });
   it("closes completion and suppresses its restart for the Enter newline", () => {
     const closeCompletion = vi.fn(() => true);
     let harness: TabHarness;

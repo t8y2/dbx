@@ -105,6 +105,44 @@ export function tableStructureIdentifierComparisonKey(name: string, databaseType
   return `unquoted:${normalizedUnquoted}`;
 }
 
+/** Plain-identifier rule for newly created Oracle names: an ASCII letter first,
+ * then letters/digits/`_`/`$`/`#`. Anything else is emitted quoted by the DDL
+ * generator and keeps its exact spelling. */
+function isPlainOracleCreateIdentifier(name: string): boolean {
+  if (!/^[A-Za-z]/.test(name)) return false;
+  return /^[A-Za-z0-9_$#]*$/.test(name.slice(1));
+}
+
+/** Plain-identifier rule for newly created Informix-family names: an ASCII
+ * letter or `_` first, then letters/digits/`_`/`$`. */
+function isPlainInformixCreateIdentifier(name: string): boolean {
+  if (!/^[A-Za-z_]/.test(name)) return false;
+  return /^[A-Za-z0-9_$]*$/.test(name.slice(1));
+}
+
+/**
+ * Storage name of a newly created table, mirroring how the CREATE DDL
+ * generator quotes new identifiers. Plain (unquoted) Oracle names fold to
+ * upper case on the server; plain Informix-family names fold to lower case.
+ * Every other dialect quotes new names — or does not fold them — so the
+ * as-typed spelling is preserved exactly. Names the DDL would have to quote
+ * (leading digit, special characters, spaces) keep their exact spelling on
+ * the folding dialects too. Boundary: a reserved-word name typed in mixed
+ * case is quoted by the generator and keeps its spelling, while this helper
+ * still folds it — accepted because the reserved-word vocabulary lives with
+ * the SQL builder, not the frontend.
+ */
+export function foldCreatedTableName(name: string, databaseType?: DatabaseType): string {
+  const value = name.trim();
+  if (databaseType === "oracle") {
+    return isPlainOracleCreateIdentifier(value) ? value.toUpperCase() : value;
+  }
+  if (databaseType === "informix") {
+    return isPlainInformixCreateIdentifier(value) ? value.toLowerCase() : value;
+  }
+  return value;
+}
+
 const POSTGRES_SERIAL_PSEUDO_TYPES = new Set(["smallserial", "serial", "bigserial"]);
 
 function withPostgresArrayTypes(types: readonly string[]): string[] {

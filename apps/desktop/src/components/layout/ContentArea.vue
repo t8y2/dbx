@@ -34,6 +34,7 @@ import {
   Pin,
   Pencil,
   Rows3,
+  Hash,
   SquareDashed,
   Minus,
   Plus,
@@ -136,10 +137,10 @@ const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryCh
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps } from "@/components/layout/querySurfaces";
-import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
+import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridRowNumberMode, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
+import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey, shouldShowCancelAction } from "@/lib/sql/queryExecutionState";
 import { sqlErrorDisplayPosition, sqlErrorEditorOffset, logSqlErrorPosition } from "@/lib/sql/errorPosition";
 import {
   databaseDisplayNameForTab,
@@ -180,6 +181,9 @@ import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
+import { sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import type { QueryMessage, QueryTab, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
@@ -279,6 +283,7 @@ const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.co
 const setColorizeDataGridCellTypes = (value: boolean) => settingsStore.updateEditorSettings({ colorizeDataGridCellTypes: value });
 const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
+const ddlRefreshInProgress = ref(false);
 
 onMounted(() => {
   // The watcher below warms the grid for query/data tabs. Keep source-only
@@ -328,6 +333,7 @@ const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
+const dataGridRowNumberMode = computed(() => settingsStore.editorSettings.dataGridRowNumberMode);
 const resultRunDisplayMode = computed(() => settingsStore.editorSettings.resultRunDisplayMode);
 const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWidthDensity);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
@@ -396,6 +402,10 @@ function setDataGridRenderMode(value: "canvas" | "dom") {
 
 function setDataGridSearchMode(value: DataGridSearchMode) {
   settingsStore.updateEditorSettings({ dataGridSearchMode: value });
+}
+
+function setDataGridRowNumberMode(value: DataGridRowNumberMode) {
+  settingsStore.updateEditorSettings({ dataGridRowNumberMode: value });
 }
 
 function setResultRunDisplayMode(value: ResultRunDisplayMode) {
@@ -484,8 +494,10 @@ const activeQueryError = computed(() => {
   return String(result.rows[0]?.[0] ?? "");
 });
 const hasQueryOutput = computed(() => tabHasQueryOutput(props.activeTab));
-const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined)));
-const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
+// 结果集页签/列表的名称是否带库名，由编辑器设置控制（默认带库名）
+const includeResultSourceDatabase = computed(() => settingsStore.editorSettings.showResultSourceDatabase);
+const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value }));
+const tabularResults = computed(() => tabularResultItems(props.activeTab.results, { includeSourceDatabase: includeResultSourceDatabase.value }));
 const allResultExportSheets = computed(() =>
   tabularResults.value.map((item) => ({
     sheetName: item.label || t("tabs.resultN", { n: item.n }),
@@ -493,7 +505,14 @@ const allResultExportSheets = computed(() =>
     sql: item.index === props.activeTab.activeResultIndex ? queryResultExecutionSql(props.activeTab) : item.result.sourceStatement,
   })),
 );
-const resultRuns = computed(() => resultRunItems(props.activeTab));
+// 结果标签优先显示来源（表名），历史批次缺少来源信息时按批次 SQL 重新解析
+const resultRuns = computed(() =>
+  resultRunItems(props.activeTab, {
+    includeSourceDatabase: includeResultSourceDatabase.value,
+    database: props.activeTab.database,
+    databaseType: activeEffectiveDatabaseType.value,
+  }),
+);
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 const activeResultGridColumnWidthCacheKey = computed(() => resultGridColumnWidthCacheKey(props.activeTab));
 const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
@@ -694,6 +713,7 @@ const resultsPaneSize = ref(Number(safeLocalStorageGet("dbx-results-pane-size"))
 const editorPaneSize = computed(() => (props.editorOnly || !resultsPaneOpen.value ? 100 : 100 - resultsPaneSize.value));
 const queryRunningElapsed = ref(0);
 const sourceLoadElapsed = ref(0);
+const ddlLoadElapsed = ref(0);
 
 function toggleResultsPane(): boolean {
   if (props.activeTab.mode !== "query" || !hasQueryOutput.value) return false;
@@ -742,19 +762,27 @@ function pendingSourceLoadStartedAt(): number | undefined {
   return load && !load.error ? load.startedAt : undefined;
 }
 
-// 一个 rAF 循环同时驱动「查询执行中」与「对象源码加载中」两个耗时显示：
+/** DDL 新标签仍在加载（未失败）时的开始时间；与源码加载共用同一个 rAF 循环。 */
+function pendingDdlLoadStartedAt(): number | undefined {
+  const load = props.activeTab.ddlLoad;
+  return load && !load.error ? load.startedAt : undefined;
+}
+
+// 一个 rAF 循环同时驱动「查询执行中」「对象源码加载中」「DDL 加载中」三个耗时显示：
 // issue #9035 的核心体感就是「不知道要等多久」，所以源码加载也要显示已耗时。
 function updateRunningElapsed() {
   const startedAt = props.activeTab.queryExecutionStartedAt;
   queryRunningElapsed.value = props.activeTab.isExecuting && startedAt ? Math.max(0, Date.now() - startedAt) : 0;
   const sourceStartedAt = pendingSourceLoadStartedAt();
   sourceLoadElapsed.value = sourceStartedAt ? Math.max(0, Date.now() - sourceStartedAt) : 0;
+  const ddlStartedAt = pendingDdlLoadStartedAt();
+  ddlLoadElapsed.value = ddlStartedAt ? Math.max(0, Date.now() - ddlStartedAt) : 0;
 }
 
 function startRunningElapsedTimer() {
   stopRunningElapsedTimer();
   updateRunningElapsed();
-  const isTicking = () => (props.activeTab.isExecuting && !!props.activeTab.queryExecutionStartedAt) || pendingSourceLoadStartedAt() !== undefined;
+  const isTicking = () => (props.activeTab.isExecuting && !!props.activeTab.queryExecutionStartedAt) || pendingSourceLoadStartedAt() !== undefined || pendingDdlLoadStartedAt() !== undefined;
   if (!isTicking()) return;
   const updateOnNextFrame = () => {
     updateRunningElapsed();
@@ -767,8 +795,11 @@ function startRunningElapsedTimer() {
 
 const queryRunningElapsedSeconds = computed(() => formatElapsedSeconds(queryRunningElapsed.value));
 const sourceLoadElapsedSeconds = computed(() => formatElapsedSeconds(sourceLoadElapsed.value));
+const ddlLoadElapsedSeconds = computed(() => formatElapsedSeconds(ddlLoadElapsed.value));
 
-watch(() => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.queryExecutionStartedAt, props.activeTab.sourceLoad?.startedAt, props.activeTab.sourceLoad?.error] as const, startRunningElapsedTimer, { immediate: true });
+watch(() => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.queryExecutionStartedAt, props.activeTab.sourceLoad?.startedAt, props.activeTab.sourceLoad?.error, props.activeTab.ddlLoad?.startedAt, props.activeTab.ddlLoad?.error] as const, startRunningElapsedTimer, {
+  immediate: true,
+});
 
 onUnmounted(() => {
   stopRunningElapsedTimer();
@@ -970,6 +1001,77 @@ function onHandleStructureViewData() {
   });
 }
 
+/**
+ * Loads the DDL of the active DDL viewer tab. Serves the toolbar refresh, the
+ * in-place retry, and the initial pending load of a freshly created tab (which
+ * renders the loading state instead of an editor): a pending load that fails
+ * lands in the tab itself with an in-place retry, while a refresh of
+ * already-loaded content only reports through a toast.
+ */
+async function loadActiveDdlViewer(force: boolean) {
+  const tab = props.activeTab;
+  const ddlViewer = tab.ddlViewer;
+  if (!ddlViewer || ddlRefreshInProgress.value) return;
+  ddlRefreshInProgress.value = true;
+  const pendingLoad = !!tab.ddlLoad;
+  if (pendingLoad) tab.ddlLoad = { startedAt: Date.now() };
+  try {
+    const { ddl } = await loadObjectDdl(
+      {
+        connectionId: tab.connectionId,
+        database: tab.database,
+        schema: ddlViewer.schema || tab.database,
+        tableName: ddlViewer.tableName,
+        objectType: ddlViewer.objectType,
+        catalog: tab.catalog,
+      },
+      { force },
+    );
+    const dialect = ddlViewer.formatDialect ?? activeSqlFormatDialect.value;
+    const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId) ?? props.activeConnection);
+    const displayed = await formatDdlForDisplay(
+      ddl,
+      {
+        dialect,
+        databaseType,
+        database: tab.database,
+        catalog: tab.catalog,
+        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+        quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+        excludeDdlStorage: settingsStore.editorSettings.excludeDdlStorage,
+      },
+      settingsStore.editorSettings.sqlFormatter,
+    );
+    queryStore.updateSql(tab.id, displayed);
+    tab.originalSql = displayed;
+    if (pendingLoad) tab.ddlLoad = undefined;
+  } catch (error: any) {
+    if (pendingLoad) {
+      tab.ddlLoad = { startedAt: Date.now(), error: error?.message || String(error) };
+    } else {
+      toast(t("contextMenu.ddlRefreshFailed", { message: error?.message || String(error) }), 5000);
+    }
+  } finally {
+    ddlRefreshInProgress.value = false;
+  }
+}
+
+function refreshDdlViewer() {
+  void loadActiveDdlViewer(true);
+}
+
+function viewDdlTableData() {
+  const tab = props.activeTab;
+  const ddlViewer = tab.ddlViewer;
+  if (!ddlViewer) return;
+  emit("viewTableData", tab.id, {
+    name: ddlViewer.tableName,
+    database: tab.database,
+    schema: ddlViewer.schema,
+    type: ddlViewer.objectType ? sqlObjectNavigationTypeFromTableType(ddlViewer.objectType) : "table",
+  });
+}
+
 function onHandleViewTableDdl(target: SqlObjectNavigationTarget) {
   emit("viewTableDdl", props.activeTab.id, target);
 }
@@ -1150,7 +1252,7 @@ async function closeResultRunsToRight(runId: string) {
 
 function openResultRunRename(run: (typeof resultRuns.value)[number]) {
   resultRunRenameId.value = run.id;
-  resultRunRenameTitle.value = run.title || t("tabs.runN", { n: run.sequence });
+  resultRunRenameTitle.value = run.title || run.sourceLabel || t("tabs.runN", { n: run.sequence });
   resultRunRenameOpen.value = true;
   nextTick(() => {
     const input = document.querySelector<HTMLInputElement>("[data-result-run-name-input]");
@@ -1219,6 +1321,16 @@ async function selectResultRun(runId: string) {
   }
   emit("update:activeOutputView", props.activeTab.id, "result");
   return true;
+}
+
+/**
+ * 点击结果标签：切换显示的同时固定该结果（issue #9975）。
+ * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来。
+ */
+async function selectResultRunFromTab(runId: string) {
+  if (!(await selectResultRun(runId))) return;
+  const run = resultRuns.value.find((item) => item.id === runId);
+  if (run && !run.pinned) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {
@@ -1497,15 +1609,34 @@ defineExpose({
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resize="onResultsSplitResize" @resized="onResultsResized">
         <Pane v-if="!resultOnly" class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
+            <div v-if="activeTab.ddlViewer" class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
+              <Button variant="outline" size="sm" :disabled="ddlRefreshInProgress" @click="refreshDdlViewer">
+                <RefreshCcw class="h-4 w-4" :class="ddlRefreshInProgress ? 'animate-spin' : ''" />
+                {{ t("structureEditor.refresh") }}
+              </Button>
+              <Button variant="outline" size="sm" @click="viewDdlTableData">
+                <TableProperties class="h-4 w-4" />
+                {{ t("contextMenu.viewData") }}
+              </Button>
+            </div>
             <div v-if="activeProductionContext.active" class="production-watermark pointer-events-none absolute inset-0 z-10 grid select-none" aria-hidden="true">
               <span v-for="index in 4" :key="index" class="production-watermark__label whitespace-nowrap font-mono text-6xl font-extrabold text-red-700/[0.12] dark:text-red-200/[0.1]">{{ productionWatermarkText }}</span>
             </div>
             <!-- issue #9035：源码 tab 先出现再加载。pending 期间不挂载编辑器
-                 （还没有内容可编辑，也省下一次 Monaco 初始化），失败则就地重试。 -->
+                 （还没有内容可编辑，也省下一次 Monaco 初始化），失败则就地重试。
+                 issue #9387：DDL 新标签同样先出 tab 再加载，失败就地显示错误。 -->
             <QueryLoadingState v-if="activeTab.sourceLoad && !activeTab.sourceLoad.error" class="relative z-0 flex-1" :elapsed-seconds="sourceLoadElapsedSeconds" />
             <div v-else-if="activeTab.sourceLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-object-source-load-error>
               <p class="max-w-[80%] text-center break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
               <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryObjectSourceTab(activeTab.id)">
+                <RotateCcw class="h-4 w-4" />
+                {{ t("common.retry") }}
+              </Button>
+            </div>
+            <QueryLoadingState v-else-if="activeTab.ddlLoad && !activeTab.ddlLoad.error" class="relative z-0 flex-1" :elapsed-seconds="ddlLoadElapsedSeconds" />
+            <div v-else-if="activeTab.ddlLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-ddl-load-error>
+              <p class="max-w-[80%] text-center break-words text-destructive">{{ t("contextMenu.ddlRefreshFailed", { message: activeTab.ddlLoad.error }) }}</p>
+              <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryDdlViewerTab(activeTab.id)">
                 <RotateCcw class="h-4 w-4" />
                 {{ t("common.retry") }}
               </Button>
@@ -1540,6 +1671,8 @@ defineExpose({
               :initial-selection="activeTab.editorSelection"
               :reveal-request="activeTab.editorRevealRequest"
               :force-word-wrap="activeTab.forceWordWrap"
+              :read-only="!!activeTab.ddlViewer"
+              :hide-execution-controls="!!activeTab.ddlViewer"
               enable-explain-shortcut
               :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
               @update:model-value="emit('editorUpdate', activeTab.id, $event)"
@@ -1629,11 +1762,11 @@ defineExpose({
                             :aria-selected="run.active"
                             :data-active-result-run="run.active ? 'true' : undefined"
                             class="flex h-full select-none items-center gap-1 whitespace-nowrap pl-2.5 pr-1 text-xs font-medium outline-none focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
-                            @click="selectResultRun(run.id)"
+                            @click="selectResultRunFromTab(run.id)"
                             @keydown="onResultRunTabKeydown($event, runIndex)"
                           >
                             <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
-                            {{ run.title || t("tabs.runN", { n: run.sequence }) }}
+                            {{ run.title || run.sourceLabel || t("tabs.runN", { n: run.sequence }) }}
                           </button>
                           <button
                             type="button"
@@ -1653,17 +1786,17 @@ defineExpose({
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
-                        <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || t("tabs.runN", { n: activeResultRunItem.sequence }) : t("tabs.resultRuns") }}</span>
+                        <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || activeResultRunItem.sourceLabel || t("tabs.runN", { n: activeResultRunItem.sequence }) : t("tabs.resultRuns") }}</span>
                         <ChevronDown class="h-3.5 w-3.5 shrink-0" />
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start" class="w-48">
                       <CustomContextMenu v-for="run in resultRuns" :key="run.id" :items="() => resultRunContextMenuItems(run)" v-slot="{ onContextMenu }">
-                        <DropdownMenuItem class="flex items-center gap-2 pr-1" @select="selectResultRun(run.id)" @contextmenu="onContextMenu">
+                        <DropdownMenuItem class="flex items-center gap-2 pr-1" @select="selectResultRunFromTab(run.id)" @contextmenu="onContextMenu">
                           <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
                           <span v-else class="h-3.5 w-3.5 shrink-0" />
                           <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
-                          <span class="min-w-0 flex-1 truncate">{{ run.title || t("tabs.runN", { n: run.sequence }) }}</span>
+                          <span class="min-w-0 flex-1 truncate">{{ run.title || run.sourceLabel || t("tabs.runN", { n: run.sequence }) }}</span>
                           <button
                             type="button"
                             class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1817,6 +1950,32 @@ defineExpose({
                             @click="setDataGridSearchMode('highlight')"
                           >
                             {{ t("grid.searchModeHighlight") }}
+                          </button>
+                        </div>
+                      </LightTooltip>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <Hash class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.rowNumberMode") }}</span>
+                      </div>
+                      <LightTooltip :text="t('grid.rowNumberModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                        <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                          <button
+                            type="button"
+                            class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRowNumberMode === 'view' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="setDataGridRowNumberMode('view')"
+                          >
+                            {{ t("grid.rowNumberModeView") }}
+                          </button>
+                          <button
+                            type="button"
+                            class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRowNumberMode === 'source' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="setDataGridRowNumberMode('source')"
+                          >
+                            {{ t("grid.rowNumberModeSource") }}
                           </button>
                         </div>
                       </LightTooltip>
@@ -2158,10 +2317,14 @@ defineExpose({
                 "
                 :all-export-results="allResultExportSheets"
                 :export-file-base-name="activeQueryResultExportBaseName"
+                :show-cancel="shouldShowCancelAction(activeTab)"
+                :cancelling="activeTab.isCancelling"
+                :cancel-disabled="!canCancelQueryExecution(activeTab)"
+                @cancel="emit('cancel', activeTab.id)"
                 @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
                 @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', activeTab.id, sql, searchText, whereInput, orderBy, limit, offset, intent)"
-                @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy)"
+                @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy, appendResult)"
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', activeTab.id, column, columnIndex, direction, whereInput, mode)"
                 @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
               >
@@ -2427,6 +2590,32 @@ defineExpose({
               </div>
               <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                 <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <Hash class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.rowNumberMode") }}</span>
+                </div>
+                <LightTooltip :text="t('grid.rowNumberModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                  <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                    <button
+                      type="button"
+                      class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRowNumberMode === 'view' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="setDataGridRowNumberMode('view')"
+                    >
+                      {{ t("grid.rowNumberModeView") }}
+                    </button>
+                    <button
+                      type="button"
+                      class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRowNumberMode === 'source' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="setDataGridRowNumberMode('source')"
+                    >
+                      {{ t("grid.rowNumberModeSource") }}
+                    </button>
+                  </div>
+                </LightTooltip>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
                   <Rows3 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span>{{ t("grid.transposeMultiRowToggle") }}</span>
                 </div>
@@ -2557,11 +2746,15 @@ defineExpose({
           :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
           :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
           :export-file-base-name="activeTab.title"
+          :show-cancel="shouldShowCancelAction(activeTab)"
+          :cancelling="activeTab.isCancelling"
+          :cancel-disabled="!canCancelQueryExecution(activeTab)"
+          @cancel="emit('cancel', activeTab.id)"
           @update:where-input="(v: string) => (activeTab.whereInput = v)"
           @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
           @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
           @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', activeTab.id, sql, searchText, whereInput, orderBy, limit, offset, intent)"
-          @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy)"
+          @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy, appendResult)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', activeTab.id, column, columnIndex, direction, whereInput, mode)"
           @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
         >
@@ -2807,7 +3000,7 @@ defineExpose({
       <div class="flex-1 min-h-0">
         <TableStructureEditor
           ref="tableStructureEditorRef"
-          :key="activeTab.id"
+          :key="`${activeTab.id}-${activeTab.structureTableName || 'new'}`"
           :connection-id="activeTab.connectionId"
           :database="activeTab.database"
           :catalog="activeTab.catalog"
@@ -2818,7 +3011,7 @@ defineExpose({
           :initial-target="activeTab.structureInitialTarget"
           :draft="activeTab.structureDraft"
           @update:draft="(draft) => (activeTab.structureDraft = draft)"
-          @saved="(commentChanged) => emit('structureEditorSaved', activeTab.id, commentChanged)"
+          @saved="(commentChanged, createdTableName) => emit('structureEditorSaved', activeTab.id, commentChanged, createdTableName)"
           @close="emit('structureEditorClose', activeTab.id)"
           @open-settings="(initialTab, initialSection) => emit('openSettings', initialTab, initialSection)"
           @view-data="onHandleStructureViewData"

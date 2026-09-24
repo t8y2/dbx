@@ -104,7 +104,7 @@ import {
   type ConnectionExportProtection,
 } from "@/lib/connection/connectionConfigTransfer";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import { usesOracleCurrentSchemaCompletion } from "@/lib/sql/oracleCompletionSession";
+import { usesOracleCurrentSchemaCompletion, isOracleCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
 import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import * as api from "@/lib/backend/api";
 import { oracleDatabaseLinksFromResult, oracleDatabaseLinksSql, supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
@@ -165,6 +165,8 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, stripDatabaseSavedSqlTreeNodes, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
+import type { SoqlCompletionField, SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
+import type { SalesforceCurrentUser } from "@/types/salesforce";
 import { flattenElasticsearchMappingFields, type ElasticsearchCompletionField } from "@/lib/elasticsearch/elasticsearchCompletion";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mongoCollectionKindFromNode, toMongoCollectionKind, visibleMongoCollections } from "@/lib/sidebar/mongoCollectionMutation";
@@ -532,6 +534,11 @@ export const useConnectionStore = defineStore("connection", () => {
   const redisCommandDocsCacheGeneration = new Map<string, number>();
   const mongoCompletionCollectionsCache = ref<Record<string, string[]>>({});
   const mongoCompletionFieldsCache = ref<Record<string, MongoCompletionField[]>>({});
+  const soqlCompletionObjectsCache = ref<Record<string, SoqlCompletionObject[]>>({});
+  const soqlCompletionFieldsCache = ref<Record<string, SoqlCompletionField[]>>({});
+  // One entry per connection: the authenticated Salesforce user never changes for
+  // the life of a connection (token refreshes reuse the same identity).
+  const salesforceCurrentUserCache = ref<Record<string, SalesforceCurrentUser>>({});
   const schemaListCache = ref<Record<string, string[]>>({});
   const sidebarSearchQuery = ref("");
   const sidebarTableSearchQueries = ref<Record<string, string>>({});
@@ -593,6 +600,12 @@ export const useConnectionStore = defineStore("connection", () => {
     database: string;
     schema?: string;
     tableName?: string;
+  } | null>(null);
+  const dataDictionarySource = ref<{
+    connectionId: string;
+    database: string;
+    schema?: string;
+    tableNames?: string[];
   } | null>(null);
   const tableImportSource = ref<{
     connectionId: string;
@@ -1666,6 +1679,7 @@ export const useConnectionStore = defineStore("connection", () => {
       oscar: "神通 OSCAR",
       influxdb: "InfluxDB",
       victoriametrics: "VictoriaMetrics",
+      salesforce: "Salesforce",
     };
 
     const profile = config.driver_profile || config.db_type;
@@ -2270,6 +2284,50 @@ export const useConnectionStore = defineStore("connection", () => {
       isExpanded: false,
       children: [],
     };
+  }
+
+  function buildEventTriggersNode(connectionId: string, database: string): TreeNode {
+    return {
+      id: `${connectionId}:${database}:__event_triggers`,
+      label: "tree.eventTriggers",
+      type: "group-event-triggers",
+      connectionId,
+      database,
+      isExpanded: false,
+      children: [],
+    };
+  }
+
+  async function loadEventTriggers(connectionId: string, database: string) {
+    const node = findNode(treeNodes.value, `${connectionId}:${database}:__event_triggers`);
+    if (!node) return;
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      if (useCachedChildren(node, undefined, load)) return;
+      const triggers = await withMetadataLoadTimeout(connectionId, api.listEventTriggers(connectionId, database), "event-triggers");
+      const children: TreeNode[] = triggers.map((et) => ({
+        id: `${node.id}:${et.name}`,
+        label: et.name,
+        type: "event-trigger" as const,
+        connectionId,
+        database,
+        comment: et.comment ?? null,
+        meta: et,
+        isExpanded: false,
+      }));
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      setChildren(targetNode, children);
+      targetNode.objectCount = children.length;
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
   }
 
   function objectGroupCacheKey(node: TreeNode): string {
@@ -3805,6 +3863,12 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const key of Object.keys(mongoCompletionFieldsCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete mongoCompletionFieldsCache.value[key];
     }
+    for (const key of Object.keys(soqlCompletionObjectsCache.value)) {
+      if (key === exactCacheKey || key.startsWith(cachePrefix)) delete soqlCompletionObjectsCache.value[key];
+    }
+    for (const key of Object.keys(soqlCompletionFieldsCache.value)) {
+      if (key === exactCacheKey || key.startsWith(cachePrefix)) delete soqlCompletionFieldsCache.value[key];
+    }
     for (const key of completionTableIndex.keys()) {
       if (key.startsWith(cachePrefix)) completionTableIndex.delete(key);
     }
@@ -5182,7 +5246,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
-    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
+    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos", "salesforce"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
     if (!node || node.type !== "connection" || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
@@ -5847,6 +5911,7 @@ export const useConnectionStore = defineStore("connection", () => {
           }
           if (isPostgresLikeForExtensions(getConfig(connectionId)?.db_type)) {
             children.push(buildExtensionManagementNode(connectionId, database));
+            children.push(buildEventTriggersNode(connectionId, database));
           }
           if (isSidebarSearchQueryChanged(options)) return;
           const targetNode = treeNodeLoadTarget(load);
@@ -6282,6 +6347,7 @@ export const useConnectionStore = defineStore("connection", () => {
             });
             if (!schema && isPostgresLikeForExtensions(config?.db_type)) {
               children.push(buildExtensionManagementNode(connectionId, database));
+              children.push(buildEventTriggersNode(connectionId, database));
             }
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
@@ -7447,6 +7513,8 @@ export const useConnectionStore = defineStore("connection", () => {
       node.isExpanded = true;
     } else if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await loadExtensions(node.connectionId, node.database || "");
+    } else if (node.type === "group-event-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await loadEventTriggers(node.connectionId, node.database || "");
     }
   }
 
@@ -7997,7 +8065,7 @@ export const useConnectionStore = defineStore("connection", () => {
     requestRevision = completionCacheRevision(connectionId, database),
     matchMode: CompletionAssistantMatchMode = "prefix",
   ): Promise<SqlCompletionTable[]> {
-    const oracleAssistant = getConfig(connectionId)?.db_type === "oracle";
+    const oracleAssistant = isOracleCompletionDatabase(getConfig(connectionId)?.db_type);
     const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, globalSearch ? currentSchema : (schema ?? currentSchema)) : schema?.trim() || undefined;
     const objectKinds: CompletionAssistantObjectKind[] = ["table", "view"];
     const response = await completionAssistantSearch(
@@ -8033,7 +8101,7 @@ export const useConnectionStore = defineStore("connection", () => {
     matchMode: CompletionAssistantMatchMode = "prefix",
   ): Promise<SqlCompletionObject[]> {
     const databaseType = getConfig(connectionId)?.db_type;
-    const oracleAssistant = databaseType === "oracle";
+    const oracleAssistant = isOracleCompletionDatabase(databaseType);
     const requestedSchema = schema?.trim() || currentSchema?.trim() || undefined;
     const sequenceOnly = objectKinds.length === 1 && objectKinds[0] === "sequence";
     const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, currentSchema) : requestedSchema || (!sequenceOnly && databaseType === "postgres" ? "public" : databaseType === "mysql" ? database : undefined);
@@ -8509,6 +8577,105 @@ export const useConnectionStore = defineStore("connection", () => {
       evictOldestCacheEntries(mongoCompletionFieldsCache.value, COMPLETION_CACHE_MAX);
       return fields;
     });
+  }
+
+  // Map a Salesforce describe column to a SOQL completion field. The backend packs
+  // relationshipName / referenceTo / label into ColumnInfo.extra (JSON) and active
+  // picklist values into enum_values; parse defensively since extra may be absent.
+  function soqlFieldFromColumnInfo(column: ColumnInfo): SoqlCompletionField {
+    let extra: { relationshipName?: string; referenceTo?: string[]; label?: string } | null = null;
+    if (column.extra) {
+      try {
+        extra = JSON.parse(column.extra);
+      } catch {
+        extra = null;
+      }
+    }
+    return {
+      name: column.name,
+      type: column.data_type || undefined,
+      label: extra?.label ?? column.comment ?? undefined,
+      picklistValues: column.enum_values?.length ? column.enum_values : undefined,
+      relationshipName: extra?.relationshipName ?? undefined,
+      referenceTo: extra?.referenceTo?.length ? extra.referenceTo : undefined,
+    };
+  }
+
+  async function listSoqlCompletionObjects(connectionId: string, database: string): Promise<SoqlCompletionObject[]> {
+    // No `database` guard: the Salesforce backend ignores the database parameter
+    // (the whole org is one synthesized database), and a restored query tab can
+    // legitimately carry an empty database while the connection still works.
+    const cacheKey = `${connectionId}:${database}`;
+    const cached = soqlCompletionObjectsCache.value[cacheKey];
+    if (cached) return cached;
+    return withCompletionInFlight(`${cacheKey}:soql-objects`, async () => {
+      await ensureConnected(connectionId);
+      const tables = await api.listTables(connectionId, database, "");
+      const labelByName = new Map(tables.map((t) => [t.name, t.comment ?? undefined]));
+      const objects = sortSidebarNames(tables.map((t) => t.name)).map((name) => ({ name, label: labelByName.get(name) }));
+      // Never cache an empty list: a transient failure would otherwise stick for the
+      // whole session and silently degrade SOQL completion to keywords-only.
+      if (objects.length > 0) {
+        soqlCompletionObjectsCache.value[cacheKey] = objects;
+        evictOldestCacheEntries(soqlCompletionObjectsCache.value, COMPLETION_CACHE_MAX);
+      }
+      return objects;
+    });
+  }
+
+  async function listSoqlCompletionFields(connectionId: string, database: string, objectName: string): Promise<SoqlCompletionField[]> {
+    if (!objectName) return [];
+    const cacheKey = `${connectionId}:${database}:${objectName}`;
+    const cached = soqlCompletionFieldsCache.value[cacheKey];
+    if (cached) return cached;
+    return withCompletionInFlight(`${cacheKey}:soql-fields`, async () => {
+      await ensureConnected(connectionId);
+      // Backed by the driver's in-memory describe cache, so repeated loads (e.g. one
+      // per keystroke while traversing a relationship) do not re-hit the Salesforce API.
+      const columns = await api.getColumns(connectionId, database, "", objectName);
+      const fields = columns.map(soqlFieldFromColumnInfo);
+      // Never cache an empty list: a transient describe failure would otherwise stick
+      // and make field completion silently vanish for this object all session.
+      if (fields.length > 0) {
+        soqlCompletionFieldsCache.value[cacheKey] = fields;
+        evictOldestCacheEntries(soqlCompletionFieldsCache.value, COMPLETION_CACHE_MAX);
+      }
+      return fields;
+    });
+  }
+
+  /**
+   * Identity behind a Salesforce connection (`GET /services/oauth2/userinfo` plus an
+   * admin probe), resolved at most once per connection and cached for the session.
+   * Deliberately failure-tolerant: the toolbar badge and the non-admin hint on the
+   * DML confirmation are advisory, so a failed lookup returns null instead of
+   * surfacing an error or blocking an edit.
+   */
+  async function loadSalesforceCurrentUser(connectionId: string): Promise<SalesforceCurrentUser | null> {
+    if (!connectionId) return null;
+    const cached = salesforceCurrentUserCache.value[connectionId];
+    if (cached) return cached;
+    try {
+      return await withCompletionInFlight(`${connectionId}:salesforce-current-user`, async () => {
+        await ensureConnected(connectionId);
+        const user = await api.salesforceCurrentUser(connectionId);
+        // Never cache an identity-less result: a partial failure would otherwise
+        // stick for the session and keep the badge blank.
+        if (user && (user.userId || user.username)) {
+          salesforceCurrentUserCache.value[connectionId] = user;
+          evictOldestCacheEntries(salesforceCurrentUserCache.value, COMPLETION_CACHE_MAX);
+        }
+        return user ?? null;
+      });
+    } catch (error) {
+      console.debug("[salesforce] current user lookup failed", error);
+      return null;
+    }
+  }
+
+  /** Last known Salesforce identity for a connection, or null before it resolves. */
+  function salesforceCurrentUser(connectionId: string): SalesforceCurrentUser | null {
+    return salesforceCurrentUserCache.value[connectionId] ?? null;
   }
 
   function listCompletionTableMetadata(connectionId: string, database: string, schema: string, filter?: string, limit?: number, catalog?: string): Promise<TableInfo[]> {
@@ -9946,6 +10113,10 @@ export const useConnectionStore = defineStore("connection", () => {
     listRedisCompletionCommandDocs,
     listMongoCompletionCollections,
     listMongoCompletionFields,
+    listSoqlCompletionObjects,
+    listSoqlCompletionFields,
+    loadSalesforceCurrentUser,
+    salesforceCurrentUser,
     invalidateCompletionCache,
     invalidateCompletionTableCache,
     completionCacheRevision,
@@ -9963,6 +10134,7 @@ export const useConnectionStore = defineStore("connection", () => {
     sqlFileSource,
     diagramSource,
     docsSource,
+    dataDictionarySource,
     tableImportSource,
     mongoDatabaseDumpSource,
     mongoImportSource,

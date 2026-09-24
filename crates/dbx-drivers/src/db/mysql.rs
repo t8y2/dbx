@@ -41,6 +41,7 @@ use crate::mysql_event_sql::MysqlEventInfo;
 pub struct MySqlPool {
     inner: mysql_async::Pool,
     max_connections: usize,
+    checkout_verifications: std::sync::Arc<MySqlCheckoutVerifications>,
 }
 
 impl MySqlPool {
@@ -49,7 +50,11 @@ impl MySqlPool {
         mysql_async::Opts: TryFrom<O>,
         <mysql_async::Opts as TryFrom<O>>::Error: std::error::Error,
     {
-        Self { inner: mysql_async::Pool::new(opts), max_connections: max_connections.max(1) }
+        Self {
+            inner: mysql_async::Pool::new(opts),
+            max_connections: max_connections.max(1),
+            checkout_verifications: Default::default(),
+        }
     }
 
     /// Whether this is a tab-scoped client-session pool. These pools hold a
@@ -86,6 +91,57 @@ impl Deref for MySqlPool {
 pub trait MySqlPoolAccess {
     fn driver_pool(&self) -> &mysql_async::Pool;
     fn checkout_max_connections(&self) -> Option<usize>;
+    /// Liveness evidence for pooled connections; `None` pings every checkout.
+    fn checkout_verifications(&self) -> Option<&MySqlCheckoutVerifications> {
+        None
+    }
+}
+
+/// Connections that passed a `PING` this recently skip the next liveness
+/// `PING`, like the Tomcat JDBC pool's `validationInterval` (3 s by default).
+/// A burst of checkouts (opening a table, paging a grid, loading metadata) then
+/// pays one liveness round trip instead of one each, while a connection that
+/// sat idle longer is still verified and replaced when it died.
+const MYSQL_CHECKOUT_VERIFY_INTERVAL: Duration = Duration::from_secs(3);
+
+/// When each pooled connection, keyed by its server connection id, last passed
+/// a liveness `PING` (the checkout health check or the pool reuse probe).
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct MySqlCheckoutVerifications {
+    verified_at: std::sync::Mutex<HashMap<u32, Instant>>,
+}
+
+impl MySqlCheckoutVerifications {
+    fn is_recent(&self, connection_id: u32, now: Instant) -> bool {
+        let verified_at = self.verified_at.lock().unwrap_or_else(|e| e.into_inner());
+        verified_at
+            .get(&connection_id)
+            .is_some_and(|verified| now.saturating_duration_since(*verified) < MYSQL_CHECKOUT_VERIFY_INTERVAL)
+    }
+
+    fn record(&self, connection_id: u32, now: Instant) {
+        let mut verified_at = self.verified_at.lock().unwrap_or_else(|e| e.into_inner());
+        verified_at.retain(|_, verified| now.saturating_duration_since(*verified) < MYSQL_CHECKOUT_VERIFY_INTERVAL);
+        verified_at.insert(connection_id, now);
+    }
+}
+
+/// Pings a connection checked out of `pool` unless it passed a `PING` within
+/// the verification interval, and remembers a successful `PING`.
+pub async fn verify_pooled_conn<P>(pool: &P, conn: &mut mysql_async::Conn) -> Result<(), mysql_async::Error>
+where
+    P: MySqlPoolAccess + ?Sized,
+{
+    let verifications = pool.checkout_verifications();
+    if verifications.is_some_and(|verifications| verifications.is_recent(conn.id(), Instant::now())) {
+        return Ok(());
+    }
+    conn.ping().await?;
+    if let Some(verifications) = verifications {
+        verifications.record(conn.id(), Instant::now());
+    }
+    Ok(())
 }
 
 pub async fn get_event_info<P: MySqlPoolAccess + ?Sized>(
@@ -133,6 +189,10 @@ impl MySqlPoolAccess for MySqlPool {
 
     fn checkout_max_connections(&self) -> Option<usize> {
         Some(self.max_connections)
+    }
+
+    fn checkout_verifications(&self) -> Option<&MySqlCheckoutVerifications> {
+        Some(&self.checkout_verifications)
     }
 }
 
@@ -186,6 +246,14 @@ pub fn session_status_from_last_ok(conn: &mysql_async::Conn) -> Option<MySqlSess
             autocommit: flags.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT),
         }
     })
+}
+
+/// Whether the last OK/EOF packet ended the server's whole response. A packet
+/// with `SERVER_MORE_RESULTS_EXISTS` only closed one result set of a response
+/// that is still pending (a `CALL` returning several sets), so its status
+/// flags may not describe the session once the response finishes.
+pub fn last_ok_ends_response(conn: &mysql_async::Conn) -> bool {
+    conn.last_ok_packet().is_some_and(|packet| !packet.status_flags().contains(StatusFlags::SERVER_MORE_RESULTS_EXISTS))
 }
 
 const MYSQL_TCP_KEEPALIVE_MS: u32 = 30_000;
@@ -1405,10 +1473,23 @@ async fn verify_pool_connection_with_setup_fallback(
         }
     }
 
-    let Some(fallback_mode) = mysql_group_concat_setup_fallback_mode(setup_mode, &error) else {
+    let recognized_mode = mysql_group_concat_setup_fallback_mode(setup_mode, &error);
+    // An unrecognized wording (a server whose rejection text dbx does not know yet) is
+    // retried on the strength of the retry actually connecting. See
+    // [`mysql_setup_probe_fallback_mode`].
+    let probed = recognized_mode.is_none();
+    let fallback = recognized_mode.or_else(|| mysql_setup_probe_fallback_mode(setup_mode, &retry_url, &error));
+    let Some(fallback_mode) = fallback else {
         return Err(error);
     };
-    log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {fallback_mode:?} mode");
+    if probed {
+        log::info!(
+            "MySQL connection failed with a server error while the optional group_concat_max_len setup was in place; \
+             retrying with {fallback_mode:?} mode to check whether that setup caused it"
+        );
+    } else {
+        log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {fallback_mode:?} mode");
+    }
     let fallback_pool = create_pool(
         &retry_url,
         ca_cert_path,
@@ -1420,7 +1501,14 @@ async fn verify_pool_connection_with_setup_fallback(
         eof_mode,
         tcp_keepalive_mode,
     )?;
-    verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
+    match verify_pool_connection(&fallback_pool, timeout).await {
+        Ok(()) => Ok(fallback_pool),
+        // The probe only explains the failure when it connects; keep the server's
+        // first answer otherwise so an unrelated failure is not reported as a setup
+        // rejection.
+        Err(_) if probed => Err(error),
+        Err(fallback_error) => Err(fallback_error),
+    }
 }
 
 /// MySQL older than 5.5.3 has no `utf8mb4` charset, so the built-in `SET NAMES utf8mb4`
@@ -1486,6 +1574,12 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     let setup_value_rejected = lower.contains("error 1231") && lower.contains("can't be set to");
     // TDDL rejects the dynamic floor expression as an incorrect argument type (issue #10111).
     let setup_argument_rejected = lower.contains("incorrect argument type") || lower.contains("error 1232");
+    // TXSQL (TencentDB MySQL 5.7) rejects the built-in floor statement with 1193 but
+    // truncates the echoed variable name to `group_concat_`, so neither the full-name
+    // guard nor the compact floor signature matches. Require the closing quote so a
+    // variable that merely shares the prefix (for example `group_concat_foo`) is not
+    // mistaken for the built-in floor statement.
+    let txsql_truncated_name_rejected = lower.contains("unknown system variable 'group_concat_'");
     // Gaea tries to parse the built-in floor expression as an integer literal.
     let gaea_setup_expression_rejected = lower.contains("error 1105 (hy000)")
         && compact.contains(&format!(
@@ -1512,16 +1606,48 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     // without broadly matching user-supplied `cast(` expressions.
     let floor_statement_rejected = lower.contains("group_concat_max_len")
         || compact.contains(&format!("..._len,{MYSQL_GROUP_CONCAT_MAX_LEN})asunsigned)"));
+    // Some TDSQL/TXSQL proxy layers cap the echoed variable name to a fixed
+    // length before wrapping it back in a quote, so the 1193 error reports
+    // `Unknown system variable 'group_concat_'` with `max_len` cut off
+    // (issue #10197). The truncated prefix is specific enough on its own.
+    let proxy_truncated_variable_rejected = lower.contains("unknown system variable 'group_concat_'");
     if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected || setup_argument_rejected))
+        || txsql_truncated_name_rejected
         || gaea_setup_expression_rejected
         || starrocks_setup_expression_rejected
         || sphinxql_setup_query_rejected
         || gateway_session_variable_rejected
+        || proxy_truncated_variable_rejected
     {
         return Some(MySqlSetupMode::Compatible);
     }
 
     None
+}
+
+/// Fall back to [`MySqlSetupMode::Compatible`] for a connection a server rejected while
+/// dbx's own optional `group_concat_max_len` setup was in play.
+///
+/// Vendor wordings for rejecting that statement are open-ended (KunDB answers
+/// `invalid syntax: CAST(...)`, Apache Doris answers `must be constant value`, older
+/// StarRocks versions answer with a bare `1064 (HY000)`), so instead of enumerating
+/// them the caller retries once without the optional statement and keeps the retry only
+/// when the server then accepts the connection.
+///
+/// The retry cannot hide a failure the optional statement does not explain: it only
+/// drops dbx's own built-in statement (a user-supplied `sessionVariables=...` is still
+/// applied in `Compatible` mode) and its own error is discarded when it fails too.
+fn mysql_setup_probe_fallback_mode(setup_mode: MySqlSetupMode, url: &str, error: &str) -> Option<MySqlSetupMode> {
+    if setup_mode != MySqlSetupMode::Standard {
+        return None;
+    }
+    // A connection that configures the variable itself never sent the built-in
+    // statement, so dropping it cannot explain its failure.
+    setup_mode.group_concat_max_len_query(url)?;
+    // Only a server-side rejection can come from a setup statement. Retrying a
+    // transport failure would repeat it and double how long an unreachable server
+    // makes the user wait.
+    error.to_ascii_lowercase().contains("server error").then_some(MySqlSetupMode::Compatible)
 }
 
 fn create_pool(
@@ -4489,9 +4615,16 @@ where
     P: MySqlPoolAccess + ?Sized,
 {
     let start = Instant::now();
+    let verifications = pool.checkout_verifications();
     let mut conn = get_conn_with_timeout_and_cancel(pool, timeout, cancel_token).await?;
+    if verifications.is_some_and(|verifications| verifications.is_recent(conn.id(), Instant::now())) {
+        return Ok(conn);
+    }
     match ping_conn_with_timeout_and_cancel(&mut conn, timeout, cancel_token).await {
         Ok(()) => {
+            if let Some(verifications) = verifications {
+                verifications.record(conn.id(), Instant::now());
+            }
             log::debug!(
                 "[db:health.check:done] elapsed_ms={} timeout_ms={}",
                 start.elapsed().as_millis(),
@@ -4517,6 +4650,9 @@ where
                     let _ = tokio::time::timeout(cleanup_timeout, conn.disconnect()).await;
                 }
                 return Err(err);
+            }
+            if let Some(verifications) = verifications {
+                verifications.record(conn.id(), Instant::now());
             }
             log::info!(
                 "[db:health.check:recovered] elapsed_ms={} timeout_ms={}",
@@ -4743,6 +4879,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4776,16 +4913,18 @@ async fn execute_result_set_with_text_protocol_on_conn(
             })
             .collect();
 
+        let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
         return Ok(MySqlQueryResult::exact(QueryResult {
             columns,
             column_types,
             column_sortables: vec![],
-            spatial_columns: spatial_columns.finish(),
+            spatial_columns,
             spatial_values,
             rows: result_rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -4868,17 +5007,19 @@ async fn execute_result_set_with_text_protocol_on_conn(
         );
     }
 
+    let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
     Ok(MySqlQueryResult {
         result: QueryResult {
             columns,
             column_types,
             column_sortables: vec![],
-            spatial_columns: spatial_columns.finish(),
+            spatial_columns,
             spatial_values,
             rows: result_rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -4997,17 +5138,19 @@ async fn execute_result_sets_with_text_protocol_on_conn(
             Vec::new()
         };
         result_set_warnings.push(warnings);
+        let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
         results.push(MySqlQueryResult {
             result: QueryResult {
                 columns,
                 column_types,
                 column_sortables: vec![],
-                spatial_columns: spatial_columns.finish(),
+                spatial_columns,
                 spatial_values,
                 rows,
                 affected_rows: 0,
                 execution_time_ms: start.elapsed().as_millis(),
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated,
                 session_id: None,
                 has_more: false,
@@ -5035,6 +5178,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5206,17 +5350,19 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
         );
     }
 
+    let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
     Ok(MySqlQueryResult {
         result: QueryResult {
             columns,
             column_types,
             column_sortables: vec![],
-            spatial_columns: spatial_columns.finish(),
+            spatial_columns,
             spatial_values,
             rows: result_rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -5540,6 +5686,7 @@ pub async fn execute_transaction_statement_on_conn(
             affected_rows,
             execution_time_ms: started_at.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5564,16 +5711,18 @@ pub async fn execute_transaction_statement_on_conn(
         // result set before reading the final status or allowing another
         // operation on this physical connection.
         query.drop_result().await.map_err(transaction_error_from_mysql_error)?;
+        let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
         QueryResult {
             columns,
             column_types,
             column_sortables: Vec::new(),
-            spatial_columns: spatial_columns.finish(),
+            spatial_columns,
             spatial_values,
             rows,
             affected_rows: 0,
             execution_time_ms: started_at.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -5695,6 +5844,7 @@ pub async fn execute_query_on_conn_with_limits_progress(
                                 affected_rows: 0,
                                 execution_time_ms: start.elapsed().as_millis(),
                                 server_execute_time_us: None,
+                                query_timings_ms: None,
                                 truncated: false,
                                 session_id: None,
                                 has_more: false,
@@ -5733,6 +5883,7 @@ pub async fn execute_query_on_conn_with_limits_progress(
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5862,6 +6013,7 @@ pub async fn execute_non_result_batch_on_conn(
             affected_rows: result.affected_rows(),
             execution_time_ms: elapsed_ms.saturating_sub(previous_elapsed_ms),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6489,6 +6641,42 @@ mod tests {
         assert_eq!(exact, Ok("connection"));
         assert_eq!(adjacent, Ok("connection"));
         assert_eq!(configured_five, Err("MySQL get connection timed out".to_string()));
+    }
+
+    #[test]
+    fn checkout_verification_skips_only_a_recently_verified_connection() {
+        let verifications = MySqlCheckoutVerifications::default();
+        let verified = Instant::now();
+        assert!(!verifications.is_recent(7, verified));
+
+        verifications.record(7, verified);
+
+        assert!(verifications.is_recent(7, verified + MYSQL_CHECKOUT_VERIFY_INTERVAL - Duration::from_millis(1)));
+        assert!(!verifications.is_recent(7, verified + MYSQL_CHECKOUT_VERIFY_INTERVAL));
+        assert!(!verifications.is_recent(8, verified));
+    }
+
+    #[test]
+    fn checkout_verification_forgets_expired_connections() {
+        let verifications = MySqlCheckoutVerifications::default();
+        let first = Instant::now();
+        verifications.record(1, first);
+
+        verifications.record(2, first + MYSQL_CHECKOUT_VERIFY_INTERVAL);
+
+        let tracked: Vec<u32> = verifications.verified_at.lock().unwrap().keys().copied().collect();
+        assert_eq!(tracked, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn raw_driver_pool_verifies_every_checkout() {
+        let raw = mysql_async::Pool::new(mysql_async::OptsBuilder::default());
+        let pool = MySqlPool::new(mysql_async::OptsBuilder::default(), 1);
+
+        assert!(raw.checkout_verifications().is_none());
+        assert!(pool.checkout_verifications().is_some());
+        let _ = tokio::time::timeout(Duration::from_secs(1), raw.disconnect()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), pool.disconnect()).await;
     }
 
     #[tokio::test]
@@ -8417,6 +8605,42 @@ mod tests {
     }
 
     #[test]
+    fn mysql_group_concat_txsql_truncated_name_retries_without_session_variable() {
+        // TXSQL 5.7 (5.7.36-v17-txsql) reports 1193 with the variable name truncated
+        // to `group_concat_`, losing the full name the generic guard relies on.
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_''",
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): [txsql] Unknown system variable 'group_concat_''",
+            "ERROR 1193 (HY000): Unknown system variable 'group_concat_'",
+        ] {
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+                Some(MySqlSetupMode::Compatible),
+                "{error}"
+            );
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
+                None,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_txsql_truncated_name_match_stays_narrow() {
+        for error in [
+            // A different unknown variable that merely shares the prefix.
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_foo''",
+            // The plain `group_concat` function is not the variable either.
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat''",
+            // An unrelated unknown variable on the same server.
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'sql_mode''",
+        ] {
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None, "{error}");
+        }
+    }
+
+    #[test]
     fn mysql_group_concat_gaea_parse_int_error_retries_without_session_variable() {
         let error = "MySQL connection failed: Server error: `ERROR 1105 (HY000): strconv.ParseInt: parsing \"cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)\": invalid syntax'";
 
@@ -8462,6 +8686,59 @@ mod tests {
             "Server error: `ERROR 1064 (HY000): You have an error in your SQL syntax'",
         ] {
             assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None, "{error}");
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_unrecognized_server_rejection_still_retries_without_session_variable() {
+        // KunDB (#10003) answers `invalid syntax`, Apache Doris answers `must be
+        // constant value`, and a bare `1064 (HY000)` carries no usable wording at all;
+        // servers like these are probed instead of matched: retry once without the
+        // statement and keep the retry only when it connects.
+        let url = "mysql://root:pw@host:3306/app";
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 1105 (HY000): invalid syntax: CAST(greatest(@@SESSION.group_concat_max_len, 1048576) AS unsigned)'",
+            "MySQL connection failed: Server error: `ERROR 1105 (HY000): errCode = 2, detailMessage = cast('greatest(@@group_concat_max_len, 1048576) as UNSIGNED) must be constant value'",
+            "MySQL connection failed: Server error: `ERROR 1064 (HY000): Unknown error'",
+        ] {
+            assert_eq!(
+                mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, error),
+                Some(MySqlSetupMode::Compatible),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_probe_requires_builtin_setup_statement() {
+        let error = "MySQL connection failed: Server error: `ERROR 1105 (HY000): invalid syntax: CAST(greatest(@@SESSION.group_concat_max_len, 1048576) AS unsigned)'";
+
+        // `Compatible` already sends no built-in statement, so there is nothing to drop.
+        assert_eq!(
+            mysql_setup_probe_fallback_mode(MySqlSetupMode::Compatible, "mysql://root:pw@host/app", error),
+            None
+        );
+        // A connection configuring the variable itself never sent the built-in one.
+        assert_eq!(
+            mysql_setup_probe_fallback_mode(
+                MySqlSetupMode::Standard,
+                "mysql://root:pw@host:3306/app?sessionVariables=group_concat_max_len%3D2048",
+                error
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mysql_group_concat_probe_ignores_transport_failures() {
+        let url = "mysql://root:pw@host:3306/app";
+
+        for error in [
+            "MySQL connection failed: Connection refused (os error 61)",
+            "MySQL connection failed: error communicating with database: timed out",
+            "MySQL connection failed: Driver error: `Client asked for SSL but server does not have this capability'",
+        ] {
+            assert_eq!(mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, error), None, "{error}");
         }
     }
 
@@ -8515,6 +8792,28 @@ mod tests {
     #[test]
     fn mysql_proxy_parse_tablename_1105_does_not_disable_group_concat() {
         let error = "MySQL connection failed: Server error: `ERROR 07000 (1105): SQL操作失败 (operate fail ) ：解析表名出错 ( parse tablename error ) '";
+
+        assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
+    }
+
+    #[test]
+    fn mysql_tdsql_proxy_truncated_variable_name_retries_without_session_variable() {
+        // A TDSQL/TXSQL proxy in front of the real server truncates the echoed
+        // variable name to a fixed length, so the 1193 error never contains the
+        // full `group_concat_max_len` spelling (issue #10197).
+        let error =
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+        assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None);
+    }
+
+    #[test]
+    fn mysql_tdsql_proxy_truncated_variable_retry_requires_exact_prefix() {
+        let error = "Server error: `ERROR 1193 (HY000): Unknown system variable 'other_var_'";
 
         assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
     }

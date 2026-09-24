@@ -1840,12 +1840,20 @@ async fn do_execute_typed(
             // (`preserve_explicit_transaction`) or a later execution already
             // decided to keep this one.
             if p.is_client_session_pool() {
+                // A truncated or failed result, or result sets still pending
+                // behind the one that was read, may leave the last status packet
+                // short of the end, so only a complete response can prove that
+                // the cleanup `ROLLBACK` is unnecessary.
+                let status_is_final = *mode == crate::connection::MysqlMode::Normal
+                    && statement_result.as_ref().is_ok_and(|result| !result.truncated)
+                    && db::mysql::last_ok_ends_response(&conn);
                 let transaction = settle_mysql_auto_commit_transaction_boxed(
                     state,
                     pool_key,
                     &mut conn,
                     options.preserve_explicit_transaction,
                     crate::query_execution_sql::mysql_statement_opens_explicit_transaction(sql),
+                    status_is_final,
                 )
                 .await;
                 match transaction {
@@ -2070,6 +2078,23 @@ async fn do_execute_typed(
             }
             result
         }
+        PoolKind::Salesforce(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            let result = wait_for_query_opt(cancel_token, query_timeout, async move {
+                if let Some(cursor) = options.result_session_id.as_deref() {
+                    client.fetch_more(cursor).await
+                } else {
+                    client.execute_query(&sql, max_rows).await
+                }
+            })
+            .await;
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
         PoolKind::VectorDb(client) => {
             let client = client.clone();
             let sql = sql.to_string();
@@ -2150,6 +2175,7 @@ async fn do_execute_typed(
             }
             let cancel_for_agent = cancel_token.clone();
             let result = async move {
+                let lock_started = std::time::Instant::now();
                 let mut client = match cancel_for_agent.as_ref() {
                     Some(token) => {
                         tokio::select! {
@@ -2163,7 +2189,10 @@ async fn do_execute_typed(
                     }
                     None => client.lock().await,
                 };
-                if let Some(session_id) = options.result_session_id.as_deref() {
+                let lock_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
+                let response: Result<db::QueryResult, AgentCallError> = if let Some(session_id) =
+                    options.result_session_id.as_deref()
+                {
                     let params = agent_fetch_query_page_params(session_id, options.page_size.unwrap_or(MAX_ROWS));
                     client
                         .fetch_query_page_typed_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
@@ -2178,7 +2207,14 @@ async fn do_execute_typed(
                     client
                         .execute_query_typed_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
                         .await
-                }
+                };
+                response.map(|mut result| {
+                    // Older agents have no phase map. Do not imply complete telemetry.
+                    if let Some(timings) = result.query_timings_ms.as_mut() {
+                        timings.insert("core_lock".into(), lock_ms);
+                    }
+                    result
+                })
             }
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
@@ -3908,6 +3944,26 @@ fn decide_mysql_auto_commit_transaction(
     MysqlAutoCommitDecision { preserve: false, rollback }
 }
 
+/// Whether the cleanup `ROLLBACK` after an execution would be a server no-op.
+///
+/// Every final status packet carries `SERVER_STATUS_IN_TRANS`, and MariaDB
+/// Connector/J skips `ROLLBACK`/`COMMIT` on the same flag. DBX only relies on it
+/// when the packet provably closes the execution (`status_is_final`: a native
+/// MySQL-mode connection whose response was read to the end without an error,
+/// so neither an earlier command's packet nor a pending result set is left
+/// behind) and the batch did not open a transaction itself. A batch with
+/// `BEGIN` keeps the historical cleanup, so a server or proxy that never
+/// reports the flag cannot leave the user's transaction open.
+fn mysql_cleanup_rollback_is_noop(
+    status_is_final: bool,
+    explicit_start_in_batch: bool,
+    status: Option<db::mysql::MySqlSessionStatus>,
+) -> bool {
+    status_is_final
+        && !explicit_start_in_batch
+        && status.is_some_and(|status| !status.in_transaction && status.autocommit)
+}
+
 /// Type-erased entry point for [`settle_mysql_auto_commit_transaction`].
 ///
 /// `do_execute_typed` is one of the largest async fns in the crate and is
@@ -3922,8 +3978,16 @@ fn settle_mysql_auto_commit_transaction_boxed<'a>(
     conn: &'a mut mysql_async::Conn,
     allow_preserve: bool,
     explicit_start_in_batch: bool,
+    status_is_final: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<MysqlAutoCommitTransaction, String>> + Send + 'a>> {
-    Box::pin(settle_mysql_auto_commit_transaction(state, pool_key, conn, allow_preserve, explicit_start_in_batch))
+    Box::pin(settle_mysql_auto_commit_transaction(
+        state,
+        pool_key,
+        conn,
+        allow_preserve,
+        explicit_start_in_batch,
+        status_is_final,
+    ))
 }
 
 /// Settles the open transaction of a tab-scoped MySQL connection after an
@@ -3938,6 +4002,7 @@ async fn settle_mysql_auto_commit_transaction(
     conn: &mut mysql_async::Conn,
     allow_preserve: bool,
     explicit_start_in_batch: bool,
+    status_is_final: bool,
 ) -> Result<MysqlAutoCommitTransaction, String> {
     let already_preserved = state.has_preserved_explicit_transaction(pool_key).await;
     let mut status = db::mysql::session_status_from_last_ok(conn);
@@ -3953,9 +4018,12 @@ async fn settle_mysql_auto_commit_transaction(
         return Ok(MysqlAutoCommitTransaction::Preserved);
     }
     state.clear_preserved_explicit_transaction(pool_key).await;
-    // Historical cleanup: `ROLLBACK` is a server no-op when no transaction is
-    // open, and releases the read view when one is.
-    db::mysql::rollback_open_transaction(conn).await?;
+    // Historical cleanup: `ROLLBACK` releases the read view of a transaction
+    // that is still open. Skip the round trip only when the final status
+    // packet proves nothing is open.
+    if !mysql_cleanup_rollback_is_noop(status_is_final, explicit_start_in_batch, status) {
+        db::mysql::rollback_open_transaction(conn).await?;
+    }
     Ok(match decision.rollback {
         MysqlAutoCommitRollback::Explicit => MysqlAutoCommitTransaction::RolledBackExplicit,
         MysqlAutoCommitRollback::SessionAutocommit => MysqlAutoCommitTransaction::RolledBackSessionAutocommit,
@@ -4061,15 +4129,22 @@ async fn execute_multi_mysql(
     // tab, making the tab read stale rows until disconnect. Closing any open
     // transaction before returning the connection restores the auto-commit
     // contract, unless the tab keeps explicit user transactions open
-    // (`preserve_explicit_transaction`); ROLLBACK on an already-committed/
-    // implicit transaction is a server no-op, and a failure here only discards
-    // this connection.
+    // (`preserve_explicit_transaction`). The ROLLBACK round trip is skipped when
+    // the final status packet proves nothing is open, and a failure here only
+    // discards this connection.
     {
         let tab_scoped = pool.is_client_session_pool();
-        let explicit_start_in_batch = tab_scoped
-            && statements
-                .iter()
-                .any(|statement| crate::query_execution_sql::mysql_statement_opens_explicit_transaction(statement));
+        let explicit_start_in_batch = statements
+            .iter()
+            .any(|statement| crate::query_execution_sql::mysql_statement_opens_explicit_transaction(statement));
+        // An error, a truncated result, or result sets still pending may leave
+        // the last status packet short of the end, so only a batch whose
+        // response was read completely can prove that the cleanup `ROLLBACK`
+        // is unnecessary.
+        let status_is_final = mode == crate::connection::MysqlMode::Normal
+            && error_action.is_none()
+            && results.iter().all(|result| !result.execution_error && !result.result.truncated)
+            && db::mysql::last_ok_ends_response(&conn);
         let rollback_started_at = std::time::Instant::now();
         let transaction = if tab_scoped {
             settle_mysql_auto_commit_transaction(
@@ -4078,8 +4153,15 @@ async fn execute_multi_mysql(
                 &mut conn,
                 options.preserve_explicit_transaction,
                 explicit_start_in_batch,
+                status_is_final,
             )
             .await
+        } else if mysql_cleanup_rollback_is_noop(
+            status_is_final,
+            explicit_start_in_batch,
+            db::mysql::session_status_from_last_ok(&conn),
+        ) {
+            Ok(MysqlAutoCommitTransaction::None)
         } else {
             db::mysql::rollback_open_transaction(&mut conn).await.map(|()| MysqlAutoCommitTransaction::None)
         };
@@ -4137,6 +4219,7 @@ fn error_query_result(message: String) -> db::QueryResult {
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4156,6 +4239,7 @@ fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
         affected_rows: 0,
         execution_time_ms,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4503,6 +4587,7 @@ async fn execute_statements_inner(
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4650,6 +4735,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
         | PoolKind::Meilisearch(_)
+        | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
@@ -5054,6 +5140,7 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
         | PoolKind::Meilisearch(_)
+        | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
@@ -5115,6 +5202,7 @@ async fn exec_tx_pg_inner(
             affected_rows: total_affected,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5209,6 +5297,7 @@ async fn exec_tx_mysql_inner(
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -5252,6 +5341,9 @@ async fn exec_tx_sqlite_inner(
 ) -> Result<db::QueryResult, String> {
     let statements = statements.to_vec();
     let query_timeout = budget.query_timeout;
+    if let Some(worker) = pool.worker() {
+        return exec_tx_sqlite_worker_inner(worker, statements, start, query_timeout).await;
+    }
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
             conn.execute_batch("BEGIN").map_err(|e| format!("Failed to begin transaction: {}", e))?;
@@ -5402,6 +5494,7 @@ async fn exec_tx_sqlite_inner(
                         affected_rows: total_affected,
                         execution_time_ms: start.elapsed().as_millis(),
                         server_execute_time_us: None,
+                        query_timings_ms: None,
                         truncated: false,
                         session_id: None,
                         has_more: false,
@@ -5417,6 +5510,55 @@ async fn exec_tx_sqlite_inner(
                 }
             }
         })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn exec_tx_sqlite_worker_inner(
+    worker: Arc<db::sqlite_worker::SqliteWorkerClient>,
+    statements: Vec<String>,
+    start: std::time::Instant,
+    query_timeout: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    // Detached like the local spawn_blocking path, so a dropped caller cannot leave the
+    // worker connection inside an open transaction. One session keeps other requests out.
+    tokio::spawn(async move {
+        let mut session = worker.session().await;
+        session.query("BEGIN", None).await.map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        // ponytail: the worker cannot interrupt a running statement, so the budget is only
+        // checked between statements; bounding one slow statement needs a worker interrupt op.
+        let within_budget = || match query_timeout {
+            Some(timeout) if start.elapsed() >= timeout => {
+                Err(format!("Query timed out after {} seconds", timeout.as_secs()))
+            }
+            _ => Ok(()),
+        };
+        let outcome: Result<db::QueryResult, String> = async {
+            let mut total_affected = 0;
+            for (i, sql) in statements.iter().enumerate() {
+                within_budget()?;
+                total_affected += session
+                    .query(sql, None)
+                    .await
+                    .map_err(|e| {
+                        query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql)
+                    })?
+                    .affected_rows;
+            }
+            within_budget()?;
+            let committed = session.query("COMMIT", None).await.map_err(|e| format!("COMMIT failed: {e}"))?;
+            Ok(db::QueryResult {
+                affected_rows: total_affected,
+                execution_time_ms: start.elapsed().as_millis(),
+                ..committed
+            })
+        }
+        .await;
+        if outcome.is_err() {
+            let _ = session.query("ROLLBACK", None).await;
+        }
+        outcome
     })
     .await
     .map_err(|e| e.to_string())?
@@ -5486,6 +5628,7 @@ async fn exec_tx_explicit_inner(
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6489,7 +6632,9 @@ async fn execute_manual_txn_agent_statement(
         execution_schema,
         options,
     );
+    let lock_started = std::time::Instant::now();
     let mut locked = client.lock().await;
+    let lock_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
     let result = match request {
         ManualTxnAgentQueryRequest::Execute(params) => {
             locked.execute_query_typed_with_timeout::<db::QueryResult>(params, None).await
@@ -6502,7 +6647,12 @@ async fn execute_manual_txn_agent_statement(
         }
     };
     result
-        .map(|result| truncate_result_with_max_rows(result, Some(row_limit.max(1))))
+        .map(|mut result| {
+            if let Some(timings) = result.query_timings_ms.as_mut() {
+                timings.insert("core_lock".into(), lock_ms);
+            }
+            truncate_result_with_max_rows(result, Some(row_limit.max(1)))
+        })
         .map_err(|error| error.into_legacy_string())
 }
 
@@ -6594,6 +6744,7 @@ async fn execute_manual_txn_postgres_statement(
             affected_rows: affected,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6629,6 +6780,7 @@ async fn execute_manual_txn_mysql_statement(
                 affected_rows,
                 execution_time_ms: start.elapsed().as_millis(),
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -6661,6 +6813,7 @@ async fn execute_manual_txn_mysql_statement(
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -6681,6 +6834,7 @@ async fn execute_manual_txn_mysql_statement(
             affected_rows,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6738,6 +6892,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6768,6 +6923,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -7248,6 +7404,61 @@ mod tests {
             "legitimate 'interrupt'-text error must not be masked as a timeout: {error}"
         );
         assert!(error.contains("Statement 1 failed") && error.contains("interrupted_at"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn sqlite_ssh_worker_transaction_rolls_back_on_failure_and_commits_on_success() {
+        let remote = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().expect("open remote SQLite")));
+        remote.lock().unwrap().execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)").expect("create table");
+        let (client_stream, worker_stream) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(fake_sqlite_ssh_worker(worker_stream, remote.clone()));
+        let pool = db::sqlite::SqliteHandle::from_worker(Arc::new(
+            db::sqlite_worker::SqliteWorkerClient::from_test_stream(client_stream),
+        ));
+        let budget = DbOperationBudget::with_defaults();
+        let row_count =
+            || remote.lock().unwrap().query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0)).unwrap();
+
+        let error = exec_tx_sqlite_inner(
+            pool.clone(),
+            &["INSERT INTO t VALUES (1)".to_string(), "INSERT INTO missing VALUES (2)".to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect_err("second statement fails");
+        assert!(error.contains("Statement 2 failed") && error.contains("no such table: missing"), "{error}");
+        assert_eq!(row_count(), 0);
+
+        let result = exec_tx_sqlite_inner(
+            pool,
+            &["INSERT INTO t VALUES (1)".to_string(), "INSERT INTO t VALUES (2)".to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect("transaction commits");
+        assert_eq!(result.affected_rows, 2);
+        assert_eq!(row_count(), 2);
+    }
+
+    /// Answers SQLite worker JSONL requests from a real SQLite connection.
+    async fn fake_sqlite_ssh_worker(stream: tokio::io::DuplexStream, conn: Arc<Mutex<rusqlite::Connection>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let request: serde_json::Value = serde_json::from_str(&line).expect("worker request");
+            let mut response = {
+                let conn = conn.lock().unwrap();
+                match conn.execute_batch(request["sql"].as_str().unwrap_or_default()) {
+                    Ok(()) => serde_json::json!({ "affected_rows": conn.changes() }),
+                    Err(error) => serde_json::json!({ "error": error.to_string() }),
+                }
+            };
+            response["id"] = request["id"].clone();
+            writer.write_all(format!("{response}\n").as_bytes()).await.expect("worker response");
+        }
     }
 
     #[tokio::test]
@@ -8929,6 +9140,7 @@ for line in sys.stdin:
                     affected_rows: 0,
                     execution_time_ms: 4,
                     server_execute_time_us: None,
+                    query_timings_ms: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -9204,6 +9416,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 1,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -10264,6 +10477,7 @@ for line in sys.stdin:
                 affected_rows: 0,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -10290,6 +10504,7 @@ for line in sys.stdin:
                 affected_rows: 0,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -11586,6 +11801,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11624,6 +11840,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11692,6 +11909,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11732,6 +11950,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11764,6 +11983,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11803,6 +12023,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11836,6 +12057,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -12000,6 +12222,22 @@ for line in sys.stdin:
         let unknown_without_opener = decide_mysql_auto_commit_transaction(true, false, false, None);
         assert!(!unknown_without_opener.preserve);
         assert_eq!(unknown_without_opener.rollback, MysqlAutoCommitRollback::None);
+    }
+
+    #[test]
+    fn mysql_cleanup_rollback_is_skipped_only_when_the_final_status_proves_nothing_is_open() {
+        assert!(mysql_cleanup_rollback_is_noop(true, false, Some(mysql_status(false, true))));
+
+        // A transaction is open, or auto-commit is off: the cleanup must run.
+        assert!(!mysql_cleanup_rollback_is_noop(true, false, Some(mysql_status(true, true))));
+        assert!(!mysql_cleanup_rollback_is_noop(true, false, Some(mysql_status(false, false))));
+        // The last statement failed, so no status packet is cached.
+        assert!(!mysql_cleanup_rollback_is_noop(true, false, None));
+        // A truncated or failed result may leave an earlier command's packet.
+        assert!(!mysql_cleanup_rollback_is_noop(false, false, Some(mysql_status(false, true))));
+        // A batch that opened a transaction keeps the cleanup even when the
+        // server reports nothing open, in case it never sets the flag.
+        assert!(!mysql_cleanup_rollback_is_noop(true, true, Some(mysql_status(false, true))));
     }
 
     #[test]

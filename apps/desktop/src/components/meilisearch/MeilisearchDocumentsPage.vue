@@ -18,6 +18,7 @@ import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
 import { compactLocalTimestamp, sanitizeExportBaseName, saveTextFile } from "@/lib/export/saveTextFile";
+import { formatQueryDuration } from "@/lib/format/duration";
 import { parseDocumentStoreJsonDocument, serializeDocumentStoreId, stringifyDocumentStoreValue } from "@/lib/app/documentJsonValues";
 import { parseJsonPreservingLargeNumbers, safeJsonFormat, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { useToast } from "@/composables/useToast";
@@ -120,7 +121,7 @@ const page = computed(() => Math.max(0, Math.floor(offset.value / Math.max(1, li
 const totalPages = computed(() => Math.max(1, Math.ceil(totalHits.value / Math.max(1, limit.value))));
 const canGoNext = computed(() => offset.value + limit.value < totalHits.value);
 
-const resultSummary = computed(() => t("meilisearch.resultSummary", { count: totalHits.value, time: processingTimeMs.value }));
+const resultSummary = computed(() => t("meilisearch.resultSummary", { count: totalHits.value, duration: formatQueryDuration(processingTimeMs.value) }));
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

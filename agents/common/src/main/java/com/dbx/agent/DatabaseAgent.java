@@ -11,6 +11,9 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 public interface DatabaseAgent {
+    /** Opt in to request-boundary timing, including pooled connection lifecycle. */
+    default boolean supportsQueryTiming() { return false; }
+
     void connect(ConnectParams params);
 
     boolean testConnection(ConnectParams params);

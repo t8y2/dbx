@@ -3,7 +3,7 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } fr
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import {
   PluginHostBridge,
   pluginSandboxDocument,
@@ -404,6 +404,15 @@ function createBridge() {
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
       copyText: (_pluginId, text) => copyToClipboard(text),
+      // Permission-gated in the bridge (host.clipboard:read); the helper
+      // prefers the Tauri clipboard plugin and falls back to the Web Clipboard.
+      clipboardRead: (_pluginId) => readTextFromClipboard(),
+      // Session consent for the first clipboard read: a native ask dialog naming
+      // the plugin, so reads always have a human in the loop. On the web host
+      // (no dialog surface) the callback is omitted and the bridge denies.
+      confirmClipboardRead: isTauriRuntime()
+        ? (_pluginId, pluginName) => import("@tauri-apps/plugin-dialog").then(({ ask }) => ask(t("pluginPlatform.clipboardReadConsent", { name: pluginName }), { title: t("pluginPlatform.clipboardReadConsentTitle"), kind: "warning" }).then((allowed) => allowed === true))
+        : undefined,
       pickFiles: (pluginId, options) => pickPluginFiles(pluginId, options),
       readFileChunk: (pluginId, handleId, offset, length) => readPluginFileChunkById(pluginId, handleId, offset, length),
       beginFileSave: (pluginId, request) => beginPluginFileSave(pluginId, request),

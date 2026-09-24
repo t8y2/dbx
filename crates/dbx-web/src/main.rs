@@ -1,4 +1,5 @@
 mod auth;
+mod demo;
 mod error;
 mod routes;
 mod sse;
@@ -386,11 +387,14 @@ async fn serve() {
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
 
+    let demo_mode = demo::demo_mode_from_env();
+
     let migration_ready = storage_migration_ready(&app_state).await;
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
         public_base_path: public_base_path.clone(),
+        demo_mode,
         password_disabled,
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
@@ -459,6 +463,15 @@ async fn serve() {
         .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
         .route("/connection/mcp/duplicate", post(routes::connection::mcp_duplicate_connection))
         .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
+        .route(
+            "/connection/salesforce-oauth-browser-authorize",
+            post(routes::connection::salesforce_oauth_browser_authorize),
+        )
+        .route("/connection/salesforce-oauth-device-start", post(routes::connection::salesforce_oauth_device_start))
+        .route("/connection/salesforce-oauth-device-poll", post(routes::connection::salesforce_oauth_device_poll))
+        .route("/connection/salesforce-oauth-refresh", post(routes::connection::salesforce_oauth_refresh))
+        .route("/connection/salesforce-oauth-password-login", post(routes::connection::salesforce_oauth_password_login))
+        .route("/salesforce/current-user", get(routes::connection::salesforce_current_user))
         .route("/plugins", get(routes::plugins::list_plugins))
         .route("/plugins/trusted-keys", get(routes::plugins::list_plugin_trusted_keys))
         .route("/plugins/trusted-keys/save", post(routes::plugins::save_plugin_trusted_key))
@@ -587,6 +600,7 @@ async fn serve() {
         .route("/schema/table-owner", get(routes::schema::get_table_owner))
         .route("/schema/extensions", get(routes::schema::list_extensions))
         .route("/schema/available-extensions", get(routes::schema::list_available_extensions))
+        .route("/schema/event-triggers", get(routes::schema::list_event_triggers))
         .route("/schema/ddl", get(routes::schema::get_ddl))
         .route("/docs/snapshot", post(routes::docs::collect_snapshot))
         .route("/docs/annotations/load", post(routes::docs::load_annotations))
@@ -1253,6 +1267,7 @@ async fn serve() {
 
     let api = add_mq_routes(api)
         .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate))
+        .layer(middleware::from_fn_with_state(web_state.clone(), demo::demo_mode_gate))
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
 
@@ -1283,6 +1298,9 @@ async fn serve() {
         tracing::info!("Password protection is disabled");
     } else if std::env::var("DBX_PASSWORD").is_ok() {
         tracing::info!("Password protection is enabled");
+    }
+    if demo_mode {
+        tracing::info!("Demo mode is enabled: connection/plugin/AI mutations are blocked");
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");

@@ -57,18 +57,18 @@ cd agents
 
 ## 项目结构
 
-| 路径 | 说明 |
-| --- | --- |
-| `apps/desktop/src/` | Vue 前端 |
-| `src-tauri/` | Tauri 桌面端壳层与命令层 |
-| `crates/dbx-core/` | 共享 Rust 数据库逻辑 |
-| `crates/dbx-web/` | Docker / Web HTTP 后端 |
-| `packages/cli/` | `@dbx-app/cli` |
-| `packages/mcp-server/` | `@dbx-app/mcp-server` |
+| 路径                    | 说明                              |
+| ----------------------- | --------------------------------- |
+| `apps/desktop/src/`     | Vue 前端                          |
+| `src-tauri/`            | Tauri 桌面端壳层与命令层          |
+| `crates/dbx-core/`      | 共享 Rust 数据库逻辑              |
+| `crates/dbx-web/`       | Docker / Web HTTP 后端            |
+| `packages/cli/`         | `@dbx-app/cli`                    |
+| `packages/mcp-server/`  | `@dbx-app/mcp-server`             |
 | `packages/mongo-shell/` | 桌面端内部 MongoDB 编辑器解析工具 |
-| `docs/` | 官方文档站 |
-| `examples/` | 配置与自动化示例 |
-| `agents/` | JDBC Agent 驱动工程 |
+| `docs/`                 | 官方文档站                        |
+| `examples/`             | 配置与自动化示例                  |
+| `agents/`               | JDBC Agent 驱动工程               |
 
 ## 开发约定
 
@@ -83,6 +83,8 @@ cd agents
 ### 控制改动范围
 
 一个 PR 只做一类事。文档 PR 不要夹带无关代码；修 Bug 时也不要顺手大重构，除非重构是修复所必需的。
+
+提交前和推送后请按 [PR 提交与 CI 核查](docs/testing/pr-preflight.md) 检查多语言完整性、相关工作流及远端状态。
 
 ### 提交说明
 

@@ -21,6 +21,7 @@ import {
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { formatError } from "@/lib/backend/errorUtils";
+import { parseJsonPreservingLargeNumbers, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { tableMetaWithoutOptionalDatabaseQualifier } from "@/lib/table/tableSelectSql";
 import type { DatabaseType } from "@/types/database";
 
@@ -35,6 +36,7 @@ interface ExtractorRequestSource {
   sourceColumnIndexes: number[];
   columnTypes: Array<string | undefined>;
   normalizeValues: boolean;
+  keepUnsafeJsonText: boolean;
   presentBinaryText: boolean;
   rawRows: unknown[][];
 }
@@ -76,10 +78,13 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   const hasUnsupportedDiscreteSelection = computed(() => options.hasCellSelection.value && options.selectedCellMatrix.value === null);
   const requestSources = new WeakMap<DataGridExtractRequest, ExtractorRequestSource>();
 
-  function normalizeCellValue(value: unknown, columnType: string | undefined): unknown {
+  function normalizeCellValue(value: unknown, columnType: string | undefined, keepUnsafeJsonText: boolean): unknown {
     if (typeof value !== "string" || columnType?.trim().toLowerCase() !== "json") return value;
     try {
-      return JSON.parse(value);
+      const parsed = JSON.parse(value);
+      // SQL literals must keep numbers JavaScript would round (e.g. 64-bit ids above 2^53), so send the original text.
+      if (keepUnsafeJsonText && stringifyJsonPreservingLargeNumbers(parseJsonPreservingLargeNumbers(value)) !== JSON.stringify(parsed)) return value;
+      return parsed;
     } catch {
       return value;
     }
@@ -87,12 +92,12 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
 
   // 除 SQL 外的剪贴板展示格式都可把文本型 MySQL VARBINARY 从 `0x<hex>` 还原为原始字符串。
   // SQL 必须继续持有 hex 才能保证 round-trip；rawRows 则始终保存原值，供 DBX 内部网格回粘使用。
-  function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, presentBinaryText: boolean, columnIndex: number): unknown {
+  function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, keepUnsafeJsonText: boolean, presentBinaryText: boolean, columnIndex: number): unknown {
     if (presentBinaryText) {
       const text = binaryCellClipboardText(value, columnType, options.databaseType.value);
       if (text !== null) return text;
     }
-    const normalized = normalizeValues ? normalizeCellValue(value, columnType) : value;
+    const normalized = normalizeValues ? normalizeCellValue(value, columnType, keepUnsafeJsonText) : value;
     const externalValue = options.externalCellValue?.(normalized, columnIndex);
     return externalValue === undefined ? normalized : externalValue;
   }
@@ -214,9 +219,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const selectedColumnIndexes = selectedSourceIndexes.map((sourceIndex) => compactIndexBySource.get(sourceIndex)).filter((index): index is number => index !== undefined);
     const columnTypes = requiredSourceIndexes.map((sourceIndex) => columnTypesBySource.get(sourceIndex));
     const normalizeValues = descriptor.category === "json" || descriptor.category === "sql";
+    const keepUnsafeJsonText = descriptor.category === "sql";
     const presentBinaryText = descriptor.category !== "sql";
     const rawRows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => row[sourceIndex]));
-    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, presentBinaryText, index)));
+    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index)));
     const tableMeta =
       descriptor.category === "sql"
         ? tableMetaWithoutOptionalDatabaseQualifier(
@@ -245,6 +251,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       sourceColumnIndexes: requiredSourceIndexes,
       columnTypes,
       normalizeValues,
+      keepUnsafeJsonText,
       presentBinaryText,
       rawRows,
     });
@@ -279,7 +286,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
         return sourceIndex !== undefined && values.has(sourceIndex) ? values.get(sourceIndex) : value;
       });
     });
-    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.presentBinaryText, index)));
+    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.keepUnsafeJsonText, limitedSource.presentBinaryText, index)));
     const resolvedRequest = { ...request, rows };
     requestSources.set(resolvedRequest, { ...limitedSource, rawRows });
     return resolvedRequest;

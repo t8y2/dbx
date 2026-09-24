@@ -1922,6 +1922,7 @@ for line in sys.stdin:
             affected_rows,
             execution_time_ms: 1,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,

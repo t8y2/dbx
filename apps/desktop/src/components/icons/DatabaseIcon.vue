@@ -123,6 +123,7 @@ const assetIcons: Record<string, string> = {
   jdbcx: "jdbcx",
   mqtt: "mqtt",
   dolt: "dolt",
+  salesforce: "salesforce",
 };
 
 const normalizedType = computed(() => (props.dbType || "").toLowerCase().replace(/[\s-]+/g, "_"));

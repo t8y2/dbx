@@ -200,6 +200,9 @@ pub fn build_table_data_select_sql_with_database(
     if database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_table_select_sql(&options, limit);
     }
+    if database_type == Some(DatabaseType::Salesforce) {
+        return build_salesforce_table_select_sql(&options, limit);
+    }
     if database_type == Some(DatabaseType::VictoriaMetrics) {
         return format!("{}[1h]", victoriametrics_metric_selector(&options.table_name));
     }
@@ -863,6 +866,47 @@ pub(super) fn build_neo4j_table_select_sql(options: &TableDataSelectSqlOptions, 
     format!("MATCH (n:{label}){where_clause} RETURN {returns}{order}{skip} LIMIT {limit};")
 }
 
+/// Salesforce's `FIELDS(ALL)` selector is only legal with a LIMIT of 200 or less.
+const SALESFORCE_FIELDS_ALL_MAX_LIMIT: usize = 200;
+
+/// Builds the SOQL used by the data-table grid for a Salesforce sObject.
+///
+/// SOQL is not SQL in three ways that matter here: there is no `SELECT *`, there
+/// are no delimited identifiers (`FROM "Account"` is a `MALFORMED_QUERY`), and
+/// the "everything" projection is the `FIELDS(ALL)` selector, which Salesforce
+/// only accepts with `LIMIT 200` or less. Known fields are therefore projected
+/// by name — that keeps any page size working — and `FIELDS(ALL)` is the capped
+/// fallback for the callers that build SQL before the describe cache has loaded.
+///
+/// The statement carries no trailing semicolon: SOQL does not accept one.
+pub(super) fn build_salesforce_table_select_sql(options: &TableDataSelectSqlOptions, limit: usize) -> String {
+    let object = options.table_name.trim();
+    let columns: Vec<&str> = options
+        .columns
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|column| !column.is_empty() && !column.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
+        .collect();
+    let (projection, effective_limit) = if columns.is_empty() {
+        ("FIELDS(ALL)".to_string(), limit.min(SALESFORCE_FIELDS_ALL_MAX_LIMIT))
+    } else {
+        (columns.join(", "), limit)
+    };
+    // Passed through verbatim: a grid filter is the user's own predicate, and
+    // SOQL WHERE accepts the same parenthesised shape. Wrapping it in parentheses
+    // keeps a caller-supplied `OR` from binding outside the filter.
+    let predicate = normalize_where_input(options.where_input.as_deref());
+    let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
+    let order_by = options.order_by.as_deref().map(str::trim).filter(|order_by| !order_by.is_empty());
+    let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
+    // SOQL caps OFFSET at 2000 rows. Past that the org rejects the query, and
+    // surfacing its own error beats silently returning an earlier page.
+    let offset =
+        options.offset.filter(|offset| *offset > 0).map(|offset| format!(" OFFSET {offset}")).unwrap_or_default();
+    format!("SELECT {projection} FROM {object}{where_clause}{order} LIMIT {effective_limit}{offset}")
+}
+
 pub(super) fn build_questdb_table_select_sql(
     table: &str,
     where_clause: &str,
@@ -1178,5 +1222,87 @@ mod tests {
         options.offset = Some(100);
 
         assert_eq!(build_table_data_select_sql(options), "SELECT [id], [name] FROM [users] ORDER BY [id] ASC");
+    }
+
+    #[test]
+    fn salesforce_table_select_projects_described_fields_as_soql() {
+        // SOQL has no `SELECT *` and no delimited identifiers, so the ANSI shape the
+        // grid used to emit (`SELECT * FROM "Account" LIMIT 100`) fails twice over:
+        // the star is not a SOQL selector and the quote is read as a string literal,
+        // which Salesforce reports as MALFORMED_QUERY at column 14. Fields from the
+        // describe go out bare and by name. No trailing semicolon either — SOQL
+        // rejects one.
+        let mut options = opts(DatabaseType::Salesforce, Some("sales"), Some("org"), "Account");
+        options.columns = vec!["Id".to_string(), "Name".to_string(), "First_Name__c".to_string()];
+        options.limit = Some(100);
+
+        // A Salesforce org is a single scope: schema/database qualification has no
+        // SOQL spelling and would land in the FROM clause as a parse error.
+        assert_eq!(build_table_data_select_sql(options), "SELECT Id, Name, First_Name__c FROM Account LIMIT 100");
+    }
+
+    #[test]
+    fn salesforce_table_select_caps_the_fields_all_fallback() {
+        // Callers that build SQL before the describe cache has loaded have no field
+        // list. `FIELDS(ALL)` is the SOQL "everything" projection, but Salesforce
+        // only accepts it with LIMIT 200 or less, so a larger page size is clamped
+        // instead of being sent as a query the org would refuse outright.
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Salesforce),
+                table_name: "Account".to_string(),
+                limit: Some(1000),
+                ..Default::default()
+            }),
+            "SELECT FIELDS(ALL) FROM Account LIMIT 200"
+        );
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Salesforce),
+                table_name: "Account".to_string(),
+                ..Default::default()
+            }),
+            "SELECT FIELDS(ALL) FROM Account LIMIT 100"
+        );
+    }
+
+    #[test]
+    fn salesforce_table_select_keeps_an_explicit_projection_at_any_page_size() {
+        // The 200-row clamp is a property of FIELDS(), not of SOQL: naming the
+        // fields keeps a 1000-row page legal.
+        let mut options = opts(DatabaseType::Salesforce, None, None, "Account");
+        options.columns = vec!["Id".to_string(), "Name".to_string()];
+        options.limit = Some(1000);
+
+        assert_eq!(build_table_data_select_sql(options), "SELECT Id, Name FROM Account LIMIT 1000");
+    }
+
+    #[test]
+    fn salesforce_table_select_composes_filter_order_and_offset() {
+        let mut options = opts(DatabaseType::Salesforce, None, None, "Account");
+        options.columns = vec!["Id".to_string(), "Name".to_string()];
+        options.where_input = Some("WHERE Industry = 'Energy' OR AnnualRevenue > 0".to_string());
+        options.order_by = Some("Name ASC".to_string());
+        options.limit = Some(50);
+        options.offset = Some(150);
+
+        // The leading WHERE is stripped and the predicate is parenthesised so a
+        // caller-supplied OR cannot bind outside the grid filter.
+        assert_eq!(
+            build_table_data_select_sql(options),
+            "SELECT Id, Name FROM Account WHERE (Industry = 'Energy' OR AnnualRevenue > 0) ORDER BY Name ASC LIMIT 50 OFFSET 150"
+        );
+    }
+
+    #[test]
+    fn salesforce_table_select_drops_the_synthetic_row_id() {
+        // The grid's synthetic row-id column is a DBX artifact for drivers without a
+        // primary key; it is not an sObject field, so projecting it would be an
+        // invalid field name in SOQL.
+        let mut options = opts(DatabaseType::Salesforce, None, None, "Account");
+        options.columns = vec!["Id".to_string(), DBX_ROWID_COLUMN.to_string()];
+        options.include_row_id = true;
+
+        assert_eq!(build_table_data_select_sql(options), "SELECT Id FROM Account LIMIT 10");
     }
 }

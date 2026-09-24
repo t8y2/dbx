@@ -674,3 +674,12 @@ pub async fn list_available_extensions(
 ) -> Result<Vec<db::ExtensionInfo>, String> {
     dbx_core::schema::list_available_extensions_core(&state, &connection_id, &database).await
 }
+
+#[tauri::command]
+pub async fn list_event_triggers(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<Vec<db::EventTriggerInfo>, String> {
+    dbx_core::schema::list_event_triggers_core(&state, &connection_id, &database).await
+}

@@ -411,7 +411,7 @@ function createBridge() {
       // the plugin, so reads always have a human in the loop. On the web host
       // (no dialog surface) the callback is omitted and the bridge denies.
       confirmClipboardRead: isTauriRuntime()
-        ? (_pluginId, pluginName) => import("@tauri-apps/plugin-dialog").then(({ ask }) => ask(t("pluginClipboardReadConsent", { name: pluginName }), { title: t("pluginClipboardReadConsentTitle"), kind: "warning" }).then((allowed) => allowed === true))
+        ? (_pluginId, pluginName) => import("@tauri-apps/plugin-dialog").then(({ ask }) => ask(t("pluginPlatform.clipboardReadConsent", { name: pluginName }), { title: t("pluginPlatform.clipboardReadConsentTitle"), kind: "warning" }).then((allowed) => allowed === true))
         : undefined,
       pickFiles: (pluginId, options) => pickPluginFiles(pluginId, options),
       readFileChunk: (pluginId, handleId, offset, length) => readPluginFileChunkById(pluginId, handleId, offset, length),

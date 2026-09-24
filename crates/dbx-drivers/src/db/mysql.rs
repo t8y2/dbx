@@ -1554,6 +1554,12 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     let setup_value_rejected = lower.contains("error 1231") && lower.contains("can't be set to");
     // TDDL rejects the dynamic floor expression as an incorrect argument type (issue #10111).
     let setup_argument_rejected = lower.contains("incorrect argument type") || lower.contains("error 1232");
+    // TXSQL (TencentDB MySQL 5.7) rejects the built-in floor statement with 1193 but
+    // truncates the echoed variable name to `group_concat_`, so neither the full-name
+    // guard nor the compact floor signature matches. Require the closing quote so a
+    // variable that merely shares the prefix (for example `group_concat_foo`) is not
+    // mistaken for the built-in floor statement.
+    let txsql_truncated_name_rejected = lower.contains("unknown system variable 'group_concat_'");
     // Gaea tries to parse the built-in floor expression as an integer literal.
     let gaea_setup_expression_rejected = lower.contains("error 1105 (hy000)")
         && compact.contains(&format!(
@@ -1581,6 +1587,7 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     let floor_statement_rejected = lower.contains("group_concat_max_len")
         || compact.contains(&format!("..._len,{MYSQL_GROUP_CONCAT_MAX_LEN})asunsigned)"));
     if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected || setup_argument_rejected))
+        || txsql_truncated_name_rejected
         || gaea_setup_expression_rejected
         || starrocks_setup_expression_rejected
         || sphinxql_setup_query_rejected
@@ -8532,6 +8539,42 @@ mod tests {
                 None,
                 "{error}"
             );
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_txsql_truncated_name_retries_without_session_variable() {
+        // TXSQL 5.7 (5.7.36-v17-txsql) reports 1193 with the variable name truncated
+        // to `group_concat_`, losing the full name the generic guard relies on.
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_''",
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): [txsql] Unknown system variable 'group_concat_''",
+            "ERROR 1193 (HY000): Unknown system variable 'group_concat_'",
+        ] {
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+                Some(MySqlSetupMode::Compatible),
+                "{error}"
+            );
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
+                None,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_txsql_truncated_name_match_stays_narrow() {
+        for error in [
+            // A different unknown variable that merely shares the prefix.
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_foo''",
+            // The plain `group_concat` function is not the variable either.
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat''",
+            // An unrelated unknown variable on the same server.
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'sql_mode''",
+        ] {
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None, "{error}");
         }
     }
 

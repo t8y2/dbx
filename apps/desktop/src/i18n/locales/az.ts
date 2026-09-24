@@ -7313,6 +7313,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Cədvəl sütunlarının şərhlərini birbaşa sütun adlarının altında göstər.",
     showColumnTypesInHeader: "Sütun növlərini adların altında göstər",
     showColumnTypesInHeaderDescription: "Hər sütunun verilən növünü birbaşa cədvəldəki sütun adlarının altında göstər.",
+    showColumnHeaderTooltips: "Sütun başlığı üzərinə gətirildikdə ipucları",
+    showColumnHeaderTooltipsDescription: "Kursor nəticə cədvəlindəki sütun başlıqlarının üzərinə gətirildikdə ətraflı ipucları göstər. Bu pəncərələri dayandırmaq üçün söndürün.",
     showResultSourceDatabase: "Nəticə adlarında verilənlər bazası adını göstər",
     showResultSourceDatabaseDescription: "Söndürüldükdə nəticə sekmələri yalnız cədvəl adını göstərir; tam ad (verilənlər bazası adı ilə) ipucunda görünməyə davam edir.",
     dataGridShowTransposeFieldMetadata: "Transpozisiya görünüşündə sahə metaverilənlərini göstər",

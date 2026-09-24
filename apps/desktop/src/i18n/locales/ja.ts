@@ -7296,6 +7296,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "グリッド列名の直下にテーブル列コメントを表示します。",
     showColumnTypesInHeader: "列名の下にデータ型を表示",
     showColumnTypesInHeaderDescription: "グリッド列名の直下に各列のデータ型を表示します。",
+    showColumnHeaderTooltips: "列ヘッダーのホバーツールチップ",
+    showColumnHeaderTooltipsDescription: "結果グリッドの列ヘッダーにホバーしたときに詳細ツールチップを表示します。オフにすると表示されません。",
     showResultSourceDatabase: "結果セット名にデータベース名を含める",
     showResultSourceDatabaseDescription: "オフにすると結果セットのタブにはテーブル名のみを表示し、完全な名前（データベース名を含む）はツールチップで確認できます。",
     dataGridShowTransposeFieldMetadata: "転置ビューにフィールドメタデータを表示",

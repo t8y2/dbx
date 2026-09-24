@@ -7195,6 +7195,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Tablo sütun açıklamalarını doğrudan ızgara sütun adlarının altında göster.",
     showColumnTypesInHeader: "Sütun türlerini adların altında göster",
     showColumnTypesInHeaderDescription: "Her sütunun veri türünü doğrudan ızgara sütun adlarının altında göster.",
+    showColumnHeaderTooltips: "Sütun başlığı ipuçları",
+    showColumnHeaderTooltipsDescription: "Sonuç ızgarasında sütun başlıklarının üzerine gelindiğinde ayrıntı ipuçlarını göster. Açılır ipuçlarını durdurmak için kapatın.",
     showResultSourceDatabase: "Sonuç adlarında veritabanı adını göster",
     showResultSourceDatabaseDescription: "Kapalıyken sonuç sekmeleri yalnızca tablo adını gösterir; tam ad (veritabanı adı dahil) ipucunda görünmeye devam eder.",
     dataGridShowTransposeFieldMetadata: "Devrik görünümde alan meta verisini göster",

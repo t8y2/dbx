@@ -7339,6 +7339,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Muestra los comentarios de columnas directamente debajo del nombre de la columna.",
     showColumnTypesInHeader: "Mostrar tipos de columna bajo los nombres",
     showColumnTypesInHeaderDescription: "Muestra el tipo de dato de cada columna directamente debajo del nombre de la columna.",
+    showColumnHeaderTooltips: "Sugerencias al pasar el cursor por los encabezados de columna",
+    showColumnHeaderTooltipsDescription: "Muestra sugerencias con detalles al pasar el cursor sobre los encabezados de columna de la cuadrícula de resultados. Desactívalo para ocultarlas.",
     showResultSourceDatabase: "Incluir el nombre de la base de datos en los nombres de los resultados",
     showResultSourceDatabaseDescription: "Si se desactiva, las pestañas de resultados solo muestran el nombre de la tabla; el nombre completo sigue visible en la información emergente.",
     dataGridShowTransposeFieldMetadata: "Mostrar metadatos de campo en la vista transpuesta",

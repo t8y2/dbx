@@ -491,7 +491,7 @@ fn default_key_path() -> Option<std::path::PathBuf> {
     // file; their auto-provisioned fallback lives in the system temp dir.
     #[cfg(test)]
     {
-        return Some(std::env::temp_dir().join("dbx-test-secret.key"));
+        Some(std::env::temp_dir().join("dbx-test-secret.key"))
     }
     #[cfg(not(test))]
     {

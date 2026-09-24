@@ -7265,6 +7265,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Exibir comentários de colunas da tabela diretamente abaixo dos nomes das colunas da grade.",
     showColumnTypesInHeader: "Mostrar tipos de coluna sob os nomes",
     showColumnTypesInHeaderDescription: "Exibir o tipo de dado de cada coluna diretamente abaixo dos nomes das colunas da grade.",
+    showColumnHeaderTooltips: "Dicas ao passar o mouse nos cabeçalhos de coluna",
+    showColumnHeaderTooltipsDescription: "Mostra dicas com detalhes ao passar o mouse sobre os cabeçalhos de coluna da grade de resultados. Desative para ocultá-las.",
     showResultSourceDatabase: "Incluir o nome do banco de dados nos nomes dos resultados",
     showResultSourceDatabaseDescription: "Quando desativado, as abas de resultados mostram apenas o nome da tabela; o nome completo (com o banco de dados) continua na dica de ferramenta.",
     dataGridShowTransposeFieldMetadata: "Mostrar metadados de campo na visualização transposta",

@@ -7263,6 +7263,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Visualizza i commenti delle colonne della tabella direttamente sotto i nomi delle colonne nella griglia.",
     showColumnTypesInHeader: "Mostra i tipi di colonna sotto i nomi",
     showColumnTypesInHeaderDescription: "Visualizza il tipo di dato di ciascuna colonna direttamente sotto i nomi delle colonne nella griglia.",
+    showColumnHeaderTooltips: "Tooltip al passaggio del mouse sulle intestazioni di colonna",
+    showColumnHeaderTooltipsDescription: "Mostra tooltip con dettagli al passaggio del mouse sulle intestazioni di colonna della griglia dei risultati. Disattiva per nasconderli.",
     showResultSourceDatabase: "Includi il nome del database nei nomi dei risultati",
     showResultSourceDatabaseDescription: "Se disattivato, le schede dei risultati mostrano solo il nome della tabella; il nome completo resta visibile nel tooltip.",
     dataGridShowTransposeFieldMetadata: "Mostra i metadati dei campi nella vista trasposta",

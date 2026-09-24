@@ -9428,6 +9428,8 @@ export default withEnglishFallback({
     shortcutLowercaseSelection: "Преобразовать выделенное в нижний регистр",
     shortcutConvertNamingStyle: "Переключить стиль именования",
     shortcutExPasteSqlInCondition: "ExPaste: вставить как условие IN",
+    showColumnHeaderTooltips: "Всплывающие подсказки при наведении на имена полей",
+    showColumnHeaderTooltipsDescription: "Показывать подробную всплывающую подсказку при наведении курсора на имя поля в заголовке результатов; после отключения всплывающая подсказка при наведении больше не появляется.",
     showResultSourceDatabase: "Имя набора результатов содержит имя базы данных",
     showResultSourceDatabaseDescription: "После отключения вкладки наборов результатов будут отображать только имена таблиц; полное имя (включая имя базы данных) по-прежнему можно посмотреть во всплывающей подсказке.",
   },

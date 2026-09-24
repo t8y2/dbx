@@ -6582,6 +6582,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "直接在資料表格欄位名稱下方顯示資料表欄位註解。",
     showColumnTypesInHeader: "在欄位名稱下方顯示資料類型",
     showColumnTypesInHeaderDescription: "直接在資料表格欄位名稱下方顯示每個欄位的資料類型。",
+    showColumnHeaderTooltips: "欄位名稱懸浮提示",
+    showColumnHeaderTooltipsDescription: "在資料表格欄位名稱上懸浮時顯示詳細提示；關閉後懸浮不再彈出。",
     showResultSourceDatabase: "結果集名稱包含資料庫名稱",
     showResultSourceDatabaseDescription: "關閉後結果集頁籤只顯示資料表名稱，完整名稱（含資料庫名稱）仍可在懸浮提示中查看。",
     dataGridShowTransposeFieldMetadata: "在轉置檢視中顯示欄位中繼資料",

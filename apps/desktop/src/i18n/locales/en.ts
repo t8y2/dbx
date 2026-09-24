@@ -7961,6 +7961,8 @@ export default {
     showColumnCommentsInHeaderDescription: "Display table column comments directly below grid column names.",
     showColumnTypesInHeader: "Show column types under names",
     showColumnTypesInHeaderDescription: "Display each column's data type directly below grid column names.",
+    showColumnHeaderTooltips: "Column header hover tooltips",
+    showColumnHeaderTooltipsDescription: "Show detail tooltips when hovering result grid column headers. Turn off to stop hover popups.",
     showResultSourceDatabase: "Include database name in result set names",
     showResultSourceDatabaseDescription: "When off, result set tabs show only the table name; the full name stays visible in the tooltip.",
     dataGridShowTransposeFieldMetadata: "Show field metadata in transpose view",

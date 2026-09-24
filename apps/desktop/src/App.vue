@@ -1263,11 +1263,12 @@ function openPluginConnectionDialog(pluginId: string, providerId: string) {
   showConnectionDialog.value = true;
 }
 async function checkAllUpdates() {
-  if (manualCheckingAllUpdates.value) return;
+  if (manualCheckingAllUpdates.value || componentUpdates.updating.value) return;
   manualCheckingAllUpdates.value = true;
   const startedAt = Date.now();
   try {
-    const [, componentRefresh] = await Promise.allSettled([checkUpdates({ silent: true }), componentUpdates.refresh()]);
+    // A user-triggered check must replace any in-flight background snapshot that may predate the update.
+    const [, componentRefresh] = await Promise.allSettled([checkUpdates({ silent: true }), componentUpdates.refresh({ force: true })]);
     if (componentRefresh.status === "fulfilled" && componentRefresh.value) syncToolbarComponentUpdateState();
     const remaining = 500 - (Date.now() - startedAt);
     if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
@@ -1283,7 +1284,7 @@ function openDriverStoreFromUpdate(target?: DriverStoreTab) {
 
 function handleToolbarUpdateClick() {
   showUpdateDialog.value = true;
-  if (!checkingAllUpdates.value) void checkAllUpdates();
+  void checkAllUpdates();
 }
 
 function syncToolbarComponentUpdateState() {

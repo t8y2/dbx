@@ -3461,9 +3461,7 @@ function loadAllRowsAndGoToLast() {
     return;
   }
   const knownTotal = displayedTotalRowCount.value;
-  const remaining = typeof knownTotal === "number" && Number.isFinite(knownTotal) && knownTotal >= props.result.rows.length
-    ? knownTotal - props.result.rows.length
-    : segment.limit;
+  const remaining = typeof knownTotal === "number" && Number.isFinite(knownTotal) && knownTotal >= props.result.rows.length ? knownTotal - props.result.rows.length : segment.limit;
   if (remaining > LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD) {
     pendingLoadAllRows.value = { remaining };
     loadAllRowsConfirmOpen.value = true;

@@ -3628,6 +3628,7 @@ export default withEnglishFallback({
     excludeDdlStorageHint: "Aplica-se à exibição e cópia de DDL e à exportação de estruturas do Oracle e OceanBase Oracle. Desative esta opção para manter os parâmetros de compressão, réplicas e armazenamento. As partições e restrições são sempre mantidas.",
     refreshDdlOnOpen: "Atualizar sempre que abrir",
     refreshDdlOnOpenHint: "Quando ativado, o DDL é recarregado do banco de dados sempre que é aberto; quando desativado, os dados em cache têm prioridade",
+    ddlRefreshFailed: "Falha ao atualizar o DDL: {message}",
     dropObject: "Remover Objeto",
     dropView: "Remover Visão",
     dropColumn: "Remover Coluna",

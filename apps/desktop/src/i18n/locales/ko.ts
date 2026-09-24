@@ -3764,6 +3764,7 @@ export default withEnglishFallback({
     eventSave: "Save",
     refreshDdlOnOpen: "열 때마다 새로 고침",
     refreshDdlOnOpenHint: "켜면 열 때마다 데이터베이스에서 DDL을 다시 불러오고, 끄면 캐시된 데이터를 우선 사용합니다",
+    ddlRefreshFailed: "DDL 새로 고침 실패: {message}",
     viewDependencies: "의존 관계 보기",
     copyConnectionInfo: "연결 정보 복사",
     copyConnectionUrl: "연결 URL",

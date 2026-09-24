@@ -3779,6 +3779,7 @@ export default {
     excludeDdlStorageHint: "Applies to Oracle and OceanBase Oracle DDL display, copying and structure export. Disable to retain compression, replica and storage options. Partitions and constraints are preserved.",
     refreshDdlOnOpen: "Refresh each time it opens",
     refreshDdlOnOpenHint: "When enabled, DDL is reloaded from the database each time it opens; when disabled, cached data is preferred",
+    ddlRefreshFailed: "Failed to refresh DDL: {message}",
     dropObject: "Drop Object",
     dropEventSuccess: 'Event "{name}" dropped',
     editObject: "Edit Object",

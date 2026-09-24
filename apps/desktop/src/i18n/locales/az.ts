@@ -3520,6 +3520,7 @@ export default withEnglishFallback({
     excludeDdlStorageHint: "Oracle və OceanBase Oracle DDL-in göstərilməsinə, kopyalanmasına və strukturun ixracına tətbiq olunur. Sıxılma, replika və saxlama parametrlərini saxlamaq üçün söndürün. Bölmələr və məhdudiyyətlər həmişə saxlanılır.",
     refreshDdlOnOpen: "Hər açılışda yenilə",
     refreshDdlOnOpenHint: "Aktiv olduqda DDL hər açılışda verilənlər bazasından yenidən yüklənir; deaktiv olduqda keşdəki məlumatlara üstünlük verilir",
+    ddlRefreshFailed: "DDL yenilənməsi alınmadı: {message}",
     dropObject: "Obyekti sil",
     dropEventSuccess: '"{name}" hadisəsi silindi',
     editObject: "Obyekti redaktə et",

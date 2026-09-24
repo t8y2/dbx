@@ -3867,6 +3867,7 @@ export default withEnglishFallback({
     excludeDdlStorageHint: "Oracle と OceanBase Oracle の DDL の表示・コピーと構造のエクスポートに適用されます。無効にすると、圧縮・レプリカ・ストレージのパラメーターを保持します。パーティションと制約は常に保持されます。",
     refreshDdlOnOpen: "開くたびに更新",
     refreshDdlOnOpenHint: "有効にすると開くたびにデータベースから DDL を再取得し、無効にするとキャッシュを優先して使用します",
+    ddlRefreshFailed: "DDL の更新に失敗しました: {message}",
     manageExtension: "拡張機能を管理...",
     dropExtension: "拡張機能を削除",
     processList: "プロセス一覧",

@@ -3691,6 +3691,7 @@ export default withEnglishFallback({
     excludeDdlStorageHint: "用于 Oracle 与 OceanBase Oracle 的 DDL 显示、复制和结构导出。关闭后保留压缩、副本和存储参数；分区和约束始终保留。",
     refreshDdlOnOpen: "每次打开时刷新",
     refreshDdlOnOpenHint: "开启后每次打开都会从数据库重新读取；关闭时优先使用缓存",
+    ddlRefreshFailed: "刷新 DDL 失败：{message}",
     dropObject: "删除对象",
     dropView: "删除视图",
     dropColumn: "删除字段",

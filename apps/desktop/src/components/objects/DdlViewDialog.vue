@@ -10,8 +10,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { alignDdlColumnDefinitions, applyDdlDatabaseQualifier, ddlFormatDialectFor, omitDdlIdentifierQuotes, uppercaseDdlColumnTypes } from "@/lib/sql/ddlDisplay";
+import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { ddlFormatDialectFor, formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { useQueryStore } from "@/stores/queryStore";
 import { Button } from "@/components/ui/button";
@@ -50,8 +50,6 @@ const { t } = useI18n();
 const { toast } = useToast();
 const { isDark, themePalette } = useTheme();
 const settingsStore = useSettingsStore();
-const isRoutingToTab = ref(false);
-const dialogVisible = computed(() => props.open && !isRoutingToTab.value);
 
 const originalDdlContent = ref("");
 const formattedDdlContent = ref("");
@@ -191,11 +189,19 @@ async function loadDdl(force = false) {
       { force },
     );
     const formatDialect = ddlFormatDialectFor({ formatDialect: props.formatDialect, databaseType: props.databaseType, highlightDialect: props.dialect });
-    const formatted = await formatSqlForDisplay(ddl, formatDialect, settingsStore.editorSettings.sqlFormatter);
     originalDdlContent.value = ddl;
-    const withDatabasePreference = applyDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
-    const withIdentifierPreference = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? withDatabasePreference : omitDdlIdentifierQuotes(withDatabasePreference, formatDialect);
-    formattedDdlContent.value = alignDdlColumnDefinitions(uppercaseDdlColumnTypes(withIdentifierPreference, formatDialect), formatDialect);
+    formattedDdlContent.value = await formatDdlForDisplay(
+      ddl,
+      {
+        dialect: formatDialect,
+        databaseType: props.databaseType,
+        database: props.database,
+        catalog: props.catalog,
+        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+        quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+      },
+      settingsStore.editorSettings.sqlFormatter,
+    );
   } catch (e: any) {
     ddlError.value = e?.message || String(e);
   } finally {
@@ -208,24 +214,17 @@ watch(
   () => props.open,
   async (open) => {
     resetDialogDragOffset();
-    if (!open) {
-      isRoutingToTab.value = false;
-      return;
-    }
-    isRoutingToTab.value = settingsStore.editorSettings.ddlOpenMode === "tab";
+    if (!open) return;
     const active = document.activeElement;
     editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
     ddlDisplayMode.value = "formatted";
     originalDdlContent.value = "";
     formattedDdlContent.value = "";
-    await loadDdl(settingsStore.editorSettings.refreshDdlOnOpen);
-    if (isRoutingToTab.value && props.open) {
-      if (ddlError.value || !ddlContent.value.trim()) {
-        isRoutingToTab.value = false;
-        return;
-      }
-      openDdlInNewTab();
+    if (settingsStore.editorSettings.ddlOpenMode === "tab") {
+      openDdlViewerTabPending();
+      return;
     }
+    await loadDdl(settingsStore.editorSettings.refreshDdlOnOpen);
   },
   { immediate: true },
 );
@@ -333,10 +332,14 @@ function copyDdlContent() {
   }
 }
 
-function openDdlInNewTab() {
-  const ddl = ddlContent.value.trim();
-  if (!ddl) return;
-
+/**
+ * Creates the read-only DDL tab. With `ddl` empty the tab is created pending
+ * (`ddlLoad`) and loads through the tab surface itself — the same "tab first,
+ * load with visible state" flow as object-source tabs — so in tab mode the
+ * click shows the tab and its loading state immediately instead of silently
+ * waiting behind a closed dialog; a failure is shown in place with a retry.
+ */
+function createDdlViewerTab(ddl: string, pending: boolean) {
   const queryStore = useQueryStore();
   const tabId = queryStore.createTab(props.connectionId, props.database, `${t("contextMenu.viewDdl")} - ${props.tableName}`, "query", props.schema, ddl, props.catalog, { forceNew: true, sourceView: true });
   const tab = queryStore.tabs.find((item) => item.id === tabId);
@@ -347,8 +350,23 @@ function openDdlInNewTab() {
       objectType: props.objectType,
       formatDialect: ddlFormatDialectFor({ formatDialect: props.formatDialect, databaseType: props.databaseType, highlightDialect: props.dialect }),
     };
+    if (pending) {
+      tab.ddlLoad = { startedAt: Date.now() };
+      void queryStore.loadDdlViewerTab(tabId);
+    }
   }
   onClose();
+}
+
+function openDdlInNewTab() {
+  const ddl = ddlContent.value.trim();
+  if (!ddl) return;
+
+  createDdlViewerTab(ddl, false);
+}
+
+function openDdlViewerTabPending() {
+  createDdlViewerTab("", true);
 }
 
 watch(ddlContent, (content) => {
@@ -358,9 +376,9 @@ watch(ddlContent, (content) => {
 
 // When DDL finishes loading, create the editor inside the dialog.
 watch([ddlLoading, ddlContent], ([loading, content]) => {
-  if (!loading && content && props.open && !isRoutingToTab.value) {
+  if (!loading && content && props.open) {
     nextTick(() => {
-      if (!ddlLoading.value && props.open && !isRoutingToTab.value && ddlContent.value === content) void initDdlEditor(content);
+      if (!ddlLoading.value && props.open && ddlContent.value === content) void initDdlEditor(content);
     });
   }
 });
@@ -402,7 +420,7 @@ function onClose() {
 </script>
 
 <template>
-  <Dialog :open="dialogVisible" @update:open="onClose">
+  <Dialog :open="props.open" @update:open="onClose">
     <DialogContent :style="dialogContentStyle" class="dbx-ddl-view-dialog flex min-h-0 flex-col overflow-hidden sm:max-w-190" @close-auto-focus="onDdlDialogCloseAutoFocus">
       <DialogHeader class="shrink-0 cursor-move select-none" @pointerdown="startDialogDrag" @pointermove="moveDialogDrag" @pointerup="endDialogDrag" @pointercancel="endDialogDrag">
         <DialogTitle>DDL - {{ props.tableName }}</DialogTitle>

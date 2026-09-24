@@ -1,7 +1,9 @@
 import { requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
-import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import { dropsSchemaQualifier, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import type { DatabaseType } from "@/types/database";
 
@@ -541,4 +543,43 @@ export function alignDdlColumnDefinitions(sql: string, dialect: SqlFormatDialect
   for (const attribute of attributeOrder) alignColumnAttribute(lines, columns, attribute, dialect);
 
   return lines.join("\n");
+}
+
+export interface DdlDisplayFormatOptions {
+  dialect: SqlFormatDialect;
+  databaseType?: DatabaseType;
+  database?: string;
+  catalog?: string;
+  includeDatabaseName: boolean;
+  quoteIdentifiers: boolean;
+  /**
+   * Storage-clause filtering for surfaces that bake the text once (DDL viewer
+   * tabs store plain SQL). The dialog and the structure editor keep it off and
+   * re-filter on read instead, so toggling the preference updates them without
+   * reloading the DDL.
+   */
+  excludeDdlStorage?: boolean;
+}
+
+/**
+ * Shared preference tail of the read-only DDL display pipeline: applies the
+ * database-name qualifier, the identifier-quoting preference, and the column
+ * type casing/alignment to already-formatted DDL. Use {@link formatDdlForDisplay}
+ * unless the input is formatted separately.
+ */
+export function applyDdlDisplayPreferences(sql: string, options: DdlDisplayFormatOptions): string {
+  const qualified = applyDdlDatabaseQualifier(sql, options.dialect, options.databaseType, options.includeDatabaseName, options.database, options.catalog);
+  const quoted = options.quoteIdentifiers ? qualified : omitDdlIdentifierQuotes(qualified, options.dialect);
+  const aligned = alignDdlColumnDefinitions(uppercaseDdlColumnTypes(quoted, options.dialect), options.dialect);
+  return options.excludeDdlStorage ? applyDdlStoragePreference(aligned, options.databaseType) : aligned;
+}
+
+/**
+ * Canonical read-only DDL display pipeline shared by the DDL dialog, DDL viewer
+ * tabs, and the structure editor's DDL tab: format the statement, apply the
+ * SQL-editor preferences, and align the column definitions. Callers feed the
+ * result of the object DDL fetch straight through it.
+ */
+export async function formatDdlForDisplay(ddl: string, options: DdlDisplayFormatOptions, formatter: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS): Promise<string> {
+  return applyDdlDisplayPreferences(await formatSqlForDisplay(ddl, options.dialect, formatter), options);
 }

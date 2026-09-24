@@ -91,12 +91,30 @@ impl SecretCodec {
         data_dir: &std::path::Path,
         allow_create: bool,
     ) -> Result<SecretKeyResolution, String> {
-        if let Some(path) = std::env::var_os("DBX_SECRET_KEY_FILE") {
+        Self::resolve_with_env(policy, data_dir, allow_create, |name| std::env::var_os(name))
+    }
+
+    /// [`Self::resolve`] with the environment lookup injected. `DBX_SECRET_KEY`
+    /// and `DBX_SECRET_KEY_FILE` are process global, so tests drive the explicit
+    /// key branches through here instead of mutating the environment: a mutation
+    /// in flight would silently change the key every other test in the same
+    /// binary resolves, and the tests that encrypt with one key would fail to
+    /// decrypt once it is restored.
+    fn resolve_with_env<F>(
+        policy: SecretKeyPolicy,
+        data_dir: &std::path::Path,
+        allow_create: bool,
+        env_lookup: F,
+    ) -> Result<SecretKeyResolution, String>
+    where
+        F: Fn(&str) -> Option<std::ffi::OsString>,
+    {
+        if let Some(path) = env_lookup("DBX_SECRET_KEY_FILE") {
             let path = std::path::PathBuf::from(path);
             let codec = Self::read_key_file(&path, false)?;
             return Ok(SecretKeyResolution { codec, source: SecretKeySource::ExplicitFile });
         }
-        if let Some(value) = std::env::var_os("DBX_SECRET_KEY") {
+        if let Some(value) = env_lookup("DBX_SECRET_KEY") {
             let value = value.to_str().ok_or_else(|| "SECRET_KEY_INVALID".to_string())?;
             let codec = Self::from_key_material(value.trim()).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
             return Ok(SecretKeyResolution { codec, source: SecretKeySource::ExplicitEnv });
@@ -140,7 +158,9 @@ impl SecretCodec {
         F: FnOnce(bool) -> Result<Option<SecretCodec>, String>,
     {
         let compatibility_error = if let Some(path) = compatibility_path.as_ref().filter(|path| path.exists()) {
-            match Self::read_key_file(path, false) {
+            // Another process may have just created this file and not finished
+            // writing it yet; retry briefly before treating it as corrupt.
+            match read_key_file_with_retry(path, false) {
                 Ok(codec) => return Ok(SecretKeyResolution { codec, source: SecretKeySource::ManagedDataDir }),
                 Err(error) => Some(error),
             }
@@ -401,13 +421,9 @@ fn create_key_file(path: &std::path::Path, managed: bool) -> Result<SecretCodec,
     }
     match path.symlink_metadata() {
         Ok(metadata) if managed && metadata.file_type().is_symlink() => Err("KEY_FILE_UNAVAILABLE".to_string()),
-        Ok(_) => {
-            if managed {
-                read_key_file_with_retry(path, managed)
-            } else {
-                SecretCodec::read_key_file(path, managed)
-            }
-        }
+        // The winner of the `create_new` race may still be mid-write, so read
+        // through the same retry loop the managed key path uses.
+        Ok(_) => read_key_file_with_retry(path, managed),
         Err(_) => Err("KEY_FILE_UNAVAILABLE".to_string()),
     }
 }
@@ -417,16 +433,24 @@ pub fn managed_key_path(data_dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn read_key_file_with_retry(path: &std::path::Path, reject_symlink: bool) -> Result<SecretCodec, String> {
+    let mut last_error = "KEY_FILE_UNAVAILABLE".to_string();
     for attempt in 0..20 {
         match SecretCodec::read_key_file(path, reject_symlink) {
             Ok(codec) => return Ok(codec),
-            Err(error) if attempt < 19 && error == "SECRET_KEY_INVALID" && path.metadata().is_ok() => {
+            Err(error) => {
+                let retryable = attempt < 19 && error == "SECRET_KEY_INVALID" && path.metadata().is_ok();
+                last_error = error;
+                if !retryable {
+                    break;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            Err(error) => return Err(error),
         }
     }
-    Err("KEY_FILE_UNAVAILABLE".to_string())
+    // Surface what the file actually said: callers tell a corrupt key
+    // (SECRET_KEY_INVALID) apart from an unreadable one, and retrying must not
+    // blur that distinction once the retries are exhausted.
+    Err(last_error)
 }
 
 fn default_key_path() -> Option<std::path::PathBuf> {
@@ -448,7 +472,7 @@ fn aad(namespace: &str, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{managed_key_path, SecretCodec, SecretKeyPolicy, SecretKeySource};
+    use super::{managed_key_path, read_key_file_with_retry, SecretCodec, SecretKeyPolicy, SecretKeySource};
     use base64::Engine as _;
     use std::sync::{Mutex, OnceLock};
 
@@ -533,6 +557,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn compatibility_key_still_being_written_by_a_concurrent_starter_is_retried() {
+        // The shared compatibility path (`~/.config/dbx/secret.key`) is global, so
+        // two starters can race: the `create_new` winner leaves an empty file on
+        // disk for a moment. A reader that gives up immediately reports
+        // SECRET_KEY_INVALID for a key that is fine a millisecond later.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("secret.key");
+        std::fs::write(&path, "").unwrap();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let material = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32]);
+            std::fs::write(&writer_path, material).unwrap();
+        });
+
+        // allow_create=false covers the read-only probe every write goes through;
+        // allow_create=true covers the losing side of the create_new race.
+        for allow_create in [false, true] {
+            let resolved =
+                SecretCodec::resolve_platform_default(Some(path.clone()), allow_create, |_| Ok(None)).unwrap();
+            assert_eq!(resolved.source, SecretKeySource::ManagedDataDir);
+            let expected = SecretCodec::new([7u8; 32]);
+            let envelope = expected.encrypt("n", "k", "value").unwrap();
+            assert_eq!(resolved.codec.decrypt("n", "k", &envelope).unwrap(), "value");
+        }
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn exhausted_key_file_retries_keep_the_original_error_code() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("secret.key");
+        std::fs::write(&path, "\n").unwrap();
+        // A key file that stays corrupt must not be laundered into the generic
+        // "unavailable" code: the migration preflight reports Invalid vs
+        // Unavailable differently.
+        assert!(matches!(read_key_file_with_retry(&path, false), Err(error) if error == "SECRET_KEY_INVALID"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn managed_key_symlink_is_rejected() {
@@ -554,39 +618,37 @@ mod tests {
     #[test]
     fn explicit_key_file_symlink_is_allowed() {
         use std::os::unix::fs::symlink;
-        let _guard = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real.key");
         let link = dir.path().join("external.key");
         std::fs::write(&real, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([5u8; 32])).unwrap();
         symlink(&real, &link).unwrap();
 
-        let previous_file = std::env::var_os("DBX_SECRET_KEY_FILE");
-        let previous_env = std::env::var_os("DBX_SECRET_KEY");
-        std::env::set_var("DBX_SECRET_KEY_FILE", &link);
-        std::env::remove_var("DBX_SECRET_KEY");
-        let resolved = SecretCodec::resolve(SecretKeyPolicy::ManagedDataDir, dir.path(), false).unwrap();
+        let resolved = SecretCodec::resolve_with_env(
+            SecretKeyPolicy::ManagedDataDir,
+            dir.path(),
+            false,
+            explicit_env(&[("DBX_SECRET_KEY_FILE", std::ffi::OsString::from(&link))]),
+        )
+        .unwrap();
         assert_eq!(resolved.source, SecretKeySource::ExplicitFile);
-        restore_env("DBX_SECRET_KEY_FILE", previous_file);
-        restore_env("DBX_SECRET_KEY", previous_env);
     }
 
     #[cfg(unix)]
     #[test]
     fn invalid_non_utf8_explicit_environment_key_does_not_fallback() {
         use std::os::unix::ffi::OsStringExt;
-        let _guard = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let previous_file = std::env::var_os("DBX_SECRET_KEY_FILE");
-        let previous_env = std::env::var_os("DBX_SECRET_KEY");
-        std::env::remove_var("DBX_SECRET_KEY_FILE");
-        std::env::set_var("DBX_SECRET_KEY", std::ffi::OsString::from_vec(vec![0xff, 0xfe]));
+        let invalid = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
         assert!(matches!(
-            SecretCodec::resolve(SecretKeyPolicy::ManagedDataDir, dir.path(), true),
+            SecretCodec::resolve_with_env(
+                SecretKeyPolicy::ManagedDataDir,
+                dir.path(),
+                true,
+                explicit_env(&[("DBX_SECRET_KEY", invalid)])
+            ),
             Err(error) if error == "SECRET_KEY_INVALID"
         ));
-        restore_env("DBX_SECRET_KEY_FILE", previous_file);
-        restore_env("DBX_SECRET_KEY", previous_env);
     }
 
     #[test]
@@ -651,40 +713,38 @@ mod tests {
 
     #[test]
     fn explicit_sources_follow_precedence_without_fallback() {
-        let _guard = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("external.key");
-        let previous_file = std::env::var_os("DBX_SECRET_KEY_FILE");
-        let previous_env = std::env::var("DBX_SECRET_KEY").ok();
-        std::env::remove_var("DBX_SECRET_KEY_FILE");
-        std::env::remove_var("DBX_SECRET_KEY");
-        SecretCodec::resolve(SecretKeyPolicy::ManagedDataDir, dir.path(), true).unwrap();
+        let env_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([2u8; 32]);
+        let resolve = |allow_create: bool, entries: &[(&str, std::ffi::OsString)]| {
+            let env = explicit_env(entries);
+            SecretCodec::resolve_with_env(SecretKeyPolicy::ManagedDataDir, dir.path(), allow_create, env)
+        };
 
+        // Nothing explicit is configured, so the managed data-dir key is provisioned.
+        resolve(true, &[]).unwrap();
+
+        // A corrupt explicit file outranks a valid explicit key and must not fall back.
         std::fs::write(&file, "\n").unwrap();
-        std::env::set_var("DBX_SECRET_KEY_FILE", &file);
-        std::env::set_var("DBX_SECRET_KEY", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([2u8; 32]));
-        assert!(matches!(
-            SecretCodec::resolve(SecretKeyPolicy::ManagedDataDir, dir.path(), false),
-            Err(error) if error == "SECRET_KEY_INVALID"
-        ));
+        let both = [
+            ("DBX_SECRET_KEY_FILE", std::ffi::OsString::from(&file)),
+            ("DBX_SECRET_KEY", std::ffi::OsString::from(env_key.as_str())),
+        ];
+        assert!(matches!(resolve(false, &both), Err(error) if error == "SECRET_KEY_INVALID"));
 
         std::fs::write(&file, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8; 32])).unwrap();
-        let resolved = SecretCodec::resolve(SecretKeyPolicy::ManagedDataDir, dir.path(), false).unwrap();
-        assert_eq!(resolved.source, SecretKeySource::ExplicitFile);
+        assert_eq!(resolve(false, &both).unwrap().source, SecretKeySource::ExplicitFile);
 
-        std::env::remove_var("DBX_SECRET_KEY_FILE");
-        let resolved = SecretCodec::resolve(SecretKeyPolicy::ManagedDataDir, dir.path(), false).unwrap();
-        assert_eq!(resolved.source, SecretKeySource::ExplicitEnv);
-
-        restore_env("DBX_SECRET_KEY_FILE", previous_file);
-        restore_env("DBX_SECRET_KEY", previous_env.map(std::ffi::OsString::from));
+        let key_only = [("DBX_SECRET_KEY", std::ffi::OsString::from(env_key.as_str()))];
+        assert_eq!(resolve(false, &key_only).unwrap().source, SecretKeySource::ExplicitEnv);
     }
 
-    fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-        if let Some(value) = value {
-            std::env::set_var(name, value);
-        } else {
-            std::env::remove_var(name);
-        }
+    /// Environment lookup for [`SecretCodec::resolve_with_env`] that never
+    /// touches the process environment, so these tests cannot change the key
+    /// another test in the same binary resolves while they run.
+    fn explicit_env<'a>(
+        entries: &'a [(&'a str, std::ffi::OsString)],
+    ) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {
+        move |name| entries.iter().find(|(key, _)| *key == name).map(|(_, value)| value.clone())
     }
 }

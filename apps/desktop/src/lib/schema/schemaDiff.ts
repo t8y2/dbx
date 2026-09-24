@@ -46,9 +46,7 @@ export function databaseTypeToDialectKind(dbType: DatabaseType): string {
 }
 
 /** The connection fields the JDBC product inference reads. */
-export type SchemaDiffDialectConnection = Partial<
-  Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config" | "username">
->;
+export type SchemaDiffDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config" | "username">>;
 
 /**
  * Product type the schema-diff engine must treat a connection as.

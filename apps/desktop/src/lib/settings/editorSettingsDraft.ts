@@ -46,6 +46,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "tabSortMode",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
+  "showColumnHeaderTooltips",
   "showResultSourceDatabase",
   "dataGridShowTransposeFieldMetadata",
   "colorizeDataGridCellTypes",

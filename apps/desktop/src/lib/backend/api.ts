@@ -244,6 +244,7 @@ export const listOwners = forward("listOwners");
 export const getTableOwner = forward("getTableOwner");
 export const listExtensions = forward("listExtensions");
 export const listAvailableExtensions = forward("listAvailableExtensions");
+export const listEventTriggers = forward("listEventTriggers");
 export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
 export const generateSchemaSyncPlan = forward("generateSchemaSyncPlan");

@@ -145,6 +145,33 @@ pub struct ExtensionInfo {
     pub schema: Option<String>,
 }
 
+/// A PostgreSQL event trigger (`pg_event_trigger`). Event triggers fire on DDL
+/// commands at the database level, independent of any schema. This is distinct
+/// from MySQL events (`MysqlEventInfo`) and per-table triggers (`TriggerInfo`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventTriggerInfo {
+    pub name: String,
+    /// DDL event: ddl_command_start | ddl_command_end | sql_drop | table_rewrite.
+    pub event: String,
+    /// Owner role name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// `schema.function(args)` executed by the trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    /// Session replica status char: O | A | R | D.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<String>,
+    /// Command tags in the WHEN clause (NULL = all tags).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// `pg_get_eventtriggerdef` reconstruction of the CREATE statement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectStatistics {
     pub name: String,

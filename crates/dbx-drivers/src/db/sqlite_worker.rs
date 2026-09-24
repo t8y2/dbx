@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,6 +24,11 @@ const DEFAULT_PERSIST_DIR: &str = "~/.cache/dbx/sqlite-worker";
 const CONSENT_FILE_NAME: &str = "sqlite-worker-consent.json";
 const SQLITE_WORKER_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 static SQLITE_SSH_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(false);
+// ponytail: one mutex per host+path for the process lifetime. Opening a table
+// prewarms and queries at once; both used to `cat` the same `.part` and publish
+// a corrupt worker. Upgrade path: evict idle keys if the map ever matters.
+static SQLITE_WORKER_INSTALLS: std::sync::OnceLock<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
+    std::sync::OnceLock::new();
 
 pub fn sqlite_worker_chain_id(connection_id: &str) -> String {
     format!("{connection_id}:sqlite-worker")
@@ -401,6 +406,11 @@ pub async fn connect_sqlite_worker(
         ensure_remote_sqlite_file_exists(session.as_ref(), &expanded_db).await?;
         if placement != SqliteWorkerPlacement::Preplaced {
             ensure_worker_consent(data_dir, &identity, &remote_path, &digest).await?;
+        }
+        let _install = remote_worker_install_lock(&identity, &remote_path).await;
+        if placement != SqliteWorkerPlacement::Preplaced
+            && verify_remote_digest(session.as_ref(), &remote_path, &digest).await.is_err()
+        {
             upload_worker(session.as_ref(), &remote_path, &local_worker.bytes).await?;
         }
         verify_remote_digest(session.as_ref(), &remote_path, &digest).await?;
@@ -690,10 +700,27 @@ async fn remove_uploaded_session_worker(session: &Handle<SshClient>, path: &str)
     }
 }
 
-async fn upload_worker(session: &Handle<SshClient>, dest: &str, bytes: &[u8]) -> Result<(), String> {
+fn worker_upload_command(dest: &str, byte_len: usize) -> String {
     let quoted = shell_quote(dest);
-    let command =
-        format!("mkdir -p \"$(dirname {quoted})\" && cat > {quoted}.part && chmod 700 {quoted}.part && mv {quoted}.part {quoted}");
+    // Unique part file: two connects must not `cat` into the same path.
+    let part = shell_quote(&format!("{dest}.part-{}", uuid::Uuid::new_v4().simple()));
+    format!(
+        "mkdir -p \"$(dirname {quoted})\" && cat > {part} && test \"$(wc -c < {part})\" -eq {byte_len} && chmod 700 {part} && mv {part} {quoted}"
+    )
+}
+
+async fn remote_worker_install_lock(identity: &str, remote_path: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let key = format!("{identity}\n{remote_path}");
+    let installs = SQLITE_WORKER_INSTALLS.get_or_init(|| AsyncMutex::new(HashMap::new()));
+    let slot = {
+        let mut installs = installs.lock().await;
+        installs.entry(key).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
+    };
+    slot.lock_owned().await
+}
+
+async fn upload_worker(session: &Handle<SshClient>, dest: &str, bytes: &[u8]) -> Result<(), String> {
+    let command = worker_upload_command(dest, bytes.len());
     ssh_exec_with_stdin(session, command, bytes).await
 }
 
@@ -707,29 +734,41 @@ async fn ssh_exec_with_stdin<R: tokio::io::AsyncRead + Unpin>(
     channel.data(stdin).await.map_err(|e| e.to_string())?;
     channel.eof().await.map_err(|e| e.to_string())?;
     let mut exit_status = None;
+    let mut stderr = Vec::new();
     loop {
         match channel.wait().await {
             Some(ChannelMsg::ExitStatus { exit_status: status }) => exit_status = Some(status),
             Some(ChannelMsg::Close) | None => break,
-            Some(ChannelMsg::Eof | ChannelMsg::Data { .. } | ChannelMsg::ExtendedData { .. }) => {}
+            Some(ChannelMsg::ExtendedData { data, .. }) => stderr.extend_from_slice(data.as_ref()),
+            Some(ChannelMsg::Eof | ChannelMsg::Data { .. }) => {}
             Some(_) => {}
         }
     }
-    remote_exec_status(exit_status)
+    remote_exec_status(exit_status, &String::from_utf8_lossy(&stderr))
 }
 
-fn remote_exec_status(exit_status: Option<u32>) -> Result<(), String> {
+fn remote_exec_status(exit_status: Option<u32>, stderr: &str) -> Result<(), String> {
     match exit_status {
         Some(0) => Ok(()),
-        Some(code) => Err(format!("remote command exited with status {code}")),
-        None => Err("remote command closed without an exit status".to_string()),
+        Some(code) => Err(remote_command_failure(format!("remote command exited with status {code}"), stderr)),
+        None => Err(remote_command_failure("remote command closed without an exit status".to_string(), stderr)),
+    }
+}
+
+fn remote_command_failure(message: String, stderr: &str) -> String {
+    let detail = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    let detail = detail.chars().take(400).collect::<String>();
+    if detail.is_empty() {
+        message
+    } else {
+        format!("{message}: {detail}")
     }
 }
 
 fn validate_remote_download(copied: u64, exit_status: Option<u32>) -> Result<(), String> {
     // Check exit status first: a failed `cat` with empty output is better
     // explained by the nonzero status than by the emptiness it caused.
-    remote_exec_status(exit_status)?;
+    remote_exec_status(exit_status, "")?;
     if copied == 0 {
         return Err("Downloaded SQLite backup was empty".to_string());
     }
@@ -838,6 +877,28 @@ mod tests {
     #[test]
     fn sqlite_worker_chain_id_is_distinct_from_connection_id() {
         assert_eq!(sqlite_worker_chain_id("conn-1"), "conn-1:sqlite-worker");
+    }
+
+    #[test]
+    fn worker_upload_uses_a_private_part_file_and_checks_size() {
+        let command = worker_upload_command("/home/u/.cache/dbx/sqlite-worker/abc", 12);
+        assert!(command.contains("mkdir -p"));
+        assert!(command.contains(".part-"));
+        assert!(!command.contains(".part &&"));
+        assert!(command.contains("test \"$(wc -c < "));
+        assert!(command.contains("-eq 12"));
+        assert!(command.contains("&& mv "));
+        assert_ne!(worker_upload_command("/tmp/worker", 1), worker_upload_command("/tmp/worker", 1));
+    }
+
+    #[test]
+    fn remote_command_failure_keeps_stderr() {
+        assert_eq!(remote_exec_status(Some(0), "noise").unwrap(), ());
+        assert_eq!(
+            remote_exec_status(Some(1), "cannot execute binary file").unwrap_err(),
+            "remote command exited with status 1: cannot execute binary file"
+        );
+        assert!(remote_exec_status(None, "").unwrap_err().contains("without an exit status"));
     }
 
     #[test]

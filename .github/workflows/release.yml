@@ -703,6 +703,89 @@ jobs:
             Remove-Item -LiteralPath $workDir -Recurse -Force
           }
 
+  build-windows-7-static-browser:
+    needs: release-ready
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-win7-windows-msvc
+            arch: x86_64
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Setup Rust for Windows 7
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+
+      - name: Install NASM
+        run: choco install nasm -y --no-progress
+
+      - name: Add NASM to PATH
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "C:\Program Files\NASM"
+
+      - name: Build DBX for Windows 7 ${{ matrix.arch }}
+        shell: pwsh
+        run: |
+          cargo build --locked --package dbx-web --release --no-default-features --features embed-static,duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled --target ${{ matrix.target }} -Z build-std=std,panic_abort
+
+      - name: Audit Windows 7 PE imports
+        shell: pwsh
+        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/${{ matrix.target }}/release/dbx-web.exe
+
+      - name: Upload Windows portable ${{ matrix.arch }} ZIP
+        timeout-minutes: 20
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $arch = "${{ matrix.arch }}"
+          $portableRoot = "portable"
+          $portableDir = Join-Path $portableRoot "DBX_${version}_${arch}"
+          $zipName = "dbx-web_${version}_${arch}-browser-static.zip"
+          $zipSha256 = "dbx-web_${version}_${arch}-browser-static.zip.sha256"
+          $exePath = "target/${{ matrix.target }}/release/dbx-web.exe"
+
+          if (!(Test-Path $exePath)) {
+            Write-Error "Missing Windows executable: $exePath"
+            exit 1
+          }
+
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          Copy-Item $exePath (Join-Path $portableDir "dbx-web.exe") -Force
+          Copy-Item "LICENSE" (Join-Path $portableDir "LICENSE") -Force
+          Copy-Item "README.md" (Join-Path $portableDir "README.md") -Force
+          Copy-Item ".github\scripts\start-dbx-web.bat" (Join-Path $portableDir "start.bat") -Force
+
+          Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
+
+          $zip_sha256 = (Get-FileHash -LiteralPath $zipName -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path $zipSha256 -Value $zip_sha256 -Encoding utf8NoBOM
+
+          gh release upload "${env:GITHUB_REF_NAME}" $zipName $zipSha256 --repo "${env:GITHUB_REPOSITORY}" --clobber
+
   static-browser:
     # Fully static musl builds of the browser (dbx-web) variant. No glibc
     # dependency, so the tarball runs on any Linux distribution (verified in
@@ -799,7 +882,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           cargo zigbuild --release -p dbx-web --target ${{ matrix.target }} \
-            --no-default-features --features "duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled"
+            --no-default-features --features "embed-static,duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled"
 
       - name: Package static browser runtime
         env:
@@ -938,7 +1021,8 @@ jobs:
 
   publish:
     # Keep the release as a draft until every release-blocking platform job passes.
-    # Nix packaging is advisory and runs independently from publication.
+    # Nix packaging and the Windows 7 static-browser build are advisory and
+    # upload their release assets independently of publication.
     needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, static-browser]
     runs-on: ubuntu-latest
     steps:

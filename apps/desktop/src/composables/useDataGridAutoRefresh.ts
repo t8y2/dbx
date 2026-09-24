@@ -9,6 +9,10 @@ export interface UseDataGridAutoRefreshOptions {
 export function useDataGridAutoRefresh(options: UseDataGridAutoRefreshOptions) {
   const intervalSeconds = ref(options.initialIntervalSeconds ?? 10);
   const enabled = ref(false);
+  // Bumped whenever the countdown is (re)armed: when the timer is started and on
+  // every tick. The toolbar keys its single-sweep clock hand off this, so the
+  // sweep restarts in phase with the real timer instead of free-running.
+  const sweepKey = ref(0);
   let timer: ReturnType<typeof setInterval> | undefined;
 
   function stop() {
@@ -17,6 +21,9 @@ export function useDataGridAutoRefresh(options: UseDataGridAutoRefreshOptions) {
   }
 
   function tick() {
+    // The sweep restarts even when the refresh itself is skipped: the timer is
+    // still counting down to the next attempt.
+    sweepKey.value += 1;
     if (!enabled.value || !options.canRefresh.value) return;
     void options.refresh();
   }
@@ -24,6 +31,7 @@ export function useDataGridAutoRefresh(options: UseDataGridAutoRefreshOptions) {
   function start() {
     stop();
     if (!enabled.value) return;
+    sweepKey.value += 1;
     timer = setInterval(tick, intervalSeconds.value * 1000);
   }
 
@@ -43,6 +51,7 @@ export function useDataGridAutoRefresh(options: UseDataGridAutoRefreshOptions) {
   return {
     intervalSeconds,
     enabled,
+    sweepKey,
     start,
     stop,
     setIntervalSeconds,

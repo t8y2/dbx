@@ -45,8 +45,9 @@ vi.mock("./PluginWorkbenchHost.vue", () => ({
       contribution: { type: Object, required: true },
       context: { type: Object, default: undefined },
     },
-    setup(props) {
-      return () => h("div", { "data-workbench-host-stub": "" }, `${props.plugin.manifest.name} · ${props.contribution.label}`);
+    emits: ["open-workbench"],
+    setup(props, { emit }) {
+      return () => h("div", { "data-workbench-host-stub": "", onClick: () => emit("open-workbench", props.contribution.id, { commandId: "untrusted" }) }, `${props.plugin.manifest.name} · ${props.contribution.label}`);
     },
   }),
 }));
@@ -100,6 +101,19 @@ describe("PluginBottomDock workbench contribution guard", () => {
 
     expect(renderError).toBeUndefined();
     expect(root.querySelector("[data-workbench-host-stub]")?.textContent).toBe("Sample · Sample panel");
+  });
+
+  it("preserves host command provenance when a plugin opens a second session", async () => {
+    mocks.listPlugins.mockResolvedValue([installedPlugin("sample.panel")]);
+    const first = dock.addPluginDockEntry({ pluginId: "io.dbx.sample", workbenchContributionId: "sample.panel", kind: "command", commandId: "sample.open", instanceKey: "local", icon: "terminal", title: "Terminal" });
+    entryIds.push(first);
+    await mountDock();
+    (root.querySelector("[data-workbench-host-stub]") as HTMLElement).click();
+    const state = dock.usePluginBottomDock();
+    const second = state.entries.value.find((entry) => entry.id === state.activeEntryId.value)!;
+    entryIds.push(second.id);
+    expect(second.id).not.toBe(first);
+    expect(second).toMatchObject({ commandId: "sample.open", instanceKey: "local", icon: "terminal" });
   });
 
   it("degrades to an empty frame instead of crashing when the plugin no longer declares the entry's workbench contribution", async () => {

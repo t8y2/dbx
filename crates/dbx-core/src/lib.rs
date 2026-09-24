@@ -56,6 +56,7 @@ pub use data::mongodb_dump;
 pub use data::mongodb_import_export;
 pub use dbx_drivers::mongo_oidc;
 pub use dbx_drivers::mongo_shell;
+pub use dbx_drivers::salesforce_oauth;
 pub use dbx_formats::export_split_zip;
 pub use dbx_plugin_runtime::plugins;
 pub use dbx_sql::db_admin_sql;

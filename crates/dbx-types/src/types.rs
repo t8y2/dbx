@@ -145,6 +145,33 @@ pub struct ExtensionInfo {
     pub schema: Option<String>,
 }
 
+/// A PostgreSQL event trigger (`pg_event_trigger`). Event triggers fire on DDL
+/// commands at the database level, independent of any schema. This is distinct
+/// from MySQL events (`MysqlEventInfo`) and per-table triggers (`TriggerInfo`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventTriggerInfo {
+    pub name: String,
+    /// DDL event: ddl_command_start | ddl_command_end | sql_drop | table_rewrite.
+    pub event: String,
+    /// Owner role name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// `schema.function(args)` executed by the trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    /// Session replica status char: O | A | R | D.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<String>,
+    /// Command tags in the WHEN clause (NULL = all tags).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// `pg_get_eventtriggerdef` reconstruction of the CREATE statement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectStatistics {
     pub name: String,
@@ -482,6 +509,9 @@ pub struct QueryResult {
     /// completed statement cannot be correlated to one audit row.
     #[serde(default)]
     pub server_execute_time_us: Option<u64>,
+    /// Optional measured query phases in milliseconds; absent on older agents.
+    #[serde(default)]
+    pub query_timings_ms: Option<std::collections::BTreeMap<String, f64>>,
     #[serde(default)]
     pub truncated: bool,
     #[serde(default)]
@@ -523,6 +553,7 @@ impl Serialize for QueryResult {
             + usize::from(!self.spatial_values.is_empty())
             + usize::from(self.elasticsearch_raw_body.is_some())
             + usize::from(self.server_execute_time_us.is_some())
+            + usize::from(self.query_timings_ms.is_some())
             + usize::from(!self.messages.is_empty());
         let mut state = serializer.serialize_struct("QueryResult", field_count)?;
         state.serialize_field("columns", &self.columns)?;
@@ -539,6 +570,9 @@ impl Serialize for QueryResult {
         state.serialize_field("execution_time_ms", &self.execution_time_ms)?;
         if let Some(server_execute_time_us) = &self.server_execute_time_us {
             state.serialize_field("server_execute_time_us", server_execute_time_us)?;
+        }
+        if let Some(timings) = &self.query_timings_ms {
+            state.serialize_field("query_timings_ms", timings)?;
         }
         state.serialize_field("truncated", &self.truncated)?;
         state.serialize_field("session_id", &self.session_id)?;
@@ -1252,6 +1286,7 @@ mod tests {
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,

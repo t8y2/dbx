@@ -3,7 +3,7 @@
 import { createApp, nextTick, type App, type ComponentPublicInstance } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
-import type { MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { formatMarketplaceReleasedDate, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { COMPONENT_PLUGINS_UPDATED_EVENT, COMPONENT_UPDATES_CHANGED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 const mocks = vi.hoisted(() => ({
@@ -56,6 +56,9 @@ vi.mock("@/components/ui/tooltip", async () => {
   return { Tooltip: stub, TooltipContent: stub, TooltipTrigger: stub };
 });
 vi.mock("@/components/plugins/PluginIcon.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginIcon") }));
+// Shortcut preferences have their own component/store tests. Keep this batch
+// harness scoped to plugin mutations and their exact backend call counts.
+vi.mock("@/components/plugins/PluginShortcutSettings.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginShortcutSettings") }));
 
 import PluginContributionsPanel from "@/components/plugins/PluginContributionsPanel.vue";
 
@@ -63,6 +66,7 @@ type PanelState = {
   batchRunning: boolean;
   batchMode: boolean;
   marketplaceViewMode: "grid" | "list";
+  marketplaceSortMode: string;
   marketplaceRepositoryId: string;
   marketplaceListings: MarketplacePluginListing[];
   catalogResults: PluginRepositoryCatalogResult[];
@@ -780,5 +784,73 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0" });
     expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.batchSummary:{"success":1,"failed":0,"names":""}', 4000);
     expect(state.batchRunning).toBe(false);
+  });
+});
+
+describe("PluginContributionsPanel marketplace sort", () => {
+  const OLDEST = "2025-01-01T00:00:00Z";
+  const NEWEST = "2026-06-01T00:00:00Z";
+
+  // Name order (a.older, b.newer) is deliberately the opposite of date order, so the
+  // rendered order tells the two sort modes apart.
+  function datedCatalog(): PluginRepositoryCatalogResult {
+    const result = catalog("first", ["a.older", "b.newer"]);
+    const [older, newer] = result.catalog!.plugins;
+    older.versions[0].releasedAt = OLDEST;
+    newer.versions[0].releasedAt = NEWEST;
+    return result;
+  }
+
+  function renderedOrder(): string[] {
+    return [...host.querySelectorAll("article")].map((article) => (article.textContent?.includes("a.older") ? "a.older" : "b.newer"));
+  }
+
+  // The persisted sort mode is read during setup, so restoring it can only be observed
+  // by mounting again with localStorage already seeded.
+  async function remount(): Promise<void> {
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp(PluginContributionsPanel, { onPluginRuntimeReplaced: mocks.refreshPluginWorkbenches });
+    state = (app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } }).$.setupState;
+    await flushUi();
+    state.batchMode = true;
+    state.selectedPluginId = "a";
+    await nextTick();
+  }
+
+  it("restores the persisted mode on remount, shows the release date in both views, and persists changes", async () => {
+    mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([datedCatalog()]);
+    localStorage.setItem("dbx-plugin-marketplace-sort-mode", "recently-updated");
+    await remount();
+
+    expect(state.marketplaceSortMode).toBe("recently-updated");
+    expect(renderedOrder()).toEqual(["b.newer", "a.older"]);
+    const newestText = formatMarketplaceReleasedDate(NEWEST, "en");
+    const oldestText = formatMarketplaceReleasedDate(OLDEST, "en");
+    expect(newestText).not.toBe("");
+    expect(host.querySelectorAll("article")[0].textContent).toContain(newestText);
+    expect(host.querySelectorAll("article")[1].textContent).toContain(oldestText);
+
+    state.marketplaceViewMode = "list";
+    await nextTick();
+    expect(renderedOrder()).toEqual(["b.newer", "a.older"]);
+    expect(host.querySelectorAll("article")[0].textContent).toContain(newestText);
+    expect(host.querySelectorAll("article")[1].textContent).toContain(oldestText);
+
+    state.marketplaceSortMode = "name";
+    await flushUi();
+    expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
+    expect(localStorage.getItem("dbx-plugin-marketplace-sort-mode")).toBe("name");
+  });
+
+  it("falls back to name order when the stored sort mode is unknown", async () => {
+    mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([datedCatalog()]);
+    localStorage.setItem("dbx-plugin-marketplace-sort-mode", "not-a-mode");
+    await remount();
+
+    expect(state.marketplaceSortMode).toBe("name");
+    expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
   });
 });

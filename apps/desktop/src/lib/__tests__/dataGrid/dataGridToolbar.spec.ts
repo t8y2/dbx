@@ -27,6 +27,7 @@ function autoRefreshCapability(overrides: Partial<DataGridToolbarAutoRefreshCapa
     stopLabel: "Stop auto-refresh",
     enabled: false,
     intervalSeconds: 10,
+    sweepKey: 0,
     intervalOptions: [5, 10, 30],
     intervalLabel: (seconds) => `${seconds}s`,
     onToggle: vi.fn(),

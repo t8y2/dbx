@@ -34,6 +34,13 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");
+    // SOQL has no delimited identifiers and reads `"` as a string literal, so
+    // `SELECT * FROM "Account"` fails with MALFORMED_QUERY. Object and field API
+    // names always go out bare, and an org is a single scope: no schema qualifier.
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Salesforce), "Account"), "Account");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Salesforce), "First_Name__c"), "First_Name__c");
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Salesforce), "Account", None), "Account");
+    assert_eq!(qualified_table_name(Some(DatabaseType::Salesforce), Some("sales"), "Account"), "Account");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Spanner), "user`name"), "`user``name`");
     // ArgoDB shares the Hive-family dialect: backticks quote identifiers and
     // double quotes are string literals, and schemas qualify table names.

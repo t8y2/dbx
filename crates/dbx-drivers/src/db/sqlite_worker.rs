@@ -102,8 +102,15 @@ enum WorkerIo {
     Closed,
 }
 
-impl SqliteWorkerClient {
-    pub async fn query(&self, sql: &str, max_rows: Option<usize>) -> Result<QueryResult, String> {
+/// Holds the worker I/O lock so consecutive requests, such as the statements of
+/// one transaction, cannot interleave with other callers on the worker's single connection.
+pub struct SqliteWorkerSession<'a> {
+    client: &'a SqliteWorkerClient,
+    io: tokio::sync::MutexGuard<'a, WorkerIo>,
+}
+
+impl SqliteWorkerSession<'_> {
+    pub async fn query(&mut self, sql: &str, max_rows: Option<usize>) -> Result<QueryResult, String> {
         match self.roundtrip(WorkerOp::Query { sql: sql.to_string(), max_rows }).await? {
             WorkerBody::Ok { columns, column_types, rows, affected_rows, truncated, .. } => Ok(QueryResult {
                 columns: columns.unwrap_or_default(),
@@ -115,6 +122,7 @@ impl SqliteWorkerClient {
                 affected_rows: affected_rows.unwrap_or(0),
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: truncated.unwrap_or(false),
                 session_id: None,
                 has_more: false,
@@ -123,6 +131,47 @@ impl SqliteWorkerClient {
             }),
             WorkerBody::Err { error } => Err(error),
         }
+    }
+
+    async fn roundtrip(&mut self, op: WorkerOp) -> Result<WorkerBody, String> {
+        let id = self.client.next_id.fetch_add(1, Ordering::SeqCst);
+        let mut encoded = serde_json::to_vec(&WorkerRequest { id, op }).map_err(|e| e.to_string())?;
+        encoded.push(b'\n');
+        match &mut *self.io {
+            WorkerIo::Process { stdin, stdout, .. } => {
+                stdin.write_all(&encoded).await.map_err(|e| e.to_string())?;
+                stdin.flush().await.map_err(|e| e.to_string())?;
+                let mut line = String::new();
+                stdout.read_line(&mut line).await.map_err(|e| e.to_string())?;
+                parse_response(id, &line)
+            }
+            WorkerIo::Closed => Err("SQLite worker session is closed".to_string()),
+            WorkerIo::Ssh { stream, .. } => {
+                stream.write_all(&encoded).await.map_err(|e| e.to_string())?;
+                stream.flush().await.map_err(|e| e.to_string())?;
+                parse_response(id, &read_jsonl_line(stream).await?)
+            }
+        }
+    }
+}
+
+impl SqliteWorkerClient {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_test_stream(stream: impl AsyncRead + AsyncWrite + Send + Unpin + 'static) -> Self {
+        Self {
+            io: AsyncMutex::new(WorkerIo::Ssh { stream: BufReader::new(Box::pin(stream)) }),
+            next_id: AtomicU64::new(1),
+            ssh_session: None,
+            remove_remote_path: None,
+        }
+    }
+
+    pub async fn session(&self) -> SqliteWorkerSession<'_> {
+        SqliteWorkerSession { client: self, io: self.io.lock().await }
+    }
+
+    pub async fn query(&self, sql: &str, max_rows: Option<usize>) -> Result<QueryResult, String> {
+        self.session().await.query(sql, max_rows).await
     }
 
     pub async fn backup(&self, dest: &str) -> Result<(), String> {
@@ -208,25 +257,7 @@ impl SqliteWorkerClient {
     }
 
     async fn roundtrip(&self, op: WorkerOp) -> Result<WorkerBody, String> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let mut encoded = serde_json::to_vec(&WorkerRequest { id, op }).map_err(|e| e.to_string())?;
-        encoded.push(b'\n');
-        let mut io = self.io.lock().await;
-        match &mut *io {
-            WorkerIo::Process { stdin, stdout, .. } => {
-                stdin.write_all(&encoded).await.map_err(|e| e.to_string())?;
-                stdin.flush().await.map_err(|e| e.to_string())?;
-                let mut line = String::new();
-                stdout.read_line(&mut line).await.map_err(|e| e.to_string())?;
-                parse_response(id, &line)
-            }
-            WorkerIo::Closed => Err("SQLite worker session is closed".to_string()),
-            WorkerIo::Ssh { stream, .. } => {
-                stream.write_all(&encoded).await.map_err(|e| e.to_string())?;
-                stream.flush().await.map_err(|e| e.to_string())?;
-                parse_response(id, &read_jsonl_line(stream).await?)
-            }
-        }
+        self.session().await.roundtrip(op).await
     }
 }
 

@@ -1280,6 +1280,27 @@ describe("useDataGridExport prepared row statements", () => {
     expect(extractDataGridSelection).toHaveBeenNthCalledWith(2, expect.objectContaining({ rows: [[7, { name: "Ada", tags: ["admin"] }]] }));
   });
 
+  it("keeps JSON cell text in SQL requests when parsing would round large numbers", async () => {
+    const tableMeta: DataGridTableMeta = {
+      tableName: "events",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "int", is_nullable: false, is_primary_key: true },
+        { name: "payload", data_type: "json", is_nullable: true },
+      ],
+    };
+    const payload = '{"gameCategoryId":1968549762545291267,"name":"Ada"}';
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0, 1], columns: ["id", "payload"], rows: [[7, payload]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValue({ text: "copied", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 2 });
+    const state = createExportState(tableMeta, ["id", "payload"], matrix, [7, payload]);
+
+    await expect(state.copyWithExtractor("sql-inserts")).resolves.toBe(true);
+    await expect(state.copyWithExtractor("sql-updates")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenNthCalledWith(1, expect.objectContaining({ rows: [[7, payload]] }));
+    expect(extractDataGridSelection).toHaveBeenNthCalledWith(2, expect.objectContaining({ rows: [[7, payload]] }));
+  });
+
   it("resolves large-value previews before building an extractor request", async () => {
     const matrix: CellSelectionMatrix = {
       rowIndexes: [0],

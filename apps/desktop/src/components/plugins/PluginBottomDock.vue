@@ -184,6 +184,7 @@ function onPlusAction(value: string) {
       workbenchContributionId: entry.workbenchContributionId,
       kind: "command",
       commandId: command.id,
+      instanceKey: command.action.instance_key,
       title: option.label,
       icon: command.icon,
       commandContext: option.context ?? {},
@@ -203,6 +204,7 @@ function onPlusAction(value: string) {
       workbenchContributionId: entry.workbenchContributionId,
       kind: "connection",
       commandId: command.id,
+      instanceKey: command.action.instance_key,
       title: connection.name || connection.id,
       icon: activeCommand.value?.icon,
       commandContext: {
@@ -250,6 +252,9 @@ function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributi
     pluginId: entry.pluginId,
     workbenchContributionId: entry.workbenchContributionId,
     kind: "command",
+    commandId: entry.commandId,
+    instanceKey: entry.instanceKey,
+    icon: entry.icon,
     title: entry.title,
     commandContext: payload,
   });

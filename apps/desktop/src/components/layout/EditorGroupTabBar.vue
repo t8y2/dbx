@@ -131,6 +131,7 @@ const fixedTabsScroll = useTabScroll(fixedTabsRowRef);
 const regularTabsScroll = useTabScroll(regularTabsRowRef);
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
+const openTabTooltipId = ref<string | null>(null);
 // Drag suppression must survive pointerup: the browser fires click *after*
 // pointerup, so the flag is consumed by the click instead of being cleared
 // with the drag state. A fresh pointerdown always resets it.
@@ -912,6 +913,23 @@ const tabTooltipSide = computed(() => {
   if (!isVerticalLayout.value) return "bottom" as const;
   return settingsStore.editorSettings.tabPlacement === "left" ? ("right" as const) : ("left" as const);
 });
+function updateTabTooltipOpen(tabId: string, open: boolean) {
+  if (open) {
+    openTabTooltipId.value = tabId;
+  } else if (openTabTooltipId.value === tabId) {
+    openTabTooltipId.value = null;
+  }
+}
+
+function closeTabTooltip(tabId: string) {
+  if (openTabTooltipId.value === tabId) {
+    openTabTooltipId.value = null;
+  }
+}
+
+function isConnectionlessPluginTab(tab: QueryTab): boolean {
+  return (tab.mode === "plugin-workbench" || tab.mode === "plugin-filesystem") && !tab.connectionId;
+}
 
 /**
  * Drag visuals for a pill, ported from the legacy tab bar's tabDropStyle: the
@@ -1578,7 +1596,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                       @contextmenu="onContextMenu"
                       @transitionend.self="handleTabGroupTransitionEnd"
                     >
-                      <Tooltip>
+                      <Tooltip :open="openTabTooltipId === entry.tab.id" @update:open="updateTabTooltipOpen(entry.tab.id, $event)">
                         <TooltipTrigger as-child>
                           <div
                             class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
@@ -1596,6 +1614,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             :data-active-tab="isTabActive(entry.tab)"
                             :data-tab-id="entry.tab.id"
                             @pointerdown="handleTabPointerDown($event, entry.tab)"
+                            @mouseleave="closeTabTooltip(entry.tab.id)"
                             @click="handleTabClick(entry.tab)"
                             @dblclick="handleTabDoubleClick(entry.tab, $event)"
                             @mousedown.middle.prevent="closeTab(entry.tab)"
@@ -1638,7 +1657,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             </button>
                           </div>
                         </TooltipTrigger>
-                        <TooltipContent :side="tabTooltipSide" class="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 text-xs">
+                        <TooltipContent v-if="isConnectionlessPluginTab(entry.tab)" :side="tabTooltipSide" data-plugin-title-tooltip>
+                          {{ tabTitleText(entry.tab) }}
+                        </TooltipContent>
+                        <TooltipContent v-else :side="tabTooltipSide" class="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 text-xs">
                           <template v-for="line in tabTooltipLines(entry.tab, t)" :key="line.label">
                             <span class="whitespace-nowrap font-medium opacity-70">{{ line.label }}</span>
                             <span class="min-w-0 break-all">{{ line.value }}</span>
@@ -1650,29 +1672,34 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                 </template>
                 <template v-if="!section.pinned && showSpecialPageTabs">
                   <CustomContextMenu v-if="specialPageTabs?.pluginCenterOpen" :items="getSpecialPageTabMenuItems('pluginCenter')" v-slot="{ onContextMenu }">
-                    <div
-                      data-plugin-center-tab
-                      class="app-tab-pill group flex shrink-0 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                      :class="specialPageTabClass(!!specialPageTabs?.pluginCenterActive)"
-                      :style="specialPageTabStyle(!!specialPageTabs?.pluginCenterActive)"
-                      :data-active-tab="specialPageTabs?.pluginCenterActive"
-                      :title="t('toolbar.pluginCenter')"
-                      :aria-label="t('toolbar.pluginCenter')"
-                      :aria-pressed="!!specialPageTabs?.pluginCenterActive"
-                      role="button"
-                      tabindex="0"
-                      @click="emit('activate-plugin-center')"
-                      @keydown.enter.self.prevent="emit('activate-plugin-center')"
-                      @keydown.space.self.prevent="emit('activate-plugin-center')"
-                      @contextmenu="onContextMenu"
-                      @mousedown.middle.prevent="emit('close-plugin-center')"
-                    >
-                      <PlugZap class="h-3.5 w-3.5 shrink-0 text-violet-600 dark:text-violet-400" />
-                      <span v-if="!isTabBarCollapsed" class="min-w-0 flex-1 truncate">{{ t("toolbar.pluginCenter") }}</span>
-                      <button v-if="!isTabBarCollapsed" class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('common.close')" :title="t('common.close')" @click.stop="emit('close-plugin-center')">
-                        <X class="h-3 w-3" />
-                      </button>
-                    </div>
+                    <Tooltip :open="openTabTooltipId === 'special:plugin-center'" @update:open="updateTabTooltipOpen('special:plugin-center', $event)">
+                      <TooltipTrigger as-child>
+                        <div
+                          data-plugin-center-tab
+                          class="app-tab-pill group flex shrink-0 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
+                          :class="specialPageTabClass(!!specialPageTabs?.pluginCenterActive)"
+                          :style="specialPageTabStyle(!!specialPageTabs?.pluginCenterActive)"
+                          :data-active-tab="specialPageTabs?.pluginCenterActive"
+                          :aria-label="t('toolbar.pluginCenter')"
+                          :aria-pressed="!!specialPageTabs?.pluginCenterActive"
+                          role="button"
+                          tabindex="0"
+                          @mouseleave="closeTabTooltip('special:plugin-center')"
+                          @click="emit('activate-plugin-center')"
+                          @keydown.enter.self.prevent="emit('activate-plugin-center')"
+                          @keydown.space.self.prevent="emit('activate-plugin-center')"
+                          @contextmenu="onContextMenu"
+                          @mousedown.middle.prevent="emit('close-plugin-center')"
+                        >
+                          <PlugZap class="h-3.5 w-3.5 shrink-0 text-violet-600 dark:text-violet-400" />
+                          <span v-if="!isTabBarCollapsed" class="min-w-0 flex-1 truncate">{{ t("toolbar.pluginCenter") }}</span>
+                          <button v-if="!isTabBarCollapsed" class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('common.close')" :title="t('common.close')" @click.stop="emit('close-plugin-center')">
+                            <X class="h-3 w-3" />
+                          </button>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent :side="tabTooltipSide">{{ t("toolbar.pluginCenter") }}</TooltipContent>
+                    </Tooltip>
                   </CustomContextMenu>
                   <CustomContextMenu v-if="specialPageTabs?.settingsOpen" :items="getSpecialPageTabMenuItems('settings')" v-slot="{ onContextMenu }">
                     <div

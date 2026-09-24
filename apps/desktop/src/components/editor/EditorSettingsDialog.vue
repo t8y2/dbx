@@ -629,6 +629,7 @@ const completionTriggerModeDescription = computed(() => {
 });
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editShowWhitespace = ref(settingsStore.editorSettings.showWhitespace);
+const editDdlOpenMode = ref<EditorSettings["ddlOpenMode"]>(settingsStore.editorSettings.ddlOpenMode);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
 const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
 const editSqlSemanticDiagnosticsMode = ref<SqlSemanticDiagnosticsMode>(settingsStore.editorSettings.sqlSemanticDiagnosticsMode);
@@ -660,6 +661,7 @@ const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
+const editShowResultSourceDatabase = ref(settingsStore.editorSettings.showResultSourceDatabase);
 const editDataGridShowTransposeFieldMetadata = ref(settingsStore.editorSettings.dataGridShowTransposeFieldMetadata);
 const editColorizeDataGridCellTypes = ref(settingsStore.editorSettings.colorizeDataGridCellTypes);
 const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showIndexIndicatorsInHeader);
@@ -985,6 +987,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     completionTriggerMode: editCompletionTriggerMode.value,
     wordWrap: editWordWrap.value,
     showWhitespace: editShowWhitespace.value,
+    ddlOpenMode: editDdlOpenMode.value,
     vimModeEnabled: editVimModeEnabled.value,
     autoCloseBrackets: editAutoCloseBrackets.value,
     sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode.value,
@@ -1000,6 +1003,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     tabSortMode: editTabSortMode.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
+    showResultSourceDatabase: editShowResultSourceDatabase.value,
     dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata.value,
     colorizeDataGridCellTypes: editColorizeDataGridCellTypes.value,
     dataGridTypeColorSchemes: editDataGridTypeColorSchemes.value,
@@ -1628,6 +1632,7 @@ function syncEditorSettingsDraftFromStore() {
   editCompletionTriggerMode.value = settingsStore.editorSettings.completionTriggerMode;
   editWordWrap.value = settingsStore.editorSettings.wordWrap;
   editShowWhitespace.value = settingsStore.editorSettings.showWhitespace;
+  editDdlOpenMode.value = settingsStore.editorSettings.ddlOpenMode;
   editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
   editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
   editSqlSemanticDiagnosticsMode.value = settingsStore.editorSettings.sqlSemanticDiagnosticsMode;
@@ -1644,6 +1649,7 @@ function syncEditorSettingsDraftFromStore() {
   editTabSortMode.value = settingsStore.editorSettings.tabSortMode;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
+  editShowResultSourceDatabase.value = settingsStore.editorSettings.showResultSourceDatabase;
   editDataGridShowTransposeFieldMetadata.value = settingsStore.editorSettings.dataGridShowTransposeFieldMetadata;
   editColorizeDataGridCellTypes.value = settingsStore.editorSettings.colorizeDataGridCellTypes;
   editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(settingsStore.editorSettings.dataGridTypeColorSchemes);
@@ -1762,6 +1768,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen,
   wordWrap: editWordWrap,
   showWhitespace: editShowWhitespace,
+  ddlOpenMode: editDdlOpenMode,
   vimModeEnabled: editVimModeEnabled,
   autoCloseBrackets: editAutoCloseBrackets,
   sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode,
@@ -1776,6 +1783,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   tabSortMode: editTabSortMode,
   showColumnCommentsInHeader: editShowColumnCommentsInHeader,
   showColumnTypesInHeader: editShowColumnTypesInHeader,
+  showResultSourceDatabase: editShowResultSourceDatabase,
   dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata,
   colorizeDataGridCellTypes: editColorizeDataGridCellTypes,
   dataGridTypeColorSchemes: editDataGridTypeColorSchemes,
@@ -2231,6 +2239,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCompletionTriggerMode.value = DEFAULT_EDITOR_SETTINGS.completionTriggerMode;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
+    editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
     editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
     editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
@@ -2299,6 +2308,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     historyRetention.reset();
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
+    editShowResultSourceDatabase.value = DEFAULT_EDITOR_SETTINGS.showResultSourceDatabase;
     editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
     editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
     // Back to the built-in palette, but keep the user's saved schemes available.
@@ -2383,6 +2393,7 @@ function resetAllDefaults() {
   editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
+  editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
   editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
   editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
   editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
@@ -2732,6 +2743,10 @@ function setSidebarObjectDisplay(value: "grouped" | "simple") {
 
 function setRoutineSourceOpenMode(value: "query-tab" | "dialog") {
   editRoutineSourceOpenMode.value = value;
+}
+
+function setDdlOpenMode(value: unknown) {
+  if (value === "dialog" || value === "tab") editDdlOpenMode.value = value;
 }
 
 function setIconTheme(value: DesktopIconTheme) {
@@ -3456,6 +3471,7 @@ async function saveMcpPolicy(
       databaseScope: "all" | "selected" | "none";
       allowedDatabases: string[];
       databasePolicies: { databaseName: string; readOnly: boolean; allowDangerousSql: boolean }[];
+      allowSalesforceDml: boolean;
     }[];
     groupPolicies?: McpGroupPolicy[];
     queryTimeoutSecs?: number | null;
@@ -3644,6 +3660,14 @@ function onMcpGroupExecutionModeChange(groupId: string, mode: McpConnectionExecu
   void saveMcpPolicy({ groupPolicies });
 }
 
+// A connection rule is only worth persisting when it actually changes something: an
+// explicit execution mode, a narrowed database scope, a per-database override, or the
+// Salesforce DML opt-in. Rules that merely restate the inherited defaults are dropped so
+// the stored policy stays readable and keeps following later global changes.
+function mcpConnectionPolicyIsMeaningful(rule: McpConnectionPolicy): boolean {
+  return rule.executionModeConfigured || rule.databaseScope !== "all" || rule.databasePolicies.length > 0 || rule.allowSalesforceDml;
+}
+
 function onMcpConnectionExecutionModeChange(connectionId: string, mode: McpConnectionExecutionMode | "inherit") {
   if (mode === "high_risk_write" && !window.confirm(t("settings.mcpExecutionModeHighRiskConfirm"))) return;
   const existing = settingsStore.mcpGlobalPolicy.connectionPolicies.find((item) => item.connectionId === connectionId);
@@ -3667,8 +3691,38 @@ function onMcpConnectionExecutionModeChange(connectionId: string, mode: McpConne
     databaseScope: existing?.databaseScope ?? ("all" as const),
     allowedDatabases: existing?.allowedDatabases ?? [],
     databasePolicies: selectedMode.databasePolicies,
+    // Switching a connection to read-only silently revokes the DML opt-in, matching
+    // the backend's ceiling: an agent must never keep a write path it lost.
+    allowSalesforceDml: (existing?.allowSalesforceDml ?? false) && !selectedMode.readOnly,
   };
-  if (next.executionModeConfigured || next.databaseScope !== "all" || next.databasePolicies.length > 0) rules.push(next);
+  if (mcpConnectionPolicyIsMeaningful(next)) rules.push(next);
+  void saveMcpPolicy({ connectionPolicies: rules });
+}
+
+function onMcpConnectionSalesforceDmlChange(connectionId: string, allowed: boolean) {
+  const existing = settingsStore.mcpGlobalPolicy.connectionPolicies.find((item) => item.connectionId === connectionId);
+  if (allowed) {
+    // Read-only is a hard ceiling on the server too, so letting the box stay checked
+    // here would only advertise a write path that every prepare call then refuses.
+    const effectiveMode = mcpEffectiveExecutionMode(mcpInheritedGroupExecutionMode(connectionId), mcpConnectionExecutionMode(connectionId), "inherit");
+    if (effectiveMode === "read_only") {
+      toast(t("settings.mcpConnectionPolicyAllowSalesforceDmlReadOnlyBlocked"), 5000);
+      return;
+    }
+  }
+  const rules = settingsStore.mcpGlobalPolicy.connectionPolicies.filter((item) => item.connectionId !== connectionId);
+  const next: McpConnectionPolicy = {
+    connectionId,
+    readOnly: existing?.readOnly ?? false,
+    allowDangerousSql: existing?.allowDangerousSql ?? false,
+    executionModeConfigured: existing?.executionModeConfigured ?? false,
+    executionModePolicyVersion: existing?.executionModePolicyVersion ?? null,
+    databaseScope: existing?.databaseScope ?? "all",
+    allowedDatabases: existing?.allowedDatabases ?? [],
+    databasePolicies: existing?.databasePolicies ?? [],
+    allowSalesforceDml: allowed,
+  };
+  if (mcpConnectionPolicyIsMeaningful(next)) rules.push(next);
   void saveMcpPolicy({ connectionPolicies: rules });
 }
 
@@ -3688,7 +3742,7 @@ function onMcpDatabaseExecutionModeChange(connectionId: string, databaseName: st
     databasePolicies,
   };
   const rules = settingsStore.mcpGlobalPolicy.connectionPolicies.filter((item) => item.connectionId !== connectionId);
-  if (next.executionModeConfigured || next.databaseScope !== "all" || next.databasePolicies.length > 0) rules.push(next);
+  if (mcpConnectionPolicyIsMeaningful(next)) rules.push(next);
   void saveMcpPolicy({ connectionPolicies: rules });
 }
 
@@ -6327,6 +6381,22 @@ onUnmounted(() => {
 
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="editor-ddl-open-mode">{{ t("settings.ddlOpenMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.ddlOpenModeDescription") }}</p>
+                  </div>
+                  <Select :model-value="editDdlOpenMode" @update:model-value="setDdlOpenMode">
+                    <SelectTrigger id="editor-ddl-open-mode" class="h-8 w-36 shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="dialog">{{ t("settings.ddlOpenModeDialog") }}</SelectItem>
+                      <SelectItem value="tab">{{ t("settings.ddlOpenModeTab") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="editor-vim-mode">{{ t("settings.vimMode") }}</Label>
                     <p class="text-xs text-muted-foreground">
                       {{ t("settings.vimModeDescription") }}
@@ -7884,6 +7954,17 @@ onUnmounted(() => {
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="show-result-source-database">
+                      {{ t("settings.showResultSourceDatabase") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showResultSourceDatabaseDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="show-result-source-database" v-model="editShowResultSourceDatabase" />
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="data-grid-show-transpose-field-metadata">
                       {{ t("settings.dataGridShowTransposeFieldMetadata") }}
                     </Label>
@@ -9311,7 +9392,7 @@ LIMIT 100;</pre
                               <span class="flex w-full min-w-0 items-center gap-2">
                                 <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" :icon-path="provider.iconPath" />
                                 <span class="min-w-0 flex-1 truncate">{{ provider.label }}</span>
-                                <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] font-normal">{{ t("ai.jalapenoSponsored") }}</Badge>
+                                <Badge v-if="provider.badgeKey" variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] font-normal">{{ t(provider.badgeKey) }}</Badge>
                               </span>
                             </SelectItem>
                           </SelectGroup>
@@ -9896,6 +9977,7 @@ LIMIT 100;</pre
                           @update:scope="onMcpResourceScopeChange"
                           @set:group-policy="onMcpGroupExecutionModeChange"
                           @set:connection-policy="onMcpConnectionExecutionModeChange"
+                          @set:connection-salesforce-dml="onMcpConnectionSalesforceDmlChange"
                         />
                       </div>
                     </template>

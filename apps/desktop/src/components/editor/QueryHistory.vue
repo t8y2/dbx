@@ -17,6 +17,7 @@ import { hasHistoryDateRange, historyDateRangeIsValid, type HistoryDateRange } f
 import { HISTORY_ROW_HEIGHT, HISTORY_SCROLL_BUFFER, shouldVirtualizeHistory } from "@/lib/history/historyVirtualList";
 import { historyConnectionHasSelectedDatabase } from "@/lib/history/historySearch";
 import { historyEntrySource } from "@/lib/history/historyEntrySource";
+import { formatQueryDuration } from "@/lib/format/duration";
 import type { HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -356,7 +357,7 @@ function detailsRows(entry: HistoryEntry) {
     [t("history.detail.database"), entry.database || "-"],
     [t("history.detail.target"), entry.target || "-"],
     [t("history.detail.time"), formatFullTime(entry.executed_at)],
-    [t("history.detail.duration"), `${entry.execution_time_ms}ms`],
+    [t("history.detail.duration"), formatQueryDuration(entry.execution_time_ms)],
     [t("history.detail.affectedRows"), entry.affected_rows ?? "-"],
     [t("history.detail.rollback"), canRollbackHistoryEntry(entry) ? t("history.rollbackAvailable") : t("history.rollbackUnavailable")],
     [t("history.detail.status"), entry.success ? t("history.success") : t("history.failed")],
@@ -707,7 +708,7 @@ onBeforeUnmount(() => {
                   </span>
                 </span>
                 <span class="ml-auto shrink-0" :class="entry.success ? 'text-green-500' : 'text-red-500'">
-                  {{ entry.success ? `${entry.execution_time_ms}ms` : t("history.failed") }}
+                  {{ entry.success ? formatQueryDuration(entry.execution_time_ms) : t("history.failed") }}
                 </span>
               </div>
             </div>

@@ -14,6 +14,7 @@ const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
 const showDiagramDialog = ref(false);
 const showDocsDialog = ref(false);
+const showDataDictionaryDialog = ref(false);
 const showTableImportDialog = ref(false);
 const showMongoImportDialog = ref(false);
 const showMongoDatabaseDumpDialog = ref(false);
@@ -71,6 +72,10 @@ const diagramFocusTableNames = ref<string[]>([]);
 const docsPrefillConnectionId = ref("");
 const docsPrefillDatabase = ref("");
 const docsPrefillSchema = ref("");
+const dataDictionaryPrefillConnectionId = ref("");
+const dataDictionaryPrefillDatabase = ref("");
+const dataDictionaryPrefillSchema = ref("");
+const dataDictionaryPrefillTableNames = ref<string[]>([]);
 const tableImportPrefillConnectionId = ref("");
 const tableImportPrefillDatabase = ref("");
 const tableImportPrefillSchema = ref("");
@@ -242,6 +247,20 @@ export function useDialogSources() {
           // Clearing the source is what makes the dialog re-openable: setting
           // the same value twice would not re-trigger this watcher.
           connectionStore.docsSource = null;
+        }
+      },
+    );
+
+    watch(
+      () => connectionStore.dataDictionarySource,
+      (v) => {
+        if (v) {
+          dataDictionaryPrefillConnectionId.value = v.connectionId;
+          dataDictionaryPrefillDatabase.value = v.database;
+          dataDictionaryPrefillSchema.value = v.schema ?? "";
+          dataDictionaryPrefillTableNames.value = v.tableNames ?? [];
+          showDataDictionaryDialog.value = true;
+          connectionStore.dataDictionarySource = null;
         }
       },
     );
@@ -539,6 +558,7 @@ export function useDialogSources() {
     showSqlFileDialog,
     showDiagramDialog,
     showDocsDialog,
+    showDataDictionaryDialog,
     showTableImportDialog,
     showMongoImportDialog,
     showMongoDatabaseDumpDialog,
@@ -592,6 +612,10 @@ export function useDialogSources() {
     docsPrefillConnectionId,
     docsPrefillDatabase,
     docsPrefillSchema,
+    dataDictionaryPrefillConnectionId,
+    dataDictionaryPrefillDatabase,
+    dataDictionaryPrefillSchema,
+    dataDictionaryPrefillTableNames,
     tableImportPrefillConnectionId,
     tableImportPrefillDatabase,
     tableImportPrefillSchema,

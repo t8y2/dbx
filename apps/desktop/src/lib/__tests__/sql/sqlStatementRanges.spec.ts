@@ -1254,6 +1254,45 @@ COMMENT = '测试';`;
     expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([sql.slice(0, -1)]);
   });
 
+  it("keeps SQL Server table hints broken onto their own line with the host statement (#10098)", () => {
+    const sql = "SELECT u.id\nFROM users u\nWITH (NOLOCK)\nWHERE u.id = 1\nSELECT 2;";
+    const expected = "SELECT u.id\nFROM users u\nWITH (NOLOCK)\nWHERE u.id = 1";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual([expected, "SELECT 2"]);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "NOLOCK"), "sqlserver")?.sql.trim()).toBe(expected);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "WHERE"), "sqlserver")?.sql.trim()).toBe(expected);
+  });
+
+  it("keeps JOIN table hints broken onto their own line with the host statement", () => {
+    const sql = "SELECT *\nFROM a\nWITH (NOLOCK)\nJOIN b\nWITH (NOLOCK) ON a.id = b.id\nSELECT 2;";
+    const expected = "SELECT *\nFROM a\nWITH (NOLOCK)\nJOIN b\nWITH (NOLOCK) ON a.id = b.id";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual([expected, "SELECT 2"]);
+  });
+
+  it("keeps INSERT table hints broken onto their own line with the INSERT", () => {
+    const sql = "INSERT INTO t\nWITH (TABLOCK) (id)\nVALUES (1)\nSELECT 2;";
+    // INSERT ... SELECT keeps the source SELECT attached; the table-hint WITH
+    // must not open a soft statement of its own inside the INSERT.
+    const expected = "INSERT INTO t\nWITH (TABLOCK) (id)\nVALUES (1)\nSELECT 2";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual([expected]);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "TABLOCK"), "sqlserver")?.sql.trim()).toBe(expected);
+  });
+
+  it("still treats a line-start CTE WITH as a soft statement start", () => {
+    const sql = "SELECT 1\nWITH x AS (SELECT 2)\nSELECT * FROM x\nSELECT 3;";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 1", "WITH x AS (SELECT 2)\nSELECT * FROM x", "SELECT 3"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual(["SELECT 1", "WITH x AS (SELECT 2)\nSELECT * FROM x", "SELECT 3"]);
+  });
+
+  it("still treats WITH RECURSIVE as a soft statement start", () => {
+    const sql = "SELECT 1\nWITH RECURSIVE t AS (SELECT 2)\nSELECT * FROM t;";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["SELECT 1", "WITH RECURSIVE t AS (SELECT 2)\nSELECT * FROM t"]);
+  });
+
   it("keeps MySQL ALTER TABLE drop column clauses with the statement", () => {
     const sql = "ALTER TABLE t\n  DROP COLUMN a,\n  DROP COLUMN b;";
 

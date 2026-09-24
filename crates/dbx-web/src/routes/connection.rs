@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use dbx_core::connection::{
@@ -13,6 +13,10 @@ use dbx_core::nacos::config::{
 };
 use dbx_core::runtime_config::{
     release_runtime_config_on_disconnect, should_retain_runtime_config, TEST_PROBE_ID_PREFIX,
+};
+use dbx_core::salesforce_oauth::{
+    device_authorization_request, device_poll, password_grant_token, refresh_access_token, SfDeviceAuthorization,
+    SfDevicePoll, SfOauthParams, SfRefreshedToken, SfTokenSet,
 };
 use dbx_core::session_credentials::{PurposeSessionCredentialWriteToken, SessionCredentialWriteToken};
 use serde::{Deserialize, Serialize};
@@ -863,6 +867,87 @@ async fn remove_connection_pools_for_connection_ids(state: &WebState, connection
     for connection_id in connection_ids {
         state.app.remove_connection_pools_detached(connection_id).await;
     }
+}
+
+// ── Salesforce OAuth ──────────────────────────────────────────────
+//
+// Web mode does not have a system browser opener; the browser flow is refused
+// with a clear message pointing users at the device flow which works fine
+// headless. The device flow endpoints proxy directly into dbx-drivers.
+
+pub async fn salesforce_oauth_browser_authorize(
+    State(_state): State<Arc<WebState>>,
+    Json(_body): Json<SalesforceOauthParamsRequest>,
+) -> Result<Json<SfTokenSet>, AppError> {
+    Err(AppError::from("Browser OAuth is not available in web mode. Use the device code flow instead.".to_string()))
+}
+
+pub async fn salesforce_oauth_device_start(
+    State(_state): State<Arc<WebState>>,
+    Json(body): Json<SalesforceOauthParamsRequest>,
+) -> Result<Json<SfDeviceAuthorization>, AppError> {
+    device_authorization_request(&body.params).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn salesforce_oauth_device_poll(
+    State(_state): State<Arc<WebState>>,
+    Json(body): Json<SalesforceDevicePollRequest>,
+) -> Result<Json<SfDevicePoll>, AppError> {
+    device_poll(&body.params, &body.device_code, body.interval_secs).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn salesforce_oauth_refresh(
+    State(_state): State<Arc<WebState>>,
+    Json(body): Json<SalesforceRefreshRequest>,
+) -> Result<Json<SfRefreshedToken>, AppError> {
+    refresh_access_token(&body.params, &body.refresh_token).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn salesforce_oauth_password_login(
+    State(_state): State<Arc<WebState>>,
+    Json(body): Json<SalesforcePasswordLoginRequest>,
+) -> Result<Json<SfTokenSet>, AppError> {
+    password_grant_token(&body.params, &body.username, &body.password).await.map(Json).map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+pub struct SalesforceOauthParamsRequest {
+    pub params: SfOauthParams,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforceDevicePollRequest {
+    pub params: SfOauthParams,
+    #[serde(rename = "deviceCode")]
+    pub device_code: String,
+    #[serde(rename = "intervalSecs")]
+    pub interval_secs: u64,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforceRefreshRequest {
+    pub params: SfOauthParams,
+    #[serde(rename = "refreshToken")]
+    pub refresh_token: String,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforcePasswordLoginRequest {
+    pub params: SfOauthParams,
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforceCurrentUserQuery {
+    pub connection_id: String,
+}
+
+pub async fn salesforce_current_user(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SalesforceCurrentUserQuery>,
+) -> Result<Json<dbx_core::connection::SalesforceCurrentUser>, AppError> {
+    state.app.salesforce_current_user(&q.connection_id).await.map(Json).map_err(AppError::from)
 }
 
 #[cfg(test)]

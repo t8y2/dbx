@@ -685,6 +685,7 @@ fn execute_change_transaction(
             affected_rows: 0,
             execution_time_ms: started_at.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,

@@ -10,7 +10,7 @@ import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS,
 import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, isDataTabMetadataLifecycleStale, type DataTabOpenMode, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
-import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
@@ -354,7 +354,7 @@ export function useSidebarDataOpenRuntime() {
       }
 
       const metadataRefresh = shouldRefreshTableMeta && !deferTableMetaRefresh ? refreshTableMetaInBackground(tabId) : undefined;
-      if (!cachedTableMeta && (effectiveDbType === "mysql" || effectiveDbType === "postgres" || defaultSortMode !== "none")) {
+      if (!cachedTableMeta && (requiresEagerTableMetadataForDataOpen(effectiveDbType) || defaultSortMode !== "none")) {
         // No query is in flight yet, so deferred drivers can safely load metadata serially.
         if (deferTableMetaRefresh) await refreshTableMetaInBackground(tabId);
         await metadataRefresh;

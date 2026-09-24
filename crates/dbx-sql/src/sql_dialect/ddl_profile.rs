@@ -823,7 +823,7 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
         // Non-tabular / not applicable for relational CREATE TABLE
         Redis | MongoDb | DynamoDb | Elasticsearch | Easysearch | Solr | Meilisearch | Qdrant | Milvus | Weaviate
         | ChromaDb | Neo4j | Cassandra | Etcd | ZooKeeper | Nacos | Consul | InfluxDb3 | VictoriaMetrics
-        | MessageQueue | Mqtt | Hbase => conservative_ansi(db_type),
+        | MessageQueue | Mqtt | Hbase | Salesforce => conservative_ansi(db_type),
     }
 }
 

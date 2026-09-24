@@ -3,7 +3,13 @@
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import DdlScopeFixture from "./DdlDialog.legacyScope.fixture.vue";
+
+const ddlViewDialogSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/objects/DdlViewDialog.vue"), "utf8");
+const ddlTabContentSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/layout/ContentArea.vue"), "utf8");
+const editorGroupSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/layout/EditorGroup.vue"), "utf8");
 
 const mountedApps: App[] = [];
 
@@ -56,5 +62,36 @@ describe("DdlViewDialog legacy fallback selectors", () => {
     // never reaches it; the footer element is one level down and does get it.
     expect(content!.hasAttribute(scopeId!)).toBe(false);
     expect(footer!.hasAttribute(scopeId!)).toBe(true);
+  });
+
+  it("keeps the DDL dialog free of per-dialog legacy fallback rules", () => {
+    // The dialog content element is rendered through reka-ui's portal Teleport and
+    // never carries this component's scoped data-v attribute, so per-dialog rules
+    // are avoided entirely: width comes from the global sm:max-w-190 legacy entry
+    // and the footer layout from the global dialog-footer rule.
+    expect(ddlViewDialogSource).not.toContain("dbx-legacy-webview");
+    expect(ddlViewDialogSource).not.toContain("@media");
+    expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog flex min-h-0 flex-col overflow-hidden sm:max-w-190"');
+    expect(ddlViewDialogSource).toContain("ddlDisplayOriginal");
+    expect(ddlViewDialogSource).toContain("resizeDdlDialog");
+  });
+
+  it("keeps the dialog as the default and offers opening the DDL in a new tab", () => {
+    expect(ddlViewDialogSource).toContain('import { useQueryStore } from "@/stores/queryStore";');
+    expect(ddlViewDialogSource).toContain("queryStore.createTab(props.connectionId, props.database");
+    expect(ddlViewDialogSource).toContain("sourceView: true");
+    expect(ddlViewDialogSource).toContain('ddlOpenMode === "tab"');
+    expect(ddlViewDialogSource).toContain("ddlViewer = {");
+    expect(ddlViewDialogSource).toContain("updateEditorSettings({ ddlOpenMode: value })");
+    expect(ddlViewDialogSource).toContain('@click="openDdlInNewTab"');
+  });
+
+  it("renders DDL tabs read-only with only refresh and table-data actions", () => {
+    expect(editorGroupSource).toContain("!activeTab.value.ddlViewer");
+    expect(ddlTabContentSource).toContain('v-if="activeTab.ddlViewer" class="flex h-10');
+    expect(ddlTabContentSource).toContain('@click="refreshDdlViewer"');
+    expect(ddlTabContentSource).toContain('@click="viewDdlTableData"');
+    expect(ddlTabContentSource).toContain(':read-only="!!activeTab.ddlViewer"');
+    expect(ddlTabContentSource).toContain(':hide-execution-controls="!!activeTab.ddlViewer"');
   });
 });

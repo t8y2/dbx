@@ -455,7 +455,24 @@ For a table-scoped action, declare `menu: "table"`:
 }
 ```
 
-Clicking a connection item dispatches `contextMenu/<id>` with a non-secret connection summary (`{ id, dbType, name, database }`). Clicking a table item uses the same backend method and dispatches:
+A context-menu item can instead declare a host-handled Workbench action:
+
+```json
+{
+  "type": "context-menu",
+  "id": "vendor.example.generate",
+  "label": "Generate test data",
+  "menu": "table",
+  "action": {
+    "type": "open-workbench",
+    "workbench": "vendor.example.main"
+  }
+}
+```
+
+The `workbench` reference must identify a `workbench` contribution in the same plugin manifest. This declarative action is resolved by the host and does not invoke the plugin backend.
+
+For legacy entries without `action`, clicking a connection item dispatches `contextMenu/<id>` with the existing non-secret connection summary (`{ id, dbType, name, database }`) under `connection`. Clicking a table item uses the same backend method and dispatches:
 
 ```json
 {
@@ -468,7 +485,11 @@ Clicking a connection item dispatches `contextMenu/<id>` with a non-secret conne
 }
 ```
 
-`database` and `schema` are optional and are omitted when the selected database does not expose those scopes. The table context contains object identity only; it never contains credentials, connection strings, or raw connection configuration. The backend entrypoint is required; return `{ "message": "..." }` to surface a toast.
+`database` and `schema` are optional and are omitted when the selected database does not expose those scopes. The table context contains object identity only; it never contains credentials, connection strings, or raw connection configuration.
+
+For a declarative `open-workbench` action, DBX passes the current connection summary as Workbench context for `menu: "connection"`, and the stable `TableContext` object above directly as Workbench context for `menu: "table"` (without the backend `table` envelope). Connection context includes only `id`, `dbType`, `name`, and `database`; the host may also provide the standard `connectionId` for tab association. Neither path includes `host`, `port`, `username`, `password`, a connection string, or raw connection configuration. Reopening the same Workbench refreshes it with the latest invocation context.
+
+A backend entrypoint is required only for legacy context-menu entries without a declarative action. Their `{ "message": "..." }` result continues to surface as a toast.
 
 ### `filesystem-provider`
 

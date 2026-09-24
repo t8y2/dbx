@@ -104,6 +104,7 @@ import { buildSqlShortcutExecutionSql, enabledSqlShortcutActions, resolveSqlShor
 import { resolveSqlShortcutTableToken } from "@/lib/sql/sqlShortcutTableTarget";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
+import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
 
@@ -138,7 +139,9 @@ import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionReferenced
 const props = defineProps<QueryEditorProps>();
 
 function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
-  return props.syntaxDialect === "clickhouse" ? props.dialect : (props.syntaxDialect ?? props.dialect);
+  // clickhouse and soql ride the SQL editor but have no matching behavior dialect;
+  // fall back to the connection's dialect (undefined for Salesforce).
+  return props.syntaxDialect === "clickhouse" || props.syntaxDialect === "soql" ? props.dialect : (props.syntaxDialect ?? props.dialect);
 }
 
 function queryEditorSelectionLanguage(): "sql" | "text" {
@@ -1841,6 +1844,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         }),
         sqlBlockFoldService,
         drawSelection(),
+        editorClipboardLineEndingsExtension(EditorView),
         trimmedSelectionLayer(),
         selectionMatchOccurrences(),
         dropCursor(),

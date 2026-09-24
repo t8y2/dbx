@@ -117,6 +117,7 @@ const SQL_EXECUTION_TARGET_REGISTRY: Partial<Record<DatabaseType, SqlExecutionTa
   chromadb: { scope: "connection" },
   etcd: { scope: "connection" },
   zookeeper: { scope: "connection" },
+  salesforce: { scope: "connection" },
   doris: { supportsCatalog: true },
   starrocks: { supportsCatalog: true },
   "cloudflare-d1": { defaultDatabase: () => "main", allowDefaultWhenDatabaseListEmpty: true },

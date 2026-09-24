@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dispatch, findOne, mountComponent } from "@/components/grid/__tests__/vueHostHarness";
+import { dispatch, findAll, findOne, mountComponent } from "@/components/grid/__tests__/vueHostHarness";
 import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
 vi.mock("vue-i18n", () => ({
@@ -42,6 +42,12 @@ function connection(id: string): ConnectionConfig {
     username: "test",
     password: "",
   };
+}
+
+const DML_LABEL = "settings.mcpConnectionPolicyAllowSalesforceDml";
+
+function salesforceDmlCheckboxes(root: ReturnType<typeof mountComponent>["root"]) {
+  return findAll(root, (node) => node.type === "input" && node.props["aria-label"] === DML_LABEL);
 }
 
 const layout: SidebarLayout = {
@@ -167,5 +173,67 @@ describe("McpResourceScopePicker", () => {
     dispatch(modeButton(mounted.root, "all"), "click");
 
     expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe("McpResourceScopePicker Salesforce DML opt-in", () => {
+  const sfdc = { ...connection("c2"), db_type: "salesforce" } as unknown as ConnectionConfig;
+
+  function mountWithSalesforce(props: Record<string, unknown> = {}) {
+    const setDml = vi.fn();
+    const mounted = mountComponent(McpResourceScopePicker, {
+      layout,
+      connections: [connection("c1"), sfdc],
+      allowedGroupIds: [],
+      allowedConnectionIds: ["c1", "c2"],
+      "onSet:connection-salesforce-dml": setDml,
+      ...props,
+    });
+    return { mounted, setDml };
+  }
+
+  it("offers the write opt-in only on Salesforce connections", () => {
+    const { mounted } = mountWithSalesforce();
+
+    const checkboxes = salesforceDmlCheckboxes(mounted.root);
+    expect(checkboxes).toHaveLength(1);
+    expect(checkboxes[0].props.checked).toBe(false);
+  });
+
+  it("hides the opt-in until the connection is inside the exposed scope", async () => {
+    const { mounted } = mountWithSalesforce({ allowedConnectionIds: ["c1"] });
+    expect(salesforceDmlCheckboxes(mounted.root)).toHaveLength(0);
+
+    await mounted.setProps({ allowedConnectionIds: ["c1", "c2"] });
+    expect(salesforceDmlCheckboxes(mounted.root)).toHaveLength(1);
+  });
+
+  it("emits the connection id and the requested state", () => {
+    const { mounted, setDml } = mountWithSalesforce();
+
+    dispatch(salesforceDmlCheckboxes(mounted.root)[0], "change", { target: { checked: true } });
+
+    expect(setDml).toHaveBeenCalledWith("c2", true);
+  });
+
+  it("shows a persisted opt-in as checked and a read-only rule as off", () => {
+    const optedIn = mountWithSalesforce({
+      connectionPolicies: [{ connectionId: "c2", readOnly: false, allowDangerousSql: false, allowSalesforceDml: true }],
+    });
+    expect(salesforceDmlCheckboxes(optedIn.mounted.root)[0].props.checked).toBe(true);
+
+    // Read-only is a hard ceiling server-side, so the switch must not look enabled here.
+    const readOnly = mountWithSalesforce({
+      connectionPolicies: [{ connectionId: "c2", readOnly: true, allowDangerousSql: false, allowSalesforceDml: true }],
+    });
+    expect(salesforceDmlCheckboxes(readOnly.mounted.root)[0].props.checked).toBe(false);
+  });
+
+  it("does not emit while the policy controls are disabled", () => {
+    const { mounted, setDml } = mountWithSalesforce({ disabled: true });
+
+    dispatch(salesforceDmlCheckboxes(mounted.root)[0], "change", { target: { checked: true } });
+
+    expect(setDml).not.toHaveBeenCalled();
   });
 });

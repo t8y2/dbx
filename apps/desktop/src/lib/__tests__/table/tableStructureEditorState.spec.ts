@@ -31,6 +31,7 @@ import {
   structureColumnCommentsForCopy,
   structureColumnNamesForCopy,
   tableStructureIdentifierComparisonKey,
+  foldCreatedTableName,
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
@@ -213,6 +214,40 @@ describe("tableStructureEditorState", () => {
 
     const jdbcNames = new Set([tableStructureIdentifierComparisonKey("Foo", "jdbc", { unquotedIdentifierCase: "lower", quotedIdentifierCase: "mixed" })]);
     expect(jdbcNames.has(tableStructureIdentifierComparisonKey("foo", "jdbc", { unquotedIdentifierCase: "lower", quotedIdentifierCase: "mixed" }))).toBe(false);
+  });
+
+  describe("foldCreatedTableName", () => {
+    it("folds plain Oracle names to upper case and trims surrounding whitespace", () => {
+      expect(foldCreatedTableName("MyTable", "oracle")).toBe("MYTABLE");
+      expect(foldCreatedTableName("  MyTable  ", "oracle")).toBe("MYTABLE");
+      expect(foldCreatedTableName("order_items$", "oracle")).toBe("ORDER_ITEMS$");
+      expect(foldCreatedTableName("t#1", "oracle")).toBe("T#1");
+    });
+
+    it("keeps Oracle names that the DDL generator must quote unchanged", () => {
+      // A leading digit, spaces or special characters force quoting, and a
+      // quoted identifier keeps its exact spelling on the server.
+      expect(foldCreatedTableName("1MyTable", "oracle")).toBe("1MyTable");
+      expect(foldCreatedTableName("my table", "oracle")).toBe("my table");
+      expect(foldCreatedTableName("МойТable", "oracle")).toBe("МойТable");
+      expect(foldCreatedTableName("", "oracle")).toBe("");
+    });
+
+    it("folds plain Informix-family names to lower case and keeps quoted ones unchanged", () => {
+      expect(foldCreatedTableName("MyTable", "informix")).toBe("mytable");
+      expect(foldCreatedTableName("  MyTable  ", "informix")).toBe("mytable");
+      expect(foldCreatedTableName("_t1$", "informix")).toBe("_t1$");
+      expect(foldCreatedTableName("1MyTable", "informix")).toBe("1MyTable");
+      expect(foldCreatedTableName("my table", "informix")).toBe("my table");
+    });
+
+    it("preserves names exactly on dialects that quote new identifiers", () => {
+      for (const databaseType of ["postgres", "mysql", "sqlserver", "dameng", "oceanbase-oracle", undefined] as const) {
+        expect(foldCreatedTableName("MyTable", databaseType)).toBe("MyTable");
+        expect(foldCreatedTableName("  MyTable  ", databaseType)).toBe("MyTable");
+        expect(foldCreatedTableName("1MyTable", databaseType)).toBe("1MyTable");
+      }
+    });
   });
 
   it("keeps existing Oracle trigger drafts read-only until full source editing is available", () => {

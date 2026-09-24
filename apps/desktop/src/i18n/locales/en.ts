@@ -615,6 +615,11 @@ export default {
     exitAndUpdate: "Exit & Update",
     dockerUsersRun: "Docker users should run",
     toUpdate: "to update",
+    historyTab: "Older versions",
+    historyHint: "Back up your data before rolling back. Older versions may not be able to read data or credentials created by newer versions.",
+    historyPublishedOn: "Released {date}",
+    historyLoadFailed: "Failed to load older versions. Please try again later.",
+    historyLoadMore: "Load more",
   },
   pluginDock: {
     close: "Close terminal",

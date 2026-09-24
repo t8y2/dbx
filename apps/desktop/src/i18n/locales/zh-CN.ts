@@ -531,6 +531,11 @@ export default withEnglishFallback({
     exitAndUpdate: "退出并更新",
     dockerUsersRun: "Docker 用户请运行",
     toUpdate: "更新",
+    historyTab: "历史版本",
+    historyHint: "回退到旧版本前请先备份数据；旧版本可能无法读取新版本创建的数据或凭据。",
+    historyPublishedOn: "发布于 {date}",
+    historyLoadFailed: "加载历史版本失败，请稍后重试。",
+    historyLoadMore: "加载更多",
   },
   pluginDock: {
     close: "关闭终端",

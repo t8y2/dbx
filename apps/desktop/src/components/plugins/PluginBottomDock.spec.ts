@@ -121,7 +121,7 @@ describe("PluginBottomDock workbench contribution guard", () => {
     // guard the dock still fired a doomed invokePlugin(undefined) round trip
     // and warned on every picker open / entry switch.
     const plugin = installedPlugin("sample.panel");
-    plugin.manifest.contributions.push({
+    plugin.manifest.contributions!.push({
       type: "command",
       id: "sample.open",
       label: "Open sample",

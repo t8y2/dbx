@@ -4,9 +4,9 @@ import { createApp, defineComponent, h, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({ listPlugins: vi.fn() }));
+const mocks = vi.hoisted(() => ({ listPlugins: vi.fn(), invokePlugin: vi.fn() }));
 
-vi.mock("@/lib/backend/api", () => ({ listPlugins: mocks.listPlugins }));
+vi.mock("@/lib/backend/api", () => ({ listPlugins: mocks.listPlugins, invokePlugin: mocks.invokePlugin }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ locale: ref("en"), t: (key: string) => key }) }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [] }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
@@ -114,6 +114,32 @@ describe("PluginBottomDock workbench contribution guard", () => {
     entryIds.push(second.id);
     expect(second.id).not.toBe(first);
     expect(second).toMatchObject({ commandId: "sample.open", instanceKey: "local", icon: "terminal" });
+  });
+
+  it("skips the launch options fetch when the panel command has no options_action", async () => {
+    // options_action is optional on open-workbench panel commands; without the
+    // guard the dock still fired a doomed invokePlugin(undefined) round trip
+    // and warned on every picker open / entry switch.
+    const plugin = installedPlugin("sample.panel");
+    plugin.manifest.contributions!.push({
+      type: "command",
+      id: "sample.open",
+      label: "Open sample",
+      action: { type: "open-workbench", workbench: "sample.panel", presentation: "panel" },
+    });
+    mocks.listPlugins.mockResolvedValue([plugin]);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      entryIds.push(dock.addPluginDockEntry({ pluginId: "io.dbx.sample", workbenchContributionId: "sample.panel", kind: "command", commandId: "sample.open", title: "Sample terminal" }));
+      await mountDock();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(renderError).toBeUndefined();
+      expect(mocks.invokePlugin).not.toHaveBeenCalled();
+      expect(warnSpy.mock.calls.filter((call) => String(call[0]).includes("[DBX][plugin:dock]"))).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("degrades to an empty frame instead of crashing when the plugin no longer declares the entry's workbench contribution", async () => {

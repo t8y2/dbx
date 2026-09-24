@@ -36,8 +36,8 @@ use crate::types::{
     ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
     CompletionAssistantResponse, ConstraintInfo, CustomTypeDdl, CustomTypeDetails, CustomTypeDomainConstraint,
-    CustomTypeKind, CustomTypeMember, CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, ExtensionInfo,
-    ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo, PgPartitionBound,
+    CustomTypeKind, CustomTypeMember, CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, EventTriggerInfo,
+    ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo, PgPartitionBound,
     PgPartitionKind, PgPartitionNode, PgTablePartitioning, QueryMessage, QueryResult, RuleInfo, SchemaInfo,
     SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
@@ -9756,6 +9756,84 @@ pub async fn list_available_extensions(pool: &Pool) -> Result<Vec<ExtensionInfo>
             version: pg_row_try_string(row, 1),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
             schema: None,
+        })
+        .collect())
+}
+
+fn postgres_event_trigger_catalog_exists_sql() -> &'static str {
+    "SELECT EXISTS ( \
+       SELECT 1 FROM pg_catalog.pg_class c \
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+       WHERE n.nspname = 'pg_catalog' AND c.relname = 'pg_event_trigger' \
+     )"
+}
+
+async fn postgres_event_trigger_catalog_exists(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let row = postgres_query_one_cached(client, postgres_event_trigger_catalog_exists_sql(), &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(pg_row_try_bool(&row, 0).unwrap_or(false))
+}
+
+fn postgres_event_triggers_sql() -> &'static str {
+    "SELECT e.evtname, \
+       e.evtevent, \
+       COALESCE(r.rolname, '') AS owner, \
+       COALESCE(format('%I.%I(%s)', pn.nspname, p.proname, pg_get_function_identity_arguments(p.oid)), '') AS function, \
+       e.evtenabled::text AS enabled, \
+       e.evttags AS tags, \
+       obj_description(e.oid, 'pg_event_trigger') AS comment, \
+       pg_get_eventtriggerdef(e.oid) AS source \
+     FROM pg_catalog.pg_event_trigger e \
+     LEFT JOIN pg_catalog.pg_roles r ON r.oid = e.evtowner \
+     LEFT JOIN pg_catalog.pg_proc p ON p.oid = e.evtfoid \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace \
+     ORDER BY e.evtname"
+}
+
+fn postgres_event_triggers_sourceless_sql() -> &'static str {
+    "SELECT e.evtname, \
+       e.evtevent, \
+       COALESCE(r.rolname, '') AS owner, \
+       COALESCE(format('%I.%I(%s)', pn.nspname, p.proname, pg_get_function_arguments(p.oid)), '') AS function, \
+       e.evtenabled::text AS enabled, \
+       e.evttags AS tags, \
+       obj_description(e.oid, 'pg_event_trigger') AS comment, \
+       NULL::text AS source \
+     FROM pg_catalog.pg_event_trigger e \
+     LEFT JOIN pg_catalog.pg_roles r ON r.oid = e.evtowner \
+     LEFT JOIN pg_catalog.pg_proc p ON p.oid = e.evtfoid \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace \
+     ORDER BY e.evtname"
+}
+
+/// Lists PostgreSQL event triggers (`pg_event_trigger`). Event triggers are
+/// database-level objects, so the query takes no schema parameter. Stripped
+/// PostgreSQL-compatible kernels that lack the catalog report an empty list,
+/// and servers that expose the catalog without `pg_get_eventtriggerdef` fall
+/// back to a sourceless listing so the trigger identity is still visible.
+pub async fn list_event_triggers(pool: &Pool) -> Result<Vec<EventTriggerInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    if !postgres_event_trigger_catalog_exists(&client).await.unwrap_or(false) {
+        return Ok(Vec::new());
+    }
+    let rows = match postgres_query_cached(&client, postgres_event_triggers_sql(), &[]).await {
+        Ok(rows) => rows,
+        Err(primary_error) => postgres_query_cached(&client, postgres_event_triggers_sourceless_sql(), &[])
+            .await
+            .map_err(|fallback_error| format!("{primary_error}; sourceless fallback failed: {fallback_error}"))?,
+    };
+    Ok(rows
+        .iter()
+        .map(|row| EventTriggerInfo {
+            name: pg_row_try_string(row, 0),
+            event: pg_row_try_string(row, 1),
+            owner: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+            function: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
+            enabled: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
+            tags: row.try_get::<_, Option<Vec<String>>>(5).ok().flatten(),
+            comment: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
+            source: row.try_get::<_, Option<String>>(7).ok().flatten().filter(|s| !s.is_empty()),
         })
         .collect())
 }

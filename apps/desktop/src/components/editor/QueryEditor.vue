@@ -111,7 +111,7 @@ import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatch
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
-
+import { createSqlUnknownObjectHighlights, refreshSqlUnknownObjectHighlights } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 
@@ -122,18 +122,12 @@ import { addNextQueryEditorSelectionOccurrence, selectAllQueryEditorSelectionOcc
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
 import { createQueryEditorSelectionCaseShortcutBindings } from "@/lib/editor/queryEditorSelectionCaseShortcut";
-
 import { createQueryEditorExecutionShortcutBindings, createQueryEditorPostCompositionKeyGuard } from "@/lib/editor/queryEditorExecutionShortcut";
-
 import { supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
-
 import { queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
-
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-
 import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
-
 import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
 
 const props = defineProps<QueryEditorProps>();
@@ -160,6 +154,9 @@ const COMPLETION_ENTER_MAX_WAIT_MS = 125;
 const SQL_SIGNATURE_HELP_WINDOW_CHARS = 10_000;
 // Internal rollback switch: flip to false to route completion, diagnostics, and navigation through the legacy SQL context path.
 const SEMANTIC_SQL_COMPLETION_ENABLED = true;
+// Master switch for colouring table/column names that the connected database does not have.
+// There is no settings entry yet: flip this to false to turn the whole feature off.
+const SQL_UNKNOWN_OBJECT_HIGHLIGHT_ENABLED = true;
 
 const emit = defineEmits<{
   "update:modelValue": [value: string];
@@ -216,7 +213,8 @@ const sqlDriverProfile = computed(() => (props.connectionId ? connectionStore.ge
 const MAX_COMPLETION_TABLES = 200;
 const PRESTO_ON_DEMAND_TABLE_COMPLETION_MIN_PREFIX = 2;
 const PRESTO_ON_DEMAND_TABLE_COMPLETION_LIMIT = 20;
-
+const SQL_UNKNOWN_OBJECT_INITIAL_DELAY_MS = 900;
+const SQL_UNKNOWN_OBJECT_DEBOUNCE_MS = 600;
 const liveFontSize = ref(settingsStore.editorSettings.fontSize);
 const gestureStartFontSize = ref(settingsStore.editorSettings.fontSize);
 const isGestureZooming = ref(false);
@@ -1499,52 +1497,55 @@ async function expandSelectStar(target = selectStarExpansionTarget.value) {
   currentView.focus();
 }
 
-const { sqlErrorDecorationRange, sqlSemanticDecorationRanges, reconfigureDiagnostics, setSemanticDiagnostics, clearScheduledSemanticDiagnostics, invalidateSemanticDiagnosticsForDocumentChange, shouldSkipSqlSemanticDiagnostics, scheduleSemanticDiagnostics } = useQueryEditorDiagnostics({
-  props,
-  view,
-  settingsStore,
-  connectionStore,
-  sqlDriverProfile,
-  sqlStatementParameterOptions,
-  sqlBehaviorDialect,
-  semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED,
-  maxCompletionTables: MAX_COMPLETION_TABLES,
-  runtime: {
-    get setSqlDiagnosticsEffect() {
-      return codeMirrorRuntime.setSqlDiagnosticsEffect;
+const { sqlErrorDecorationRange, sqlSemanticDecorationRanges, reconfigureDiagnostics, setSemanticDiagnostics, clearScheduledSemanticDiagnostics, invalidateSemanticDiagnosticsForDocumentChange, shouldSkipSqlSemanticDiagnostics, scheduleSemanticDiagnostics, loadSqlUnknownObjectSpans } =
+  useQueryEditorDiagnostics({
+    props,
+    view,
+    settingsStore,
+    connectionStore,
+    sqlDriverProfile,
+    sqlStatementParameterOptions,
+    sqlBehaviorDialect,
+    queryEditorSelectionLanguage,
+    semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED,
+    maxCompletionTables: MAX_COMPLETION_TABLES,
+    unknownObjectHighlightEnabled: SQL_UNKNOWN_OBJECT_HIGHLIGHT_ENABLED,
+    runtime: {
+      get setSqlDiagnosticsEffect() {
+        return codeMirrorRuntime.setSqlDiagnosticsEffect;
+      },
+      get diagnosticComp() {
+        return codeMirrorRuntime.diagnosticComp;
+      },
+      get buildSqlDiagnosticExtension() {
+        return codeMirrorRuntime.buildSqlDiagnosticExtension;
+      },
+      get codeMirrorCompletionStatus() {
+        return codeMirrorRuntime.codeMirrorCompletionStatus;
+      },
+      get executableStatementRangeCache() {
+        return executableStatementRangeCache;
+      },
+      set executableStatementRangeCache(value) {
+        executableStatementRangeCache = value;
+      },
+      get editorIsActive() {
+        return editorIsActive;
+      },
     },
-    get diagnosticComp() {
-      return codeMirrorRuntime.diagnosticComp;
+    metadata: {
+      get cachedTables() {
+        return completionMetadata.cachedTables;
+      },
+      cachedColumnsByTable,
+      loadedColumnsByTable,
+      usesOracleSessionCompletionColumns,
+      findExactSemanticDiagnosticTable,
+      completionCacheKey,
+      ensureColumnsForTable,
+      isMissingTableMetadataError,
     },
-    get buildSqlDiagnosticExtension() {
-      return codeMirrorRuntime.buildSqlDiagnosticExtension;
-    },
-    get codeMirrorCompletionStatus() {
-      return codeMirrorRuntime.codeMirrorCompletionStatus;
-    },
-    get executableStatementRangeCache() {
-      return executableStatementRangeCache;
-    },
-    set executableStatementRangeCache(value) {
-      executableStatementRangeCache = value;
-    },
-    get editorIsActive() {
-      return editorIsActive;
-    },
-  },
-  metadata: {
-    get cachedTables() {
-      return completionMetadata.cachedTables;
-    },
-    cachedColumnsByTable,
-    loadedColumnsByTable,
-    usesOracleSessionCompletionColumns,
-    findExactSemanticDiagnosticTable,
-    completionCacheKey,
-    ensureColumnsForTable,
-    isMissingTableMetadataError,
-  },
-});
+  });
 
 async function formatCurrentSql() {
   if (props.readOnly) return;
@@ -1872,6 +1873,12 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         Prec.highest(keymap.of([{ key: "Space", run: acceptSqlServerCompletionOnSpace }])),
         initializedRuntime.sqlLanguageComp.of(sqlExtensions.buildSqlLanguageExtension()),
         initializedRuntime.sqlSemanticHighlightComp.of(sqlExtensions.buildSqlSemanticHighlightExtension()),
+        createSqlUnknownObjectHighlights({
+          enabled: SQL_UNKNOWN_OBJECT_HIGHLIGHT_ENABLED,
+          load: loadSqlUnknownObjectSpans,
+          initialDelayMs: SQL_UNKNOWN_OBJECT_INITIAL_DELAY_MS,
+          debounceMs: SQL_UNKNOWN_OBJECT_DEBOUNCE_MS,
+        }),
         tooltips({ parent: tooltipParent }),
         initializedRuntime.completionComp.of(sqlExtensions.buildSqlCompletionExtension()),
         sqlCompletionTheme(EditorView),
@@ -2495,6 +2502,7 @@ function resumeQueryEditorBackgroundWork() {
   editorIsActive = true;
   registerTableReferenceDropListener();
   scheduleSemanticDiagnostics();
+  view.value?.dispatch({ effects: [refreshSqlUnknownObjectHighlights.of(null)] });
   // Warm the database driver/pool while the user is still reading or typing, so
   // the first Run does not pay pool creation or external-driver startup.
   warmActiveTabConnection();

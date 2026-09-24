@@ -9358,6 +9358,8 @@ export default withEnglishFallback({
     shortcutLowercaseSelection: "Преобразовать выделенное в нижний регистр",
     shortcutConvertNamingStyle: "Переключить стиль именования",
     shortcutExPasteSqlInCondition: "ExPaste: вставить как условие IN",
+    showColumnHeaderTooltips: "Всплывающие подсказки при наведении на имена полей",
+    showColumnHeaderTooltipsDescription: "Показывать подробную всплывающую подсказку при наведении курсора на имя поля в заголовке результатов; после отключения всплывающая подсказка при наведении больше не появляется.",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

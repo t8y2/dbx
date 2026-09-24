@@ -62,6 +62,56 @@ describe("useDataGridColumnResize", () => {
     clearDataGridColumnWidthStates();
   });
 
+  it("fits every visible column to its content when auto fitting the whole grid", () => {
+    const longText = "x".repeat(300);
+    const state = createResizeState({
+      columns: ["id", "note"],
+      rows: [
+        [1, longText],
+        [2, longText],
+      ],
+    });
+
+    state.initColumnWidths();
+    const before = state.renderedColumnWidths.value.slice();
+    expect(Math.max(...before)).toBeLessThan(DATA_GRID_COL_AUTO_FIT_MAX_WIDTH);
+
+    state.autoFitAllColumns();
+
+    const after = state.renderedColumnWidths.value;
+    // The long text column now uses the full auto-fit allowance instead of the
+    // density value limit that bounds the default grow-only sizing.
+    expect(after[1]).toBeGreaterThan(before[1]!);
+    expect(after[1]).toBeLessThanOrEqual(DATA_GRID_COL_AUTO_FIT_MAX_WIDTH);
+    expect(after[0]).toBeGreaterThanOrEqual(DATA_GRID_COL_MIN_WIDTH);
+    expect(after.length).toBe(before.length);
+  });
+
+  it("keeps auto fitted widths when the grid re-initialises for the same columns", () => {
+    const longText = "y".repeat(220);
+    const state = createResizeState({
+      columns: ["id", "note", "extra"],
+      rows: [[1, longText, "short"]],
+    });
+
+    state.initColumnWidths();
+    state.autoFitAllColumns();
+    const fitted = state.renderedColumnWidths.value.slice();
+
+    state.initColumnWidths();
+
+    expect(state.renderedColumnWidths.value).toEqual(fitted);
+  });
+
+  it("does not change any width when the grid has no columns yet", () => {
+    const state = createResizeState({ columns: [], rows: [] });
+
+    state.initColumnWidths();
+    state.autoFitAllColumns();
+
+    expect(state.renderedColumnWidths.value).toEqual([]);
+  });
+
   it("keeps compact query result columns at content width instead of filling the viewport", () => {
     const state = createResizeState({
       columns: ["id", "user_id"],

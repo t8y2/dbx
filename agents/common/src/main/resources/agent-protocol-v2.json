@@ -30,6 +30,8 @@
     "list_constraints",
     "list_partitions",
     "list_subpartitions",
+    "get_table_partition_status",
+    "get_table_partitioning",
     "execute_query",
     "execute_query_page",
     "fetch_query_page",

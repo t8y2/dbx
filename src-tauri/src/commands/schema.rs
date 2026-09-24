@@ -388,6 +388,16 @@ pub async fn get_columns(
     .await
 }
 
+/// Read-only Plugin Host API over the existing connection. The core function
+/// performs the open-connection gate before entering the ordinary metadata path.
+#[tauri::command]
+pub async fn get_plugin_table_metadata(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::schema::plugin_metadata::PluginTableContext,
+) -> Result<dbx_core::schema::plugin_metadata::PluginTableMetadata, String> {
+    dbx_core::schema::plugin_metadata::get_table_metadata(&state, request).await
+}
+
 #[tauri::command]
 pub async fn get_all_columns(
     state: State<'_, Arc<AppState>>,
@@ -543,6 +553,17 @@ pub async fn list_invalid_indexes(
     table: String,
 ) -> Result<Vec<String>, String> {
     dbx_core::schema::list_invalid_indexes_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn get_table_partitioning(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<dbx_core::db::PgTablePartitioning, String> {
+    dbx_core::schema::get_table_partitioning_core(&state, &connection_id, &database, &schema, &table).await
 }
 
 #[tauri::command]

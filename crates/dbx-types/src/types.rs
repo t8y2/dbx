@@ -145,12 +145,36 @@ pub struct ExtensionInfo {
     pub schema: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectStatistics {
     pub name: String,
     pub schema: Option<String>,
     pub estimated_rows: Option<i64>,
     pub total_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_row_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_data_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_increment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_free: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,6 +205,26 @@ pub struct ObjectSource {
     pub editable: Option<bool>,
 }
 
+/// Provenance for structured metadata fields that are optional in [`ColumnInfo`].
+/// This stays internal to the metadata mapping path and is not serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnMetadataCapabilities {
+    pub default: bool,
+    pub length: bool,
+    pub precision: bool,
+    pub scale: bool,
+}
+
+impl ColumnMetadataCapabilities {
+    pub const fn all_supported() -> Self {
+        Self { default: true, length: true, precision: true, scale: true }
+    }
+
+    pub const fn default_only() -> Self {
+        Self { default: true, length: false, precision: false, scale: false }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ColumnInfo {
     pub name: String,
@@ -203,6 +247,8 @@ pub struct ColumnInfo {
     pub character_set: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collation: Option<String>,
+    #[serde(skip)]
+    pub metadata_capabilities: Option<ColumnMetadataCapabilities>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,10 +391,13 @@ impl SpatialColumnBuilder {
         }
     }
 
-    pub fn finish(self) -> Vec<SpatialColumn> {
+    fn finish(self) -> Vec<SpatialColumn> {
         self.columns.into_iter().map(|(column_index, srid)| SpatialColumn { column_index, srid }).collect()
     }
 
+    /// Drivers collect one SRID slot per cell while streaming rows; a result
+    /// without spatial columns drops that all-`None` matrix instead of sending
+    /// it to every consumer.
     pub fn finish_with_values(
         self,
         spatial_values: Vec<Vec<Option<u32>>>,
@@ -713,6 +762,100 @@ pub struct SubpartitionInfo {
     pub value: String,
     pub partition_type: String,
     pub partition_key: String,
+}
+
+/// PostgreSQL declarative partitioning strategy (`pg_partitioned_table.partstrat`:
+/// `r` = range, `l` = list, `h` = hash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PgPartitionKind {
+    Range,
+    List,
+    Hash,
+}
+
+/// Structured form of a partition's `pg_get_expr(relpartbound)` definition.
+///
+/// Values are kept as SQL literal text (`'2024-01-01'`, `1`, `MINVALUE`,
+/// `MAXVALUE`, `'a'`) so the UI can round-trip exactly what PostgreSQL
+/// reported without re-typing or re-quoting them client-side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PgPartitionBound {
+    Range { from: Vec<String>, to: Vec<String> },
+    List { values: Vec<String> },
+    Hash { modulus: i32, remainder: i32 },
+    Default,
+}
+
+/// One relation in a PostgreSQL partition hierarchy, as returned by
+/// `get_table_partitioning_core`. `children` is nested to the same depth as
+/// the catalog's partition tree (PG supports multi-level partitioning).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PgPartitionNode {
+    pub schema: String,
+    pub name: String,
+    /// Set only when this node is itself a partitioned parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<PgPartitionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_definition: Option<String>,
+    /// This node's own partition bound (set for every non-root node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<PgPartitionBound>,
+    /// Raw `pg_get_expr(relpartbound)` text; retained as a display fallback
+    /// when `bound` could not be parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_definition: Option<String>,
+    #[serde(default)]
+    pub is_leaf: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_estimate: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<i64>,
+    #[serde(default)]
+    pub children: Vec<PgPartitionNode>,
+}
+
+/// Structured partitioning view of one PostgreSQL relation, used by the table
+/// structure editor's "Partitions" tab. Works for the partitioned parent
+/// (`is_partitioned`), for a member partition (`is_partition`), and reports
+/// the whole subtree rooted at the requested relation either way.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PgTablePartitioning {
+    pub is_partitioned: bool,
+    pub is_partition: bool,
+    /// Display form `"schema.table"` of the owning parent, when this relation
+    /// is itself a partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Parent parts, kept separate so a dotted identifier cannot be mis-split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_bound: Option<PgPartitionBound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<PgPartitionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_definition: Option<String>,
+    #[serde(default)]
+    pub key_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_expression: Option<String>,
+    /// Name of the default partition, when the parent has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_partition: Option<String>,
+    /// Descendant partitions (the root itself is not included).
+    #[serde(default)]
+    pub partitions: Vec<PgPartitionNode>,
+    /// Server version (`current_setting('server_version_num')`), used by the UI
+    /// to gate `DETACH PARTITION CONCURRENTLY` (PostgreSQL 14+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version_num: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

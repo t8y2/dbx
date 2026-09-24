@@ -110,6 +110,7 @@ const SQL_EXECUTION_TARGET_REGISTRY: Partial<Record<DatabaseType, SqlExecutionTa
   elasticsearch: { scope: "connection" },
   easysearch: { scope: "connection" },
   meilisearch: { scope: "connection" },
+  solr: { scope: "connection" },
   qdrant: { scope: "connection" },
   milvus: { scope: "connection" },
   weaviate: { scope: "connection" },

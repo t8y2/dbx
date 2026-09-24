@@ -269,7 +269,9 @@ fn write_extraction(
                 include_column_header: extractor == DataGridExtractorId::TsvWithHeaders,
                 ..context.request.options.dsv.clone()
             };
-            write_dsv(context, output, &options)?;
+            // TSV is split on the tab separator with no quote state machine, so a
+            // value that merely contains a double quote must not be escaped.
+            write_dsv(context, output, &options, false)?;
             Ok(text_metadata("text/tab-separated-values", "tsv"))
         }
         DataGridExtractorId::Csv | DataGridExtractorId::CsvWithHeaders => {
@@ -278,17 +280,17 @@ fn write_extraction(
                 include_column_header: extractor == DataGridExtractorId::CsvWithHeaders,
                 ..context.request.options.dsv.clone()
             };
-            write_dsv(context, output, &options)?;
+            write_dsv(context, output, &options, true)?;
             Ok(text_metadata("text/csv", "csv"))
         }
         DataGridExtractorId::PipeSeparated => {
             let options =
                 DataGridDsvOptions { column_separator: "|".to_string(), ..context.request.options.dsv.clone() };
-            write_dsv(context, output, &options)?;
+            write_dsv(context, output, &options, false)?;
             Ok(text_metadata("text/plain", "txt"))
         }
         DataGridExtractorId::Dsv => {
-            write_dsv(context, output, &context.request.options.dsv)?;
+            write_dsv(context, output, &context.request.options.dsv, true)?;
             Ok(text_metadata("text/plain", "txt"))
         }
         DataGridExtractorId::OneRow => {

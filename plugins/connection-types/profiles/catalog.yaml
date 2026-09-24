@@ -137,6 +137,13 @@ profiles:
     port: 9200
     user: ""
     category: document
+  - id: solr
+    dbType: solr
+    label: Apache Solr
+    icon: solr
+    port: 8983
+    user: ""
+    category: document
   - id: meilisearch
     dbType: meilisearch
     label: Meilisearch

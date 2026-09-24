@@ -1,6 +1,7 @@
 import { classifyElasticsearchRequestRisk, classifyElasticsearchSourceRisk, type ElasticsearchRequestRisk } from "@/lib/elasticsearch/elasticsearchRequestRisk";
+import { classifySolrRequestRisk, classifySolrSourceRisk } from "@/lib/solr/solrRequestRisk";
 import { mongoAggregateWriteStage, splitMongoCommandRanges, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
-import { isElasticsearchCompatibleDatabaseType, type DatabaseType } from "@/types/database";
+import { isElasticsearchCompatibleDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 
 export type SqlRiskLevel = "read" | "write" | "ddl" | "transaction" | "unknown";
 
@@ -54,7 +55,7 @@ export function classifySqlRisk(sql: string, options: SqlRiskOptions = {}): SqlR
 
   // REST requests carry a JSON body that must not be split on semicolons, and
   // every request in the text is classified so the highest risk wins.
-  const searchEngineRisk = searchEngineAssessment(sql, options.dialect, classifyElasticsearchSourceRisk);
+  const searchEngineRisk = searchEngineAssessment(sql, options.dialect, { elasticsearch: classifyElasticsearchSourceRisk, solr: classifySolrSourceRisk });
   if (searchEngineRisk) return { ...searchEngineRisk, statements: [searchEngineRisk] };
 
   const statements = splitSqlStatementsForSafety(sql).map((statement) => classifySqlStatementRisk(statement, options));
@@ -69,7 +70,7 @@ export function classifySqlStatementRisk(sql: string, options: SqlRiskOptions = 
 
   const dynamodbRisk = classifyDynamoDbStatementRisk(sql, options.dialect);
   if (dynamodbRisk) return dynamodbRisk;
-  const searchEngineRisk = searchEngineAssessment(sql, options.dialect, classifyElasticsearchRequestRisk);
+  const searchEngineRisk = searchEngineAssessment(sql, options.dialect, { elasticsearch: classifyElasticsearchRequestRisk, solr: classifySolrRequestRisk });
   if (searchEngineRisk) return searchEngineRisk;
   return classifyTokens(tokenizeSqlForRisk(sql));
 }
@@ -85,9 +86,11 @@ export function classifySqlStatementRisk(sql: string, options: SqlRiskOptions = 
  * is a schema change, ...), which a request path does not carry. Reporting
  * `rest` keeps REST mutations as opaque as they were before this branch existed.
  */
-function searchEngineAssessment(sql: string, dialect: DatabaseType | string | undefined, classify: (value: string) => ElasticsearchRequestRisk | null): SqlRiskStatementAssessment | null {
-  if (!isElasticsearchCompatibleDatabaseType(dialect as DatabaseType | undefined)) return null;
-  const risk = classify(sql);
+function searchEngineAssessment(sql: string, dialect: DatabaseType | string | undefined, classify: { elasticsearch: (value: string) => ElasticsearchRequestRisk | null; solr: (value: string) => ElasticsearchRequestRisk | null }): SqlRiskStatementAssessment | null {
+  const databaseType = dialect as DatabaseType | undefined;
+  const classifier = isSolrDatabaseType(databaseType) ? classify.solr : isElasticsearchCompatibleDatabaseType(databaseType) ? classify.elasticsearch : null;
+  if (!classifier) return null;
+  const risk = classifier(sql);
   if (!risk) return null;
   return { risk: risk === "read" ? "read" : risk === "write" ? "write" : "ddl", firstKeyword: "rest" };
 }

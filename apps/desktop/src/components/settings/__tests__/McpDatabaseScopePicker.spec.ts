@@ -42,6 +42,13 @@ async function passthroughComponent() {
 }
 vi.mock("@/components/ui/button", async () => ({ Button: await passthroughComponent() }));
 vi.mock("@/components/ui/badge", async () => ({ Badge: await passthroughComponent() }));
+vi.mock("@/components/ui/select", async () => ({
+  Select: await passthroughComponent(),
+  SelectContent: await passthroughComponent(),
+  SelectItem: await passthroughComponent(),
+  SelectTrigger: await passthroughComponent(),
+  SelectValue: await passthroughComponent(),
+}));
 vi.mock("@/components/ui/input", async () => {
   const { defineComponent, h } = await import("vue");
   const Input = defineComponent({

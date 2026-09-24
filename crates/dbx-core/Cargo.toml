@@ -15,6 +15,9 @@ sqlite-multiple-ciphers = ["dbx-drivers/sqlite-multiple-ciphers"]
 # (dbx-cli, dbx-mcp); do not combine with the cipher features.
 sqlite-bundled = ["rusqlite/bundled", "dbx-drivers/sqlite-bundled"]
 openapi = ["dbx-types/openapi", "dbx-sql/openapi"]
+# OS keyring storage for the secret-store key material (macOS/Windows keychain,
+# Linux dbus Secret Service with persistent fallback). Desktop only.
+os-keyring = ["dep:keyring", "keyring/linux-native-sync-persistent"]
 system-fonts = ["font-kit"]
 
 [dependencies]
@@ -36,6 +39,8 @@ log = "0.4"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
@@ -62,6 +67,11 @@ aes-gcm = "0.10"
 aes = "0.8"
 cbc = "0.1"
 argon2 = "0.5"
+# The Linux dbus Secret Service backend (linux-native-sync-persistent) pulls
+# libdbus-sys, whose pkg-config build script cannot cross-compile (musl static
+# browser, docker zigbuild). It stays opt-in so server/cross builds skip it and
+# fall back to the managed .dbx/secret.key file.
+keyring = { version = "3.6.3", default-features = false, optional = true, features = ["apple-native", "windows-native", "crypto-rust"] }
 sha2 = "0.10"
 async-trait = "0.1"
 bytes = "1"

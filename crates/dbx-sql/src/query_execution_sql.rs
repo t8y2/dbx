@@ -200,6 +200,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
             | DatabaseType::MongoDb
             | DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
+            | DatabaseType::Solr
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -230,9 +231,22 @@ fn strip_trailing_semicolons(sql: &str) -> String {
 
 fn is_safe_explain_source(sql: &str) -> bool {
     let source = strip_sql_comments(sql).trim_start().to_lowercase();
-    ["select", "with", "table", "values"].iter().any(|keyword| {
-        source == *keyword || source.starts_with(&format!("{keyword} ")) || source.starts_with(&format!("{keyword}\n"))
-    })
+    ["select", "with", "table", "values"].iter().any(|keyword| starts_with_explain_keyword_boundary(&source, keyword))
+}
+
+fn starts_with_explain_keyword_boundary(source: &str, keyword: &str) -> bool {
+    let Some(remainder) = source.strip_prefix(keyword) else {
+        return false;
+    };
+
+    match remainder.chars().next() {
+        None => true,
+        Some(character) if character.is_ascii_alphanumeric() || matches!(character, '_' | '$') => false,
+        // The safety gate permits ASCII whitespace and punctuation after the
+        // leading keyword, but fails closed for non-ASCII continuation chars.
+        Some(character) if character.is_ascii() => true,
+        Some(_) => false,
+    }
 }
 
 fn is_safe_oracle_explain_dml_source(sql: &str) -> bool {
@@ -241,11 +255,65 @@ fn is_safe_oracle_explain_dml_source(sql: &str) -> bool {
     ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|keyword| starts_with_keyword(&source, keyword))
 }
 
+/// Write verbs that mark a read-leading statement as a write, for example a
+/// data-modifying CTE (`WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x`).
+const DANGEROUS_SQL_KEYWORDS: &[&str] =
+    &["drop", "delete", "truncate", "alter", "update", "merge", "replace", "insert", "create"];
+
+/// Write verbs that are also scalar function names, so `REPLACE(col, 'a', 'b')`
+/// and `INSERT(str, pos, len, new)` are ordinary parts of a read-only query.
+///
+/// Only these two verbs are exempted when they are called with parentheses.
+/// `update` stays dangerous even then: MySQL accepts a parenthesized table
+/// reference (`UPDATE (t) SET c = 1`, verified on MySQL 8.4), while
+/// `REPLACE (`/`INSERT (` are rejected there as statements, so a parenthesized
+/// call can never hide a write for the exempted verbs.
+const WRITE_VERBS_WITH_SCALAR_FUNCTION_FORMS: &[&str] = &["replace", "insert"];
+
 pub fn contains_dangerous_sql_keyword(sql: &str) -> bool {
     let source = strip_sql_comments_and_literals(sql).to_lowercase();
-    ["drop", "delete", "truncate", "alter", "update", "merge", "replace", "insert", "create"]
-        .iter()
-        .any(|keyword| contains_word(&source, keyword))
+    DANGEROUS_SQL_KEYWORDS.iter().any(|keyword| contains_dangerous_sql_verb(&source, keyword))
+}
+
+/// Match a write verb as a whole word. A verb called with parentheses is a
+/// scalar function for [`WRITE_VERBS_WITH_SCALAR_FUNCTION_FORMS`] (`SELECT
+/// REPLACE(name, 'a', 'b') FROM users` must stay read-only), including when the
+/// dialect allows whitespace before the parenthesis.
+fn contains_dangerous_sql_verb(source: &str, keyword: &str) -> bool {
+    let bytes = source.as_bytes();
+    let keyword_bytes = keyword.as_bytes();
+    if keyword_bytes.is_empty() || bytes.len() < keyword_bytes.len() {
+        return false;
+    }
+    let allows_function_form = WRITE_VERBS_WITH_SCALAR_FUNCTION_FORMS.contains(&keyword);
+
+    for idx in 0..=bytes.len() - keyword_bytes.len() {
+        if &bytes[idx..idx + keyword_bytes.len()] != keyword_bytes {
+            continue;
+        }
+        if is_identifier_byte(idx.checked_sub(1).and_then(|i| bytes.get(i)).copied()) {
+            continue;
+        }
+        let rest = &bytes[idx + keyword_bytes.len()..];
+        match rest.first().copied() {
+            None => return true,
+            Some(b'(') if allows_function_form => continue,
+            Some(byte) if is_identifier_byte(Some(byte)) => continue,
+            Some(byte) => {
+                if allows_function_form && byte.is_ascii_whitespace() && starts_with_parenthesis(rest) {
+                    continue;
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when the first non-whitespace byte is `(` (SQL Server style `REPLACE (a, b, c)`).
+fn starts_with_parenthesis(rest: &[u8]) -> bool {
+    let offset = rest.iter().take_while(|byte| byte.is_ascii_whitespace()).count();
+    rest.get(offset) == Some(&b'(')
 }
 
 /// Keywords that start a read-only SQL statement.
@@ -390,6 +458,9 @@ pub enum SearchEngineQueryRisk {
 }
 
 pub fn classify_search_engine_query_risk(source: &str, database_type: DatabaseType) -> Option<SearchEngineQueryRisk> {
+    if database_type == DatabaseType::Solr {
+        return classify_solr_query_risk(source);
+    }
     if !matches!(database_type, DatabaseType::Elasticsearch | DatabaseType::Easysearch) {
         return None;
     }
@@ -435,6 +506,113 @@ pub fn classify_search_engine_query_risk(source: &str, database_type: DatabaseTy
         "DELETE" if has_document_id("_doc") => Some(SearchEngineQueryRisk::Write),
         "POST" | "PUT" | "PATCH" | "DELETE" => Some(SearchEngineQueryRisk::Dangerous),
         _ => None,
+    }
+}
+
+/// Solr REST 写请求集中在 `/{core}/update`（含 JSON/XML/CSV update handlers）；
+/// 只读 POST handler 名单之外的写路径（`/admin/*`、`/schema`、`/config`、
+/// collection/core 管理）一律按 Dangerous 处理。
+fn classify_solr_query_risk(source: &str) -> Option<SearchEngineQueryRisk> {
+    const READ_ONLY_POST_ENDPOINTS: &[&str] = &[
+        "select",
+        "query",
+        "get",
+        "export",
+        "terms",
+        "suggest",
+        "spell",
+        "mlt",
+        "sql",
+        "graph",
+        "clustering",
+        "tvrh",
+        "luke",
+        "elevate",
+        "browse",
+        "debug",
+    ];
+    let source = strip_leading_search_engine_comments(source);
+    let request_line = source.lines().next()?.trim();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_ascii_uppercase();
+    let raw_path = parts.next()?;
+    let path = raw_path.split('?').next().unwrap_or(raw_path).trim_end_matches('/');
+    let mut segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
+    if segments.first().is_some_and(|segment| segment.eq_ignore_ascii_case("solr")) {
+        segments.remove(0);
+    }
+    let endpoint = segments.last().copied().unwrap_or("");
+    // update handler 的变体（/update/json、/update/json/docs、/update/csv）在
+    // update 段之后还有子路径，所以不能只检查末段。
+    let is_update_path = segments.iter().any(|segment| segment.starts_with("update") || *segment == "commit");
+
+    match method.as_str() {
+        // Solr 的 update handler 也响应 GET（commit/optimize/stream.body 都能
+        // 改数据），所以 update 路径对任何方法都算写，不能只放行 POST。
+        _ if is_update_path => Some(SearchEngineQueryRisk::Write),
+        "GET" | "HEAD" | "OPTIONS" => {
+            if solr_admin_request_is_mutation(raw_path, &segments)
+                || solr_replication_request_is_mutation(raw_path, &segments)
+            {
+                Some(SearchEngineQueryRisk::Dangerous)
+            } else {
+                Some(SearchEngineQueryRisk::ReadOnly)
+            }
+        }
+        "POST" if READ_ONLY_POST_ENDPOINTS.contains(&endpoint) => Some(SearchEngineQueryRisk::ReadOnly),
+        "POST" | "PUT" | "PATCH" | "DELETE" => Some(SearchEngineQueryRisk::Dangerous),
+        _ => None,
+    }
+}
+
+/// CoreAdmin/Collections 管理端点接受 GET 触发的变更动作
+///（`GET /admin/cores?action=CREATE&name=x` 会真实建 core），只有显式只读的
+/// action 才能算 ReadOnly；其余带 action 的一律按 Dangerous 处理。
+fn solr_admin_request_is_mutation(raw_path: &str, segments: &[&str]) -> bool {
+    let is_admin_target = segments.windows(2).any(|pair| {
+        pair[0].eq_ignore_ascii_case("admin")
+            && matches!(pair[1].to_ascii_lowercase().as_str(), "cores" | "collections")
+    });
+    if !is_admin_target {
+        return false;
+    }
+    let Some(query) = raw_path.split('?').nth(1) else { return false };
+    let action = query.split('&').find_map(|param| {
+        param.split_once('=').filter(|(key, _)| key.eq_ignore_ascii_case("action")).map(|(_, value)| value)
+    });
+    match action {
+        None => false,
+        Some(action) => !matches!(action.to_ascii_uppercase().as_str(), "STATUS" | "REQUESTSTATUS" | "LIST"),
+    }
+}
+
+/// ReplicationHandler 也接受 GET 触发的变更
+///（`GET /{core}/replication?command=disablereplication` 会真实停用复制），
+/// 只有显式只读的 command 才算 ReadOnly；不带 command 时 handler 默认返回
+/// 详情，按只读处理。
+fn solr_replication_request_is_mutation(raw_path: &str, segments: &[&str]) -> bool {
+    if !segments.last().is_some_and(|segment| segment.eq_ignore_ascii_case("replication")) {
+        return false;
+    }
+    const READ_ONLY_COMMANDS: &[&str] = &[
+        "details",
+        "restorestatus",
+        "filelist",
+        "filecontent",
+        "filedownload",
+        "filemtime",
+        "indexversion",
+        "showversion",
+    ];
+    let Some(query) = raw_path.split('?').nth(1) else {
+        return false;
+    };
+    let command = query.split('&').find_map(|param| {
+        param.split_once('=').filter(|(key, _)| key.eq_ignore_ascii_case("command")).map(|(_, value)| value)
+    });
+    match command {
+        None => false,
+        Some(command) => !READ_ONLY_COMMANDS.iter().any(|readonly| readonly.eq_ignore_ascii_case(command)),
     }
 }
 
@@ -687,6 +865,35 @@ fn is_safe_read_pragma(upper_stripped: &str) -> bool {
 fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
     upper.starts_with(keyword)
         && (upper.len() == keyword.len() || !upper.as_bytes()[keyword.len()].is_ascii_alphanumeric())
+}
+
+/// Whether one MySQL statement is an explicit transaction opener that a
+/// tab-scoped auto-commit session may keep alive across executions: a bare
+/// `BEGIN` / `BEGIN WORK` / `START TRANSACTION [modifiers]`.
+///
+/// `COMMIT` / `ROLLBACK` close a transaction instead of opening one, and
+/// compound statements (`BEGIN ... END`, only valid inside stored programs)
+/// never open a transaction at the top level, so neither is matched. Anything
+/// ambiguous — extra statements in the same text, other `BEGIN` continuations —
+/// is reported as "not an opener" so the caller falls back to the historical
+/// cleanup instead of keeping a transaction open by accident.
+pub fn mysql_statement_opens_explicit_transaction(sql: &str) -> bool {
+    let cleaned = strip_sql_comments(sql);
+    let mut parts = cleaned.split(';');
+    let statement = parts.next().unwrap_or_default().trim();
+    if statement.is_empty() || parts.any(|part| !part.trim().is_empty()) {
+        return false;
+    }
+    let upper = statement.to_ascii_uppercase();
+    let mut tokens = upper.split_whitespace();
+    match tokens.next() {
+        Some("BEGIN") => matches!(tokens.next(), None | Some("WORK")),
+        // Modifiers (`READ ONLY`, `READ WRITE`, `WITH CONSISTENT SNAPSHOT`) are
+        // optional and are verified by the server; a malformed one fails the
+        // statement, so no transaction is left open for this execution.
+        Some("START") => tokens.next() == Some("TRANSACTION"),
+        _ => false,
+    }
 }
 
 /// Check whether a SQL statement is allowed under read-only mode.
@@ -1127,6 +1334,45 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn builds_postgres_explain_sql_for_keyword_boundaries() {
+        for sql in [
+            "SELECT* FROM users",
+            "SELECT\t* FROM users",
+            "SELECT(1)",
+            "VALUES(1)",
+            "SELECT\r\n*\r\nFROM users",
+            "TABLE users",
+        ] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Postgres),
+                    format: None,
+                    analyze: None,
+                    sql: sql.to_string(),
+                }),
+                ExplainSqlBuildResult { ok: true, sql: Some(format!("EXPLAIN (FORMAT JSON) {sql}")), reason: None },
+                "expected safe EXPLAIN source: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_explain_keyword_identifier_prefixes() {
+        for sql in ["SELECTED", "SELECT_foo", "SELECT$foo", "SELECT1", "VALUES_foo", "VALUES1"] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Postgres),
+                    format: None,
+                    analyze: None,
+                    sql: sql.to_string(),
+                }),
+                ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) },
+                "expected unsafe EXPLAIN source: {sql:?}"
+            );
+        }
     }
 
     #[test]
@@ -1622,6 +1868,55 @@ mod tests {
     }
 
     #[test]
+    fn contains_dangerous_sql_keyword_ignores_scalar_functions_named_like_writes() {
+        // #9978: REPLACE()/INSERT() are scalar functions, not statements.
+        assert!(!contains_dangerous_sql_keyword("SELECT REPLACE(name, 'a', 'b') FROM users"));
+        assert!(!contains_dangerous_sql_keyword("SELECT REPLACE (name, 'a', 'b') FROM users"));
+        assert!(!contains_dangerous_sql_keyword("SELECT INSERT('Quadratic', 3, 4, 'What')"));
+        assert!(!contains_dangerous_sql_keyword("SELECT dropped, inserted FROM t"));
+        assert!(contains_dangerous_sql_keyword("REPLACE INTO users VALUES (1)"));
+        assert!(contains_dangerous_sql_keyword("REPLACE users SET name = 'x'"));
+        assert!(contains_dangerous_sql_keyword("INSERT INTO users VALUES (1)"));
+        // `UPDATE (t)` is a real write: MySQL accepts a parenthesized table reference.
+        assert!(contains_dangerous_sql_keyword("UPDATE (users) SET name = 'x'"));
+    }
+
+    #[test]
+    fn is_write_sql_allows_mysql_json_table_query_with_replace_function() {
+        // #9978: a JSON_TABLE query using REPLACE() must not be treated as a write,
+        // otherwise read-only connections ask for write permission before running it.
+        let sql = "with tmp as (\n  select '张三,李四,王五' as `names`\n)\nSELECT jt.name\nFROM tmp t\nJOIN JSON_TABLE(\n    CONCAT('[\"',REPLACE(t.`names`,',','\",\"'),'\"]'),\n    '$[*]' COLUMNS(name VARCHAR(50) PATH '$')\n) jt";
+        assert!(!is_write_sql_for_database(sql, DatabaseType::Mysql), "JSON_TABLE + REPLACE() must stay read-only");
+        assert!(!is_write_sql_for_database("SELECT REPLACE(name, 'a', 'b') FROM users", DatabaseType::Mysql));
+        assert!(!is_write_sql_for_database("SELECT INSERT('Quadratic', 3, 4, 'What')", DatabaseType::Mysql));
+        assert!(!is_write_sql_for_database("SELECT REPLACE (name, 'a', 'b') FROM users", DatabaseType::SqlServer));
+        assert!(!is_write_sql_for_database("SELECT replace(name, 'a', 'b') FROM users", DatabaseType::Postgres));
+        assert!(!is_write_sql(sql));
+    }
+
+    #[test]
+    fn is_write_sql_still_blocks_writes_using_function_like_verbs() {
+        assert!(is_write_sql_for_database("REPLACE INTO users VALUES (1)", DatabaseType::Mysql));
+        assert!(is_write_sql_for_database("REPLACE users SET name = 'x'", DatabaseType::Mysql));
+        assert!(is_write_sql_for_database("INSERT INTO users VALUES (1)", DatabaseType::Mysql));
+        // MySQL accepts a parenthesized table reference, so `UPDATE (` is a write.
+        assert!(is_write_sql_for_database("UPDATE (users) SET name = 'x'", DatabaseType::Mysql));
+        assert!(is_write_sql_for_database(
+            "WITH x AS (SELECT 1 AS n) UPDATE (users) SET name = 'x'",
+            DatabaseType::Mysql
+        ));
+        // Data-modifying CTEs keep being detected.
+        assert!(is_write_sql_for_database(
+            "WITH x AS (INSERT INTO users VALUES (1) RETURNING *) SELECT * FROM x",
+            DatabaseType::Postgres
+        ));
+        assert!(is_write_sql_for_database(
+            "WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x",
+            DatabaseType::Postgres
+        ));
+    }
+
+    #[test]
     fn contains_dangerous_sql_keyword_ignores_in_string_literals() {
         assert!(!contains_dangerous_sql_keyword("SELECT 'DROP TABLE users' FROM t"));
         assert!(!contains_dangerous_sql_keyword("SELECT 'delete' FROM t"));
@@ -2033,6 +2328,86 @@ mod tests {
     }
 
     #[test]
+    fn classifies_solr_rest_requests() {
+        // Read-only requests: select/query/get and other read handlers.
+        assert!(!is_write_sql_for_database("GET /mycore/select?q=*:*&rows=20", DatabaseType::Solr));
+        assert!(!is_write_sql_for_database(
+            "POST /mycore/query\n{\"query\":\"name:foo\",\"limit\":10}",
+            DatabaseType::Solr
+        ));
+        assert!(!is_write_sql_for_database("GET /mycore/schema/fields", DatabaseType::Solr));
+
+        // Document writes hit the update handlers, including the `/update/...`
+        // variants whose last path segment is not literally `update`.
+        assert!(is_write_sql_for_database(
+            "POST /mycore/update\n{\"add\":{\"doc\":{\"id\":\"1\"}}}",
+            DatabaseType::Solr
+        ));
+        assert!(is_write_sql_for_database("POST /mycore/update/json/docs\n{\"id\":\"1\"}", DatabaseType::Solr));
+        assert!(is_write_sql_for_database("GET /mycore/update?commit=true", DatabaseType::Solr));
+
+        // CoreAdmin actions mutate over GET too; only the read whitelist stays safe.
+        assert_eq!(
+            classify_search_engine_query_risk("GET /admin/cores?action=CREATE&name=x", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /admin/cores?action=STATUS", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /admin/info/system", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+
+        // Replication commands mutate over GET too; only the read whitelist stays safe.
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=details", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=restorestatus", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=filelist", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=disablereplication", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=enablereplication", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=fetchindex", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+
+        // Core/schema/admin operations are dangerous.
+        assert_eq!(
+            classify_search_engine_query_risk("POST /admin/cores?action=CREATE&name=x", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk(
+                "POST /mycore/schema\n{\"add-field\":{\"name\":\"x\",\"type\":\"string\"}}",
+                DatabaseType::Solr
+            ),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+
+        // Non-Solr types never take this classifier.
+        assert!(classify_search_engine_query_risk("POST /mycore/update", DatabaseType::Postgres).is_none());
+    }
+
+    #[test]
     fn excludes_victoriametrics_from_sql_query_paths() {
         assert!(!supports_sql_query(DatabaseType::VictoriaMetrics));
         assert!(supports_sql_query(DatabaseType::Postgres));
@@ -2145,5 +2520,46 @@ mod tests {
     fn is_write_sql_for_database_salesforce_dml_is_write() {
         let dml = "DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Account\",\"id\":\"x\"}";
         assert!(is_write_sql_for_database(dml, DatabaseType::Salesforce));
+    }
+
+    #[test]
+    fn mysql_explicit_transaction_openers_are_recognized() {
+        for sql in [
+            "BEGIN",
+            "begin",
+            "BEGIN;",
+            "  BEGIN  ",
+            "BEGIN WORK",
+            "BEGIN WORK;",
+            "-- open a transaction\nBEGIN",
+            "/* keep */ START TRANSACTION",
+            "START TRANSACTION",
+            "start transaction;",
+            "START TRANSACTION READ ONLY",
+            "START TRANSACTION READ WRITE",
+            "START TRANSACTION WITH CONSISTENT SNAPSHOT",
+        ] {
+            assert!(mysql_statement_opens_explicit_transaction(sql), "expected opener: {sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_non_openers_are_not_treated_as_explicit_transactions() {
+        for sql in [
+            "",
+            "   ",
+            ";",
+            "SELECT 1",
+            "COMMIT",
+            "ROLLBACK",
+            "BEGIN;\nUPDATE t SET a = 1;",
+            "BEGIN\nDECLARE x INT;\nEND",
+            "BEGIN END",
+            "START REPLICA",
+            "SET autocommit = 0",
+            "SELECT 'BEGIN' FROM t",
+        ] {
+            assert!(!mysql_statement_opens_explicit_transaction(sql), "expected non-opener: {sql}");
+        }
     }
 }

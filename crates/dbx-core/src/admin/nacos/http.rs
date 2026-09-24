@@ -2653,6 +2653,7 @@ impl NacosAdmin for NacosOpenApiAdmin {
 
     async fn publish_config(&self, req: NacosConfigUpsert) -> Result<(), String> {
         let namespace = self.namespace(req.namespace.as_deref());
+        let uses_cas = req.cas_md5.is_some();
         let (v3_form, v1_form) = build_publish_forms(req, namespace);
 
         let mut errors = Vec::new();
@@ -2661,8 +2662,8 @@ impl NacosAdmin for NacosOpenApiAdmin {
                 continue;
             }
             match self.request(reqwest::Method::POST, path, Vec::new(), Some(form), None).await {
-                Ok(resp) => match error_for_status(resp, path).await {
-                    Ok(_) => return Ok(()),
+                Ok(resp) => match publish_response(resp, path, uses_cas).await {
+                    Ok(()) => return Ok(()),
                     Err(err) => errors.push(err),
                 },
                 Err(err) => errors.push(err),
@@ -2672,8 +2673,8 @@ impl NacosAdmin for NacosOpenApiAdmin {
             return Err(format!("Failed to publish Nacos config: {}", errors.join("; ")));
         }
         match self.request(reqwest::Method::POST, "/v1/cs/configs", Vec::new(), Some(v1_form), None).await {
-            Ok(resp) => match error_for_status(resp, "/v1/cs/configs").await {
-                Ok(_) => Ok(()),
+            Ok(resp) => match publish_response(resp, "/v1/cs/configs", uses_cas).await {
+                Ok(()) => Ok(()),
                 Err(err) => {
                     errors.push(err);
                     Err(format!("Failed to publish Nacos config: {}", errors.join("; ")))
@@ -2888,6 +2889,7 @@ impl NacosAdmin for NacosOpenApiAdmin {
             app_name: history.app_name,
             desc: history.desc,
             tags: history.tags,
+            cas_md5: None,
         })
         .await
         .map_err(|publish_err| {
@@ -3789,6 +3791,7 @@ fn build_publish_forms(req: NacosConfigUpsert, namespace: String) -> (NacosForm,
     push_optional(&mut v3_form, "desc", req.desc.clone());
     push_optional(&mut v3_form, "configTags", req.tags.clone());
     push_optional(&mut v3_form, "config_tags", req.tags.clone());
+    push_optional(&mut v3_form, "casMd5", req.cas_md5.clone());
 
     let mut v1_form = vec![
         ("dataId".to_string(), req.data_id),
@@ -3800,6 +3803,7 @@ fn build_publish_forms(req: NacosConfigUpsert, namespace: String) -> (NacosForm,
     push_optional(&mut v1_form, "appName", req.app_name);
     push_optional(&mut v1_form, "desc", req.desc);
     push_optional(&mut v1_form, "config_tags", req.tags);
+    push_optional(&mut v1_form, "casMd5", req.cas_md5);
 
     (v3_form, v1_form)
 }
@@ -3837,6 +3841,19 @@ async fn error_for_status(resp: reqwest::Response, path: &str) -> Result<reqwest
         format!("Nacos admin {path} returned {status}: {detail}")
     };
     Err(classified_error(classify_nacos_error(&message), &message))
+}
+
+async fn publish_response(resp: reqwest::Response, path: &str, uses_cas: bool) -> Result<(), String> {
+    let response = error_for_status(resp, path).await?;
+    let body = response.text().await.map_err(|error| format!("Failed to read Nacos publish response: {error}"))?;
+    if body.trim().eq_ignore_ascii_case("false") {
+        return Err(if uses_cas {
+            format!("Nacos publish rejected by CAS validation at {path}")
+        } else {
+            format!("Nacos publish rejected at {path}")
+        });
+    }
+    Ok(())
 }
 
 fn compact_response_detail(detail: &str) -> String {
@@ -7695,6 +7712,7 @@ mod tests {
                 app_name: Some("portal".to_string()),
                 desc: Some("main config".to_string()),
                 tags: Some("prod,gray".to_string()),
+                cas_md5: Some("before-md5".to_string()),
             },
             "ops".to_string(),
         );
@@ -7706,8 +7724,10 @@ mod tests {
         assert!(v3_form.contains(&("type".to_string(), "yaml".to_string())));
         assert!(v3_form.contains(&("configTags".to_string(), "prod,gray".to_string())));
         assert!(v3_form.contains(&("config_tags".to_string(), "prod,gray".to_string())));
+        assert!(v3_form.contains(&("casMd5".to_string(), "before-md5".to_string())));
         assert!(v1_form.contains(&("group".to_string(), "DEFAULT_GROUP".to_string())));
         assert!(v1_form.contains(&("tenant".to_string(), "ops".to_string())));
+        assert!(v1_form.contains(&("casMd5".to_string(), "before-md5".to_string())));
     }
 
     #[test]

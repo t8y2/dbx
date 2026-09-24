@@ -103,6 +103,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
     "host.filesystem",
     "host.binary",
     "host.plans:read",
+    "host.schema:read",
     "host.storage",
     "host.network:https://s3.example.com:443"
   ],
@@ -120,7 +121,9 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `engines.dbx` 是可选的 DBX 版本范围；`engines.host_api` 是必需的 Host API 版本声明。
 - `host.workbench` 允许打开另一个工作台，`host.events` 接收宿主事件，`host.binary` 使用二进制通道，`host.filesystem` 使用文件系统入口。
 - `host.plans:read` 允许针对 DBX 自己的连接读取估算执行计划（见 [估算执行计划](#估算执行计划)）。它是只读权限：不授予普通 SQL 执行、写操作、DDL 或真实执行计划，且这是唯一存在的计划类权限。
-- `host.storage` 为工作台 UI 提供本插件独享的持久化键值存储（见 [持久化 UI 状态](#持久化-ui-状态)）；数据只落在插件自己的数据目录里。
+- `host.schema:read` 允许通过 `host.getTableMetadata` 读取已打开连接的窄化 table schema metadata；它不会授予任意 SQL、写入或隐式重连（见 [Table Schema Metadata](#table-schema-metadata)）。
+- `host.storage` 为工作台 UI 提供本插件独享的持久化键值存储（见 [持久化 UI 状态](#持久化-ui-状态)）；数据只落在插件自己的插件数据目录里。
+- `host.ai` 允许插件在 DBX 内置 AI 面板中新建带数据快照的对话，沿用宿主的模型选择、历史、追问、停止和导出功能。旧版 DBX 会在安装时因未知权限而失败，需要兼容旧宿主的插件应把 `host.ai` 作为可选能力。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
 - `backend.executable`、`ui.root` 和 `ui.entry` 必须指向包内文件；带原生后端的包必须为每个目标平台提供对应可执行文件。
@@ -213,8 +216,23 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 | --- | --- | --- |
 | `workbench` | `type`, `id`, `label` | 注册可从侧边栏或插件入口打开的工作台。 |
 | `filesystem-provider` | `type`, `id`, `label`, `schemes` | 注册虚拟文件系统；`root_uri` 例如 `s3://bucket`，能力可选 `read`、`write`、`delete`、`rename`、`mkdir`。 |
-| `context-menu` | `type`, `id`, `label`, `menu: "connection"` | 向连接的右键菜单增加动作。 |
+| `context-menu` | `type`、`id`、`label`、`menu: "connection"` 或 `"table"` | 向 Sidebar Tree 的连接或 table 右键菜单增加动作。 |
 | `result-view` | `type`, `id`, `label` | 注册查询或任务结果视图。 |
+
+`menu: "table"` contribution 当前只在用户对 Sidebar Tree 中的具体 table 节点打开右键菜单时生效。DBX 通过必需的 backend entrypoint 调用 `contextMenu/<contribution-id>`，并传递 table identity：
+
+```json
+{
+  "table": {
+    "connectionId": "connection-id",
+    "database": "example",
+    "schema": "public",
+    "table": "users"
+  }
+}
+```
+
+`database` 和 `schema` 是可选字段；不可用时会省略，不会强制传递空字符串。该 context 只包含对象 identity，不包含 credential、connection string 或原始连接配置。Object Browser 后续可以复用相同 identity contract，但本次版本没有把它作为 table 菜单入口。
 
 同一插件内通过 `id` 互相引用：Connection Provider 的 `workbench` 必须指向一个已声明的工作台，`filesystem_provider` 必须指向一个已声明的文件系统 Provider。图标优先使用 Contribution 的 `icon`，缺失时回退到插件级 `icon`。
 
@@ -297,7 +315,9 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `openFilesystem(id, context)` | 打开本插件的文件系统入口；需要 `host.filesystem`。 |
 | `getPlanCapabilities(connectionId)` | 读取宿主与该连接能提供什么计划能力；需要 `host.plans:read`。 |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | 返回 `sql` 的估算执行计划；需要 `host.plans:read`。 |
-| `capabilities` | 来自 init 消息的 `{ downloadFile, planApi, storage }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
+| `getTableMetadata({ connectionId, database?, schema?, table })` | 读取已打开连接的窄化 table schema metadata；需要 `host.schema:read`。 |
+| `capabilities` | 来自 init 消息的 `{ downloadFile, planApi, schemaMetadataApi, storage, ai }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
+| `ai.openConversation({ title, prompt, context, send? })` | 在内置 AI 面板新建插件对话；`send` 默认 `false`，为 `true` 时立即分析；需要 `host.ai`，并以 `capabilities.ai` 广播——旧宿主不带该字段，请按能力位关闭而不是用真实请求试探。 |
 | `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
 | `storage` | 本插件独享的持久化键值状态；需要 `host.storage`；见下文。 |
 | `fileTransfer` | 本地文件流式传输与系统拖放（仅桌面端）；见下文。 |
@@ -349,6 +369,59 @@ if (window.dbxPlugin.capabilities.planApi) {
 判断能力时请读 `dbxPlugin.capabilities.planApi`（旧宿主不会带这个字段），再用 `getPlanCapabilities` 确认这条连接是否支持，最后才调用 `explainPlan`。自行拼 `EXPLAIN` 文本既没必要，也不会被接受。
 
 计划 API 属于 Host API 1.2。无法离开它工作的插件应在 manifest 里声明下限：`"engines": { "host_api": "^1.2" }`。manifest 里的版本范围是兼容下限，`capabilities.planApi` 是运行期探测，两者都保留。
+
+### Table Schema Metadata（表结构元数据）
+
+插件可以读取当前 DBX 已打开连接中某个 table 的窄化 schema metadata，而不需要拥有驱动、连接池、凭据或自己拼 SQL。请求复用现有的 `PluginTableContext`，只允许 table identity：
+
+```json
+{
+  "permissions": ["host.schema:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.schemaMetadataApi) {
+  const metadata = await window.dbxPlugin.getTableMetadata({
+    connectionId,
+    database,
+    schema,
+    table: "users"
+  });
+  for (const column of metadata.columns) {
+    renderColumn(column.name, column.dataType, column.nullable);
+  }
+}
+```
+
+`getTableMetadata({ connectionId, database?, schema?, table })` 返回：
+
+```json
+{
+  "columns": [
+    {
+      "name": "id",
+      "dataType": "integer",
+      "nullable": false,
+      "precision": 32,
+      "default": "nextval('users_id_seq'::regclass)"
+    }
+  ],
+  "fieldCapabilities": {
+    "length": "supported",
+    "precision": "supported",
+    "scale": "supported",
+    "default": "supported"
+  }
+}
+```
+
+- `columns` 只包含 `name`、`dataType`、`nullable`、可选的 `length`、`precision`、`scale` 和 `default`。不会返回 comment、key/index、credential、连接串、驱动内部对象或任意 SQL 结果。
+- 可选值在没有值时保持 `null` 或直接省略，绝不会被伪造为 `0` 或空字符串。`fieldCapabilities` 用 `supported`、`unsupported`、`unknown` 区分提供方支持、明确不支持和宿主没有可靠 provenance 的情况；`unknown` 不应被插件当成支持。
+- `database` 和 `schema` 可选；不可用时省略，不要把空字符串当作 public identity。`connectionId` 和 `table` 必须是非空且不超过 256 个字符的 identity 值。
+- 这是只读 API。DBX 只复用已打开的 Host connection/session，禁止插件隐式重连、创建连接池或执行任意 SQL。已保存但当前断开的连接会以 `Connection is not open` 拒绝；请求的 database 没有对应已打开 session 时也会拒绝，而不是切换到别的连接。
+
+该 API 属于 Host API 1.3。无法离开它工作的插件应声明：`"engines": { "host_api": "^1.3" }`；同时仍应读取 `capabilities.schemaMetadataApi`，因为旧宿主不会提供该字段。没有 `host.schema:read` 时，宿主会在请求到达 backend 前拒绝调用。
 
 ### 文件传输与系统拖放
 
@@ -415,6 +488,23 @@ if (window.dbxPlugin.capabilities.storage) {
 | `delete(key)` | 删除一个键；删除不存在的键同样成功。 |
 
 键为不超过 256 字符的字符串；单个值序列化后上限 256 KiB，整库上限 1 MiB——这是 UI 状态存储，不是数据落盘通道。数据保存在插件自己的 `plugin-data/<id>` 目录里，按插件隔离，版本升级和卸载后都保留。大批量数据、缓存以及 Sidecar 产生的任何文件请放进 Sidecar 的数据目录（见 [原生 Sidecar 和 RPC](#原生-sidecar-和-rpc)）。Web 宿主上同一 API 由浏览器本地存储支撑，两端代码完全一致。
+
+### 在 DBX AI 中分析插件数据
+
+在 manifest 中声明 `"permissions": ["host.ai"]`，然后从插件的分析按钮调用：
+
+```js
+await dbxPlugin.ai.openConversation({
+  title: "Watchlist analysis",
+  prompt: "Compare the supplied quotes and explain risks and missing data.",
+  context: { snapshotId: "watchlist-1", quotes, source, dataTimestamp },
+  send: true,
+});
+```
+
+`title` 最多 200 字符，`prompt` 最多 32000 字符，`context` 必须是纯 JSON 对象，上限 2 MiB。宿主绑定真实插件身份，并复制快照；后续行情刷新或切换数据库不会替换该会话的数据。快照作为会话数据保存，在历史恢复及导出时保留。插件应提供来源、数据时间、延迟及缺失字段，AI 不会自动拉取行情。
+
+该接口只打开内置对话，不向插件返回模型回复或 AI 配置。首版使用纯文本 Ask 通道，支持 DBX 的 HTTP 模型供应商和 Ollama；不提供数据库工具或 CLI Agent。选择未配置的模型时会保留待发送问题，用户可在 DBX 面板中选择模型后继续。
 
 ### 主题、布局和静态资源
 

@@ -103,6 +103,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.filesystem",
     "host.binary",
     "host.plans:read",
+    "host.schema:read",
     "host.storage",
     "host.network:https://s3.example.com:443"
   ],
@@ -120,7 +121,9 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `engines.dbx` is an optional DBX version range; `engines.host_api` is required.
 - `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
 - `host.plans:read` allows reading estimated execution plans for DBX's own connections (see [Estimated Execution Plans](#estimated-execution-plans)). It is read-only: it never grants SQL execution, writes, DDL, or actual plans, and it is the only plan scope that exists.
+- `host.schema:read` allows `host.getTableMetadata` to read narrow table schema metadata from an already-open connection; it grants no arbitrary SQL, writes, or implicit reconnect (see [Table Schema Metadata](#table-schema-metadata)).
 - `host.storage` gives the workbench UI a persistent key-value store scoped to this plugin (see [Persistent UI State](#persistent-ui-state)). Values never leave the plugin's own data directory.
+- `host.ai` lets the plugin open a conversation with a data snapshot in the built-in DBX AI panel, using its model selector, history, follow-up messages, cancellation and export. Older DBX builds reject the unknown permission at install time, so plugins that must install everywhere should treat `host.ai` as optional.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -213,8 +216,23 @@ Action `when` accepts `always`, `create`, or `edit`; `variant` accepts `default`
 | --- | --- | --- |
 | `workbench` | `type`, `id`, `label` | Registers a workbench opened from the sidebar or plugin entry. |
 | `filesystem-provider` | `type`, `id`, `label`, `schemes` | Registers a virtual filesystem; `root_uri` can be `s3://bucket`, with optional `read`, `write`, `delete`, `rename`, and `mkdir` capabilities. |
-| `context-menu` | `type`, `id`, `label`, `menu: "connection"` | Adds an action to a connection context menu. |
+| `context-menu` | `type`, `id`, `label`, `menu: "connection"` or `"table"` | Adds an action to a Sidebar Tree connection or table context menu. |
 | `result-view` | `type`, `id`, `label` | Registers a query or task result view. |
+
+A `menu: "table"` contribution is currently exposed when the user opens a context menu on a concrete table node in the Sidebar Tree. DBX invokes the required backend entrypoint as `contextMenu/<contribution-id>` with the table identity:
+
+```json
+{
+  "table": {
+    "connectionId": "connection-id",
+    "database": "example",
+    "schema": "public",
+    "table": "users"
+  }
+}
+```
+
+`database` and `schema` are optional and are omitted when unavailable. The context contains no credential, connection string, or raw connection configuration. Object Browser can reuse this identity contract in a later contribution surface, but it is not a table menu surface in this release.
 
 Reference contributions by ID: a connection provider's `workbench` must point to a declared workbench and `filesystem_provider` to a declared filesystem provider. A contribution icon takes precedence over the plugin-level icon.
 
@@ -297,7 +315,9 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
-| `capabilities` | `{ downloadFile, planApi, storage }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `getTableMetadata({ connectionId, database?, schema?, table })` | Reads narrow table schema metadata from an already-open connection; requires `host.schema:read`. |
+| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, storage, ai }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `ai.openConversation({ title, prompt, context, send? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false`, or starts analysis when `true`; requires `host.ai` and is advertised as `capabilities.ai` — gate on it instead of probing, since older hosts omit it. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
 | `fileTransfer` | Streams local files and OS drops (desktop only); see below. |
@@ -349,6 +369,59 @@ The plan API is bounded by design:
 Gate on capability rather than probing: read `dbxPlugin.capabilities.planApi` from the init message (an older host omits it), then confirm per-connection support with `getPlanCapabilities` before calling `explainPlan`. Submitting `EXPLAIN` text of your own is neither necessary nor accepted.
 
 The plan API is Host API 1.2. A plugin that cannot work without it declares the floor in its manifest with `"engines": { "host_api": "^1.2" }`. The manifest range is a compatibility floor and `capabilities.planApi` is the runtime check; keep both.
+
+### Table Schema Metadata
+
+A plugin can read narrow schema metadata for one table on a DBX connection that is already open, without owning a driver, connection pool, credential, or SQL string. The request reuses the canonical `PluginTableContext` and contains table identity only:
+
+```json
+{
+  "permissions": ["host.schema:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.schemaMetadataApi) {
+  const metadata = await window.dbxPlugin.getTableMetadata({
+    connectionId,
+    database,
+    schema,
+    table: "users"
+  });
+  for (const column of metadata.columns) {
+    renderColumn(column.name, column.dataType, column.nullable);
+  }
+}
+```
+
+`getTableMetadata({ connectionId, database?, schema?, table })` returns:
+
+```json
+{
+  "columns": [
+    {
+      "name": "id",
+      "dataType": "integer",
+      "nullable": false,
+      "precision": 32,
+      "default": "nextval('users_id_seq'::regclass)"
+    }
+  ],
+  "fieldCapabilities": {
+    "length": "supported",
+    "precision": "supported",
+    "scale": "supported",
+    "default": "supported"
+  }
+}
+```
+
+- `columns` contains only `name`, `dataType`, `nullable`, and optional `length`, `precision`, `scale`, and `default`. It never returns comments, keys/indexes, credentials, connection strings, driver objects, or arbitrary SQL results.
+- Optional values remain `null` or are omitted when no value exists; they are never fabricated as `0` or an empty string. `fieldCapabilities` uses `supported`, `unsupported`, and `unknown` to distinguish provider support, an explicitly unavailable field, and missing reliable provenance; plugins must not treat `unknown` as supported.
+- `database` and `schema` are optional and omitted when unavailable; do not use empty strings as public identity. `connectionId` and `table` must be non-empty identity values no longer than 256 characters.
+- This API is read-only. DBX reuses only an already-open Host connection/session; a plugin cannot trigger an implicit reconnect, create a pool, or execute arbitrary SQL. A saved-but-disconnected connection is rejected with `Connection is not open`; a requested database without a matching open session is also rejected instead of being routed to another connection.
+
+This API is part of Host API 1.3. A plugin that cannot work without it should declare `"engines": { "host_api": "^1.3" }` and still read `capabilities.schemaMetadataApi`, because older hosts omit that field. Without `host.schema:read`, the host rejects the request before it reaches the backend.
 
 ### File Transfer and OS Drops
 
@@ -415,6 +488,23 @@ if (window.dbxPlugin.capabilities.storage) {
 | `delete(key)` | Removes one key; deleting an unset key succeeds. |
 
 Keys are strings up to 256 characters; values are capped at 256 KiB serialized and the whole store at 1 MiB — this is UI state, not a data sink. Entries live in the plugin's own `plugin-data/<id>` directory, isolated per plugin, and survive upgrades and uninstall. Bulk data, caches, and anything the sidecar produces belong in the sidecar's data directory instead (see [Native Sidecars and RPC](#native-sidecars-and-rpc)). On the web host the same API is backed by the browser profile, so identical code works in both hosts.
+
+### Analyse plugin data in DBX AI
+
+Declare `"permissions": ["host.ai"]` in the manifest, then call this from the plugin's analysis action:
+
+```js
+await dbxPlugin.ai.openConversation({
+  title: "Watchlist analysis",
+  prompt: "Compare the supplied quotes and explain risks and missing data.",
+  context: { snapshotId: "watchlist-1", quotes, source, dataTimestamp },
+  send: true,
+});
+```
+
+`title` allows 200 characters and `prompt` allows 32000. `context` must be a plain JSON object and is limited to 2 MiB. The host binds the installed plugin identity and copies the snapshot. Quote refreshes or database tab changes do not replace conversation data. The snapshot is stored as conversation data for history restoration and export. Include source, data timestamp, delays and missing fields; AI does not fetch market data itself.
+
+This method opens the built-in conversation and returns no model response or AI configuration to the plugin. The initial implementation uses text-only Ask through DBX's HTTP providers and Ollama, without database tools or CLI Agents. If no model is configured, the prompt remains an editable draft so the user can select a model and continue.
 
 ### Themes, Layout, and Static Assets
 

@@ -69,16 +69,19 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
+import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, PgTablePartitioning, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsAiAssistantContext, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { PARTITION_TREE_INDENT_PX } from "@/lib/table/pgPartitionPresentation";
 import {
   buildDropObjectSql,
   buildDropTableSql,
@@ -118,6 +121,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { formatSidebarTableNamesForCopy, type SidebarTableCopyTarget } from "@/lib/sidebar/sidebarTableNameCopy";
 import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
@@ -144,6 +148,7 @@ import {
   initialObjectBrowserSortDirection,
   objectBrowserRowLegacyPinnedTreeNodeIds,
   objectBrowserRowMatchesPinnedTreeNode,
+  groupObjectBrowserRows,
   objectBrowserRowPinnedTreeNodeIdentity,
   sortObjectBrowserRows,
   summarizeObjectBrowserSearch,
@@ -245,7 +250,11 @@ const eventEditorKey = computed(() =>
   }),
 );
 // Table info panel state
-const tableInfoTab = ref<TableInfoTab>("ddl");
+const tableInfoTab = ref<TableInfoTab>("info");
+const tableOverviewStats = ref<ObjectStatistics | null>(null);
+const tableOverviewComment = ref<string | null>(null);
+const tableOverviewLoading = ref(false);
+const tableOverviewLoaded = ref(false);
 const tableColumns = ref<ColumnInfo[]>([]);
 const tableColumnsLoading = ref(false);
 const tableColumnsLoaded = ref(false);
@@ -265,16 +274,25 @@ const tableTriggersLoaded = ref(false);
 const tableConstraints = ref<ConstraintInfo[]>([]);
 const tableConstraintsLoading = ref(false);
 const tableConstraintsLoaded = ref(false);
+const tablePartitions = ref<PgTablePartitioning | null>(null);
+const tablePartitionsLoading = ref(false);
+const tablePartitionsLoaded = ref(false);
+// Only tables that actually are partitioned get the Partitions tab; the cheap
+// partition-status probe decides before the full tree is fetched.
+const tableIsPartitioned = ref(false);
+const tablePartitionStatusResolved = ref(false);
 // The Constraints tab hides foreign keys when the dedicated Foreign Keys tab
 // is also shown, mirroring DataGrid/TableStructureEditor.
 const tableConstraintsForTab = computed(() => constraintsForConstraintsTab(tableConstraints.value, tableMetadataCapabilities.value.foreignKeys));
 const tableInfoSearchQuery = ref("");
 const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
 const activeTableInfoLoading = computed(() => {
+  if (tableInfoTab.value === "info") return tableOverviewLoading.value;
   if (tableInfoTab.value === "ddl") return tableDdlLoading.value;
   if (tableInfoTab.value === "columns") return tableColumnsLoading.value;
   if (tableInfoTab.value === "indexes") return tableIndexesLoading.value;
   if (tableInfoTab.value === "foreignKeys") return tableForeignKeysLoading.value;
+  if (tableInfoTab.value === "partitions") return tablePartitionsLoading.value;
   return tableInfoTab.value === "triggers" && tableTriggersLoading.value;
 });
 const SIDE_PANEL_MIN_WIDTH = 280;
@@ -624,17 +642,14 @@ const gridTemplateColumns = computed(() => {
 const objectGridMinWidth = computed(() => {
   return objectBrowserColumns.value.reduce((total, key) => total + objectColumnWidths.value[key], 0) + Math.max(0, objectBrowserColumns.value.length - 1) * 12 + 24;
 });
-const partitionRowsByParentId = computed(() => {
-  const groups = new Map<string, ObjectBrowserRow[]>();
-  for (const row of rows.value) {
-    if (!row.partitionParentId) continue;
-    const group = groups.get(row.partitionParentId) ?? [];
-    group.push(row);
-    groups.set(row.partitionParentId, group);
-  }
-  return groups;
-});
-const filteredRows = computed(() => groupedFilteredRows());
+
+const groupedRows = computed(() => groupedFilteredRows());
+const filteredRows = computed(() => groupedRows.value.rows);
+
+/** Nesting level of a partition row (0 for a top-level object). */
+function partitionRowDepth(row: ObjectBrowserRow): number {
+  return groupedRows.value.depths.get(row.id) ?? 0;
+}
 const selectableRows = computed(() => rows.value.filter((row) => row.type === "TABLE"));
 
 // ---- Grid (tile) view virtualization ----
@@ -924,32 +939,13 @@ function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
 }
 
 function groupedFilteredRows() {
-  const query = search.value.trim();
-  const candidateRows = rows.value.filter(rowMatchesObjectFilter);
-  const candidateIds = new Set(candidateRows.map((row) => row.id));
-  const matchingRows = objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter);
-  const matchingIds = new Set(matchingRows.map((row) => row.id));
-  const parentIdsWithMatchingPartitions = new Set(matchingRows.flatMap((row) => (row.partitionParentId ? [row.partitionParentId] : [])));
-  const rootRows = candidateRows.filter((row) => {
-    if (row.partitionParentId) return false;
-    if (!query) return true;
-    return matchingIds.has(row.id) || parentIdsWithMatchingPartitions.has(row.id);
+  return groupObjectBrowserRows({
+    rows: rows.value.filter(rowMatchesObjectFilter),
+    matchingRows: objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter),
+    query: search.value.trim(),
+    expandedPartitionParentIds: expandedPartitionParentIds.value,
+    sortRows: sortObjectBrowserRowsWithPins,
   });
-  const sortedRoots = sortObjectBrowserRowsWithPins(rootRows);
-  const result: ObjectBrowserRow[] = [];
-
-  for (const row of sortedRoots) {
-    result.push(row);
-    const partitions = partitionRowsByParentId.value.get(row.id)?.filter((partition) => candidateIds.has(partition.id));
-    if (!partitions?.length) continue;
-    const parentMatches = matchingIds.has(row.id);
-    const shouldShowPartitions = expandedPartitionParentIds.value.has(row.id) || !!query;
-    if (!shouldShowPartitions) continue;
-    const visiblePartitions = query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id)) : partitions;
-    result.push(...sortObjectBrowserRowsWithPins(visiblePartitions));
-  }
-
-  return result;
 }
 
 function iconClass(type: ObjectBrowserRow["type"]) {
@@ -1074,6 +1070,7 @@ type TableInfoTabItem = { id: TableInfoTab; label: string; icon: Component; coun
 
 const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
   const tabs: TableInfoTabItem[] = [];
+  tabs.push({ id: "info", label: t("grid.tableInfoOverview"), icon: Info });
   if (tableMetadataCapabilities.value.ddl) {
     tabs.push({ id: "ddl", label: "DDL", icon: Code2 });
   }
@@ -1092,6 +1089,9 @@ const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
   if (tableMetadataCapabilities.value.triggers) {
     tabs.push({ id: "triggers", label: t("grid.tableInfoTriggers"), icon: RotateCcw, count: tableTriggers.value.length });
   }
+  if (tableMetadataCapabilities.value.partitions && tableIsPartitioned.value) {
+    tabs.push({ id: "partitions", label: t("structureEditor.partitions"), icon: Network, count: tablePartitions.value?.partitions.length });
+  }
   return tabs;
 });
 
@@ -1100,6 +1100,31 @@ const tableInfoTabListStyle = computed(() => ({
 }));
 
 const filteredTableColumns = computed(() => filterObjectBrowserTableColumns(tableColumns.value, tableInfoSearchQuery.value));
+const tableOverviewRows = computed(() => {
+  const stats = tableOverviewStats.value;
+  const rows = [
+    { label: t("common.table"), value: sidePanelRow.value?.name ?? "" },
+    { label: t("common.schema"), value: sidePanelRow.value?.schema || selectedSchema.value || props.database },
+    { label: t("common.database"), value: props.database },
+    { label: t("structureEditor.comment"), value: tableOverviewComment.value ?? "" },
+    { label: t("grid.tableInfoEstimatedRows"), value: formatObjectBrowserCount(stats?.estimated_rows) },
+    { label: t("grid.tableInfoTotalSize"), value: formatObjectBrowserBytes(stats?.total_bytes) },
+    { label: t("grid.tableInfoDataLength"), value: formatObjectBrowserBytes(stats?.data_length) },
+    { label: t("grid.tableInfoEngine"), value: stats?.engine ?? "" },
+    { label: t("grid.tableInfoCreatedAt"), value: stats?.created_at ?? "" },
+    { label: t("grid.tableInfoUpdatedAt"), value: stats?.updated_at ?? "" },
+    { label: t("grid.tableInfoCollation"), value: stats?.collation ?? "" },
+    { label: t("grid.tableInfoRowFormat"), value: stats?.row_format ?? "" },
+    { label: t("grid.tableInfoAvgRowLength"), value: formatObjectBrowserBytes(stats?.avg_row_length) },
+    { label: t("grid.tableInfoMaxDataLength"), value: formatObjectBrowserBytes(stats?.max_data_length) },
+    { label: t("grid.tableInfoCheckTime"), value: stats?.check_time ?? "" },
+    { label: t("grid.tableInfoIndexLength"), value: formatObjectBrowserBytes(stats?.index_length) },
+    { label: t("grid.tableInfoAutoIncrement"), value: stats?.auto_increment ?? "" },
+    { label: t("grid.tableInfoDataFree"), value: formatObjectBrowserBytes(stats?.data_free) },
+  ];
+  const query = tableInfoSearchQuery.value.trim().toLowerCase();
+  return rows.filter((row) => row.value && (!query || row.label.toLowerCase().includes(query) || row.value.toLowerCase().includes(query)));
+});
 
 const filteredTableIndexes = computed(() => {
   if (!tableInfoSearchQuery.value) return tableIndexes.value;
@@ -1148,11 +1173,19 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   sidePanelGuard.bump();
   // Reset state
   tableColumns.value = [];
+  tableOverviewStats.value = null;
+  tableOverviewComment.value = null;
+  tableOverviewLoaded.value = false;
   rawTableDdlContent.value = "";
   tableIndexes.value = [];
   tableForeignKeys.value = [];
   tableTriggers.value = [];
   tableConstraints.value = [];
+  tablePartitions.value = null;
+  tablePartitionsLoaded.value = false;
+  tablePartitionsLoading.value = false;
+  tableIsPartitioned.value = false;
+  tablePartitionStatusResolved.value = false;
   tableColumnsLoaded.value = false;
   tableDdlLoaded.value = false;
   tableIndexesLoaded.value = false;
@@ -1160,22 +1193,47 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   tableTriggersLoaded.value = false;
   tableConstraintsLoaded.value = false;
   tableInfoSearchQuery.value = "";
-  // Determine initial tab: explicit request > previously activated
+  // Determine initial tab: explicit request > previously activated. Resolve the
+  // partition status first so a persisted `partitions` tab is not rejected (and
+  // overwritten) before the probe lands.
+  await probeTablePartitionStatus();
   const firstTab = initialTab ?? tableInfoTab.value;
   await selectTableInfoTab(firstTab);
 }
 
 async function selectTableInfoTab(tab: TableInfoTab) {
+  // The panel can be re-selected (or restored) without `openTableInfo`, so make
+  // sure the partition status has been probed before the tab list is consulted.
+  if (!tablePartitionStatusResolved.value) await probeTablePartitionStatus();
   const nextTab = tableInfoTabs.value.some((item) => item.id === tab) ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
   tableInfoTab.value = nextTab;
   tableInfoSearchQuery.value = "";
-  if (nextTab === "ddl") await fetchTableDdl();
+  if (nextTab === "info") await fetchTableOverview();
+  else if (nextTab === "ddl") await fetchTableDdl();
   else if (nextTab === "columns") await fetchTableColumns();
   else if (nextTab === "indexes") await fetchTableIndexes();
   else if (nextTab === "foreignKeys") await fetchTableForeignKeys();
   else if (nextTab === "constraints") await fetchTableConstraints();
   else if (nextTab === "triggers") await fetchTableTriggers();
+  else if (nextTab === "partitions") await fetchTablePartitions();
+}
+
+async function fetchTableOverview(force = false) {
+  const row = sidePanelRow.value;
+  if (!row || (!force && tableOverviewLoaded.value)) return;
+  const epoch = sidePanelGuard.capture();
+  const schema = row.schema || selectedSchema.value || props.database;
+  tableOverviewLoading.value = true;
+  try {
+    const [statistics, comment] = await Promise.all([api.listObjectStatistics(props.connection.id, props.database, schema).catch(() => [] as ObjectStatistics[]), api.getTableComment(props.connection.id, props.database, schema, row.name, props.catalog).catch(() => null)]);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableOverviewStats.value = findTableStatistics(statistics, row.name, schema) ?? null;
+    tableOverviewComment.value = comment;
+    tableOverviewLoaded.value = true;
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tableOverviewLoading.value = false;
+  }
 }
 
 function tableMetadataRequest(row: ObjectBrowserRow): ObjectDdlRequest {
@@ -1309,6 +1367,53 @@ async function fetchTableTriggers(force = false) {
   }
 }
 
+async function probeTablePartitionStatus() {
+  const row = sidePanelRow.value;
+  if (!row || !tableMetadataCapabilities.value.partitions) {
+    tableIsPartitioned.value = false;
+    tablePartitionStatusResolved.value = true;
+    return;
+  }
+  const epoch = sidePanelGuard.capture();
+  try {
+    const request = tableMetadataRequest(row);
+    const status = await api.getTablePartitionStatus(request.connectionId, request.database, request.schema || request.database, request.tableName);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableIsPartitioned.value = status.isPartitionedParent || status.isPartition;
+  } catch {
+    // Fail closed: hide the tab rather than offering one that cannot load.
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableIsPartitioned.value = false;
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tablePartitionStatusResolved.value = true;
+  }
+}
+
+async function fetchTablePartitions(force = false) {
+  const row = sidePanelRow.value;
+  if (!row || (tablePartitionsLoaded.value && !force)) return;
+  const epoch = sidePanelGuard.capture();
+  tablePartitionsLoading.value = true;
+  let loadedSuccessfully = false;
+  try {
+    const request = tableMetadataRequest(row);
+    // Live catalog read: partition metadata has no persisted cache facet.
+    const value = await api.getTablePartitioning(request.connectionId, request.database, request.schema || request.database, request.tableName);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tablePartitions.value = value;
+    loadedSuccessfully = true;
+  } catch (error) {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tablePartitions.value = null;
+    toast(translateBackendError(t, error), 5000);
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) {
+      tablePartitionsLoaded.value = loadedSuccessfully;
+      tablePartitionsLoading.value = false;
+    }
+  }
+}
+
 async function fetchTableConstraints(force = false) {
   const row = sidePanelRow.value;
   if (!row || (tableConstraintsLoaded.value && !force)) return;
@@ -1334,10 +1439,19 @@ async function fetchTableConstraints(force = false) {
 }
 
 async function refreshActiveTableInfo() {
+  if (sidePanelMode.value === "source") {
+    await refreshActiveSource();
+    return;
+  }
   if (sidePanelMode.value !== "table-info" || !sidePanelRow.value) return;
   sidePanelGuard.bump();
 
-  if (tableInfoTab.value === "ddl") {
+  if (tableInfoTab.value === "info") {
+    tableOverviewStats.value = null;
+    tableOverviewComment.value = null;
+    tableOverviewLoaded.value = false;
+    await fetchTableOverview(true);
+  } else if (tableInfoTab.value === "ddl") {
     rawTableDdlContent.value = "";
     tableDdlLoaded.value = false;
     await fetchTableDdl(true);
@@ -1361,6 +1475,10 @@ async function refreshActiveTableInfo() {
     tableTriggers.value = [];
     tableTriggersLoaded.value = false;
     await fetchTableTriggers(true);
+  } else if (tableInfoTab.value === "partitions") {
+    tablePartitions.value = null;
+    tablePartitionsLoaded.value = false;
+    await fetchTablePartitions(true);
   }
 }
 
@@ -1447,9 +1565,14 @@ async function openSource(row: ObjectBrowserRow) {
     closeSidePanel();
     return;
   }
+  await loadSourcePanel(row);
+}
+
+async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditing?: boolean }) {
   // Starting a different object must invalidate slower source requests before
   // any state is reset, otherwise an old response can populate the new row.
   const epoch = sidePanelGuard.start();
+  const preserveEditing = options?.preserveEditing === true && sourceEditing.value;
   sidePanelRow.value = row;
   sidePanelMode.value = "source";
   sourceRow.value = row;
@@ -1483,7 +1606,9 @@ async function openSource(row: ObjectBrowserRow) {
     sourceEditableText.value = editable;
     sourceContent.value = row.type === "SEQUENCE" ? result.source : editable;
     sourceDraft.value = editable;
-    sourceEditing.value = sourceCanEdit.value && row.type !== "SEQUENCE";
+    // Fresh open always enters edit when allowed; refresh preserves prior edit mode.
+    const enterEditing = sourceCanEdit.value && row.type !== "SEQUENCE" && (options?.preserveEditing ? preserveEditing : true);
+    sourceEditing.value = enterEditing;
     if (!sourceCanEdit.value && row.type !== "SEQUENCE") {
       toast(t("objects.sourceReadOnly"), 3000);
     }
@@ -1493,6 +1618,13 @@ async function openSource(row: ObjectBrowserRow) {
   } finally {
     if (sidePanelGuard.isFresh(epoch)) sourceLoading.value = false;
   }
+}
+
+async function refreshActiveSource() {
+  const row = sourceRow.value || (sidePanelMode.value === "source" ? sidePanelRow.value : null);
+  if (!row || sidePanelMode.value !== "source") return;
+  if (sourceEditing.value && !window.confirm(t("objects.refreshDiscardConfirm"))) return;
+  await loadSourcePanel(row, { preserveEditing: true });
 }
 
 function openEventEditor(row: ObjectBrowserRow) {
@@ -2341,7 +2473,29 @@ async function confirmDuplicateStructure() {
   }
 }
 
-function copySelectedTablesToClipboard() {
+function objectBrowserTableNamesCopyText(rows: readonly ObjectBrowserRow[]): string {
+  const targets = rows.map(
+    (row) =>
+      ({
+        id: row.name,
+        label: row.name,
+        type: "table",
+        connectionId: props.connection.id,
+        database: props.database,
+        catalog: props.catalog,
+        schema: row.schema || selectedSchema.value || undefined,
+      }) as SidebarTableCopyTarget,
+  );
+  return formatSidebarTableNamesForCopy(targets, {
+    separator: settingsStore.editorSettings.sidebarCopyTableNameSeparator,
+    includeSchema: settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema,
+    databaseType: effectiveDatabaseType.value,
+    driverProfile: props.connection.driver_profile,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+  });
+}
+
+async function copySelectedTablesToClipboard() {
   const selectedRows = selectedTableRows.value;
   if (selectedRows.length === 0) return;
   connectionStore.treeClipboard = {
@@ -2354,7 +2508,12 @@ function copySelectedTablesToClipboard() {
       tableComment: row.comment,
     })),
   };
-  toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
+  try {
+    await copyToClipboard(objectBrowserTableNamesCopyText(selectedRows));
+    toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function canPasteTableClipboard(): boolean {
@@ -2455,7 +2614,7 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
     if (selectedTableCount.value === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    copySelectedTablesToClipboard();
+    void copySelectedTablesToClipboard();
     return;
   }
   if (eventTargetAllowsAppClipboardShortcut(event, "v")) {
@@ -3665,6 +3824,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     <Square v-else class="h-3.5 w-3.5" />
                   </button>
                   <div class="flex min-w-0 items-center gap-2">
+                    <span v-if="partitionRowDepth(item) > 0" :data-partition-depth="partitionRowDepth(item)" :style="{ width: `${partitionRowDepth(item) * PARTITION_TREE_INDENT_PX}px` }" class="h-5 shrink-0" aria-hidden="true" />
                     <button
                       v-if="item.partitionCount"
                       type="button"
@@ -3675,7 +3835,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <ChevronDown v-if="isPartitionParentExpanded(item)" class="h-3.5 w-3.5" />
                       <ChevronRight v-else class="h-3.5 w-3.5" />
                     </button>
-                    <span v-else-if="item.partitionParentId" class="ml-4 h-5 w-5 shrink-0" />
+                    <span v-else-if="item.partitionParentId" class="h-5 w-5 shrink-0" />
                     <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
                     <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
                     <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
@@ -3819,7 +3979,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div v-if="tableInfoTab === 'ddl' && effectiveDatabaseType === 'oceanbase-oracle'" class="border-b px-3 py-2">
             <DdlStorageToggle :database-type="effectiveDatabaseType" :disabled="tableDdlLoading" />
           </div>
-          <div v-if="tableInfoTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
+          <div v-if="tableInfoTab === 'info'" class="flex-1 min-h-0 overflow-auto">
+            <div v-if="tableOverviewLoading" class="h-full flex items-center justify-center"><Loader2 class="w-4 h-4 animate-spin text-muted-foreground" /></div>
+            <div v-else-if="tableInfoSearchQuery && tableOverviewRows.length === 0" class="p-6 text-center text-xs text-muted-foreground">{{ t("grid.tableInfoNoResults") }}</div>
+            <div v-else class="divide-y">
+              <div v-for="row in tableOverviewRows" :key="row.label" class="flex items-baseline gap-3 px-3 py-2 text-xs">
+                <span class="w-24 shrink-0 text-muted-foreground">{{ row.label }}</span>
+                <span class="min-w-0 flex-1 select-text break-words font-mono text-[11px]" :title="row.value">{{ row.value }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="tableInfoTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
             <div v-if="tableColumnsLoading" class="h-full flex items-center justify-center">
               <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
             </div>
@@ -3943,6 +4113,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </div>
             </div>
           </div>
+          <TablePartitionsPanel v-else-if="tableInfoTab === 'partitions'" :partitioning="tablePartitions" :loading="tablePartitionsLoading" :error="''" :search-query="tableInfoSearchQuery" />
           <pre
             v-else-if="tableInfoTab === 'ddl' && !tableDdlLoading"
             ref="tableInfoDdlPreRef"
@@ -3981,6 +4152,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </Button>
             <Button v-if="!sourceEditing && sourceCanEdit" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
               <PencilLine class="h-3 w-3" />
+            </Button>
+            <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="sourceLoading || sourceSaving" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="refreshActiveSource">
+              <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': sourceLoading }" />
             </Button>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSource">
               <X class="h-3 w-3" />

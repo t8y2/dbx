@@ -993,6 +993,25 @@ jobs:
             --retain 5 \
             --apply
 
+  notify-feishu:
+    name: Notify Feishu group
+    needs: [publish, sync-release-to-cnb]
+    # Card sends once the release is public even if the CNB mirror sync failed.
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Send release card to Feishu
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+        run: python3 scripts/notify_feishu.py "${{ github.ref_name }}"
+
   docker:
     runs-on: ubuntu-latest
     strategy:

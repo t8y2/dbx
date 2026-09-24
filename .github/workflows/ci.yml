@@ -316,6 +316,9 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
       SCCACHE_IDLE_TIMEOUT: "0"
+      # Single source for the job's nightly pin: the toolchain step and the
+      # prebuilt AWS-LC cache key must move together.
+      WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-07-22
     steps:
       - uses: actions/checkout@v7
 
@@ -336,12 +339,166 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: ${{ env.WIN7_NIGHTLY_TOOLCHAIN }}
           components: rust-src
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
+
+      - name: Restore prebuilt Win7 AWS-LC
+        id: aws-lc-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/win7-aws-lc-install
+          # Key covers the workspace Cargo.lock too: a main-workspace aws-lc-sys
+          # bump must rebuild the prebuilt artifacts instead of reusing the
+          # cached headers/lib for a stale version.
+          key: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
+
+      - name: Build Win7 AWS-LC cache
+        if: steps.aws-lc-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          $targetRoot = Join-Path $env:RUNNER_TEMP "win7-aws-lc-build"
+          $installRoot = Join-Path $env:RUNNER_TEMP "win7-aws-lc-install"
+          cargo build --locked --release `
+            --manifest-path .github/fixtures/win7-aws-lc-cache/Cargo.toml `
+            --target x86_64-win7-windows-msvc `
+            -Z build-std=std,panic_abort
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $include = Get-ChildItem $targetRoot -Directory -Recurse -Filter include |
+            Where-Object { Test-Path (Join-Path $_.FullName "openssl/base.h") } |
+            Select-Object -First 1
+          $library = Get-ChildItem $targetRoot -File -Recurse -Filter "*crypto.lib" |
+            Where-Object { $_.Name -like "*aws_lc_0_43_0_crypto.lib" } |
+            Select-Object -First 1
+          if (!$include -or !$library) {
+            Write-Error "AWS-LC did not create the required headers and static library."
+            exit 1
+          }
+
+          $metadata = cargo metadata --locked --format-version 1 `
+            --manifest-path .github/fixtures/win7-aws-lc-cache/Cargo.toml |
+            ConvertFrom-Json
+          $awsLcPackage = $metadata.packages |
+            Where-Object { $_.name -eq "aws-lc-sys" } |
+            Select-Object -First 1
+          $crateRoot = Split-Path $awsLcPackage.manifest_path -Parent
+          $bindings = Join-Path $crateRoot "src/x86_64_pc_windows_msvc_crypto.rs"
+          if (!(Test-Path $bindings)) {
+            Write-Error "AWS-LC did not provide the Windows MSVC bindings."
+            exit 1
+          }
+
+          New-Item -ItemType Directory -Path (Join-Path $installRoot "include") -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $installRoot "lib") -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $installRoot "share/rust") -Force | Out-Null
+          Copy-Item -Path (Join-Path $include.FullName "*") `
+            -Destination (Join-Path $installRoot "include") -Recurse -Force
+          Copy-Item -LiteralPath $library.FullName `
+            -Destination (Join-Path $installRoot "lib/crypto.lib") -Force
+          $bindingOutput = Join-Path $installRoot "share/rust/aws_lc_bindings.rs"
+          $insideInnerAttribute = $false
+          $bindingLines = foreach ($line in Get-Content -LiteralPath $bindings) {
+            if (!$insideInnerAttribute -and $line -eq "#![allow(") {
+              $insideInnerAttribute = $true
+              continue
+            }
+            if ($insideInnerAttribute) {
+              if ($line -eq ")]") {
+                $insideInnerAttribute = $false
+              }
+              continue
+            }
+            $line
+          }
+          $bindingLines | Set-Content -LiteralPath $bindingOutput -Encoding utf8NoBOM
+          $timer.Stop()
+          "AWS-LC cache build: $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds" >> $env:GITHUB_STEP_SUMMARY
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/win7-aws-lc-build
+
+      - name: Configure prebuilt Win7 AWS-LC
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "win7-aws-lc-install"
+          $requiredFiles = @(
+            "include/openssl/base.h",
+            "include/openssl/boringssl_prefix_symbols.h",
+            "lib/crypto.lib",
+            "share/rust/aws_lc_bindings.rs"
+          )
+          foreach ($relativePath in $requiredFiles) {
+            if (!(Test-Path (Join-Path $installRoot $relativePath))) {
+              Write-Error "The AWS-LC cache does not contain $relativePath."
+              exit 1
+            }
+          }
+          "AWS_LC_SYS_SYSTEM_DIR=$installRoot" >> $env:GITHUB_ENV
+          "AWS_LC_SYS_USE_SYSTEM=1" >> $env:GITHUB_ENV
+          "AWS_LC_SYS_STATIC=1" >> $env:GITHUB_ENV
+          "AWS-LC cache hit: ${{ steps.aws-lc-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Restore prebuilt Win7 OpenSSL
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/win7-openssl-install
+          key: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
+
+      - name: Build Win7 OpenSSL cache
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          $targetRoot = Join-Path $env:RUNNER_TEMP "win7-openssl-build"
+          $installRoot = Join-Path $env:RUNNER_TEMP "win7-openssl-install"
+          cargo build --locked --release `
+            --manifest-path .github/fixtures/win7-openssl-cache/Cargo.toml `
+            --target x86_64-win7-windows-msvc `
+            -Z build-std=std,panic_abort
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $install = Get-ChildItem $targetRoot -Directory -Recurse -Filter install |
+            Where-Object { $_.FullName -like "*openssl-build*" } |
+            Select-Object -First 1
+          if (!$install) {
+            Write-Error "OpenSSL did not create an install directory."
+            exit 1
+          }
+          New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+          Copy-Item -Path (Join-Path $install.FullName "*") -Destination $installRoot -Recurse -Force
+          $timer.Stop()
+          "OpenSSL cache build: $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds" >> $env:GITHUB_STEP_SUMMARY
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/win7-openssl-build
+
+      - name: Configure prebuilt Win7 OpenSSL
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "win7-openssl-install"
+          if (!(Test-Path (Join-Path $installRoot "include/openssl/ssl.h"))) {
+            Write-Error "The OpenSSL cache does not contain ssl.h."
+            exit 1
+          }
+          if (!(Get-ChildItem (Join-Path $installRoot "lib") -Filter "*ssl*.lib")) {
+            Write-Error "The OpenSSL cache does not contain an SSL library."
+            exit 1
+          }
+          if (!(Get-ChildItem (Join-Path $installRoot "lib") -Filter "*crypto*.lib")) {
+            Write-Error "The OpenSSL cache does not contain a crypto library."
+            exit 1
+          }
+          "OPENSSL_DIR=$installRoot" >> $env:GITHUB_ENV
+          "OPENSSL_NO_VENDOR=1" >> $env:GITHUB_ENV
+          "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+          "OpenSSL cache hit: ${{ steps.openssl-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh
@@ -406,7 +563,7 @@ jobs:
       - name: Show sccache stats
         if: always()
         continue-on-error: true
-        run: ${SCCACHE_PATH} --show-stats
+        run: sccache --show-stats
 
       - name: Upload Windows 7 test installer
         uses: actions/upload-artifact@v6
@@ -1037,6 +1194,11 @@ jobs:
         working-directory: agents
     steps:
       - uses: actions/checkout@v7
+      - name: Install system dependencies
+        if: matrix.driver == 'duckdb'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
       # Pin mold because runner image updates can change bundled DuckDB C++ links.

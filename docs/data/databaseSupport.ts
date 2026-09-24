@@ -21,6 +21,7 @@ export const databaseSupport: DatabaseSupportItem[] = [
   { id: "oracle", name: "Oracle", icon: "/icons/database/oracle.svg", tone: "#f80000" },
   { id: "elasticsearch", name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
   { id: "easysearch", name: "Easysearch", icon: "/icons/database/easysearch.svg", tone: "#836eff" },
+  { id: "solr", name: "Apache Solr", icon: "/icons/database/solr.svg", tone: "#d9411e" },
   { id: "meilisearch", name: "Meilisearch", icon: "/icons/database/meilisearch.svg", tone: "#ff5caa" },
   { id: "qdrant", name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
   { id: "milvus", name: "Milvus", icon: "/icons/database/milvus.webp", tone: "#00a1ea" },

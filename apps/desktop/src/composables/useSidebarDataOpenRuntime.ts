@@ -17,6 +17,7 @@ import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
+import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 
 const DATA_TAB_METADATA_TTL_MS = TABLE_METADATA_CACHE_TTL_MS;
 
@@ -59,6 +60,21 @@ export function useSidebarDataOpenRuntime() {
         ...extra,
       });
       lastPhaseAt = now;
+    };
+    // Each data tab executes on its own session-scoped pool
+    // (`<connection>:<database>[:catalog:..]:session:<tabId>`), so its first Run
+    // pays a fresh database connection. On a remote link that setup costs
+    // hundreds of milliseconds of round trips and lands on the critical path of
+    // the page fetch the user is waiting for. Start it in the background as soon
+    // as the tab exists (and again once the connection is up) so it overlaps the
+    // table-metadata load instead of the visible loading spinner.
+    const warmTabSessionPool = (targetTabId: string) => {
+      if (!config) return;
+      connectionStore.warmConnection(node.connectionId, {
+        database: dataTabExecutionDatabase(config, node.database, node.catalog),
+        catalog: node.catalog,
+        clientSessionId: targetTabId,
+      });
     };
     openDataLog("info", "start", {
       traceId,
@@ -215,6 +231,7 @@ export function useSidebarDataOpenRuntime() {
     })();
     openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });
     logPhase("tab-created", { tabId });
+    warmTabSessionPool(tabId);
     // 接管该 tab：登记本次导航代次，作废在途的 openTableTarget/openData 旧代次
     // ——旧导航即使目标身份相同（同表不同 whereInput）也不得再落地
     const navigationToken = beginDataTabNavigation(tabId);
@@ -312,6 +329,7 @@ export function useSidebarDataOpenRuntime() {
       }
       openDataLog("info", "ensure-connected:done", { traceId, elapsed: elapsed() });
       logPhase("ensure-connected", { tabId });
+      warmTabSessionPool(tabId);
       if (!config) throw new Error("Connection config not found");
 
       const limit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);

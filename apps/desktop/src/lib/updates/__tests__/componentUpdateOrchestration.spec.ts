@@ -1,11 +1,32 @@
 // @vitest-environment happy-dom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearPendingComponentUpdatesAfterAppUpdate, markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, runPendingComponentUpdatePlan, shouldCloseUpdateCenterAfterComponentUpdate, takePendingComponentUpdatesAfterAppRestart } from "@/lib/updates/componentUpdateOrchestration";
+import {
+  clearPendingComponentUpdatesAfterAppUpdate,
+  continuePreparedAppUpdate,
+  hasPendingComponentUpdatesAfterAppRestart,
+  markPendingComponentUpdatesAfterAppUpdate,
+  resolveUpdateAllAction,
+  runPendingComponentUpdatesBeforePluginReconnect,
+  runPendingComponentUpdatePlan,
+  shouldCloseUpdateCenterAfterComponentUpdate,
+  takePendingComponentUpdatesAfterAppRestart,
+  updateBlockerLabels,
+} from "@/lib/updates/componentUpdateOrchestration";
 
 describe("component update orchestration", () => {
   beforeEach(() => {
     localStorage.clear();
+  });
+
+  it("lists blocked connection names and falls back to the driver label", () => {
+    expect(
+      updateBlockerLabels([
+        { label: "MySQL", connections: ["生产 MySQL", "报表 MySQL"] },
+        { label: "Oracle", connections: [] },
+        { label: "DuckDB", connections: ["生产 MySQL"] },
+      ]),
+    ).toEqual(["生产 MySQL", "报表 MySQL", "Oracle"]);
   });
 
   it("keeps pending component updates across a failed or ordinary startup", () => {
@@ -14,6 +35,85 @@ describe("component update orchestration", () => {
     expect(takePendingComponentUpdatesAfterAppRestart("0.6.16")).toBeNull();
     expect(takePendingComponentUpdatesAfterAppRestart("v0.6.16")).toBeNull();
     expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")).toEqual({ fromVersion: "0.6.16", targetVersion: "0.6.17", plan: { kind: "auto" } });
+  });
+
+  it("detects pending component updates before restored plugin tabs reconnect", () => {
+    expect(hasPendingComponentUpdatesAfterAppRestart()).toBe(false);
+
+    markPendingComponentUpdatesAfterAppUpdate("0.6.18", "0.6.19", { kind: "manual", categories: ["plugins"] });
+
+    expect(hasPendingComponentUpdatesAfterAppRestart()).toBe(true);
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.19")).not.toBeNull();
+    expect(hasPendingComponentUpdatesAfterAppRestart()).toBe(false);
+  });
+
+  it("consumes pending component updates before reconnecting restored plugin tabs", async () => {
+    const events: string[] = [];
+
+    await runPendingComponentUpdatesBeforePluginReconnect({
+      hasPendingComponentUpdates: () => true,
+      prepareStartup: async () => {
+        events.push("prepare");
+      },
+      consumePendingComponentUpdates: async () => {
+        events.push("consume");
+      },
+      reconnectRestoredPluginTabs: async () => {
+        events.push("reconnect");
+      },
+    });
+
+    expect(events).toEqual(["prepare", "consume", "reconnect"]);
+  });
+
+  it("reconnects restored plugin tabs immediately when no component update is pending", async () => {
+    const events: string[] = [];
+    let finishStartup = () => {};
+    const startupFinished = new Promise<void>((resolve) => {
+      finishStartup = resolve;
+    });
+
+    const startup = runPendingComponentUpdatesBeforePluginReconnect({
+      hasPendingComponentUpdates: () => false,
+      prepareStartup: async () => {
+        events.push("prepare");
+        await startupFinished;
+      },
+      consumePendingComponentUpdates: async () => {
+        events.push("consume");
+      },
+      reconnectRestoredPluginTabs: async () => {
+        events.push("reconnect");
+      },
+    });
+
+    await Promise.resolve();
+    expect(events).toEqual(["reconnect", "prepare"]);
+    finishStartup();
+    await startup;
+    expect(events).toEqual(["reconnect", "prepare"]);
+  });
+
+  it("still reconnects restored plugin tabs when pending component updates fail", async () => {
+    const events: string[] = [];
+
+    await expect(
+      runPendingComponentUpdatesBeforePluginReconnect({
+        hasPendingComponentUpdates: () => true,
+        prepareStartup: async () => {
+          events.push("prepare");
+        },
+        consumePendingComponentUpdates: async () => {
+          events.push("consume");
+          throw new Error("update failed");
+        },
+        reconnectRestoredPluginTabs: async () => {
+          events.push("reconnect");
+        },
+      }),
+    ).rejects.toThrow("update failed");
+
+    expect(events).toEqual(["prepare", "consume", "reconnect"]);
   });
 
   it("consumes a successful restart exactly once", () => {
@@ -74,17 +174,72 @@ describe("component update orchestration", () => {
     expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")?.plan).toEqual({ kind: "auto" });
   });
 
-  it("downloads DBX before deferring component updates", () => {
+  it("downloads DBX before installing it with component updates", () => {
     expect(resolveUpdateAllAction({ hasAppUpdate: true, appUpdateCanInstall: true, appUpdatePrepared: false, hasComponentUpdates: true })).toBe("download-app");
-    expect(resolveUpdateAllAction({ hasAppUpdate: true, appUpdateCanInstall: true, appUpdatePrepared: true, hasComponentUpdates: true })).toBe("defer-components");
+    expect(resolveUpdateAllAction({ hasAppUpdate: true, appUpdateCanInstall: true, appUpdatePrepared: true, hasComponentUpdates: true })).toBe("install-app");
   });
 
   it("persists the selected component categories when the DBX package is already prepared", () => {
     const action = resolveUpdateAllAction({ hasAppUpdate: true, appUpdateCanInstall: true, appUpdatePrepared: true, hasComponentUpdates: true });
-    expect(action).toBe("defer-components");
+    expect(action).toBe("install-app");
 
     expect(markPendingComponentUpdatesAfterAppUpdate("0.6.16", "0.6.17", { kind: "manual", categories: ["drivers", "mcp"] })).toBe(true);
     expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")?.plan).toEqual({ kind: "manual", categories: ["drivers", "mcp"] });
+  });
+
+  it("continues from update all into the prepared app install", async () => {
+    const rememberComponentUpdates = vi.fn(async () => true);
+    const installComponents = vi.fn(async () => {});
+    const installDownloadedUpdate = vi.fn(async () => {});
+    const restartApp = vi.fn(async () => {});
+
+    await continuePreparedAppUpdate({
+      hasComponentUpdates: true,
+      restartOnly: false,
+      rememberComponentUpdates,
+      installComponents,
+      installDownloadedUpdate,
+      restartApp,
+    });
+
+    expect(rememberComponentUpdates).toHaveBeenCalledOnce();
+    expect(installDownloadedUpdate).toHaveBeenCalledOnce();
+    expect(restartApp).not.toHaveBeenCalled();
+    expect(installComponents).not.toHaveBeenCalled();
+  });
+
+  it("continues from update all into restart when the app update is already staged", async () => {
+    const restartApp = vi.fn(async () => {});
+
+    await continuePreparedAppUpdate({
+      hasComponentUpdates: true,
+      restartOnly: true,
+      rememberComponentUpdates: async () => true,
+      installComponents: async () => {},
+      installDownloadedUpdate: async () => {},
+      restartApp,
+    });
+
+    expect(restartApp).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to component updates without restarting when the restart plan cannot be persisted", async () => {
+    const installComponents = vi.fn(async () => {});
+    const installDownloadedUpdate = vi.fn(async () => {});
+    const restartApp = vi.fn(async () => {});
+
+    await continuePreparedAppUpdate({
+      hasComponentUpdates: true,
+      restartOnly: false,
+      rememberComponentUpdates: async () => false,
+      installComponents,
+      installDownloadedUpdate,
+      restartApp,
+    });
+
+    expect(installComponents).toHaveBeenCalledOnce();
+    expect(installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(restartApp).not.toHaveBeenCalled();
   });
 
   it("updates components immediately when no DBX update exists or the package cannot be installed", () => {

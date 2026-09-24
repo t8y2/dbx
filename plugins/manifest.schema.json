@@ -30,7 +30,7 @@
       "uniqueItems": true,
       "items": {
         "anyOf": [
-          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.storage"] },
+          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai"] },
           { "type": "string", "pattern": "^host\\.network:https://[A-Za-z0-9._-]+(:[0-9]+)?$" }
         ]
       }
@@ -325,7 +325,7 @@
         "label": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
         "icon": { "$ref": "#/$defs/assetPath" },
-        "menu": { "const": "connection" }
+        "menu": { "enum": ["connection", "table"] }
       }
     },
     "resultViewContribution": {

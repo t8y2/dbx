@@ -16,6 +16,7 @@ export const DATABASE_TYPES = [
   "elasticsearch",
   "easysearch",
   "meilisearch",
+  "solr",
   "hbase",
   "qdrant",
   "chromadb",

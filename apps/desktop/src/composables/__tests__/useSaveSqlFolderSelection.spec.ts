@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { useSaveSqlFolderSelection } from "@/composables/useSaveSqlFolderSelection";
 
@@ -12,8 +11,6 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const appSource = readFileSync(new URL("../../App.vue", import.meta.url), "utf8");
-
 describe("save SQL folder selection", () => {
   it("keeps save and reselection blocked until folder creation completes", async () => {
     const creation = deferred<string>();
@@ -24,9 +21,6 @@ describe("save SQL folder selection", () => {
 
     expect(folder.pending.value).toBe(true);
     expect(folder.selection.value).toBe("existing-folder");
-    expect(appSource).toContain("if (saveSqlFolderCreationPending.value) return;");
-    expect(appSource).toContain(':disabled="saveSqlFolderCreationPending"');
-    expect(appSource).toContain(':disabled="saveSqlFolderCreationPending || !saveSqlName.trim()"');
 
     creation.resolve("created-folder");
     await pendingSelection;

@@ -34,6 +34,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   easysearch: { deferred: "index settings are not database properties" },
   meilisearch: { deferred: "index settings are not database properties" },
   salesforce: { deferred: "sObject metadata is managed in Salesforce Setup" },
+  solr: { deferred: "core settings are not database properties" },
   hbase: { deferred: "namespace and table properties need a dedicated HBase workflow" },
   qdrant: { deferred: "collection settings are not database properties" },
   milvus: { deferred: "collection/database settings need a dedicated vector workflow" },

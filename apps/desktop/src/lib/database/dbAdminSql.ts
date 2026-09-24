@@ -314,16 +314,20 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     return { sql, sourceColumns: options.sourceColumns, executeAsScript: primaryKeyColumns.length > 0 || duplicateTableStructureRequiresScript(sql) };
   }
 
+  let sourceColumns = options.sourceColumns;
+  if (options.databaseType === "vastbase") {
+    sourceColumns ??= await api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+  }
   const sql = await buildDuplicateTableStructureSql({
     databaseType: options.databaseType,
     schema: options.schema,
     sourceName: options.sourceName,
     targetName: options.targetName,
     tableComment: options.tableComment,
-    columnComments: [],
+    columnComments: options.databaseType === "vastbase" ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
     identifierQuote: options.identifierQuote,
   });
-  return { sql, sourceColumns: options.sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
+  return { sql, sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
 }
 
 export interface CopyTableDataSqlOptions {
@@ -334,6 +338,7 @@ export interface CopyTableDataSqlOptions {
   columns?: string[];
   postgresOverridingSystemValue?: boolean;
   sqlserverIdentityInsert?: boolean;
+  damengIdentityInsert?: boolean;
   normalizeNewTargetName?: boolean;
   /** Quote character reported by the connected server, for types whose quote is not fixed by the
    * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the

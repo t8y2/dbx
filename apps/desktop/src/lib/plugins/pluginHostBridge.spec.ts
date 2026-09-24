@@ -3,9 +3,9 @@ import { reactive, readonly } from "vue";
 import { PluginHostBridge, pluginSandboxDocument, pluginSdkSource } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginResultViewContribution, PluginWorkbenchContribution } from "@/types/database";
 
-function plugin(permissions: string[] = []): InstalledPlugin {
+function plugin(permissions: string[] = [], contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
-    manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions, drivers: [], contributions: [] },
+    manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions, drivers: [], contributions },
     compatibility: { compatible: true },
   };
 }
@@ -14,6 +14,30 @@ const workbench: PluginWorkbenchContribution = { type: "workbench", id: "sample.
 const resultView: PluginResultViewContribution = { type: "result-view", id: "sample.graph", label: "Graph" };
 
 describe("PluginHostBridge", () => {
+  it("host.listConnections returns a read-only secret-free list scoped to the calling plugin", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const listConnections = vi.fn(() => [{ id: "conn-1", name: "Prod", providerId: "sample.connection", connectionType: "sample", readOnly: true }]);
+    const contributions = [
+      { type: "connection-provider", id: "sample.connection", label: "Sample", database_type: "sample", fields: [] },
+      { type: "workbench", id: "sample.main", label: "Sample" },
+    ] as InstalledPlugin["manifest"]["contributions"];
+    const bridge = new PluginHostBridge(plugin(["host.workbench"], contributions), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      listConnections,
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "9", method: "host.listConnections", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(listConnections).toHaveBeenCalledWith("sample"));
+    expect(messages[0]).toMatchObject({ source: "dbx-host", type: "response", id: "9", result: [{ id: "conn-1", name: "Prod", providerId: "sample.connection", readOnly: true }] });
+  });
+
   it("streams downloads under the owning plugin, scopes cancellation and reports native capability", async () => {
     const messages: any[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -73,6 +97,50 @@ describe("PluginHostBridge", () => {
     bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: "open", method: "host.downloadFile", params: {} } } as MessageEvent);
     await vi.waitFor(() => expect(messages[1].error).toContain("desktop host"));
   });
+  it("opens the built-in AI conversation only with the declared permission and host-owned identity", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const openAiConversation = vi.fn().mockResolvedValue(undefined);
+    const api = { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), openAiConversation };
+    const request = { source: "dbx-plugin", version: 1, type: "request", id: "ai", method: "host.ai.openConversation", params: { title: "自选分析", prompt: "分析", context: { snapshotId: "s1" }, send: true, pluginId: "forged" } };
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, api);
+    denied.handleWindowMessage({ source: target, data: request } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ error: "Plugin has not declared permission 'host.ai'" });
+    expect(openAiConversation).not.toHaveBeenCalled();
+
+    const allowed = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, api);
+    allowed.handleWindowMessage({ source: target, data: request } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(openAiConversation).toHaveBeenCalledWith({ context: { pluginId: "sample", pluginName: "Sample", title: "自选分析", capturedAt: expect.any(String), data: { snapshotId: "s1" } }, prompt: "分析", send: true });
+    expect(messages[1]).toMatchObject({ id: "ai", result: null });
+    expect(api.invoke).not.toHaveBeenCalled();
+  });
+
+  it("advertises the ai capability group in the init message", () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const withAi = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      openAiConversation: vi.fn().mockResolvedValue(undefined),
+    });
+    withAi.sendInit();
+    expect(messages[0].capabilities.ai).toBe(true);
+
+    messages.length = 0;
+    const withoutAdapter = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+    withoutAdapter.sendInit();
+    expect(messages[0].capabilities.ai).toBe(false);
+  });
+
   it("binds backend calls to the owning plugin identity", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -521,6 +589,95 @@ describe("PluginHostBridge", () => {
     planCall(legacy, target, "host.getPlanCapabilities", { connectionId: "c1" }, "legacy");
     await vi.waitFor(() => expect(messages).toHaveLength(3));
     expect(messages[2]).toMatchObject({ id: "legacy", error: "Host plan API is unavailable" });
+  });
+
+  it("requires host.schema:read, normalizes table identity, and serves narrow metadata", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getTableMetadata = vi.fn().mockResolvedValue({
+      columns: [{ name: "id", dataType: "integer", nullable: false }],
+      fieldCapabilities: { length: "unknown", precision: "unknown", scale: "unknown", default: "unknown" },
+    });
+    const base = { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), getTableMetadata };
+
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, base);
+    planCall(denied, target, "host.getTableMetadata", { connectionId: "c1", table: "users" }, "denied");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "denied", error: "Plugin has not declared permission 'host.schema:read'" });
+    expect(getTableMetadata).not.toHaveBeenCalled();
+
+    const allowed = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => target, base);
+    allowed.sendInit();
+    planCall(allowed, target, "host.getTableMetadata", { connectionId: "  c1  ", database: " app ", schema: "   ", table: " users " }, "metadata");
+    await vi.waitFor(() => expect(messages).toHaveLength(3));
+
+    expect(getTableMetadata).toHaveBeenCalledWith({ connectionId: "c1", database: "app", table: "users" });
+    expect(messages[2]).toMatchObject({ id: "metadata", result: expect.objectContaining({ columns: expect.any(Array) }) });
+  });
+
+  it("rejects malformed table metadata contexts and advertises the adapter capability", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getTableMetadata = vi.fn();
+    const bridge = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      getTableMetadata,
+    });
+    bridge.sendInit();
+    expect(messages[0].capabilities).toMatchObject({ schemaMetadataApi: true });
+
+    const cases: [string, unknown, string][] = [
+      ["missing-connection", { table: "users" }, "connectionId"],
+      ["blank-connection", { connectionId: " ", table: "users" }, "connectionId"],
+      ["missing-table", { connectionId: "c1" }, "table"],
+      ["table-type", { connectionId: "c1", table: 7 }, "table"],
+      ["identifier-long", { connectionId: "c1", table: "x".repeat(257) }, "table"],
+      ["scope-type", { connectionId: "c1", table: "users", schema: 1 }, "schema"],
+    ];
+    for (const [id, params] of cases) planCall(bridge, target, "host.getTableMetadata", params, id);
+    planCall(bridge, target, "host.getTableMetadata", "not an object", "params-object");
+    await vi.waitFor(() => expect(messages).toHaveLength(cases.length + 2));
+
+    cases.forEach(([id, , expected], index) => {
+      expect(messages[index + 1]).toMatchObject({ id });
+      expect(messages[index + 1].error).toContain(expected);
+    });
+    expect(messages[messages.length - 1]).toMatchObject({ id: "params-object", error: "host.getTableMetadata params must be an object" });
+    expect(getTableMetadata).not.toHaveBeenCalled();
+
+    const legacyMessages: any[] = [];
+    const legacyTarget = { postMessage: (message: unknown) => legacyMessages.push(message) } as unknown as Window;
+    const legacy = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => legacyTarget, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+    legacy.sendInit();
+    expect(legacyMessages[0].capabilities).toMatchObject({ schemaMetadataApi: false });
+    planCall(legacy, legacyTarget, "host.getTableMetadata", { connectionId: "c1", table: "users" }, "legacy");
+    await vi.waitFor(() => expect(legacyMessages).toHaveLength(2));
+    expect(legacyMessages[1]).toMatchObject({ id: "legacy", error: "Host schema metadata API is unavailable" });
+  });
+
+  it.each(["Connection session is not open for the requested database", "Query canceled", "metadata provider denied", "DBX metadata pool is busy; please retry"])("forwards schema metadata failures without retrying: %s", async (error) => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getTableMetadata = vi.fn().mockRejectedValue(new Error(error));
+    const bridge = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      getTableMetadata,
+    });
+    planCall(bridge, target, "host.getTableMetadata", { connectionId: "c1", table: "users" }, "failure");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "failure", error });
+    expect(getTableMetadata).toHaveBeenCalledTimes(1);
   });
 
   it("opens only the owning plugin filesystem with explicit permission", async () => {
@@ -992,6 +1149,7 @@ describe("plugin SDK source", () => {
       invoke: (method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
       getPlanCapabilities: (connectionId: string) => Promise<unknown>;
       explainPlan: (request: unknown) => Promise<unknown>;
+      getTableMetadata: (context: unknown) => Promise<unknown>;
     };
   }
 
@@ -1079,6 +1237,17 @@ describe("plugin SDK source", () => {
     expect(requests[1].params).toEqual({ connectionId: "c1", sql: "SELECT 1", mode: "estimated" });
   });
 
+  it("exposes read-only table metadata through the SDK request surface", () => {
+    const posted: unknown[] = [];
+    const { dbxPlugin } = loadSdk(posted);
+
+    void dbxPlugin!.getTableMetadata({ connectionId: "c1", database: "app", table: "users" });
+
+    const request = firstRequest(posted);
+    expect(request.method).toBe("host.getTableMetadata");
+    expect(request.params).toEqual({ connectionId: "c1", database: "app", table: "users" });
+  });
+
   it("forwards fileTransfer requests to the host api", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -1151,5 +1320,47 @@ describe("plugin SDK source", () => {
     expect(source).toContain("onDragState");
     expect(source).toContain("type === 'filedrop'");
     expect(source).toContain("type === 'dragstate'");
+  });
+
+  it("sdk wires the workbench/close handshake: onClose listeners, ack and ready feature flag", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("workbench.close");
+    expect(source).toContain("onClose");
+    expect(source).toContain("type === 'workbench/close'");
+    expect(source).toContain("'workbench/close-ack'");
+  });
+
+  it("requestWorkbenchClose posts the close message and resolves true on the plugin ack", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, { workbenchId: "wb-1" }, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    // The new SDK advertises the handshake on ready.
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready", features: ["workbench.close"] } } as MessageEvent);
+
+    const pending = bridge.requestWorkbenchClose(200);
+    expect(messages.some((message) => message.type === "workbench/close" && message.workbenchId === "wb-1")).toBe(true);
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "workbench/close-ack", workbenchId: "wb-1" } } as MessageEvent);
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it("requestWorkbenchClose resolves false after the deadline when the plugin never acks", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready", features: ["workbench.close"] } } as MessageEvent);
+
+    await expect(bridge.requestWorkbenchClose(5)).resolves.toBe(false);
+    // A late ack after the deadline is ignored and must not throw.
+    expect(() => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "workbench/close-ack" } } as MessageEvent)).not.toThrow();
+  });
+
+  it("requestWorkbenchClose skips the wait for SDKs without the handshake feature", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } } as MessageEvent);
+
+    await expect(bridge.requestWorkbenchClose(5000)).resolves.toBe(false);
+    expect(messages.some((message) => message.type === "workbench/close")).toBe(true);
   });
 });

@@ -745,6 +745,39 @@ export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>, 
   return normalized;
 }
 
+export interface CapturedShortcutEdit {
+  /** 归一化后的完整键位表：与 store 落盘口径一致，草稿直接采用它就不会与落盘值分叉。 */
+  shortcuts: ShortcutSettings;
+  /**
+   * 用户按下的组合命中了“另一平台的默认键”规则：落盘时该字面量会被换成本机平台
+   * 的默认键，所以这个组合在本平台不可能被保存（见上方 PLATFORM_DEFAULT_SHORTCUTS）。
+   */
+  rejectedByPlatformDefault: boolean;
+  /** 归一化是否改动了任意一行（跨平台默认键、旧默认键、遗留迁移都会改动）。 */
+  changed: boolean;
+}
+
+/**
+ * 捕获阶段的归一化：把用户在设置面板按下的组合先过一遍落盘时会走的
+ * `normalizeShortcutSettings`，让草稿始终是持久化值的**不动点**。
+ *
+ * 设置面板的“有无未保存改动”是拿草稿和 store 里的值做 JSON 比较
+ * （`editorSettingsDraftChanged`）得来的：草稿里只要存在一个会被落盘口径改写的
+ * 值，这个比较就永远为真——「应用」看起来毫无反应，「应用并关闭」每次都弹
+ * “未保存的更改”，改了多少次都存不进去（#9881：把「关闭其他标签页」改成 ⇧⌥W，
+ * 落盘时被跨平台默认键规则换回 ⌥⌘W）。调用方拿到结果后必须采用 `shortcuts`，
+ * 并在 `rejectedByPlatformDefault` 为真时提示用户换一个组合。
+ */
+export function resolveCapturedShortcutEdit(actionId: ShortcutActionId, shortcut: string, shortcuts: ShortcutSettings, platform = globalThis.navigator?.platform || ""): CapturedShortcutEdit {
+  const next = normalizeShortcutSettings({ ...shortcuts, [actionId]: shortcut }, platform);
+  const rejectedByPlatformDefault = next[actionId] !== shortcut && (PLATFORM_DEFAULT_SHORTCUTS[actionId]?.has(shortcut) === true || (actionId === "closeTab" && shortcut === LEGACY_CLOSE_TAB_DEFAULT));
+  return {
+    shortcuts: next,
+    rejectedByPlatformDefault,
+    changed: SHORTCUT_DEFINITIONS.some((definition) => next[definition.id] !== shortcuts[definition.id]),
+  };
+}
+
 export function shortcutToCodeMirrorKey(shortcut: string): string {
   return parseShortcutStrokes(shortcut)
     .map((parts) =>

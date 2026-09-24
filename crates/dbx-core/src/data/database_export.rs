@@ -182,6 +182,8 @@ struct DatabaseExportObjectCounts {
     extensions: usize,
     procedures: usize,
     functions: usize,
+    triggers: usize,
+    events: usize,
 }
 
 fn exports_database_tables(request: &DatabaseExportRequest) -> bool {
@@ -191,7 +193,21 @@ fn exports_database_tables(request: &DatabaseExportRequest) -> bool {
 fn exports_database_routines(request: &DatabaseExportRequest) -> bool {
     // Routine export is schema-wide, so an explicit table selection must not
     // add unrelated procedures or functions to either execution or progress.
+    exports_schema_wide_objects(request)
+}
+
+/// Schema-wide objects (routines, triggers, events) are exported as a whole. An explicit
+/// table selection must not add unrelated objects to either execution or progress.
+fn exports_schema_wide_objects(request: &DatabaseExportRequest) -> bool {
     request.include_objects && request.selected_tables.is_empty()
+}
+
+/// MySQL lists triggers and events as schema-wide objects (see
+/// `crates/dbx-drivers/src/db/mysql.rs`), which is what the export writes out. Other
+/// engines either report triggers per table (PostgreSQL) or not at all, so their export
+/// stays unchanged.
+fn exports_mysql_trigger_objects(db_type: DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Mysql)
 }
 
 fn database_export_total_objects(request: &DatabaseExportRequest, counts: &DatabaseExportObjectCounts) -> usize {
@@ -207,6 +223,9 @@ fn database_export_total_objects(request: &DatabaseExportRequest, counts: &Datab
     }
     if exports_database_routines(request) {
         total += counts.procedures + counts.functions;
+    }
+    if exports_schema_wide_objects(request) {
+        total += counts.triggers + counts.events;
     }
     total
 }
@@ -1983,6 +2002,27 @@ fn concurrent_metadata_prefetch_allowed(pool_kind: Option<&crate::connection::Po
     )
 }
 
+/// 预取实际使用的连接池能同时 checkout 出来的请求数。
+///
+/// 并发预取只有在池真的能同时服务多条请求时才有意义：会话级连接池
+/// （PostgreSQL/MySQL 的导出会话、标签页会话）只有一个物理连接，超出容量的并发
+/// 只会把请求排到同一个连接后面，排队时间一旦超过 checkout 超时，该表的元数据
+/// 就会以 "DBX metadata pool is busy; please retry" 失败（issue #10018）。
+fn metadata_prefetch_pool_capacity(pool: Option<&crate::connection::PoolKind>) -> usize {
+    match pool {
+        Some(crate::connection::PoolKind::Postgres(pool)) => pool.status().max_size,
+        Some(crate::connection::PoolKind::Mysql(pool, _)) => {
+            // 会话级 MySQL 池同样只有一个连接；`None` 表示驱动未暴露上限，
+            // 交由 `database_export_metadata_prefetch_concurrency` 按类型收敛。
+            crate::db::mysql::MySqlPoolAccess::checkout_max_connections(pool).unwrap_or(usize::MAX)
+        }
+        // ClickHouse 走 HTTP，不存在按物理连接排队的上限。
+        Some(crate::connection::PoolKind::ClickHouse(_)) => usize::MAX,
+        // 其余驱动（含串行客户端与单连接句柄）一律按单连接处理，回退逐表串行直查。
+        _ => 1,
+    }
+}
+
 fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize {
     // PostgreSQL exports can hold a snapshot connection while metadata and UI
     // requests share the base pool. Keep enough capacity available for normal
@@ -1992,6 +2032,14 @@ fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize
     } else {
         8
     }
+}
+
+/// 预取的实际并发度 = 数据库类型的上限 ∩ 预取所用连接池的容量。
+///
+/// 池容量为 1（会话级 PostgreSQL/MySQL 池）时并发度收敛到 1；调用方只在容量
+/// 大于 1 时才启用预取，因此这里返回 1 意味着走逐表串行直查的回退路径。
+fn metadata_prefetch_concurrency(db_type: DatabaseType, pool_capacity: usize) -> usize {
+    database_export_metadata_prefetch_concurrency(db_type).min(pool_capacity.max(1))
 }
 
 fn record_export_error<W: Write>(
@@ -2300,6 +2348,29 @@ async fn save_export_destination_identity(
 ) -> Result<(), String> {
     let value = identity.map(ExportDestinationIdentity::encode).unwrap_or_default();
     state.storage.save_state(&export_destination_state_key(dir), &value, "application/octet-stream").await
+}
+
+/// Read/delete operations must not trust a replaced backup mount or create a missing directory.
+pub async fn verify_export_destination_identity(
+    state: &crate::connection::AppState,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!("Backup directory is unavailable: {}", dir.display()));
+    }
+    let recorded = state
+        .storage
+        .load_state(&export_destination_state_key(dir))
+        .await?
+        .map(|(bytes, _)| ExportDestinationIdentity::decode(&bytes))
+        .transpose()?
+        .flatten();
+    if recorded.as_ref().is_some_and(|identity| {
+        recorded_export_destination_identity_mismatch(identity, export_destination_identity_for_path(dir).as_ref())
+    }) {
+        return Err(format!("Backup directory now resolves to a different filesystem: {}", dir.display()));
+    }
+    Ok(())
 }
 
 /// Returns whether this macOS destination still has the transient, untagged
@@ -2644,6 +2715,19 @@ fn export_source_file_name(file_path: &str) -> String {
     format!("{stem}.sql")
 }
 
+tokio::task_local! {
+    static TRACKED_BACKUP_DESTINATION: (std::path::PathBuf, Arc<std::sync::atomic::AtomicBool>);
+}
+
+/// Tracks successful create_new separately from preparation errors and path collisions.
+pub(crate) async fn track_backup_destination<F: std::future::Future>(
+    path: std::path::PathBuf,
+    created: Arc<std::sync::atomic::AtomicBool>,
+    operation: F,
+) -> F::Output {
+    TRACKED_BACKUP_DESTINATION.scope((path, created), operation).await
+}
+
 async fn create_database_export_writer(
     state: &Arc<crate::connection::AppState>,
     request: &DatabaseExportRequest,
@@ -2696,6 +2780,13 @@ async fn create_database_export_writer(
     // at the same path in between. Re-check the identity of the handle we
     // actually opened, not just the path, and refuse to keep a backup that
     // landed on the wrong filesystem. See #6327.
+    if request.prevent_overwrite {
+        let _ = TRACKED_BACKUP_DESTINATION.try_with(|(path, created)| {
+            if path == std::path::Path::new(&request.file_path) {
+                created.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
     let opened_destination_identity = export_destination_identity_for_file(&file);
     if export_destination_identity_mismatch(
         expected_destination_identity.as_ref(),
@@ -3067,8 +3158,10 @@ async fn export_database_sql_core_inner(
     // 8. Discover optional schema-wide objects before calculating workload.
     let mut procedures: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut functions: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut triggers: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut events: Vec<crate::types::ObjectInfo> = Vec::new();
 
-    if exports_database_routines(request) {
+    if exports_schema_wide_objects(request) {
         match crate::schema::list_objects_core(
             state,
             &request.connection_id,
@@ -3092,6 +3185,10 @@ async fn export_database_sql_core_inner(
                         procedures.push(obj.clone());
                     } else if ot.contains("FUNCTION") {
                         functions.push(obj.clone());
+                    } else if exports_mysql_trigger_objects(db_type) && ot.contains("TRIGGER") {
+                        triggers.push(obj.clone());
+                    } else if exports_mysql_trigger_objects(db_type) && ot.contains("EVENT") {
+                        events.push(obj.clone());
                     }
                 }
             }
@@ -3111,6 +3208,8 @@ async fn export_database_sql_core_inner(
             extensions: postgres_extensions.len(),
             procedures: procedures.len(),
             functions: functions.len(),
+            triggers: triggers.len(),
+            events: events.len(),
         },
     );
 
@@ -3138,15 +3237,28 @@ async fn export_database_sql_core_inner(
     // legacy profile、PrestoSQL 等路由结果）的插件请求超时覆盖排队时间且超时会
     // 终止 sidecar；SQLite/DuckDB 等为单连接。被挡住的场景预取 Vec 保持全 None，
     // 写出循环内的 None 回退路径即原有的逐表串行直查行为。
+    //
+    // 这里必须检查预取**真正使用**的那个池：下面的 DDL/列元数据都带
+    // `client_session_id`，走的是导出会话的元数据池，而不是基础池。PostgreSQL
+    // 的会话池只有一个物理连接，若按基础池（10 连接）放行 4 路预取，每张表的
+    // `pg_ddl` 还会各自并发 8 个 checkout，32 个 checkout 挤在一条连接上，队尾
+    // 等待超过 checkout 超时后整张表的 DDL 就会以 "DBX metadata pool is busy;
+    // please retry" 失败（issue #10018）。
+    let metadata_prefetch_pool = match state
+        .get_or_create_metadata_pool_for_session(
+            &request.connection_id,
+            Some(&request.database),
+            Some(&client_session_id),
+        )
+        .await
+    {
+        Ok(metadata_pool_key) => state.pool_handle(&metadata_pool_key).await,
+        // 建池失败时不预取，让写出循环的直查路径按原有方式报告错误
+        Err(_) => None,
+    };
+    let metadata_prefetch_capacity = metadata_prefetch_pool_capacity(metadata_prefetch_pool.as_ref());
     let concurrent_prefetch_is_safe =
-        match state.get_or_create_pool(&request.connection_id, Some(&request.database)).await {
-            Ok(metadata_pool_key) => {
-                let pool = state.pool_handle(&metadata_pool_key).await;
-                concurrent_metadata_prefetch_allowed(pool.as_ref())
-            }
-            // 建池失败时不预取，让写出循环的直查路径按原有方式报告错误
-            Err(_) => false,
-        };
+        metadata_prefetch_capacity > 1 && concurrent_metadata_prefetch_allowed(metadata_prefetch_pool.as_ref());
     if concurrent_prefetch_is_safe
         && exports_database_tables(request)
         && !tables.is_empty()
@@ -3203,7 +3315,7 @@ async fn export_database_sql_core_inner(
                 (index, PrefetchedTableMetadata { ddl, columns })
             })
         }))
-        .buffer_unordered(database_export_metadata_prefetch_concurrency(db_type));
+        .buffer_unordered(metadata_prefetch_concurrency(db_type, metadata_prefetch_capacity));
         while let Some((index, metadata)) = prefetch_stream.next().await {
             if metadata
                 .ddl
@@ -3792,6 +3904,71 @@ async fn export_database_sql_core_inner(
 
             object_index += 1;
         }
+
+        // Export triggers and events after routines: a trigger body may call a routine,
+        // and an event body may call one too.
+        for (trigger, object_type) in triggers
+            .iter()
+            .map(|t| (t, ObjectSourceKind::Trigger))
+            .chain(events.iter().map(|e| (e, ObjectSourceKind::Event)))
+        {
+            if is_export_cancelled(&request.export_id).await {
+                return Err("Export cancelled".to_string());
+            }
+
+            let object_name = &trigger.name;
+
+            on_progress(ExportProgress {
+                export_id: request.export_id.clone(),
+                current_object: object_name.clone(),
+                object_index,
+                total_objects,
+                rows_exported: total_rows_exported,
+                total_rows: None,
+                status: ExportStatus::Running,
+                error: None,
+                preparing: false,
+                error_count: 0,
+                error_summary: None,
+            });
+
+            let kind_label = if object_type == ObjectSourceKind::Trigger { "trigger" } else { "event" };
+            match crate::schema::get_object_source_core(
+                state,
+                &request.connection_id,
+                &request.database,
+                &request.schema,
+                object_name,
+                object_type.clone(),
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(obj_source) => {
+                    let source = build_database_export_object_source_sql(
+                        db_type,
+                        &object_type,
+                        object_name,
+                        &obj_source.source,
+                        request.drop_table_if_exists,
+                    );
+                    if !source.is_empty() {
+                        writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                    }
+                }
+                Err(e) => {
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("exporting {kind_label} {object_name}: {e}"),
+                        &mut lenient_errors,
+                    )?;
+                }
+            }
+
+            object_index += 1;
+        }
     }
 
     // PostgreSQL trigger definitions reference their trigger functions. The
@@ -3863,6 +4040,8 @@ fn build_database_export_object_source_sql(
         ObjectSourceKind::View => "VIEW",
         ObjectSourceKind::Procedure => "PROCEDURE",
         ObjectSourceKind::Function => "FUNCTION",
+        ObjectSourceKind::Trigger => "TRIGGER",
+        ObjectSourceKind::Event => "EVENT",
         _ => return source,
     };
     let object_name = quote_identifier(object_name, &DatabaseType::Mysql);
@@ -3874,17 +4053,18 @@ mod tests {
     use super::{
         await_export_operation, await_export_stream_operation, clear_export_cancelled, combine_schema_sql_export,
         concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency,
-        emit_database_export_cancelled, postgres_create_schema_sql, postgres_export_schema_names, set_export_cancelled,
-        snapshot_batch_cancelled, ExportStatus, EXPORT_CANCELLED_ERROR,
+        emit_database_export_cancelled, metadata_prefetch_concurrency, metadata_prefetch_pool_capacity,
+        postgres_create_schema_sql, postgres_export_schema_names, set_export_cancelled, snapshot_batch_cancelled,
+        ExportStatus, EXPORT_CANCELLED_ERROR,
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        build_export_insert_statements_excluding, build_export_sql_insert, create_database_export_writer,
-        database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
-        drop_table_if_exists_sql, ensure_export_destination_dir, export_destination_identity_mismatch,
-        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
-        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_extension_ddl,
-        generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        build_export_insert_statements_excluding, build_export_object_source_sql, build_export_sql_insert,
+        create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
+        database_export_total_objects, drop_table_if_exists_sql, ensure_export_destination_dir,
+        export_destination_identity_mismatch, filter_export_table_infos, format_export_sql_literal,
+        format_export_table_ddl, format_mysql_spatial_export_literal, format_xugu_spatial_export_literal,
+        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
         generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, replace_database_export_select_list,
@@ -4117,6 +4297,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduled_backup_destination_tracking_grants_ownership_only_after_create_new() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tracked.sql");
+        let state = Arc::new(test_app_state(directory.path()).await);
+        let mut request = export_request(true, true, true, Vec::new());
+        request.file_path = path.to_string_lossy().into_owned();
+        request.prevent_overwrite = true;
+        let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = super::track_backup_destination(
+            path.clone(),
+            created.clone(),
+            create_database_export_writer(&state, &request),
+        )
+        .await
+        .unwrap();
+        assert!(created.load(std::sync::atomic::Ordering::Relaxed));
+        drop(writer);
+        std::fs::write(&path, b"keep existing").unwrap();
+        let collision = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(super::track_backup_destination(
+            path.clone(),
+            collision.clone(),
+            create_database_export_writer(&state, &request)
+        )
+        .await
+        .is_err());
+        assert!(!collision.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(std::fs::read(path).unwrap(), b"keep existing");
+    }
+
+    #[tokio::test]
     async fn backup_writer_does_not_overwrite_an_existing_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("existing.sql");
@@ -4144,13 +4355,15 @@ mod tests {
             extensions: 1,
             procedures: 1,
             functions: 1,
+            triggers: 2,
+            events: 1,
         };
 
         let cases = [
             ("structure", export_request(true, false, false, Vec::new()), 5),
             ("data", export_request(false, true, false, Vec::new()), 2),
-            ("objects", export_request(false, false, true, Vec::new()), 3),
-            ("all", export_request(true, true, true, Vec::new()), 8),
+            ("objects", export_request(false, false, true, Vec::new()), 6),
+            ("all", export_request(true, true, true, Vec::new()), 11),
             ("nothing", export_request(false, false, false, Vec::new()), 0),
         ];
 
@@ -4182,10 +4395,57 @@ mod tests {
             extensions: 1,
             procedures: 4,
             functions: 5,
+            triggers: 2,
+            events: 3,
         };
         let request = export_request(true, true, true, vec!["users".to_string(), "active_users".to_string()]);
 
         assert_eq!(database_export_total_objects(&request, &counts), 4);
+    }
+
+    #[test]
+    fn mysql_database_export_drops_triggers_and_events_before_create() {
+        let trigger = "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders_ai` AFTER INSERT ON `orders` FOR EACH ROW INSERT INTO audit_log(msg) VALUES ('x')";
+        let event =
+            "CREATE DEFINER=`root`@`%` EVENT `ev_purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM audit_log WHERE id < 0";
+
+        assert_eq!(
+            build_database_export_object_source_sql(
+                DatabaseType::Mysql,
+                &ObjectSourceKind::Trigger,
+                "trg_orders_ai",
+                trigger,
+                true
+            ),
+            format!(
+                "DROP TRIGGER IF EXISTS `trg_orders_ai`;\n{}",
+                build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Trigger, trigger)
+            )
+        );
+        assert_eq!(
+            build_database_export_object_source_sql(
+                DatabaseType::Mysql,
+                &ObjectSourceKind::Event,
+                "ev_purge",
+                event,
+                true
+            ),
+            format!(
+                "DROP EVENT IF EXISTS `ev_purge`;\n{}",
+                build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Event, event)
+            )
+        );
+        // Without `dropTableIfExists` the source is written as-is.
+        assert_eq!(
+            build_database_export_object_source_sql(
+                DatabaseType::Mysql,
+                &ObjectSourceKind::Trigger,
+                "trg_orders_ai",
+                trigger,
+                false
+            ),
+            build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Trigger, trigger)
+        );
     }
 
     #[test]
@@ -4279,6 +4539,65 @@ mod tests {
     fn postgres_metadata_prefetch_reserves_pool_capacity() {
         assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Postgres), 4);
         assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Mysql), 8);
+    }
+
+    #[tokio::test]
+    async fn metadata_prefetch_capacity_follows_the_pool_the_prefetch_uses() {
+        use crate::connection::PoolKind;
+
+        let postgres_pool = |max_size: usize| {
+            let manager = deadpool_postgres::Manager::new(tokio_postgres::Config::new(), tokio_postgres::NoTls);
+            PoolKind::Postgres(
+                deadpool_postgres::Pool::builder(manager)
+                    .runtime(deadpool_postgres::Runtime::Tokio1)
+                    .max_size(max_size)
+                    .build()
+                    .expect("build PostgreSQL test pool"),
+            )
+        };
+        // 导出会话池（issue #10018）：PostgreSQL 会话池只有一条物理连接，
+        // 并发预取只会把 checkout 排到同一个连接后面。
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&postgres_pool(1))), 1);
+        // 基础池（无会话）保留多连接并发。
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&postgres_pool(10))), 10);
+
+        // 会话级 MySQL 池同样单连接；非会话池按连接数放行。
+        let session_mysql = PoolKind::Mysql(
+            crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:1/app", 1),
+            crate::connection::MysqlMode::Bare,
+        );
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&session_mysql)), 1);
+        let shared_mysql = PoolKind::Mysql(
+            crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:1/app", 10),
+            crate::connection::MysqlMode::Bare,
+        );
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&shared_mysql)), 10);
+
+        let clickhouse = PoolKind::ClickHouse(crate::db::clickhouse_driver::ChClient::new(
+            "http://127.0.0.1:1",
+            None,
+            None,
+            std::time::Duration::from_secs(1),
+        ));
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&clickhouse)), usize::MAX);
+
+        let agent = PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub());
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&agent)), 1);
+        assert_eq!(metadata_prefetch_pool_capacity(None), 1);
+    }
+
+    #[test]
+    fn metadata_prefetch_concurrency_never_exceeds_one_for_single_connection_pools() {
+        // 会话级 PostgreSQL/MySQL 池只有一条连接：并发预取在这里没有任何收益，
+        // 只会把 checkout 排到同一个连接后面并最终超时（issue #10018）。
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Postgres, 1), 1);
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Mysql, 1), 1);
+        // 多连接池保留原有上限。
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Postgres, 10), 4);
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Mysql, 10), 8);
+        // 池容量小于类型上限时按池容量收敛。
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Mysql, 3), 3);
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Postgres, usize::MAX), 4);
     }
 
     #[test]

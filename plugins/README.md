@@ -371,8 +371,10 @@ A workbench opens in a normal persistent DBX tab. The iframe is loaded with `san
 - `openWorkbench(contributionId, context)` — requires `host.workbench`
 - `openFilesystem(providerId, context)` — requires `host.filesystem`
 - `getPlanCapabilities(connectionId)` / `explainPlan(request)` — reads an estimated execution plan for one connection; requires `host.plans:read`, see [Estimated execution plans](#estimated-execution-plans)
+- `getTableMetadata({ connectionId, database?, schema?, table })` — reads narrow schema metadata for one table on an already-open connection; requires `host.schema:read`, see [Table Schema Metadata](#table-schema-metadata)
 - `storage` — `storage.get(key)` / `storage.set(key, value)` / `storage.delete(key)` persist small JSON state per plugin in `plugin-data/<id>`; requires `host.storage`; values cap at 256 KiB and the whole store at 1 MiB, bulk data belongs in the sidecar's `DBX_PLUGIN_DATA_DIR`
-- `capabilities` — `{ downloadFile, planApi, storage }` advertised in the init message; a missing or `false` entry means that Host API group is unavailable on this host, so gate the matching call on it instead of probing with a request
+- `ai.openConversation({ title, prompt, context, send? })` — opens a plugin conversation in the built-in DBX AI panel from a snapshot the plugin supplies; requires `host.ai`; `title` caps at 200 characters, `prompt` at 32000, and `context` at 2 MiB, and `send` defaults to `false` so pass `true` to start the analysis immediately. The host copies the snapshot into the conversation as history data and never hands model output or model configuration back to the plugin
+- `capabilities` — `{ downloadFile, planApi, schemaMetadataApi, storage, ai }` advertised in the init message; a missing or `false` entry means that Host API group is unavailable on this host, so gate the matching call on it instead of probing with a request
 - `onEvent(listener)` — events are forwarded only with `host.events`
 - `onBinary(listener)` — binary frames are forwarded only with `host.binary`; listeners receive `{ channel, data: Uint8Array }`
 
@@ -431,7 +433,7 @@ The `context.result` snapshot is bounded — `{ columns, rows (<= 500), truncate
 
 ### `context-menu`
 
-A context-menu entry is rendered **natively** by DBX (no sandbox iframe, native theme and keyboard behavior) in the declared menu surface. v1 supports the saved-connection sidebar menu:
+A context-menu entry is rendered **natively** by DBX (no sandbox iframe, native theme and keyboard behavior) in the declared menu surface. v1 supports the saved-connection and table menus in the Sidebar Tree. Object Browser integration is not part of the first table contribution surface.
 
 ```json
 {
@@ -442,7 +444,31 @@ A context-menu entry is rendered **natively** by DBX (no sandbox iframe, native 
 }
 ```
 
-Clicking the item dispatches a `contextMenu/<id>` backend request with a non-secret connection summary (`{ id, dbType, name, database }`). The backend entrypoint is required; return `{ "message": "..." }` to surface a toast.
+For a table-scoped action, declare `menu: "table"`:
+
+```json
+{
+  "type": "context-menu",
+  "id": "example.inspect-table",
+  "label": "Inspect table",
+  "menu": "table"
+}
+```
+
+Clicking a connection item dispatches `contextMenu/<id>` with a non-secret connection summary (`{ id, dbType, name, database }`). Clicking a table item uses the same backend method and dispatches:
+
+```json
+{
+  "table": {
+    "connectionId": "connection-id",
+    "database": "example",
+    "schema": "public",
+    "table": "users"
+  }
+}
+```
+
+`database` and `schema` are optional and are omitted when the selected database does not expose those scopes. The table context contains object identity only; it never contains credentials, connection strings, or raw connection configuration. The backend entrypoint is required; return `{ "message": "..." }` to surface a toast.
 
 ### `filesystem-provider`
 
@@ -474,6 +500,64 @@ Host API 1.x defines these backend methods:
 Every entry has `name`, canonical `uri`, `kind` (`file`, `directory`, `symlink`, or `other`), and optional `size`, `modifiedAt`, and `contentType`. DBX validates schemes, response sizes, base64, cursors, and entry metadata before the frontend sees a result.
 
 Mutation methods return `{ success, message?, entry? }` and are rejected unless the provider declares the matching capability. Inline read/write payloads are capped at 4 MiB. The built-in file manager currently owns directory navigation, pagination, and bounded file preview. Large upload/download and PTY/SFTP streams use `stdio-framed` binary channels with plugin-defined transfer methods, chunk acknowledgements, cancellation, and progress events; they must not be encoded as one large JSON value.
+
+### Table Schema Metadata
+
+A plugin can read narrow, read-only schema metadata for one table without owning a driver, connection pool, credential, or SQL string. It reuses the canonical `PluginTableContext` identity used by table contributions:
+
+```json
+{
+  "permissions": ["host.schema:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.schemaMetadataApi) {
+  const metadata = await window.dbxPlugin.getTableMetadata({
+    connectionId,
+    database,
+    schema,
+    table: "users"
+  });
+  renderColumns(metadata.columns);
+}
+```
+
+The result is deliberately narrower than DBX's internal `ColumnInfo`:
+
+```json
+{
+  "columns": [
+    {
+      "name": "id",
+      "dataType": "integer",
+      "nullable": false,
+      "precision": 32,
+      "default": "nextval('users_id_seq'::regclass)"
+    }
+  ],
+  "fieldCapabilities": {
+    "length": "supported",
+    "precision": "supported",
+    "scale": "supported",
+    "default": "supported"
+  }
+}
+```
+
+`columns` exposes only `name`, `dataType`, `nullable`, and optional `length`, `precision`, `scale`, and `default`. Comments, keys/indexes, credentials, connection strings, driver objects, and arbitrary SQL results never cross the boundary. Optional values remain omitted or `null`; the host never turns missing metadata into `0` or an empty string. `fieldCapabilities` reports `supported`, `unsupported`, or `unknown` for each structured optional field. `unknown` means DBX lacks reliable provider provenance and must not be treated as support.
+
+`database` and `schema` are optional and omitted when unavailable. `connectionId` and `table` are non-empty, trimmed identity values capped at 256 characters. The host must already hold the matching connection/session: a saved-but-disconnected connection is rejected with `Connection is not open`, and a database without an open matching session is rejected instead of creating a pool or switching connections. The permission grants no arbitrary SQL and no write access.
+
+This is Host API 1.3. A plugin that requires it declares:
+
+```json
+{
+  "engines": { "host_api": "^1.3" }
+}
+```
+
+The `schemaMetadataApi` capability is runtime detection for older hosts; a plugin should gate the call on it rather than probing the request. Without `host.schema:read`, the bridge rejects the call before the backend adapter runs.
 
 ### Estimated execution plans
 
@@ -667,7 +751,7 @@ Sidecars are shared per plugin process, not spawned per tab. Plugins own their i
 - **UI isolation:** sandboxed iframe, restrictive CSP, bounded bridge payloads, safe asset paths, plugin identity binding.
 - **Secret persistence:** plugin secrets are removed from connection JSON and stored through DBX's secret-store path. Ordinary cloud-sync snapshots always contain redacted placeholders. Secrets enter sync data only inside the encrypted payload when the user has configured a sync passphrase; without one, plugin secrets remain local and are not synchronized.
 - **Native backend trust:** a native sidecar runs with the current OS user's privileges. A signature identifies the repository that approved and published the package; it is not an OS sandbox or proof that the author is harmless. Install only plugins whose backend code you trust.
-- **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX. `host.plans:read` grants reading host-generated estimated execution plans only; it never grants SQL execution, writes, DDL, or actual plans. `host.storage` confines the workbench UI to a small JSON store inside its own `plugin-data/<id>` directory; it grants no other filesystem reach.
+- **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX. `host.plans:read` grants reading host-generated estimated execution plans only; it never grants SQL execution, writes, DDL, or actual plans. `host.schema:read` grants only narrow metadata for a table on an already-open host connection; it never grants arbitrary SQL, writes, or reconnects. `host.storage` confines the workbench UI to a small JSON store inside its own `plugin-data/<id>` directory; it grants no other filesystem reach. `host.ai` lets a workbench open a built-in AI conversation seeded with a snapshot the plugin supplies; the plugin gets no model output, no model configuration, and no SQL execution out of it.
 
 Custom repository public keys can be added or removed in Plugin Center. Obtain them through a channel independent from the downloaded package.
 

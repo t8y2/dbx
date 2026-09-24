@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { applyDdlSearchMarks } from "@/lib/sql/ddlSearchMarks";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 
 import { useUpdateBlocker } from "@/lib/app/updatePreparation";
@@ -45,6 +46,7 @@ import {
   RefreshCw,
   RefreshCcw,
   TableProperties,
+  Network,
   UserRound,
   Database,
   Eraser,
@@ -90,10 +92,11 @@ import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import DataGridReadonlyTextSelection from "@/components/grid/DataGridReadonlyTextSelection.vue";
 import GridSnapshotDialog from "@/components/grid/GridSnapshotDialog.vue";
-import type { QueryResult, ColumnInfo, ConstraintInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef, QueryPageJumpProgress } from "@/types/database";
+import type { QueryResult, ColumnInfo, ConstraintInfo, DatabaseType, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef, QueryPageJumpProgress } from "@/types/database";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
 import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference";
+import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
@@ -307,7 +310,7 @@ import { uiTuning } from "@/lib/app/uiTuning";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
 import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
-import { dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
+import { bulkEditInputToSqlValue, dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
 import type { CellPosition } from "@/lib/dataGrid/gridSelection";
 import type { GridSnapshotSource } from "@/lib/gridSnapshot/gridSnapshot";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
@@ -758,6 +761,7 @@ const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.c
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
 const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
+const splitDataGridToolbar = computed(() => settingsStore.editorSettings.dataGridToolbarLayout === "split");
 const responsiveDataGridToolbarActionCount = computed(() => dataGridToolbarActionCollapseCount(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
 const compactDataGridToolbarActionCount = computed(() => Math.max(responsiveDataGridToolbarActionCount.value, dataGridTopbarOverflowActionCount.value));
 const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
@@ -1329,6 +1333,8 @@ const {
   localFilteredRows,
   localFilterAllOptions,
   localFilterOptions,
+  localFilterSort,
+  toggleLocalFilterSort,
   localFilterTypedValue,
   canApplyTypedLocalFilterValue,
   openLocalFilter,
@@ -2283,7 +2289,7 @@ function columnWidthDisplayValue(value: CellValue, columnIndex: number): CellVal
   return showWhitespaceEnabled.value && typeof display === "string" ? gridCellDisplayValue(display, flatteningMultiLineEnabled.value, true) : display;
 }
 
-const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
+const { initColumnWidths, onResizeStart, autoFitColumn, autoFitAllColumns, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
   columns: visibleColumns,
   sourceRows: computed(() => props.result.rows),
   columnIndexes: visibleColumnIndexes,
@@ -6093,6 +6099,7 @@ const {
   restoreDetailOriginalValue,
   setValueEditorNull,
   formatValueEditorJson,
+  formatDetailJsonDraft,
   compactDetailJson,
   openDetailJsonCompare,
   setDetailNull,
@@ -6535,10 +6542,10 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
   return {
     "--data-grid-cell-bg": rowBg,
     "--data-grid-row-number-bg": rowNumberBg,
-    "--data-grid-cell-selected-bg": dark ? "rgb(20, 40, 60)" : "rgb(239, 246, 255)",
+    "--data-grid-cell-selected-bg": dark ? "rgb(30, 64, 100)" : "rgb(179, 208, 254)",
     "--data-grid-cell-selected-single-bg": dark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)",
     "--data-grid-cell-selected-dirty-bg": dark ? "rgb(76, 66, 38)" : "rgb(235, 224, 184)",
-    "--data-grid-cell-selected-border": dark ? "rgb(96, 165, 250)" : "rgb(59, 130, 246)",
+    "--data-grid-cell-selected-border": dark ? "rgb(96, 165, 250)" : "rgb(37, 99, 235)",
     "--data-grid-row-number-active-bg": activeRowBg,
     "--data-grid-row-number-selected-bg": dark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)",
   } as CSSProperties;
@@ -8498,7 +8505,8 @@ async function applyBulkEditValue() {
         toast(t("grid.conditionalBulkEditConditionRequired"), 5000);
         return;
       }
-      const value = bulkEditValue.value === "" ? null : coerceCellValue(bulkEditValue.value, undefined, target.columnIndex);
+      const rawValue = bulkEditInputToSqlValue(bulkEditValue.value);
+      const value = rawValue === null ? null : coerceCellValue(rawValue, undefined, target.columnIndex);
       const statement = await buildDataGridConditionalUpdateSql({
         databaseType: resolvedDatabaseType.value,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
@@ -8520,8 +8528,9 @@ async function applyBulkEditValue() {
     return;
   }
 
-  // Empty input sets the selected cells to SQL NULL (the placeholder hints "Value, or NULL").
-  const value = bulkEditValue.value === "" ? null : bulkEditValue.value;
+  // Empty input or the bare keyword NULL sets the selected cells to SQL NULL
+  // (the placeholder hints "Value, or NULL").
+  const value = bulkEditInputToSqlValue(bulkEditValue.value);
   if (!fillSelectionWithValue(value)) return;
   bulkEditDialogOpen.value = false;
 }
@@ -10404,6 +10413,13 @@ const tableOwner = ref<string | null>(null);
 const tableOwnerLoading = ref(false);
 const tableOwnerError = ref("");
 const tableOwnerRequestGeneration = ref(0);
+// Overview tab state: row/size statistics plus the table comment, loaded lazily
+// when the tab is first selected.
+const tableOverviewStats = ref<ObjectStatistics | null>(null);
+const tableOverviewComment = ref<string | null>(null);
+const tableOverviewLoading = ref(false);
+const tableOverviewLoaded = ref(false);
+const tableOverviewRequestGeneration = ref(0);
 const canShowTableOwner = computed(() => resolvedDatabaseType.value === "postgres" && !!props.connectionId && !!props.database && !!props.tableMeta?.schema && !!props.tableMeta?.tableName);
 
 function scrollDdlSearchMatchIntoView(match: HTMLElement) {
@@ -10498,16 +10514,28 @@ const constraintsLoaded = ref(false);
 const constraintsLoading = ref(false);
 const constraintsError = ref("");
 const constraintsRequestGeneration = ref(0);
+const partitioning = ref<PgTablePartitioning | null>(null);
+const partitioningLoaded = ref(false);
+const partitioningLoading = ref(false);
+const partitioningError = ref("");
+const partitioningRequestGeneration = ref(0);
+// The Partitions tab is only offered for tables that actually are partitioned
+// (a partitioned parent or a member partition). Probed lazily with the cheap
+// partition-status query, not the full tree.
+const isPartitionedTable = ref(false);
+const partitionStatusResolved = ref(false);
 // The Constraints tab hides foreign keys when a dedicated Foreign Keys tab is
 // also shown (each constraint appears once; FK navigation stays in that tab).
 const constraintsForTab = computed(() => constraintsForConstraintsTab(constraints.value, tableMetadataCapabilities.value.foreignKeys));
 const searchQuery = ref("");
 const activeTableInfoLoading = computed(() => {
+  if (activeTableInfoTab.value === "info") return tableOverviewLoading.value;
   if (activeTableInfoTab.value === "ddl") return ddlLoading.value;
   if (activeTableInfoTab.value === "columns") return tableInfoColumnsLoading.value;
   if (activeTableInfoTab.value === "indexes") return indexesLoading.value;
   if (activeTableInfoTab.value === "foreignKeys") return foreignKeysLoading.value;
   if (activeTableInfoTab.value === "constraints") return constraintsLoading.value;
+  if (activeTableInfoTab.value === "partitions") return partitioningLoading.value;
   return activeTableInfoTab.value === "triggers" && triggersLoading.value;
 });
 const cellDetailPanelLayout = computed(() => settingsStore.editorSettings.cellDetailPanelLayout);
@@ -10530,6 +10558,7 @@ watch([activeTableInfoTab, ddlLoading], ([tab, loading]) => {
   }
   void nextTick(() => {
     ddlPreRef.value?.focus();
+    applyDdlSearchMarks(ddlPreRef.value, searchQuery.value);
     syncDdlSearchMatches(true);
   });
 });
@@ -10610,6 +10639,30 @@ const mongoConnectionConfig = resolvedConnectionConfig;
 const canManageMongoIndexes = computed(() => resolvedDatabaseType.value === "mongodb" && !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && supportsMongoIndexMutations(mongoConnectionConfig.value, props.tableMeta?.tableType));
 const canShowTableIndexes = computed(() => tableMetadataCapabilities.value.indexes && (resolvedDatabaseType.value !== "mongodb" || mongoCollectionSupportsIndexes(props.tableMeta?.tableType)));
 
+async function probeTablePartitionStatus() {
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const schema = props.tableMeta?.schema || props.database || "";
+  const tableName = props.tableMeta?.tableName;
+  const identity = currentIndexTableIdentity.value;
+  if (!tableMetadataCapabilities.value.partitions || !connectionId || !database || !tableName || !identity) {
+    isPartitionedTable.value = false;
+    partitionStatusResolved.value = true;
+    return;
+  }
+  try {
+    const status = await api.getTablePartitionStatus(connectionId, database, schema, tableName);
+    if (identity !== currentIndexTableIdentity.value) return;
+    isPartitionedTable.value = status.isPartitionedParent || status.isPartition;
+  } catch {
+    // Fail closed: hide the tab rather than offering one that cannot load.
+    if (identity !== currentIndexTableIdentity.value) return;
+    isPartitionedTable.value = false;
+  } finally {
+    if (identity === currentIndexTableIdentity.value) partitionStatusResolved.value = true;
+  }
+}
+
 const metadataLoaders = useDataGridTableMetadataLoaders({
   props,
   state: {
@@ -10636,6 +10689,11 @@ const metadataLoaders = useDataGridTableMetadataLoaders({
     constraintsLoaded,
     constraintsLoading,
     constraintsError,
+    partitioning,
+    partitioningLoaded,
+    partitioningLoading,
+    partitioningError,
+    partitioningRequestGeneration,
     tableInfoColumnsRequestGeneration,
     tableOwnerRequestGeneration,
     indexesRequestGeneration,
@@ -10652,10 +10710,42 @@ const metadataLoaders = useDataGridTableMetadataLoaders({
   toastMongoIndexRefreshError: (message) => toast(t("contextMenu.mongoIndexRefreshFailed", { message }), 5000),
 });
 
-const { fetchDdl, fetchTableInfoColumns, fetchTableOwner, currentIndexTableIdentity, fetchIndexes, refreshMongoIndexMetadataAfterMutation, currentForeignKeyTableIdentity, fetchForeignKeys: fetchForeignKeysMetadata, fetchTriggers, fetchConstraints } = metadataLoaders;
+const { fetchDdl, fetchTableInfoColumns, fetchTableOwner, currentIndexTableIdentity, fetchIndexes, refreshMongoIndexMetadataAfterMutation, currentForeignKeyTableIdentity, fetchForeignKeys: fetchForeignKeysMetadata, fetchTriggers, fetchConstraints, fetchPartitions } = metadataLoaders;
+
+async function fetchTableOverview(force = false) {
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const schema = props.tableMeta?.schema;
+  const tableName = props.tableMeta?.tableName;
+  if (!connectionId || !database || !tableName) return;
+  if (!force && tableOverviewLoaded.value) return;
+  const generation = ++tableOverviewRequestGeneration.value;
+  tableOverviewLoading.value = true;
+  try {
+    // Both lookups are best-effort: drivers without statistics support simply
+    // leave the corresponding rows hidden in the overview tab.
+    const [stats, comment] = await Promise.all([
+      api.listObjectStatistics(connectionId, database, schema ?? "").catch((error) => {
+        console.debug("table overview statistics unavailable", error);
+        return [] as ObjectStatistics[];
+      }),
+      api.getTableComment(connectionId, database, schema ?? "", tableName, props.tableMeta?.catalog).catch((error) => {
+        console.debug("table overview comment unavailable", error);
+        return null;
+      }),
+    ]);
+    if (generation !== tableOverviewRequestGeneration.value) return;
+    tableOverviewStats.value = findTableStatistics(stats, tableName, schema) ?? null;
+    tableOverviewComment.value = comment || null;
+    tableOverviewLoaded.value = true;
+  } finally {
+    if (generation === tableOverviewRequestGeneration.value) tableOverviewLoading.value = false;
+  }
+}
 tableMetadataLoaderFetchForeignKeys = fetchForeignKeysMetadata;
 const tableInfoTabs = computed(() => {
   const tabs: TableInfoTabItem[] = [];
+  tabs.push({ id: "info", label: t("grid.tableInfoOverview"), icon: Info });
   if (tableMetadataCapabilities.value.ddl) {
     tabs.push({ id: "ddl", label: "DDL", icon: Code2 });
   }
@@ -10699,6 +10789,14 @@ const tableInfoTabs = computed(() => {
       count: triggers.value.length,
     });
   }
+  if (tableMetadataCapabilities.value.partitions && isPartitionedTable.value) {
+    tabs.push({
+      id: "partitions",
+      label: t("structureEditor.partitions"),
+      icon: Network,
+      count: partitioning.value?.partitions.length,
+    });
+  }
   return tabs;
 });
 const tableInfoTabListStyle = computed(() => ({
@@ -10722,16 +10820,22 @@ function toggleTableInfoDrawerPinned() {
 }
 
 async function selectTableInfoTab(tab: TableInfoTab) {
+  // The drawer is often opened after the table was already selected, so the
+  // partition status may never have been probed; do it here (once) before the
+  // tab list is consulted, or the Partitions tab would be missing entirely.
+  if (!partitionStatusResolved.value) await probeTablePartitionStatus();
   const tabSupported = tableInfoTabs.value.some((item) => item.id === tab);
   const nextTab = tabSupported ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
   activeTableInfoTab.value = nextTab;
   if (tabSupported) settingsStore.updateEditorSettings({ tableInfoActiveTab: tab });
-  if (nextTab === "ddl") await fetchDdl();
+  if (nextTab === "info") await fetchTableOverview();
+  else if (nextTab === "ddl") await fetchDdl();
   else if (nextTab === "indexes") await fetchIndexes();
   else if (nextTab === "foreignKeys") await fetchForeignKeys();
   else if (nextTab === "constraints") await fetchConstraints();
   else if (nextTab === "triggers") await fetchTriggers();
+  else if (nextTab === "partitions") await fetchPartitions();
 }
 
 watch(
@@ -10756,7 +10860,10 @@ async function refreshActiveTableInfo() {
   if (!showTableInfo.value || !props.tableMeta) return;
   if (canShowTableOwner.value) void fetchTableOwner(true);
 
-  if (activeTableInfoTab.value === "ddl") await fetchDdl(true);
+  if (activeTableInfoTab.value === "info") {
+    tableOverviewLoaded.value = false;
+    await fetchTableOverview();
+  } else if (activeTableInfoTab.value === "ddl") await fetchDdl(true);
   else if (activeTableInfoTab.value === "columns") await fetchTableInfoColumns(true);
   else if (activeTableInfoTab.value === "indexes") {
     indexesLoaded.value = false;
@@ -10770,6 +10877,9 @@ async function refreshActiveTableInfo() {
   } else if (activeTableInfoTab.value === "triggers") {
     triggersLoaded.value = false;
     await fetchTriggers();
+  } else if (activeTableInfoTab.value === "partitions") {
+    partitioningLoaded.value = false;
+    await fetchPartitions(true);
   }
 }
 
@@ -10783,6 +10893,11 @@ watch(
     tableOwnerLoading.value = false;
     tableOwnerError.value = "";
     tableOwnerRequestGeneration.value += 1;
+    tableOverviewStats.value = null;
+    tableOverviewComment.value = null;
+    tableOverviewLoading.value = false;
+    tableOverviewLoaded.value = false;
+    tableOverviewRequestGeneration.value += 1;
     rawDdlContent.value = "";
     indexes.value = [];
     indexesLoaded.value = false;
@@ -10802,6 +10917,13 @@ watch(
     constraintsLoading.value = false;
     constraintsError.value = "";
     constraintsRequestGeneration.value += 1;
+    partitioning.value = null;
+    partitioningLoaded.value = false;
+    partitioningLoading.value = false;
+    partitioningError.value = "";
+    partitioningRequestGeneration.value += 1;
+    isPartitionedTable.value = false;
+    partitionStatusResolved.value = false;
     // 表身份变更后，主动触发索引加载，确保索引指示器在切换表后立即可见
     if (showIndexIndicatorsInHeader.value && canShowTableIndexes.value && currentIndexTableIdentity.value) {
       void fetchIndexes();
@@ -11416,24 +11538,27 @@ const filteredConstraints = computed(() => {
   return base.filter((c) => c.name.toLowerCase().includes(q) || c.constraint_type.toLowerCase().includes(q) || c.columns.some((col) => col.toLowerCase().includes(q)) || c.definition.toLowerCase().includes(q));
 });
 
-const filteredDdlContent = computed(() => {
-  if (!ddlContent.value) return "";
-  const html = highlight(ddlContent.value);
-  if (!searchQuery.value) return html;
-
-  const escaped = searchQuery.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`(${escaped})`, "gi");
-  // Match only text between > and < (text nodes), then replace the search term within those spans
-  return html.replace(/>([^<]*)</g, (_, text) => {
-    return `>${text.replace(regex, '<mark class="ddl-search-match">$1</mark>')}<`;
-  });
-});
+// The highlighted DDL only changes when the statement itself changes: the
+// search marks are applied to the rendered DOM instead, so typing in the DDL
+// search box no longer re-highlights (or re-parses) the whole document (#9212).
+const highlightedDdlContent = computed(() => (ddlContent.value ? highlight(ddlContent.value) : ""));
 
 watch(
-  [filteredDdlContent, searchQuery],
+  highlightedDdlContent,
+  async () => {
+    await nextTick();
+    applyDdlSearchMarks(ddlPreRef.value, searchQuery.value);
+    syncDdlSearchMatches(true);
+  },
+  { flush: "post" },
+);
+
+watch(
+  searchQuery,
   async () => {
     ddlSearchMatchIndex.value = 0;
     await nextTick();
+    applyDdlSearchMarks(ddlPreRef.value, searchQuery.value);
     syncDdlSearchMatches(true);
   },
   { flush: "post" },
@@ -11469,6 +11594,7 @@ defineExpose({
   hasCustomColumnOrder,
   moveDisplayableColumn,
   resetColumnOrder,
+  autoFitAllColumns,
   nullColumnsHidden,
   allNullColumnCount,
   canToggleAllNullColumns,
@@ -11909,12 +12035,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
         <!-- Leave real vertical space around the 28px controls instead of fitting them against the border. -->
-        <div ref="dataGridTopbarRef" v-if="showDataGridTopbar" class="data-grid-topbar-shell flex h-8 min-w-0 shrink-0 items-center border-b bg-muted/20">
-          <div v-if="hasResultToolbarLeadingSlot" class="flex shrink-0 items-center border-r">
+        <div
+          ref="dataGridTopbarRef"
+          v-if="showDataGridTopbar"
+          :data-grid-toolbar-layout="settingsStore.editorSettings.dataGridToolbarLayout"
+          class="data-grid-topbar-shell min-w-0 shrink-0 border-b bg-muted/20"
+          :class="splitDataGridToolbar ? 'grid h-16 grid-cols-[auto_minmax(0,1fr)] grid-rows-2' : 'flex h-8 items-center'"
+        >
+          <div v-if="hasResultToolbarLeadingSlot" data-grid-topbar-row="actions" class="flex shrink-0 items-center border-r" :class="splitDataGridToolbar ? 'col-start-1 row-start-1' : ''">
             <slot name="result-toolbar-leading" :compact="compactDataGridToolbar" />
           </div>
           <!-- Clip both axes instead of creating a hidden scroll container around the toolbar controls. -->
-          <div class="data-grid-topbar-scroll min-w-0 flex-1 overflow-clip">
+          <div data-grid-topbar-row="filters" class="data-grid-topbar-scroll min-w-0 overflow-clip" :class="splitDataGridToolbar ? 'data-grid-topbar-scroll--row-divider col-span-2 row-start-2' : 'flex-1'">
             <div class="data-grid-topbar flex items-stretch relative" :class="{ 'data-grid-topbar--compact': compactDataGridToolbar }">
               <div v-if="useTransaction && editable && hasDataGridSaveTarget" class="flex items-center px-2 py-0.5 border-r shrink-0">
                 <Select :model-value="rowStatusFilter" @update:model-value="(value: any) => setRowStatusFilter(String(value))">
@@ -11984,7 +12116,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           </div>
 
           <DataGridToolbar
-            class="ml-auto"
+            data-grid-topbar-row="actions"
+            :class="splitDataGridToolbar ? 'col-start-2 row-start-1' : 'ml-auto'"
             :compact-action-count="compactDataGridToolbarActionCount"
             :navigation-visible="props.result.columns.length > 0"
             :refresh="refreshToolbarCapability"
@@ -12938,6 +13071,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           :draft-mode="localFilterDraft?.mode"
                           :draft-values="localFilterDraft?.values"
                           :options="localFilterOptions"
+                          :sort="localFilterSort"
+                          @sort="toggleLocalFilterSort"
                           :all-options-count="localFilterAllOptions.length"
                           :can-apply-typed-value="canApplyTypedLocalFilterValue"
                           :typed-value="localFilterTypedValue"
@@ -13520,6 +13655,13 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               v-if="activeTableInfoTab !== 'ddl'"
               :active-tab="activeTableInfoTab"
               :search-query="searchQuery"
+              :table-name="props.tableMeta?.tableName ?? ''"
+              :table-schema="props.tableMeta?.schema ?? ''"
+              :database="props.database ?? ''"
+              :table-owner="tableOwner"
+              :overview-stats="tableOverviewStats"
+              :overview-comment="tableOverviewComment"
+              :overview-loading="tableOverviewLoading"
               :columns="filteredColumns"
               :columns-loading="tableInfoColumnsLoading"
               :indexes="filteredIndexes"
@@ -13535,6 +13677,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               :constraints="filteredConstraints"
               :constraints-loading="constraintsLoading"
               :constraints-error="constraintsError"
+              :partitioning="partitioning"
+              :partitions-loading="partitioningLoading"
+              :partitions-error="partitioningError"
               :is-protected-mongo-index="isProtectedMongoIndex"
               :format-column-type="gaussdbMColumnType"
               @table-info-column-click="onTableInfoColumnClick"
@@ -13550,7 +13695,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 tabindex="0"
                 class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text outline-none"
                 :class="settingsStore.editorSettings.tableDdlWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
-                v-html="filteredDdlContent"
+                v-html="highlightedDdlContent"
                 @keydown="onDdlKeydown"
               ></pre>
             </template>
@@ -13606,6 +13751,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 :can-copy-sql-condition="canCopyPreparedDetailSqlCondition"
                 :database-type="resolvedDatabaseType"
                 @start-edit="startDetailEdit"
+                @format-json="formatDetailJsonDraft"
                 @compact-json="compactDetailJson"
                 @compare-json="openDetailJsonCompare"
                 @toggle-formatted="toggleCellDetailJsonFormatted"
@@ -14024,10 +14170,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-cell-crosshair-row-bg: rgb(174, 195, 224);
   --data-grid-cell-crosshair-col-bg: rgb(142, 170, 210);
   --data-grid-cell-dirty-bg: rgb(255, 248, 230);
-  --data-grid-cell-selected-bg: rgb(239, 246, 255);
+  --data-grid-cell-selected-bg: rgb(179, 208, 254);
   --data-grid-cell-selected-single-bg: rgb(191, 219, 254);
   --data-grid-cell-selected-dirty-bg: rgb(235, 224, 184);
-  --data-grid-cell-selected-border: rgb(59, 130, 246);
+  --data-grid-cell-selected-border: rgb(37, 99, 235);
   --data-grid-cell-hover-bg: rgb(245, 245, 245);
   --data-grid-cell-search-bg: rgb(253, 245, 184);
   --data-grid-cell-current-search-bg: rgba(253, 224, 71, 0.52);
@@ -14058,7 +14204,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-cell-crosshair-row-bg: rgb(75, 84, 98);
   --data-grid-cell-crosshair-col-bg: rgb(98, 111, 130);
   --data-grid-cell-dirty-bg: rgb(94, 75, 26);
-  --data-grid-cell-selected-bg: rgb(20, 40, 60);
+  --data-grid-cell-selected-bg: rgb(30, 64, 100);
   --data-grid-cell-selected-single-bg: rgb(30, 64, 96);
   --data-grid-cell-selected-dirty-bg: rgb(76, 66, 38);
   --data-grid-cell-selected-border: rgb(96, 165, 250);
@@ -14092,10 +14238,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(240 177 0) 10%, transparent);
     --data-grid-cell-crosshair-row-bg: color-mix(in srgb, var(--primary) 34%, var(--background));
     --data-grid-cell-crosshair-col-bg: color-mix(in srgb, var(--primary) 50%, var(--background));
-    --data-grid-cell-selected-bg: color-mix(in oklab, rgb(59 130 246) 12%, var(--background));
+    --data-grid-cell-selected-bg: color-mix(in oklab, rgb(59 130 246) 28%, var(--background));
     --data-grid-cell-selected-single-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
     --data-grid-cell-selected-dirty-bg: color-mix(in oklab, rgb(234 181 50) 30%, color-mix(in oklab, rgb(59 130 246) 18%, var(--background)));
-    --data-grid-cell-selected-border: color-mix(in oklab, rgb(59 130 246) 75%, transparent);
+    --data-grid-cell-selected-border: color-mix(in oklab, rgb(37 99 235) 75%, transparent);
     --data-grid-cell-hover-bg: color-mix(in oklab, var(--accent) 50%, transparent);
     --data-grid-row-number-new-bg: color-mix(in oklab, rgb(16 185 129) 15%, var(--background));
     --data-grid-row-number-edited-bg: color-mix(in oklab, rgb(245 158 11) 15%, var(--background));
@@ -14148,7 +14294,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 }
 
 :global(.dark) [data-grid-root] {
-  --data-grid-cell-selected-bg: rgb(20, 40, 60);
+  --data-grid-cell-selected-bg: rgb(30, 64, 100);
   --data-grid-cell-selected-single-bg: rgb(30, 64, 96);
   --data-grid-cell-selected-dirty-bg: rgb(76, 66, 38);
   --data-grid-cell-selected-border: rgb(96, 165, 250);
@@ -14275,6 +14421,20 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 .data-grid-topbar-scroll {
   scrollbar-width: none;
   scrollbar-gutter: auto;
+}
+
+.data-grid-topbar-scroll--row-divider {
+  position: relative;
+}
+
+.data-grid-topbar-scroll--row-divider::before {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 1;
+  height: 1px;
+  background-color: var(--border);
+  content: "";
+  pointer-events: none;
 }
 
 .data-grid-topbar-scroll::-webkit-scrollbar {

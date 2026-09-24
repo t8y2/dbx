@@ -388,8 +388,19 @@ function stripResultRunSessionIds(resultRuns: QueryTab["resultRuns"]): QueryTab[
 
 function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult | undefined {
   if (!result) return undefined;
-  const columnValues = result.columns.map((_, colIndex) => result.rows.map((row) => row[colIndex] ?? null));
-  return removeUndefinedFields({
+  const rowCount = result.rows.length;
+  const columnValues = result.columns.map(() => {
+    const values: CellValue[] = [];
+    values.length = rowCount;
+    return values;
+  });
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+    const row = result.rows[rowIndex];
+    for (let columnIndex = 0; columnIndex < columnValues.length; columnIndex++) {
+      columnValues[columnIndex][rowIndex] = row?.[columnIndex] ?? null;
+    }
+  }
+  const metadata = removeUndefinedFields({
     columns: [...result.columns],
     execution_error: result.execution_error,
     statement_index: result.statement_index,
@@ -398,8 +409,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
-    columnValues,
-    rowCount: result.rows.length,
+    rowCount,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
@@ -413,6 +423,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,
   });
+  return { ...metadata, columnValues };
 }
 
 function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResult | undefined {
@@ -445,18 +456,17 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
 }
 
 function snapshotToPayload(snapshot: TabResultSnapshot): TabResultSnapshotPayload {
-  return removeUndefinedFields({
-    ...snapshot,
-    result: toColumnarResult(snapshot.result),
-    results: snapshot.results?.map((result) => toColumnarResult(result)!),
-    resultRuns: snapshot.resultRuns?.map((run) =>
-      removeUndefinedFields({
-        ...run,
-        result: toColumnarResult(run.result),
-        results: run.results?.map((result) => toColumnarResult(result)!),
-      }),
-    ),
-  });
+  const { result, results, resultRuns, ...metadata } = snapshot;
+  return {
+    ...removeUndefinedFields(metadata),
+    result: toColumnarResult(result),
+    results: results?.map((result) => toColumnarResult(result)!),
+    resultRuns: resultRuns?.map(({ result, results, ...run }) => ({
+      ...removeUndefinedFields(run),
+      result: toColumnarResult(result),
+      results: results?.map((result) => toColumnarResult(result)!),
+    })),
+  };
 }
 
 function payloadToSnapshot(payload: TabResultSnapshotPayload): TabResultSnapshot {
@@ -725,7 +735,7 @@ export function encodeTabResultSnapshot(snapshot: TabResultSnapshot): Uint8Array
     columnCount: stats.columnCount,
     payload: snapshotToPayload(snapshot),
   };
-  return encode(removeUndefinedFields(envelope));
+  return encode(envelope, { ignoreUndefined: true });
 }
 
 export function decodeTabResultSnapshot(bytes: Uint8Array | ArrayBuffer): TabResultSnapshot | undefined {

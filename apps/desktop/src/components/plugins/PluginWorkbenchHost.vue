@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -21,9 +21,11 @@ import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { downloadPluginFile, cancelPluginDownload } from "@/lib/plugins/pluginFileDownload";
 import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
+import { getCachedPluginUiHtml, setCachedPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { OPEN_PLUGIN_AI_CONVERSATION } from "@/lib/ai/aiPluginConversation";
 
 const props = withDefaults(
   defineProps<{
@@ -45,6 +47,7 @@ const emit = defineEmits<{
 const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
+const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
 const iframe = ref<HTMLIFrameElement>();
 const source = ref("");
 const loading = ref(true);
@@ -60,15 +63,17 @@ let loadGeneration = 0;
 
 // --- Plugin file-transfer bridge (native dialogs + OS file drops) ---------
 // The sandboxed iframe cannot reach local files, so handles live here: Tauri
-// handles wrap the plugin_file registry in Rust (`t<n>` ids); the web host
-// keeps File objects and in-memory save buffers (`w<n>` ids). Only paths that
-// came from a native dialog or an OS drop reach plugin_file_open — never a
-// plugin-supplied string.
+// handles wrap the plugin_file registry in Rust (`t<uuid>` ids); the web host
+// keeps File objects and in-memory save buffers (`w<n>` ids). Handle ids are
+// opaque strings end to end — never run them through Number(): ids above
+// Number.MAX_SAFE_INTEGER silently round, and the registry then rejects every
+// read with "unknown plugin file handle". Only paths that came from a native
+// dialog or an OS drop reach plugin_file_open — never a plugin-supplied string.
 
 let webFileSequence = 0;
 const webPickedFiles = new Map<string, File>();
 const webSaveBuffers = new Map<string, { name: string; contentType: string; chunks: Map<number, Uint8Array> }>();
-const openTauriHandles = new Set<number>();
+const openTauriHandles = new Set<string>();
 const tauriHandlePrefix = "t";
 const webHandlePrefix = "w";
 
@@ -81,9 +86,9 @@ function encodeBytesBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function parseHandleId(handleId: string): { source: "tauri" | "web"; numericId: number } {
-  if (handleId.startsWith(tauriHandlePrefix)) return { source: "tauri", numericId: Number(handleId.slice(tauriHandlePrefix.length)) };
-  if (handleId.startsWith(webHandlePrefix)) return { source: "web", numericId: Number(handleId.slice(webHandlePrefix.length)) };
+function parseHandleId(handleId: string): { source: "tauri" | "web"; rawId: string } {
+  if (handleId.startsWith(tauriHandlePrefix)) return { source: "tauri", rawId: handleId.slice(tauriHandlePrefix.length) };
+  if (handleId.startsWith(webHandlePrefix)) return { source: "web", rawId: handleId.slice(webHandlePrefix.length) };
   throw new Error("Unknown file handle");
 }
 
@@ -149,7 +154,7 @@ async function readPluginFileChunkById(pluginId: string, handleId: string, offse
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { readPluginLocalFileChunk } = await tauriFileApi();
-    return readPluginLocalFileChunk(pluginId, parsed.numericId, offset, length);
+    return readPluginLocalFileChunk(pluginId, parsed.rawId, offset, length);
   }
   const file = webPickedFiles.get(handleId);
   if (!file) throw new Error("Unknown file handle");
@@ -217,7 +222,7 @@ async function writePluginFileChunkById(pluginId: string, handleId: string, offs
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { writePluginLocalFileChunk } = await tauriFileApi();
-    return writePluginLocalFileChunk(pluginId, parsed.numericId, offset, encodeBytesBase64(bytes));
+    return writePluginLocalFileChunk(pluginId, parsed.rawId, offset, encodeBytesBase64(bytes));
   }
   const buffer = webSaveBuffers.get(handleId);
   if (!buffer) throw new Error("Unknown file handle");
@@ -229,8 +234,8 @@ async function finishPluginFileSave(pluginId: string, handleId: string): Promise
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { closePluginLocalFile } = await tauriFileApi();
-    openTauriHandles.delete(parsed.numericId);
-    await closePluginLocalFile(pluginId, parsed.numericId);
+    openTauriHandles.delete(parsed.rawId);
+    await closePluginLocalFile(pluginId, parsed.rawId);
     return;
   }
   const buffer = webSaveBuffers.get(handleId);
@@ -256,8 +261,8 @@ async function closePluginFileHandleById(pluginId: string, handleId: string): Pr
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { closePluginLocalFile } = await tauriFileApi();
-    openTauriHandles.delete(parsed.numericId);
-    await closePluginLocalFile(pluginId, parsed.numericId);
+    openTauriHandles.delete(parsed.rawId);
+    await closePluginLocalFile(pluginId, parsed.rawId);
     return;
   }
   webPickedFiles.delete(handleId);
@@ -371,13 +376,29 @@ function createBridge() {
       notify: api.notifyPlugin,
       sendBinary: api.sendPluginBinary,
       readAsset: api.readPluginUiAsset,
+      openAiConversation,
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
+      // PR-A4 generic extension point: a read-only, secret-free, plugin-scoped connection list (for in-panel connection switching).
+      listConnections: (ownerPluginId) => {
+        const providerIds = new Set((props.plugin.manifest.contributions || []).filter((candidate) => candidate.type === "connection-provider").map((candidate) => candidate.id));
+        if (ownerPluginId !== props.plugin.manifest.id) return [];
+        return useConnectionStore()
+          .connections.filter((connection) => providerIds.has(connection.plugin_connection_provider ?? ""))
+          .map((connection) => ({
+            id: connection.id,
+            name: connection.name,
+            providerId: connection.plugin_connection_provider ?? "",
+            connectionType: connection.plugin_connection_type,
+            readOnly: connection.read_only === true,
+          }));
+      },
       // Both plan calls carry the plugin's declared `host.plans:read` gate in the
       // bridge; the backend owns EXPLAIN generation, the timeout, and the plan cap.
       getPlanCapabilities: (connectionId) => api.getPluginPlanCapabilities(connectionId),
       explainPlan: (request) => api.getPluginEstimatedPlan(request),
+      getTableMetadata: (context) => api.getPluginTableMetadata(context),
       closeTab: () => emit("closeTab"),
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
@@ -462,19 +483,34 @@ function localUiAssetPath(source: string): string | undefined {
 }
 
 async function inlineLocalUiAssets(html: string, pluginId: string): Promise<{ html: string; entryDirectory: string }> {
+  // Shipped ui builds usually inline every asset into one HTML document.
+  // Parsing and re-serializing a multi-megabyte document is pure overhead when
+  // there is nothing local to inline — pre-check before touching DOMParser.
+  if (!/<script\b[^>]*\bsrc=/i.test(html) && !/<link\b[^>]*rel=["']?stylesheet/i.test(html)) {
+    return { html, entryDirectory: "" };
+  }
   const document = new DOMParser().parseFromString(html, "text/html");
   const resources = [...document.querySelectorAll("script[src], link[rel='stylesheet'][href]")];
   // Dynamic-import chunks and CSS url() references live next to the entry
   // script; its directory is the <base> the sandbox document needs to resolve
   // them through the dbx-plugin scheme.
   let entryDirectory = "";
-  for (const resource of resources) {
-    const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
-    const path = source ? localUiAssetPath(source) : undefined;
-    if (!path) continue;
-    if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
-    const asset = await api.readPluginUiAsset(pluginId, path);
-    const content = new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0)));
+  // Fetch every referenced asset concurrently — these are bridge round-trips
+  // into the sidecar, and panels reopen this path on every workbench (re)load.
+  const fetched = await Promise.all(
+    resources.map((resource) => {
+      const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
+      const path = source ? localUiAssetPath(source) : undefined;
+      if (!path) return Promise.resolve({ resource, content: null });
+      if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
+      return api.readPluginUiAsset(pluginId, path).then((asset) => ({
+        resource,
+        content: new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0))),
+      }));
+    }),
+  );
+  for (const { resource, content } of fetched) {
+    if (content === null) continue;
     if (resource.tagName === "SCRIPT") {
       const script = document.createElement("script");
       for (const attribute of [...resource.attributes]) {
@@ -503,6 +539,8 @@ function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | und
   return entryDirectory ? `${origin}${entryDirectory}/` : origin;
 }
 
+// Inlined plugin ui html per `${pluginId}:${version}` (see loadWorkbench).
+
 async function loadWorkbench() {
   const generation = ++loadGeneration;
   bridge?.dispose();
@@ -512,11 +550,23 @@ async function loadWorkbench() {
   error.value = "";
   try {
     if (!props.plugin.compatibility.compatible) throw new Error((props.plugin.compatibility.errors || []).join("; ") || t("pluginPlatform.pluginIncompatible"));
-    const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
-    if (disposed || generation !== loadGeneration) return;
-    const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
-    const { html, entryDirectory } = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
-    if (disposed || generation !== loadGeneration) return;
+    // The read/decode/inline pipeline over a multi-megabyte ui build dominates
+    // workbench open time; cache the inlined html per plugin id+version so
+    // reopening panels (new dock entries, workbench reloads) skips it. Theme
+    // is applied per load via the sandbox document, so the cache never pins a
+    // stale appearance.
+    const htmlCacheKey = `${props.plugin.manifest.id}:${props.plugin.manifest.version}`;
+    let cachedHtml = getCachedPluginUiHtml(htmlCacheKey);
+    if (!cachedHtml) {
+      const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
+      if (disposed || generation !== loadGeneration) return;
+      const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
+      const inlined = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
+      if (disposed || generation !== loadGeneration) return;
+      cachedHtml = inlined;
+      setCachedPluginUiHtml(htmlCacheKey, cachedHtml);
+    }
+    const { html, entryDirectory } = cachedHtml;
     source.value = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
       baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
     });
@@ -590,9 +640,22 @@ watch(
   () => bridge?.updateTheme(currentBridgeTheme()),
 );
 
+/** §8.3/§7.4 two-phase close: parents await this before removing the entry so
+ * the plugin can release its workbench scope (PTY sessions, subscriptions);
+ * the bridge bounds the wait and resolves false on legacy/hung plugins. */
+function requestClose(): Promise<boolean> {
+  return bridge ? bridge.requestWorkbenchClose() : Promise.resolve(false);
+}
+
+defineExpose({ requestClose });
+
 onBeforeUnmount(() => {
   disposed = true;
   loadGeneration += 1;
+  // Best-effort §8.3 close notice for teardown paths that never called
+  // requestClose (tab closes, plugin reload): the message still goes out, but
+  // delivery of the plugin's cleanup is not guaranteed once the iframe dies.
+  void bridge?.requestWorkbenchClose(0).catch(() => undefined);
   bridge?.dispose();
   bridge = undefined;
   window.removeEventListener("message", onMessage);

@@ -74,12 +74,16 @@ pub async fn get_agent_explain_info_core(
     decode_agent_explain_result(result)
 }
 
-/// Resolves the dialect an EXPLAIN must be generated for. A custom JDBC
-/// connection is only known to be Oracle when its configuration says so; every
-/// other custom JDBC connection stays `Jdbc` and therefore gets no plan
-/// acquisition. Shared with the plugin Host plan API so both paths agree on
-/// which dialects are treatable.
+/// Resolves the dialect an EXPLAIN must be generated for. Doris' MySQL-based
+/// connection profiles are Doris dialects, not MySQL. A custom JDBC connection
+/// is only known to be Oracle when its configuration says so; every other
+/// custom JDBC connection stays `Jdbc` and therefore gets no plan acquisition.
+/// Shared with the plugin Host plan API so both paths agree on which dialects
+/// are treatable.
 pub(crate) fn explain_database_type(config: &ConnectionConfig) -> DatabaseType {
+    if crate::db::doris::is_config(config) {
+        return DatabaseType::Doris;
+    }
     if config.db_type != DatabaseType::Jdbc {
         return config.db_type;
     }
@@ -129,6 +133,7 @@ mod tests {
     use crate::plugins::{
         InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
     };
+    use crate::query_execution_sql::{build_explain_sql, ExplainSqlOptions};
     #[cfg(unix)]
     use std::sync::Arc;
 
@@ -151,6 +156,41 @@ mod tests {
             "object plan"
         );
         assert!(decode_agent_explain_result(serde_json::json!(["unexpected"])).is_err());
+    }
+
+    #[test]
+    fn resolves_doris_profiles_to_doris_explain_sql_without_changing_mysql() {
+        let cases = [
+            (DatabaseType::Doris, None, DatabaseType::Doris, "EXPLAIN SELECT 1"),
+            (DatabaseType::Mysql, Some("doris"), DatabaseType::Doris, "EXPLAIN SELECT 1"),
+            (DatabaseType::Mysql, Some("selectdb"), DatabaseType::Doris, "EXPLAIN SELECT 1"),
+            (DatabaseType::Mysql, None, DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1"),
+            (DatabaseType::Mysql, Some("mysql"), DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1"),
+        ];
+
+        for (raw_type, driver_profile, expected_type, expected_sql) in cases {
+            let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+                "id": "dialect-test",
+                "name": "Dialect test",
+                "db_type": raw_type.as_str(),
+                "driver_profile": driver_profile,
+                "host": "127.0.0.1",
+                "port": 9030,
+                "username": "user",
+                "password": "secret"
+            }))
+            .unwrap();
+
+            let resolved_type = explain_database_type(&config);
+            assert_eq!(resolved_type, expected_type, "{raw_type:?} + {driver_profile:?}");
+            let explain = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(resolved_type),
+                format: None,
+                analyze: None,
+                sql: "SELECT 1".to_string(),
+            });
+            assert_eq!(explain.sql.as_deref(), Some(expected_sql), "{raw_type:?} + {driver_profile:?}");
+        }
     }
 
     #[test]

@@ -125,6 +125,17 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">
+        <img src="docs/public/sponsors/aicodemirror-card.png" alt="AICodeMirror" width="175" />
+      </a>
+    </td>
+    <td>
+      感谢 AICodeMirror 赞助了本项目！AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级高并发、极速开票、7×24 专属技术支持。Claude Code / Codex / Gemini 官方渠道低至 3.8 / 0.2 / 0.9 折，充值更有折上折！AICodeMirror 为 DBX 用户提供了特别福利，通过此链接注册的用户，可享受首充 8 折，企业客户最高可享 7.5 折！
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">访问 AICodeMirror</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
       <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
         <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
       </a>

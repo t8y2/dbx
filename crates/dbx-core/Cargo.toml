@@ -15,9 +15,11 @@ sqlite-multiple-ciphers = ["dbx-drivers/sqlite-multiple-ciphers"]
 # (dbx-cli, dbx-mcp); do not combine with the cipher features.
 sqlite-bundled = ["rusqlite/bundled", "dbx-drivers/sqlite-bundled"]
 openapi = ["dbx-types/openapi", "dbx-sql/openapi"]
-# OS keyring storage for the secret-store key material (macOS/Windows keychain,
-# Linux dbus Secret Service with persistent fallback). Desktop only.
-os-keyring = ["dep:keyring", "keyring/linux-native-sync-persistent"]
+# OS keyring storage for the secret-store key material: macOS/Windows
+# keychain via the keyring crate, Linux Secret Service via the pure-Rust
+# secret-service/zbus client so cross builds (zigbuild) link no C libdbus.
+# Desktop and native package builds enable this.
+os-keyring = ["dep:keyring", "dep:secret-service"]
 system-fonts = ["font-kit"]
 
 [dependencies]
@@ -67,10 +69,9 @@ aes-gcm = "0.10"
 aes = "0.8"
 cbc = "0.1"
 argon2 = "0.5"
-# The Linux dbus Secret Service backend (linux-native-sync-persistent) pulls
-# libdbus-sys, whose pkg-config build script cannot cross-compile (musl static
-# browser, docker zigbuild). It stays opt-in so server/cross builds skip it and
-# fall back to the managed .dbx/secret.key file.
+# macOS/Windows keychain backend. The crate's own Linux backend requires
+# C libdbus (cannot cross-compile); Linux uses the secret-service crate below
+# with the same on-disk attribute layout instead.
 keyring = { version = "3.6.3", default-features = false, optional = true, features = ["apple-native", "windows-native", "crypto-rust"] }
 sha2 = "0.10"
 async-trait = "0.1"
@@ -99,3 +100,9 @@ tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(all(unix, not(target_os = "redox")))'.dependencies]
 nix = { version = "0.31.3", features = ["user"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Pure-Rust (zbus) Secret Service client; speaks the session-bus protocol
+# directly so zigbuild targets need no system libdbus. Attribute names match
+# what the keyring crate writes (target/service/username) for interop.
+secret-service = { version = "4.0", optional = true, default-features = false, features = ["rt-tokio-crypto-rust"] }

@@ -10,6 +10,7 @@ import it from "@/i18n/locales/it";
 import ja from "@/i18n/locales/ja";
 import ko from "@/i18n/locales/ko";
 import ptBR from "@/i18n/locales/pt-BR";
+import ru from "@/i18n/locales/ru";
 import tr from "@/i18n/locales/tr";
 import zhCN from "@/i18n/locales/zh-CN";
 import zhTW from "@/i18n/locales/zh-TW";
@@ -23,6 +24,7 @@ const LOCALES = {
   ja,
   ko,
   "pt-BR": ptBR,
+  ru,
   tr,
   "zh-CN": zhCN,
   "zh-TW": zhTW,

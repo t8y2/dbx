@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
         assert_eq!(tokens.instance_url, "https://acme.my.salesforce.com");
         let authorize_url = opened.lock().unwrap().clone().unwrap();
-        assert_eq!(authorize_url.query_pairs().find(|(k, _)| k == "code_challenge").unwrap().1.len() > 20, true);
+        assert!(authorize_url.query_pairs().find(|(k, _)| k == "code_challenge").unwrap().1.len() > 20);
         let recorded = requests.lock().unwrap();
         assert!(recorded[0].contains("grant_type=authorization_code"));
         assert!(recorded[0].contains("code=auth-code"));
@@ -994,9 +994,10 @@ mod tests {
         assert_eq!(second.instance_url, None);
 
         server.abort();
-        let recorded = requests.lock().unwrap();
-        assert!(recorded[0].contains("grant_type=refresh_token"));
-        assert!(recorded[0].contains("refresh_token=old-refresh"));
+        // Copy the recorded body out so the MutexGuard drops before the next await.
+        let first_request = requests.lock().unwrap()[0].clone();
+        assert!(first_request.contains("grant_type=refresh_token"));
+        assert!(first_request.contains("refresh_token=old-refresh"));
 
         assert!(refresh_access_token_policy(&p, "  ", policy).await.unwrap_err().contains("refresh token is empty"));
     }
@@ -1091,12 +1092,13 @@ mod tests {
         assert_eq!(tokens.access_token, "ropc-token");
         assert_eq!(tokens.refresh_token, None, "ROPC issues no refresh token");
         assert_eq!(tokens.instance_url, "https://acme--qas1.sandbox.my.salesforce.com");
-        let recorded = requests.lock().unwrap();
-        assert!(recorded[0].contains("grant_type=password"));
-        assert!(recorded[0].contains("client_secret=app-secret"));
-        assert!(recorded[0].contains("format=json"));
+        // Copy the recorded body out so the MutexGuard drops before the next await.
+        let first_request = requests.lock().unwrap()[0].clone();
+        assert!(first_request.contains("grant_type=password"));
+        assert!(first_request.contains("client_secret=app-secret"));
+        assert!(first_request.contains("format=json"));
         // password is form-encoded, '+' must not leak as a space separator
-        assert!(recorded[0].contains("pw%2Btoken"), "{}", recorded[0]);
+        assert!(first_request.contains("pw%2Btoken"), "{first_request}");
 
         assert!(password_grant_token_policy(&p, "", "x", EndpointPolicy::AllowLoopbackHttp)
             .await

@@ -646,6 +646,11 @@ export default {
     exitAndUpdate: "Exit & Update",
     dockerUsersRun: "Docker users should run",
     toUpdate: "to update",
+    historyTab: "Older versions",
+    historyHint: "Back up your data before rolling back. Older versions may not be able to read data or credentials created by newer versions.",
+    historyPublishedOn: "Released {date}",
+    historyLoadFailed: "Failed to load older versions. Please try again later.",
+    historyLoadMore: "Load more",
   },
   pluginDock: {
     close: "Close terminal",
@@ -4279,7 +4284,20 @@ export default {
     loadMore: "Load more...",
     objectBrowser: "Browse in Object Browser ({count})",
     extensions: "Extensions",
+    eventTriggers: "Event Triggers",
   },
+  eventTrigger: {
+    detailsTitle: "Event Trigger Details",
+    viewDetails: "View details",
+    name: "Name",
+    event: "Event",
+    owner: "Owner",
+    function: "Function",
+    enabled: "Enabled",
+    tags: "Tags",
+    definition: "Definition",
+  },
+
   extension: {
     manageTitle: "Manage Extensions",
     installTitle: "Install Extension",

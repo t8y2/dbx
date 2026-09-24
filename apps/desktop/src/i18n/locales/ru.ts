@@ -592,6 +592,11 @@ export default withEnglishFallback({
     exitAndUpdate: "Выйти и обновить",
     dockerUsersRun: "Пользователям Docker следует выполнить",
     toUpdate: "для обновления",
+    historyTab: "История версий",
+    historyHint: "Перед откатом к старой версии сначала сделайте резервную копию данных; старая версия может не поддерживать чтение данных или учётных данных, созданных новой версией.",
+    historyPublishedOn: "Опубликовано {date}",
+    historyLoadFailed: "Не удалось загрузить историю версий, повторите попытку позже.",
+    historyLoadMore: "Загрузить ещё",
   },
   pluginDock: {
     close: "Закрыть терминал",
@@ -4137,7 +4142,20 @@ export default withEnglishFallback({
     loadMore: "Загрузить ещё...",
     objectBrowser: "Открыть в обозревателе объектов ({count})",
     extensions: "Расширения",
+    eventTriggers: "Триггеры событий",
   },
+  eventTrigger: {
+    detailsTitle: "Сведения о триггере события",
+    viewDetails: "Просмотреть сведения",
+    name: "Имя",
+    event: "Событие",
+    owner: "Владелец",
+    function: "Функция",
+    enabled: "Включено",
+    tags: "Теги",
+    definition: "Определение",
+  },
+
   extension: {
     manageTitle: "Управление расширениями",
     installTitle: "Установить расширение",

@@ -600,6 +600,7 @@ async fn serve() {
         .route("/schema/table-owner", get(routes::schema::get_table_owner))
         .route("/schema/extensions", get(routes::schema::list_extensions))
         .route("/schema/available-extensions", get(routes::schema::list_available_extensions))
+        .route("/schema/event-triggers", get(routes::schema::list_event_triggers))
         .route("/schema/ddl", get(routes::schema::get_ddl))
         .route("/docs/snapshot", post(routes::docs::collect_snapshot))
         .route("/docs/annotations/load", post(routes::docs::load_annotations))

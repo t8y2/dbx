@@ -425,6 +425,11 @@ export default withEnglishFallback({
     exitAndUpdate: "Çık ve Güncelle",
     dockerUsersRun: "Docker kullanıcıları güncellemek için",
     toUpdate: "komutunu çalıştırmalı",
+    historyTab: "Eski sürümler",
+    historyHint: "Eski bir sürüme dönmeden önce verilerinizi yedekleyin. Eski sürümler, yeni sürümlerle oluşturulan verileri veya kimlik bilgilerini okuyamayabilir.",
+    historyPublishedOn: "{date} tarihinde yayınlandı",
+    historyLoadFailed: "Eski sürümler yüklenemedi. Lütfen daha sonra tekrar deneyin.",
+    historyLoadMore: "Daha fazla yükle",
   },
   sidebar: {
     connections: "BAĞLANTILAR",
@@ -3867,7 +3872,20 @@ export default withEnglishFallback({
     loadMore: "Daha fazla yükle...",
     objectBrowser: "Nesne Gezgininde Gözat ({count})",
     extensions: "Uzantılar",
+    eventTriggers: "Olay tetikleyicileri",
   },
+  eventTrigger: {
+    detailsTitle: "Olay tetikleyici ayrıntıları",
+    viewDetails: "Ayrıntıları gör",
+    name: "Ad",
+    event: "Olay",
+    owner: "Sahip",
+    function: "Fonksiyon",
+    enabled: "Etkin",
+    tags: "Etiketler",
+    definition: "Tanım",
+  },
+
   extension: {
     manageTitle: "Uzantıları Yönet",
     installTitle: "Uzantı Kur",

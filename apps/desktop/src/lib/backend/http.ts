@@ -52,6 +52,7 @@ import type {
   PartitionInfo,
   SubpartitionInfo,
   ExtensionInfo,
+  EventTriggerInfo,
   FunctionInfo,
   SequenceInfo,
   RuleInfo,
@@ -1331,6 +1332,10 @@ export async function listExtensions(connectionId: string, database: string, sch
 
 export async function listAvailableExtensions(connectionId: string, database: string): Promise<ExtensionInfo[]> {
   return get(`/api/schema/available-extensions?${qs({ connection_id: connectionId, database })}`);
+}
+
+export async function listEventTriggers(connectionId: string, database: string): Promise<EventTriggerInfo[]> {
+  return get(`/api/schema/event-triggers?${qs({ connection_id: connectionId, database })}`);
 }
 
 export async function listDialectDataTypes(dialectName: string): Promise<string[]> {

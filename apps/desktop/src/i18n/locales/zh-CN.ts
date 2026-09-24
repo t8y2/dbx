@@ -562,6 +562,11 @@ export default withEnglishFallback({
     exitAndUpdate: "退出并更新",
     dockerUsersRun: "Docker 用户请运行",
     toUpdate: "更新",
+    historyTab: "历史版本",
+    historyHint: "回退到旧版本前请先备份数据；旧版本可能无法读取新版本创建的数据或凭据。",
+    historyPublishedOn: "发布于 {date}",
+    historyLoadFailed: "加载历史版本失败，请稍后重试。",
+    historyLoadMore: "加载更多",
   },
   pluginDock: {
     close: "关闭终端",
@@ -4189,7 +4194,20 @@ export default withEnglishFallback({
     loadMore: "加载更多...",
     objectBrowser: "在对象浏览器中查看 ({count})",
     extensions: "扩展",
+    eventTriggers: "事件触发器",
   },
+  eventTrigger: {
+    detailsTitle: "事件触发器详情",
+    viewDetails: "查看详情",
+    name: "名称",
+    event: "事件",
+    owner: "所有者",
+    function: "函数",
+    enabled: "启用状态",
+    tags: "标签",
+    definition: "定义",
+  },
+
   extension: {
     installTitle: "安装扩展",
     manageTitle: "管理扩展",

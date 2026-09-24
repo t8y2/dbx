@@ -1185,6 +1185,18 @@ export interface ExtensionInfo {
   schema?: string | null;
 }
 
+/** PostgreSQL event trigger metadata (`pg_event_trigger`). Database-level DDL trigger. */
+export interface EventTriggerInfo {
+  name: string;
+  event: string;
+  owner?: string | null;
+  function?: string | null;
+  enabled?: string | null;
+  tags?: string[] | null;
+  comment?: string | null;
+  source?: string | null;
+}
+
 export interface OwnerInfo {
   object_name: string;
   object_type: string;
@@ -1524,9 +1536,11 @@ export type TreeNodeType =
   | "group-packages"
   | "group-partitions"
   | "group-extensions"
+  | "group-event-triggers"
   | "group-tablespaces"
   | "group-datafiles"
   | "extension"
+  | "event-trigger"
   | "object-browser"
   | "user-admin"
   | "dameng-users"
@@ -1653,7 +1667,7 @@ export interface TreeNode {
   vgroupId?: string;
   /** 投影时盖章的分组类别（tables/views/…），供拖拽落点 O(1) 类别判定。 */
   vgroupKind?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | EventTriggerInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
   loadMore?: {
     parentId: string;
     offset: number;

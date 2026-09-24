@@ -423,6 +423,11 @@ export default withEnglishFallback({
     exitAndUpdate: "Çıx və yenilə",
     dockerUsersRun: "Docker istifadəçiləri bu əmri işlətməlidir",
     toUpdate: "yeniləmək üçün",
+    historyTab: "Köhnə versiyalar",
+    historyHint: "Köhnə versiyaya qayıtmazdan əvvəl məlumatlarınızın ehtiyat nüsxəsini çıxarın. Köhnə versiyalar yeni versiyaların yaratdığı məlumatları və ya etimad məlumatlarını oxuya bilməz.",
+    historyPublishedOn: "{date} tarixində yayımlandı",
+    historyLoadFailed: "Köhnə versiyalar yüklənə bilmədi. Zəhmət olmasa sonra yenidən cəhd edin.",
+    historyLoadMore: "Daha çox yüklə",
   },
   sidebar: {
     connections: "ƏLAQƏLƏR",
@@ -3895,7 +3900,20 @@ export default withEnglishFallback({
     loadMore: "Daha çox yüklə...",
     objectBrowser: "Obyekt brauzerində bax ({count})",
     extensions: "Genişləndirmələr",
+    eventTriggers: "Hadisə tetikleyiciləri",
   },
+  eventTrigger: {
+    detailsTitle: "Hadisə tetikleyicisi detalı",
+    viewDetails: "Detalları gör",
+    name: "Ad",
+    event: "Hadisə",
+    owner: "Sahib",
+    function: "Funksiya",
+    enabled: "Aktiv",
+    tags: "Etiketlər",
+    definition: "Tərif",
+  },
+
   extension: {
     manageTitle: "Genişləndirmələri idarə et",
     installTitle: "Genişləndirmə quraşdır",

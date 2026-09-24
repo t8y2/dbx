@@ -1,4 +1,4 @@
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, type Ref } from "vue";
 import type { ConnectionConfig } from "@/types/database";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
@@ -29,7 +29,7 @@ const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["r
 
 export interface QuickOpenItem {
   id: string;
-  type: "connection" | "plugin_workbench" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file" | "content_match";
+  type: "connection" | "plugin_workbench" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file" | "content_match" | "plugin_command";
   label: string;
   description?: string;
   connectionId: string;
@@ -47,9 +47,19 @@ export interface QuickOpenItem {
   matchText?: string; // For content matches: matched slice
   lineText?: string; // For content matches: full matching line
   highlightIndices?: [number, number]; // For content matches: [start, end) chars into lineText to highlight
-  pluginId?: string; // For plugin workbenches: plugin manifest id
+  pluginId?: string; // For plugin commands and plugin workbenches: source plugin manifest id
+  commandId?: string; // For plugin commands: short id of the command contribution
+  pluginName?: string; // For plugin commands: source plugin display name (provenance hint)
   contributionId?: string; // For plugin workbenches: workbench contribution id
   pluginIcon?: string; // For plugin workbenches: contribution icon path, falling back to the manifest icon
+}
+
+export interface UseQuickOpenOptions {
+  /**
+   * External extra items (e.g. plugin commandPalette commands): merged into the initial list and the search result pool,
+   * refreshed by the caller; with no query they are appended after the built-in entries in injection order.
+   */
+  extraItems?: Ref<QuickOpenItem[]>;
 }
 
 export type QuickOpenMatchKind = "exact" | "initials" | "prefix" | "word-prefix" | "substring" | "fuzzy";
@@ -272,9 +282,10 @@ function collectSqlFileEntries(entries: SqlFileEntry[], results: SqlFileEntry[])
   }
 }
 
-export function useQuickOpen() {
+export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   const connectionStore = useConnectionStore();
   const savedSqlStore = useSavedSqlStore();
+  const extraItems = options.extraItems;
   const searchQuery = ref("");
   const selectedIndex = ref(0);
   const remoteItems = ref<QuickOpenItem[]>([]);
@@ -921,7 +932,7 @@ export function useQuickOpen() {
   const filteredItems = computed((): MatchedItem[] => {
     if (!searchQuery.value.trim()) {
       // Show all tree items plus a limited set of recent SQL library files and external SQL files
-      return [...allItems.value, ...sqlLibraryRecentItems.value, ...sqlFileRecentItems.value].map((item) => ({
+      return [...allItems.value, ...sqlLibraryRecentItems.value, ...sqlFileRecentItems.value, ...(extraItems?.value ?? [])].map((item) => ({
         ...item,
         matchScore: Infinity,
         matchIndices: [],
@@ -932,7 +943,7 @@ export function useQuickOpen() {
 
     const seen = new Set<string>();
     // When searching, include ALL SQL library files and external SQL files
-    for (const item of [...allItems.value, ...sqlLibraryAllItems.value, ...sqlFileItems.value, ...remoteItems.value]) {
+    for (const item of [...allItems.value, ...sqlLibraryAllItems.value, ...sqlFileItems.value, ...remoteItems.value, ...(extraItems?.value ?? [])]) {
       const key = quickOpenItemKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -970,6 +981,7 @@ export function useQuickOpen() {
         sql_library_file: 12,
         sql_file: 13,
         content_match: 14,
+        plugin_command: 15,
       };
       const typeDifference = typeOrder[a.type] - typeOrder[b.type];
       if (typeDifference !== 0) return typeDifference;

@@ -1,4 +1,4 @@
-import { computed, reactive } from "vue";
+import { computed, reactive, ref } from "vue";
 import * as api from "@/lib/backend/api";
 import type { MigrationPreflight, MigrationReport } from "@/lib/backend/migration";
 
@@ -17,12 +17,16 @@ export function useMigrationStore(backend: MigrationApi = api) {
     entered: boolean;
     step: 1 | 2 | 3;
   }>({ status: null, report: null, loading: true, busy: false, error: null, errorCode: null, errorMessage: null, entered: false, step: 1 });
+  const migrationAttempted = ref(false);
   const completed = computed(() => state.status !== null && !state.status.needsMigration && ["succeeded", "not_required"].includes(state.status.state));
   // A managed data-directory key is intentionally created when migration
   // starts. Its absence during the read-only preflight is actionable, not a
   // migration failure, as long as the backend explicitly allows creation.
   const hasBlockingError = () => Boolean(state.errorCode && !(state.errorCode === "MISSING_MANAGED_KEY" && state.status?.keyCreationAllowed === true));
-  const blocking = computed(() => state.loading || state.busy || state.error === "statusFailed" || !completed.value || (!state.entered && Boolean(state.report || state.status?.backupPath)));
+  // A retained backup is a recovery asset and must not make the success page
+  // reappear on later launches. An attempt in this session keeps the wizard
+  // visible even when its response is lost, until the user enters the app.
+  const blocking = computed(() => state.loading || state.busy || state.error === "statusFailed" || !completed.value || (!state.entered && (migrationAttempted.value || Boolean(state.report))));
   function clearError() {
     state.error = null;
     state.errorCode = null;
@@ -43,8 +47,9 @@ export function useMigrationStore(backend: MigrationApi = api) {
       state.step = completed.value ? 3 : 1;
       // A completed migration only needs the success page in the session that
       // performed it. On later launches, retained backups are recovery assets,
-      // not a reason to block the normal application startup.
-      state.entered = completed.value;
+      // not a reason to block the normal application startup. `entered` is
+      // therefore only changed by the explicit success-page action below.
+      state.entered = false;
       if (state.status?.state === "failed" || hasBlockingError()) state.error = "migrationFailed";
     } catch {
       state.error = "statusFailed";
@@ -55,6 +60,7 @@ export function useMigrationStore(backend: MigrationApi = api) {
   async function run(retry: boolean) {
     if (state.busy) return;
     state.busy = true;
+    migrationAttempted.value = true;
     state.step = 2;
     clearError();
     try {

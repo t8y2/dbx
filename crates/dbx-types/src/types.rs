@@ -145,12 +145,36 @@ pub struct ExtensionInfo {
     pub schema: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectStatistics {
     pub name: String,
     pub schema: Option<String>,
     pub estimated_rows: Option<i64>,
     pub total_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_row_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_data_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_increment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_free: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,6 +205,26 @@ pub struct ObjectSource {
     pub editable: Option<bool>,
 }
 
+/// Provenance for structured metadata fields that are optional in [`ColumnInfo`].
+/// This stays internal to the metadata mapping path and is not serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnMetadataCapabilities {
+    pub default: bool,
+    pub length: bool,
+    pub precision: bool,
+    pub scale: bool,
+}
+
+impl ColumnMetadataCapabilities {
+    pub const fn all_supported() -> Self {
+        Self { default: true, length: true, precision: true, scale: true }
+    }
+
+    pub const fn default_only() -> Self {
+        Self { default: true, length: false, precision: false, scale: false }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ColumnInfo {
     pub name: String,
@@ -203,6 +247,8 @@ pub struct ColumnInfo {
     pub character_set: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collation: Option<String>,
+    #[serde(skip)]
+    pub metadata_capabilities: Option<ColumnMetadataCapabilities>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,10 +391,13 @@ impl SpatialColumnBuilder {
         }
     }
 
-    pub fn finish(self) -> Vec<SpatialColumn> {
+    fn finish(self) -> Vec<SpatialColumn> {
         self.columns.into_iter().map(|(column_index, srid)| SpatialColumn { column_index, srid }).collect()
     }
 
+    /// Drivers collect one SRID slot per cell while streaming rows; a result
+    /// without spatial columns drops that all-`None` matrix instead of sending
+    /// it to every consumer.
     pub fn finish_with_values(
         self,
         spatial_values: Vec<Vec<Option<u32>>>,

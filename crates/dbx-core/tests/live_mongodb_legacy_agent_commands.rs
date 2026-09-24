@@ -285,3 +285,87 @@ async fn collection_stats_and_create_database_run_over_the_legacy_agent() {
     command(&state, id, &created, doc! { "dropDatabase": 1 }).await;
     command(&state, id, &database, doc! { "dropDatabase": 1 }).await;
 }
+
+/// MongoDB pools are keyed `<connection id>:<database>`. Dump, restore and collection
+/// import/export used to resolve the pool by the bare connection id instead, which only worked
+/// while some earlier call happened to have left a pool under that key.
+#[tokio::test]
+#[ignore = "opt-in: DBX_MONGO_LEGACY_DUMP_TEST_HOST (host:port, MongoDB 3.6+ without auth) and an installed MongoDB Legacy Agent; creates a temporary database"]
+async fn dump_and_export_resolve_the_per_database_pool() {
+    use dbx_core::mongodb_dump::*;
+
+    let endpoint = std::env::var("DBX_MONGO_LEGACY_DUMP_TEST_HOST").expect("DBX_MONGO_LEGACY_DUMP_TEST_HOST");
+    let (host, port) = endpoint.split_once(':').expect("host:port");
+    let files = tempfile::tempdir().unwrap();
+    let database = format!("dbx_legacy_pool_{}", uuid::Uuid::new_v4().simple());
+    let state = AppState::new(Storage::open(&files.path().join("storage.db")).await.unwrap());
+    let id = "legacy-pool-key-test";
+    let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": id, "name": "Legacy pool key test", "db_type": "mongodb", "host": host, "port": port.parse::<u16>().unwrap(), "username": "", "password": "", "database": database, "driver_profile": "mongodb-legacy" })).unwrap();
+    state.configs.write().await.insert(id.into(), config);
+
+    command(
+        &state,
+        id,
+        &database,
+        doc! { "insert": "orders", "documents": [ { "_id": 1, "n": 1 }, { "_id": 2, "n": 2 } ] },
+    )
+    .await;
+
+    // Seeding went through the bare-connection pool. Drop it, leaving only the per-database pool
+    // the dump itself creates — the state the app is normally in.
+    state.remove_pool_by_key(id).await;
+    let key = state.get_or_create_pool(id, Some(&database)).await.unwrap();
+    assert_eq!(key, format!("{id}:{database}"), "MongoDB pools are keyed per database");
+    assert!(
+        state.pool_handle(id).await.is_none(),
+        "the bare-connection pool must be gone for this test to mean anything"
+    );
+
+    let catalog = inspect_mongodb_database_dump(&state, id, &database).await.unwrap();
+    assert_eq!(catalog.collections.len(), 1, "{catalog:?}");
+
+    let output = files.path().join("pool-key.archive");
+    let dump = MongoDatabaseDumpRequest {
+        task_id: uuid::Uuid::new_v4().to_string(),
+        connection_id: id.into(),
+        database: database.clone(),
+        file_path: output.to_str().unwrap().into(),
+        format: MongoDumpFormat::Archive,
+        gzip: false,
+        collections: None,
+    };
+    let dumped = dump_mongodb_database(&state, &dump, |_| Box::pin(async { false }), |_| {}).await.unwrap();
+    assert_eq!(dumped.collections_done, 1);
+    assert_eq!(dumped.documents_read, 2);
+
+    // Restore writes through the same lookup.
+    let preview = prepare_mongodb_restore_source(MongoRestoreSourceRequest {
+        path: output.to_str().unwrap().into(),
+        format: MongoDumpFormat::Archive,
+        gzip: false,
+    })
+    .await
+    .unwrap();
+    let restored = format!("{database}_restored");
+    let restore = MongoDatabaseRestoreRequest {
+        task_id: uuid::Uuid::new_v4().to_string(),
+        connection_id: id.into(),
+        database: restored.clone(),
+        source_database: database.clone(),
+        source_ref: preview.source_ref.clone(),
+        collections: None,
+        drop_existing: false,
+        restore_options: true,
+        restore_indexes: true,
+        stop_on_error: true,
+        objcheck: false,
+        batch_size: 500,
+        execution_id: None,
+    };
+    let result = restore_mongodb_database(&state, &restore, |_| Box::pin(async { false }), |_| {}).await.unwrap();
+    assert_eq!(result.documents_written, 2);
+    assert!(release_mongodb_restore_source(&preview.source_ref));
+
+    command(&state, id, &restored, doc! { "dropDatabase": 1 }).await;
+    command(&state, id, &database, doc! { "dropDatabase": 1 }).await;
+}

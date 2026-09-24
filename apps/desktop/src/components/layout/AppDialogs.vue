@@ -262,7 +262,13 @@ watch(
     :prefill-table="dialogs.dataComparePrefillTable.value"
     :session-id="dialogs.dataCompareSessionId.value"
   />
-  <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" :prefill-file-path="dialogs.sqlFilePrefillFilePath.value" />
+  <SqlFileExecutionDialog
+    v-model:open="dialogs.showSqlFileDialog.value"
+    :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value"
+    :prefill-database="dialogs.sqlFilePrefillDatabase.value"
+    :prefill-file-path="dialogs.sqlFilePrefillFilePath.value"
+    :prefill-preview="dialogs.sqlFilePrefillPreview.value"
+  />
   <SchemaDiagramDialog
     v-if="dialogs.showDiagramDialog.value"
     v-model:open="dialogs.showDiagramDialog.value"

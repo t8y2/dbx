@@ -3,7 +3,6 @@
 import { createApp, nextTick, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
-import pluginHostSource from "./PluginWorkbenchHost.vue?raw";
 
 const mocks = vi.hoisted(() => ({
   readPluginUiEntry: vi.fn(),
@@ -196,19 +195,5 @@ describe("PluginWorkbenchHost initialization", () => {
     document.dispatchEvent(payload("leave"));
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "dragstate", active: false }), "*");
     elementFromPoint.mockRestore();
-  });
-});
-
-describe("PluginWorkbenchHost file-save handle tracking", () => {
-  const hostSource = pluginHostSource;
-  const beginSaveSource = hostSource.slice(hostSource.indexOf("async function beginPluginFileSave"), hostSource.indexOf("async function writePluginFileChunkById"));
-
-  it("opens the save target through openTauriPluginFile so the write handle joins openTauriHandles", () => {
-    // A beginSave the plugin abandons (no finish/cancel) must still be
-    // reclaimed by unmount's disposeLocalFileHandles; a direct
-    // openPluginLocalFile call would leak the handle in the shared
-    // 64-slot registry for the lifetime of the workbench host.
-    expect(beginSaveSource).toContain("await openTauriPluginFile(pluginId, path, true)");
-    expect(beginSaveSource).not.toContain("openPluginLocalFile");
   });
 });

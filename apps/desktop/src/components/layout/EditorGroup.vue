@@ -17,6 +17,7 @@ import { usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databas
 import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryEditorSurfaceHandle, StatementRange } from "./querySurfaces";
 import type { QueryTab } from "@/types/database";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 defineOptions({ inheritAttrs: false });
 
@@ -85,8 +86,9 @@ defineExpose({
   acceptQueryEditorExecutionViewport: (requestId: number) => activeSurfaceRef.value?.acceptQueryEditorExecutionViewport(requestId) ?? false,
   pasteClipboardAsSqlInCondition: () => activeSurfaceRef.value?.pasteClipboardAsSqlInCondition() ?? Promise.resolve(false),
   applyTableStructureChanges: () => activeSurfaceRef.value?.applyTableStructureChanges() ?? Promise.resolve(false),
-  insertRedisCommand: (command: string) => activeSurfaceRef.value?.insertRedisCommand(command) ?? Promise.resolve(false),
-  executeRedisCommand: (command: string) => activeSurfaceRef.value?.executeRedisCommand(command) ?? Promise.resolve(false),
+  insertRedisCommand: (command: string, target: AiConversationBinding) => activeSurfaceRef.value?.insertRedisCommand(command, target) ?? Promise.resolve(false),
+  executeRedisCommand: (command: string, target: AiConversationBinding) => activeSurfaceRef.value?.executeRedisCommand(command, target) ?? Promise.resolve(false),
+  isRedisConsoleReady: (target: AiConversationBinding) => activeSurfaceRef.value?.isRedisConsoleReady(target) ?? false,
   previewStatementRange: (tabId: string, range: StatementRange | null) => (activeTab.value?.id === tabId ? (activeSurfaceRef.value?.previewStatementRange(range) ?? false) : false),
   focusStatementRange: (tabId: string, range: StatementRange | null) => (activeTab.value?.id === tabId ? (activeSurfaceRef.value?.focusStatementRange(range) ?? false) : false),
   focusErrorPosition: (tabId: string, offset: number) => (activeTab.value?.id === tabId ? (activeSurfaceRef.value?.focusErrorPosition(offset) ?? false) : false),

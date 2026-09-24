@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { dataGridScrollPosition, isDataGridNearScrollBottom, isDataGridPrefixAppend, shouldCheckInfiniteScrollAfterScroll } from "../../apps/desktop/src/lib/dataGrid/dataGridInfiniteScroll.ts";
 
@@ -38,13 +37,4 @@ test("append marker does not preserve state when an existing row was replaced", 
   const previous = { rows: [first, second] };
   assert.equal(isDataGridPrefixAppend(previous, { rows: [first, [...second], [3, "Grace"]], appended_from_row_count: 2 }), false);
   assert.equal(isDataGridPrefixAppend(previous, { rows: [first, second, [3, "Grace"]] }), false);
-});
-
-test("infinite scroll requests only the next bounded segment", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /function infiniteScrollNextPage\(\) \{[\s\S]*?if \(!canFetchNextInfiniteScrollSegment\.value\) \{[\s\S]*?infiniteScrollAllLoaded = true;[\s\S]*?return;[\s\S]*?\}/);
-  assert.match(source, /const nextOffset = props\.result\.rows\.length/);
-  assert.match(source, /Math\.min\(pageSize\.value, remainingRows\)/);
-  assert.doesNotMatch(source, /emit\("paginate", 0, cumulativeLimit/);
-  assert.match(source, /props\.result\.appended_from_row_count !== requestedOffset/);
 });

@@ -406,10 +406,12 @@ fn command_cursor_id(cursor: &Document) -> Result<i64, String> {
 
 async fn dump_client(state: &AppState, id: &str, database: &str) -> Result<DumpClient, String> {
     metadata::validate_database(database)?;
-    state.get_or_create_pool(id, Some(database)).await?;
-    match state.pool_handle(id).await {
-        Some(PoolKind::MongoDb(client)) => Ok(DumpClient::Native(client.clone())),
-        Some(PoolKind::Agent(client)) => {
+    // Propagate pool resolution errors (e.g. connection establishment failures) instead of
+    // swallowing them into the generic message below, so users see the real cause.
+    let pool = crate::mongodb_import_export::mongo_pool_for_database(state, id, database).await?;
+    match pool {
+        PoolKind::MongoDb(client) => Ok(DumpClient::Native(client.clone())),
+        PoolKind::Agent(client) => {
             // Check what every dump, restore, or preview shares up front, so an outdated
             // agent is refused before any work starts rather than mid-operation. The find
             // cursor only the dump's BSON export relies on is gated on that path instead.

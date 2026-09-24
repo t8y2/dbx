@@ -4,6 +4,9 @@ import { createApp, defineComponent, h, nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  desktop: true,
+  releaseSqlFilePreview: vi.fn(),
+  previewWebSqlFile: vi.fn(),
   addSqlFileTask: vi.fn(),
   beginManualTransaction: vi.fn(),
   commitManualTransaction: vi.fn(),
@@ -40,7 +43,14 @@ function passthrough(tag: string) {
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/lib/common/utils", () => ({ uuid: mocks.uuid }));
-vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => mocks.desktop }));
+vi.mock("@/lib/backend/http", () => ({
+  previewSqlFile: mocks.previewWebSqlFile,
+  loadSqlFileUploadMaxBytes: vi.fn(async () => 200 * 1024 * 1024),
+}));
+vi.mock("@/lib/sql/httpSqlFileProgress", () => ({
+  listenSqlFileProgressById: (_id: string, handler: (progress: Record<string, unknown>) => void) => mocks.listenSqlFileProgress(handler),
+}));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.openFileDialog }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: mocks.highlight }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
@@ -69,6 +79,7 @@ vi.mock("@/lib/backend/api", () => ({
   executeSqlFiles: mocks.executeSqlFiles,
   listenSqlFileProgress: mocks.listenSqlFileProgress,
   previewSqlFile: mocks.previewSqlFile,
+  releaseSqlFilePreview: mocks.releaseSqlFilePreview,
   inspectSqlFileTables: mocks.inspectSqlFileTables,
 }));
 vi.mock("@lucide/vue", () => {
@@ -176,6 +187,8 @@ function deferred() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.desktop = true;
+  mocks.releaseSqlFilePreview.mockResolvedValue(undefined);
   mocks.progressHandler = undefined;
   mocks.highlighterState = reactive({ ready: false, appearance: "light" });
   mocks.highlight.mockReset().mockImplementation((sql: string) => (mocks.highlighterState!.ready ? `<span data-theme="${mocks.highlighterState!.appearance}">${sql}</span>` : sql));
@@ -245,6 +258,57 @@ afterEach(() => {
 });
 
 describe("SqlFileExecutionDialog retries", () => {
+  async function mountRestoredPreview() {
+    mocks.desktop = false;
+    const preview = {
+      fileName: "backup.sql",
+      filePath: "/server/tmp/sql_file/restore-token/backup.sql",
+      preview: "SELECT 42;",
+      sizeBytes: 10,
+      canExecuteWithoutSelectedDatabase: true,
+      cleanupToken: "restore-token",
+    };
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, prefillPreview: preview });
+    app.mount(root);
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    expect(root.textContent).toContain("SELECT 42;");
+    expect(mocks.previewSqlFile).not.toHaveBeenCalled();
+    expect(mocks.previewWebSqlFile).not.toHaveBeenCalled();
+    return preview;
+  }
+
+  it("renders a prepared Web preview without uploading a server path and releases it on unmount", async () => {
+    await mountRestoredPreview();
+    app!.unmount();
+    app = undefined;
+    await vi.waitFor(() => expect(mocks.releaseSqlFilePreview).toHaveBeenCalledWith("restore-token"));
+  });
+
+  it.each(["done", "error", "cancelled"])("executes the prepared server object and releases it after %s", async (status) => {
+    const preview = await mountRestoredPreview();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      expect(mocks.releaseSqlFilePreview).not.toHaveBeenCalled();
+      mocks.progressHandler?.(progress(request.executionId, status, status === "error" ? { error: "restore failed" } : {}));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledWith(expect.objectContaining({ filePath: preview.filePath }), [preview.filePath]));
+    await vi.waitFor(() => expect(mocks.releaseSqlFilePreview).toHaveBeenCalledWith("restore-token"));
+    expect(mocks.previewWebSqlFile).not.toHaveBeenCalled();
+  });
+
+  it("keeps browser uploads on the File-only preview path", async () => {
+    await mountRestoredPreview();
+    const file = new File(["SELECT 2;"], "upload.sql", { type: "text/plain" });
+    mocks.previewWebSqlFile.mockResolvedValueOnce({ fileName: file.name, filePath: "/server/tmp/sql_file/upload.sql", sizeBytes: file.size, preview: "SELECT 2;", canExecuteWithoutSelectedDatabase: true });
+    const input = root!.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, "files", { value: [file] });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.previewWebSqlFile).toHaveBeenCalledWith(file));
+    expect(mocks.releaseSqlFilePreview).toHaveBeenCalledWith("restore-token");
+  });
+
   it("reuses the unchanged preview across progress and failure updates while keeping controls responsive", async () => {
     const onOpenChange = vi.fn();
     await mountReadyDialog(onOpenChange);

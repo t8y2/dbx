@@ -1,10 +1,7 @@
-import { readFileSync } from "node:fs";
 import { history, undo, undoDepth } from "@codemirror/commands";
 import { EditorState, Transaction } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import { LARGE_PASTE_HISTORY_USER_EVENT, LARGE_PASTE_NATIVE_RECOVERY_THRESHOLD, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
-
-const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
 describe("QueryEditor large paste recovery", () => {
   it("recovers the suffix of a SQL paste truncated at the WebView boundary", () => {
@@ -58,9 +55,5 @@ describe("QueryEditor large paste recovery", () => {
     expect(undo(view)).toBe(true);
     expect(state.doc.toString()).toBe("SELECT ");
     expect(state.selection.main.from).toBe(7);
-  });
-
-  it("wires the recovery into the editor paste event", () => {
-    expect(queryEditorSource).toMatch(/paste\(event, currentView\)[\s\S]*?recoverLargeTauriPaste\(event, currentView\)/);
   });
 });

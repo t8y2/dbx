@@ -1,6 +1,9 @@
 import type {
   ConnectionConfig,
   InstalledPlugin,
+  PluginCommandContribution,
+  PluginConditionClause,
+  PluginConditionContextKeys,
   PluginConnectionAction,
   PluginConnectionProviderContribution,
   PluginContribution,
@@ -72,6 +75,68 @@ export class FrontendPluginRegistry {
     return this.listWorkbenches().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
   }
 
+  listCommands(): PluginContributionEntry<PluginCommandContribution>[] {
+    return this.listContributions("command");
+  }
+
+  findCommand(pluginId: string, contributionId: string): PluginContributionEntry<PluginCommandContribution> | undefined {
+    return this.listCommands().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
+  }
+
+  /** First command of the plugin whose action opens the given workbench (§4.1). */
+  findCommandTargetingWorkbench(pluginId: string, workbenchContributionId: string): PluginCommandContribution | undefined {
+    for (const contribution of this.findPlugin(pluginId)?.contributions ?? []) {
+      if (contribution.type !== "command") continue;
+      const action = contribution.action;
+      if (action.type === "open-workbench" && action.workbench === workbenchContributionId) return contribution;
+    }
+    return undefined;
+  }
+
+  /**
+   * PR-A4 appToolbar placements (HOST_PLUGIN_UI_SPEC §5.1): one icon entry
+   * per visible toolbar placement, ordered by `order` then the full command
+   * id so the result never depends on manifest or install order. Toolbar
+   * entries stay hidden unless the manifest sets `default_visible: true`
+   * (§5.2: toolbar items default to hidden).
+   */
+  listToolbarMenuCommands(): Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> {
+    const result: Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> = [];
+    for (const definition of this.definitions) {
+      for (const contribution of definition.contributions) {
+        if (contribution.type !== "menus") continue;
+        const placements = contribution.items.filter((item) => item.location === "appToolbar" && item.default_visible === true && evaluateWhen(item.when, "appToolbar")).sort((a, b) => a.order - b.order || a.command.localeCompare(b.command));
+        for (const item of placements) {
+          const command = definition.contributions.find((candidate): candidate is PluginCommandContribution => candidate.type === "command" && candidate.id === item.command);
+          if (command) result.push({ plugin: definition.plugin, command, order: item.order });
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * commandPalette placements (HOST_PLUGIN_UI_SPEC §5): palette declarations have no
+   * a default_visible gate (§5.2 only mandates hidden-by-default for toolbar items). Commands sort by `order`
+   * ascending, then by the fully qualified command id (`${pluginId}.${commandId}`) for a stable order independent of
+   * manifest or install order.
+   */
+  listPaletteMenuCommands(): Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> {
+    const result: Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> = [];
+    for (const definition of this.definitions) {
+      for (const contribution of definition.contributions) {
+        if (contribution.type !== "menus") continue;
+        for (const item of contribution.items) {
+          if (item.location !== "commandPalette") continue;
+          if (!evaluateWhen(item.when, "commandPalette")) continue;
+          const command = definition.contributions.find((candidate): candidate is PluginCommandContribution => candidate.type === "command" && candidate.id === item.command);
+          if (command) result.push({ plugin: definition.plugin, command, order: item.order });
+        }
+      }
+    }
+    return result.sort((left, right) => left.order - right.order || `${left.plugin.manifest.id}.${left.command.id}`.localeCompare(`${right.plugin.manifest.id}.${right.command.id}`));
+  }
+
   /**
    * Resolve any contribution the plugin UI entrypoint can render, whichever host
    * surface opened the tab — a `workbench` opened from the sidebar or a
@@ -87,8 +152,32 @@ export class FrontendPluginRegistry {
     return this.definitions
       .filter((definition) => definition.plugin.compatibility.compatible)
       .flatMap((definition) => definition.contributions.filter((contribution): contribution is Extract<PluginContribution, { type: T }> => contribution.type === type).map((contribution) => ({ plugin: definition.plugin, contribution })))
-      .sort((left, right) => `${left.plugin.manifest.name}:${left.contribution.label || left.contribution.id}`.localeCompare(`${right.plugin.manifest.name}:${right.contribution.label || right.contribution.id}`));
+      .sort((left, right) => `${left.plugin.manifest.name}:${pluginContributionSortLabel(left.contribution)}`.localeCompare(`${right.plugin.manifest.name}:${pluginContributionSortLabel(right.contribution)}`));
   }
+}
+
+/** menus contributions carry no label of their own (copy comes from the referenced command); the sort key degrades to the id. */
+function pluginContributionSortLabel(contribution: PluginContribution): string {
+  return (contribution as { label?: string }).label || contribution.id;
+}
+
+/**
+ * §5.3/§5.4 condition evaluation (pure): implicit AND within `all`; clauses referencing a missing key evaluate to false for all
+ * operators. contextKeys are snapshots provided by the host per scenario.
+ */
+export function evaluatePluginCommandConditions(clauses: PluginConditionClause[] | undefined, contextKeys: PluginConditionContextKeys): boolean {
+  return (clauses ?? []).every((clause) => {
+    const actual = contextKeys[clause.key];
+    if (actual === undefined) return false;
+    if (clause.operator === "equals") return String(actual) === String(clause.value);
+    if (clause.operator === "notEquals") return String(actual) !== String(clause.value);
+    return Array.isArray(clause.value) && clause.value.map(String).includes(String(actual));
+  });
+}
+
+/** Placement render gate: when defaults to visible; evaluated against the placement surface snapshot. */
+function evaluateWhen(when: { all: PluginConditionClause[] } | undefined, surface: string): boolean {
+  return evaluatePluginCommandConditions(when?.all, { surface });
 }
 
 export function createFrontendPluginRegistry(plugins: readonly InstalledPlugin[], locale = "en"): FrontendPluginRegistry {
@@ -276,6 +365,9 @@ function localizePluginMetadata(plugin: InstalledPlugin, localization?: PluginMa
 }
 
 function localizeContribution(contribution: PluginContribution, localization: PluginContributionLocalization | undefined, pluginName: string): PluginContribution {
+  // Menus entries carry no display text of their own — labels come from the
+  // referenced commands, so they pass through localization untouched.
+  if (contribution.type === "menus") return contribution;
   const fallbackLabel = contribution.type === "connection-provider" ? optionalTrimmed(contribution.label) || optionalTrimmed(pluginName) || contribution.id : contribution.label;
   const localized = {
     ...contribution,
@@ -290,8 +382,8 @@ function localizeContribution(contribution: PluginContribution, localization: Pl
       label: localizedRequiredText(action.label, localization?.actions?.[action.id]?.label),
       description: localizedOptionalText(action.description, localization?.actions?.[action.id]?.description),
     }));
-  } else if (localized.type === "workbench" || localized.type === "result-view") {
-    // Both render through the plugin UI entrypoint, so both resolve their icon
+  } else if (localized.type === "workbench" || localized.type === "command" || localized.type === "result-view") {
+    // Workbench, command and result-view contributions all resolve their icon
     // asset path the same way.
     localized.icon = optionalPluginAssetPath(localized.icon);
   }

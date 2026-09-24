@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { Copy, FileText, ListChecks, Settings } from "@lucide/vue";
+import { Copy, FileText, ListChecks, RefreshCcw, Settings } from "@lucide/vue";
+import { Button } from "@/components/ui/button";
 import * as api from "@/lib/backend/api";
 import type { MeilisearchIndexOverview } from "@/lib/backend/tauri";
 import { formatBytes } from "@/lib/database/serverMetrics";
@@ -26,6 +27,8 @@ const { toast } = useToast();
 
 const activeSection = ref<ActiveSection>(restoredUiState.activeSection ?? "documents");
 const overview = ref<MeilisearchIndexOverview | null>(null);
+const refreshing = ref(false);
+let refreshRequestId = 0;
 
 trackUiState(() => ({ activeSection: activeSection.value }));
 
@@ -41,11 +44,17 @@ const updatedAtLabel = computed(() => {
   return formatMeilisearchTaskDateTime(value, locale.value);
 });
 
-async function refreshStats() {
+async function refreshStats(notifyOnError = false) {
+  const requestId = ++refreshRequestId;
+  refreshing.value = true;
   try {
-    overview.value = await api.meilisearchGetIndexOverview(props.connectionId, props.index);
-  } catch {
+    const nextOverview = await api.meilisearchGetIndexOverview(props.connectionId, props.index);
+    if (requestId === refreshRequestId) overview.value = nextOverview;
+  } catch (cause: any) {
     // Overview is best-effort; the tab still works without it.
+    if (requestId === refreshRequestId && notifyOnError) toast(cause?.message || String(cause), 5000);
+  } finally {
+    if (requestId === refreshRequestId) refreshing.value = false;
   }
 }
 
@@ -69,7 +78,12 @@ onMounted(() => {
     <!-- Left column: index meta + navigation -->
     <nav class="w-44 shrink-0 border-r flex flex-col gap-1 overflow-y-auto p-2">
       <div class="px-1 pb-2">
-        <div class="truncate text-sm font-semibold text-foreground" :title="index">{{ index }}</div>
+        <div class="flex items-center gap-1">
+          <div class="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" :title="index">{{ index }}</div>
+          <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="refreshing" :title="t('meilisearch.refresh')" :aria-label="t('meilisearch.refresh')" @click="refreshStats(true)">
+            <RefreshCcw class="h-3.5 w-3.5" :class="{ 'animate-spin': refreshing }" />
+          </Button>
+        </div>
         <div v-if="overview?.isIndexing" class="mt-0.5 text-xs text-primary">{{ t("meilisearch.isIndexing") }}</div>
       </div>
 

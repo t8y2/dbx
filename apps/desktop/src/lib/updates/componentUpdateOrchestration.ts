@@ -14,7 +14,11 @@ export interface PendingComponentUpdates {
   plan: PendingComponentUpdatePlan;
 }
 
-export type UpdateAllAction = "none" | "download-app" | "defer-components" | "update-components";
+export type UpdateAllAction = "none" | "download-app" | "install-app" | "update-components";
+
+export function updateBlockerLabels(blockers: Array<{ label: string; connections?: string[] }>): string[] {
+  return [...new Set(blockers.flatMap((blocker) => (blocker.connections?.length ? blocker.connections : [blocker.label])))];
+}
 
 function normalizeVersion(version: string): string {
   return version.trim().replace(/^[vV]/, "");
@@ -112,7 +116,16 @@ export function takePendingComponentUpdatesAfterAppRestart(currentVersion: strin
 
 export function resolveUpdateAllAction(options: { hasAppUpdate: boolean; appUpdateCanInstall: boolean; appUpdatePrepared: boolean; hasComponentUpdates: boolean }): UpdateAllAction {
   if (!options.hasAppUpdate || !options.appUpdateCanInstall) return options.hasComponentUpdates ? "update-components" : "none";
-  return options.appUpdatePrepared ? "defer-components" : "download-app";
+  return options.appUpdatePrepared ? "install-app" : "download-app";
+}
+
+export async function continuePreparedAppUpdate(options: { hasComponentUpdates: boolean; restartOnly: boolean; rememberComponentUpdates: () => Promise<boolean>; installComponents: () => Promise<void>; installDownloadedUpdate: () => Promise<void>; restartApp: () => Promise<void> }): Promise<void> {
+  if (options.hasComponentUpdates && !(await options.rememberComponentUpdates())) {
+    await options.installComponents();
+    return;
+  }
+  if (options.restartOnly) await options.restartApp();
+  else await options.installDownloadedUpdate();
 }
 
 export function shouldCloseUpdateCenterAfterComponentUpdate(options: { failedCount: number; skippedDriverCount: number; hasAppUpdate: boolean; remainingComponentUpdateCount: number }): boolean {

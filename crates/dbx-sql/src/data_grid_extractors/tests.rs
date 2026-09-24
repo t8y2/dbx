@@ -189,6 +189,37 @@ fn extracts_raw_values_without_escaping_quotes() {
 }
 
 #[test]
+fn tsv_and_pipe_emit_embedded_quotes_verbatim_while_csv_escapes_them() {
+    // Reproduces #10087: a value that is itself wrapped in double quotes (e.g.
+    // MySQL `SELECT CONCAT('"', id, '"')`) must copy out unchanged from the grid's
+    // default multi-cell (TSV) copy, instead of being wrapped and doubled.
+    let quoted = r#""9932b4d2ad1c4ff88b5bfe1690ee1bb8""#;
+
+    for (extractor, separator) in [(DataGridExtractorId::Tsv, "\t"), (DataGridExtractorId::PipeSeparated, "|")] {
+        let mut request = request(extractor);
+        request.rows = vec![vec![json!(1), json!(quoted)]];
+        let result = extract_data_grid_selection(request).expect("plain delimited extraction");
+        assert_eq!(result.text, format!("1{separator}{quoted}"), "extractor {extractor:?} must not escape quotes");
+    }
+
+    // CSV is an RFC4180 format, so the same value must still be quoted and doubled.
+    let mut csv = request(DataGridExtractorId::Csv);
+    csv.rows = vec![vec![json!(1), json!(quoted)]];
+    let csv_result = extract_data_grid_selection(csv).expect("CSV extraction");
+    assert_eq!(csv_result.text, format!("1,\"{}\"", quoted.replace('"', "\"\"")));
+}
+
+#[test]
+fn tsv_still_quotes_values_that_would_break_the_row_shape() {
+    // Relaxing the quote-character trigger must not stop quoting on the actual
+    // separator / line breaks, which would otherwise corrupt the TSV structure.
+    let mut request = request(DataGridExtractorId::Tsv);
+    request.rows = vec![vec![json!(1), json!("a\tb\nc")]];
+    let result = extract_data_grid_selection(request).expect("TSV extraction");
+    assert_eq!(result.text, "1\t\"a\tb\nc\"");
+}
+
+#[test]
 fn raw_exports_null_as_an_empty_value() {
     let mut request = request(DataGridExtractorId::Raw);
     request.columns = vec![column("name", 0)];

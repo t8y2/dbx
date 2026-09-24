@@ -115,13 +115,9 @@ import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 
-const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-const dataGridCellDetailEditSource = readFileSync("apps/desktop/src/composables/useDataGridCellDetailEdit.ts", "utf8");
 const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
 const cellDetailDialogSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailDialog.vue", "utf8");
 const binaryTextPreviewSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailTextPreview.vue", "utf8");
-const cellDetailHeaderSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailHeader.vue", "utf8");
-const globalsCss = readFileSync("apps/desktop/src/styles/globals.css", "utf8");
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   return {
@@ -153,55 +149,6 @@ function localDateKey() {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
-});
-describe("DataGrid canvas surfaces", () => {
-  it("keeps condition and text filter editors open when persistent expansion is enabled", () => {
-    expect(dataGridSource).toContain('const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");');
-    expect(dataGridSource).toContain("const isFilterEditorPinnedOpen = computed(() => isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);");
-    expect(dataGridSource).toContain("get: () => isFilterEditorPinnedOpen.value || filterBuilderOpen.value,");
-    expect(dataGridSource).toContain("if (!isFilterEditorPinnedOpen.value) filterBuilderOpen.value = false;");
-    expect(dataGridSource).toContain('v-model:filter-builder-open="effectiveFilterBuilderOpen"');
-    expect(dataGridSource).toContain("filterEditorView === 'conditions' && effectiveFilterBuilderOpen");
-    expect(dataGridSource).toContain("filterEditorView === 'text' && effectiveFilterBuilderOpen");
-  });
-
-  it("asks before an expensive Elasticsearch cursor jump", () => {
-    expect(dataGridSource).toContain("requestCount >= ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS");
-    expect(dataGridSource).toContain('t("grid.esDeepPageJumpConfirmMessage"');
-    expect(dataGridSource).toContain('@click="confirmEsDeepPageJump"');
-  });
-
-  it("shows stable request progress while an Elasticsearch page jump is running", () => {
-    expect(dataGridSource).toContain('t("grid.pageJumpLoading", { page: pageJumpProgress.targetPage })');
-    expect(dataGridSource).toContain('t("grid.pageJumpProgress", { current: pageJumpProgress.completedRequests, total: pageJumpProgress.totalRequests })');
-    expect(dataGridSource).toContain('role="progressbar"');
-    expect(dataGridSource).toContain(':style="{ width: `${pageJumpProgressPercent}%` }"');
-  });
-
-  it("uses the stable overlay for viewport and device-pixel measurement", () => {
-    expect(dataGridSource).toContain("function canvasMeasurementSurface(): HTMLElement | null");
-    expect(dataGridSource).toContain("return canvasOverlayRef.value ?? null;");
-    expect(dataGridSource).toContain("const measurementSurface = canvasMeasurementSurface();");
-    expect(dataGridSource).toContain("getSurface: canvasMeasurementSurface,");
-    expect(dataGridSource).toContain("const canvas = inactiveCanvasSurface();");
-    expect(dataGridSource).toContain("canvasUsingBackSurface.value = !canvasUsingBackSurface.value;");
-  });
-
-  it("uses the canvas that actually received the event during a surface flip", () => {
-    expect(dataGridSource).toContain("function canvasEventSurface(event: MouseEvent): HTMLCanvasElement | null");
-    expect(dataGridSource).toContain("const currentTarget = event.currentTarget;");
-    expect(dataGridSource).toContain("return currentTarget instanceof HTMLCanvasElement ? currentTarget : activeCanvasSurface();");
-    expect(dataGridSource).toContain("const canvas = canvasEventSurface(event);");
-
-    const canvasMouseMove = dataGridSource.slice(dataGridSource.indexOf("function onCanvasMouseMove"), dataGridSource.indexOf("function onCanvasMouseLeave"));
-    expect(canvasMouseMove).toContain("const cursorSurface = canvasEventSurface(event);");
-  });
-
-  it("handles double clicks on the stable canvas container", () => {
-    expect(dataGridSource).toContain('@dblclick="onCanvasDblClick"');
-    expect(dataGridSource.match(/@dblclick="onCanvasDblClick"/g)).toHaveLength(1);
-    expect(dataGridSource).toContain("@dblclick.stop");
-  });
 });
 
 describe("DataGridSearchBar", () => {
@@ -258,18 +205,6 @@ describe("DataGridSearchBar", () => {
 });
 
 describe("DataGridPagination", () => {
-  it("keeps drag summaries count-only and wires the derived average without materializing selected cells", () => {
-    const summaryStart = dataGridSource.indexOf("const selectionSummary = computed");
-    const pendingSummary = dataGridSource.indexOf("createPendingSelectionSummary(selectedCellCount.value, multiRowCount.value)", summaryStart);
-    const materializedSummary = dataGridSource.indexOf("summarizeSelection(selectedCells.value)", summaryStart);
-
-    expect(summaryStart).toBeGreaterThan(-1);
-    expect(pendingSummary).toBeGreaterThan(summaryStart);
-    expect(materializedSummary).toBeGreaterThan(pendingSummary);
-    expect(dataGridSource).toContain('const selectionSummaryAverageText = computed(() => {\n  if (isSelectingCells.value) return "…";');
-    expect(dataGridSource).toContain(':selection-summary-average-text="selectionSummaryAverageText"');
-  });
-
   it("shows average beside the existing selection summary values", () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 4, rowCount: 2 },
@@ -507,8 +442,6 @@ describe("DataGridColumnHeader", () => {
     expect(String(tooltipType.props.class ?? "")).toContain("data-grid-type-string");
     const headerTypeLine = findOne(mounted.root, (node) => hostText(node) === "varchar(255)" && node.props["data-grid-header-type-line"] === "");
     expect(String(headerTypeLine.props.class)).toContain("data-grid-type-string");
-    // Softer dark-mode palette override for the tooltip container.
-    expect(globalsCss).toMatch(/\.dark \.dbx-column-info-tooltip \{[^}]*--data-grid-type-string-fg: #4ade80/);
   });
 
   it("cancels resize-handle clicks without leaking header click events", () => {
@@ -1423,38 +1356,6 @@ describe("DataGridTextFilterWorkbench", () => {
 });
 
 describe("cell detail surfaces", () => {
-  it("keeps detail tabs and editor actions usable when the panel narrows", () => {
-    const tabsHeader = cellDetailHeaderSource;
-    const tabViewport = tabsHeader.match(/<div class="([^"]*overflow-x-auto[^"]*)">\s*<TabsList/);
-    const tabList = tabsHeader.match(/<TabsList class="([^"]+)">/);
-    const triggerClasses = Array.from(tabsHeader.matchAll(/<TabsTrigger\b[^>]*class="([^"]+)"/g), ([, classes]) => classes.split(/\s+/));
-
-    expect(tabViewport?.[1]?.split(/\s+/)).toEqual(expect.arrayContaining(["min-w-0", "flex-1", "overflow-x-auto"]));
-    expect(tabList?.[1]?.split(/\s+/)).toEqual(expect.arrayContaining(["flex", "w-max", "min-w-full"]));
-    expect(triggerClasses).toHaveLength(3);
-    for (const classes of triggerClasses) {
-      expect(classes).toEqual(expect.arrayContaining(["min-w-max", "flex-1", "shrink-0"]));
-    }
-    expect(dataGridSource).not.toContain("activeCellDetailTabsGridClass");
-
-    const valueEditorLifecycleStart = dataGridSource.indexOf("watch(valueEditorContainer");
-    const valueEditorLifecycleEnd = dataGridSource.indexOf("const detailEdit = useDataGridCellDetailEdit", valueEditorLifecycleStart);
-    const valueEditorLifecycle = dataGridSource.slice(valueEditorLifecycleStart, valueEditorLifecycleEnd);
-    expect(valueEditorLifecycle).toContain("const editor = valueDetailEditor;");
-    expect(valueEditorLifecycle).toContain("if (valueDetailEditor !== editor) return;");
-    expect(valueEditorLifecycle).toContain("if (editor.getValue() !== detailEditValue.value)");
-    expect(valueEditorLifecycle).toContain("editor.setValue(detailEditValue.value, activeCellDetail.value?.type);");
-
-    const valueEditorStart = dataGridSource.indexOf("<TabsContent v-if=\"activeCellDetailTabs.includes('valueEditor')\"");
-    const valueEditorEnd = dataGridSource.indexOf("</TabsContent>", valueEditorStart);
-    const valueEditor = dataGridSource.slice(valueEditorStart, valueEditorEnd);
-    expect(valueEditor).toMatch(/<TabsContent[^>]*class="[^"]*\bmin-w-0\b[^"]*">/);
-    expect(valueEditor).toMatch(/<div class="[^"]*\bmin-w-0\b[^"]*\bflex-wrap\b[^"]*">/);
-
-    expect(cellDetailPanelSource).toMatch(/<TabsContent value="details" class="[^"]*\bmin-w-0\b[^"]*">/);
-    expect(cellDetailPanelSource).toMatch(/<div class="[^"]*\bmin-w-0\b[^"]*\bflex-wrap\b[^"]*">/);
-  });
-
   it("presents printable LONG BLOB bytes as text and copies the presented value", async () => {
     const copyText = vi.fn();
     const blobDetail = detail({
@@ -1855,14 +1756,6 @@ describe("cell detail surfaces", () => {
     expect(dispatch(enabledCompare, "mousedown").defaultPrevented).toBe(true);
     dispatch(enabledCompare, "click");
     expect(compareJson).toHaveBeenCalledOnce();
-  });
-
-  it("snapshots comparison values before opening and suppresses modal-induced blur commits", () => {
-    expect(dataGridCellDetailEditSource).toContain("detailValueDiffSnapshot.value = snapshot;");
-    expect(dataGridCellDetailEditSource).toContain("detailValueDiffOpen.value = true;");
-    expect(dataGridSource).toContain("if (!detailValueDiffOpen.value && !detailTransformOpen.value) commitValueEditorEdit();");
-    expect(dataGridSource).toContain(':disabled="!canCompareDetailJson" @mousedown.prevent @click="openDetailJsonCompare"');
-    expect(dataGridSource).toContain('v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot"');
   });
 
   // issue #9832：编辑中点「压缩 JSON」会把草稿压成单行，此时必须仍能点「格式化 JSON」

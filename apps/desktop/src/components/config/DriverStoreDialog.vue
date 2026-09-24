@@ -41,6 +41,7 @@ import { runAgentOfflineExportAction } from "@/lib/driverStore/agentOfflineExpor
 import { DRIVER_CATEGORIES, getCategoryForAgentDriver, assertAgentDriverCategoriesComplete } from "@/lib/connection/driver-category-definitions";
 import { hasAnyUpdatableDriverMatching, countInstalledDrivers, countAvailableDrivers, partitionDriversByInstallStatus, upgradeAllDriverTypes, upgradeAllMatchesFullUpdateSet, type DriverInstallStatusFilter } from "@/lib/connection/driverListFilter";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
+import { updateBlockerLabels } from "@/lib/updates/componentUpdateOrchestration";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -51,6 +52,10 @@ const isWeb = !isTauriRuntime();
 function backendError(e: unknown): string {
   const message = e instanceof Error ? e.message : ((e as { message?: string } | null)?.message ?? String(e));
   return translateBackendError(t, message);
+}
+
+function driverUpdateBlockedMessage(blockers: Awaited<ReturnType<typeof api.checkAgentUpdateBlockers>>): string {
+  return updateBlockerLabels(blockers).join(", ");
 }
 
 const props = withDefaults(
@@ -504,7 +509,7 @@ async function runDriverInstall(dbType: string) {
     }
     const blockers = await api.checkAgentUpdateBlockers([dbType]);
     if (blockers.length > 0) {
-      toast(t("driverStore.driverUpdateBlocked", { labels: blockers.map((blocker) => blocker.label).join(", ") }));
+      toast(t("driverStore.driverUpdateBlocked", { labels: driverUpdateBlockedMessage(blockers) }));
       return;
     }
     const operationId = uuid();
@@ -548,7 +553,7 @@ async function upgradeAll() {
     if (updatableDbTypes.length === 0) return;
     const blockers = await api.checkAgentUpdateBlockers(updatableDbTypes);
     if (blockers.length > 0) {
-      toast(t("driverStore.driverUpdateBlocked", { labels: blockers.map((blocker) => blocker.label).join(", ") }));
+      toast(t("driverStore.driverUpdateBlocked", { labels: driverUpdateBlockedMessage(blockers) }));
       return;
     }
     // Do not expose Cancel until the backend operation has registered its token.
@@ -623,7 +628,7 @@ async function uninstallDriver(dbType: string) {
     }
     const blockers = await api.checkAgentUpdateBlockers([dbType]);
     if (blockers.length > 0) {
-      toast(t("driverStore.driverUpdateBlocked", { labels: blockers.map((blocker) => blocker.label).join(", ") }));
+      toast(t("driverStore.driverUpdateBlocked", { labels: driverUpdateBlockedMessage(blockers) }));
       return;
     }
     await api.uninstallAgent(dbType);
@@ -791,7 +796,7 @@ async function importDriverFile(driver: AgentDriverInfo) {
   }
   const blockers = await api.checkAgentUpdateBlockers([dbType]);
   if (blockers.length > 0) {
-    toast(t("driverStore.driverUpdateBlocked", { labels: blockers.map((blocker) => blocker.label).join(", ") }));
+    toast(t("driverStore.driverUpdateBlocked", { labels: driverUpdateBlockedMessage(blockers) }));
     return;
   }
   const label = driverLabel(dbType);

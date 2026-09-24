@@ -2350,6 +2350,29 @@ async fn save_export_destination_identity(
     state.storage.save_state(&export_destination_state_key(dir), &value, "application/octet-stream").await
 }
 
+/// Read/delete operations must not trust a replaced backup mount or create a missing directory.
+pub async fn verify_export_destination_identity(
+    state: &crate::connection::AppState,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!("Backup directory is unavailable: {}", dir.display()));
+    }
+    let recorded = state
+        .storage
+        .load_state(&export_destination_state_key(dir))
+        .await?
+        .map(|(bytes, _)| ExportDestinationIdentity::decode(&bytes))
+        .transpose()?
+        .flatten();
+    if recorded.as_ref().is_some_and(|identity| {
+        recorded_export_destination_identity_mismatch(identity, export_destination_identity_for_path(dir).as_ref())
+    }) {
+        return Err(format!("Backup directory now resolves to a different filesystem: {}", dir.display()));
+    }
+    Ok(())
+}
+
 /// Returns whether this macOS destination still has the transient, untagged
 /// `st_dev` identity written by DBX versions before persistent volume UUIDs
 /// were introduced. The caller must require an explicit directory selection
@@ -2692,6 +2715,19 @@ fn export_source_file_name(file_path: &str) -> String {
     format!("{stem}.sql")
 }
 
+tokio::task_local! {
+    static TRACKED_BACKUP_DESTINATION: (std::path::PathBuf, Arc<std::sync::atomic::AtomicBool>);
+}
+
+/// Tracks successful create_new separately from preparation errors and path collisions.
+pub(crate) async fn track_backup_destination<F: std::future::Future>(
+    path: std::path::PathBuf,
+    created: Arc<std::sync::atomic::AtomicBool>,
+    operation: F,
+) -> F::Output {
+    TRACKED_BACKUP_DESTINATION.scope((path, created), operation).await
+}
+
 async fn create_database_export_writer(
     state: &Arc<crate::connection::AppState>,
     request: &DatabaseExportRequest,
@@ -2744,6 +2780,13 @@ async fn create_database_export_writer(
     // at the same path in between. Re-check the identity of the handle we
     // actually opened, not just the path, and refuse to keep a backup that
     // landed on the wrong filesystem. See #6327.
+    if request.prevent_overwrite {
+        let _ = TRACKED_BACKUP_DESTINATION.try_with(|(path, created)| {
+            if path == std::path::Path::new(&request.file_path) {
+                created.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
     let opened_destination_identity = export_destination_identity_for_file(&file);
     if export_destination_identity_mismatch(
         expected_destination_identity.as_ref(),
@@ -4251,6 +4294,37 @@ mod tests {
         let mut output = String::new();
         flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap()).read_to_string(&mut output).unwrap();
         assert_eq!(output, "SELECT 1;\n");
+    }
+
+    #[tokio::test]
+    async fn scheduled_backup_destination_tracking_grants_ownership_only_after_create_new() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tracked.sql");
+        let state = Arc::new(test_app_state(directory.path()).await);
+        let mut request = export_request(true, true, true, Vec::new());
+        request.file_path = path.to_string_lossy().into_owned();
+        request.prevent_overwrite = true;
+        let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = super::track_backup_destination(
+            path.clone(),
+            created.clone(),
+            create_database_export_writer(&state, &request),
+        )
+        .await
+        .unwrap();
+        assert!(created.load(std::sync::atomic::Ordering::Relaxed));
+        drop(writer);
+        std::fs::write(&path, b"keep existing").unwrap();
+        let collision = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(super::track_backup_destination(
+            path.clone(),
+            collision.clone(),
+            create_database_export_writer(&state, &request)
+        )
+        .await
+        .is_err());
+        assert!(!collision.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(std::fs::read(path).unwrap(), b"keep existing");
     }
 
     #[tokio::test]

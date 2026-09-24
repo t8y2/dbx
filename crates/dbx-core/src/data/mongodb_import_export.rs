@@ -1669,6 +1669,22 @@ fn progress(
     }
 }
 
+/// Resolve the pool that serves `database` on this connection.
+///
+/// MongoDB pools are keyed `<connection id>:<database>`, so looking one up by the bare
+/// connection id misses the pool `get_or_create_pool` just returned. Depending on what else the
+/// app has opened, the bare key is either absent — "Not a MongoDB connection" on a perfectly good
+/// connection — or holds a *different*, possibly already closed, pool, which surfaces later as
+/// "Agent stdin not available". Always resolve through the key the pool was created under.
+pub(crate) async fn mongo_pool_for_database(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<PoolKind, String> {
+    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    state.pool_handle(&pool_key).await.ok_or_else(|| "Not found".to_string())
+}
+
 async fn insert_documents_batch(
     state: &AppState,
     connection_id: &str,
@@ -1676,8 +1692,9 @@ async fn insert_documents_batch(
     collection: &str,
     documents: Vec<Document>,
 ) -> Result<MongoInsertOutcome, MongoImportIssue> {
-    let pool =
-        state.pool_handle(connection_id).await.ok_or_else(|| MongoImportIssue::new("CONNECTION", "Not found"))?;
+    let pool = mongo_pool_for_database(state, connection_id, database)
+        .await
+        .map_err(|error| MongoImportIssue::new("CONNECTION", error))?;
     match &pool {
         PoolKind::MongoDb(client) => {
             insert_bson_documents(client, database, collection, documents).await.map_err(bulk_write_issue)
@@ -2339,8 +2356,7 @@ where
         return Err("Export cancelled".to_string());
     }
 
-    state.get_or_create_pool(&request.connection_id, Some(&request.database)).await?;
-    let pool = state.pool_handle(&request.connection_id).await.ok_or_else(|| "Not found".to_string())?;
+    let pool = mongo_pool_for_database(state, &request.connection_id, &request.database).await?;
     match &pool {
         PoolKind::MongoDb(_) | PoolKind::Agent(_) => {}
         _ => return Err("Not a MongoDB connection".to_string()),
@@ -2420,7 +2436,7 @@ async fn count_export_documents(state: &AppState, request: &MongoExportRequest) 
     if request.filter.as_deref().is_some_and(|filter| !filter.trim().is_empty() && filter.trim() != "{}") {
         return None;
     }
-    let pool = state.pool_handle(&request.connection_id).await?;
+    let pool = mongo_pool_for_database(state, &request.connection_id, &request.database).await.ok()?;
     match pool {
         PoolKind::MongoDb(client) => mongo_driver::count_documents(
             &client,
@@ -2457,7 +2473,7 @@ where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
     F: FnMut(serde_json::Value) -> Result<(), String>,
 {
-    let pool = state.pool_handle(&request.connection_id).await.ok_or_else(|| "Not found".to_string())?;
+    let pool = mongo_pool_for_database(state, &request.connection_id, &request.database).await?;
     match pool {
         PoolKind::MongoDb(client) => {
             for_each_find_document(
@@ -2849,7 +2865,7 @@ where
     if is_cancelled(&request.export_id).await {
         return Err("Export cancelled".to_string());
     }
-    let pool = state.pool_handle(&request.connection_id).await.ok_or_else(|| "Not found".to_string())?;
+    let pool = mongo_pool_for_database(state, &request.connection_id, &request.database).await?;
     let file = File::create(temp).map_err(|error| error.to_string())?;
     let buffered = BufWriter::new(file);
     let mut writer = if request.gzip {

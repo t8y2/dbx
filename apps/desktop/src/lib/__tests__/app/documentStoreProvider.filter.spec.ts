@@ -91,9 +91,43 @@ describe("document store structured filters", () => {
       }
     }
 
-    // A JSON column is matched as text, like any other non-numeric column.
+    // Non-string columns are matched through the $convert coercion form: plain $regex only
+    // matches fields that hold a string, so it silently filtered such columns to 0 rows.
     expect(buildDocumentFilterCondition({ id: "contains", fieldName: "MessageText", mode: "like", rawValue: "abc", conjunction: "AND" }, { kind: "mongodb", sampleValue: { a: 1 } })).toEqual({
-      MessageText: { $regex: "abc", $options: "i" },
+      $expr: {
+        $regexMatch: {
+          input: { $convert: { input: "$MessageText", to: "string", onError: "", onNull: "" } },
+          regex: "abc",
+          options: "i",
+        },
+      },
+    });
+    expect(buildDocumentFilterCondition({ id: "starts", fieldName: "MessageText", mode: "begins-with", rawValue: "abc", conjunction: "AND" }, { kind: "mongodb", sampleValue: { $date: "2026-01-01T00:00:00Z" } })).toEqual({
+      $expr: {
+        $regexMatch: {
+          input: { $convert: { input: "$MessageText", to: "string", onError: "", onNull: "" } },
+          regex: "^abc",
+          options: "i",
+        },
+      },
+    });
+    expect(buildDocumentFilterCondition({ id: "not-contains", fieldName: "MessageText", mode: "not-like", rawValue: "abc", conjunction: "AND" }, { kind: "mongodb", sampleValue: true })).toEqual({
+      $expr: {
+        $not: [
+          {
+            $regexMatch: {
+              input: { $convert: { input: "$MessageText", to: "string", onError: "", onNull: "" } },
+              regex: "abc",
+              options: "i",
+            },
+          },
+        ],
+      },
+    });
+    // Solr keeps the plain $regex path even for non-string samples: its driver translates
+    // anchored $regex into fq clauses but cannot translate $expr.
+    expect(buildDocumentFilterCondition({ id: "starts", fieldName: "MessageText", mode: "begins-with", rawValue: "abc", conjunction: "AND" }, { kind: "solr", sampleValue: 42 })).toEqual({
+      MessageText: { $regex: "^abc", $options: "i" },
     });
 
     // Operators that genuinely need a typed value still reject text that is not one.

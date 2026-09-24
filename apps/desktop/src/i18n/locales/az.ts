@@ -5652,7 +5652,7 @@ export default withEnglishFallback({
     sortDesc: "Azalan",
     limit: "Hədd",
     offset: "Sürüşmə",
-    resultSummary: "Təxminən {count} nəticə · {time} ms",
+    resultSummary: "Təxminən {count} nəticə · {duration}",
     viewJson: "JSON",
     viewTable: "Cədvəl",
     viewGrid: "Tor",

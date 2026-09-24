@@ -9,9 +9,10 @@ import { type ElasticsearchCompletionItem } from "@/lib/elasticsearch/elasticsea
 import { type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { batchColumnSelectionColumnList, batchColumnSelectionInsertReplacement, batchColumnSelectionReplaceTo, isBatchColumnSelectionCompletionActive } from "@/lib/editor/batchColumnSelection";
 import { type RedisCompletionItem } from "@/lib/redis/redisCompletion";
+import { type SoqlCompletionItem } from "@/lib/soql/soqlCompletion";
 import type { SqlCompletionItem } from "@/lib/sql/sqlCompletion";
 
-export type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem;
+export type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem | SoqlCompletionItem;
 
 export interface BatchColumnSelectionActionItem {
   label: string;

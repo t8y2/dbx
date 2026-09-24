@@ -157,6 +157,9 @@ Ask the MCP client to:
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
+| `dbx_salesforce_current_user` | Show the Salesforce user and org behind a connection, including the "Modify All Data" flag |
+| `dbx_salesforce_prepare_write` | Prepare one Salesforce record write and return a summary plus a single-use confirm token |
+| `dbx_salesforce_apply_write` | Apply a prepared Salesforce write using its confirm token |
 | `dbx_peek_messages` | Read Kafka messages without committing consumer offsets |
 | `dbx_send_message` | Send a message to a supported message queue topic |
 | `dbx_open_table` | Open a table in the running DBX desktop application |
@@ -169,6 +172,8 @@ When connection scoping is enabled, mutating connection tools and desktop UI too
 `dbx_peek_messages` reads a Kafka topic in local or Web mode when `mq-admin` is enabled. Pass `connection_id` or `connection_name`, `topic`, optional `count` (1–100, default 20), `start_position` (`latest` by default, `earliest`, or `offset`), and optional non-negative `partition`. A non-negative `offset` is required only in offset mode; without a partition it applies to all partitions. The JSON response preserves base64 payloads and metadata, reports broker partial reads via `incomplete`, and reports whole-message omissions under a 256 KiB output budget via `outputTruncated`. It respects connection/tool scopes and permits read-only and production reads without committing consumer offsets. It does not support other MQ types or continuous subscriptions.
 
 `dbx_list_databases` returns only database names allowed by the selected connection's MCP database scope. `dbx_send_message` is available when message-queue support is included in the server build.
+
+Salesforce connections take SOQL through `dbx_execute_query` and list objects through `dbx_list_tables`. `dbx_execute_batch` and `dbx_open_session` are refused: SOQL is read-only, and every call is a stateless REST request with no session to pin. A record write is a two-step confirmed operation — `dbx_salesforce_prepare_write` returns a summary plus a single-use `confirm_token` that expires after 5 minutes, a person approves that summary, and `dbx_salesforce_apply_write` sends exactly the prepared statement. Preparing needs the per-connection **Allow DML** switch in DBX Settings → MCP, which is off by default, and Salesforce cannot roll an applied write back.
 
 ## Execution Modes
 
@@ -537,6 +542,9 @@ MCP 配置：
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
 | `dbx_close_session` | 关闭会话并释放固定连接资源 |
 | `dbx_execute_redis_command` | 执行 Redis 命令 |
+| `dbx_salesforce_current_user` | 显示连接背后的 Salesforce 用户与组织，包括 “Modify All Data” 标志 |
+| `dbx_salesforce_prepare_write` | 准备一条 Salesforce 记录写入，返回摘要和一次性确认令牌 |
+| `dbx_salesforce_apply_write` | 使用确认令牌应用已准备的 Salesforce 写入 |
 | `dbx_peek_messages` | 读取 Kafka 消息，不提交消费位点 |
 | `dbx_send_message` | 向支持的消息队列 Topic 发送消息 |
 | `dbx_open_table` | 在 DBX 桌面端打开表 |
@@ -547,6 +555,8 @@ MCP 配置：
 启用 `mq-admin` 后，`dbx_peek_messages` 可在本地和 Web 模式下读取 Kafka Topic。参数为 `connection_id` 或 `connection_name`、`topic`、可选 `count`（1–100，默认 20）、`start_position`（默认 `latest`，也支持 `earliest`、`offset`）及可选的非负 `partition`。仅 offset 模式必须且允许指定非负 `offset`，未指定分区时该位点应用于所有分区。JSON 结果保留 base64 消息体和元数据，通过 `incomplete` 标记底层不完整读取，通过 `outputTruncated` 标记因 256 KiB 输出预算而省略整条消息。工具遵守连接和工具范围，允许只读与生产连接读取，不提交消费位点，不支持其他 MQ 类型或持续订阅。
 
 `dbx_list_databases` 只返回该连接 MCP 数据库范围内允许访问的名称。`dbx_send_message` 仅在 Server 构建时包含消息队列支持时可用。
+
+Salesforce 连接通过 `dbx_execute_query` 执行 SOQL，通过 `dbx_list_tables` 列出对象。`dbx_execute_batch` 与 `dbx_open_session` 会被拒绝：SOQL 只读，且每次调用都是无状态 REST 请求，没有可固定的会话。写入记录是两步确认操作——`dbx_salesforce_prepare_write` 返回摘要和一次性 `confirm_token`（5 分钟后过期），由人确认该摘要后，`dbx_salesforce_apply_write` 才会发送那条已准备好的语句。准备写入需要在 DBX 设置 → MCP 中为该连接开启 **允许 DML**（默认关闭），且 Salesforce 无法回滚已应用的写入。
 
 ### 本地数据目录
 

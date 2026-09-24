@@ -80,6 +80,19 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  pluginPlatform: {
+    shortcutsPluginCenter: "Plagin mərkəzinin yanında (açılan menyu)",
+    shortcutsToolbar: "Yeniləmə düyməsinin solunda (üzən)",
+    shortcutsToolbarCount: "Görünən nişanların sayı",
+    shortcutsToolbarHint: "0 bütün girişləri menyuya yerləşdirir. Yer çatmadıqda qalanları da menyuya keçir.",
+    shortcutsMore: "Digər plagin qısayolları ({count})",
+    shortcutsLeftTop: "Sol · Yuxarı",
+    shortcutsLeftBottom: "Sol · Aşağı",
+    shortcutsRightTop: "Sağ · Yuxarı",
+    shortcutsRightBottom: "Sağ · Aşağı",
+    shortcutsVisiblePlugins: "Görünən plaginlər",
+    shortcutsResize: "Hündürlüyü dəyişmək üçün sürükləyin; avtomatik hündürlük üçün iki dəfə klikləyin",
+  },
   cellTransform: {
     title: "Çevirmə önizləməsi",
     description: "Cari dəyəri baxmaq və ya köçürmək üçün çevirir. İlkin dəyər və redaktə qaralaması dəyişmir.",
@@ -2815,9 +2828,12 @@ export default withEnglishFallback({
     builtinProviders: "Daxili dəstək",
     partnerProviders: "Premium sponsorlar",
     jalapenoSponsored: "$1 pulsuz kredit",
+    hualongSponsored: "$1 pulsuz kredit",
+    aicodemirrorSponsored: "¥8 pulsuz kredit",
     jalapenoDescription: "🎉 Aparıcı komandaların etibar etdiyi müəssisə səviyyəli AI artıq sizin üçün əlçatandır! Ən müasir modelləri 50% endirimlə sınayın və daha çox məbləğ yüklədikcə daha çox bonus kredit qazanın!",
     hualongDescription:
       "🐉 AI ilə intensiv işləyən tərtibatçılar üçün rəsmi mənbəli model vasitəçisi! Yoxlanıla bilən token səviyyəli hesablaşma, müəssisə müqavilələri və hesab-fakturalarla 100% orijinal Codex və Claude seriyaları.\n🎉$1 pulsuz kredit üçün DBX&HUALONG promo kodu ilə qeydiyyatdan keçin!",
+    aicodemirrorDescription: "⚡ AICodeMirror korporativ səviyyəli yüksək paralellik, sürətli faktura və 7×24 xüsusi dəstək təklif edir; yeni istifadəçilər ¥8 pulsuz kredit və ilk dolduruşda 20% endirim qazanır.",
     visitPartner: "Tərəfdaşın saytına keç",
     getApiKey: "API açarı əldə et",
     providerStatusActive: "Aktiv",
@@ -7277,6 +7293,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Cədvəl sütunlarının şərhlərini birbaşa sütun adlarının altında göstər.",
     showColumnTypesInHeader: "Sütun növlərini adların altında göstər",
     showColumnTypesInHeaderDescription: "Hər sütunun verilən növünü birbaşa cədvəldəki sütun adlarının altında göstər.",
+    showResultSourceDatabase: "Nəticə adlarında verilənlər bazası adını göstər",
+    showResultSourceDatabaseDescription: "Söndürüldükdə nəticə sekmələri yalnız cədvəl adını göstərir; tam ad (verilənlər bazası adı ilə) ipucunda görünməyə davam edir.",
     dataGridShowTransposeFieldMetadata: "Transpozisiya görünüşündə sahə metaverilənlərini göstər",
     dataGridShowTransposeFieldMetadataDescription: "Transpozisiya görünüşündə aktiv edilmiş sütun növlərini və şərhləri ayrı sətirlərdə göstər. Bu, sətrin hündürlüyünü artırır.",
     colorizeDataGridCellTypes: "Verilənlər cədvəlinin dəyərlərini rənglə fərqləndir",
@@ -8093,6 +8111,10 @@ export default withEnglishFallback({
     mcpConnectionPolicyReadOnly: "Yalnız oxuma",
     mcpConnectionPolicySafeWrite: "Təhlükəsiz yazma əməliyyatlarına icazə ver",
     mcpConnectionPolicyHighRiskWrite: "Yüksək riskli əməliyyatlara icazə ver",
+    mcpConnectionPolicyAllowSalesforceDml: "DML-ə icazə ver",
+    mcpConnectionPolicyAllowSalesforceDmlHint:
+      "Süni intellekt agentinə iki mərhələli təsdiqlə (əvvəlcə hazırla, sonra tətbiq et) bu orqanizasyonda tək Salesforce qeydlərini yaratmağa, yeniləməyə və ya silməyə imkan verir. Yalnız oxumaq rejimləri bu açarı nəzərə almır. Salesforce yazılışları geri qaytarıla bilməz.",
+    mcpConnectionPolicyAllowSalesforceDmlReadOnlyBlocked: "Bu bağlantı yalnız oxumaq üçün olduğundan Salesforce DML bağlı qalır. Əvvəlcə yazmağa icazə verən icra rejimini seçin.",
     mcpToolPermissionsTitle: "MCP alət icazələri",
     mcpToolPermissionsDescription: "Yalnız ehtiyacınız olan MCP alətlərini təqdim edin. Seçim ləğv edildikdə, müştərilər alət təriflərini keşdə saxlamış olsalar belə, server onların müraciətlərini rədd edir.",
     mcpToolListConnections: "Əlaqələri siyahıla",
@@ -8110,6 +8132,9 @@ export default withEnglishFallback({
     mcpToolRollbackTransaction: "Tranzaksiyanı geri qaytar",
     mcpToolCloseSession: "Sorğu sessiyasını bağla",
     mcpToolExecuteRedisCommand: "Redis əmrini icra et",
+    mcpToolSalesforceCurrentUser: "Salesforce cari istifadəçisi",
+    mcpToolSalesforcePrepareWrite: "Salesforce yazılışını hazırla",
+    mcpToolSalesforceApplyWrite: "Salesforce yazılışını tətbiq et",
     mcpToolPeekMessages: "Kafka mesajlarını oxu",
     mcpToolSendMessage: "Mesaj növbəsinə mesaj göndər",
     mcpToolAddConnection: "Əlaqə əlavə et",

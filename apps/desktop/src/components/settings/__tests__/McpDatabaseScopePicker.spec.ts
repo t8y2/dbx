@@ -90,6 +90,7 @@ function emptyPolicy(connectionId: string, scope: McpConnectionPolicy["databaseS
     databaseScope: scope,
     allowedDatabases: [],
     databasePolicies: [],
+    allowSalesforceDml: false,
   };
 }
 

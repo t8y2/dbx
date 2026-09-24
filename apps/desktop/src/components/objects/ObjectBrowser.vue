@@ -1011,6 +1011,9 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
     case "open-source":
       void (row.type === "EVENT" ? openEventEditor(row) : openSource(row));
       break;
+    case "open-source-tab":
+      openSourceTab(row);
+      break;
   }
 }
 
@@ -1038,7 +1041,7 @@ function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
   const activation = settingsStore.editorSettings.sidebarActivation;
   const { action, isDouble } = resolveRowClickAction(row, event.detail, activation, effectiveDatabaseType.value);
   // Double click: cancel any pending single-click and fire immediately. When
-  // the row's single/double actions are identical (e.g. VIEW → open-source),
+  // the row's single/double actions are identical (e.g. SEQUENCE → open-source),
   // this gesture's first click already ran it — re-executing would toggle the
   // just-opened side panel back off (or emit open-table twice for MongoDB).
   if (isDouble) {
@@ -1557,6 +1560,24 @@ function openTableStructureEditor() {
   const row = sidePanelRow.value;
   if (!row || row.type !== "TABLE" || !canOpenTableStructureEditor.value) return;
   queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, tableInfoTab.value, undefined, props.catalog);
+}
+
+/**
+ * Double-clicking a routine opens its source as an editable query tab
+ * (issue #10202), the same container the sidebar and editor navigation use.
+ * The store owns connection setup, source loading and tab de-duplication, so
+ * this path deliberately does not fall back to the side panel.
+ */
+function openSourceTab(row: ObjectBrowserRow) {
+  queryStore.openObjectSourceTabPending({
+    connectionId: props.connection.id,
+    database: props.database,
+    title: `Source - ${row.displayName || row.name}`,
+    schema: row.schema || selectedSchema.value || props.database,
+    catalog: props.catalog,
+    initialEditing: true,
+    request: { name: row.name, objectType: row.type as ObjectSourceKind, signature: row.signature ?? undefined },
+  });
 }
 
 async function openSource(row: ObjectBrowserRow) {

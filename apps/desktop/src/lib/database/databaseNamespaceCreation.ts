@@ -32,6 +32,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   elasticsearch: { deferred: "index creation is not modeled as database creation" },
   easysearch: { deferred: "index creation is not modeled as database creation" },
   meilisearch: { deferred: "index creation is not modeled as database creation" },
+  salesforce: { deferred: "Salesforce orgs do not expose database creation through SOQL" },
   solr: { deferred: "core creation is not modeled as database creation" },
   hbase: { deferred: "namespace creation needs dedicated HBase namespace options" },
   qdrant: { deferred: "collection creation is separate from database creation" },

@@ -108,6 +108,27 @@ describe("useComponentUpdates", () => {
     expect(updates.driverUpdateCount.value).toBe(0);
   });
 
+  it("starts a fresh MCP check for an explicit user action instead of reusing a background result", async () => {
+    const backgroundMcp = deferred<typeof mcpStatus>();
+    const userMcp = deferred<typeof mcpStatus>();
+    mocks.checkMcpServerStatus.mockReturnValueOnce(backgroundMcp.promise).mockReturnValueOnce(userMcp.promise);
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const backgroundRefresh = updates.refresh();
+    await Promise.resolve();
+    const userRefresh = updates.refresh({ force: true });
+    await Promise.resolve();
+
+    userMcp.resolve(mcpStatus);
+    expect(await userRefresh).toBe(true);
+    expect(updates.mcpUpdateAvailable.value).toBe(true);
+
+    backgroundMcp.resolve({ ...mcpStatus, latest_version: mcpStatus.current_version, update_available: false });
+    expect(await backgroundRefresh).toBe(false);
+    expect(updates.mcpUpdateAvailable.value).toBe(true);
+    expect(mocks.checkMcpServerStatus).toHaveBeenCalledTimes(2);
+  });
+
   it("clears driver and MCP update state after a successful update and refresh", async () => {
     mocks.listInstalledAgents.mockResolvedValueOnce([{ db_type: "mysql", update_available: true }]).mockResolvedValueOnce([{ db_type: "mysql", update_available: false }]);
     mocks.checkMcpServerStatus.mockResolvedValueOnce(mcpStatus).mockResolvedValueOnce({ ...mcpStatus, latest_version: "1.0.0", update_available: false });

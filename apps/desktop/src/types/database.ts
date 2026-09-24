@@ -476,6 +476,7 @@ export interface PluginContextMenuContribution {
   description?: string;
   icon?: string;
   menu: PluginContextMenuTarget;
+  action?: PluginOpenWorkbenchTarget;
 }
 
 export interface PluginResultViewContribution {
@@ -490,11 +491,15 @@ export type PluginCommandPresentation = "tab" | "panel";
 export type PluginCommandReuse = "singleton" | "new";
 export type PluginCommandRestore = "none";
 
-/** v1 ships exactly one action (HOST_PLUGIN_UI_SPEC §4.1): open a declared workbench. */
-export interface PluginOpenWorkbenchAction {
+/** Shared wire-level navigation contract used by commands and context-menu contributions. */
+export interface PluginOpenWorkbenchTarget {
   type: "open-workbench";
   /** Workbench contribution of the SAME plugin. */
   workbench: string;
+}
+
+/** v1 command action extends the shared target with command-specific launch behavior. */
+export interface PluginOpenWorkbenchAction extends PluginOpenWorkbenchTarget {
   presentation?: PluginCommandPresentation;
   reuse?: PluginCommandReuse;
   instance_key?: string;
@@ -1267,8 +1272,13 @@ export interface QueryResult {
   execution_time_ms: number;
   /** OceanBase SQL Audit EXECUTE_TIME for a completed statement, in microseconds. */
   server_execute_time_us?: number;
-  /** Desktop wait from query request dispatch to the complete result payload; summed across appended pages. OceanBase Oracle query tabs only. */
+  /** Desktop wait from query request dispatch to the complete result payload; summed across appended pages. Completed query/command requests only. */
   client_request_wait_ms?: number;
+  /** Measured phases; totals overlap. Missing phases were not measured. */
+  query_timings_ms?: Record<string, number>;
+  client_prepare_ms?: number;
+  client_result_ms?: number;
+  timing_page_count?: number;
   /** Whether a backend-reported result total is exact. */
   total_is_exact?: boolean;
   truncated?: boolean;
@@ -1281,6 +1291,10 @@ export interface QueryResult {
    *  the tabular view and the original JSON. */
   elasticsearch_raw_body?: string;
   sourceLabel?: string;
+  /** 结果集来源的库名 / schema（与 sourceLabel 同时写入），供结果集页签按设置决定是否展示。 */
+  sourceQualifier?: string;
+  /** 结果集来源的对象名（通常为表名），关闭“结果集名称包含数据库名”时用于展示短名称。 */
+  sourceName?: string;
   sourceStatement?: string;
   /** Absolute offsets in the editor document at execution time. */
   sourceFrom?: number;
@@ -1346,8 +1360,19 @@ export interface QueryResultRun {
   createdAt: number;
   /** Keeps this result from being replaced by an ordinary query execution. */
   pinned?: boolean;
+  /**
+   * 标题是否由用户/多库执行显式指定（重命名或按目标库命名）。
+   * 为假时 title 只是系统默认的 `Run N`，结果标签应改用来源名显示。
+   */
+  customTitle?: boolean;
   /** Distinguishes successive result payloads that reuse the same run slot. */
   resultGridRevision?: string;
+  /**
+   * 结果来源（库名.表名 / 表名），随批次一起保存。
+   * 非活动批次的结果 payload 会被回收，因此结果标签命名不能依赖 payload。
+   */
+  sourceLabel?: string;
+  sourceName?: string;
   /**
    * Logical-result identity for the tab-switch view snapshot cache. Distinct
    * from `resultGridRevision` (the grid remount key): this one changes on every
@@ -1933,6 +1958,8 @@ export interface QueryTab {
     | "plugin-workbench"
     | "plugin-filesystem";
   pluginWorkbench?: {
+    /** Host command that created this tab; distinct commands can share a workbench. */
+    commandId?: string;
     pluginId: string;
     contributionId: string;
     context?: Record<string, unknown>;

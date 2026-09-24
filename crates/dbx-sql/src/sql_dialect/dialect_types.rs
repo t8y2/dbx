@@ -39,6 +39,7 @@ fn core_catalog_name(kind: DialectKind) -> &'static str {
         DialectKind::ManticoreSearch => "ManticoreSearch",
         DialectKind::Informix => "Informix",
         DialectKind::Questdb => "QuestDB",
+        DialectKind::Soql => "SOQL",
         DialectKind::Unsupported => "Unsupported",
     }
 }

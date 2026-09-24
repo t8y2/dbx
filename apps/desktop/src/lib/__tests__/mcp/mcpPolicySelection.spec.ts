@@ -89,6 +89,19 @@ describe("MCP tool permission selection", () => {
     expect(MCP_TOOL_OPTIONS.map((tool) => tool.name).sort()).toEqual(registeredToolNames);
   });
 
+  it("keeps the Salesforce tools individually switchable, writes included", () => {
+    expect(MCP_TOOL_OPTIONS.filter((tool) => tool.name.startsWith("dbx_salesforce_")).map((tool) => [tool.name, tool.labelKey])).toEqual([
+      ["dbx_salesforce_current_user", "settings.mcpToolSalesforceCurrentUser"],
+      ["dbx_salesforce_prepare_write", "settings.mcpToolSalesforcePrepareWrite"],
+      ["dbx_salesforce_apply_write", "settings.mcpToolSalesforceApplyWrite"],
+    ]);
+
+    // An admin can expose reading (identity + SOQL) without handing over the write path.
+    const readOnlySfdc = toggleMcpAllowedToolName(null, "dbx_salesforce_apply_write", false);
+    expect(toggleMcpAllowedToolName(readOnlySfdc, "dbx_salesforce_prepare_write", false)).not.toContain("dbx_salesforce_prepare_write");
+    expect(readOnlySfdc).toContain("dbx_salesforce_current_user");
+  });
+
   it("keeps batch execution allowed when allow-all becomes an explicit allowlist", () => {
     const next = toggleMcpAllowedToolName(null, "dbx_send_message", false);
 

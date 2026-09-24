@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "anyhow",
  "axum",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.95"
+version = "0.4.96"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2190,6 +2190,7 @@ dependencies = [
  "rusqlite",
  "rustls 0.23.43",
  "rustls-pemfile 2.2.0",
+ "secret-service",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -2283,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.95"
+version = "0.4.96"
 dependencies = [
  "async-trait",
  "axum",
@@ -2395,7 +2396,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -4862,7 +4863,6 @@ checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
 dependencies = [
  "byteorder",
  "dbus-secret-service",
- "linux-keyutils",
  "log",
  "secret-service",
  "security-framework 2.11.1",
@@ -5018,16 +5018,6 @@ dependencies = [
  "openssl-sys",
  "pkg-config",
  "vcpkg",
-]
-
-[[package]]
-name = "linux-keyutils"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83270a18e9f90d0707c41e9f35efada77b64c0e6f3f1810e71c8368a864d5590"
-dependencies = [
- "bitflags 2.13.1",
- "libc",
 ]
 
 [[package]]
@@ -9711,6 +9701,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2 0.6.5",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -11677,6 +11668,7 @@ dependencies = [
  "serde_repr",
  "sha1 0.10.7",
  "static_assertions",
+ "tokio",
  "tracing",
  "uds_windows",
  "windows-sys 0.52.0",

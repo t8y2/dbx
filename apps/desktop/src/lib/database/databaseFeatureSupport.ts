@@ -128,7 +128,7 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  * hidden there as well (issue #9609).
  */
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt" && dbType !== "meilisearch";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt" && dbType !== "meilisearch" && dbType !== "salesforce";
 }
 
 /**
@@ -250,7 +250,9 @@ export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, 
 }
 
 export function supportsTableTruncate(dbType?: DatabaseType): boolean {
-  return !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "influxdb3" && dbType !== "victoriametrics" && dbType !== "manticoresearch";
+  return (
+    !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "influxdb3" && dbType !== "victoriametrics" && dbType !== "manticoresearch" && dbType !== "salesforce"
+  );
 }
 
 export function supportsTableVacuum(dbType?: DatabaseType): boolean {

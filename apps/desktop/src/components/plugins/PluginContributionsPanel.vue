@@ -2,6 +2,7 @@
 import { computed, defineComponent, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ArrowUp, BadgeCheck, Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, Info, LayoutGrid, Link2, List, Loader2, PackageCheck, Pencil, Pin, PinOff, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
+import { isSensitivePluginPermission } from "@/lib/plugins/pluginPermissions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/composables/useToast";
+import PluginShortcutSettings from "./PluginShortcutSettings.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import * as api from "@/lib/backend/api";
 import { clearPluginIconCache } from "@/lib/plugins/pluginIconResolver";
@@ -24,11 +26,14 @@ import {
   buildInstalledUpdateIndex,
   buildMarketplacePluginListings,
   filterMarketplacePluginListings,
+  formatMarketplaceReleasedDate,
   listingRepositoryCanVerify,
   marketplaceHomepageUrl,
   pluginSourceChange,
+  sortMarketplacePluginListings,
   type InstalledPluginUpdateEntry,
   type MarketplacePluginListing,
+  type MarketplacePluginSortMode,
   type PluginSourceChange,
 } from "@/lib/plugins/pluginMarketplace";
 import { isBatchSelectableListing, runBatch } from "@/lib/plugins/pluginBatch";
@@ -68,6 +73,7 @@ const GithubIcon = defineComponent({
 
 const PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY = "dbx-plugin-allow-unsigned";
 const MARKETPLACE_VIEW_MODE_STORAGE_KEY = "dbx-plugin-marketplace-view-mode";
+const MARKETPLACE_SORT_MODE_STORAGE_KEY = "dbx-plugin-marketplace-sort-mode";
 
 type TauriFileDropPayload = { type: "enter"; paths: string[]; position: { x: number; y: number } } | { type: "over"; position: { x: number; y: number } } | { type: "drop"; paths: string[]; position: { x: number; y: number } } | { type: "leave" };
 
@@ -111,6 +117,15 @@ const repositoryCatalogUrl = ref("");
 const marketplaceQuery = ref("");
 const marketplaceRepositoryId = ref("all");
 const marketplaceViewMode = ref<"grid" | "list">(safeLocalStorageGet(MARKETPLACE_VIEW_MODE_STORAGE_KEY) === "list" ? "list" : "grid");
+const MARKETPLACE_SORT_MODES: MarketplacePluginSortMode[] = ["name", "recently-updated", "recently-listed", "updates-first"];
+// "name" stays the default: the batch specs select listings positionally, so a persisted
+// value must be re-validated against the known modes before it may change the order.
+const marketplaceSortMode = ref<MarketplacePluginSortMode>(
+  ((): MarketplacePluginSortMode => {
+    const stored = safeLocalStorageGet(MARKETPLACE_SORT_MODE_STORAGE_KEY) as MarketplacePluginSortMode;
+    return MARKETPLACE_SORT_MODES.includes(stored) ? stored : "name";
+  })(),
+);
 const webFileInput = ref<HTMLInputElement | null>(null);
 const panelRootRef = ref<HTMLElement | null>(null);
 const draggingPackage = ref(false);
@@ -146,6 +161,8 @@ const providerConnections = computed(() => {
 const selectedConnection = computed(() => providerConnections.value.find((connection) => connection.id === selectedConnectionId.value));
 const marketplaceListings = computed(() => buildMarketplacePluginListings(catalogResults.value, installedPlugins.value, appLocale.value));
 const filteredMarketplaceListings = computed(() => filterMarketplacePluginListings(marketplaceListings.value, marketplaceQuery.value, marketplaceRepositoryId.value));
+// Render order only: batch selection and update execution keep the builder's name order.
+const sortedMarketplaceListings = computed(() => sortMarketplacePluginListings(filteredMarketplaceListings.value, marketplaceSortMode.value));
 const batchUpdatableListings = computed(() => filteredMarketplaceListings.value.filter((listing) => listing.status === "update"));
 const batchSelectedListings = computed(() => filteredMarketplaceListings.value.filter((listing) => isBatchSelectableListing(listing.status) && selectedListingKeys.value.has(listing.key)));
 const batchSelectedInstalled = computed(() => definitions.value.filter((definition) => selectedInstalledIds.value.has(definition.plugin.manifest.id)));
@@ -896,6 +913,7 @@ onMounted(() => {
   if (isTauriRuntime()) document.addEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
 });
 watch(marketplaceViewMode, (mode) => safeLocalStorageSet(MARKETPLACE_VIEW_MODE_STORAGE_KEY, mode));
+watch(marketplaceSortMode, (mode) => safeLocalStorageSet(MARKETPLACE_SORT_MODE_STORAGE_KEY, mode));
 onBeforeUnmount(() => {
   window.removeEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated);
   if (isTauriRuntime()) document.removeEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
@@ -932,6 +950,15 @@ onBeforeUnmount(() => {
               <Input data-plugin-marketplace-search v-model="marketplaceQuery" class="h-8 min-w-0 pl-8 text-xs sm:w-[min(100%,28rem)]" :placeholder="t('pluginPlatform.searchMarketplace')" />
             </div>
             <div class="flex min-w-0 items-center gap-2 sm:ml-auto">
+              <Select v-model="marketplaceSortMode">
+                <SelectTrigger class="h-8 min-w-0 flex-1 text-xs sm:w-40 sm:flex-none" :aria-label="t('pluginPlatform.sortBy')"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="name">{{ t("pluginPlatform.sortByName") }}</SelectItem>
+                  <SelectItem value="recently-updated">{{ t("pluginPlatform.sortByRecentlyUpdated") }}</SelectItem>
+                  <SelectItem value="recently-listed">{{ t("pluginPlatform.sortByRecentlyListed") }}</SelectItem>
+                  <SelectItem value="updates-first">{{ t("pluginPlatform.sortByUpdatesFirst") }}</SelectItem>
+                </SelectContent>
+              </Select>
               <Select v-model="marketplaceRepositoryId">
                 <SelectTrigger class="h-8 min-w-0 flex-1 text-xs sm:w-52 sm:flex-none"><SelectValue :placeholder="t('pluginPlatform.allRepositories')" /></SelectTrigger>
                 <SelectContent>
@@ -983,13 +1010,13 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-if="marketplaceLoading" class="flex min-h-[440px] flex-1 items-center justify-center gap-2 rounded-lg border border-dashed p-12 text-xs text-muted-foreground"><Loader2 class="size-4 animate-spin" />{{ t("pluginPlatform.loadingMarketplace") }}</div>
-          <div v-else-if="!filteredMarketplaceListings.length" class="flex min-h-[440px] flex-1 flex-col items-center justify-center rounded-lg border border-dashed p-12 text-center">
+          <div v-else-if="!sortedMarketplaceListings.length" class="flex min-h-[440px] flex-1 flex-col items-center justify-center rounded-lg border border-dashed p-12 text-center">
             <Store class="size-7 text-muted-foreground" />
             <div class="mt-3 text-sm font-medium">{{ t("pluginPlatform.noMarketplacePlugins") }}</div>
             <div class="mt-1 text-xs text-muted-foreground">{{ t("pluginPlatform.noMarketplacePluginsDescription") }}</div>
           </div>
           <div v-else-if="marketplaceViewMode === 'grid'" class="grid w-full grid-cols-1 gap-3 md:grid-cols-3">
-            <article v-for="listing in filteredMarketplaceListings" :key="listing.key" class="group flex min-w-0 min-h-48 flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40">
+            <article v-for="listing in sortedMarketplaceListings" :key="listing.key" class="group flex min-w-0 min-h-48 flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40">
               <div class="flex items-start gap-3">
                 <button
                   v-if="batchMode && isBatchSelectableListing(listing.status)"
@@ -1034,12 +1061,22 @@ onBeforeUnmount(() => {
                   >
                     <Globe class="size-3.5" />
                   </button>
+                  <span v-if="listing.latestVersionReleasedAt" class="shrink-0 text-[10px] text-muted-foreground">{{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
                   <Badge variant="outline" class="h-5 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
                 </div>
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5">
                 <Badge v-for="tag in listing.plugin.tags.slice(0, 3)" :key="tag" variant="outline" class="h-5 px-1.5 text-[10px]">{{ tag }}</Badge>
-                <Badge v-if="listing.plugin.permissions.length" variant="outline" class="h-5 px-1.5 text-[10px]">{{ t("pluginPlatform.permissionsCount", { count: listing.plugin.permissions.length }) }}</Badge>
+                <!-- Real permission strings, not a count badge: sensitive ones (clipboard read, …)
+                     highlight in the destructive variant so a user sees the risk surface before
+                     installing; the rest stay muted. -->
+                <Tooltip :delay-duration="300">
+                  <TooltipTrigger as-child>
+                    <Badge v-if="listing.plugin.permissions.length" variant="outline" class="h-5 px-1.5 font-mono text-[10px]">{{ listing.plugin.permissions.join(" · ") }}</Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="max-w-md break-all font-mono text-[11px]">{{ listing.plugin.permissions.join("\n") }}</TooltipContent>
+                </Tooltip>
+                <Badge v-for="permission in listing.plugin.permissions" :key="permission" v-show="isSensitivePluginPermission(permission)" variant="destructive" class="h-5 px-1.5 font-mono text-[10px]" :data-sensitive-permission="permission">{{ permission }}</Badge>
               </div>
               <Tooltip :delay-duration="700">
                 <TooltipTrigger as-child>
@@ -1070,7 +1107,7 @@ onBeforeUnmount(() => {
             </article>
           </div>
           <div v-else class="flex w-full flex-col gap-2">
-            <article v-for="listing in filteredMarketplaceListings" :key="listing.key" class="flex items-center gap-3 rounded-xl border bg-card p-3 transition-colors hover:border-primary/40">
+            <article v-for="listing in sortedMarketplaceListings" :key="listing.key" class="flex items-center gap-3 rounded-xl border bg-card p-3 transition-colors hover:border-primary/40">
               <button
                 v-if="batchMode && isBatchSelectableListing(listing.status)"
                 type="button"
@@ -1107,6 +1144,7 @@ onBeforeUnmount(() => {
                   >
                     <Globe class="size-3.5" />
                   </button>
+                  <span v-if="listing.latestVersionReleasedAt" class="shrink-0 text-[10px] text-muted-foreground">{{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
                   <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
                 </div>
                 <div class="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
@@ -1375,6 +1413,7 @@ onBeforeUnmount(() => {
 
       <TabsContent value="settings" class="m-0 min-h-0 flex-1 overflow-y-auto">
         <div class="space-y-4 pb-2">
+          <PluginShortcutSettings />
           <section class="space-y-3 rounded-xl border p-4">
             <div class="flex items-start gap-3">
               <div class="rounded-md bg-primary/10 p-2 text-primary"><FileUp class="size-4" /></div>

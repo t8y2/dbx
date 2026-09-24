@@ -11,9 +11,14 @@ export interface SavedQueryResultRun {
   sql: string;
   createdAt: number;
   pinned?: boolean;
+  /** 标题是否为用户/多库执行显式指定；为假时结果标签改用来源名显示 */
+  customTitle?: boolean;
   activeResultIndex?: number;
   resultCacheKey?: string;
   resultEvicted?: boolean;
+  /** 结果来源（库名.表名 / 表名），用于结果标签命名；与结果 payload 分离，回收 payload 后仍可显示 */
+  sourceLabel?: string;
+  sourceName?: string;
 }
 
 export interface SavedOpenTab {
@@ -219,6 +224,9 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
             sequence: run.sequence,
             sql: run.sql,
             createdAt: run.createdAt,
+            ...(run.sourceLabel ? { sourceLabel: run.sourceLabel } : {}),
+            ...(run.sourceName ? { sourceName: run.sourceName } : {}),
+            ...(run.customTitle ? { customTitle: true } : {}),
             ...(run.pinned ? { pinned: true } : {}),
             activeResultIndex: run.activeResultIndex,
             ...(run.resultCacheKey !== undefined ? { resultCacheKey: run.resultCacheKey } : {}),

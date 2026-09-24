@@ -10797,6 +10797,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,

@@ -13,6 +13,20 @@ DBX plugins are independently installed `.dbxp` packages that can contribute con
   **Marketplace listing pull requests go to [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store), not `t8y2/dbx`.** A plugin's feature code normally remains in its author's source repository. Open a PR against [`t8y2/dbx`](https://github.com/t8y2/dbx) only when changing the DBX host, SDK, CLI, protocol, schemas, documentation, or official examples.
 </Callout>
 
+## Plugin Shortcuts
+
+Manage shortcuts in **Plugin Center → Settings → Global settings**. They are enabled by default at the top right. Choose the top or bottom of either side, below the connection tree, or a floating strip before Update. The floating strip shows 3 icons by default, configurable from 0 to 10; remaining entries appear in a dropdown, one icon and name per row. Limited space moves additional entries into the dropdown.
+
+Each function has its own draggable icon. Visibility switches apply to a whole plugin. All positions share the saved order. Hiding or uninstalling a plugin retains its recorded positions, so the same entries return to those positions; unrecorded entries follow saved entries. Entry identity consists of the plugin ID, entry kind, and function ID. Changing these IDs creates a new entry.
+
+Choose **Beside Plugin Center (dropdown)** to show all shortcuts as icon-and-name rows in the menu beside the Plugin Center button. Rows support drag sorting; the floating toolbar icon count does not apply here.
+
+Below the connection tree, shortcuts form a single-column list with an icon on the left and a name on the right, using the tree’s row style and font size. Automatic height fits one entry per row up to five rows, with vertical scrolling for remaining entries. Drag the divider to save a custom height; double-click it to restore automatic height. Escape, window blur, or releasing outside the sorting area cancels sorting. Failed saves show an error and roll back.
+
+Shortcuts honor declared `appToolbar` visibility and command enablement. Standalone plugins also expose existing workbenches, preferring a matching command when available. Legacy plugins without commands can expose filesystem entries. Connection plugins only expose explicitly declared global commands; the host does not invent workbench entries without connection context. Incompatible plugins are excluded.
+
+Position affects icons only: content retains its existing `panel/tab` presentation. Hiding shortcuts, changing position, or hiding a plugin does not close running sessions. A panel shortcut toggles only the matching selected command panel and restores that same instance. No Manifest or backend protocol changes are required. Legacy `left/right` preferences migrate to the top of the corresponding side.
+
 ## Which Repository Receives the Change
 
 | Change | Destination | Official DBX PR? |
@@ -105,6 +119,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.plans:read",
     "host.schema:read",
     "host.storage",
+    "host.clipboard:read",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -124,6 +139,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `host.schema:read` allows `host.getTableMetadata` to read narrow table schema metadata from an already-open connection; it grants no arbitrary SQL, writes, or implicit reconnect (see [Table Schema Metadata](#table-schema-metadata)).
 - `host.storage` gives the workbench UI a persistent key-value store scoped to this plugin (see [Persistent UI State](#persistent-ui-state)). Values never leave the plugin's own data directory.
 - `host.ai` lets the plugin open a conversation with a data snapshot in the built-in DBX AI panel, using its model selector, history, follow-up messages, cancellation and export. Older DBX builds reject the unknown permission at install time, so plugins that must install everywhere should treat `host.ai` as optional.
+- `host.clipboard:read` allows reading the system clipboard from the workbench UI (see [System Clipboard](#system-clipboard)). Clipboard writes need no permission; reads hand user data (passwords, tokens) to plugin code, so they are gated.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -216,10 +232,10 @@ Action `when` accepts `always`, `create`, or `edit`; `variant` accepts `default`
 | --- | --- | --- |
 | `workbench` | `type`, `id`, `label` | Registers a workbench opened from the sidebar or plugin entry. |
 | `filesystem-provider` | `type`, `id`, `label`, `schemes` | Registers a virtual filesystem; `root_uri` can be `s3://bucket`, with optional `read`, `write`, `delete`, `rename`, and `mkdir` capabilities. |
-| `context-menu` | `type`, `id`, `label`, `menu: "connection"` or `"table"` | Adds an action to a Sidebar Tree connection or table context menu. |
+| `context-menu` | `type`, `id`, `label`, `menu: "connection"` or `"table"`, optional `action` | Adds a backend action or opens a declared Workbench from a Sidebar Tree context menu. |
 | `result-view` | `type`, `id`, `label` | Registers a query or task result view. |
 
-A `menu: "table"` contribution is currently exposed when the user opens a context menu on a concrete table node in the Sidebar Tree. DBX invokes the required backend entrypoint as `contextMenu/<contribution-id>` with the table identity:
+A `menu: "table"` contribution is currently exposed when the user opens a context menu on a concrete table node in the Sidebar Tree. A legacy contribution without `action` invokes the required backend entrypoint as `contextMenu/<contribution-id>` with the table identity:
 
 ```json
 {
@@ -234,9 +250,25 @@ A `menu: "table"` contribution is currently exposed when the user opens a contex
 
 `database` and `schema` are optional and are omitted when unavailable. The context contains no credential, connection string, or raw connection configuration. Object Browser can reuse this identity contract in a later contribution surface, but it is not a table menu surface in this release.
 
+A context-menu contribution can instead declare a host-handled Workbench action:
+
+```json
+{
+  "type": "context-menu",
+  "id": "vendor.example.generate",
+  "label": "Generate test data",
+  "menu": "table",
+  "action": { "type": "open-workbench", "workbench": "vendor.example.main" }
+}
+```
+
+`action.workbench` must reference a `workbench` contribution in the same plugin. The host opens it directly, without invoking the sidecar, and passes the current invocation context as Workbench context. For `menu: "table"`, this is the `TableContext` object above directly (not the backend `{ "table": ... }` envelope); for `menu: "connection"`, it is the existing non-secret connection summary (`id`, `dbType`, `name`, `database`). The host may also provide the standard `connectionId` for tab association. No host, port, username, password, connection string, or raw connection configuration is exposed. Reopening the Workbench refreshes its context with the latest invocation.
+
+Only legacy context-menu contributions without `action` require a backend entrypoint; their `{ "message": "..." }` response continues to show a toast.
+
 Reference contributions by ID: a connection provider's `workbench` must point to a declared workbench and `filesystem_provider` to a declared filesystem provider. A contribution icon takes precedence over the plugin-level icon.
 
-Choose `workbench` for a custom file browser: the plugin owns its list, virtualization, previews, context menus, and split panes. Choose `filesystem_provider` only to use DBX's generic file manager; declaring both defaults to the workbench. `context-menu` invokes `contextMenu/<contribution-id>` on the backend; `result-view` receives a result snapshot in workbench context, and the opened contribution id arrives in the `dbx-plugin-init` payload so one UI entrypoint can serve several workbenches and result views. See the [full contribution protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md) for payloads.
+Choose `workbench` for a custom file browser: the plugin owns its list, virtualization, previews, context menus, and split panes. Choose `filesystem_provider` only to use DBX's generic file manager; declaring both defaults to the workbench. A legacy `context-menu` invokes `contextMenu/<contribution-id>` on the backend, while a declarative `open-workbench` action opens its same-plugin Workbench directly; `result-view` receives a result snapshot in workbench context, and the opened contribution id arrives in the `dbx-plugin-init` payload so one UI entrypoint can serve several workbenches and result views. See the [full contribution protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md) for payloads.
 
 ### Filesystem Protocol
 
@@ -316,11 +348,12 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
 | `getTableMetadata({ connectionId, database?, schema?, table })` | Reads narrow table schema metadata from an already-open connection; requires `host.schema:read`. |
-| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, storage, ai }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, storage, ai, clipboardWrite, clipboardRead }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
 | `ai.openConversation({ title, prompt, context, send? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false`, or starts analysis when `true`; requires `host.ai` and is advertised as `capabilities.ai` — gate on it instead of probing, since older hosts omit it. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
 | `fileTransfer` | Streams local files and OS drops (desktop only); see below. |
+| `clipboard` | System clipboard access from the sandbox; see below. |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
 
@@ -422,6 +455,31 @@ if (window.dbxPlugin.capabilities.schemaMetadataApi) {
 - This API is read-only. DBX reuses only an already-open Host connection/session; a plugin cannot trigger an implicit reconnect, create a pool, or execute arbitrary SQL. A saved-but-disconnected connection is rejected with `Connection is not open`; a requested database without a matching open session is also rejected instead of being routed to another connection.
 
 This API is part of Host API 1.3. A plugin that cannot work without it should declare `"engines": { "host_api": "^1.3" }` and still read `capabilities.schemaMetadataApi`, because older hosts omit that field. Without `host.schema:read`, the host rejects the request before it reaches the backend.
+
+### System Clipboard
+
+The plugin sandbox has an opaque origin and no clipboard permission, so `navigator.clipboard` is unavailable there. The host bridges the system clipboard instead:
+
+- `window.dbxPlugin.copy(text)` / `window.dbxPlugin.clipboard.writeText(text)` write to the system clipboard. Both ride the same ungated bridge method: a write has the user's data as its input and is the low-risk half of the surface.
+- `window.dbxPlugin.clipboard.readText()` reads the system clipboard. It requires the `host.clipboard:read` permission — a read hands user data (passwords, tokens) to plugin code with no further user interaction — and is Host API 1.3: declare `"engines": { "host_api": "^1.3" }` if your workbench cannot function without it.
+
+Gate reads on the init capability rather than probing: `capabilities.clipboardRead` (and `capabilities.clipboardWrite` for writes) are absent on older hosts, which makes them falsy. A rejected read (missing permission, web host without native clipboard access) rejects its Promise — degrade gracefully, e.g. fall back to a keyboard-paste path instead of failing the interaction.
+
+```js
+await window.dbxPlugin.ready;
+const canRead = !!window.dbxPlugin.capabilities.clipboardRead;
+const canWrite = !!window.dbxPlugin.capabilities.clipboardWrite;
+
+async function pasteFromClipboard() {
+  if (!canRead) return null;
+  try {
+    return await window.dbxPlugin.clipboard.readText();
+  } catch {
+    // Permission missing or the clipboard read failed: keep the keyboard path.
+    return null;
+  }
+}
+```
 
 ### File Transfer and OS Drops
 

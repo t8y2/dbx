@@ -424,7 +424,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}.2.31"
+            cargo zigbuild --release -p dbx-cli --no-default-features --features dbx-mcp/os-keyring --target "${{ matrix.target }}.2.31"
           else
             # Same keychain rationale as the MCP native legs; the feature is
             # forwarded through the dbx-mcp dependency.
@@ -662,9 +662,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # Linux zigbuild cannot link the dbus Secret Service backend; the
-            # managed .dbx/secret.key file remains the key material source.
-            cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}.2.31"
+            # Pure-Rust (zbus) Secret Service backend: no C libdbus, so the
+            # zigbuild legs can read desktop-provisioned keys too.
+            cargo zigbuild --release -p dbx-mcp --features os-keyring --target "${{ matrix.target }}.2.31"
           else
             # Native macOS/Windows builds read the OS keychain key that DBX
             # Desktop provisions during the data security upgrade, so the MCP

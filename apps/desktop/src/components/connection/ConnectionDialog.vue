@@ -36,6 +36,8 @@ import type {
 import { CONNECTION_PICKER_OPTIONS, CONNECTION_PROFILES, CONNECTION_PROFILE_ICONS, type ConnectionPickerOption, type ConnectionProfileCategory, type ConnectionProfileDefinition } from "@/types/generated/connectionProfiles";
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { VictoriaMetricsExternalConfig } from "@/types/victoriametrics";
+import type { SalesforceAuthContext, SalesforceAuthMode, SalesforceEnvironment, SalesforceExternalConfig, SalesforceOAuthAuthorizeParams, SalesforceOAuthDevicePollResult } from "@/types/salesforce";
+import { SALESFORCE_OAUTH_CALLBACK_URL } from "@/types/salesforce";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { MqttConnectionConfig } from "@/types/mqtt";
 import type { NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosNamespaceInfo, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
@@ -1574,6 +1576,390 @@ function buildVictoriaMetricsExternalConfig(): VictoriaMetricsExternalConfig {
   return { apiPath, lookback };
 }
 
+// ---------------------------------------------------------------------------
+// Salesforce OAuth / device-code flow state
+// ---------------------------------------------------------------------------
+
+const salesforceAuthMode = ref<SalesforceAuthMode>("token");
+const salesforceEnvironment = ref<SalesforceEnvironment>("production");
+const salesforceLoginUrl = ref("");
+const salesforceClientId = ref("");
+const salesforceClientSecret = ref("");
+// Username-password (ROPC) mode credentials. The password is never
+// round-tripped from the backend; blank on edit unless re-typed.
+const salesforceUsername = ref("");
+const salesforceUserPassword = ref("");
+
+const salesforceOauthRunning = ref(false);
+const salesforceOauthError = ref("");
+const salesforceOauthSuccess = ref("");
+// When editing an existing connection whose credentials live in the backend's
+// secret store, refreshToken/clientSecret are intentionally not sent back to
+// the UI. Track "we have previously authorized" separately from whether we
+// still hold the tokens in-memory so the form can show a status chip.
+const salesforceOauthPreviouslyAuthorized = ref(false);
+
+type SalesforceDevicePhase = "idle" | "polling" | "success" | "expired" | "denied" | "error";
+const salesforceDevicePhase = ref<SalesforceDevicePhase>("idle");
+const salesforceDeviceUserCode = ref("");
+const salesforceDeviceVerificationUri = ref("");
+const salesforceDeviceCode = ref("");
+const salesforceDeviceIntervalSecs = ref(5);
+const salesforceDeviceSecondsLeft = ref(0);
+const salesforceDeviceError = ref("");
+const salesforceDeviceUserCodeCopied = ref(false);
+const salesforceDeviceVerificationCopied = ref(false);
+
+let salesforceDevicePollTimer: ReturnType<typeof setTimeout> | null = null;
+let salesforceDevicePollAbortId = 0;
+let salesforceDeviceExpiresTimer: ReturnType<typeof setInterval> | null = null;
+
+function salesforceAuthModeFromConfig(externalConfig: unknown, fallbackPassword?: string): SalesforceAuthMode {
+  const cfg = (externalConfig as SalesforceExternalConfig | undefined) ?? undefined;
+  const mode = cfg?.auth?.mode;
+  if (mode === "oauth" || mode === "device" || mode === "password") return mode;
+  if (cfg?.auth && (cfg.auth.refreshToken || cfg.auth.clientId || cfg.auth.authorizedAt)) return "oauth";
+  // No persisted auth context: if a password/token is present, treat as manual token.
+  if (fallbackPassword?.trim()) return "token";
+  return "token";
+}
+
+function resetSalesforceOAuthFields(externalConfig?: unknown, fallbackPassword?: string) {
+  const cfg = (externalConfig as SalesforceExternalConfig | undefined) ?? undefined;
+  const auth = cfg?.auth;
+  salesforceAuthMode.value = salesforceAuthModeFromConfig(externalConfig, fallbackPassword);
+  salesforceEnvironment.value = (auth?.environment as SalesforceEnvironment) || "production";
+  salesforceLoginUrl.value = auth?.loginUrl?.trim() || "";
+  salesforceClientId.value = auth?.clientId?.trim() || "";
+  // Client secret is never round-tripped from the backend for security; the
+  // input is blank on edit and only sent when the user re-types it.
+  salesforceClientSecret.value = "";
+  salesforceUsername.value = auth?.username?.trim() || "";
+  salesforceUserPassword.value = "";
+  salesforceOauthRunning.value = false;
+  salesforceOauthError.value = "";
+  salesforceOauthSuccess.value = "";
+  // A Client ID alone only means the form was filled in, not that anybody ever
+  // signed in; claiming "authorized" from it showed a false reassurance banner.
+  salesforceOauthPreviouslyAuthorized.value = !!(auth?.refreshToken || auth?.authorizedAt);
+  salesforceDevicePhase.value = "idle";
+  salesforceDeviceUserCode.value = "";
+  salesforceDeviceVerificationUri.value = "";
+  salesforceDeviceCode.value = "";
+  salesforceDeviceIntervalSecs.value = 5;
+  salesforceDeviceSecondsLeft.value = 0;
+  salesforceDeviceError.value = "";
+  salesforceDeviceUserCodeCopied.value = false;
+  salesforceDeviceVerificationCopied.value = false;
+  salesforceDeviceStopPolling();
+}
+
+function hydrateSalesforceOAuthFields(value: unknown, fallbackPassword?: string) {
+  resetSalesforceOAuthFields(value, fallbackPassword);
+}
+
+function salesforceBuildAuthorizeParams(): SalesforceOAuthAuthorizeParams {
+  const clientId = salesforceClientId.value.trim();
+  if (!clientId) throw new Error(t("connection.salesforceOauthClientIdRequired"));
+  const environment = salesforceEnvironment.value;
+  const loginUrl = environment === "custom" ? salesforceLoginUrl.value.trim() : undefined;
+  if (environment === "custom" && !loginUrl) {
+    throw new Error(t("connection.salesforceOauthLoginUrlRequired"));
+  }
+  const clientSecret = salesforceClientSecret.value.trim() || undefined;
+  return { environment, loginUrl, clientId, clientSecret };
+}
+
+function salesforceApplyTokenToForm(token: { accessToken: string; instanceUrl: string }) {
+  form.value.password = token.accessToken;
+  // The backend normalizes bare hostnames; we mirror it so the card preview
+  // shows the final instance URL even before the backend canonicalizes it.
+  let instanceUrl = token.instanceUrl.trim();
+  if (instanceUrl && !/^https?:\/\//i.test(instanceUrl)) {
+    instanceUrl = `https://${instanceUrl.replace(/\/+$/, "")}`;
+  }
+  if (instanceUrl) {
+    form.value.host = instanceUrl.replace(/\/+$/, "");
+  }
+}
+
+function salesforceBuildAuthContext(mode: SalesforceAuthMode, token?: { refreshToken?: string }): SalesforceAuthContext | undefined {
+  if (mode === "token") return undefined;
+  const context: SalesforceAuthContext = {
+    mode,
+    environment: salesforceEnvironment.value,
+    clientId: salesforceClientId.value.trim() || undefined,
+    authorizedAt: new Date().toISOString(),
+  };
+  if (salesforceEnvironment.value === "custom") {
+    context.loginUrl = salesforceLoginUrl.value.trim() || undefined;
+  }
+  // Only forward the client secret when the user explicitly typed it in this
+  // session — otherwise we would overwrite the backend-stored secret with "".
+  if (salesforceClientSecret.value.trim()) {
+    context.clientSecret = salesforceClientSecret.value.trim();
+  }
+  if (mode === "password") {
+    context.username = salesforceUsername.value.trim() || undefined;
+    if (salesforceUserPassword.value) {
+      context.password = salesforceUserPassword.value;
+    }
+  }
+  if (token?.refreshToken) {
+    context.refreshToken = token.refreshToken;
+  }
+  return context;
+}
+
+function salesforceMergeAuthIntoExternalConfig(mode: SalesforceAuthMode, token?: { refreshToken?: string }) {
+  const existing = (form.value.external_config && typeof form.value.external_config === "object" ? (form.value.external_config as Record<string, unknown>) : {}) as SalesforceExternalConfig & Record<string, unknown>;
+  const auth = salesforceBuildAuthContext(mode, token);
+  if (!auth) {
+    const { auth: _dropped, ...rest } = existing;
+    form.value.external_config = Object.keys(rest).length > 0 ? rest : undefined;
+    return;
+  }
+  // Preserve an existing refreshToken when the user re-authorizes without the
+  // backend returning a new one (e.g. refresh flow that omits a rotation).
+  if (!auth.refreshToken && existing.auth?.refreshToken) {
+    auth.refreshToken = existing.auth.refreshToken;
+  }
+  // Same for the ROPC password: it is not round-tripped for display, so an
+  // edit-without-retype must not clobber the stored credential.
+  if (!auth.password && existing.auth?.password) {
+    auth.password = existing.auth.password;
+  }
+  form.value.external_config = { ...existing, auth };
+}
+
+async function salesforceStartBrowserAuthorize() {
+  salesforceOauthError.value = "";
+  salesforceOauthSuccess.value = "";
+  salesforceOauthPreviouslyAuthorized.value = false;
+  let params: SalesforceOAuthAuthorizeParams;
+  try {
+    params = salesforceBuildAuthorizeParams();
+  } catch (e) {
+    salesforceOauthError.value = errorMessage(e);
+    return;
+  }
+  salesforceOauthRunning.value = true;
+  try {
+    const token = await api.salesforceOauthBrowserAuthorize(params);
+    salesforceApplyTokenToForm(token);
+    salesforceMergeAuthIntoExternalConfig("oauth", token);
+    salesforceOauthSuccess.value = t("connection.salesforceOauthSuccess", { instanceUrl: token.instanceUrl });
+    salesforceOauthPreviouslyAuthorized.value = true;
+  } catch (e) {
+    salesforceOauthError.value = errorMessage(e);
+  } finally {
+    salesforceOauthRunning.value = false;
+  }
+}
+
+async function salesforceStartPasswordLogin() {
+  salesforceOauthError.value = "";
+  salesforceOauthSuccess.value = "";
+  salesforceOauthPreviouslyAuthorized.value = false;
+  let params: SalesforceOAuthAuthorizeParams;
+  try {
+    params = salesforceBuildAuthorizeParams();
+  } catch (e) {
+    salesforceOauthError.value = errorMessage(e);
+    return;
+  }
+  const username = salesforceUsername.value.trim();
+  if (!username) {
+    salesforceOauthError.value = t("connection.salesforceUsernameRequired");
+    return;
+  }
+  if (!salesforceUserPassword.value) {
+    salesforceOauthError.value = t("connection.salesforceUserPasswordRequired");
+    return;
+  }
+  salesforceOauthRunning.value = true;
+  try {
+    const token = await api.salesforceOauthPasswordLogin(params, username, salesforceUserPassword.value);
+    salesforceApplyTokenToForm(token);
+    salesforceMergeAuthIntoExternalConfig("password", token);
+    salesforceOauthSuccess.value = t("connection.salesforceOauthSuccess", { instanceUrl: token.instanceUrl });
+    salesforceOauthPreviouslyAuthorized.value = true;
+  } catch (e) {
+    salesforceOauthError.value = errorMessage(e);
+  } finally {
+    salesforceOauthRunning.value = false;
+  }
+}
+
+function salesforceDeviceStopPolling() {
+  salesforceDevicePollAbortId++;
+  if (salesforceDevicePollTimer) {
+    clearTimeout(salesforceDevicePollTimer);
+    salesforceDevicePollTimer = null;
+  }
+  if (salesforceDeviceExpiresTimer) {
+    clearInterval(salesforceDeviceExpiresTimer);
+    salesforceDeviceExpiresTimer = null;
+  }
+}
+
+function salesforceDeviceStartExpiryCountdown(expiresInSecs: number) {
+  salesforceDeviceSecondsLeft.value = Math.max(0, Math.floor(expiresInSecs));
+  if (salesforceDeviceExpiresTimer) clearInterval(salesforceDeviceExpiresTimer);
+  salesforceDeviceExpiresTimer = setInterval(() => {
+    salesforceDeviceSecondsLeft.value = Math.max(0, salesforceDeviceSecondsLeft.value - 1);
+    if (salesforceDeviceSecondsLeft.value <= 0 && salesforceDevicePhase.value === "polling") {
+      salesforceDeviceStopPolling();
+      salesforceDevicePhase.value = "expired";
+    }
+  }, 1000);
+}
+
+async function salesforceDeviceRequestCode() {
+  salesforceOauthError.value = "";
+  salesforceOauthSuccess.value = "";
+  salesforceOauthPreviouslyAuthorized.value = false;
+  salesforceDeviceError.value = "";
+  salesforceDeviceUserCode.value = "";
+  salesforceDeviceVerificationUri.value = "";
+  salesforceDeviceUserCodeCopied.value = false;
+  salesforceDeviceVerificationCopied.value = false;
+  let params: SalesforceOAuthAuthorizeParams;
+  try {
+    params = salesforceBuildAuthorizeParams();
+  } catch (e) {
+    salesforceDeviceError.value = errorMessage(e);
+    salesforceDevicePhase.value = "error";
+    return;
+  }
+  salesforceOauthRunning.value = true;
+  salesforceDevicePhase.value = "idle";
+  try {
+    const start = await api.salesforceOauthDeviceStart(params);
+    salesforceDeviceUserCode.value = start.userCode;
+    salesforceDeviceVerificationUri.value = start.verificationUri;
+    salesforceDeviceCode.value = start.deviceCode;
+    salesforceDeviceIntervalSecs.value = Math.max(1, start.intervalSecs || 5);
+    salesforceDevicePhase.value = "polling";
+    salesforceDeviceStartExpiryCountdown(start.expiresInSecs);
+    await salesforceDevicePollLoop(params, start.deviceCode, salesforceDeviceIntervalSecs.value, salesforceDevicePollAbortId);
+  } catch (e) {
+    salesforceDeviceError.value = errorMessage(e);
+    salesforceDevicePhase.value = "error";
+    salesforceDeviceStopPolling();
+  } finally {
+    salesforceOauthRunning.value = false;
+  }
+}
+
+async function salesforceDevicePollLoop(params: SalesforceOAuthAuthorizeParams, deviceCode: string, intervalSecs: number, abortId: number): Promise<void> {
+  while (salesforceDevicePhase.value === "polling" && abortId === salesforceDevicePollAbortId) {
+    await new Promise<void>((resolve) => {
+      salesforceDevicePollTimer = setTimeout(() => resolve(), intervalSecs * 1000);
+    });
+    if (abortId !== salesforceDevicePollAbortId) return;
+    let result: SalesforceOAuthDevicePollResult;
+    try {
+      result = await api.salesforceOauthDevicePoll(params, deviceCode, intervalSecs);
+    } catch (e) {
+      // Transient network error: keep polling until the code expires.
+      if (salesforceDeviceSecondsLeft.value <= 0) {
+        salesforceDevicePhase.value = "expired";
+        salesforceDeviceStopPolling();
+        return;
+      }
+      salesforceDeviceError.value = errorMessage(e);
+      continue;
+    }
+    if (abortId !== salesforceDevicePollAbortId) return;
+    if (result.status === "pending") {
+      salesforceDeviceIntervalSecs.value = Math.max(1, result.intervalSecs || intervalSecs);
+      continue;
+    }
+    salesforceDeviceStopPolling();
+    if (result.status === "success") {
+      salesforceApplyTokenToForm(result.token);
+      salesforceMergeAuthIntoExternalConfig("device", result.token);
+      salesforceOauthSuccess.value = t("connection.salesforceOauthSuccess", { instanceUrl: result.token.instanceUrl });
+      salesforceOauthPreviouslyAuthorized.value = true;
+      salesforceDevicePhase.value = "success";
+      return;
+    }
+    if (result.status === "expired") {
+      salesforceDevicePhase.value = "expired";
+      return;
+    }
+    if (result.status === "denied") {
+      salesforceDeviceError.value = result.reason || t("connection.salesforceDeviceDenied");
+      salesforceDevicePhase.value = "denied";
+      return;
+    }
+  }
+}
+
+function salesforceDeviceCancel() {
+  salesforceDeviceStopPolling();
+  salesforceDevicePhase.value = "idle";
+  salesforceDeviceUserCode.value = "";
+  salesforceDeviceVerificationUri.value = "";
+  salesforceDeviceCode.value = "";
+}
+
+function salesforceDeviceRestart() {
+  salesforceDeviceCancel();
+  salesforceDeviceError.value = "";
+  salesforceOauthError.value = "";
+}
+
+async function salesforceCopyUserCode() {
+  if (!salesforceDeviceUserCode.value) return;
+  await copyToClipboard(salesforceDeviceUserCode.value);
+  salesforceDeviceUserCodeCopied.value = true;
+  setTimeout(() => {
+    salesforceDeviceUserCodeCopied.value = false;
+  }, 1500);
+}
+
+async function salesforceCopyVerificationUri() {
+  if (!salesforceDeviceVerificationUri.value) return;
+  await copyToClipboard(salesforceDeviceVerificationUri.value);
+  salesforceDeviceVerificationCopied.value = true;
+  setTimeout(() => {
+    salesforceDeviceVerificationCopied.value = false;
+  }, 1500);
+}
+
+function salesforceOpenVerificationPage() {
+  if (!salesforceDeviceVerificationUri.value) return;
+  // Same pattern as the update-flow "open release notes" action: defer to the
+  // shell helper that picks the right opener for desktop vs. web.
+  void (async () => {
+    try {
+      if (isDesktop) {
+        const { open } = await import("@tauri-apps/plugin-shell");
+        await open(salesforceDeviceVerificationUri.value);
+      } else {
+        globalThis.open(salesforceDeviceVerificationUri.value, "_blank", "noopener,noreferrer");
+      }
+    } catch (e) {
+      salesforceDeviceError.value = errorMessage(e);
+    }
+  })();
+}
+
+function salesforceSetAuthMode(mode: SalesforceAuthMode) {
+  // Switching modes resets any in-flight state so stale tokens from one flow
+  // never leak into another.
+  if (salesforceOauthRunning.value && mode !== salesforceAuthMode.value) return;
+  salesforceAuthMode.value = mode;
+  salesforceOauthError.value = "";
+  salesforceOauthSuccess.value = "";
+  if (mode !== "device") {
+    salesforceDeviceCancel();
+    salesforceDeviceError.value = "";
+  }
+}
+
 watch(influxDbVersion, (version, previousVersion) => {
   if (form.value.db_type !== "influxdb") return;
   if (version === "2" || version === "3") {
@@ -2546,6 +2932,9 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.url_params = "";
     }
+    if (profile.type === "salesforce") {
+      resetSalesforceOAuthFields(form.value.external_config, form.value.password);
+    }
     resetHiveKerberosFields(profile.type === "hive" || profile.type === "argo" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
   }
   if (profile.type === "meilisearch") {
@@ -2776,6 +3165,11 @@ watch(
         hydrateVictoriaMetricsFields(config.external_config);
       } else {
         resetVictoriaMetricsFields();
+      }
+      if (config.db_type === "salesforce") {
+        hydrateSalesforceOAuthFields(config.external_config, config.password);
+      } else {
+        resetSalesforceOAuthFields(undefined, undefined);
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
       resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "argo" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
@@ -4426,6 +4820,51 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.connection_string = undefined;
     config.database = "metrics";
     config.username = config.username.trim();
+  } else if (config.db_type === "salesforce") {
+    // Token-mode connections never carry auth context (the access token itself is
+    // the credential in `password`). OAuth/device modes merge the auth context
+    // into `external_config.auth`; the backend handles refreshToken encryption.
+    config.connection_string = undefined;
+    config.database = undefined;
+    config.username = config.username.trim();
+    const existing = (config.external_config && typeof config.external_config === "object" ? (config.external_config as Record<string, unknown>) : {}) as SalesforceExternalConfig & Record<string, unknown>;
+    if (salesforceAuthMode.value === "token") {
+      const { auth: _dropped, ...rest } = existing;
+      config.external_config = Object.keys(rest).length > 0 ? rest : undefined;
+    } else {
+      // Preserve an existing refreshToken/clientSecret when the user saves the
+      // form without re-authorizing or re-typing them (they're not round-tripped
+      // from the backend). The hydrate step flagged this via
+      // `salesforceOauthPreviouslyAuthorized`.
+      const auth: SalesforceAuthContext = {
+        mode: salesforceAuthMode.value,
+        environment: salesforceEnvironment.value,
+        clientId: salesforceClientId.value.trim() || existing.auth?.clientId,
+        authorizedAt: existing.auth?.authorizedAt,
+      };
+      if (salesforceEnvironment.value === "custom") {
+        auth.loginUrl = salesforceLoginUrl.value.trim() || existing.auth?.loginUrl;
+      }
+      if (salesforceClientSecret.value.trim()) {
+        auth.clientSecret = salesforceClientSecret.value.trim();
+      } else if (existing.auth?.clientSecret) {
+        // Preserve secret indicator without leaking the value to the client.
+        auth.clientSecret = existing.auth.clientSecret;
+      }
+      if (salesforceAuthMode.value === "password") {
+        auth.username = salesforceUsername.value.trim() || existing.auth?.username;
+        if (salesforceUserPassword.value) {
+          auth.password = salesforceUserPassword.value;
+        } else if (existing.auth?.password) {
+          // Stored ROPC credential (scrubbed into the backend secret store);
+          // keep it when the user edits the connection without retyping.
+          auth.password = existing.auth.password;
+        }
+      } else if (existing.auth?.refreshToken) {
+        auth.refreshToken = existing.auth.refreshToken;
+      }
+      config.external_config = { ...existing, auth };
+    }
   } else if (config.db_type === "elasticsearch") {
     config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value, elasticsearchConnectivityCheckDisabled.value);
   } else if (config.db_type === "meilisearch") {
@@ -5476,6 +5915,7 @@ function resetForm(options: { preservePickerState?: boolean } = {}) {
   appliedConnectionUrlInput.value = "";
   resetMeilisearchHostInput();
   oracleTnsAdminPath.value = "";
+  resetSalesforceOAuthFields(undefined, undefined);
   if (!options.preservePickerState) {
     dialogStep.value = "select";
     dbSearchQuery.value = "";
@@ -6366,6 +6806,9 @@ onMounted(async () => {
 onUnmounted(() => {
   unlistenAgentInstallProgress?.();
   unlistenAgentInstallProgress = null;
+  // Stop any in-flight Salesforce device-code poll / expiry countdown so
+  // closing the dialog does not leave orphan timers running.
+  salesforceDeviceStopPolling();
 });
 
 function openExternalUrl(url: string) {
@@ -6521,7 +6964,7 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="connection" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
-                <div v-if="!isPluginConnection && !isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul' && form.db_type !== 'mq'" class="grid grid-cols-4 items-center gap-4">
+                <div v-if="!isPluginConnection && !isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul' && form.db_type !== 'mq' && form.db_type !== 'salesforce'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
                     <Input v-model="connectionUrlInput" class="flex-1" :placeholder="connectionUrlPlaceholder" @keydown.enter.prevent="applyConnectionUrl" />
@@ -7941,6 +8384,289 @@ function openExternalUrl(url: string) {
 
                   <template v-else-if="form.db_type === 'cloudflare-d1'">
                     <CloudflareD1ConnectionFields v-model:account-id="form.host" v-model:database-id="form.database" v-model:api-token="form.password" />
+                  </template>
+
+                  <!-- Salesforce: instance URL + access token (SOQL) -->
+                  <template v-else-if="form.db_type === 'salesforce'">
+                    <!-- Instance URL (always visible so the user can confirm the
+                         target org; OAuth/device flows overwrite it after a
+                         successful authorize) -->
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.salesforceInstanceUrl") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <div class="flex gap-2">
+                          <Input v-model="form.host" class="flex-1" :placeholder="t('connection.salesforceInstanceUrlPlaceholder')" />
+                          <Input v-model.number="form.port" type="number" class="w-24 shrink-0" />
+                        </div>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceInstanceUrlHint") }}</p>
+                      </div>
+                    </div>
+
+                    <!-- Authentication mode picker -->
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.salesforceAuthMode") }}</Label>
+                      <div class="col-span-3 grid h-8 grid-cols-4 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
+                        <button
+                          type="button"
+                          class="h-7 rounded-sm px-2 text-xs transition-colors"
+                          :class="salesforceAuthMode === 'token' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          :aria-pressed="salesforceAuthMode === 'token'"
+                          :disabled="salesforceOauthRunning"
+                          @click="salesforceSetAuthMode('token')"
+                        >
+                          {{ t("connection.salesforceAuthModeToken") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-7 rounded-sm px-2 text-xs transition-colors"
+                          :class="salesforceAuthMode === 'oauth' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground disabled:text-muted-foreground/50'"
+                          :aria-pressed="salesforceAuthMode === 'oauth'"
+                          :disabled="salesforceOauthRunning || !isDesktop"
+                          :title="!isDesktop ? t('connection.salesforceAuthModeOauthDesktopOnly') : undefined"
+                          @click="salesforceSetAuthMode('oauth')"
+                        >
+                          {{ t("connection.salesforceAuthModeOauth") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-7 rounded-sm px-2 text-xs transition-colors"
+                          :class="salesforceAuthMode === 'device' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          :aria-pressed="salesforceAuthMode === 'device'"
+                          :disabled="salesforceOauthRunning"
+                          @click="salesforceSetAuthMode('device')"
+                        >
+                          {{ t("connection.salesforceAuthModeDevice") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-7 rounded-sm px-2 text-xs transition-colors"
+                          :class="salesforceAuthMode === 'password' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          :aria-pressed="salesforceAuthMode === 'password'"
+                          :disabled="salesforceOauthRunning"
+                          @click="salesforceSetAuthMode('password')"
+                        >
+                          {{ t("connection.salesforceAuthModePassword") }}
+                        </button>
+                      </div>
+                    </div>
+                    <div v-if="!isDesktop && salesforceAuthMode === 'oauth'" class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceAuthModeOauthDesktopOnly") }}</p>
+                    </div>
+
+                    <!-- Manual access token -->
+                    <template v-if="salesforceAuthMode === 'token'">
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelClass">{{ t("connection.salesforceAccessToken") }}</Label>
+                        <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.salesforceAccessTokenPlaceholder')" />
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <span />
+                        <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceAccessTokenHint") }}</p>
+                      </div>
+                    </template>
+
+                    <!-- Shared OAuth / device-code fields -->
+                    <template v-else>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">{{ t("connection.salesforceEnvironment") }}</Label>
+                        <Select v-model="salesforceEnvironment" :disabled="salesforceOauthRunning">
+                          <SelectTrigger class="col-span-3">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="production">{{ t("connection.salesforceEnvironmentProduction") }}</SelectItem>
+                            <SelectItem value="sandbox">{{ t("connection.salesforceEnvironmentSandbox") }}</SelectItem>
+                            <SelectItem value="custom">{{ t("connection.salesforceEnvironmentCustom") }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div v-if="salesforceEnvironment === 'custom'" class="grid grid-cols-4 items-start gap-4">
+                        <Label :class="connectionLabelClass">{{ t("connection.salesforceLoginUrl") }}</Label>
+                        <div class="col-span-3 space-y-1.5">
+                          <Input v-model="salesforceLoginUrl" :placeholder="t('connection.salesforceLoginUrlPlaceholder')" :disabled="salesforceOauthRunning" />
+                          <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceLoginUrlHint") }}</p>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <Label :class="connectionLabelSmallClass">
+                          {{ t("connection.salesforceClientId") }}
+                          <span class="ml-1 text-destructive">*</span>
+                        </Label>
+                        <div class="col-span-3 space-y-1.5">
+                          <Input v-model="salesforceClientId" :placeholder="t('connection.salesforceClientIdPlaceholder')" :disabled="salesforceOauthRunning" autocomplete="off" />
+                          <!-- The callback URL only matters for the browser redirect flow; the
+                               other two modes never see one, so keep it out of their way. -->
+                          <p v-if="salesforceAuthMode === 'oauth'" class="text-xs leading-5 text-muted-foreground">
+                            {{ t("connection.salesforceClientIdHint", { callbackUrl: SALESFORCE_OAUTH_CALLBACK_URL }) }}
+                          </p>
+                          <p v-else class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceClientIdHintShared") }}</p>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelClass">{{ t("connection.salesforceClientSecret") }}</Label>
+                        <div class="col-span-3 space-y-1.5">
+                          <PasswordInput v-model="salesforceClientSecret" :placeholder="t('connection.salesforceClientSecretPlaceholder')" :disabled="salesforceOauthRunning" autocomplete="new-password" />
+                        </div>
+                      </div>
+
+                      <!-- Username & password (ROPC) credentials -->
+                      <template v-if="salesforceAuthMode === 'password'">
+                        <div class="grid grid-cols-4 items-start gap-4">
+                          <Label :class="connectionLabelClass">{{ t("connection.salesforceUsernameLabel") }}</Label>
+                          <div class="col-span-3 space-y-1.5">
+                            <Input v-model="salesforceUsername" :placeholder="t('connection.salesforceUsernamePlaceholder')" :disabled="salesforceOauthRunning" autocomplete="off" />
+                            <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceUsernameHint") }}</p>
+                          </div>
+                        </div>
+                        <div class="grid grid-cols-4 items-start gap-4">
+                          <Label :class="connectionLabelClass">{{ t("connection.salesforceUserPasswordLabel") }}</Label>
+                          <div class="col-span-3 space-y-1.5">
+                            <PasswordInput v-model="salesforceUserPassword" :placeholder="t('connection.salesforceUserPasswordPlaceholder')" :disabled="salesforceOauthRunning" autocomplete="new-password" />
+                            <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceUserPasswordHint") }}</p>
+                          </div>
+                        </div>
+                      </template>
+
+                      <!-- Previously-authorized banner (edit flow) -->
+                      <div v-if="salesforceOauthPreviouslyAuthorized && !salesforceOauthRunning && salesforceDevicePhase !== 'polling'" class="grid grid-cols-4 items-center gap-4">
+                        <span />
+                        <div class="col-span-3 flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
+                          <ShieldCheck class="h-4 w-4 shrink-0" />
+                          <span>{{ t("connection.salesforceOauthAuthorized") }}</span>
+                        </div>
+                      </div>
+
+                      <!-- Browser OAuth action -->
+                      <template v-if="salesforceAuthMode === 'oauth'">
+                        <div class="grid grid-cols-4 items-center gap-4">
+                          <span />
+                          <div class="col-span-3 flex items-center gap-2">
+                            <Button type="button" :disabled="salesforceOauthRunning || !salesforceClientId.trim() || !isDesktop" @click="salesforceStartBrowserAuthorize">
+                              <Loader2 v-if="salesforceOauthRunning" class="mr-2 h-4 w-4 animate-spin" />
+                              {{ salesforceOauthRunning ? t("connection.salesforceOauthAuthorizing") : salesforceOauthPreviouslyAuthorized ? t("connection.salesforceOauthReauthorize") : t("connection.salesforceOauthAuthorize") }}
+                            </Button>
+                          </div>
+                        </div>
+                        <div v-if="salesforceOauthRunning" class="grid grid-cols-4 items-start gap-4">
+                          <span />
+                          <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceOauthAuthorizingHint") }}</p>
+                        </div>
+                      </template>
+
+                      <!-- Username-password sign in -->
+                      <template v-if="salesforceAuthMode === 'password'">
+                        <div class="grid grid-cols-4 items-center gap-4">
+                          <span />
+                          <div class="col-span-3 flex items-center gap-2">
+                            <Button type="button" :disabled="salesforceOauthRunning || !salesforceClientId.trim() || !salesforceUsername.trim() || !salesforceUserPassword" @click="salesforceStartPasswordLogin">
+                              <Loader2 v-if="salesforceOauthRunning" class="mr-2 h-4 w-4 animate-spin" />
+                              {{ salesforceOauthRunning ? t("connection.salesforceOauthAuthorizing") : salesforceOauthPreviouslyAuthorized ? t("connection.salesforcePasswordSignInAgain") : t("connection.salesforcePasswordSignIn") }}
+                            </Button>
+                          </div>
+                        </div>
+                        <div class="grid grid-cols-4 items-start gap-4">
+                          <span />
+                          <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforcePasswordRopcNote") }}</p>
+                        </div>
+                      </template>
+
+                      <!-- Device-code flow -->
+                      <template v-if="salesforceAuthMode === 'device'">
+                        <div v-if="salesforceDevicePhase === 'idle' || salesforceDevicePhase === 'error'" class="grid grid-cols-4 items-center gap-4">
+                          <span />
+                          <div class="col-span-3 flex items-center gap-2">
+                            <Button type="button" :disabled="salesforceOauthRunning || !salesforceClientId.trim()" @click="salesforceDeviceRequestCode">
+                              <Loader2 v-if="salesforceOauthRunning" class="mr-2 h-4 w-4 animate-spin" />
+                              {{ t("connection.salesforceDeviceGetCode") }}
+                            </Button>
+                          </div>
+                        </div>
+                        <div v-if="salesforceDevicePhase === 'idle' || salesforceDevicePhase === 'error'" class="grid grid-cols-4 items-start gap-4">
+                          <span />
+                          <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceDeviceFlowNote") }}</p>
+                        </div>
+
+                        <template v-if="salesforceDevicePhase === 'polling'">
+                          <div class="grid grid-cols-4 items-start gap-4">
+                            <Label :class="connectionLabelSmallClass">{{ t("connection.salesforceDeviceUserCodeLabel") }}</Label>
+                            <div class="col-span-3 space-y-1.5">
+                              <div class="flex items-center gap-2 rounded-md border border-input bg-muted/40 px-3 py-2">
+                                <span class="font-mono text-lg font-semibold tracking-widest">{{ salesforceDeviceUserCode }}</span>
+                                <Button type="button" variant="ghost" size="icon" class="h-7 w-7" @click="salesforceCopyUserCode">
+                                  <Check v-if="salesforceDeviceUserCodeCopied" class="h-4 w-4 text-emerald-600" />
+                                  <Copy v-else class="h-4 w-4" />
+                                </Button>
+                              </div>
+                              <div v-if="salesforceDeviceVerificationUri" class="flex items-center gap-2 text-xs">
+                                <a class="text-primary underline underline-offset-2 hover:no-underline" href="#" @click.prevent="salesforceOpenVerificationPage">{{ t("connection.salesforceDeviceOpenVerification") }}</a>
+                                <code class="truncate rounded bg-muted px-1 py-0.5 text-[11px]">{{ salesforceDeviceVerificationUri }}</code>
+                                <Button type="button" variant="ghost" size="icon" class="h-6 w-6" @click="salesforceCopyVerificationUri">
+                                  <Check v-if="salesforceDeviceVerificationCopied" class="h-3.5 w-3.5 text-emerald-600" />
+                                  <Copy v-else class="h-3.5 w-3.5" />
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                          <div class="grid grid-cols-4 items-center gap-4">
+                            <span />
+                            <div class="col-span-3 flex items-center gap-3 text-xs text-muted-foreground">
+                              <Loader2 class="h-4 w-4 animate-spin" />
+                              <span>{{ t("connection.salesforceDevicePolling") }}</span>
+                              <span v-if="salesforceDeviceSecondsLeft > 0">· {{ t("connection.salesforceDeviceSecondsLeft", { seconds: salesforceDeviceSecondsLeft }) }}</span>
+                              <Button type="button" variant="outline" size="sm" class="ml-auto" @click="salesforceDeviceCancel">
+                                {{ t("connection.salesforceDeviceCancel") }}
+                              </Button>
+                            </div>
+                          </div>
+                          <div class="grid grid-cols-4 items-start gap-4">
+                            <span />
+                            <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceDevicePollingHint") }}</p>
+                          </div>
+                        </template>
+
+                        <div v-else-if="salesforceDevicePhase === 'expired'" class="grid grid-cols-4 items-center gap-4">
+                          <span />
+                          <div class="col-span-3 flex flex-col gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
+                            <span class="text-amber-700 dark:text-amber-300">{{ t("connection.salesforceDeviceExpired") }}</span>
+                            <Button type="button" size="sm" variant="outline" class="self-start" @click="salesforceDeviceRestart">
+                              {{ t("connection.salesforceDeviceRestart") }}
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div v-else-if="salesforceDevicePhase === 'denied'" class="grid grid-cols-4 items-center gap-4">
+                          <span />
+                          <div class="col-span-3 flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">
+                            <span class="text-destructive">{{ salesforceDeviceError || t("connection.salesforceDeviceDenied") }}</span>
+                            <Button type="button" size="sm" variant="outline" class="self-start" @click="salesforceDeviceRestart">
+                              {{ t("connection.salesforceDeviceRestart") }}
+                            </Button>
+                          </div>
+                        </div>
+                      </template>
+                    </template>
+
+                    <!-- Shared status / error strip (oauth success + any error) -->
+                    <div v-if="salesforceOauthSuccess && (salesforceAuthMode === 'oauth' || salesforceAuthMode === 'password' || salesforceDevicePhase === 'success')" class="grid grid-cols-4 items-center gap-4">
+                      <span />
+                      <div class="col-span-3 flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
+                        <ShieldCheck class="h-4 w-4 shrink-0" />
+                        <span>{{ salesforceOauthSuccess }}</span>
+                      </div>
+                    </div>
+                    <div v-if="salesforceOauthError && (salesforceAuthMode === 'oauth' || salesforceAuthMode === 'password')" class="grid grid-cols-4 items-center gap-4">
+                      <span />
+                      <div class="col-span-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                        {{ salesforceOauthError }}
+                      </div>
+                    </div>
+                    <div v-if="salesforceDeviceError && salesforceAuthMode === 'device' && salesforceDevicePhase !== 'polling' && salesforceDevicePhase !== 'denied'" class="grid grid-cols-4 items-center gap-4">
+                      <span />
+                      <div class="col-span-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                        {{ salesforceDeviceError }}
+                      </div>
+                    </div>
                   </template>
 
                   <!-- MySQL / PostgreSQL: host, port, user, password, database -->

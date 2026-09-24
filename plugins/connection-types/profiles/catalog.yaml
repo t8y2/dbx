@@ -736,6 +736,13 @@ profiles:
     port: 8428
     user: ""
     category: timeseries
+  - id: salesforce
+    dbType: salesforce
+    label: Salesforce
+    icon: salesforce
+    port: 443
+    user: ""
+    category: analytics
   - id: custom_mysql
     dbType: mysql
     label: Custom

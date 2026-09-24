@@ -58,6 +58,12 @@ function forward<K extends keyof Backend>(name: K): Backend[K] {
 export const testConnection = forward("testConnection");
 export const testSshTunnel = forward("testSshTunnel");
 export const testConnectionWithInfo = forward("testConnectionWithInfo");
+export const salesforceOauthBrowserAuthorize = forward("salesforceOauthBrowserAuthorize");
+export const salesforceOauthDeviceStart = forward("salesforceOauthDeviceStart");
+export const salesforceOauthDevicePoll = forward("salesforceOauthDevicePoll");
+export const salesforceOauthRefresh = forward("salesforceOauthRefresh");
+export const salesforceOauthPasswordLogin = forward("salesforceOauthPasswordLogin");
+export const salesforceCurrentUser = forward("salesforceCurrentUser");
 export const connectDb = forward("connectDb");
 export const connectionDatabaseInfo = forward("connectionDatabaseInfo");
 export const saveConnectionDatabaseInfo = forward("saveConnectionDatabaseInfo");

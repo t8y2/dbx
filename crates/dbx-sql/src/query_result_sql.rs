@@ -550,9 +550,17 @@ fn err(reason: &str) -> QuerySqlBuildResult {
 }
 
 fn unsupported_pagination_type(database_type: Option<DatabaseType>) -> bool {
+    // SOQL has no derived tables and no OFFSET wrapping; the Salesforce driver
+    // pages through QueryLocator cursors (session_id) instead.
     matches!(
         database_type,
-        Some(DatabaseType::Neo4j | DatabaseType::MongoDb | DatabaseType::Redis | DatabaseType::Solr)
+        Some(
+            DatabaseType::Neo4j
+                | DatabaseType::MongoDb
+                | DatabaseType::Redis
+                | DatabaseType::Salesforce
+                | DatabaseType::Solr
+        )
     )
 }
 

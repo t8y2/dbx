@@ -210,6 +210,27 @@ describe("FrontendPluginRegistry", () => {
     expect(registry.findUiContribution("com.example.plugin", "example.graph")).toBeUndefined();
   });
 
+  it("keeps declarative context-menu actions as context-menu metadata, not commands", () => {
+    const registry = createFrontendPluginRegistry([
+      installedPlugin("com.example.plugin", [
+        { type: "workbench", id: "example.main", label: "Example Workbench" },
+        {
+          type: "context-menu",
+          id: "example.open",
+          label: "Open Example",
+          menu: "connection",
+          action: { type: "open-workbench", workbench: "example.main" },
+        },
+      ]),
+    ]);
+
+    const item = registry.listContextMenuItems("connection")[0];
+    expect(item?.contribution.action).toEqual({ type: "open-workbench", workbench: "example.main" });
+    expect(registry.findWorkbench("com.example.plugin", "example.main")?.contribution.id).toBe("example.main");
+    expect(registry.findCommand("com.example.plugin", "example.open")).toBeUndefined();
+    expect(registry.listCommands()).toHaveLength(0);
+  });
+
   it("indexes context-menu contributions per menu surface", () => {
     const registry = createFrontendPluginRegistry([
       installedPlugin("com.example.plugin", [
@@ -221,6 +242,7 @@ describe("FrontendPluginRegistry", () => {
     const connectionItems = registry.listContextMenuItems("connection");
     expect(connectionItems).toHaveLength(1);
     expect(connectionItems[0]?.contribution.id).toBe("example.inspect");
+    expect(connectionItems[0]?.contribution.action).toBeUndefined();
     expect(connectionItems[0]?.plugin.manifest.id).toBe("com.example.plugin");
 
     const tableItems = registry.listContextMenuItems("table");

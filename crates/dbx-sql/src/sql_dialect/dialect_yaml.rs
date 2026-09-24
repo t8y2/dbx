@@ -959,6 +959,7 @@ fn kind_name(kind: DialectKind) -> String {
         DialectKind::ManticoreSearch => "ManticoreSearch",
         DialectKind::Informix => "Informix",
         DialectKind::Questdb => "QuestDB",
+        DialectKind::Soql => "SOQL",
         DialectKind::Unsupported => "Unsupported",
     }
     .to_string()
@@ -1333,6 +1334,7 @@ identifier_rules:
             DialectKind::ManticoreSearch,
             DialectKind::Informix,
             DialectKind::Questdb,
+            DialectKind::Soql,
         ];
         for kind in kinds {
             let yaml = DialectYaml::from_descriptor(*kind);

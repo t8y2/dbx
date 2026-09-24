@@ -7159,6 +7159,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Tablo sütun açıklamalarını doğrudan ızgara sütun adlarının altında göster.",
     showColumnTypesInHeader: "Sütun türlerini adların altında göster",
     showColumnTypesInHeaderDescription: "Her sütunun veri türünü doğrudan ızgara sütun adlarının altında göster.",
+    showColumnHeaderTooltips: "Sütun başlığı ipuçları",
+    showColumnHeaderTooltipsDescription: "Sonuç ızgarasında sütun başlıklarının üzerine gelindiğinde ayrıntı ipuçlarını göster. Açılır ipuçlarını durdurmak için kapatın.",
     dataGridShowTransposeFieldMetadata: "Devrik görünümde alan meta verisini göster",
     dataGridShowTransposeFieldMetadataDescription: "Etkin sütun türlerini ve açıklamalarını devrik görünümde ayrı satırlarda göster. Bu, satır yüksekliğini artırır.",
     colorizeDataGridCellTypes: "Veri tablosu değerlerini renklendir",

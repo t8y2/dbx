@@ -7207,6 +7207,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Exibir comentários de colunas da tabela diretamente abaixo dos nomes das colunas da grade.",
     showColumnTypesInHeader: "Mostrar tipos de coluna sob os nomes",
     showColumnTypesInHeaderDescription: "Exibir o tipo de dado de cada coluna diretamente abaixo dos nomes das colunas da grade.",
+    showColumnHeaderTooltips: "Dicas ao passar o mouse nos cabeçalhos de coluna",
+    showColumnHeaderTooltipsDescription: "Mostra dicas com detalhes ao passar o mouse sobre os cabeçalhos de coluna da grade de resultados. Desative para ocultá-las.",
     dataGridShowTransposeFieldMetadata: "Mostrar metadados de campo na visualização transposta",
     dataGridShowTransposeFieldMetadataDescription: "Exibir tipos de coluna e comentários habilitados em linhas separadas na visualização transposta. Isso aumenta a altura das linhas.",
     colorizeDataGridCellTypes: "Colorir valores por tipo de dado",

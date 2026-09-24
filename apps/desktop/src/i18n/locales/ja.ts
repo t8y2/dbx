@@ -7238,6 +7238,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "グリッド列名の直下にテーブル列コメントを表示します。",
     showColumnTypesInHeader: "列名の下にデータ型を表示",
     showColumnTypesInHeaderDescription: "グリッド列名の直下に各列のデータ型を表示します。",
+    showColumnHeaderTooltips: "列ヘッダーのホバーツールチップ",
+    showColumnHeaderTooltipsDescription: "結果グリッドの列ヘッダーにホバーしたときに詳細ツールチップを表示します。オフにすると表示されません。",
     dataGridShowTransposeFieldMetadata: "転置ビューにフィールドメタデータを表示",
     dataGridShowTransposeFieldMetadataDescription: "有効なデータ型とコメントを転置ビューの別行に表示します。有効にすると行の高さが増えます。",
     colorizeDataGridCellTypes: "データ型に応じて値を色分け",

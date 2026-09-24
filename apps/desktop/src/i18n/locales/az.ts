@@ -7277,6 +7277,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "Cədvəl sütunlarının şərhlərini birbaşa sütun adlarının altında göstər.",
     showColumnTypesInHeader: "Sütun növlərini adların altında göstər",
     showColumnTypesInHeaderDescription: "Hər sütunun verilən növünü birbaşa cədvəldəki sütun adlarının altında göstər.",
+    showColumnHeaderTooltips: "Sütun başlığı üzərinə gətirildikdə ipucları",
+    showColumnHeaderTooltipsDescription: "Kursor nəticə cədvəlindəki sütun başlıqlarının üzərinə gətirildikdə ətraflı ipucları göstər. Bu pəncərələri dayandırmaq üçün söndürün.",
     dataGridShowTransposeFieldMetadata: "Transpozisiya görünüşündə sahə metaverilənlərini göstər",
     dataGridShowTransposeFieldMetadataDescription: "Transpozisiya görünüşündə aktiv edilmiş sütun növlərini və şərhləri ayrı sətirlərdə göstər. Bu, sətrin hündürlüyünü artırır.",
     colorizeDataGridCellTypes: "Verilənlər cədvəlinin dəyərlərini rənglə fərqləndir",

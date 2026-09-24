@@ -7788,6 +7788,8 @@ export default withEnglishFallback({
     showColumnCommentsInHeaderDescription: "把表字段注释直接显示在结果表头字段名下方。",
     showColumnTypesInHeader: "在字段名下方显示数据类型",
     showColumnTypesInHeaderDescription: "把每个字段的数据类型直接显示在结果表头字段名下方。",
+    showColumnHeaderTooltips: "字段名悬浮提示",
+    showColumnHeaderTooltipsDescription: "在结果表头字段名上悬浮时显示详情提示；关闭后悬浮不再弹出。",
     dataGridShowTransposeFieldMetadata: "在转置视图中显示字段元数据",
     dataGridShowTransposeFieldMetadataDescription: "在转置视图中分行显示已启用的数据类型和注释。开启后会增加行高。",
     colorizeDataGridCellTypes: "按数据类型为表格值着色",

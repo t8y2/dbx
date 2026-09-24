@@ -3137,15 +3137,15 @@ mod tests {
         mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_current_schema_from_query_result,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
-        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
-        oracle_object_statistics_user_segments_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
-        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_sql,
-        presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
-        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
+        oracle_current_schema_from_query_result, oracle_object_statistics_dba_segments_sql,
+        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
+        oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_from_query_result,
+        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
+        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
+        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
         table_comments_from_query_result, table_name_filter_matches, tdengine_table_comment_like_pattern,
         tdengine_table_comment_sql, tdengine_table_comments_sql, uses_mongodb_agent_collection_listing,
         visible_schema_filter, ExternalDriverStatisticsDialect, MetadataErrorAction, MysqlTableListSource,
@@ -3675,6 +3675,200 @@ done
 
         config.db_type = DatabaseType::Oracle;
         assert!(!is_oracle_external_driver_config(&config));
+    }
+
+    #[test]
+    fn oracle_completion_synonyms_sql_matches_native_agent_semantics() {
+        let sql = oracle_completion_synonyms_sql(
+            "dbx_test",
+            "SYN",
+            Some(&db::CompletionAssistantMatchMode::Prefix),
+            false,
+            20,
+            &["TABLE", "VIEW"],
+        );
+        assert!(sql.contains("FROM all_synonyms s"), "{sql}");
+        assert!(
+            sql.contains("JOIN all_objects o ON o.owner = s.table_owner AND o.object_name = s.table_name"),
+            "{sql}"
+        );
+        assert!(sql.contains("WHERE s.db_link IS NULL AND s.owner = 'DBX_TEST'"), "{sql}");
+        assert!(sql.contains("o.object_type IN ('TABLE', 'VIEW')"), "{sql}");
+        assert!(sql.contains("UPPER(s.synonym_name) LIKE UPPER('SYN%') ESCAPE '\\'"), "{sql}");
+        assert!(sql.contains("ORDER BY s.synonym_name"), "{sql}");
+        assert!(sql.ends_with("WHERE ROWNUM <= 20"), "{sql}");
+
+        // Case sensitive substring search keeps the mask verbatim and still escapes wildcards.
+        let contains = oracle_completion_synonyms_sql(
+            "DBX_TEST",
+            " syn_tbl_ ",
+            Some(&db::CompletionAssistantMatchMode::Contains),
+            true,
+            5,
+            &["TABLE"],
+        );
+        assert!(contains.contains("s.synonym_name LIKE '%syn\\_tbl\\_%' ESCAPE '\\'"), "{contains}");
+        assert!(contains.contains("o.object_type IN ('TABLE')"), "{contains}");
+        assert!(contains.ends_with("WHERE ROWNUM <= 5"), "{contains}");
+
+        // An empty mask must not add a name predicate at all.
+        let unfiltered = oracle_completion_synonyms_sql("DBX_TEST", "   ", None, false, 10, &["TABLE", "VIEW"]);
+        assert!(!unfiltered.contains("LIKE"), "{unfiltered}");
+        assert!(unfiltered.contains("s.owner = 'DBX_TEST'"), "{unfiltered}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oracle_external_driver_completion_includes_synonyms() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-oracle-synonym-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let queries = dir.join("queries.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"listTables"'*)
+      printf '{{"id":%s,"result":[{{"name":"SYN_ORDERS","table_type":"TABLE","comment":null,"parent_schema":null,"parent_name":null}}]}}\n' "$id"
+      ;;
+    *'"method":"executeQuery"'*)
+      printf '%s\n' "$line" >> '{}'
+      case "$line" in
+        *"o.object_type IN ('VIEW')"*)
+          printf '{{"id":%s,"result":{{"columns":["OWNER","NAME"],"rows":[],"affected_rows":0,"execution_time_ms":0}}}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"result":{{"columns":["OWNER","NAME"],"rows":[["DBX_TEST","SYN_ISSUE8534"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+      esac
+      ;;
+  esac
+done
+"#,
+                queries.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "oracle-synonym".to_string();
+        config.database = Some("XE".to_string());
+        config.connection_string = Some("jdbc:oracle:thin:@//127.0.0.1:1521/XE".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    "oracle-synonym".to_string(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: std::sync::Arc::new(config),
+                        session,
+                    },
+                );
+            })
+            .await;
+
+        let response = super::completion_assistant_search_core(
+            &state,
+            db::CompletionAssistantRequest {
+                connection_id: "oracle-synonym".to_string(),
+                database: "XE".to_string(),
+                schema: Some("DBX_TEST".to_string()),
+                object_kinds: vec![db::CompletionAssistantObjectKind::Table, db::CompletionAssistantObjectKind::View],
+                mask: "SYN".to_string(),
+                case_sensitive: false,
+                global_search: false,
+                max_results: Some(50),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: None,
+                parent_name: None,
+                match_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let synonym = response
+            .candidates
+            .iter()
+            .find(|candidate| candidate.name == "SYN_ISSUE8534")
+            .expect("synonym completion missing");
+        assert_eq!(synonym.kind, db::CompletionAssistantCandidateKind::Table);
+        assert_eq!(synonym.data_type.as_deref(), Some("SYNONYM"));
+        assert_eq!(synonym.schema.as_deref(), Some("DBX_TEST"));
+        assert!(response.candidates.iter().any(|candidate| candidate.name == "SYN_ORDERS"));
+        assert!(response.fallback_used);
+
+        // A view-only request must not surface a synonym that points at a table.
+        let view_only = super::completion_assistant_search_core(
+            &state,
+            db::CompletionAssistantRequest {
+                connection_id: "oracle-synonym".to_string(),
+                database: "XE".to_string(),
+                schema: Some("DBX_TEST".to_string()),
+                object_kinds: vec![db::CompletionAssistantObjectKind::View],
+                mask: "SYN".to_string(),
+                case_sensitive: false,
+                global_search: false,
+                max_results: Some(50),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: None,
+                parent_name: None,
+                match_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(view_only.candidates.is_empty(), "{:?}", view_only.candidates);
+
+        let queries = std::fs::read_to_string(&queries).unwrap();
+        assert!(queries.contains("o.object_type IN ('VIEW')"), "{queries}");
+        assert!(queries.contains("FROM all_synonyms s"), "{queries}");
+        assert!(queries.contains("o.object_type IN ('TABLE', 'VIEW')"), "{queries}");
+        assert!(queries.contains("s.owner = 'DBX_TEST'"), "{queries}");
+        assert!(queries.contains("UPPER(s.synonym_name) LIKE UPPER('SYN%')"), "{queries}");
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
@@ -6269,6 +6463,36 @@ async fn completion_assistant_fallback_core(
                 return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: true });
             }
         }
+
+        let completion_config = connection_config(state, &request.connection_id).await;
+        if completion_config.as_ref().is_some_and(is_oracle_external_driver_config) && candidates.len() < limit {
+            let remaining = limit - candidates.len();
+            // The agent only keeps synonyms pointing at the object kinds this request asked
+            // for, so a view-only completion must not surface table synonyms.
+            let synonym_targets = oracle_completion_synonym_target_object_types(&kinds);
+            match oracle_external_driver_completion_synonyms(state, request, schema, remaining, &synonym_targets).await {
+                Ok(synonyms) => {
+                    // `ROWNUM` caps the statement at `remaining` rows, so a full page means
+                    // more synonym names were left for the next request.
+                    let truncated = synonyms.len() >= remaining;
+                    candidates.extend(synonyms);
+                    if truncated {
+                        return Ok(db::CompletionAssistantResponse {
+                            candidates,
+                            incomplete: true,
+                            fallback_used: true,
+                        });
+                    }
+                }
+                Err(error) => log::debug!(
+                    "[schema][completion_assistant:oracle-synonyms-failed] connection_id={} database={} schema={} error={}",
+                    request.connection_id,
+                    request.database,
+                    schema,
+                    error
+                ),
+            }
+        }
     }
 
     if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Column)) {
@@ -6296,6 +6520,92 @@ async fn completion_assistant_fallback_core(
     }
 
     Ok(db::CompletionAssistantResponse { candidates, incomplete: false, fallback_used: true })
+}
+
+/// Oracle synonyms for the table-name completion of a generic JDBC connection.
+///
+/// Native Oracle agents answer table-like completion from
+/// `completion_assistant_search_v1`, which resolves `ALL_SYNONYMS` for the requested
+/// owner; a `jdbc:oracle:` connection has no such assistant, so the fallback asks the
+/// driver for the equivalent rows. A driver that rejects the statement (an older plugin,
+/// a read-only account without `ALL_SYNONYMS` visibility, …) must not break completion at
+/// all, so the caller keeps the table candidates and only logs the failure.
+async fn oracle_external_driver_completion_synonyms(
+    state: &AppState,
+    request: &db::CompletionAssistantRequest,
+    schema: &str,
+    limit: usize,
+    target_object_types: &[&str],
+) -> Result<Vec<db::CompletionAssistantCandidate>, String> {
+    if limit == 0 || target_object_types.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(&request.connection_id, Some(&request.database), None).await?;
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some(PoolKind::ExternalDriver { config, session, .. }) = pool_handle.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let sql = oracle_completion_synonyms_sql(
+        schema,
+        &request.mask,
+        request.match_mode.as_ref(),
+        request.case_sensitive,
+        limit,
+        target_object_types,
+    );
+    let result: db::QueryResult = session
+        .invoke_with_timeout(
+            "executeQuery",
+            serde_json::json!({
+                "connection": config.as_ref(),
+                "database": request.database,
+                "schema": schema,
+                "sql": sql,
+                "maxRows": limit
+            }),
+            agent_metadata_timeout(Some(config.as_ref())),
+        )
+        .await?;
+
+    let owner_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("owner"));
+    let name_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("name"));
+    Ok(result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let name = name_index.and_then(|index| row.get(index)).and_then(|value| value.as_str())?.to_string();
+            let owner = owner_index
+                .and_then(|index| row.get(index))
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string);
+            Some(db::CompletionAssistantCandidate {
+                name,
+                kind: db::CompletionAssistantCandidateKind::Table,
+                database: Some(request.database.clone()),
+                schema: owner,
+                parent_schema: None,
+                parent_name: None,
+                comment: None,
+                data_type: Some("SYNONYM".to_string()),
+                signature: None,
+            })
+        })
+        .collect())
+}
+
+/// Object types a synonym may point at for this completion request, mirroring the
+/// native agent's `oracleCompletionTableObjectTypes`.
+fn oracle_completion_synonym_target_object_types(kinds: &[db::CompletionAssistantObjectKind]) -> Vec<&'static str> {
+    let mut object_types = Vec::new();
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Table)) {
+        object_types.push("TABLE");
+    }
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::View)) {
+        object_types.push("VIEW");
+    }
+    object_types
 }
 
 fn completion_table_object_types(kinds: &[db::CompletionAssistantObjectKind]) -> Option<Vec<String>> {
@@ -10175,6 +10485,56 @@ pub fn oracle_list_objects_sql(schema: &str) -> String {
          ORDER BY CASE object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 WHEN 'SEQUENCE' THEN 4 WHEN 'PACKAGE' THEN 5 ELSE 6 END, object_name",
         oracle_owner_filter(schema)
     )
+}
+
+/// Oracle synonym names whose target is a table or a view, for table-name completion.
+///
+/// Native Oracle agents answer table-like completion from
+/// `completion_assistant_search_v1`, which resolves `ALL_SYNONYMS` and keeps only the
+/// entries pointing at a table/view. Generic `jdbc:oracle:` connections answer from the
+/// driver's table list instead, and that list is built from `ALL_TAB_COMMENTS` TABLE/VIEW
+/// rows, so their completion used to lose synonym names entirely (issue #8663).
+///
+/// The query mirrors the agent's semantics: only local synonyms (`DB_LINK IS NULL`) whose
+/// target still exists in `ALL_OBJECTS` with one of `target_object_types` is returned, the
+/// mask is pushed into the statement, and `ROWNUM` bounds the row count for Oracle 11g.
+pub fn oracle_completion_synonyms_sql(
+    schema: &str,
+    mask: &str,
+    match_mode: Option<&db::CompletionAssistantMatchMode>,
+    case_sensitive: bool,
+    limit: usize,
+    target_object_types: &[&str],
+) -> String {
+    let owner = oracle_owner_filter(schema);
+    let pattern = sql_string(&oracle_completion_like_pattern(mask, match_mode));
+    let target_object_types =
+        target_object_types.iter().map(|object_type| sql_string(object_type)).collect::<Vec<_>>().join(", ");
+    let name_predicate = if mask.trim().is_empty() {
+        String::new()
+    } else if case_sensitive {
+        format!(" AND s.synonym_name LIKE {pattern} ESCAPE '\\'")
+    } else {
+        format!(" AND UPPER(s.synonym_name) LIKE UPPER({pattern}) ESCAPE '\\'")
+    };
+    format!(
+        "SELECT owner, name FROM (\
+         SELECT s.owner AS owner, s.synonym_name AS name FROM all_synonyms s \
+         JOIN all_objects o ON o.owner = s.table_owner AND o.object_name = s.table_name \
+         WHERE s.db_link IS NULL AND s.owner = {owner} AND o.object_type IN ({target_object_types}){name_predicate} \
+         ORDER BY s.synonym_name) WHERE ROWNUM <= {limit}"
+    )
+}
+
+/// Builds the `LIKE` pattern used by [`oracle_completion_synonyms_sql`]: the mask's own
+/// wildcards are escaped so a user typing `_` or `%` does not widen the search, and the
+/// match mode decides between a prefix and a substring lookup.
+fn oracle_completion_like_pattern(mask: &str, match_mode: Option<&db::CompletionAssistantMatchMode>) -> String {
+    let escaped = mask.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    match match_mode.unwrap_or(&db::CompletionAssistantMatchMode::Prefix) {
+        db::CompletionAssistantMatchMode::Prefix => format!("{escaped}%"),
+        db::CompletionAssistantMatchMode::Contains => format!("%{escaped}%"),
+    }
 }
 
 async fn oracle_agent_list_objects(

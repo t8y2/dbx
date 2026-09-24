@@ -435,12 +435,12 @@ onScopeDispose(() => {
   <div v-show="visible" ref="dockRoot" data-plugin-bottom-dock class="relative z-10 flex shrink-0 flex-col overflow-hidden border-t bg-background" :style="{ height: maximized ? `${DOCK_MAX_VIEWPORT_RATIO * 100}vh` : collapsed ? '2.25rem' : `${dockHeight}px` }">
     <div data-plugin-dock-resize-handle class="absolute inset-x-0 top-0 z-10 h-1.5 cursor-row-resize hover:bg-primary/30" @pointerdown="onResizeHandlePointerDown" />
     <div class="flex h-9 shrink-0 items-center gap-1 border-b bg-muted/30 pl-2 pr-3">
-      <div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" data-plugin-dock-tabs>
+      <div class="flex min-w-0 items-center gap-1 overflow-x-auto" data-plugin-dock-tabs>
         <button
           v-for="entry in entries"
           :key="entry.id"
-          class="group flex h-7 min-w-0 max-w-40 shrink items-center gap-1 overflow-hidden rounded-md px-2 text-xs"
-          :class="[entry.id === activeEntryId ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground', dragEntryId && dragEntryId !== entry.id ? 'opacity-60' : '']"
+          class="group flex h-7 min-w-0 max-w-40 shrink items-center gap-1 overflow-hidden rounded-md border px-2 text-xs"
+          :class="[entry.id === activeEntryId ? 'border-border bg-accent font-medium text-foreground' : 'border-transparent text-muted-foreground hover:bg-muted hover:text-foreground', dragEntryId && dragEntryId !== entry.id ? 'opacity-60' : '']"
           :title="entry.title"
           :draggable="renamingEntryId !== entry.id"
           @click="activatePluginDockEntry(entry.id)"
@@ -464,39 +464,53 @@ onScopeDispose(() => {
             @blur="commitRename"
           />
           <span v-else class="min-w-0 flex-1 truncate text-left">{{ entry.title }}</span>
-          <span v-if="renamingEntryId !== entry.id" class="ml-0.5 shrink-0 rounded p-0.5 opacity-0 transition-opacity hover:bg-background/80 group-hover:opacity-100" role="button" :aria-label="t('pluginDock.close')" @click.stop="closeEntry(entry.id)">
+          <!-- Close affordance is always visible on the active tab, on hover
+               for the rest — the screenshot's interaction model: the active
+               terminal is the one you close most, hunting for a hover-only X
+               is friction. -->
+          <span
+            v-if="renamingEntryId !== entry.id"
+            class="ml-0.5 shrink-0 rounded p-0.5 transition-opacity hover:bg-background/80 group-hover:opacity-100"
+            :class="entry.id === activeEntryId ? 'opacity-70' : 'opacity-0'"
+            role="button"
+            :aria-label="t('pluginDock.close')"
+            @click.stop="closeEntry(entry.id)"
+          >
             <X class="h-3 w-3" />
           </span>
         </button>
-      </div>
-      <div v-if="activeCommand" ref="plusRoot" class="relative">
-        <Tooltip :delay-duration="200">
-          <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-7 w-7" :aria-label="t('pluginDock.newTerminal')" :aria-expanded="plusOpen" @click="togglePlusMenu">
-              <Plus class="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{{ t("pluginDock.newTerminal") }}</TooltipContent>
-        </Tooltip>
-        <div v-if="plusOpen" data-plugin-dock-plus-menu class="absolute right-0 top-full z-30 mt-1 max-h-[50vh] w-64 overflow-y-auto rounded-md border bg-background p-1 shadow-lg" role="menu">
-          <!-- Generic list filter (appears only for long lists): the host filters
-               by label without knowing what the entries mean. -->
-          <input v-if="plusItemCount > PLUS_FILTER_THRESHOLD" v-model="plusFilter" class="mb-1 w-full rounded-md border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary/40" :placeholder="t('pluginDock.filter')" spellcheck="false" @keydown.stop />
-          <button v-if="plusMatches(t('pluginDock.newTerminal'))" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction('replay')">
-            <Plus class="h-3.5 w-3.5 shrink-0" />
-            <span class="truncate">{{ t("pluginDock.newTerminal") }}</span>
-          </button>
-          <button v-for="option in visibleLaunchOptions" :key="option.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction(option.key)">
-            <span class="truncate">{{ option.label }}</span>
-          </button>
-          <button v-for="target in visibleConnectionTargets" :key="target.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" :title="target.connection.name" @click="onPlusAction(target.key)">
-            <span class="truncate">{{ t("pluginDock.connectionTerminal") }} · {{ target.label }}</span>
-          </button>
-          <div v-if="plusQuery && !plusMatches(t('pluginDock.newTerminal')) && !visibleLaunchOptions.length && !visibleConnectionTargets.length" class="px-2 py-1.5 text-xs text-muted-foreground">
-            {{ t("pluginDock.noMatch") }}
+        <!-- The "+" sits flush after the tabs (new-terminal affordance where
+             the tab list ends), not pushed to the far right edge. -->
+        <div v-if="activeCommand" ref="plusRoot" class="relative shrink-0">
+          <Tooltip :delay-duration="200">
+            <TooltipTrigger as-child>
+              <Button variant="ghost" size="icon" class="h-7 w-7" :aria-label="t('pluginDock.newTerminal')" :aria-expanded="plusOpen" @click="togglePlusMenu">
+                <Plus class="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{{ t("pluginDock.newTerminal") }}</TooltipContent>
+          </Tooltip>
+          <div v-if="plusOpen" data-plugin-dock-plus-menu class="absolute right-0 top-full z-30 mt-1 max-h-[50vh] w-64 overflow-y-auto rounded-md border bg-background p-1 shadow-lg" role="menu">
+            <!-- Generic list filter (appears only for long lists): the host filters
+                 by label without knowing what the entries mean. -->
+            <input v-if="plusItemCount > PLUS_FILTER_THRESHOLD" v-model="plusFilter" class="mb-1 w-full rounded-md border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary/40" :placeholder="t('pluginDock.filter')" spellcheck="false" @keydown.stop />
+            <button v-if="plusMatches(t('pluginDock.newTerminal'))" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction('replay')">
+              <Plus class="h-3.5 w-3.5 shrink-0" />
+              <span class="truncate">{{ t("pluginDock.newTerminal") }}</span>
+            </button>
+            <button v-for="option in visibleLaunchOptions" :key="option.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction(option.key)">
+              <span class="truncate">{{ option.label }}</span>
+            </button>
+            <button v-for="target in visibleConnectionTargets" :key="target.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" :title="target.connection.name" @click="onPlusAction(target.key)">
+              <span class="truncate">{{ t("pluginDock.connectionTerminal") }} · {{ target.label }}</span>
+            </button>
+            <div v-if="plusQuery && !plusMatches(t('pluginDock.newTerminal')) && !visibleLaunchOptions.length && !visibleConnectionTargets.length" class="px-2 py-1.5 text-xs text-muted-foreground">
+              {{ t("pluginDock.noMatch") }}
+            </div>
           </div>
         </div>
       </div>
+      <div class="min-w-0 flex-1" />
       <Tooltip :delay-duration="200">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-7 w-7" :title="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" :aria-label="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" @click="toggleDockMaximize">

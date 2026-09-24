@@ -1369,6 +1369,10 @@ struct MySqlTlsFiles {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MySqlSetupMode {
     Standard,
+    /// dbx's built-in floor applied as a plain literal, for servers that accept
+    /// `SET SESSION group_concat_max_len = <literal>` but cannot fold the
+    /// `cast(greatest(...))` expression (StarRocks, Doris, Gaea, TDDL, KunDB, ...).
+    LiteralFloor,
     Compatible,
 }
 
@@ -1424,7 +1428,13 @@ impl MySqlSetupMode {
                      cast(greatest(@@session.group_concat_max_len, {MYSQL_GROUP_CONCAT_MAX_LEN}) as unsigned)"
                 ))
             }
-            Self::Standard | Self::Compatible => None,
+            // Servers that reject the expression form still accept the literal, so the
+            // floor is applied without the `greatest` guard that keeps a server whose
+            // global value is already higher from being lowered.
+            Self::LiteralFloor if !mysql_session_variables_override_group_concat_max_len(url) => {
+                Some(format!("SET SESSION group_concat_max_len = {MYSQL_GROUP_CONCAT_MAX_LEN}"))
+            }
+            Self::Standard | Self::LiteralFloor | Self::Compatible => None,
         }
     }
 }
@@ -1482,33 +1492,74 @@ async fn verify_pool_connection_with_setup_fallback(
     let Some(fallback_mode) = fallback else {
         return Err(error);
     };
+    let ladder = mysql_setup_fallback_ladder(fallback_mode, &error);
     if probed {
         log::info!(
             "MySQL connection failed with a server error while the optional group_concat_max_len setup was in place; \
-             retrying with {fallback_mode:?} mode to check whether that setup caused it"
+             retrying with {ladder:?} to check whether that setup caused it"
         );
     } else {
-        log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {fallback_mode:?} mode");
+        log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {ladder:?}");
     }
-    let fallback_pool = create_pool(
-        &retry_url,
-        ca_cert_path,
-        max_connections,
-        idle_timeout_secs,
-        setup_database,
-        extra_setup_queries,
-        fallback_mode,
-        eof_mode,
-        tcp_keepalive_mode,
-    )?;
-    match verify_pool_connection(&fallback_pool, timeout).await {
-        Ok(()) => Ok(fallback_pool),
-        // The probe only explains the failure when it connects; keep the server's
-        // first answer otherwise so an unrelated failure is not reported as a setup
-        // rejection.
-        Err(_) if probed => Err(error),
-        Err(fallback_error) => Err(fallback_error),
+    let mut last_error = None;
+    for mode in ladder {
+        let ladder_pool = create_pool(
+            &retry_url,
+            ca_cert_path,
+            max_connections,
+            idle_timeout_secs,
+            setup_database,
+            extra_setup_queries,
+            mode,
+            eof_mode,
+            tcp_keepalive_mode,
+        )?;
+        match verify_pool_connection(&ladder_pool, timeout).await {
+            Ok(()) => return Ok(ladder_pool),
+            Err(ladder_error) => {
+                log::info!("MySQL retry with {mode:?} mode did not connect: {ladder_error}");
+                last_error = Some(ladder_error);
+            }
+        }
     }
+    // The probe only explains the failure when it connects; keep the server's
+    // first answer otherwise so an unrelated failure is not reported as a setup
+    // rejection.
+    match (probed, last_error) {
+        (true, _) => Err(error),
+        (false, Some(ladder_error)) => Err(ladder_error),
+        (false, None) => Err(error),
+    }
+}
+
+/// Modes to retry with after the built-in `group_concat_max_len` setup was rejected.
+///
+/// Dropping the setup entirely is the safe last resort, but it also gives up dbx's
+/// one-megabyte floor. Servers that cannot fold the `cast(greatest(...))` expression
+/// usually still accept the plain literal, so it is tried first; only a rejection that
+/// names the variable itself (see [`mysql_group_concat_rejection_is_variable_level`])
+/// skips the literal rung, because such a server rejects the literal too.
+fn mysql_setup_fallback_ladder(fallback_mode: MySqlSetupMode, error: &str) -> Vec<MySqlSetupMode> {
+    if fallback_mode == MySqlSetupMode::Compatible && !mysql_group_concat_rejection_is_variable_level(error) {
+        vec![MySqlSetupMode::LiteralFloor, MySqlSetupMode::Compatible]
+    } else {
+        vec![fallback_mode]
+    }
+}
+
+/// Whether a server rejected dbx's built-in `group_concat_max_len` setup because of the
+/// variable itself rather than the `cast(greatest(...))` expression.
+///
+/// These wordings reject the plain literal as well, so they must not pay for the extra
+/// retry: `Unknown system variable 'group_concat_max_len'` (MySQL-compatible gateways and
+/// proxies that do not know the variable at all), TDSQL/TXSQL truncating the echoed name
+/// to `group_concat_`, SphinxQL/Manticore's boolean-only 1064, and gateways that report a
+/// session-variable change as a forbidden global-variable operation.
+fn mysql_group_concat_rejection_is_variable_level(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("unknown system variable")
+        || lower.contains("set global variables is forbidden")
+        || (lower.contains("sphinxql") && lower.contains("only 0 and 1 could be used as boolean values"))
 }
 
 /// MySQL older than 5.5.3 has no `utf8mb4` charset, so the built-in `SET NAMES utf8mb4`
@@ -1631,8 +1682,9 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
 /// Vendor wordings for rejecting that statement are open-ended (KunDB answers
 /// `invalid syntax: CAST(...)`, Apache Doris answers `must be constant value`, older
 /// StarRocks versions answer with a bare `1064 (HY000)`), so instead of enumerating
-/// them the caller retries once without the optional statement and keeps the retry only
-/// when the server then accepts the connection.
+/// them the caller retries with [`mysql_setup_fallback_ladder`] (the literal floor first,
+/// then without the optional statement) and keeps the retry only when the server then
+/// accepts the connection.
 ///
 /// The retry cannot hide a failure the optional statement does not explain: it only
 /// drops dbx's own built-in statement (a user-supplied `sessionVariables=...` is still
@@ -1682,10 +1734,10 @@ fn create_pool(
             mysql_setup_queries_for_database(url, Some(database), extra_setup_queries)
         }
         (None, MySqlSetupMode::Standard) => mysql_setup_queries(url, extra_setup_queries),
-        (Some(database), MySqlSetupMode::Compatible) => {
-            mysql_setup_queries_for_database_with_mode(url, Some(database), extra_setup_queries, setup_mode)
+        (Some(database), mode) => {
+            mysql_setup_queries_for_database_with_mode(url, Some(database), extra_setup_queries, mode)
         }
-        (None, MySqlSetupMode::Compatible) => mysql_setup_queries_with_mode(url, extra_setup_queries, setup_mode),
+        (None, mode) => mysql_setup_queries_with_mode(url, extra_setup_queries, mode),
     };
     let mut builder = mysql_async::OptsBuilder::from_opts(opts)
         .ip_or_hostname(tcp_host)
@@ -8707,6 +8759,76 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn mysql_group_concat_literal_floor_is_tried_before_dropping_the_setup() {
+        // StarRocks / Doris / Gaea / TDDL reject only the `cast(greatest(...))` expression,
+        // and KunDB answers with a wording dbx probes instead of matching. Servers like
+        // these accept the plain literal, so dbx keeps its one-megabyte floor by trying the
+        // literal before giving the setup up entirely (issue #10003).
+        let url = "mysql://root:pw@host:3306/app";
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 1064 (HY000): class com.starrocks.analysis.CastExpr cannot be cast to class com.starrocks.analysis.LiteralExpr'",
+            "MySQL connection failed: Server error: `ERROR 1105 (HY000): invalid syntax: CAST(greatest(@@SESSION.group_concat_max_len, 1048576) AS unsigned)'",
+            "MySQL connection failed: Server error: `ERROR 1064 (HY000): errCode = 2, detailMessage = cast('greatest(@@group_concat_max_len, 1048576) as UNSIGNED) must be constant value'",
+            "MySQL connection failed: Server error: `ERROR 1105 (HY000): strconv.ParseInt: parsing \"cast(greatest(@@session.group_concat_max_len,1048576)asunsigned)\": invalid syntax'",
+            "MySQL connection failed: Server error: `ERROR 1232 (42000): Incorrect argument type to variable 'group_concat_max_len'`",
+            "MySQL connection failed: Server error: `ERROR 1231 (42000): Variable 'group_concat_max_len' can't be set to the value of 'x'`",
+        ] {
+            let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error)
+                .or_else(|| mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, error))
+                .unwrap_or_else(|| panic!("no fallback for {error}"));
+            assert_eq!(
+                mysql_setup_fallback_ladder(fallback, error),
+                vec![MySqlSetupMode::LiteralFloor, MySqlSetupMode::Compatible],
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_variable_level_rejections_skip_the_literal_floor() {
+        // These servers reject the variable itself, so the plain literal cannot help and
+        // must not cost an extra connection attempt.
+        let url = "mysql://root:pw@host:3306/app";
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_max_len'`",
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_'`",
+            "MySQL connection failed: Server error: `ERROR 1064 (42000): sphinxql: syntax error, unexpected IDENT, expecting '=' near 'group_concat_max_len' - only 0 and 1 could be used as boolean values`",
+            "MySQL connection failed: Server error: `ERROR 10192 (HY000): set global variables is forbidden`",
+        ] {
+            let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error)
+                .or_else(|| mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, error))
+                .unwrap_or_else(|| panic!("no fallback for {error}"));
+            assert_eq!(mysql_setup_fallback_ladder(fallback, error), vec![MySqlSetupMode::Compatible], "{error}");
+        }
+    }
+
+    #[test]
+    fn mysql_literal_floor_setup_statement_raises_to_the_built_in_floor() {
+        let queries = mysql_setup_queries_with_mode(
+            "mysql://root:secret@localhost:9030/analytics?charset=utf8mb4",
+            &[],
+            MySqlSetupMode::LiteralFloor,
+        );
+
+        assert_eq!(queries, vec!["USE `analytics`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+    }
+
+    #[test]
+    fn mysql_literal_floor_setup_respects_explicit_session_variables() {
+        // The literal floor is dbx's own default and must not overwrite a value the
+        // connection configures itself.
+        assert_eq!(
+            MySqlSetupMode::LiteralFloor
+                .group_concat_max_len_query("mysql://host:3306/db?sessionVariables=group_concat_max_len%3D2048"),
+            None
+        );
+        assert_eq!(
+            MySqlSetupMode::LiteralFloor.group_concat_max_len_query("mysql://host:3306/db"),
+            Some("SET SESSION group_concat_max_len = 1048576".to_string())
+        );
     }
 
     #[test]

@@ -1473,10 +1473,23 @@ async fn verify_pool_connection_with_setup_fallback(
         }
     }
 
-    let Some(fallback_mode) = mysql_group_concat_setup_fallback_mode(setup_mode, &error) else {
+    let recognized_mode = mysql_group_concat_setup_fallback_mode(setup_mode, &error);
+    // An unrecognized wording (a server whose rejection text dbx does not know yet) is
+    // retried on the strength of the retry actually connecting. See
+    // [`mysql_setup_probe_fallback_mode`].
+    let probed = recognized_mode.is_none();
+    let fallback = recognized_mode.or_else(|| mysql_setup_probe_fallback_mode(setup_mode, &retry_url, &error));
+    let Some(fallback_mode) = fallback else {
         return Err(error);
     };
-    log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {fallback_mode:?} mode");
+    if probed {
+        log::info!(
+            "MySQL connection failed with a server error while the optional group_concat_max_len setup was in place; \
+             retrying with {fallback_mode:?} mode to check whether that setup caused it"
+        );
+    } else {
+        log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {fallback_mode:?} mode");
+    }
     let fallback_pool = create_pool(
         &retry_url,
         ca_cert_path,
@@ -1488,7 +1501,14 @@ async fn verify_pool_connection_with_setup_fallback(
         eof_mode,
         tcp_keepalive_mode,
     )?;
-    verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
+    match verify_pool_connection(&fallback_pool, timeout).await {
+        Ok(()) => Ok(fallback_pool),
+        // The probe only explains the failure when it connects; keep the server's
+        // first answer otherwise so an unrelated failure is not reported as a setup
+        // rejection.
+        Err(_) if probed => Err(error),
+        Err(fallback_error) => Err(fallback_error),
+    }
 }
 
 /// MySQL older than 5.5.3 has no `utf8mb4` charset, so the built-in `SET NAMES utf8mb4`
@@ -1590,6 +1610,31 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     }
 
     None
+}
+
+/// Fall back to [`MySqlSetupMode::Compatible`] for a connection a server rejected while
+/// dbx's own optional `group_concat_max_len` setup was in play.
+///
+/// Vendor wordings for rejecting that statement are open-ended (KunDB answers
+/// `invalid syntax: CAST(...)`, Apache Doris answers `must be constant value`, older
+/// StarRocks versions answer with a bare `1064 (HY000)`), so instead of enumerating
+/// them the caller retries once without the optional statement and keeps the retry only
+/// when the server then accepts the connection.
+///
+/// The retry cannot hide a failure the optional statement does not explain: it only
+/// drops dbx's own built-in statement (a user-supplied `sessionVariables=...` is still
+/// applied in `Compatible` mode) and its own error is discarded when it fails too.
+fn mysql_setup_probe_fallback_mode(setup_mode: MySqlSetupMode, url: &str, error: &str) -> Option<MySqlSetupMode> {
+    if setup_mode != MySqlSetupMode::Standard {
+        return None;
+    }
+    // A connection that configures the variable itself never sent the built-in
+    // statement, so dropping it cannot explain its failure.
+    setup_mode.group_concat_max_len_query(url)?;
+    // Only a server-side rejection can come from a setup statement. Retrying a
+    // transport failure would repeat it and double how long an unreachable server
+    // makes the user wait.
+    error.to_ascii_lowercase().contains("server error").then_some(MySqlSetupMode::Compatible)
 }
 
 fn create_pool(
@@ -8581,6 +8626,59 @@ mod tests {
             "Server error: `ERROR 1064 (HY000): You have an error in your SQL syntax'",
         ] {
             assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None, "{error}");
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_unrecognized_server_rejection_still_retries_without_session_variable() {
+        // KunDB (#10003) answers `invalid syntax`, Apache Doris answers `must be
+        // constant value`, and a bare `1064 (HY000)` carries no usable wording at all;
+        // servers like these are probed instead of matched: retry once without the
+        // statement and keep the retry only when it connects.
+        let url = "mysql://root:pw@host:3306/app";
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 1105 (HY000): invalid syntax: CAST(greatest(@@SESSION.group_concat_max_len, 1048576) AS unsigned)'",
+            "MySQL connection failed: Server error: `ERROR 1105 (HY000): errCode = 2, detailMessage = cast('greatest(@@group_concat_max_len, 1048576) as UNSIGNED) must be constant value'",
+            "MySQL connection failed: Server error: `ERROR 1064 (HY000): Unknown error'",
+        ] {
+            assert_eq!(
+                mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, error),
+                Some(MySqlSetupMode::Compatible),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_probe_requires_builtin_setup_statement() {
+        let error = "MySQL connection failed: Server error: `ERROR 1105 (HY000): invalid syntax: CAST(greatest(@@SESSION.group_concat_max_len, 1048576) AS unsigned)'";
+
+        // `Compatible` already sends no built-in statement, so there is nothing to drop.
+        assert_eq!(
+            mysql_setup_probe_fallback_mode(MySqlSetupMode::Compatible, "mysql://root:pw@host/app", error),
+            None
+        );
+        // A connection configuring the variable itself never sent the built-in one.
+        assert_eq!(
+            mysql_setup_probe_fallback_mode(
+                MySqlSetupMode::Standard,
+                "mysql://root:pw@host:3306/app?sessionVariables=group_concat_max_len%3D2048",
+                error
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mysql_group_concat_probe_ignores_transport_failures() {
+        let url = "mysql://root:pw@host:3306/app";
+
+        for error in [
+            "MySQL connection failed: Connection refused (os error 61)",
+            "MySQL connection failed: error communicating with database: timed out",
+            "MySQL connection failed: Driver error: `Client asked for SSL but server does not have this capability'",
+        ] {
+            assert_eq!(mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, error), None, "{error}");
         }
     }
 

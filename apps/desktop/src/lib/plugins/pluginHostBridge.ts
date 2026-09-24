@@ -15,6 +15,48 @@ const MAX_BRIDGE_SAVE_BYTES = 512 * 1024 * 1024;
 // Mirrors MAX_PLUGIN_PLAN_NAME_CHARS in crates/dbx-core/src/query/plugin_plan.rs.
 const MAX_PLUGIN_PLAN_IDENTIFIER_CHARS = 256;
 
+// Clipboard reads are the one permission that hands environment data (the
+// system clipboard) to plugin code with no user interaction on each call, so
+// beyond the manifest permission gate the bridge adds: a per-session consent
+// prompt before the first read, a bounded audit trail, and a read-rate cap.
+// A plugin that trips the cap waits rather than being able to silently poll.
+export const PLUGIN_CLIPBOARD_READ_MIN_INTERVAL_MS = 1_000;
+export const PLUGIN_CLIPBOARD_AUDIT_CAPACITY = 200;
+
+export interface PluginClipboardAuditEntry {
+  at: number;
+  /** Request outcome: granted (content returned), denied (user or no consent surface). */
+  outcome: "granted" | "denied" | "rate-limited";
+  /** Content length in UTF-16 code units; the content itself is never stored. */
+  length: number;
+}
+
+export interface PluginClipboardReadGateState {
+  /** Consent for the current bridge lifetime; null = never asked. */
+  consented: boolean | null;
+  lastReadAt: number;
+  audit: PluginClipboardAuditEntry[];
+}
+
+export function createClipboardReadGate(): PluginClipboardReadGateState {
+  return { consented: null, lastReadAt: 0, audit: [] };
+}
+
+/**
+ * Rate gate: at most one read per PLUGIN_CLIPBOARD_READ_MIN_INTERVAL_MS.
+ * Returns true when the read may proceed; a denied (rate-limited) read is
+ * recorded by the caller.
+ */
+export function clipboardReadGateAllows(state: PluginClipboardReadGateState, now: number): boolean {
+  return state.lastReadAt <= 0 || now - state.lastReadAt >= PLUGIN_CLIPBOARD_READ_MIN_INTERVAL_MS;
+}
+
+export function recordClipboardRead(state: PluginClipboardReadGateState, now: number, outcome: PluginClipboardAuditEntry["outcome"], length: number): void {
+  if (outcome !== "rate-limited") state.lastReadAt = now;
+  state.audit.push({ at: now, outcome, length });
+  if (state.audit.length > PLUGIN_CLIPBOARD_AUDIT_CAPACITY) state.audit.splice(0, state.audit.length - PLUGIN_CLIPBOARD_AUDIT_CAPACITY);
+}
+
 /** Structured editor appearance: SQL editor settings that have no CSS-token
  * carrier (font size is a number, the syntax theme an id). Font families are
  * additionally mirrored as `--font-sans` / `--font-mono` root tokens. */
@@ -132,6 +174,13 @@ export interface PluginHostBridgeApi {
    * further user interaction, so it is permission-gated.
    */
   clipboardRead?(pluginId: string): Promise<string>;
+  /**
+   * Session consent prompt for the first clipboard read of a bridge lifetime.
+   * Resolves true to allow (and remember for the workbench session), false to
+   * deny (the read request rejects). Optional on hosts without a dialog
+   * surface; a host that cannot ask must not silently allow.
+   */
+  confirmClipboardRead?(pluginId: string, pluginName: string): Promise<boolean> | boolean;
   /** Native open dialog; resolves opened read handles (null selection → empty list). */
   pickFiles?(pluginId: string, options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]>;
   /** Stream a chunk from an opened read handle. */
@@ -166,6 +215,13 @@ export class PluginHostBridge {
   private context: PluginWorkbenchContext;
   private locale: string;
   private theme?: PluginBridgeTheme;
+  /** Consent + audit + rate state for clipboard reads; lives for the bridge lifetime. */
+  private clipboardReadGate = createClipboardReadGate();
+
+  /** Bounded audit trail of this session's clipboard read attempts (oldest first). */
+  get clipboardAudit(): readonly PluginClipboardAuditEntry[] {
+    return this.clipboardReadGate.audit;
+  }
 
   /** Invoked once before each iframe load generation sends its init message. */
   onReinit?: () => Promise<void> | void;
@@ -502,9 +558,28 @@ export class PluginHostBridge {
       // `host.clipboard:read` (writes stay on ungated host.copy).
       this.requirePermission("host.clipboard:read");
       if (!this.api.clipboardRead) throw new Error("Host clipboard read is unavailable");
+      const now = Date.now();
+      if (!clipboardReadGateAllows(this.clipboardReadGate, now)) {
+        recordClipboardRead(this.clipboardReadGate, now, "rate-limited", 0);
+        throw new Error("Clipboard read rate limit exceeded; retry in a moment");
+      }
+      // Session consent: the first read asks the user through the host's
+      // dialog surface; a denial is remembered for this workbench session (an
+      // iframe reload rebuilds the bridge and asks again). A host without a
+      // consent surface denies rather than silently allowing.
+      if (this.clipboardReadGate.consented === null) {
+        const answer = this.api.confirmClipboardRead ? await this.api.confirmClipboardRead(this.plugin.manifest.id, this.plugin.manifest.name) : false;
+        this.clipboardReadGate.consented = answer === true;
+        if (!this.clipboardReadGate.consented) {
+          recordClipboardRead(this.clipboardReadGate, now, "denied", 0);
+          throw new Error("Clipboard read was denied for this plugin session");
+        }
+      }
       const text = await this.api.clipboardRead(this.plugin.manifest.id);
       if (typeof text !== "string") throw new Error("Host clipboard read returned a non-string value");
-      return { text: text.length > MAX_BRIDGE_PAYLOAD_BYTES ? text.slice(0, MAX_BRIDGE_PAYLOAD_BYTES) : text };
+      const clamped = text.length > MAX_BRIDGE_PAYLOAD_BYTES ? text.slice(0, MAX_BRIDGE_PAYLOAD_BYTES) : text;
+      recordClipboardRead(this.clipboardReadGate, now, "granted", clamped.length);
+      return { text: clamped };
     }
     if (method === "host.pickFiles") {
       // Same trust level as host.saveFile: the bytes only flow after the user

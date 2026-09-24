@@ -2,6 +2,7 @@
 import { computed, defineComponent, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ArrowUp, BadgeCheck, Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, Info, LayoutGrid, Link2, List, Loader2, PackageCheck, Pencil, Pin, PinOff, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
+import { isSensitivePluginPermission } from "@/lib/plugins/pluginPermissions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -1039,7 +1040,16 @@ onBeforeUnmount(() => {
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5">
                 <Badge v-for="tag in listing.plugin.tags.slice(0, 3)" :key="tag" variant="outline" class="h-5 px-1.5 text-[10px]">{{ tag }}</Badge>
-                <Badge v-if="listing.plugin.permissions.length" variant="outline" class="h-5 px-1.5 text-[10px]">{{ t("pluginPlatform.permissionsCount", { count: listing.plugin.permissions.length }) }}</Badge>
+                <!-- Real permission strings, not a count badge: sensitive ones (clipboard read, …)
+                     highlight in the destructive variant so a user sees the risk surface before
+                     installing; the rest stay muted. -->
+                <Tooltip :delay-duration="300">
+                  <TooltipTrigger as-child>
+                    <Badge v-if="listing.plugin.permissions.length" variant="outline" class="h-5 px-1.5 font-mono text-[10px]">{{ listing.plugin.permissions.join(" · ") }}</Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="max-w-md break-all font-mono text-[11px]">{{ listing.plugin.permissions.join("\n") }}</TooltipContent>
+                </Tooltip>
+                <Badge v-for="permission in listing.plugin.permissions" :key="permission" v-show="isSensitivePluginPermission(permission)" variant="destructive" class="h-5 px-1.5 font-mono text-[10px]" :data-sensitive-permission="permission">{{ permission }}</Badge>
               </div>
               <Tooltip :delay-duration="700">
                 <TooltipTrigger as-child>

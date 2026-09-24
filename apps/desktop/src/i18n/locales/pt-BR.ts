@@ -185,6 +185,8 @@ export default withEnglishFallback({
     verified: "Verificado",
     noDescription: "Nenhuma descrição fornecida.",
     permissionsCount: "{count} permissões",
+    clipboardReadConsent: '"{name}" solicita ler a área de transferência do sistema; a área de trabalho dela receberá o conteúdo atual (possivelmente senhas ou tokens que você copiou). Permitir leitura nesta sessão?',
+    clipboardReadConsentTitle: "Solicitação de leitura da área de transferência",
     unsupportedTarget: "Indisponível para {target}",
     installedVersion: "Instalado v{version}",
     installedVersionUpdatable: "Instalado v{installed} · Atualizar para v{latest}",

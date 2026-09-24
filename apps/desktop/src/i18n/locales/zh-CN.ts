@@ -107,6 +107,8 @@ export default withEnglishFallback({
     verified: "已认证",
     noDescription: "开发者未提供说明。",
     permissionsCount: "{count} 项权限",
+    clipboardReadConsent: "「{name}」请求读取系统剪贴板，其工作台将收到当前剪贴板内容（可能包含你复制的密码或令牌）。本次运行是否允许读取？",
+    clipboardReadConsentTitle: "剪贴板读取请求",
     unsupportedTarget: "暂不支持 {target}",
     installedVersion: "已安装 v{version}",
     installedVersionUpdatable: "已安装 v{installed} · 可更新至 v{latest}",

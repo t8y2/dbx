@@ -407,6 +407,12 @@ function createBridge() {
       // Permission-gated in the bridge (host.clipboard:read); the helper
       // prefers the Tauri clipboard plugin and falls back to the Web Clipboard.
       clipboardRead: (_pluginId) => readTextFromClipboard(),
+      // Session consent for the first clipboard read: a native ask dialog naming
+      // the plugin, so reads always have a human in the loop. On the web host
+      // (no dialog surface) the callback is omitted and the bridge denies.
+      confirmClipboardRead: isTauriRuntime()
+        ? (_pluginId, pluginName) => import("@tauri-apps/plugin-dialog").then(({ ask }) => ask(t("pluginClipboardReadConsent", { name: pluginName }), { title: t("pluginClipboardReadConsentTitle"), kind: "warning" }).then((allowed) => allowed === true))
+        : undefined,
       pickFiles: (pluginId, options) => pickPluginFiles(pluginId, options),
       readFileChunk: (pluginId, handleId, offset, length) => readPluginFileChunkById(pluginId, handleId, offset, length),
       beginFileSave: (pluginId, request) => beginPluginFileSave(pluginId, request),

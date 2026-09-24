@@ -184,6 +184,8 @@ export default withEnglishFallback({
     verified: "Verificato",
     noDescription: "Nessuna descrizione.",
     permissionsCount: "{count} autorizzazioni",
+    clipboardReadConsent: '"{name}" chiede di leggere gli appunti di sistema: la sua area di lavoro riceverà il contenuto attuale degli appunti (eventualmente password o token copiati). Consentire la lettura per questa sessione?',
+    clipboardReadConsentTitle: "Richiesta di lettura degli appunti",
     unsupportedTarget: "Non disponibile per {target}",
     installedVersion: "Installato v{version}",
     installedVersionUpdatable: "Installato v{installed} · Aggiorna a v{latest}",

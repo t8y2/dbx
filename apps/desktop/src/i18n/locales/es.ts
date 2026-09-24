@@ -185,6 +185,8 @@ export default withEnglishFallback({
     verified: "Verificado",
     noDescription: "Sin descripción.",
     permissionsCount: "{count} permisos",
+    clipboardReadConsent: '"{name}" solicita leer el portapapeles del sistema; su zona de trabajo recibirá el contenido actual del portapapeles (posiblemente contraseñas o tokens que hayas copiado). ¿Permitir la lectura del portapapeles en esta sesión?',
+    clipboardReadConsentTitle: "Solicitud de lectura del portapapeles",
     unsupportedTarget: "No disponible para {target}",
     installedVersion: "Instalado v{version}",
     installedVersionUpdatable: "Instalado v{installed} · Actualizar a v{latest}",

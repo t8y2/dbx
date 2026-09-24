@@ -185,6 +185,8 @@ export default withEnglishFallback({
     verified: "已驗證",
     noDescription: "開發者未提供說明。",
     permissionsCount: "{count} 項權限",
+    clipboardReadConsent: "「{name}」請求讀取系統剪貼簿，其工作台將收到目前剪貼簿內容（可能包含你複製的密碼或權杖）。本次執行是否允許讀取？",
+    clipboardReadConsentTitle: "剪貼簿讀取請求",
     unsupportedTarget: "暫不支援 {target}",
     installedVersion: "已安裝 v{version}",
     installedVersionUpdatable: "已安裝 v{installed} · 可更新至 v{latest}",

@@ -184,6 +184,8 @@ export default withEnglishFallback({
     verified: "검증됨",
     noDescription: "설명이 제공되지 않았습니다.",
     permissionsCount: "권한 {count}개",
+    clipboardReadConsent: '"{name}" 플러그인이 시스템 클립보드 읽기를 요청합니다. 해당 워크벤치는 현재 클립보드 내용(복사한 비밀번호나 토큰이 포함될 수 있음)을 받게 됩니다. 이 세션에서 읽기를 허용하시겠습니까?',
+    clipboardReadConsentTitle: "클립보드 읽기 요청",
     unsupportedTarget: "{target}에서는 사용할 수 없음",
     installedVersion: "설치된 버전 v{version}",
     installedVersionUpdatable: "설치된 버전 v{installed} · v{latest}(으)로 업데이트 가능",

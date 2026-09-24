@@ -182,6 +182,8 @@ export default {
     verified: "Verified",
     noDescription: "No description provided.",
     permissionsCount: "{count} permissions",
+    clipboardReadConsent: '"{name}" wants to read the system clipboard. Its workbench will receive the current clipboard content (possibly passwords or tokens you copied). Allow clipboard reads for this session?',
+    clipboardReadConsentTitle: "Clipboard Read Request",
     unsupportedTarget: "Not available for {target}",
     installedVersion: "Installed v{version}",
     installedVersionUpdatable: "Installed v{installed} · Update to v{latest}",

@@ -185,6 +185,8 @@ export default withEnglishFallback({
     verified: "認証済み",
     noDescription: "説明はありません。",
     permissionsCount: "権限 {count} 件",
+    clipboardReadConsent: "「{name}」がシステムクリップボードの読み取りを要求しています。そのワークベンチは現在のクリップボードの内容（コピーしたパスワードやトークンを含む可能性があります）を受け取ります。このセッションで読み取りを許可しますか？",
+    clipboardReadConsentTitle: "クリップボード読み取りの要求",
     unsupportedTarget: "{target} では利用できません",
     installedVersion: "インストール済み v{version}",
     installedVersionUpdatable: "インストール済み v{installed} · v{latest} に更新可能",

@@ -34,6 +34,7 @@ import {
   Pin,
   Pencil,
   Rows3,
+  Hash,
   SquareDashed,
   Minus,
   Plus,
@@ -136,7 +137,7 @@ const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryCh
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps } from "@/components/layout/querySurfaces";
-import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
+import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridRowNumberMode, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
@@ -328,6 +329,7 @@ const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
+const dataGridRowNumberMode = computed(() => settingsStore.editorSettings.dataGridRowNumberMode);
 const resultRunDisplayMode = computed(() => settingsStore.editorSettings.resultRunDisplayMode);
 const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWidthDensity);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
@@ -396,6 +398,10 @@ function setDataGridRenderMode(value: "canvas" | "dom") {
 
 function setDataGridSearchMode(value: DataGridSearchMode) {
   settingsStore.updateEditorSettings({ dataGridSearchMode: value });
+}
+
+function setDataGridRowNumberMode(value: DataGridRowNumberMode) {
+  settingsStore.updateEditorSettings({ dataGridRowNumberMode: value });
 }
 
 function setResultRunDisplayMode(value: ResultRunDisplayMode) {
@@ -1823,6 +1829,32 @@ defineExpose({
                     </div>
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                       <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <Hash class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.rowNumberMode") }}</span>
+                      </div>
+                      <LightTooltip :text="t('grid.rowNumberModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                        <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                          <button
+                            type="button"
+                            class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRowNumberMode === 'view' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="setDataGridRowNumberMode('view')"
+                          >
+                            {{ t("grid.rowNumberModeView") }}
+                          </button>
+                          <button
+                            type="button"
+                            class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRowNumberMode === 'source' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="setDataGridRowNumberMode('source')"
+                          >
+                            {{ t("grid.rowNumberModeSource") }}
+                          </button>
+                        </div>
+                      </LightTooltip>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
                         <Rows3 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                         <span>{{ t("grid.transposeMultiRowToggle") }}</span>
                       </div>
@@ -2421,6 +2453,32 @@ defineExpose({
                       @click="setDataGridSearchMode('highlight')"
                     >
                       {{ t("grid.searchModeHighlight") }}
+                    </button>
+                  </div>
+                </LightTooltip>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <Hash class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.rowNumberMode") }}</span>
+                </div>
+                <LightTooltip :text="t('grid.rowNumberModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                  <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                    <button
+                      type="button"
+                      class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRowNumberMode === 'view' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="setDataGridRowNumberMode('view')"
+                    >
+                      {{ t("grid.rowNumberModeView") }}
+                    </button>
+                    <button
+                      type="button"
+                      class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRowNumberMode === 'source' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="setDataGridRowNumberMode('source')"
+                    >
+                      {{ t("grid.rowNumberModeSource") }}
                     </button>
                   </div>
                 </LightTooltip>

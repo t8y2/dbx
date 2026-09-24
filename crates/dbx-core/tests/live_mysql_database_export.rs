@@ -404,6 +404,16 @@ async fn live_mysql_database_export_creates_missing_destination_directory() {
     let exported = std::fs::read_to_string(&file_path).unwrap();
     assert!(exported.contains("'alpha'"), "exported SQL should contain the seeded row");
 
+    // #10242: the script must declare its own encoding before the first statement that can
+    // carry non-ASCII text, otherwise an importing client whose default charset is not
+    // utf8mb4 (a `latin1` mysql CLI in a docker entrypoint, for example) re-encodes every
+    // non-ASCII value the exporter wrote as UTF-8 into mojibake.
+    let charset = exported.find("SET NAMES utf8mb4;").expect("MySQL exports must declare their encoding");
+    let create_database = exported.find("CREATE DATABASE").expect("the CREATE DATABASE preamble should be exported");
+    let create_table = exported.find("CREATE TABLE").expect("the table DDL should be exported");
+    assert!(charset < create_database, "SET NAMES must precede the CREATE DATABASE preamble");
+    assert!(charset < create_table, "SET NAMES must precede the table DDL");
+
     std::fs::remove_dir_all(dir).unwrap();
 }
 

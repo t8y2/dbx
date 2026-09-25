@@ -510,9 +510,12 @@ pub async fn preview_plugin_tools(
 }
 
 /// A plugin that implements no `mcp/tools` simply has no AI tools. Both
-/// official SDKs (and the host runtime) answer unknown methods with this text.
+/// official SDKs (and the host runtime) answer unknown methods with either
+/// phrasing, so accept both.
 fn lacks_tool_surface(error: &str) -> bool {
-    error.contains(&format!("Method not found: {PLUGIN_TOOLS_METHOD}"))
+    let lower = error.to_ascii_lowercase();
+    lower.contains(&format!("method not found: {PLUGIN_TOOLS_METHOD}"))
+        || lower.contains(&format!("unknown method: {PLUGIN_TOOLS_METHOD}"))
 }
 
 /// Invokes a sidecar method, on `host_runtime` when given. Sidecar sessions
@@ -918,6 +921,15 @@ fn truncate_chars(value: String, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lacks_tool_surface_accepts_both_unknown_method_phrasings() {
+        assert!(lacks_tool_surface("Method not found: mcp/tools"));
+        assert!(lacks_tool_surface("unknown method: mcp/tools"));
+        assert!(lacks_tool_surface("rpc error: -32601: unknown method: mcp/tools (bridge)"));
+        assert!(!lacks_tool_surface("connection refused"));
+        assert!(!lacks_tool_surface("unknown method: mcp/other"));
+    }
 
     fn connection(id: &str, name: &str, plugin_id: &str) -> OpenPluginConnection {
         OpenPluginConnection {

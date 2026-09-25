@@ -5,7 +5,7 @@ pub use dbx_drivers::runtime_config::{
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
@@ -34,7 +34,9 @@ use crate::history::{
     HistorySearchRequest, HistorySearchResult, MAX_HISTORY,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
-use crate::persistence::secret_codec::{SecretCodec, SecretKeyPolicy, SecretKeyResolution, SecretKeySource};
+use crate::persistence::secret_codec::{
+    key_file_candidates, SecretCodec, SecretKeyPolicy, SecretKeyResolution, SecretKeySource,
+};
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
@@ -193,6 +195,16 @@ pub struct Storage {
     /// Standalone CLI/MCP processes may use an existing key but must never
     /// provision one as a side effect of a write.
     secret_key_creation_allowed: bool,
+    /// Key material resolved for business reads and writes. Every resolution
+    /// round-trips to the OS credential store, so hydrating N stored secrets
+    /// used to mean N credential-store accesses on the startup path.
+    secret_codec_cache: Arc<Mutex<Option<CachedSecretCodec>>>,
+}
+
+/// Key material plus the digest of every key file it was resolved from.
+struct CachedSecretCodec {
+    codec: SecretCodec,
+    key_files: Vec<(PathBuf, Option<[u8; 32]>)>,
 }
 
 pub const SECRET_STORE_MIGRATION_ID: &str = "secret-store-v1";
@@ -1188,8 +1200,13 @@ impl Storage {
         let path = db_path.to_path_buf();
         let db_path = db_path.to_string_lossy().to_string();
         let db = connect_path_create_if_missing(&db_path).await?;
-        let storage =
-            Self { db, path, secret_key_policy: SecretKeyPolicy::PlatformDefault, secret_key_creation_allowed: true };
+        let storage = Self {
+            db,
+            path,
+            secret_key_policy: SecretKeyPolicy::PlatformDefault,
+            secret_key_creation_allowed: true,
+            secret_codec_cache: Arc::new(Mutex::new(None)),
+        };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
         // racing to open the same brand-new database file) must never stop
@@ -1229,8 +1246,61 @@ impl Storage {
         SecretCodec::resolve(self.secret_key_policy, self.data_dir(), allow_create)
     }
 
+    /// Resolution cost is dominated by the platform credential store, so the
+    /// codec is cached for the process. Key files are re-digested on every use,
+    /// and migration invalidates the cache, so no caller serves material that
+    /// the provider no longer agrees with. Callers that must observe a key
+    /// change immediately (status probes, migration) use `resolve_secret_key`.
     fn secret_codec(&self, allow_create: bool) -> Result<SecretCodec, String> {
-        self.resolve_secret_key(allow_create).map(|resolved| resolved.codec)
+        if let Some(cached) = self.cached_secret_codec() {
+            return Ok(cached);
+        }
+        let key_files = self.key_file_digests();
+        let codec = self.resolve_secret_key(allow_create).map(|resolved| resolved.codec)?;
+        // Pair the codec with the pre-resolve digests, and only when the key
+        // files are unchanged across the resolve. A pair taken after resolving
+        // could combine a stale codec with fresh digests, which the use-time
+        // digest check would then never reject.
+        if self.key_file_digests() == key_files {
+            self.cache_secret_codec(codec, key_files);
+        }
+        Ok(codec)
+    }
+
+    fn cached_secret_codec(&self) -> Option<SecretCodec> {
+        let mut cache = self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cached = cache.as_ref()?;
+        let codec = cached.codec;
+        let resolved_key_files = cached.key_files.clone();
+        if resolved_key_files != self.key_file_digests() {
+            // A key file was added, replaced, or removed after resolution.
+            *cache = None;
+            return None;
+        }
+        Some(codec)
+    }
+
+    fn cache_secret_codec(&self, codec: SecretCodec, key_files: Vec<(PathBuf, Option<[u8; 32]>)>) {
+        let entry = CachedSecretCodec { codec, key_files };
+        *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entry);
+    }
+
+    fn invalidate_secret_codec(&self) {
+        *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// Digest of every file that can supply key material on its own. Comparing
+    /// these on use costs a few small reads instead of a credential-store
+    /// round trip, and still catches a key file replaced outside DBX.
+    fn key_file_digests(&self) -> Vec<(PathBuf, Option<[u8; 32]>)> {
+        use sha2::Digest;
+        key_file_candidates(self.data_dir())
+            .into_iter()
+            .map(|path| {
+                let digest = std::fs::read(&path).ok().map(|contents| sha2::Sha256::digest(contents).into());
+                (path, digest)
+            })
+            .collect()
     }
 
     async fn secret_codec_for_write(&self, needs_key: bool) -> Result<SecretCodec, String> {
@@ -1592,6 +1662,9 @@ impl Storage {
 
     pub async fn start_data_migration(&self) -> Result<MigrationReport, String> {
         let lock = DATA_MIGRATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+        // Migration may create or replace key material, so the codec resolved
+        // for earlier reads must not be reused here.
+        self.invalidate_secret_codec();
         let preflight = self.inspect_data_migration().await?;
         if preflight.is_ready() {
             return Ok(MigrationReport {
@@ -8326,7 +8399,7 @@ mod tests {
     use crate::models::connection::{
         ConnectionConfig, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,
     };
-    use crate::persistence::secret_codec::{managed_key_path, SecretKeyPolicy};
+    use crate::persistence::secret_codec::{managed_key_path, SecretCodec, SecretKeyPolicy};
     use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
     use rusqlite::{Connection, TransactionBehavior};
     use std::collections::BTreeMap;
@@ -8552,6 +8625,44 @@ mod tests {
         reopened.retry_data_migration().await.unwrap();
         assert!(reopened.inspect_data_migration().await.unwrap().is_ready());
         assert_eq!(reopened.get_secret("legacy", "password").await.unwrap().as_deref(), Some("secret"));
+    }
+
+    /// Reads through the same codec path business reads use, so a cached codec
+    /// has to produce the right plaintext for the assertion to hold.
+    fn open_with_resolved_codec(storage: &Storage, envelope: &str) -> Result<String, String> {
+        storage.secret_codec(false)?.decrypt("connection", "password", envelope)
+    }
+
+    #[tokio::test]
+    async fn resolved_secret_codec_is_cached_until_a_key_file_changes() {
+        // Hydrating stored secrets used to re-resolve key material per secret,
+        // which on the desktop means one OS credential-store round trip per
+        // secret on the startup path.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_unmigrated(&dir.path().join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        let key_path = managed_key_path(dir.path());
+        std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+        std::fs::write(&key_path, "ab".repeat(32)).unwrap();
+        let file_codec = storage.secret_codec(false).unwrap();
+        let envelope = file_codec.encrypt("connection", "password", "secret").unwrap();
+
+        storage.cache_secret_codec(SecretCodec::new([7u8; 32]), storage.key_file_digests());
+        // Business reads answer from the cached codec instead of re-reading the
+        // key file, so an envelope sealed with the file key stays shut.
+        assert_eq!(open_with_resolved_codec(&storage, &envelope), Err("secret decryption failed".to_string()));
+
+        // Replacing the key file drops the cached codec, so the next read uses
+        // the material the provider now reports.
+        std::fs::write(&key_path, "cd".repeat(32)).unwrap();
+        assert!(storage.cached_secret_codec().is_none());
+        assert_eq!(open_with_resolved_codec(&storage, &envelope), Err("secret decryption failed".to_string()));
+
+        // Restoring the original material restores the working codec.
+        std::fs::write(&key_path, "ab".repeat(32)).unwrap();
+        assert_eq!(open_with_resolved_codec(&storage, &envelope).as_deref(), Ok("secret"));
     }
 
     #[tokio::test]

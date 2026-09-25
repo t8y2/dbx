@@ -251,7 +251,7 @@ const eventEditorKey = computed(() =>
   }),
 );
 // Table info panel state
-const tableInfoTab = ref<TableInfoTab>("info");
+const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableOverviewStats = ref<ObjectStatistics | null>(null);
 const tableOverviewComment = ref<string | null>(null);
 const tableOverviewLoading = ref(false);

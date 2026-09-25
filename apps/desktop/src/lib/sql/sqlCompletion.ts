@@ -2527,8 +2527,9 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   }
 
   // Check if we're in a context where columns are expected
-  const selectListColumnContext = isInSelectListContext(beforeCursor);
-  const inColumnContext = selectListColumnContext || isInColumnContext(beforeCursor, options.databaseType) || !!insertInfo;
+  const selectListScan = scanSelectListContext(beforeCursor);
+  const selectListColumnContext = selectListScan.inSelectList;
+  const inColumnContext = selectListColumnContext || selectListScan.inSelectListParens || isInColumnContext(beforeCursor, options.databaseType) || !!insertInfo;
   const inJoinConditionContext = isInJoinConditionContext(beforeCursor);
   const prioritizeSelectAliases = isInOrderOrGroupByContext(beforeCursor, options.databaseType);
   const inCallRoutineContext = isCallRoutineContext(beforeCursor);
@@ -2791,11 +2792,21 @@ function isInColumnContext(beforeCursor: string, databaseType?: DatabaseType): b
 }
 
 function isInSelectListContext(beforeCursor: string): boolean {
+  return scanSelectListContext(beforeCursor).inSelectList;
+}
+
+/**
+ * `inSelectList` is true when the cursor sits directly in an open SELECT list.
+ * `inSelectListParens` is true when it sits inside parentheses nested in one,
+ * such as a function argument: `SELECT a, SUM(|`.
+ */
+function scanSelectListContext(beforeCursor: string): { inSelectList: boolean; inSelectListParens: boolean } {
   let depth = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let inBacktick = false;
   const selectOpenByDepth = new Map<number, boolean>();
+  const nestedInSelectByDepth = new Map<number, boolean>();
 
   for (let i = 0; i < beforeCursor.length; i++) {
     const ch = beforeCursor[i] ?? "";
@@ -2837,11 +2848,14 @@ function isInSelectListContext(beforeCursor: string): boolean {
       continue;
     }
     if (ch === "(") {
+      const inheritsSelectList = selectOpenByDepth.get(depth) === true || nestedInSelectByDepth.get(depth) === true;
       depth++;
+      nestedInSelectByDepth.set(depth, inheritsSelectList);
       continue;
     }
     if (ch === ")") {
       selectOpenByDepth.delete(depth);
+      nestedInSelectByDepth.delete(depth);
       depth = Math.max(0, depth - 1);
       continue;
     }
@@ -2852,13 +2866,15 @@ function isInSelectListContext(beforeCursor: string): boolean {
     const word = beforeCursor.slice(i, end).toLowerCase();
     if (word === "select") {
       selectOpenByDepth.set(depth, true);
+      nestedInSelectByDepth.delete(depth);
     } else if (word === "from") {
       selectOpenByDepth.set(depth, false);
+      nestedInSelectByDepth.delete(depth);
     }
     i = end - 1;
   }
 
-  return selectOpenByDepth.get(depth) === true;
+  return { inSelectList: selectOpenByDepth.get(depth) === true, inSelectListParens: nestedInSelectByDepth.get(depth) === true };
 }
 
 function isInJoinConditionContext(beforeCursor: string): boolean {

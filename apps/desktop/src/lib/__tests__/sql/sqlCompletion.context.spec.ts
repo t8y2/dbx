@@ -1669,3 +1669,33 @@ describe("line block statement boundary", () => {
     expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["users"]));
   });
 });
+
+describe("select-list function argument completion", () => {
+  const options = {
+    databaseType: "mysql" as const,
+    tables: [{ name: "daily_statistic", type: "table" as const }],
+    columnsByTable: new Map([["daily_statistic", ["CNKI_CITATIONS", "CNKI_DOWNLOADS", "stat_date"].map((name) => ({ name, table: "daily_statistic" }))]]),
+  };
+
+  it.each(["SELECT\n  SUM(CNKI_CITATIONS) AS cnkiCitations,\n  SUM(CNKI_DOW|) AS cnkiDownloads\nFROM\n  daily_statistic", "SELECT stat_date, CNKI_CITATIONS, COUNT(CNKI_DOW|) FROM daily_statistic", "SELECT stat_date, CNKI_CITATIONS, ROUND(AVG(CNKI_DOW|), 2) FROM daily_statistic"])(
+    "suggests columns inside an aggregate after earlier projections: %s",
+    (template) => {
+      const cursor = template.indexOf("|");
+      const sql = template.replace("|", "");
+      const items = buildSqlCompletionItems(sql, cursor, options);
+
+      expect(items.filter((item) => item.type === "column").map((item) => item.label)).toContain("CNKI_DOWNLOADS");
+    },
+  );
+
+  it("does not offer select-list-only items inside an aggregate", () => {
+    const sql = "SELECT stat_date, CNKI_CITATIONS, SUM() FROM daily_statistic";
+    const cursor = sql.indexOf("SUM(") + "SUM(".length;
+    const items = buildSqlCompletionItems(sql, cursor, options);
+
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toContain("CNKI_DOWNLOADS");
+    expect(items.some((item) => item.type === "snippet" && item.label === "daily_statistic.*")).toBe(false);
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionMode === undefined)).toBe(true);
+    expect(getSqlCompletionContext(sql, cursor, options).selectListColumnContext).toBe(false);
+  });
+});

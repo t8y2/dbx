@@ -7,7 +7,6 @@ use dbx_core::query::{
     begin_manual_transaction, commit_manual_transaction, execute_sql_statement, rollback_manual_transaction,
 };
 use dbx_core::sql::{SqlFileRequest, SqlFileStatus};
-use dbx_core::storage::Storage;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -38,7 +37,7 @@ async fn verify_committed_value(state: &AppState, database: &str, table: &str, e
 #[ignore = "requires an installed OceanBase Oracle agent and writable DBX_LIVE_SQL_FILE_OB_* environment"]
 async fn live_oceanbase_sql_files_commit_rollback_failure_and_cancel() {
     let directory = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&directory.path().join("state.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&directory.path().join("state.db")).await.unwrap();
     let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
         storage,
         directory.path().join("plugins"),

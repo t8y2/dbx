@@ -7,7 +7,6 @@ use dbx_core::db::postgres;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::execute_sql_statement;
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
-use dbx_core::storage::Storage;
 
 fn live_postgres_config(
     id: &str,
@@ -117,7 +116,7 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-postgres-query-export-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     let connection_id = "live-postgres-query-export";
     let config = live_postgres_config(connection_id, &host, port, &user, &password, &database);
@@ -206,7 +205,7 @@ async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-postgres-xlsx-temporal-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     let connection_id = "live-postgres-xlsx-temporal";
     let config = live_postgres_config(connection_id, &host, port, &user, &password, &database);
@@ -275,7 +274,7 @@ async fn live_postgres_numeric_xlsx_ignores_fractional_trailing_zeros() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let dir = std::env::temp_dir().join(format!("dbx-live-postgres-xlsx-numeric-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     let connection_id = "live-postgres-xlsx-numeric";
     let config = live_postgres_config(connection_id, &host, port, &user, &password, &database);
@@ -354,7 +353,7 @@ async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
     let config = live_postgres_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-postgres-temp-export-{short_suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 
@@ -447,7 +446,7 @@ async fn live_postgres_xlsx_export_can_outlive_query_timeout_while_rows_keep_arr
     let config = live_postgres_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-postgres-query-export-timeout-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 
@@ -521,7 +520,7 @@ async fn live_postgres_stream_still_times_out_without_progress_and_recovers() {
     let config = live_postgres_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-postgres-query-export-stall-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 

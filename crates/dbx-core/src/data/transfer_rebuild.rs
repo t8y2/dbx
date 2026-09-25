@@ -1083,7 +1083,7 @@ mod tests {
 
     async fn sqlite_dependency_fixture() -> (AppState, crate::db::sqlite::SqliteHandle, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
-        let storage = crate::storage::Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let pool =
             crate::db::sqlite::connect_path_create_if_missing(directory.path().join("target.db").to_str().unwrap())

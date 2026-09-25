@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
-use dbx_core::storage::Storage;
 use dbx_core::table_import::parse_xlsx_file;
 
 fn live_clickhouse_config(
@@ -66,7 +65,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
     let config = live_clickhouse_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-clickhouse-query-export-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 

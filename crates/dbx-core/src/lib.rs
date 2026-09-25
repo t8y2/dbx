@@ -17,6 +17,8 @@ pub use ai::agent_explain;
 pub use ai::agent_kv;
 pub use ai::agent_loop;
 pub use ai::agent_tools;
+pub use ai::plugin_tools;
+pub use ai::tool_approval;
 pub use dbx_drivers::agent_catalog;
 pub use dbx_drivers::agent_connection;
 pub use dbx_drivers::agent_manager;

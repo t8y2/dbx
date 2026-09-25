@@ -3,7 +3,7 @@ use serde_json::json;
 
 async fn sqlite_fixture() -> (tempfile::TempDir, Arc<AppState>, TransferRequest, String, String) {
     let directory = tempfile::tempdir().unwrap();
-    let storage = crate::storage::Storage::open(&directory.path().join("storage.db")).await.unwrap();
+    let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new_with_plugin_dir(storage, directory.path().join("plugins")));
     for id in ["source", "target"] {
         let path = directory.path().join(format!("{id}.db"));
@@ -118,7 +118,7 @@ async fn transfer_rebuild_preview_plans_without_executing_ddl() {
 #[tokio::test]
 async fn transfer_keyset_pagination_copies_every_row_across_many_batches() {
     let directory = tempfile::tempdir().unwrap();
-    let storage = crate::storage::Storage::open(&directory.path().join("storage.db")).await.unwrap();
+    let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new_with_plugin_dir(storage, directory.path().join("plugins")));
     for id in ["source", "target"] {
         let path = directory.path().join(format!("{id}.db"));

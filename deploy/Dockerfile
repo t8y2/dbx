@@ -38,9 +38,21 @@ COPY crates/dbx-core/Cargo.toml crates/dbx-core/
 COPY crates/dbx-platform/Cargo.toml crates/dbx-platform/
 COPY crates/dbx-types/Cargo.toml crates/dbx-types/
 COPY crates/dbx-sql/Cargo.toml crates/dbx-sql/
+COPY crates/dbx-sql-core/Cargo.toml crates/dbx-sql-core/
+COPY crates/dbx-sql-data/Cargo.toml crates/dbx-sql-data/
+COPY crates/dbx-sql-dialect/Cargo.toml crates/dbx-sql-dialect/
+COPY crates/dbx-sql-schema/Cargo.toml crates/dbx-sql-schema/
 COPY crates/dbx-formats/Cargo.toml crates/dbx-formats/
 COPY crates/dbx-ai-provider/Cargo.toml crates/dbx-ai-provider/
 COPY crates/dbx-plugin-runtime/Cargo.toml crates/dbx-plugin-runtime/
+COPY crates/dbx-driver-agent/Cargo.toml crates/dbx-driver-agent/
+COPY crates/dbx-driver-support/Cargo.toml crates/dbx-driver-support/
+COPY crates/dbx-driver-elasticsearch/Cargo.toml crates/dbx-driver-elasticsearch/
+COPY crates/dbx-driver-mongodb/Cargo.toml crates/dbx-driver-mongodb/
+COPY crates/dbx-driver-mysql/Cargo.toml crates/dbx-driver-mysql/
+COPY crates/dbx-driver-postgres/Cargo.toml crates/dbx-driver-postgres/
+COPY crates/dbx-driver-redis/Cargo.toml crates/dbx-driver-redis/
+COPY crates/dbx-driver-sqlserver/Cargo.toml crates/dbx-driver-sqlserver/
 COPY crates/dbx-drivers/Cargo.toml crates/dbx-drivers/
 COPY crates/dbx-sqlite-worker/Cargo.toml crates/dbx-sqlite-worker/
 COPY crates/dbx-web/Cargo.toml crates/dbx-web/
@@ -50,7 +62,10 @@ COPY src-tauri/Cargo.toml src-tauri/
 # Copy every vendored crate: root Cargo.toml [patch.crates-io] points at
 # vendor/{ctor,rumqttc,dirs-sys,pageant,wry}; omitting any breaks the offline build.
 COPY vendor/ vendor/
-RUN for crate in dbx-platform dbx-types dbx-sql dbx-formats dbx-ai-provider dbx-plugin-runtime dbx-drivers dbx-sqlite-worker; do \
+RUN for crate in dbx-platform dbx-types dbx-sql dbx-sql-core dbx-sql-data dbx-sql-dialect dbx-sql-schema \
+      dbx-formats dbx-ai-provider dbx-plugin-runtime dbx-driver-agent dbx-driver-support \
+      dbx-driver-elasticsearch dbx-driver-mongodb dbx-driver-mysql dbx-driver-postgres \
+      dbx-driver-redis dbx-driver-sqlserver dbx-drivers dbx-sqlite-worker; do \
       mkdir -p "crates/$crate/src" && printf "" > "crates/$crate/src/lib.rs"; \
     done \
     && echo 'fn main() {}' > crates/dbx-sqlite-worker/src/main.rs
@@ -76,7 +91,7 @@ RUN case "$TARGETARCH" in \
 
 # Copy real sources and rebuild (only application code recompiles)
 COPY crates/ crates/
-# dbx-sql/build.rs embeds plugins/dialects; dbx-types/build.rs embeds
+# dbx-sql-dialect/build.rs embeds plugins/dialects; dbx-types/build.rs embeds
 # plugins/connection-types (database manifest + DatabaseType enum);
 # either directory missing makes the build script panic.
 COPY plugins/dialects/ plugins/dialects/

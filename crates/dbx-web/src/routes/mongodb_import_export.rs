@@ -613,11 +613,12 @@ mod tests {
     #[tokio::test]
     async fn export_failure_and_cancellation_are_replayed_to_late_subscribers() {
         use axum::response::IntoResponse;
-        use dbx_core::{connection::AppState, storage::Storage};
+        use dbx_core::connection::AppState;
 
         for cancelled in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+            let storage =
+                dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
             let state = Arc::new(WebState::for_tests(Arc::new(AppState::new(storage)), directory.path().into()));
             let id = uuid::Uuid::new_v4().to_string();
             let expected = if cancelled { MongoExportStatus::Cancelled } else { MongoExportStatus::Error };
@@ -674,10 +675,10 @@ mod tests {
 
     #[tokio::test]
     async fn early_import_failure_finishes_progress_and_cleans_source() {
-        use dbx_core::{connection::AppState, storage::Storage};
+        use dbx_core::connection::AppState;
 
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = Arc::new(WebState::for_tests(Arc::new(AppState::new(storage)), directory.path().into()));
         let upload_dir = import_upload_dir(directory.path());
         std::fs::create_dir_all(&upload_dir).unwrap();

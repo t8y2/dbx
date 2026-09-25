@@ -5698,8 +5698,8 @@ mod tests {
         let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
         let request = anthropic_compatible_test_request(endpoint);
         let tools = [crate::agent_events::ToolDefinition {
-            name: "get_tables",
-            description: "List tables",
+            name: "get_tables".into(),
+            description: "List tables".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": { "schema": { "type": "string" } }
@@ -5754,8 +5754,8 @@ mod tests {
         let request = claude_http_test_request(endpoint);
         let client = build_ai_http_client(&request.config, 10).unwrap();
         let tools = [crate::agent_events::ToolDefinition {
-            name: "get_tables",
-            description: "List tables",
+            name: "get_tables".into(),
+            description: "List tables".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
             read_only: true,
             parallel_ok: true,
@@ -7330,8 +7330,8 @@ mod tests {
         assert_eq!(input[3]["call_id"], "call_1");
 
         let tool = crate::agent_events::ToolDefinition {
-            name: "list_tables",
-            description: "List tables",
+            name: "list_tables".into(),
+            description: "List tables".into(),
             parameters: serde_json::json!({"type": "object"}),
             read_only: true,
             parallel_ok: true,

@@ -3,6 +3,7 @@ pub mod document_ops;
 pub mod hbase_ops;
 pub mod mongo_ops;
 pub mod object_cache;
+pub mod plugin_data;
 pub mod plugin_plan;
 pub mod query_cancel;
 pub mod redis_ops;
@@ -7025,7 +7026,9 @@ mod tests {
             fail_once: Option<&'static str>,
         ) -> (AppState, Arc<Mutex<Vec<String>>>, tempfile::TempDir) {
             let directory = tempfile::tempdir().unwrap();
-            let state = AppState::new(Storage::open(&directory.path().join("storage.db")).await.unwrap());
+            let state = AppState::new(
+                crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap(),
+            );
             let config = test_connection_config(DatabaseType::Postgres);
             state.configs.write().await.insert(config.id.clone(), config);
             let commands = Arc::new(Mutex::new(Vec::new()));
@@ -7545,7 +7548,8 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open test storage");
+        let storage =
+            crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.expect("open test storage");
         let state = Arc::new(AppState::new(storage));
         let connection_id = "sqlite-cancel-session";
         let client_session_id = "query-tab-8414";
@@ -7763,7 +7767,6 @@ mod tests {
         InstalledPlugin, PluginCompatibility, PluginDriverManifest, PluginDriverSession, PluginManifest,
         PluginRuntimeEnv,
     };
-    use crate::storage::Storage;
 
     #[cfg(unix)]
     async fn spawn_agent_batch_timeout_test_client() -> (AgentDriverClient, tempfile::NamedTempFile) {
@@ -7854,7 +7857,7 @@ for line in sys.stdin:
     async fn query_and_transaction_paths_resolve_catalog_dialect_from_connection() {
         let dir = std::env::temp_dir().join(format!("dbx-catalog-dialect-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
 
         let mut doris = test_connection_config(DatabaseType::Doris);
@@ -8116,7 +8119,7 @@ for line in sys.stdin:
         let (host, port) = address.rsplit_once(':').expect("DynamoDB endpoint must include a port");
         let dir = std::env::temp_dir().join(format!("dbx-query-dynamodb-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::DynamoDb);
         config.host = host.to_string();
@@ -8204,7 +8207,7 @@ for line in sys.stdin:
         .unwrap();
         runtime.increment_session_count();
 
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert("conn-1".to_string(), test_connection_config(DatabaseType::SqlServer));
         state
@@ -8321,7 +8324,7 @@ for line in sys.stdin:
         .unwrap();
         runtime.increment_session_count();
 
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert("conn-1".to_string(), test_connection_config(DatabaseType::Dameng));
         state
@@ -8380,7 +8383,7 @@ for line in sys.stdin:
     async fn native_pre_dispatch_cancellation_stays_typed() {
         let dir = std::env::temp_dir().join(format!("dbx-query-native-cancel-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-cancel";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8560,7 +8563,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn ddl_schema_cache_invalidates_persisted_object_snapshots() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "schema-cache";
         let sqlite =
@@ -8602,7 +8605,7 @@ for line in sys.stdin:
             ("BEGIN; ALTER TABLE users ADD COLUMN added INTEGER; COMMIT", false, false, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+            let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
             let state = AppState::new(storage);
             let sqlite = db::sqlite::connect_path_create_if_missing(dir.path().join("query.db").to_str().unwrap())
                 .await
@@ -8661,7 +8664,7 @@ for line in sys.stdin:
     async fn ddl_schema_cache_storage_failure_preserves_sql_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let storage_path = dir.path().join("storage.db");
-        let state = AppState::new(Storage::open(&storage_path).await.unwrap());
+        let state = AppState::new(crate::persistence::test_storage::open(&storage_path).await.unwrap());
         let sqlite =
             db::sqlite::connect_path_create_if_missing(dir.path().join("query.db").to_str().unwrap()).await.unwrap();
         state
@@ -8690,7 +8693,7 @@ for line in sys.stdin:
     async fn assert_sqlite_batch_error_behavior(failure_first: bool, continue_on_error: bool) {
         let dir = std::env::temp_dir().join(format!("dbx-query-batch-error-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-batch";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8741,7 +8744,7 @@ for line in sys.stdin:
     async fn transactional_sqlite_batch_rolls_back_when_a_later_statement_fails() {
         let dir = std::env::temp_dir().join(format!("dbx-query-transaction-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-transaction";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8784,7 +8787,7 @@ for line in sys.stdin:
     async fn transactional_batch_rejects_an_unsupported_backend_before_execution() {
         let dir = std::env::temp_dir().join(format!("dbx-query-unsupported-transaction-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "message-queue-transaction";
         state
@@ -8876,7 +8879,7 @@ for line in sys.stdin:
     async fn connection_pool_is_sqlserver_agent_detects_agent_and_native_pools() {
         let dir = std::env::temp_dir().join(format!("dbx-query-sqlserver-agent-flag-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
 
         // Non-SQL-Server connections never use the SQL Server agent splitter.
@@ -8912,7 +8915,7 @@ for line in sys.stdin:
         // on failure for DDL that cannot be rolled back.
         let dir = std::env::temp_dir().join(format!("dbx-query-tx-predispatch-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "message-queue-tx-ddl";
         state
@@ -8986,7 +8989,7 @@ for line in sys.stdin:
     async fn gaussdb_on_error_stop_overrides_continue_on_error() {
         let dir = std::env::temp_dir().join(format!("dbx-query-gaussdb-on-error-stop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "gaussdb-on-error-stop";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -10232,7 +10235,7 @@ for line in sys.stdin:
                 .await
                 .expect("plugin should start"),
         );
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::Jdbc);
         config.id = "jdbc-conn".to_string();
@@ -11456,7 +11459,7 @@ for line in sys.stdin:
 
         let dir = std::env::temp_dir().join(format!("dbx-manual-txn-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(db_type);
         config.id = "agent-conn".to_string();

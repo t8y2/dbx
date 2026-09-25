@@ -372,9 +372,10 @@ A workbench opens in a normal persistent DBX tab. The iframe is loaded with `san
 - `openFilesystem(providerId, context)` — requires `host.filesystem`
 - `getPlanCapabilities(connectionId)` / `explainPlan(request)` — reads an estimated execution plan for one connection; requires `host.plans:read`, see [Estimated execution plans](#estimated-execution-plans)
 - `getTableMetadata({ connectionId, database?, schema?, table })` — reads narrow schema metadata for one table on an already-open connection; requires `host.schema:read`, see [Table Schema Metadata](#table-schema-metadata)
+- `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` — runs one read-only SQL statement on a connection the user granted to the plugin; requires `host.data:read`, see [Read-only data queries](#read-only-data-queries)
 - `storage` — `storage.get(key)` / `storage.set(key, value)` / `storage.delete(key)` persist small JSON state per plugin in `plugin-data/<id>`; requires `host.storage`; values cap at 256 KiB and the whole store at 1 MiB, bulk data belongs in the sidecar's `DBX_PLUGIN_DATA_DIR`
 - `ai.openConversation({ title, prompt, context, send? })` — opens a plugin conversation in the built-in DBX AI panel from a snapshot the plugin supplies; requires `host.ai`; `title` caps at 200 characters, `prompt` at 32000, and `context` at 2 MiB, and `send` defaults to `false` so pass `true` to start the analysis immediately. The host copies the snapshot into the conversation as history data and never hands model output or model configuration back to the plugin
-- `capabilities` — `{ downloadFile, planApi, schemaMetadataApi, storage, ai }` advertised in the init message; a missing or `false` entry means that Host API group is unavailable on this host, so gate the matching call on it instead of probing with a request
+- `capabilities` — `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai }` advertised in the init message; a missing or `false` entry means that Host API group is unavailable on this host, so gate the matching call on it instead of probing with a request
 - `onEvent(listener)` — events are forwarded only with `host.events`
 - `onBinary(listener)` — binary frames are forwarded only with `host.binary`; listeners receive `{ channel, data: Uint8Array }`
 
@@ -429,7 +430,7 @@ A result view contributes a plugin-rendered visualization for query results. DBX
 
 A result view declares display metadata only: it carries no UI of its own and never names a workbench. The opened contribution id reaches the plugin UI in the init payload (`dbx-plugin-init` detail `contributionId`), so a plugin that declares several result views selects the matching one inside its single UI entrypoint.
 
-The `context.result` snapshot is bounded — `{ columns, rows (<= 500), truncated }` plus `sql`, `connectionId`, and `database`. Plugins that need the full or streamed result set should re-execute through their backend using the SQL and connection reference. Requires a UI entrypoint.
+The `context.result` snapshot is bounded — `{ columns, rows (<= 500), truncated }` plus `sql`, `connectionId`, and `database`. Plugins that need more rows can re-run a read-only statement with [`queryData`](#read-only-data-queries) (requires `host.data:read` and the user's consent for that connection). Requires a UI entrypoint.
 
 ### `context-menu`
 
@@ -580,6 +581,37 @@ This is Host API 1.3. A plugin that requires it declares:
 
 The `schemaMetadataApi` capability is runtime detection for older hosts; a plugin should gate the call on it rather than probing the request. Without `host.schema:read`, the bridge rejects the call before the backend adapter runs.
 
+### Read-only data queries
+
+A plugin can run one read-only SQL statement on a DBX connection the user granted to it. It never receives a driver, pool, credential, or connection string:
+
+```json
+{
+  "engines": { "host_api": "^1.4" },
+  "permissions": ["host.data:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.dataApi) {
+  const { columns, rows, truncated } = await window.dbxPlugin.queryData({
+    connectionId,
+    database,
+    sql: "SELECT status, count(*) AS total FROM orders GROUP BY status",
+    maxRows: 200
+  });
+}
+```
+
+The result is `{ dbType, columns: [{ name, dataType? }], rows, truncated, elapsedMs }`. The host owns every decision:
+
+- **Consent per (plugin, connection).** The first query for a connection shows a host dialog naming both. An allow is persisted in `app_settings.plugin_data_grants` and listed under the plugin in Plugin Center → Installed, where it can be revoked; a denial is remembered for the workbench session. Uninstalling a plugin drops its grants. A revoked grant fails with `PLUGIN_DATA_ACCESS_NOT_GRANTED: …` and the next query asks again.
+- **One read-only statement.** The statement must be the only one in the request and must be rated read-only by the shared SQL risk classifier used for MCP read-only access and the AI agent. Writes, DDL, locking reads, and session database switches (`USE …`) are rejected.
+- **Open SQL connections only.** A saved-but-closed connection is rejected with `Connection is not open`; non-SQL connections are not served.
+- **Bounds.** `maxRows` defaults to 500 (max 5000), serialized rows are capped at 8 MiB, and `timeoutMs` is clamped to the connection timeout and 60 s.
+
+The backend re-checks the manifest permission and the grant on every call (`crates/dbx-core/src/query/plugin_data.rs`); the bridge only adds the consent prompt and a per-session cache. Hosts without a consent surface deny instead of granting.
+
 ### Estimated execution plans
 
 A plugin can read the **estimated** execution plan of a query without touching a database driver, a credential, or a connection string. The host builds the `EXPLAIN` statement with its own `build_explain_sql`, applies the same read-only safety gate DBX uses for its own plan view, and executes it on the connection the plugin names. The plugin receives only the raw plan.
@@ -690,6 +722,25 @@ Plugins normally answer requests, but Host API 1.1 adds one method a plugin back
 - Capability gating: `plugin/initialize` advertises `host.hostApiVersion` (`1.1.0` or later) and `host.features` (containing `host.requestUserInput` when available). Only call the method when it is advertised; an older host reports `1.0.0` and drops the frame.
 - The Rust SDK (`dbx-plugin-sdk`) wraps this: `dbx_plugin_sdk::host_client()`, `HostClient::supports("host/requestUserInput")`, and `HostClient::request_user_input(&UserInputPrompt::secret("Verification code"))`.
 
+## Tools for the built-in AI assistant
+
+A backend can expose tools to the built-in DBX AI agent through the MCP-shaped sidecar methods `mcp/tools` and `mcp/call` — the same methods DBX's MCP bridge uses:
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"mcp/tools","params":{"connectionId":"<open connection id>"}}
+{"jsonrpc":"2.0","id":8,"method":"mcp/call","params":{"tool":"orders_lag","arguments":{"group":"billing"},"lifecycle":{"provider":{},"connection":{},"runtime":{}}}}
+```
+
+`mcp/tools` returns `{ "tools": [{ "name", "description", "inputSchema", "annotations"? }] }`; `mcp/call` returns an MCP `CallToolResult` (`{ "content": [{ "type": "text", "text": "…" }], "isError": false }`). `lifecycle` is the open connection's `connection/connect` payload, with secrets resolved by the host and the runtime endpoint after transport layers.
+
+Host rules (`crates/dbx-core/src/ai/plugin_tools.rs`):
+
+- Tools are offered only for plugins the user enabled in Plugin Center → Installed → Built-in AI tools, only in Agent mode with API model providers, and only for plugin connections that are currently open.
+- The host binds the connection: `connectionId` / `connectionName` are removed from the model-facing schema, and the bound `connectionId` is injected into the forwarded arguments when the plugin schema declares it. With several open connections the model chooses through an added `dbx_connection` argument.
+- A tool runs without asking only when its entry sets `annotations.readOnlyHint: true`. Every other call pauses the run behind an inline approval that shows the exact forwarded arguments; unanswered approvals are denied after five minutes (`crates/dbx-core/src/ai/tool_approval.rs`). The hint is trusted because the plugin's native backend is already trusted code; the approval protects against model mistakes and prompt injection, not against a hostile plugin.
+- Names are exposed as `<prefix>__<tool>` (`io.dbx.ssh` → `ssh__…`). Schemas are reduced to a provider-portable subset (`type`, `description`, `properties`, `required`, `items`, string `enum`, numeric/length/item bounds); argument names must match `[A-Za-z_][A-Za-z0-9_]{0,63}`.
+- Discovery times out after 8 s per connection, calls after 120 s, and results are compacted before reaching the model.
+
 ## Backend protocol
 
 The backend is a persistent child process with stdin/stdout reserved for the DBX protocol. Diagnostics must go to stderr.
@@ -772,7 +823,8 @@ Sidecars are shared per plugin process, not spawned per tab. Plugins own their i
 - **UI isolation:** sandboxed iframe, restrictive CSP, bounded bridge payloads, safe asset paths, plugin identity binding.
 - **Secret persistence:** plugin secrets are removed from connection JSON and stored through DBX's secret-store path. Ordinary cloud-sync snapshots always contain redacted placeholders. Secrets enter sync data only inside the encrypted payload when the user has configured a sync passphrase; without one, plugin secrets remain local and are not synchronized.
 - **Native backend trust:** a native sidecar runs with the current OS user's privileges. A signature identifies the repository that approved and published the package; it is not an OS sandbox or proof that the author is harmless. Install only plugins whose backend code you trust.
-- **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX. `host.plans:read` grants reading host-generated estimated execution plans only; it never grants SQL execution, writes, DDL, or actual plans. `host.schema:read` grants only narrow metadata for a table on an already-open host connection; it never grants arbitrary SQL, writes, or reconnects. `host.storage` confines the workbench UI to a small JSON store inside its own `plugin-data/<id>` directory; it grants no other filesystem reach. `host.ai` lets a workbench open a built-in AI conversation seeded with a snapshot the plugin supplies; the plugin gets no model output, no model configuration, and no SQL execution out of it.
+- **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX. `host.plans:read` grants reading host-generated estimated execution plans only; it never grants SQL execution, writes, DDL, or actual plans. `host.schema:read` grants only narrow metadata for a table on an already-open host connection; it never grants arbitrary SQL, writes, or reconnects. `host.storage` confines the workbench UI to a small JSON store inside its own `plugin-data/<id>` directory; it grants no other filesystem reach. `host.ai` lets a workbench open a built-in AI conversation seeded with a snapshot the plugin supplies; the plugin gets no model output, no model configuration, and no SQL execution out of it. `host.data:read` grants single read-only statements only on connections the user consented to, per plugin and connection, revocable in Plugin Center; it never grants writes, DDL, locking reads, database switches, or reconnects.
+- **AI tool exposure:** plugin MCP tools reach the built-in AI agent only after the user enables the plugin for it, only on open connections, and — unless declared read-only — only after a per-call approval.
 
 Custom repository public keys can be added or removed in Plugin Center. Obtain them through a channel independent from the downloaded package.
 

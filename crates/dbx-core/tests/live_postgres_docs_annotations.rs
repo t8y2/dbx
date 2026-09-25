@@ -7,7 +7,6 @@
 use dbx_core::connection::AppState;
 use dbx_core::docs::{NoteSource, SnapshotWarning};
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-use dbx_core::storage::Storage;
 
 fn live_postgres_config(
     id: &str,
@@ -130,7 +129,7 @@ async fn annotations_reach_the_generated_dbml() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-postgres-docs-annotations-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config.clone());
 

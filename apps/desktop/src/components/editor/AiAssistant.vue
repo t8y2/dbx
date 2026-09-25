@@ -66,8 +66,8 @@ import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useUserSkillStore } from "@/stores/userSkillStore";
 import { buildSelectedSkillChips, capSkillsToCharLimit, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
 import { ACTIVE_SKILLS_TOTAL_MAX, type ReadUserSkill, type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillRootSettings } from "@/types/userSkills";
-import { connectionIconType } from "@/lib/connection/connectionPresentation";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import { supportsAiAssistantContext } from "@/lib/database/databaseFeatureSupport";
+import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import { useQueryStore } from "@/stores/queryStore";
@@ -154,11 +154,11 @@ import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
 import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
-import { buildAiAgentStepItems, formatToolDurationMs, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
+import { buildAiAgentStepItems, formatAgentToolName, formatToolDurationMs, toolCallStepKey, updateAgentStepApproval, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiStream, aiCancelStream, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
@@ -184,6 +184,7 @@ import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 import { buildAiConversationExport, type AiConversationExportFormat } from "@/lib/export/aiConversationExport";
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
+import AiToolApprovalCard from "@/components/editor/AiToolApprovalCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
 import { buildPluginAiRequest, pluginContextFromMessages, pluginContextText, streamPluginAiConversation, type AiPluginContext, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 
@@ -327,19 +328,6 @@ let defaultModeInitialized = false;
 let initialConversationStateLoaded = false;
 let initialConversationRestored = false;
 let assistantViewMounted = false;
-watch(
-  () => settings.isAiConfigLoaded,
-  (loaded) => {
-    if (loaded && !defaultModeInitialized) {
-      assistantMode.value = settings.defaultAiMode;
-      // Same apply-once rule as the mode: later setting changes must not
-      // disturb an active conversation.
-      activeAction.value = resolveDefaultActionSelection(settings.defaultAiMode);
-      defaultModeInitialized = true;
-    }
-  },
-  { immediate: true },
-);
 const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
@@ -367,6 +355,25 @@ const boundConnectionId = computed(() => conversationBinding.value.connectionId)
 const boundConnection = computed(() => (boundConnectionId.value ? connectionStore.getConfig(boundConnectionId.value) : undefined));
 const boundDatabase = computed(() => conversationBinding.value.database);
 const boundSchema = computed(() => conversationBinding.value.schema);
+
+// `immediate` runs this during setup whenever the AI config finished loading
+// before the panel mounted (the usual case: the app loads it at startup), and
+// `resolveDefaultActionSelection` reads `boundConnection`. It must therefore
+// stay below the binding computeds, or setup throws a TDZ ReferenceError and
+// the panel never mounts.
+watch(
+  () => settings.isAiConfigLoaded,
+  (loaded) => {
+    if (loaded && !defaultModeInitialized) {
+      assistantMode.value = settings.defaultAiMode;
+      // Same apply-once rule as the mode: later setting changes must not
+      // disturb an active conversation.
+      activeAction.value = resolveDefaultActionSelection(settings.defaultAiMode);
+      defaultModeInitialized = true;
+    }
+  },
+  { immediate: true },
+);
 
 /**
  * Binding the visible conversation's *active run* is executing against.
@@ -1774,9 +1781,11 @@ watch(
 );
 watch([dbSelectOptions, selectedNamespace], syncSelectedDatabases, { immediate: true });
 
+const showAiDatabaseSelector = computed(() => !!boundConnection.value && supportsAiAssistantContext(boundConnection.value.db_type));
+
 const showAiSchemaSelector = computed(() => {
   const connection = boundConnection.value;
-  return !!connection && connection.db_type !== "dameng" && aiSchemaSelectionSupported(connection);
+  return showAiDatabaseSelector.value && !!connection && connection.db_type !== "dameng" && aiSchemaSelectionSupported(connection);
 });
 
 const aiSchemaDatabaseKey = computed(() => {
@@ -1798,7 +1807,7 @@ async function loadAiSchemas() {
 }
 
 async function loadDatabases(connection = boundConnection.value): Promise<string[]> {
-  if (!connection) return [];
+  if (!connection || !supportsAiAssistantContext(connection.db_type)) return [];
   if (connection.db_type !== "dameng") {
     await loadDatabaseOptions(connection.id);
     return databaseOptions.value[connection.id] || [];
@@ -2097,6 +2106,21 @@ function parseExplainFromData(explainData: unknown, dbType: string): ParsedExpla
   }
 }
 
+/** Sends the user's answer for a pending plugin tool approval back to the run that asked. */
+async function resolveToolApproval(step: AiAgentStepItem, approved: boolean) {
+  const approval = step.approval;
+  if (!approval || approval.status !== "pending") return;
+  approval.status = "submitting";
+  try {
+    // The final status arrives with `tool_approval_resolved`; `false` means
+    // the run stopped waiting (timed out, cancelled, or app restarted).
+    if (!(await resolveAiToolApproval(approval.sessionId, approval.approvalId, approved))) approval.status = "expired";
+  } catch (error) {
+    approval.status = "pending";
+    toast(t("ai.toolApproval.answerFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
 function agentEventToStep(event: AgentEvent, index: number, now: number): AiAgentStepItem | undefined {
   if (event.type === "context_compacted") {
     return {
@@ -2337,7 +2361,7 @@ function mentionTargetDatabase(): string {
 async function loadMentionCandidates(query: string) {
   const connection = boundConnection.value;
   const mentionDatabase = mentionTargetDatabase();
-  if (pluginContext.value || !connection || !boundConnectionId.value || !mentionDatabase) return;
+  if (pluginContext.value || !connection || !supportsAiAssistantContext(connection.db_type) || !boundConnectionId.value || !mentionDatabase) return;
 
   const key = mentionCacheKey(boundConnectionId.value, mentionDatabase, query);
   if (mentionCache.value[key]) {
@@ -3685,6 +3709,28 @@ async function send() {
           if (!msg.agentSteps) msg.agentSteps = [];
           const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
           if (step) upsertAgentStep(msg.agentSteps, step);
+        }
+      }
+      // A plugin tool call waits for (or got) the user's approval: keep the
+      // state on the tool card so the answer buttons live next to the call.
+      if (event.type === "tool_approval_required" || event.type === "tool_approval_resolved") {
+        const msg = runMessages[assistantIdx];
+        if (msg?.agentSteps) {
+          const key = toolCallStepKey(event.tool_call_id, agentEvents.length - 1, "tool_call_start");
+          if (event.type === "tool_approval_required") {
+            updateAgentStepApproval(msg.agentSteps, key, () => ({
+              approvalId: event.approval_id,
+              sessionId,
+              pluginName: event.plugin_name,
+              pluginTool: event.plugin_tool,
+              connectionName: event.connection_name,
+              args: event.args ?? {},
+              expiresAtMs: Date.now() + event.timeout_secs * 1000,
+              status: "pending",
+            }));
+          } else {
+            updateAgentStepApproval(msg.agentSteps, key, (approval) => (approval && approval.approvalId === event.approval_id ? { ...approval, status: event.outcome } : approval));
+          }
         }
       }
       if (runIsVisible()) scrollToBottom();
@@ -5524,16 +5570,17 @@ async function openExternalUrl(url: string) {
                       <Loader2 v-if="step.tone === 'active' && step.toolName" class="h-3 w-3 shrink-0 animate-spin" />
                       <component :is="agentStepIcon(step.tone)" v-else class="h-3 w-3 shrink-0" />
                       <span class="font-medium">{{ t(step.labelKey) }}</span>
-                      <span v-if="step.toolName" class="text-muted-foreground">: {{ step.toolName }}</span>
+                      <span v-if="step.toolName" class="text-muted-foreground">: {{ formatAgentToolName(step.toolName) }}</span>
                       <template v-if="step.tone === 'active' && step.toolName">
                         <span class="ml-auto flex shrink-0 items-center gap-1">
                           <Loader2 class="h-3 w-3 animate-spin" />
-                          <span>{{ t("ai.agentSteps.executing") }}</span>
+                          <span>{{ step.approval?.status === "pending" || step.approval?.status === "submitting" ? t("ai.toolApproval.waiting") : t("ai.agentSteps.executing") }}</span>
                         </span>
                       </template>
                       <span v-else-if="step.durationMs !== undefined" class="ml-auto shrink-0 tabular-nums" :class="step.tone === 'danger' ? 'text-red-600 dark:text-red-400' : 'text-chart-2'">{{ formatToolDurationMs(step.durationMs) }}</span>
                       <ChevronRight v-if="step.toolResult || step.toolArgs?.sql" class="h-3 w-3 shrink-0 transition-transform duration-150" :class="[{ 'rotate-90': expandedSteps.has(step.key) }, !agentStepHasTail(step) ? 'ml-auto' : '']" />
                     </button>
+                    <AiToolApprovalCard v-if="step.approval" :approval="step.approval" @resolve="resolveToolApproval(step, $event)" />
                     <div v-if="expandedSteps.has(step.key)" class="border-t border-current/10 px-2 pb-2 pt-1">
                       <div v-if="step.toolArgs?.sql" class="mb-1 rounded bg-background/50 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap">{{ step.toolArgs.sql }}</div>
                       <Button v-if="step.toolName === 'explain_query' && step.toolArgs?.sql" size="sm" variant="outline" class="mb-1 h-6 gap-1 text-[10px]" @click="emit('openExplainPlan', step.toolArgs.sql as string, conversationBinding)">
@@ -5719,7 +5766,7 @@ async function openExternalUrl(url: string) {
               <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-all p-2 text-[11px]">{{ pluginContextText(pluginContext) }}</pre>
             </details>
             <template v-else-if="connectionStore.connections.length">
-              <DatabaseIcon v-if="boundConnection" :db-type="connectionIconType(boundConnection)" class="h-3 w-3 shrink-0" />
+              <ConnectionIcon v-if="boundConnection" :connection="boundConnection" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
               <ConnectionTreeSelect
                 :model-value="boundConnectionId"
@@ -5733,7 +5780,7 @@ async function openExternalUrl(url: string) {
                 list-class="w-72 max-w-[calc(100vw-2rem)]"
                 @update:model-value="(v) => changeConnection(v)"
               />
-              <template v-if="boundConnection">
+              <template v-if="boundConnection && showAiDatabaseSelector">
                 <Database class="h-3 w-3 shrink-0 text-foreground/40" />
                 <Popover
                   @update:open="

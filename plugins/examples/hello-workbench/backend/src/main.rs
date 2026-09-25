@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 #[derive(Default)]
 struct HelloPlugin {
     connections: Mutex<HashMap<String, String>>,
+    /// Greetings changed through the `hello_set_greeting` AI tool, per connection.
+    greetings: Mutex<HashMap<String, String>>,
 }
 
 impl PluginHandler for HelloPlugin {
@@ -154,9 +156,87 @@ impl PluginHandler for HelloPlugin {
                     "etag": format!("hello-{preview_length}")
                 }))
             }
+            // Tools for the DBX AI assistant. DBX lists them with `mcp/tools`
+            // (passing the connection it binds) and runs them with `mcp/call`,
+            // handing over the open connection's lifecycle payload.
+            "mcp/tools" => Ok(mcp_tools()),
+            "mcp/call" => Ok(self.call_tool(&params)),
             _ => Err(PluginError::method_not_found(method)),
         }
     }
+}
+
+fn mcp_tools() -> Value {
+    json!({
+        "tools": [
+            {
+                "name": "hello_greet",
+                "description": "Greet someone through the open Hello connection and report which connection answered.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "connectionId": { "type": "string" },
+                        "name": { "type": "string", "description": "Who to greet", "default": "DBX" }
+                    },
+                    "required": ["connectionId"]
+                },
+                // Read-only tools run without asking the user.
+                "annotations": { "readOnlyHint": true }
+            },
+            {
+                "name": "hello_set_greeting",
+                "description": "Change the greeting the Hello connection uses from now on.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "connectionId": { "type": "string" },
+                        "greeting": { "type": "string", "description": "New greeting, e.g. Hi" }
+                    },
+                    "required": ["connectionId", "greeting"]
+                }
+            }
+        ]
+    })
+}
+
+impl HelloPlugin {
+    /// Tool failures become `isError` results rather than protocol errors, so
+    /// the model can read the problem and adjust.
+    fn call_tool(&self, params: &Value) -> Value {
+        let arguments = params.get("arguments").cloned().unwrap_or_default();
+        let connection = params.pointer("/lifecycle/connection").cloned().unwrap_or_default();
+        let connection_id = connection.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+        let connection_name = connection.get("name").and_then(Value::as_str).unwrap_or("Hello connection").to_string();
+        let Ok(mut greetings) = self.greetings.lock() else {
+            return tool_result("Greeting registry is poisoned", true);
+        };
+        match params.get("tool").and_then(Value::as_str) {
+            Some("hello_greet") => {
+                let greeting = greetings.get(&connection_id).cloned().unwrap_or_else(|| {
+                    connection
+                        .pointer("/external_config/greeting")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Hello")
+                        .to_string()
+                });
+                let name = arguments.get("name").and_then(Value::as_str).unwrap_or("DBX");
+                tool_result(&format!("{greeting}, {name}, from {connection_name}!"), false)
+            }
+            Some("hello_set_greeting") => match arguments.get("greeting").and_then(Value::as_str).map(str::trim) {
+                Some(greeting) if !greeting.is_empty() => {
+                    greetings.insert(connection_id, greeting.to_string());
+                    tool_result(&format!("{connection_name} now greets with \"{greeting}\"."), false)
+                }
+                _ => tool_result("Pass a non-empty greeting", true),
+            },
+            Some(tool) => tool_result(&format!("Unknown tool: {tool}"), true),
+            None => tool_result("Missing tool name", true),
+        }
+    }
+}
+
+fn tool_result(text: &str, is_error: bool) -> Value {
+    json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
 
 fn require_filesystem_provider(params: &Value) -> Result<(), PluginError> {

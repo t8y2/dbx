@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "anyhow",
  "axum",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.96"
+version = "0.4.97"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2158,6 +2158,7 @@ dependencies = [
  "crc",
  "csv",
  "dbx-ai-provider",
+ "dbx-core",
  "dbx-drivers",
  "dbx-formats",
  "dbx-platform",
@@ -2212,6 +2213,172 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-driver-agent"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crc",
+ "dbx-platform",
+ "dbx-sql-core",
+ "dbx-types",
+ "flate2",
+ "futures",
+ "log",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "zip",
+ "zstd",
+]
+
+[[package]]
+name = "dbx-driver-elasticsearch"
+version = "0.1.0"
+dependencies = [
+ "dbx-driver-support",
+ "dbx-types",
+ "percent-encoding",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "dbx-driver-mongodb"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "dbx-driver-support",
+ "dbx-types",
+ "futures",
+ "json5",
+ "log",
+ "mongodb",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "dbx-driver-mysql"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-driver-support",
+ "dbx-sql-core",
+ "dbx-sql-dialect",
+ "dbx-types",
+ "futures",
+ "log",
+ "mysql_async",
+ "mysql_common",
+ "percent-encoding",
+ "rust_decimal",
+ "serde_json",
+ "sqlparser",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "dbx-driver-postgres"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "dbx-driver-support",
+ "dbx-sql-core",
+ "dbx-types",
+ "deadpool-postgres",
+ "futures",
+ "log",
+ "openssl",
+ "percent-encoding",
+ "portpicker",
+ "postgres-openssl",
+ "rustls 0.23.43",
+ "rustls-pemfile 2.2.0",
+ "serde_json",
+ "sqlparser",
+ "tempfile",
+ "tokio",
+ "tokio-openssl",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tokio-util",
+ "uuid",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "dbx-driver-redis"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "dbx-driver-support",
+ "dbx-types",
+ "redis",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dbx-driver-sqlserver"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-driver-support",
+ "dbx-sql-core",
+ "dbx-sql-data",
+ "dbx-types",
+ "futures",
+ "log",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "tiberius",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "dbx-driver-support"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "dbx-platform",
+ "dbx-types",
+ "portpicker",
+ "reqwest 0.12.28",
+ "russh",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "dbx-drivers"
 version = "0.1.0"
 dependencies = [
@@ -2221,8 +2388,18 @@ dependencies = [
  "chrono",
  "crc",
  "csv",
+ "dbx-driver-agent",
+ "dbx-driver-elasticsearch",
+ "dbx-driver-mongodb",
+ "dbx-driver-mysql",
+ "dbx-driver-postgres",
+ "dbx-driver-redis",
+ "dbx-driver-sqlserver",
+ "dbx-driver-support",
  "dbx-platform",
- "dbx-sql",
+ "dbx-sql-core",
+ "dbx-sql-data",
+ "dbx-sql-dialect",
  "dbx-sqlite-worker",
  "dbx-types",
  "deadpool-postgres",
@@ -2231,7 +2408,6 @@ dependencies = [
  "json5",
  "libsqlite3-hotbundle",
  "log",
- "mongodb",
  "mysql_async",
  "mysql_common",
  "nix 0.31.3",
@@ -2240,7 +2416,6 @@ dependencies = [
  "percent-encoding",
  "portpicker",
  "postgres-openssl",
- "redis",
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
@@ -2284,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.96"
+version = "0.4.97"
 dependencies = [
  "async-trait",
  "axum",
@@ -2350,13 +2525,68 @@ dependencies = [
 name = "dbx-sql"
 version = "0.1.0"
 dependencies = [
+ "dbx-sql-core",
+ "dbx-sql-data",
+ "dbx-sql-dialect",
+ "dbx-sql-schema",
+ "dbx-types",
+]
+
+[[package]]
+name = "dbx-sql-core"
+version = "0.1.0"
+dependencies = [
  "chrono",
  "dbx-types",
  "encoding_rs",
+ "log",
+ "regex",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "unicode-ident",
+ "winnow 1.0.4",
+]
+
+[[package]]
+name = "dbx-sql-data"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-sql-core",
+ "dbx-sql-dialect",
+ "dbx-types",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "unicode-width",
+ "utoipa",
+]
+
+[[package]]
+name = "dbx-sql-dialect"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-types",
  "insta",
  "log",
  "notify",
  "percent-encoding",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dbx-sql-schema"
+version = "0.1.0"
+dependencies = [
+ "dbx-sql-core",
+ "dbx-sql-dialect",
+ "dbx-types",
+ "log",
  "rayon",
  "regex",
  "rusqlite",
@@ -2364,12 +2594,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sqlparser",
- "tempfile",
- "tokio",
- "unicode-ident",
- "unicode-width",
- "utoipa",
- "winnow 1.0.4",
 ]
 
 [[package]]
@@ -2396,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -2408,9 +2632,11 @@ dependencies = [
  "dbx-mcp",
  "futures",
  "log",
+ "mime_guess",
  "pbkdf2 0.12.2",
  "redis",
  "reqwest 0.12.28",
+ "rust-embed",
  "rustls 0.23.43",
  "serde",
  "serde_json",
@@ -7652,6 +7878,41 @@ dependencies = [
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "rust-embed"
+version = "8.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9e7760e252aaba7b09f4be00e36476cf585bdb68a53552ac954cdf504ab4bc9"
+dependencies = [
+ "rust-embed-impl",
+ "rust-embed-utils",
+ "walkdir",
+]
+
+[[package]]
+name = "rust-embed-impl"
+version = "8.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bcfc4d6f53af43755f7a723e4b6b8794fcce052a178dd8c6c1dadc5f5343097"
+dependencies = [
+ "mime_guess",
+ "proc-macro2",
+ "quote",
+ "rust-embed-utils",
+ "syn 2.0.119",
+ "walkdir",
+]
+
+[[package]]
+name = "rust-embed-utils"
+version = "8.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42ffa149f6aa81b58a5b3011d01a857c4ed12c7a732d2c51947a4c7c692185f0"
+dependencies = [
+ "sha2 0.11.0",
+ "walkdir",
 ]
 
 [[package]]

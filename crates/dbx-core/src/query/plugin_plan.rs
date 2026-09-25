@@ -533,7 +533,6 @@ pub fn plugin_plan_timeout_secs(timeout_ms: Option<u64>, config: &ConnectionConf
 mod tests {
     use super::*;
     use crate::connection::PoolKind;
-    use crate::storage::Storage;
 
     fn config(db_type: DatabaseType, query_timeout_secs: u64) -> ConnectionConfig {
         serde_json::from_value(serde_json::json!({
@@ -560,7 +559,8 @@ mod tests {
     /// disconnected" situation the plan boundary has to refuse.
     async fn saved_connection_state(configs: &[ConnectionConfig]) -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open storage");
+        let storage =
+            crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.expect("open storage");
         let state = AppState::new_with_plugin_dir(storage, dir.path().join("plugins"));
         {
             let mut stored = state.configs.write().await;

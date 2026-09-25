@@ -125,7 +125,6 @@ mod tests {
     use super::{export_table_data_csv_core, CsvQuoteMode, TableCsvExportOptions};
     use crate::connection::AppState;
     use crate::models::connection::{ConnectionConfig, DatabaseType};
-    use crate::storage::Storage;
 
     fn salesforce_config(id: &str) -> ConnectionConfig {
         let mut config = serde_json::from_value::<ConnectionConfig>(serde_json::json!({
@@ -148,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn salesforce_table_csv_export_is_refused_before_a_file_is_created() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let config = salesforce_config("sfdc-csv");
         state.configs.write().await.insert(config.id.clone(), config);

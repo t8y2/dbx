@@ -933,7 +933,7 @@ mod tests {
 
     async fn create_local_backend() -> LocalBackend {
         let path = temp_db_path("local-backend");
-        let storage = Arc::new(Storage::open(&path).await.unwrap());
+        let storage = Arc::new(crate::persistence::test_storage::open(&path).await.unwrap());
         LocalBackend::new(storage)
     }
 
@@ -1315,7 +1315,7 @@ mod tests {
     #[tokio::test]
     async fn storage_compare_and_swap_new_key() {
         let path = temp_db_path("cas-new-key");
-        let storage = Arc::new(Storage::open(&path).await.unwrap());
+        let storage = Arc::new(crate::persistence::test_storage::open(&path).await.unwrap());
         let success = storage.compare_and_swap_state("cas-new", None, b"data", "text/plain").await.unwrap();
         assert!(success);
         let (data, _) = storage.load_state("cas-new").await.unwrap().unwrap();
@@ -1325,7 +1325,7 @@ mod tests {
     #[tokio::test]
     async fn storage_compare_and_swap_exact_version() {
         let path = temp_db_path("cas-exact");
-        let storage = Arc::new(Storage::open(&path).await.unwrap());
+        let storage = Arc::new(crate::persistence::test_storage::open(&path).await.unwrap());
         storage.save_state("cas-key", b"v1", "text/plain").await.unwrap();
         let version = storage.get_state_version("cas-key").await.unwrap().unwrap();
         assert_eq!(version, 1);
@@ -1339,7 +1339,7 @@ mod tests {
     #[tokio::test]
     async fn storage_compare_and_swap_wrong_version() {
         let path = temp_db_path("cas-wrong-ver");
-        let storage = Arc::new(Storage::open(&path).await.unwrap());
+        let storage = Arc::new(crate::persistence::test_storage::open(&path).await.unwrap());
         storage.save_state("cas-key", b"v1", "text/plain").await.unwrap();
         let success = storage.compare_and_swap_state("cas-key", Some(999), b"v2", "text/plain").await.unwrap();
         assert!(!success);

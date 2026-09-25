@@ -6,13 +6,15 @@ use futures::FutureExt;
 use serde_json::json;
 use tokio::sync::Notify;
 
-use crate::agent_events::{AgentEvent, ToolCall, ToolDefinition, ToolResult};
+use crate::agent_events::{AgentEvent, ToolApprovalOutcome, ToolCall, ToolDefinition, ToolResult};
 use crate::agent_tools;
 use crate::ai::{self, AiCompletionRequest, AiConfig, AiMessage, AiProvider, AiStreamChunk, AiTaskContract};
 use crate::ai_cli_agent::CliAgentCommandSpec;
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
+use crate::plugin_tools::{self, PluginToolSet, PreparedPluginToolCall};
 use crate::token_usage::TokenUsage;
+use crate::tool_approval::{self, ToolApprovalWait};
 
 /// Default number of agent loop turns to prevent infinite loops.
 /// Users can raise the limit in Settings → AI; it is clamped to
@@ -88,6 +90,12 @@ pub struct AgentLoopContext {
     /// Stable per-conversation key forwarded to providers that support prompt
     /// caching (OpenAI Responses API). `None` disables the field entirely.
     pub prompt_cache_key: Option<String>,
+    /// Client AI session id. Plugin tool calls that need the user's approval
+    /// are routed to the client through it; without one they are refused.
+    pub session_id: Option<String>,
+    /// Runtime that owns plugin sidecar sessions. The web server runs each
+    /// agent loop on a runtime of its own, so plugin calls are spawned here.
+    pub host_runtime: Option<tokio::runtime::Handle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,11 +289,21 @@ async fn run_agent_loop_inner(
         .await;
     }
     let mut sql_permissions = agent_ctx.sql_permissions.clone();
-    let tools = if is_agent_mode {
+    let mut tools = if is_agent_mode {
         agent_tools::all_tools(agent_ctx.db_type, sql_permissions.clone())
     } else {
         agent_tools::read_only_tools(agent_ctx.db_type)
     };
+    // Plugin tools join agent runs only; ask mode keeps its database-only
+    // read tools.
+    let plugin_tool_set = if is_agent_mode {
+        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref()).await
+    } else {
+        PluginToolSet::default()
+    };
+    tools.extend(plugin_tool_set.definitions());
+    let plugin_system_prompt = plugin_tool_set.prompt_section().map(|section| format!("{system_prompt}\n\n{section}"));
+    let system_prompt = plugin_system_prompt.as_deref().unwrap_or(system_prompt);
     let task_contract = task_contract.cloned();
     let mut conversation_messages: Vec<AiMessage> = messages.to_vec();
     let mut final_text = String::new();
@@ -542,6 +560,34 @@ async fn run_agent_loop_inner(
             });
         }
 
+        // Plugin tool calls are validated first; a call not declared read-only
+        // runs only after the user approved it. Nothing has executed yet, so a
+        // cancellation here stops the run without side effects.
+        let mut plugin_calls = match gate_plugin_tool_calls(
+            &plugin_tool_set,
+            &collected_tool_calls,
+            agent_ctx,
+            &on_event,
+            cancelled,
+        )
+        .await
+        {
+            Some(plugin_calls) => plugin_calls,
+            None => {
+                for tc in &collected_tool_calls {
+                    on_event(AgentEvent::ToolCallEnd {
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        result: json!({ "content": "Cancelled before the tool ran." }),
+                        is_error: true,
+                    });
+                }
+                final_text = accumulated_text;
+                loop_exit = LoopExit::Cancelled;
+                break;
+            }
+        };
+
         // Execute tool calls: parallel for read tools, sequential for execute_query
         let state2 = Arc::clone(&agent_ctx.state);
         let conn2 = agent_ctx.connection_id.clone();
@@ -552,7 +598,7 @@ async fn run_agent_loop_inner(
 
         // Split by index into parallel and sequential groups using tool metadata
         let tool_parallel_map: std::collections::HashMap<&str, bool> =
-            tools.iter().map(|t| (t.name, t.parallel_ok)).collect();
+            tools.iter().map(|t| (t.name.as_ref(), t.parallel_ok)).collect();
         let (parallel_indices, sequential_indices): (Vec<usize>, Vec<usize>) = (0..collected_tool_calls.len())
             .partition(|&i| *tool_parallel_map.get(collected_tool_calls[i].name.as_str()).unwrap_or(&false));
 
@@ -585,19 +631,26 @@ async fn run_agent_loop_inner(
         let mut sequential_results = Vec::with_capacity(sequential_indices.len());
         for &i in &sequential_indices {
             let tc = make_tc(&collected_tool_calls[i]);
-            let execution_permissions = sequential_tool_permissions(&tc, db_type, &mut sql_permissions);
-            sequential_results.push(
-                agent_tools::execute_tool(
-                    &tc,
-                    &state2,
-                    &conn2,
-                    &db2,
-                    schema2.as_deref(),
-                    &db_type,
-                    execution_permissions,
-                )
-                .await,
-            );
+            let result = match plugin_calls.remove(&i) {
+                Some(Ok(prepared)) => {
+                    plugin_tools::execute_plugin_tool(&state2, agent_ctx.host_runtime.as_ref(), &tc, &prepared).await
+                }
+                Some(Err(not_executed)) => not_executed,
+                None => {
+                    let execution_permissions = sequential_tool_permissions(&tc, db_type, &mut sql_permissions);
+                    agent_tools::execute_tool(
+                        &tc,
+                        &state2,
+                        &conn2,
+                        &db2,
+                        schema2.as_deref(),
+                        &db_type,
+                        execution_permissions,
+                    )
+                    .await
+                }
+            };
+            sequential_results.push(result);
         }
 
         // Merge results back into original order
@@ -1095,7 +1148,7 @@ fn estimate_tool_schema_tokens(tools: &[ToolDefinition]) -> u32 {
         .map(|tool| {
             let schema_tokens =
                 serde_json::to_string(&tool.parameters).map(|schema| estimate_text_tokens(&schema)).unwrap_or_default();
-            estimate_text_tokens(tool.name) + estimate_text_tokens(tool.description) + schema_tokens + 16
+            estimate_text_tokens(&tool.name) + estimate_text_tokens(&tool.description) + schema_tokens + 16
         })
         .sum()
 }
@@ -1288,6 +1341,98 @@ fn write_attempt_response(sql: &str, targets_production: bool) -> WriteAttemptRe
     } else {
         WriteAttemptResponse::ConfirmationRequired { sql }
     }
+}
+
+const PLUGIN_TOOL_DECLINED: &str =
+    "The user declined this tool call, so it did not run. Do not retry it; continue without it.";
+const PLUGIN_TOOL_APPROVAL_TIMED_OUT: &str =
+    "Nobody approved this tool call in time, so it did not run. Do not retry it; tell the user what you intended to run.";
+const PLUGIN_TOOL_APPROVAL_UNAVAILABLE: &str =
+    "This tool may change state and needs the user's approval, which this session cannot ask for. It did not run.";
+
+/// Per-call outcome of the plugin tool gate: run the prepared call, or reply
+/// with the ready result explaining why it did not run.
+type PluginCallGate = std::collections::HashMap<usize, Result<PreparedPluginToolCall, ToolResult>>;
+
+/// Validates this turn's plugin tool calls and asks the user to approve every
+/// call that is not declared read-only, one at a time in call order. Returns
+/// `None` when the run was cancelled while an approval was pending.
+async fn gate_plugin_tool_calls<F>(
+    plugin_tool_set: &PluginToolSet,
+    tool_calls: &[ToolCall],
+    agent_ctx: &AgentLoopContext,
+    on_event: &F,
+    cancelled: &Notify,
+) -> Option<PluginCallGate>
+where
+    F: Fn(AgentEvent) + Sync,
+{
+    let mut gate = PluginCallGate::new();
+    if plugin_tool_set.is_empty() {
+        return Some(gate);
+    }
+    for (index, tool_call) in tool_calls.iter().enumerate() {
+        let Some(prepared) = plugin_tool_set.prepare_call(tool_call) else {
+            continue;
+        };
+        let outcome = match prepared {
+            Err(error) => Err(plugin_tools::not_executed_result(tool_call, error)),
+            Ok(prepared) if prepared.read_only => Ok(prepared),
+            Ok(prepared) => match agent_ctx.session_id.as_deref() {
+                None => Err(plugin_tools::not_executed_result(tool_call, PLUGIN_TOOL_APPROVAL_UNAVAILABLE)),
+                Some(session_id) => match request_tool_approval(session_id, tool_call, &prepared, on_event, cancelled)
+                    .await
+                {
+                    ToolApprovalWait::Approved => Ok(prepared),
+                    ToolApprovalWait::Denied => Err(plugin_tools::not_executed_result(tool_call, PLUGIN_TOOL_DECLINED)),
+                    ToolApprovalWait::TimedOut => {
+                        Err(plugin_tools::not_executed_result(tool_call, PLUGIN_TOOL_APPROVAL_TIMED_OUT))
+                    }
+                    ToolApprovalWait::Cancelled => return None,
+                },
+            },
+        };
+        gate.insert(index, outcome);
+    }
+    Some(gate)
+}
+
+async fn request_tool_approval<F>(
+    session_id: &str,
+    tool_call: &ToolCall,
+    prepared: &PreparedPluginToolCall,
+    on_event: &F,
+    cancelled: &Notify,
+) -> ToolApprovalWait
+where
+    F: Fn(AgentEvent) + Sync,
+{
+    let approval = tool_approval::register_tool_approval(session_id);
+    let approval_id = approval.id().to_string();
+    on_event(AgentEvent::ToolApprovalRequired {
+        approval_id: approval_id.clone(),
+        tool_call_id: tool_call.id.clone(),
+        tool_name: tool_call.name.clone(),
+        plugin_id: prepared.plugin_id.clone(),
+        plugin_name: prepared.plugin_name.clone(),
+        plugin_tool: prepared.plugin_tool.clone(),
+        connection_id: prepared.connection_id.clone(),
+        connection_name: prepared.connection_name.clone(),
+        args: prepared.arguments.clone(),
+        timeout_secs: tool_approval::TOOL_APPROVAL_TIMEOUT.as_secs(),
+    });
+    let wait = approval.wait(tool_approval::TOOL_APPROVAL_TIMEOUT, cancelled).await;
+    on_event(AgentEvent::ToolApprovalResolved {
+        approval_id,
+        tool_call_id: tool_call.id.clone(),
+        outcome: match wait {
+            ToolApprovalWait::Approved => ToolApprovalOutcome::Approved,
+            ToolApprovalWait::Denied => ToolApprovalOutcome::Denied,
+            ToolApprovalWait::TimedOut => ToolApprovalOutcome::TimedOut,
+            ToolApprovalWait::Cancelled => ToolApprovalOutcome::Cancelled,
+        },
+    });
+    wait
 }
 
 fn sequential_tool_permissions(
@@ -1516,6 +1661,113 @@ fn summarize_message_content(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plugin_tool_set() -> PluginToolSet {
+        PluginToolSet::from_listings_for_tests(
+            &[("io.dbx.kafka", "Kafka Studio")],
+            vec![(
+                plugin_tools::OpenPluginConnection {
+                    connection_id: "k1".to_string(),
+                    connection_name: "prod-kafka".to_string(),
+                    plugin_id: "io.dbx.kafka".to_string(),
+                },
+                json!({ "tools": [
+                    { "name": "kafka_topics_list", "annotations": { "readOnlyHint": true }, "inputSchema": { "type": "object", "properties": {} } },
+                    { "name": "kafka_topics_delete", "inputSchema": { "type": "object", "properties": { "topics": { "type": "array", "items": { "type": "string" } } } } }
+                ] }),
+            )],
+        )
+    }
+
+    fn plugin_tool_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: json!({ "topics": ["orders"] }),
+            provider_payload: None,
+        }
+    }
+
+    async fn gate_context(session_id: Option<&str>) -> (tempfile::TempDir, AgentLoopContext) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let ctx = AgentLoopContext {
+            state: Arc::new(AppState::new(storage)),
+            connection_id: "db".to_string(),
+            database: String::new(),
+            selected_databases: Vec::new(),
+            schema: None,
+            db_type: DatabaseType::Postgres,
+            cli_mcp_server_command: None,
+            sql_permissions: agent_tools::AgentSqlPermissions::default(),
+            max_agent_turns: DEFAULT_MAX_AGENT_TURNS,
+            prompt_cache_key: None,
+            session_id: session_id.map(str::to_string),
+            host_runtime: None,
+        };
+        (temp_dir, ctx)
+    }
+
+    #[tokio::test]
+    async fn plugin_tool_gate_runs_read_only_calls_and_asks_before_the_rest() {
+        let (_dir, ctx) = gate_context(Some("session-gate")).await;
+        let set = plugin_tool_set();
+        let calls = vec![
+            plugin_tool_call("c1", "kafka__kafka_topics_list"),
+            plugin_tool_call("c2", "kafka__kafka_topics_delete"),
+            plugin_tool_call("c3", "list_tables"),
+        ];
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        // The "user" approves as soon as the question appears.
+        let on_event = move |event: AgentEvent| {
+            if let AgentEvent::ToolApprovalRequired { approval_id, .. } = &event {
+                assert!(tool_approval::resolve_tool_approval("session-gate", approval_id, true));
+            }
+            recorded.lock().unwrap().push(event);
+        };
+        let gate = gate_plugin_tool_calls(&set, &calls, &ctx, &on_event, &Notify::new()).await.unwrap();
+
+        assert!(gate[&0].as_ref().is_ok_and(|prepared| prepared.read_only));
+        let approved = gate[&1].as_ref().unwrap();
+        assert_eq!(approved.connection_id, "k1");
+        assert_eq!(approved.arguments, json!({ "topics": ["orders"] }));
+        assert!(!gate.contains_key(&2), "database tools bypass the plugin gate");
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2, "only the non-read-only call asks: {events:?}");
+        assert!(
+            matches!(&events[0], AgentEvent::ToolApprovalRequired { tool_call_id, plugin_tool, .. } if tool_call_id == "c2" && plugin_tool == "kafka_topics_delete")
+        );
+        assert!(matches!(&events[1], AgentEvent::ToolApprovalResolved { outcome: ToolApprovalOutcome::Approved, .. }));
+    }
+
+    #[tokio::test]
+    async fn plugin_tool_gate_refuses_declined_and_unaskable_calls_and_stops_on_cancel() {
+        let set = plugin_tool_set();
+        let calls = vec![plugin_tool_call("c1", "kafka__kafka_topics_delete")];
+
+        let (_dir, ctx) = gate_context(Some("session-deny")).await;
+        let deny = |event: AgentEvent| {
+            if let AgentEvent::ToolApprovalRequired { approval_id, .. } = &event {
+                tool_approval::resolve_tool_approval("session-deny", approval_id, false);
+            }
+        };
+        let gate = gate_plugin_tool_calls(&set, &calls, &ctx, &deny, &Notify::new()).await.unwrap();
+        let declined = gate[&0].as_ref().unwrap_err();
+        assert!(declined.is_error);
+        assert_eq!(declined.content, PLUGIN_TOOL_DECLINED);
+
+        // No client session: nobody can be asked, so the call never runs.
+        let (_dir, headless) = gate_context(None).await;
+        let gate = gate_plugin_tool_calls(&set, &calls, &headless, &|_event| {}, &Notify::new()).await.unwrap();
+        assert_eq!(gate[&0].as_ref().unwrap_err().content, PLUGIN_TOOL_APPROVAL_UNAVAILABLE);
+
+        let (_dir, ctx) = gate_context(Some("session-cancel")).await;
+        let cancelled = Notify::new();
+        cancelled.notify_one();
+        assert!(gate_plugin_tool_calls(&set, &calls, &ctx, &|_event| {}, &cancelled).await.is_none());
+    }
 
     #[test]
     fn compaction_prompt_preserves_attachment_trust_boundary() {

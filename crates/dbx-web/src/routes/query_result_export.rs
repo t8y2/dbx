@@ -182,7 +182,6 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use dbx_core::connection::AppState;
-    use dbx_core::storage::Storage;
 
     use crate::state::WebExportFile;
 
@@ -190,7 +189,7 @@ mod tests {
     async fn query_result_export_download_uses_the_requested_web_filename() {
         let dir = std::env::temp_dir().join(format!("dbx-web-query-export-download-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         let file_path = dir.join("query-export.csv");

@@ -1,7 +1,7 @@
 /**
  * Read/write classification for Apache Solr REST requests.
  *
- * Mirrors `classify_solr_query_risk` in `crates/dbx-sql/src/query_execution_sql.rs`
+ * Mirrors `classify_solr_query_risk` in `crates/dbx-sql-core/src/query_execution_sql.rs`
  * so the desktop guards (read-only unlock, production safety) agree with the
  * backend read-only gate instead of treating every request as unrecognized.
  *

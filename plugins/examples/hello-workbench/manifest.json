@@ -6,14 +6,14 @@
   "icon": "assets/plugin.svg",
   "version": "1.0.0",
   "publisher": "dbx",
-  "description": "A complete DBX plugin example with a native sidecar, events, workbench UI, connection provider, and virtual filesystem provider.",
+  "description": "A complete DBX plugin example with a native sidecar, events, workbench UI, connection provider, virtual filesystem provider, AI tools, and a result view that reads data through host.data:read.",
   "source": "https://github.com/t8y2/dbx",
   "homepage": "https://github.com/t8y2/dbx/tree/main/plugins/examples/hello-workbench",
   "engines": {
     "dbx": ">=0.5.68",
     "host_api": "^1.0"
   },
-  "permissions": ["host.events", "host.filesystem"],
+  "permissions": ["host.events", "host.filesystem", "host.data:read"],
   "entrypoints": {
     "backend": {
       "executable": "bin/dbx-example-hello"
@@ -98,12 +98,18 @@
       "schemes": ["hello"],
       "root_uri": "hello:/",
       "capabilities": ["read"]
+    },
+    {
+      "type": "result-view",
+      "id": "dbx.example.hello.rows",
+      "label": "Hello rows",
+      "description": "Re-runs the current query through host.data:read to show consent-gated plugin data access."
     }
   ],
   "localizations": {
     "zh-CN": {
       "name": "DBX Hello 工作台",
-      "description": "完整的 DBX 插件示例，包含原生 Sidecar、事件、工作台界面、连接提供者和虚拟文件系统提供者。",
+      "description": "完整的 DBX 插件示例，包含原生 Sidecar、事件、工作台界面、连接提供者、虚拟文件系统提供者、AI 工具，以及通过 host.data:read 读取数据的结果视图。",
       "contributions": {
         "dbx.example.hello.connection": {
           "label": "Hello 连接",
@@ -120,12 +126,13 @@
           }
         },
         "dbx.example.hello.main": { "label": "Hello 工作台", "description": "托管在普通 DBX 工作台标签页中的沙箱插件界面。" },
-        "dbx.example.hello.files": { "label": "Hello 虚拟文件", "description": "最小化的只读文件系统提供者契约示例。" }
+        "dbx.example.hello.files": { "label": "Hello 虚拟文件", "description": "最小化的只读文件系统提供者契约示例。" },
+        "dbx.example.hello.rows": { "label": "Hello 结果行", "description": "通过 host.data:read 重新执行当前查询，演示需用户授权的插件数据访问。" }
       }
     },
     "zh-TW": {
       "name": "DBX Hello 工作台",
-      "description": "完整的 DBX 外掛範例，包含原生 Sidecar、事件、工作台介面、連線提供者和虛擬檔案系統提供者。",
+      "description": "完整的 DBX 外掛範例，包含原生 Sidecar、事件、工作台介面、連線提供者、虛擬檔案系統提供者、AI 工具，以及透過 host.data:read 讀取資料的結果檢視。",
       "contributions": {
         "dbx.example.hello.connection": {
           "label": "Hello 連線",
@@ -142,12 +149,13 @@
           }
         },
         "dbx.example.hello.main": { "label": "Hello 工作台", "description": "託管在一般 DBX 工作台分頁中的沙箱外掛介面。" },
-        "dbx.example.hello.files": { "label": "Hello 虛擬檔案", "description": "最小化的唯讀檔案系統提供者契約範例。" }
+        "dbx.example.hello.files": { "label": "Hello 虛擬檔案", "description": "最小化的唯讀檔案系統提供者契約範例。" },
+        "dbx.example.hello.rows": { "label": "Hello 結果列", "description": "透過 host.data:read 重新執行目前查詢，示範需使用者授權的外掛資料存取。" }
       }
     },
     "ja": {
       "name": "DBX Hello ワークベンチ",
-      "description": "ネイティブ Sidecar、イベント、ワークベンチ UI、接続プロバイダー、仮想ファイルシステムプロバイダーを含む完全な DBX プラグイン例です。",
+      "description": "ネイティブ Sidecar、イベント、ワークベンチ UI、接続プロバイダー、仮想ファイルシステムプロバイダー、AI ツール、host.data:read でデータを読む結果ビューを含む完全な DBX プラグイン例です。",
       "contributions": {
         "dbx.example.hello.connection": {
           "label": "Hello 接続",
@@ -164,12 +172,13 @@
           }
         },
         "dbx.example.hello.main": { "label": "Hello ワークベンチ", "description": "通常の DBX ワークベンチタブ内でホストされるサンドボックス化されたプラグイン UI です。" },
-        "dbx.example.hello.files": { "label": "Hello 仮想ファイル", "description": "最小限の読み取り専用ファイルシステムプロバイダー契約例です。" }
+        "dbx.example.hello.files": { "label": "Hello 仮想ファイル", "description": "最小限の読み取り専用ファイルシステムプロバイダー契約例です。" },
+        "dbx.example.hello.rows": { "label": "Hello 結果行", "description": "host.data:read で現在のクエリを再実行し、ユーザーの許可が必要なプラグインのデータアクセスを示します。" }
       }
     },
     "es": {
       "name": "Área de trabajo Hello de DBX",
-      "description": "Ejemplo completo de plugin de DBX con sidecar nativo, eventos, interfaz de trabajo, proveedor de conexión y proveedor de sistema de archivos virtual.",
+      "description": "Ejemplo completo de plugin de DBX con sidecar nativo, eventos, interfaz de trabajo, proveedor de conexión, proveedor de sistema de archivos virtual, herramientas de IA y una vista de resultados que lee datos con host.data:read.",
       "contributions": {
         "dbx.example.hello.connection": {
           "label": "Conexión Hello",
@@ -186,12 +195,13 @@
           }
         },
         "dbx.example.hello.main": { "label": "Área de trabajo Hello", "description": "Interfaz de plugin aislada alojada en una pestaña de trabajo normal de DBX." },
-        "dbx.example.hello.files": { "label": "Archivos virtuales Hello", "description": "Ejemplo mínimo de contrato de proveedor de sistema de archivos de solo lectura." }
+        "dbx.example.hello.files": { "label": "Archivos virtuales Hello", "description": "Ejemplo mínimo de contrato de proveedor de sistema de archivos de solo lectura." },
+        "dbx.example.hello.rows": { "label": "Filas de Hello", "description": "Vuelve a ejecutar la consulta actual con host.data:read para mostrar el acceso a datos del plugin con consentimiento." }
       }
     },
     "it": {
       "name": "Area di lavoro Hello di DBX",
-      "description": "Esempio completo di plugin DBX con sidecar nativo, eventi, interfaccia di lavoro, provider di connessione e provider di file system virtuale.",
+      "description": "Esempio completo di plugin DBX con sidecar nativo, eventi, interfaccia di lavoro, provider di connessione, provider di file system virtuale, strumenti IA e una vista risultati che legge i dati tramite host.data:read.",
       "contributions": {
         "dbx.example.hello.connection": {
           "label": "Connessione Hello",
@@ -208,12 +218,13 @@
           }
         },
         "dbx.example.hello.main": { "label": "Area di lavoro Hello", "description": "Interfaccia plugin in sandbox ospitata in una normale scheda di lavoro DBX." },
-        "dbx.example.hello.files": { "label": "File virtuali Hello", "description": "Esempio minimo di contratto provider di file system in sola lettura." }
+        "dbx.example.hello.files": { "label": "File virtuali Hello", "description": "Esempio minimo di contratto provider di file system in sola lettura." },
+        "dbx.example.hello.rows": { "label": "Righe Hello", "description": "Riesegue la query corrente tramite host.data:read per mostrare l'accesso ai dati del plugin soggetto a consenso." }
       }
     },
     "pt-BR": {
       "name": "Área de trabalho Hello do DBX",
-      "description": "Exemplo completo de plugin do DBX com sidecar nativo, eventos, interface de trabalho, provedor de conexão e provedor de sistema de arquivos virtual.",
+      "description": "Exemplo completo de plugin do DBX com sidecar nativo, eventos, interface de trabalho, provedor de conexão, provedor de sistema de arquivos virtual, ferramentas de IA e uma visualização de resultados que lê dados via host.data:read.",
       "contributions": {
         "dbx.example.hello.connection": {
           "label": "Conexão Hello",
@@ -230,7 +241,8 @@
           }
         },
         "dbx.example.hello.main": { "label": "Área de trabalho Hello", "description": "Interface de plugin em sandbox hospedada em uma aba normal de trabalho do DBX." },
-        "dbx.example.hello.files": { "label": "Arquivos virtuais Hello", "description": "Exemplo mínimo de contrato de provedor de sistema de arquivos somente leitura." }
+        "dbx.example.hello.files": { "label": "Arquivos virtuais Hello", "description": "Exemplo mínimo de contrato de provedor de sistema de arquivos somente leitura." },
+        "dbx.example.hello.rows": { "label": "Linhas Hello", "description": "Executa novamente a consulta atual via host.data:read para mostrar o acesso a dados do plugin com consentimento." }
       }
     }
   }

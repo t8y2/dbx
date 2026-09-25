@@ -2665,7 +2665,7 @@ mod tests {
     #[tokio::test]
     async fn manual_file_missing_session_never_falls_back_to_ordinary_execution() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = crate::storage::Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let request = SqlFileRequest {
             txn_session_id: Some("expired-session".to_string()),
@@ -2945,7 +2945,7 @@ mod tests {
     async fn file_progress_executor_preserves_success_cancellation_and_failure() {
         let directory = std::env::temp_dir().join(format!("dbx-file-progress-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&directory).await.unwrap();
-        let storage = crate::storage::Storage::open(&directory.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let comments = "-- no database operation\n".repeat(40_000).into_bytes();
         for (bytes, cancel, terminal) in [
@@ -3348,7 +3348,7 @@ mod tests {
     async fn streaming_gaussdb_on_error_stop_overrides_continue_on_error_at_script_position() {
         let dir = std::env::temp_dir().join(format!("dbx-sql-file-stop-on-error-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = crate::connection::AppState::new(storage);
         let config: crate::models::connection::ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "gauss-stream",

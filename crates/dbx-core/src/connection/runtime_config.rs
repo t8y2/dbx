@@ -131,7 +131,7 @@ mod tests {
 
     async fn app_state() -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let storage = crate::storage::Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         (AppState::new(storage), dir)
     }
 

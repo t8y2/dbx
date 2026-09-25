@@ -3137,15 +3137,15 @@ mod tests {
         mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_current_schema_from_query_result,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
-        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
-        oracle_object_statistics_user_segments_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
-        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_sql,
-        presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
-        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
+        oracle_current_schema_from_query_result, oracle_object_statistics_dba_segments_sql,
+        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
+        oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_from_query_result,
+        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
+        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
+        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
         table_comments_from_query_result, table_name_filter_matches, tdengine_table_comment_like_pattern,
         tdengine_table_comment_sql, tdengine_table_comments_sql, uses_mongodb_agent_collection_listing,
         visible_schema_filter, ExternalDriverStatisticsDialect, MetadataErrorAction, MysqlTableListSource,
@@ -3164,7 +3164,6 @@ mod tests {
     use crate::plugins::{
         InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
     };
-    use crate::storage::Storage;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -3295,7 +3294,7 @@ mod tests {
     async fn turso_test_state(base_url: &str) -> (AppState, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("dbx-turso-schema-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::Turso);
         config.database = Some("main".to_string());
@@ -3623,7 +3622,7 @@ done
         let session = std::sync::Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
         );
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::Jdbc);
         config.id = "mysql-wrapper".to_string();
@@ -3675,6 +3674,200 @@ done
 
         config.db_type = DatabaseType::Oracle;
         assert!(!is_oracle_external_driver_config(&config));
+    }
+
+    #[test]
+    fn oracle_completion_synonyms_sql_matches_native_agent_semantics() {
+        let sql = oracle_completion_synonyms_sql(
+            "dbx_test",
+            "SYN",
+            Some(&db::CompletionAssistantMatchMode::Prefix),
+            false,
+            20,
+            &["TABLE", "VIEW"],
+        );
+        assert!(sql.contains("FROM all_synonyms s"), "{sql}");
+        assert!(
+            sql.contains("JOIN all_objects o ON o.owner = s.table_owner AND o.object_name = s.table_name"),
+            "{sql}"
+        );
+        assert!(sql.contains("WHERE s.db_link IS NULL AND s.owner = 'DBX_TEST'"), "{sql}");
+        assert!(sql.contains("o.object_type IN ('TABLE', 'VIEW')"), "{sql}");
+        assert!(sql.contains("UPPER(s.synonym_name) LIKE UPPER('SYN%') ESCAPE '\\'"), "{sql}");
+        assert!(sql.contains("ORDER BY s.synonym_name"), "{sql}");
+        assert!(sql.ends_with("WHERE ROWNUM <= 20"), "{sql}");
+
+        // Case sensitive substring search keeps the mask verbatim and still escapes wildcards.
+        let contains = oracle_completion_synonyms_sql(
+            "DBX_TEST",
+            " syn_tbl_ ",
+            Some(&db::CompletionAssistantMatchMode::Contains),
+            true,
+            5,
+            &["TABLE"],
+        );
+        assert!(contains.contains("s.synonym_name LIKE '%syn\\_tbl\\_%' ESCAPE '\\'"), "{contains}");
+        assert!(contains.contains("o.object_type IN ('TABLE')"), "{contains}");
+        assert!(contains.ends_with("WHERE ROWNUM <= 5"), "{contains}");
+
+        // An empty mask must not add a name predicate at all.
+        let unfiltered = oracle_completion_synonyms_sql("DBX_TEST", "   ", None, false, 10, &["TABLE", "VIEW"]);
+        assert!(!unfiltered.contains("LIKE"), "{unfiltered}");
+        assert!(unfiltered.contains("s.owner = 'DBX_TEST'"), "{unfiltered}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oracle_external_driver_completion_includes_synonyms() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-oracle-synonym-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let queries = dir.join("queries.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"listTables"'*)
+      printf '{{"id":%s,"result":[{{"name":"SYN_ORDERS","table_type":"TABLE","comment":null,"parent_schema":null,"parent_name":null}}]}}\n' "$id"
+      ;;
+    *'"method":"executeQuery"'*)
+      printf '%s\n' "$line" >> '{}'
+      case "$line" in
+        *"o.object_type IN ('VIEW')"*)
+          printf '{{"id":%s,"result":{{"columns":["OWNER","NAME"],"rows":[],"affected_rows":0,"execution_time_ms":0}}}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"result":{{"columns":["OWNER","NAME"],"rows":[["DBX_TEST","SYN_ISSUE8534"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+      esac
+      ;;
+  esac
+done
+"#,
+                queries.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "oracle-synonym".to_string();
+        config.database = Some("XE".to_string());
+        config.connection_string = Some("jdbc:oracle:thin:@//127.0.0.1:1521/XE".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    "oracle-synonym".to_string(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: std::sync::Arc::new(config),
+                        session,
+                    },
+                );
+            })
+            .await;
+
+        let response = super::completion_assistant_search_core(
+            &state,
+            db::CompletionAssistantRequest {
+                connection_id: "oracle-synonym".to_string(),
+                database: "XE".to_string(),
+                schema: Some("DBX_TEST".to_string()),
+                object_kinds: vec![db::CompletionAssistantObjectKind::Table, db::CompletionAssistantObjectKind::View],
+                mask: "SYN".to_string(),
+                case_sensitive: false,
+                global_search: false,
+                max_results: Some(50),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: None,
+                parent_name: None,
+                match_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let synonym = response
+            .candidates
+            .iter()
+            .find(|candidate| candidate.name == "SYN_ISSUE8534")
+            .expect("synonym completion missing");
+        assert_eq!(synonym.kind, db::CompletionAssistantCandidateKind::Table);
+        assert_eq!(synonym.data_type.as_deref(), Some("SYNONYM"));
+        assert_eq!(synonym.schema.as_deref(), Some("DBX_TEST"));
+        assert!(response.candidates.iter().any(|candidate| candidate.name == "SYN_ORDERS"));
+        assert!(response.fallback_used);
+
+        // A view-only request must not surface a synonym that points at a table.
+        let view_only = super::completion_assistant_search_core(
+            &state,
+            db::CompletionAssistantRequest {
+                connection_id: "oracle-synonym".to_string(),
+                database: "XE".to_string(),
+                schema: Some("DBX_TEST".to_string()),
+                object_kinds: vec![db::CompletionAssistantObjectKind::View],
+                mask: "SYN".to_string(),
+                case_sensitive: false,
+                global_search: false,
+                max_results: Some(50),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: None,
+                parent_name: None,
+                match_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(view_only.candidates.is_empty(), "{:?}", view_only.candidates);
+
+        let queries = std::fs::read_to_string(&queries).unwrap();
+        assert!(queries.contains("o.object_type IN ('VIEW')"), "{queries}");
+        assert!(queries.contains("FROM all_synonyms s"), "{queries}");
+        assert!(queries.contains("o.object_type IN ('TABLE', 'VIEW')"), "{queries}");
+        assert!(queries.contains("s.owner = 'DBX_TEST'"), "{queries}");
+        assert!(queries.contains("UPPER(s.synonym_name) LIKE UPPER('SYN%')"), "{queries}");
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
@@ -3739,7 +3932,7 @@ done
             let session = std::sync::Arc::new(
                 PluginDriverSession::start_for_test(plugin, "jdbc".into(), PluginRuntimeEnv::default()).await.unwrap(),
             );
-            let state = AppState::new(Storage::open(&dir.join("storage.db")).await.unwrap());
+            let state = AppState::new(crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap());
             let mut config = test_connection_config(DatabaseType::Jdbc);
             config.id = "oracle-ddl".into();
             config.database = Some("demo".into());
@@ -4334,7 +4527,7 @@ done
     async fn metadata_pool_races_retry_once_and_saturation_returns_busy() {
         let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-pool-race-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = crate::connection::AppState::new(storage);
         state.configs.write().await.insert("conn".to_string(), test_connection_config(DatabaseType::Mysql));
 
@@ -4387,7 +4580,7 @@ done
     async fn metadata_pool_snapshot_releases_global_connections_lock() {
         let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-snapshot-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = crate::connection::AppState::new(storage);
         let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
         state
@@ -4429,7 +4622,7 @@ done
     async fn metadata_fail_stop_detaches_base_pool_without_client_session() {
         let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-fail-stop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = crate::connection::AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::Dameng);
         config.id = "conn".to_string();
@@ -4453,7 +4646,7 @@ done
     async fn metadata_timeout_detaches_pool_without_replaying_operation() {
         let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-timeout-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = crate::connection::AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::Dameng);
         config.id = "conn".to_string();
@@ -4482,7 +4675,7 @@ done
     async fn metadata_second_quarantine_detaches_replacement_pool() {
         let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-quarantine-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = crate::connection::AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::Sqlite);
         config.id = "conn".to_string();
@@ -4564,7 +4757,7 @@ for line in sys.stdin:
         runtime.increment_session_count();
         let client =
             crate::db::agent_driver::AgentDriverClient::shared_session(runtime.clone(), "metadata-session".to_string());
-        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = crate::connection::AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::Dameng);
         config.id = "conn".to_string();
@@ -5714,6 +5907,221 @@ for line in sys.stdin:
         assert!(columns[1].is_nullable);
     }
 
+    /// A `jdbc:oracle:` connection answers `getColumns` from the object it was asked for,
+    /// so a synonym (or PUBLIC synonym) comes back empty. The core layer must resolve the
+    /// synonym through the driver, like the native Oracle agent does, instead of handing
+    /// the schema tree an empty column list (issue #8534).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jdbc_oracle_columns_fall_back_to_the_resolved_synonym_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-oracle-columns-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{}'
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"getColumns"'*)
+      case "$line" in
+        *'"table":"ORDERS_ALIAS"'*)
+          printf '{{"id":%s,"result":[]}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"result":[{{"name":"ID","data_type":"NUMBER","is_nullable":false,"column_default":null,"is_primary_key":true,"extra":null,"comment":"direct column","numeric_precision":10,"numeric_scale":0,"character_maximum_length":0}}]}}\n' "$id"
+          ;;
+      esac
+      ;;
+    *'"method":"executeQuery"'*)
+      case "$line" in
+        *'FROM ALL_SYNONYMS s'*)
+          printf '{{"id":%s,"result":{{"columns":["TABLE_OWNER","TABLE_NAME"],"rows":[["SYSTEM","ORDERS"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *"c.OWNER = 'SYSTEM' AND c.TABLE_NAME = 'ORDERS'"*)
+          printf '{{"id":%s,"result":{{"columns":["COLUMN_NAME","DATA_TYPE","NULLABLE","DATA_DEFAULT","DATA_LENGTH","DATA_PRECISION","DATA_SCALE","COLUMN_ID","IS_PK","COMMENTS"],"rows":[["ID","NUMBER","N",null,"22","10","0","1","1","target id"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"result":{{"columns":[],"rows":[],"affected_rows":0,"execution_time_ms":0}}}}\n' "$id"
+          ;;
+      esac
+      ;;
+  esac
+done
+"#,
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let state = AppState::new(crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap());
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "jdbc-oracle-columns".to_string();
+        config.database = Some("demo".to_string());
+        config.connection_string = Some("jdbc:oracle:thin:@127.0.0.1:1521/demo".to_string());
+        config.jdbc_driver_class = Some("oracle.jdbc.OracleDriver".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    config.id.clone(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: std::sync::Arc::new(config),
+                        session,
+                    },
+                );
+            })
+            .await;
+
+        let synonym_columns =
+            super::get_columns_core(&state, "jdbc-oracle-columns", "demo", "DBX_TEST", "ORDERS_ALIAS").await.unwrap();
+        assert_eq!(synonym_columns.len(), 1);
+        assert_eq!(synonym_columns[0].data_type, "NUMBER(10)");
+        assert_eq!(synonym_columns[0].comment.as_deref(), Some("target id"));
+        assert!(synonym_columns[0].is_primary_key);
+
+        // A plain table keeps the driver answer and never runs the Oracle metadata SQL.
+        let table_columns =
+            super::get_columns_core(&state, "jdbc-oracle-columns", "demo", "DBX_TEST", "ORDERS").await.unwrap();
+        assert_eq!(table_columns.len(), 1);
+        assert_eq!(table_columns[0].comment.as_deref(), Some("direct column"));
+
+        let calls = std::fs::read_to_string(&calls).unwrap();
+        assert!(calls.contains("FROM ALL_SYNONYMS s"), "{calls}");
+        assert!(calls.contains("c.OWNER = 'DBX_TEST' AND c.TABLE_NAME = 'ORDERS_ALIAS'"), "{calls}");
+        assert!(calls.contains("c.OWNER = 'SYSTEM' AND c.TABLE_NAME = 'ORDERS'"), "{calls}");
+        // One probe for the alias, one for the resolved target: the plain table must not
+        // reach the Oracle metadata SQL at all.
+        assert_eq!(calls.matches("ALL_TAB_COLUMNS").count(), 2, "{calls}");
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The Oracle synonym fallback is keyed on the JDBC Oracle signals, so another JDBC
+    /// vendor must keep answering from the driver even when it reports no columns.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jdbc_mysql_columns_do_not_use_the_oracle_synonym_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-mysql-columns-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{}'
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"getColumns"'*)
+      printf '{{"id":%s,"result":[]}}\n' "$id"
+      ;;
+    *'"method":"executeQuery"'*)
+      printf '{{"id":%s,"error":{{"message":"unexpected statement"}}}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let state = AppState::new(crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap());
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "jdbc-mysql-columns".to_string();
+        config.database = Some("demo".to_string());
+        config.connection_string = Some("jdbc:mysql://127.0.0.1:3306/demo".to_string());
+        config.jdbc_driver_class = Some("com.mysql.cj.jdbc.Driver".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    config.id.clone(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: std::sync::Arc::new(config),
+                        session,
+                    },
+                );
+            })
+            .await;
+
+        let columns = super::get_columns_core(&state, "jdbc-mysql-columns", "demo", "demo", "ORDERS").await.unwrap();
+        assert!(columns.is_empty());
+        let calls = std::fs::read_to_string(&calls).unwrap();
+        assert!(!calls.contains("ALL_TAB_COLUMNS"), "{calls}");
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn oracle_object_statistics_sql_reads_rows_and_segment_bytes() {
         let sql = oracle_object_statistics_sql("app's");
@@ -6269,6 +6677,36 @@ async fn completion_assistant_fallback_core(
                 return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: true });
             }
         }
+
+        let completion_config = connection_config(state, &request.connection_id).await;
+        if completion_config.as_ref().is_some_and(is_oracle_external_driver_config) && candidates.len() < limit {
+            let remaining = limit - candidates.len();
+            // The agent only keeps synonyms pointing at the object kinds this request asked
+            // for, so a view-only completion must not surface table synonyms.
+            let synonym_targets = oracle_completion_synonym_target_object_types(&kinds);
+            match oracle_external_driver_completion_synonyms(state, request, schema, remaining, &synonym_targets).await {
+                Ok(synonyms) => {
+                    // `ROWNUM` caps the statement at `remaining` rows, so a full page means
+                    // more synonym names were left for the next request.
+                    let truncated = synonyms.len() >= remaining;
+                    candidates.extend(synonyms);
+                    if truncated {
+                        return Ok(db::CompletionAssistantResponse {
+                            candidates,
+                            incomplete: true,
+                            fallback_used: true,
+                        });
+                    }
+                }
+                Err(error) => log::debug!(
+                    "[schema][completion_assistant:oracle-synonyms-failed] connection_id={} database={} schema={} error={}",
+                    request.connection_id,
+                    request.database,
+                    schema,
+                    error
+                ),
+            }
+        }
     }
 
     if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Column)) {
@@ -6296,6 +6734,92 @@ async fn completion_assistant_fallback_core(
     }
 
     Ok(db::CompletionAssistantResponse { candidates, incomplete: false, fallback_used: true })
+}
+
+/// Oracle synonyms for the table-name completion of a generic JDBC connection.
+///
+/// Native Oracle agents answer table-like completion from
+/// `completion_assistant_search_v1`, which resolves `ALL_SYNONYMS` for the requested
+/// owner; a `jdbc:oracle:` connection has no such assistant, so the fallback asks the
+/// driver for the equivalent rows. A driver that rejects the statement (an older plugin,
+/// a read-only account without `ALL_SYNONYMS` visibility, …) must not break completion at
+/// all, so the caller keeps the table candidates and only logs the failure.
+async fn oracle_external_driver_completion_synonyms(
+    state: &AppState,
+    request: &db::CompletionAssistantRequest,
+    schema: &str,
+    limit: usize,
+    target_object_types: &[&str],
+) -> Result<Vec<db::CompletionAssistantCandidate>, String> {
+    if limit == 0 || target_object_types.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(&request.connection_id, Some(&request.database), None).await?;
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some(PoolKind::ExternalDriver { config, session, .. }) = pool_handle.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let sql = oracle_completion_synonyms_sql(
+        schema,
+        &request.mask,
+        request.match_mode.as_ref(),
+        request.case_sensitive,
+        limit,
+        target_object_types,
+    );
+    let result: db::QueryResult = session
+        .invoke_with_timeout(
+            "executeQuery",
+            serde_json::json!({
+                "connection": config.as_ref(),
+                "database": request.database,
+                "schema": schema,
+                "sql": sql,
+                "maxRows": limit
+            }),
+            agent_metadata_timeout(Some(config.as_ref())),
+        )
+        .await?;
+
+    let owner_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("owner"));
+    let name_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("name"));
+    Ok(result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let name = name_index.and_then(|index| row.get(index)).and_then(|value| value.as_str())?.to_string();
+            let owner = owner_index
+                .and_then(|index| row.get(index))
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string);
+            Some(db::CompletionAssistantCandidate {
+                name,
+                kind: db::CompletionAssistantCandidateKind::Table,
+                database: Some(request.database.clone()),
+                schema: owner,
+                parent_schema: None,
+                parent_name: None,
+                comment: None,
+                data_type: Some("SYNONYM".to_string()),
+                signature: None,
+            })
+        })
+        .collect())
+}
+
+/// Object types a synonym may point at for this completion request, mirroring the
+/// native agent's `oracleCompletionTableObjectTypes`.
+fn oracle_completion_synonym_target_object_types(kinds: &[db::CompletionAssistantObjectKind]) -> Vec<&'static str> {
+    let mut object_types = Vec::new();
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Table)) {
+        object_types.push("TABLE");
+    }
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::View)) {
+        object_types.push("VIEW");
+    }
+    object_types
 }
 
 fn completion_table_object_types(kinds: &[db::CompletionAssistantObjectKind]) -> Option<Vec<String>> {
@@ -7206,6 +7730,13 @@ async fn get_columns_core_for_session_inner_with_pool(
                 }
                 let query_oracle_columns_first =
                     should_query_oracle_columns_via_sql_first(&config.db_type, context_session_id);
+                // A `jdbc:oracle:` connection has no Oracle agent, and the JDBC driver only
+                // reports the object it was asked for: synonyms (including PUBLIC ones) come
+                // back without any row, so the schema tree loses the column types, comments
+                // and primary keys of the target table (issue #8534). Resolve the synonym
+                // through the driver before accepting that empty answer.
+                let use_oracle_columns_sql_fallback = !query_oracle_columns_first
+                    && (config.db_type == DatabaseType::Oracle || is_oracle_external_driver_config(config.as_ref()));
                 if query_oracle_columns_first {
                     match external_driver_oracle_columns_via_sql(
                         session.clone(),
@@ -7242,7 +7773,7 @@ async fn get_columns_core_for_session_inner_with_pool(
                         agent_metadata_timeout(Some(config.as_ref())),
                     )
                     .await?;
-                if columns.is_empty() && config.db_type == DatabaseType::Oracle && !query_oracle_columns_first {
+                if columns.is_empty() && use_oracle_columns_sql_fallback {
                     match external_driver_oracle_columns_via_sql(
                         session.clone(),
                         config.as_ref(),
@@ -8648,11 +9179,37 @@ async fn get_table_ddl_core_with_options(
         .await?;
         return Ok(source.source);
     }
+    if let Some(kind) = object_type.clone().filter(ddl_kind_uses_object_source) {
+        // Routines, packages, triggers, types and the other schema objects have no
+        // table DDL: `SHOW CREATE TABLE` or the columns/indexes renderer can only
+        // fabricate `CREATE TABLE <name> ()` for them. Ask for the definition
+        // instead, and keep the previous behaviour when the driver cannot produce
+        // one (engine without a source query, empty definition, …).
+        match get_object_source_core(state, connection_id, database, schema, table, kind, None, None).await {
+            Ok(source) if !source.source.trim().is_empty() => return Ok(source.source),
+            Ok(_) => {}
+            Err(error) => {
+                log::debug!(
+                    "[schema][get_table_ddl:object-source-kind-fallback-failed] connection_id={connection_id} database={database} schema={schema} table={table} error={error}"
+                );
+            }
+        }
+    }
 
     retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
         get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
     })
     .await
+}
+
+/// Whether the DDL of this object kind is its own definition, rather than the
+/// table DDL built from columns and indexes.
+///
+/// Views and materialized views are excluded because they have dedicated
+/// branches in [`get_table_ddl_core_with_options`]: a view is re-wrapped into a
+/// `CREATE ... VIEW` statement, and a materialized view returns the raw source.
+fn ddl_kind_uses_object_source(kind: &db::ObjectSourceKind) -> bool {
+    !matches!(kind, db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView)
 }
 
 /// `pg_ddl_with_partitions` when the caller wants the whole partition tree,
@@ -10212,6 +10769,56 @@ pub fn oracle_list_objects_sql(schema: &str) -> String {
     )
 }
 
+/// Oracle synonym names whose target is a table or a view, for table-name completion.
+///
+/// Native Oracle agents answer table-like completion from
+/// `completion_assistant_search_v1`, which resolves `ALL_SYNONYMS` and keeps only the
+/// entries pointing at a table/view. Generic `jdbc:oracle:` connections answer from the
+/// driver's table list instead, and that list is built from `ALL_TAB_COMMENTS` TABLE/VIEW
+/// rows, so their completion used to lose synonym names entirely (issue #8663).
+///
+/// The query mirrors the agent's semantics: only local synonyms (`DB_LINK IS NULL`) whose
+/// target still exists in `ALL_OBJECTS` with one of `target_object_types` is returned, the
+/// mask is pushed into the statement, and `ROWNUM` bounds the row count for Oracle 11g.
+pub fn oracle_completion_synonyms_sql(
+    schema: &str,
+    mask: &str,
+    match_mode: Option<&db::CompletionAssistantMatchMode>,
+    case_sensitive: bool,
+    limit: usize,
+    target_object_types: &[&str],
+) -> String {
+    let owner = oracle_owner_filter(schema);
+    let pattern = sql_string(&oracle_completion_like_pattern(mask, match_mode));
+    let target_object_types =
+        target_object_types.iter().map(|object_type| sql_string(object_type)).collect::<Vec<_>>().join(", ");
+    let name_predicate = if mask.trim().is_empty() {
+        String::new()
+    } else if case_sensitive {
+        format!(" AND s.synonym_name LIKE {pattern} ESCAPE '\\'")
+    } else {
+        format!(" AND UPPER(s.synonym_name) LIKE UPPER({pattern}) ESCAPE '\\'")
+    };
+    format!(
+        "SELECT owner, name FROM (\
+         SELECT s.owner AS owner, s.synonym_name AS name FROM all_synonyms s \
+         JOIN all_objects o ON o.owner = s.table_owner AND o.object_name = s.table_name \
+         WHERE s.db_link IS NULL AND s.owner = {owner} AND o.object_type IN ({target_object_types}){name_predicate} \
+         ORDER BY s.synonym_name) WHERE ROWNUM <= {limit}"
+    )
+}
+
+/// Builds the `LIKE` pattern used by [`oracle_completion_synonyms_sql`]: the mask's own
+/// wildcards are escaped so a user typing `_` or `%` does not widen the search, and the
+/// match mode decides between a prefix and a substring lookup.
+fn oracle_completion_like_pattern(mask: &str, match_mode: Option<&db::CompletionAssistantMatchMode>) -> String {
+    let escaped = mask.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    match match_mode.unwrap_or(&db::CompletionAssistantMatchMode::Prefix) {
+        db::CompletionAssistantMatchMode::Prefix => format!("{escaped}%"),
+        db::CompletionAssistantMatchMode::Contains => format!("%{escaped}%"),
+    }
+}
+
 async fn oracle_agent_list_objects(
     client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
@@ -11246,6 +11853,31 @@ mod object_source_tests {
 #[cfg(test)]
 mod ddl_tests {
     use super::*;
+
+    /// Ctrl/Cmd+click on a routine, trigger or package sends its object kind to
+    /// the DDL endpoint. Those requests must be answered from the object source:
+    /// the table renderer can only fabricate `CREATE TABLE <name> ()` for them.
+    #[test]
+    fn ddl_object_kinds_that_need_the_object_source() {
+        for kind in [
+            db::ObjectSourceKind::Procedure,
+            db::ObjectSourceKind::Function,
+            db::ObjectSourceKind::Trigger,
+            db::ObjectSourceKind::Event,
+            db::ObjectSourceKind::Sequence,
+            db::ObjectSourceKind::Synonym,
+            db::ObjectSourceKind::Job,
+            db::ObjectSourceKind::Package,
+            db::ObjectSourceKind::PackageBody,
+            db::ObjectSourceKind::Type,
+            db::ObjectSourceKind::TypeBody,
+        ] {
+            assert!(ddl_kind_uses_object_source(&kind), "{kind:?} must use the object source");
+        }
+        // Views and materialized views keep their dedicated branches.
+        assert!(!ddl_kind_uses_object_source(&db::ObjectSourceKind::View));
+        assert!(!ddl_kind_uses_object_source(&db::ObjectSourceKind::MaterializedView));
+    }
 
     fn column(name: &str, data_type: &str) -> db::ColumnInfo {
         db::ColumnInfo {
@@ -12343,6 +12975,91 @@ mod ddl_tests {
         );
     }
 
+    /// Doris answers `SHOW CREATE TABLE <mv>` with a pointer to
+    /// `SHOW CREATE MATERIALIZED VIEW`; the DDL request must follow that hint.
+    #[tokio::test]
+    async fn mysql_ddl_falls_back_to_materialized_view_after_a_doris_refusal() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(mysql_server_error(
+                    1105,
+                    "errCode = 2, detailMessage = not support async materialized view, please use `show create materialized view`",
+                )),
+                Ok("CREATE MATERIALIZED VIEW `mv_daily` (id)".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "dbx_test", "mv_daily").await.unwrap();
+
+        assert_eq!(ddl, "CREATE MATERIALIZED VIEW `mv_daily` (id);");
+        assert_eq!(
+            executor.executed,
+            ["SHOW CREATE TABLE `dbx_test`.`mv_daily`", "SHOW CREATE MATERIALIZED VIEW `dbx_test`.`mv_daily`"]
+        );
+    }
+
+    /// Without a database the materialized view statement stays unqualified,
+    /// matching the qualifier used for the table probe.
+    #[tokio::test]
+    async fn mysql_ddl_falls_back_to_materialized_view_without_a_database() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(mysql_server_error(
+                    1105,
+                    "not support async materialized view, please use `show create materialized view`",
+                )),
+                Ok("CREATE MATERIALIZED VIEW `mv_daily` (id)".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "", "mv_daily").await.unwrap();
+
+        assert_eq!(ddl, "CREATE MATERIALIZED VIEW `mv_daily` (id);");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `mv_daily`", "SHOW CREATE MATERIALIZED VIEW `mv_daily`"]);
+    }
+
+    /// Engines without `SHOW CREATE MATERIALIZED VIEW` answer the retry with a
+    /// syntax error; the original table error is what the user should still see.
+    #[tokio::test]
+    async fn mysql_ddl_preserves_the_table_error_when_the_materialized_view_probe_fails() {
+        let refusal = mysql_server_error(
+            1105,
+            "errCode = 2, detailMessage = not support async materialized view, please use `show create materialized view`",
+        );
+        let expected = refusal.to_string();
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(refusal), Err(mysql_server_error(1064, "You have an error in your SQL syntax"))].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "missing").await.unwrap_err();
+
+        assert_eq!(error, expected);
+        assert_eq!(
+            executor.executed,
+            ["SHOW CREATE TABLE `app`.`missing`", "SHOW CREATE MATERIALIZED VIEW `app`.`missing`"]
+        );
+    }
+
+    /// Unrelated failures must not trigger an extra probe, even when the server
+    /// reports them with the same generic error code Doris uses.
+    #[tokio::test]
+    async fn mysql_ddl_does_not_probe_materialized_views_for_unrelated_failures() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(mysql_server_error(1105, "errCode = 2, detailMessage = table is broken"))].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "missing").await.unwrap_err();
+
+        assert_eq!(error, "Server error: `ERROR 1105 (HY000): errCode = 2, detailMessage = table is broken'");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`missing`"]);
+    }
+
     #[tokio::test]
     async fn mysql_ddl_preserves_qualified_error_when_fallback_fails() {
         let first_error = mysql_server_error(1146, "qualified table doesn't exist");
@@ -12416,6 +13133,21 @@ impl MysqlDdlQueryError {
     fn is_no_such_table(&self) -> bool {
         matches!(self, Self::Query(mysql_async::Error::Server(error)) if error.code == 1146)
     }
+
+    /// Doris exposes asynchronous materialized views as base tables and then
+    /// refuses `SHOW CREATE TABLE` / `SHOW CREATE VIEW` on them with a pointer
+    /// to another statement:
+    /// `ERROR 1105 (HY000): errCode = 2, detailMessage = not support async
+    /// materialized view, please use `show create materialized view``.
+    /// Recognize that refusal so the DDL request can be retried with the
+    /// statement the server asked for instead of failing outright.
+    fn is_materialized_view_ddl_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::Query(mysql_async::Error::Server(error))
+                if error.message.to_ascii_lowercase().contains("materialized view")
+        )
+    }
 }
 
 impl std::fmt::Display for MysqlDdlQueryError {
@@ -12463,6 +13195,10 @@ async fn mysql_ddl_with_executor(
         Ok(ddl) => return Ok(normalize_mysql_display_ddl(ddl)),
         Err(error) => error,
     };
+    if qualified_error.is_materialized_view_ddl_refusal() {
+        let name = mysql_qualified_name(database, table);
+        return mysql_materialized_view_ddl(executor, &name, qualified_error).await;
+    }
     if database.trim().is_empty() || !qualified_error.is_no_such_table() {
         return Err(qualified_error.to_string());
     }
@@ -12473,6 +13209,25 @@ async fn mysql_ddl_with_executor(
     match executor.execute(&fallback_sql).await {
         Ok(ddl) => Ok(normalize_mysql_display_ddl(ddl)),
         Err(_) => Err(qualified_error.to_string()),
+    }
+}
+
+/// Reads the definition of a materialized view that the server refused to
+/// describe as a table.
+///
+/// The fallback only replaces the original error when the statement actually
+/// returns a definition: engines without `SHOW CREATE MATERIALIZED VIEW`
+/// (plain MySQL, MariaDB) answer with a syntax error, so the caller still sees
+/// the error it would have seen before this fallback existed.
+async fn mysql_materialized_view_ddl(
+    executor: &mut impl MysqlDdlQueryExecutor,
+    qualified_name: &str,
+    original_error: MysqlDdlQueryError,
+) -> Result<String, String> {
+    let sql = format!("SHOW CREATE MATERIALIZED VIEW {qualified_name}");
+    match executor.execute(&sql).await {
+        Ok(ddl) => Ok(normalize_mysql_display_ddl(ddl)),
+        Err(_) => Err(original_error.to_string()),
     }
 }
 
@@ -13769,7 +14524,7 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
             .map(|(i, c)| {
                 // A real column is quoted via `pg_ident`; an expression/functional key part
                 // arrives as raw expression text (the per-column `pg_get_indexdef` omits the
-                // opclass — see `crates/dbx-drivers/src/db/postgres.rs`), so quoting the whole
+                // opclass — see `crates/dbx-driver-postgres/src/postgres.rs`), so quoting the whole
                 // thing as an identifier would turn it into a nonexistent column reference
                 // (#6295).
                 let is_expr = idx.key_is_expression.get(i).copied().unwrap_or(false);

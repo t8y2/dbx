@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.6.22"
+version = "0.6.23"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -80,6 +80,7 @@ sys-locale = "0.3"
 sysinfo = { version = "0.32", features = ["system"] }
 
 [dev-dependencies]
+dbx-core = { path = "../crates/dbx-core", default-features = false, features = ["test-support"] }
 tauri = { version = "2.10.3", features = ["test"] }
 tempfile = "3"
 

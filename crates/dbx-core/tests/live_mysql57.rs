@@ -13,7 +13,6 @@ use dbx_core::query::{
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
 use dbx_core::sql_file_import::execute_sql_file_path;
-use dbx_core::storage::Storage;
 use dbx_core::table_import::{
     build_import_insert_batch_from_rows, parse_csv_bytes, parse_xlsx_file, TableImportColumnMapping,
 };
@@ -46,7 +45,7 @@ fn live_mysql_sql_file_config(id: &str) -> ConnectionConfig {
 
 async fn app_state_with_config(config: ConnectionConfig) -> (AppState, std::path::PathBuf) {
     let db_path = std::env::temp_dir().join(format!("dbx-live-sql-file-{}.db", uuid::Uuid::new_v4().simple()));
-    let storage = Storage::open(&db_path).await.expect("open temp storage");
+    let storage = dbx_core::persistence::test_storage::open(&db_path).await.expect("open temp storage");
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
     (state, db_path)
@@ -436,7 +435,7 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
     let config = live_mysql_query_export_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-query-export-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 
@@ -531,7 +530,7 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
     let config = live_mysql_query_export_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-issue-8803-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 
@@ -645,7 +644,7 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
     let config = live_mysql_query_export_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-query-export-timeout-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 

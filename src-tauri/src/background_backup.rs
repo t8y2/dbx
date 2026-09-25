@@ -487,7 +487,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_stops_the_mock_supervisor_and_removes_only_its_lease() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("dbx.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
         let state = Arc::new(AppState::new(storage));
         std::fs::create_dir_all(directory.path().join("database-backups")).unwrap();
         std::fs::write(marker(directory.path()), b"1").unwrap();

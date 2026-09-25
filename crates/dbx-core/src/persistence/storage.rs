@@ -59,6 +59,14 @@ const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
+/// Plugin ids whose MCP tools the built-in AI agent may call.
+const AI_PLUGIN_TOOL_PLUGINS_KEY: &str = "ai_plugin_tool_plugins";
+/// `{ pluginId: [connectionId, ...] }` — connections a plugin may read through
+/// the `host.data:read` Host API. Written only after an explicit user consent.
+const PLUGIN_DATA_GRANTS_KEY: &str = "plugin_data_grants";
+/// Upper bound for one plugin's persisted data grants; consent is per
+/// connection, so a legitimate plugin never approaches it.
+const MAX_PLUGIN_DATA_GRANTS_PER_PLUGIN: usize = 512;
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const SNIPPET_SYNC_IDS_KEY: &str = "snippet_sync_ids";
@@ -1149,7 +1157,11 @@ fn file_digest(path: &Path) -> Result<String, String> {
 
 impl Storage {
     pub async fn open(db_path: &Path) -> Result<Self, String> {
-        let storage = Self::open_unmigrated(db_path).await?;
+        Self::open_with_secret_key_policy(db_path, SecretKeyPolicy::PlatformDefault).await
+    }
+
+    pub async fn open_with_secret_key_policy(db_path: &Path, policy: SecretKeyPolicy) -> Result<Self, String> {
+        let storage = Self::open_unmigrated(db_path).await?.with_secret_key_policy(policy);
         let preflight = storage.inspect_data_migration().await?;
         if preflight.needs_migration && !preflight.key_provider_available && !preflight.key_creation_allowed {
             return Err(preflight.error_code.unwrap_or_else(|| "KEY_PROVIDER_UNAVAILABLE".to_string()));
@@ -1430,7 +1442,7 @@ impl Storage {
             .as_ref()
             .err()
             .is_some_and(|error| matches!(error.as_str(), "MISSING_MANAGED_KEY" | "KEY_PROVIDER_UNAVAILABLE"))
-            && matches!(self.secret_key_policy, SecretKeyPolicy::PlatformDefault | SecretKeyPolicy::ManagedDataDir)
+            && !matches!(self.secret_key_policy, SecretKeyPolicy::ExternalOnly)
             && encrypted == 0
             && (database_plaintext_count > 0 || sync_credentials > 0 || files.iter().any(|file| file.exists));
         let mut key_error_code = key_probe.as_ref().err().cloned();
@@ -3139,6 +3151,56 @@ fn load_history_retention_limit_from_conn(conn: &Connection) -> Result<u32, Stri
     Ok(history_retention_limit_from_settings(&settings))
 }
 
+fn app_settings_map_from_conn(conn: &Connection) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let current: Option<String> = conn
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match current {
+        Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+            .map_err(|e| format!("invalid app settings JSON: {e}")),
+        None => Ok(serde_json::Map::new()),
+    }
+}
+
+fn write_app_settings_map(
+    conn: &Connection,
+    settings: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let json = serde_json::to_string(settings).map_err(|e| e.to_string())?;
+    conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Reads a JSON string array setting, dropping blanks and duplicates so a
+/// hand-edited or partially written value can never widen a permission list.
+fn normalized_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    let mut values: Vec<String> = value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn normalized_setting_id(value: &str, label: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 256 {
+        return Err(format!("A valid {label} is required"));
+    }
+    Ok(trimmed.to_string())
+}
+
 impl Storage {
     pub async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         let entry = entry.clone();
@@ -3963,8 +4025,14 @@ impl Storage {
                 .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
                 .optional()
                 .map_err(|e| e.to_string())?;
-            let dedicated_keys =
-                [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY, SQL_FILE_UPLOAD_MAX_MB_KEY, HISTORY_RETENTION_LIMIT_KEY];
+            let dedicated_keys = [
+                MCP_GLOBAL_POLICY_KEY,
+                MAX_RETRIES_KEY,
+                SQL_FILE_UPLOAD_MAX_MB_KEY,
+                HISTORY_RETENTION_LIMIT_KEY,
+                AI_PLUGIN_TOOL_PLUGINS_KEY,
+                PLUGIN_DATA_GRANTS_KEY,
+            ];
             for key in dedicated_keys {
                 settings.remove(key);
             }
@@ -4072,6 +4140,101 @@ impl Storage {
         })
         .await
         .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
+    }
+
+    /// Plugin ids whose MCP tools the built-in AI agent may call. Empty until
+    /// the user enables a plugin in the Plugin Center.
+    pub async fn load_ai_plugin_tool_plugin_ids(&self) -> Result<Vec<String>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(normalized_string_list(settings.get(AI_PLUGIN_TOOL_PLUGINS_KEY)))
+    }
+
+    /// Enables or disables built-in AI access to one plugin's tools and returns
+    /// the updated list. The read-modify-write runs inside one connection
+    /// closure so concurrent settings saves cannot drop the change.
+    pub async fn set_ai_plugin_tool_plugin_enabled(
+        &self,
+        plugin_id: &str,
+        enabled: bool,
+    ) -> Result<Vec<String>, String> {
+        let plugin_id = normalized_setting_id(plugin_id, "plugin id")?;
+        self.with_conn(move |conn| {
+            let mut settings = app_settings_map_from_conn(conn)?;
+            let mut plugin_ids = normalized_string_list(settings.get(AI_PLUGIN_TOOL_PLUGINS_KEY));
+            plugin_ids.retain(|candidate| candidate != &plugin_id);
+            if enabled {
+                plugin_ids.push(plugin_id);
+                plugin_ids.sort();
+            }
+            settings.insert(AI_PLUGIN_TOOL_PLUGINS_KEY.to_string(), serde_json::json!(plugin_ids));
+            write_app_settings_map(conn, &settings)?;
+            Ok(plugin_ids)
+        })
+        .await
+    }
+
+    /// Connections the plugin may read through `host.data:read`.
+    pub async fn load_plugin_data_grants(&self, plugin_id: &str) -> Result<Vec<String>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(normalized_string_list(settings.get(PLUGIN_DATA_GRANTS_KEY).and_then(|grants| grants.get(plugin_id.trim()))))
+    }
+
+    /// Records or revokes the user's consent for one plugin to read one
+    /// connection and returns the plugin's updated grant list.
+    pub async fn set_plugin_data_grant(
+        &self,
+        plugin_id: &str,
+        connection_id: &str,
+        granted: bool,
+    ) -> Result<Vec<String>, String> {
+        let plugin_id = normalized_setting_id(plugin_id, "plugin id")?;
+        let connection_id = normalized_setting_id(connection_id, "connection id")?;
+        self.with_conn(move |conn| {
+            let mut settings = app_settings_map_from_conn(conn)?;
+            let mut all_grants = match settings.remove(PLUGIN_DATA_GRANTS_KEY) {
+                Some(serde_json::Value::Object(grants)) => grants,
+                _ => serde_json::Map::new(),
+            };
+            let mut connection_ids = normalized_string_list(all_grants.get(&plugin_id));
+            connection_ids.retain(|candidate| candidate != &connection_id);
+            if granted {
+                if connection_ids.len() >= MAX_PLUGIN_DATA_GRANTS_PER_PLUGIN {
+                    return Err(format!(
+                        "A plugin can hold at most {MAX_PLUGIN_DATA_GRANTS_PER_PLUGIN} data access grants"
+                    ));
+                }
+                connection_ids.push(connection_id);
+                connection_ids.sort();
+            }
+            if connection_ids.is_empty() {
+                all_grants.remove(&plugin_id);
+            } else {
+                all_grants.insert(plugin_id, serde_json::json!(connection_ids));
+            }
+            if !all_grants.is_empty() {
+                settings.insert(PLUGIN_DATA_GRANTS_KEY.to_string(), serde_json::Value::Object(all_grants));
+            }
+            write_app_settings_map(conn, &settings)?;
+            Ok(connection_ids)
+        })
+        .await
+    }
+
+    /// Drops everything the user granted to a plugin (AI tool access and data
+    /// grants). Called after uninstall so a reinstall starts without consent.
+    pub async fn forget_plugin_permissions(&self, plugin_id: &str) -> Result<(), String> {
+        let plugin_id = normalized_setting_id(plugin_id, "plugin id")?;
+        self.with_conn(move |conn| {
+            let mut settings = app_settings_map_from_conn(conn)?;
+            let mut plugin_ids = normalized_string_list(settings.get(AI_PLUGIN_TOOL_PLUGINS_KEY));
+            plugin_ids.retain(|candidate| candidate != &plugin_id);
+            settings.insert(AI_PLUGIN_TOOL_PLUGINS_KEY.to_string(), serde_json::json!(plugin_ids));
+            if let Some(serde_json::Value::Object(grants)) = settings.get_mut(PLUGIN_DATA_GRANTS_KEY) {
+                grants.remove(&plugin_id);
+            }
+            write_app_settings_map(conn, &settings)
+        })
+        .await
     }
 
     pub async fn load_mcp_http_server_settings(&self) -> Result<McpHttpServerSettings, String> {
@@ -8138,7 +8301,7 @@ mod tests {
     async fn migration_scan_cache_recovers_legacy_success_with_stale_counts() {
         let dir = temp_data_dir("migration-stale-cache");
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open_unmigrated(&dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.join("dbx.db")).await.unwrap();
         storage.set_migration_state(super::MigrationState::Succeeded, None, None, None, None).await.unwrap();
         storage
             .with_conn(|conn| {
@@ -8164,7 +8327,7 @@ mod tests {
     async fn migration_preflight_is_read_only() {
         let dir = temp_data_dir("migration-cache-transition");
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open_unmigrated(&dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.join("dbx.db")).await.unwrap();
         storage.inspect_data_migration().await.unwrap();
         let before = storage.load_migration_state().await.unwrap();
         assert_eq!(before.state, super::MigrationState::Pending);
@@ -8196,7 +8359,7 @@ mod tests {
     async fn managed_data_dir_key_is_created_only_when_plaintext_migration_starts() {
         let dir = tempfile::tempdir().unwrap();
         let database_path = dir.path().join("dbx.db");
-        let storage = Storage::open_unmigrated(&database_path)
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8236,7 +8399,7 @@ mod tests {
         assert!(row.1.starts_with("dbxenc1."));
 
         drop(storage);
-        let reopened = Storage::open_unmigrated(&database_path)
+        let reopened = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8246,7 +8409,7 @@ mod tests {
     #[tokio::test]
     async fn secret_migration_write_failure_rolls_back_all_rows() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open_unmigrated(&directory.path().join("dbx.db"))
+        let storage = crate::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db"))
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8281,7 +8444,7 @@ mod tests {
     async fn secret_migration_late_failure_restores_backup_and_retries_after_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let database_path = directory.path().join("dbx.db");
-        let storage = Storage::open_unmigrated(&database_path)
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8321,7 +8484,7 @@ mod tests {
         drop(storage);
 
         std::fs::write(&legacy_path, "[]").unwrap();
-        let reopened = Storage::open_unmigrated(&database_path)
+        let reopened = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8336,7 +8499,7 @@ mod tests {
     async fn secret_migration_running_state_resumes_after_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let database_path = directory.path().join("dbx.db");
-        let storage = Storage::open_unmigrated(&database_path)
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8344,7 +8507,7 @@ mod tests {
         let backup = storage.create_migration_backup().await.unwrap();
         storage.set_migration_state(super::MigrationState::Running, Some(&backup), None, None, None).await.unwrap();
         drop(storage);
-        let reopened = Storage::open_unmigrated(&database_path)
+        let reopened = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8359,7 +8522,7 @@ mod tests {
     #[tokio::test]
     async fn secret_migration_rejects_wrong_or_invalid_managed_keys_without_replacing_them() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open_unmigrated(&directory.path().join("dbx.db"))
+        let storage = crate::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db"))
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8385,7 +8548,7 @@ mod tests {
     async fn missing_managed_key_for_existing_ciphertext_never_creates_a_replacement() {
         let dir = tempfile::tempdir().unwrap();
         let database_path = dir.path().join("dbx.db");
-        let storage = Storage::open_unmigrated(&database_path)
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8405,7 +8568,7 @@ mod tests {
     #[tokio::test]
     async fn secret_write_after_managed_key_loss_never_creates_a_replacement() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open_unmigrated(&directory.path().join("dbx.db"))
+        let storage = crate::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db"))
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8430,7 +8593,7 @@ mod tests {
     #[tokio::test]
     async fn connection_write_after_managed_key_loss_preserves_existing_ciphertext() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open_unmigrated(&directory.path().join("dbx.db"))
+        let storage = crate::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db"))
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -8455,7 +8618,7 @@ mod tests {
     async fn disabled_secret_key_creation_does_not_provision_on_write() {
         let dir = tempfile::tempdir().unwrap();
         let database_path = dir.path().join("dbx.db");
-        let storage = Storage::open_unmigrated(&database_path)
+        let storage = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir)
@@ -8481,7 +8644,7 @@ mod tests {
     #[tokio::test]
     async fn delete_table_vgroups_for_connection_scopes_by_prefix() {
         let path = temp_db_path("vgroup-delete");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let layout = serde_json::json!({ "version": 1, "groups": [], "order": [] });
         // 真实 scope_key 形如 `{connectionId}\u{0}{linkedServer}\u{0}{catalog}\u{0}{database}\u{0}{schema}`。
@@ -8524,7 +8687,7 @@ mod tests {
 
         let dir = temp_data_dir_with_mode("permission-single-user", 0o755);
         let path = dir.join("dbx.db");
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
 
         // Stand in for an installation created before this hardening existed,
         // including a rollback journal left behind by an interrupted write.
@@ -8534,7 +8697,7 @@ mod tests {
             std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
 
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
 
         for name in ["dbx.db", "dbx.db-journal", "dbx.db-wal", "dbx.db-shm"] {
             let Some(mode) = file_mode(&dir.join(name)) else { continue };
@@ -8555,7 +8718,7 @@ mod tests {
         // data directory.
         let dir = temp_data_dir_with_mode("permission-group-shared", 0o770);
         let path = dir.join("dbx.db");
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
 
         let journal = dir.join("dbx.db-journal");
         std::fs::write(&journal, b"").unwrap();
@@ -8563,7 +8726,7 @@ mod tests {
             std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o664)).unwrap();
         }
 
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
 
         for name in ["dbx.db", "dbx.db-journal"] {
             let Some(mode) = file_mode(&dir.join(name)) else { continue };
@@ -8581,13 +8744,13 @@ mod tests {
 
         let dir = temp_data_dir_with_mode("permission-init-failure", 0o755);
         let path = dir.join("dbx.db");
-        drop(Storage::open(&path).await.unwrap());
+        drop(crate::persistence::test_storage::open(&path).await.unwrap());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         // A read-only directory keeps the database file itself writable while
         // denying the journal SQLite needs, so the schema pass fails.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let result = Storage::open(&path).await;
+        let result = crate::persistence::test_storage::open(&path).await;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(result.is_err(), "expected schema initialization to fail on a read-only directory");
@@ -8676,7 +8839,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_soft_cap_never_evicts_protected_runs() {
         let path = temp_db_path("ai-conversation-soft-cap");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let protected = ai_conversation("protected", "0000");
         let protected_run = ai_run("protected-run", "protected", AiRunStatus::Running, "0000");
@@ -8698,7 +8861,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_soft_cap_allows_more_than_fifty_protected_runs() {
         let path = temp_db_path("ai-conversation-protected-overflow");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         for index in 0..51 {
             let id = format!("protected-{index}");
@@ -8723,7 +8886,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_soft_cap_protects_pending_recoverable_runs() {
         let path = temp_db_path("ai-conversation-pending-recoverable-protection");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         // A recovered pending-input run (PRD §7 line 93) must be protected like
         // any other non-terminal run: its draft is not lost to pruning.
@@ -8747,7 +8910,7 @@ mod tests {
     #[tokio::test]
     async fn ai_run_roundtrips_fifo_category_and_pending_input() {
         let path = temp_db_path("ai-run-fifo-category-roundtrip");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let conversation = ai_conversation("fifo-conv", "0000");
         let mut run = ai_run("fifo-run", "fifo-conv", AiRunStatus::Queued, "0000");
@@ -8779,7 +8942,7 @@ mod tests {
     #[tokio::test]
     async fn saving_a_conversation_keeps_its_background_runs() {
         let path = temp_db_path("ai-conversation-upsert-keeps-runs");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         // `ai_runs` declares an ON DELETE CASCADE relationship. Exercise the
         // snapshot path with enforcement enabled so an accidental REPLACE
         // (delete + insert) cannot silently erase an active run on restart.
@@ -8814,7 +8977,7 @@ mod tests {
         // conversation (keeping the newest few, which drive the row status
         // badge after restart) and never touches recovery-relevant runs.
         let path = temp_db_path("ai-terminal-runs-capped");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         // A non-terminal run must always survive - it is the recovery payload.
         let conversation = ai_conversation("cap-conv", "0000");
@@ -8858,7 +9021,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut loaded = storage.load_ai_conversations().await.unwrap();
         assert_eq!(loaded[0].title, "SQL conversation");
         assert!(loaded[0].plugin_context.is_none());
@@ -8871,7 +9034,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_retains_plugin_snapshot_without_a_database() {
         let path = temp_db_path("ai-plugin-conversation");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut conversation = ai_conversation("market-analysis", "0000");
         conversation.database.clear();
         let snapshot = serde_json::json!({
@@ -8902,7 +9065,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_roundtrips_queued_input() {
         let path = temp_db_path("ai-conversation-queued-input-roundtrip");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let mut conversation = ai_conversation("queued-conv", "0000");
         conversation.queued_input = Some("run this after the current task".to_string());
@@ -8943,7 +9106,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_roundtrips_connection_binding() {
         let path = temp_db_path("ai-conversation-binding-roundtrip");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let mut conversation = ai_conversation("bound-conv", "0000");
         conversation.connection_id = "conn-prod".to_string();
@@ -8978,7 +9141,7 @@ mod tests {
             "INSERT INTO connections (id, config_json) VALUES ('c-prod', '{\"id\":\"c-prod\",\"name\":\"Prod MySQL\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}');",
         );
 
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let loaded = storage.load_ai_conversations().await.unwrap();
         let conversation = |id: &str| loaded.iter().find(|item| item.id == id).unwrap();
 
@@ -9003,7 +9166,7 @@ mod tests {
              INSERT INTO connections (id, config_json) VALUES ('c2', '{\"id\":\"c2\",\"name\":\"Shared Name\",\"db_type\":\"mysql\",\"host\":\"127.0.0.1\",\"port\":3306,\"username\":\"u\",\"password\":\"p\",\"database\":null}');",
         );
 
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         for conversation in storage.load_ai_conversations().await.unwrap() {
             // Two connections share the name (names are not unique), and an empty
             // name identifies nothing: neither may be auto-bound.
@@ -9016,7 +9179,7 @@ mod tests {
     #[tokio::test]
     async fn ai_conversation_backfill_never_overwrites_an_existing_binding() {
         let path = temp_db_path("ai-conversation-binding-idempotent");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut conversation = ai_conversation("pinned", "0000");
         conversation.connection_id = "conn-a".to_string();
         storage.save_ai_conversation(&conversation).await.unwrap();
@@ -9029,7 +9192,7 @@ mod tests {
             .unwrap();
         drop(conn);
 
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let loaded = storage.load_ai_conversations().await.unwrap();
         assert_eq!(loaded[0].connection_id, "conn-a");
 
@@ -9055,7 +9218,7 @@ mod tests {
     async fn history_retention_uses_persisted_limit_on_the_next_write() {
         for (limit, expected) in [(200, 200), (5000, 1002), (10000, 1002), (0, 1002)] {
             let dir = tempfile::tempdir().unwrap();
-            let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+            let storage = crate::persistence::test_storage::open(&dir.path().join("dbx.db")).await.unwrap();
             seed_history_backlog(&storage, 1001).await;
             storage
                 .with_conn(move |conn| {
@@ -9096,7 +9259,7 @@ mod tests {
     async fn history_retention_defaults_validates_and_survives_stale_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dbx.db");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         assert_eq!(storage.load_history_retention_limit().await.unwrap(), 1000);
         let stale = storage.load_app_settings_json().await.unwrap();
         for limit in [200, 1000, 5000, 10000, 0] {
@@ -9110,14 +9273,14 @@ mod tests {
         storage.save_app_settings_json(&stale).await.unwrap();
         assert_eq!(storage.load_history_retention_limit().await.unwrap(), 0);
         drop(storage);
-        let reopened = Storage::open(&path).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&path).await.unwrap();
         assert_eq!(reopened.load_history_retention_limit().await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn history_retention_invalid_persisted_values_use_default() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("dbx.db")).await.unwrap();
         for value in [
             serde_json::json!(-1),
             serde_json::json!(1),
@@ -9157,7 +9320,7 @@ mod tests {
     #[tokio::test]
     async fn history_retention_setting_changes_do_not_prune_until_next_write() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("dbx.db")).await.unwrap();
         storage.save_history_retention_limit(0).await.unwrap();
         seed_history_backlog(&storage, 1001).await;
         storage.save_history_retention_limit(200).await.unwrap();
@@ -9180,7 +9343,7 @@ mod tests {
     #[tokio::test]
     async fn history_search_filters_connection_database_and_legacy_entries() {
         let path = temp_db_path("history-search-scope");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let entries = [
             history_entry("1", "conn-a", "Primary", "sales", "select 1", "2026-07-18T01:00:00Z", true),
             history_entry("2", "conn-b", "Replica", "sales", "select 2", "2026-07-18T02:00:00Z", true),
@@ -9232,7 +9395,7 @@ mod tests {
     #[tokio::test]
     async fn history_search_combines_whole_connections_with_narrowed_database_scopes() {
         let path = temp_db_path("history-search-hierarchical-scope");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let entries = [
             history_entry("a-sales", "conn-a", "Primary", "sales", "select 1", "2026-07-18T01:00:00Z", true),
             history_entry("a-archive", "conn-a", "Primary", "archive", "select 2", "2026-07-18T02:00:00Z", true),
@@ -9277,7 +9440,7 @@ mod tests {
     #[tokio::test]
     async fn history_search_combines_text_status_and_time_filters() {
         let path = temp_db_path("history-search-fields");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let entries = [
             history_entry("1", "conn", "Main", "app", "select 100% from orders", "2026-07-17T23:59:59Z", false),
             history_entry("2", "conn", "Main", "app", "select 1000 from orders", "2026-07-18T12:00:00Z", false),
@@ -9318,7 +9481,7 @@ mod tests {
     #[tokio::test]
     async fn history_search_cursor_is_stable_for_equal_timestamps() {
         let path = temp_db_path("history-search-cursor");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         for id in ["a", "b", "c"] {
             storage
                 .save_history_entry(&history_entry(id, "conn", "Main", "app", "select 1", "2026-07-18T12:00:00Z", true))
@@ -9362,7 +9525,7 @@ mod tests {
     #[tokio::test]
     async fn tunnel_profiles_roundtrip_and_preserve_secrets() {
         let path = temp_db_path("tunnel-profiles");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let profile = ssh_profile("profile-1", "s3cret");
         storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
@@ -9390,7 +9553,7 @@ mod tests {
     #[tokio::test]
     async fn tunnel_profile_secret_fields_are_not_written_to_config_json() {
         let path = temp_db_path("tunnel-secret-at-rest");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let profile = TransportLayerConfig::HttpTunnel(HttpTunnelConfig {
             id: "http-secret".to_string(),
             name: "HTTP".to_string(),
@@ -9430,7 +9593,7 @@ mod tests {
     #[tokio::test]
     async fn tunnel_profiles_reject_empty_ids() {
         let path = temp_db_path("tunnel-profiles-empty-id");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let profile = ssh_profile("", "secret");
         assert!(storage.save_tunnel_profiles(&[profile]).await.is_err());
@@ -9472,7 +9635,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_cassandra_tls_passwords_to_secret_table_and_restores_them() {
         let path = temp_db_path("cassandra-tls-secrets");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_connections(&[cassandra_connection("cassandra")]).await.unwrap();
 
@@ -9506,7 +9669,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_does_not_persist_password_when_save_password_false() {
         let path = temp_db_path("save-password-false");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let mut config = plain_connection("no-save", "hunter2");
         config.save_password = false;
@@ -9530,8 +9693,8 @@ mod tests {
         // the same inter-connection SQLite file locking that separate OS
         // processes would hit.
         let path = temp_db_path("concurrent-save-connections");
-        let storage_a = std::sync::Arc::new(Storage::open(&path).await.unwrap());
-        let storage_b = std::sync::Arc::new(Storage::open(&path).await.unwrap());
+        let storage_a = std::sync::Arc::new(crate::persistence::test_storage::open(&path).await.unwrap());
+        let storage_b = std::sync::Arc::new(crate::persistence::test_storage::open(&path).await.unwrap());
 
         let mut tasks = Vec::new();
         for i in 0..20 {
@@ -9550,7 +9713,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_persists_password_when_save_password_true() {
         let path = temp_db_path("save-password-true");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let config = plain_connection("save-yes", "hunter2");
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
@@ -9566,7 +9729,7 @@ mod tests {
     #[tokio::test]
     async fn plugin_secret_reads_require_a_key_only_for_ciphertext() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open_unmigrated(&dir.path().join("dbx.db"))
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db"))
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -9591,7 +9754,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_plugin_secrets_to_secret_table_and_clears_removed_values() {
         let path = temp_db_path("plugin-secrets");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = plain_connection("plugin", "");
         config.db_type = DatabaseType::Plugin;
         config.plugin_id = Some("example.plugin".to_string());
@@ -9626,7 +9789,7 @@ mod tests {
     #[tokio::test]
     async fn switching_save_password_off_removes_stored_password() {
         let path = temp_db_path("save-password-switch-off");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let mut config = plain_connection("switch", "hunter2");
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
@@ -9847,7 +10010,7 @@ mod tests {
 
     async fn create_data_dir_with_connection(name: &str, connection_id: &str, token: &str) -> std::path::PathBuf {
         let data_dir = temp_data_dir(name);
-        let storage = Storage::open(&data_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&data_dir.join("dbx.db")).await.unwrap();
         storage.save_connections(&[mq_connection(connection_id, token)]).await.unwrap();
         drop(storage);
         data_dir
@@ -9857,11 +10020,13 @@ mod tests {
     async fn import_user_data_db_copies_source_when_target_is_missing() {
         let source_dir = create_data_dir_with_connection("import-source", "source-connection", "source-token").await;
         let target_dir = temp_data_dir("import-target");
+        std::fs::create_dir_all(managed_key_path(&target_dir).parent().unwrap()).unwrap();
+        std::fs::copy(managed_key_path(&source_dir), managed_key_path(&target_dir)).unwrap();
 
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::Imported);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         let connections = storage.load_connections().await.unwrap();
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].id, "source-connection");
@@ -9878,7 +10043,7 @@ mod tests {
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::SkippedTargetHasData);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         let connections = storage.load_connections().await.unwrap();
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].id, "target-connection");
@@ -9888,7 +10053,7 @@ mod tests {
     #[tokio::test]
     async fn import_user_data_db_recognizes_settings_and_snippets_as_user_data() {
         let source_dir = temp_data_dir("import-settings-only-source");
-        let source_storage = Storage::open(&source_dir.join("dbx.db")).await.unwrap();
+        let source_storage = crate::persistence::test_storage::open(&source_dir.join("dbx.db")).await.unwrap();
         source_storage
             .save_desktop_settings(&DesktopSettings { debug_logging_enabled: true, ..DesktopSettings::default() })
             .await
@@ -9905,7 +10070,7 @@ mod tests {
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::Imported);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         assert!(storage.load_desktop_settings().await.unwrap().debug_logging_enabled);
         assert_eq!(storage.load_editor_settings().await.unwrap().unwrap()["snippets"][0]["body"], "SELECT 42");
     }
@@ -9915,7 +10080,7 @@ mod tests {
         let source_dir =
             create_data_dir_with_connection("import-source-settings-target", "source-connection", "source-token").await;
         let target_dir = temp_data_dir("import-target-settings-only");
-        let target_storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let target_storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         target_storage
             .save_editor_settings(&serde_json::json!({
                 "snippets": [{ "id": "target", "prefix": "tgt", "body": "SELECT 7" }]
@@ -9927,7 +10092,7 @@ mod tests {
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::SkippedTargetHasData);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         assert_eq!(storage.load_editor_settings().await.unwrap().unwrap()["snippets"][0]["body"], "SELECT 7");
     }
 
@@ -9936,12 +10101,14 @@ mod tests {
         let source_dir =
             create_data_dir_with_connection("import-source-empty-target", "source-connection", "source-token").await;
         let target_dir = temp_data_dir("import-empty-target");
-        let _target_storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        std::fs::create_dir_all(managed_key_path(&target_dir).parent().unwrap()).unwrap();
+        std::fs::copy(managed_key_path(&source_dir), managed_key_path(&target_dir)).unwrap();
+        let _target_storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
 
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 
         assert_eq!(result, DataDbImportResult::Imported);
-        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         let connections = storage.load_connections().await.unwrap();
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].id, "source-connection");
@@ -9950,7 +10117,7 @@ mod tests {
     #[tokio::test]
     async fn import_user_data_db_skips_empty_source_schema() {
         let source_dir = temp_data_dir("import-empty-source");
-        let source_storage = Storage::open(&source_dir.join("dbx.db")).await.unwrap();
+        let source_storage = crate::persistence::test_storage::open(&source_dir.join("dbx.db")).await.unwrap();
         drop(source_storage);
         let target_dir = temp_data_dir("import-empty-source-target");
 
@@ -9976,7 +10143,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_preserves_database_info() {
         let path = temp_db_path("database-info");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = mq_connection("database-info", "mq-secret");
         config.database_info = Some(DatabaseConnectionInfo {
             product_name: Some("MySQL".to_string()),
@@ -10008,7 +10175,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_mqtt_saved_topics_updates_only_target_and_preserves_secrets() {
         let path = temp_db_path("mqtt-saved-topics");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let target = mq_connection("target", "target-secret");
         let untouched = mq_connection("untouched", "untouched-secret");
         storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
@@ -10035,7 +10202,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_mqtt_saved_topics_rejects_non_object_external_config() {
         let path = temp_db_path("mqtt-saved-topics-invalid");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut target = mq_connection("target", "target-secret");
         target.external_config = Some(serde_json::json!("invalid"));
         storage.save_connections(std::slice::from_ref(&target)).await.unwrap();
@@ -10048,7 +10215,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_driver_profile_updates_only_the_target_metadata() {
         let path = temp_db_path("connection-driver-profile");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let target = mq_connection("target", "target-secret");
         let untouched = mq_connection("untouched", "untouched-secret");
         storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
@@ -10087,7 +10254,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_database_updates_only_the_target_and_preserves_secrets() {
         let path = temp_db_path("connection-database");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let target = mq_connection("target", "target-secret");
         let untouched = mq_connection("untouched", "untouched-secret");
         storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
@@ -10107,7 +10274,7 @@ mod tests {
     #[tokio::test]
     async fn save_connection_driver_profile_rejects_a_stale_connection_config() {
         let path = temp_db_path("connection-driver-profile-stale");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let original = mq_connection("target", "target-secret");
         storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
 
@@ -10134,7 +10301,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_mq_auth_token_to_secret_table_and_restores_it() {
         let path = temp_db_path("mq-token-secrets");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_connections(&[mq_connection("pulsar", "mq-token-secret")]).await.unwrap();
 
@@ -10152,7 +10319,7 @@ mod tests {
     #[tokio::test]
     async fn unreadable_saved_connections_do_not_block_loading_or_get_deleted_by_list_saves() {
         let path = temp_db_path("unreadable-connection-preservation");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut known = mq_connection("known", "known-secret");
         storage.save_connections(std::slice::from_ref(&known)).await.unwrap();
 
@@ -10201,7 +10368,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_plugin_secrets_to_secret_table_and_restores_them() {
         let path = temp_db_path("plugin-connection-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = mq_connection("plugin-connection", "");
         config.name = "Hello plugin".to_string();
         config.db_type = DatabaseType::Plugin;
@@ -10234,7 +10401,7 @@ mod tests {
     #[tokio::test]
     async fn load_connections_preserves_opaque_null_plugin_secrets() {
         let path = temp_db_path("plugin-null-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = mq_connection("plugin-connection", "");
         config.name = "SSH plugin".to_string();
         config.db_type = DatabaseType::Plugin;
@@ -10277,7 +10444,7 @@ mod tests {
         storage.save_connections(&loaded).await.unwrap();
         assert_eq!(storage.load_connections().await.unwrap()[0].connection_secrets, *secrets);
         drop(storage);
-        let reopened = Storage::open(&path).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&path).await.unwrap();
         assert_eq!(reopened.load_connections().await.unwrap()[0].connection_secrets, *secrets);
 
         let _ = std::fs::remove_file(path);
@@ -10286,7 +10453,7 @@ mod tests {
     #[tokio::test]
     async fn metadata_save_scrubs_mq_auth_token_and_preserves_existing_secret() {
         let path = temp_db_path("mq-token-metadata");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         let original = mq_connection("pulsar", "existing-token");
         storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
@@ -10312,7 +10479,7 @@ mod tests {
     #[tokio::test]
     async fn load_connections_migrates_legacy_mq_auth_token_out_of_config_json() {
         let path = temp_db_path("mq-token-legacy-migration");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         insert_raw_connection(&storage, &mq_connection("pulsar", "legacy-token")).await;
 
         let loaded = storage.load_connections().await.unwrap();
@@ -10328,7 +10495,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_deletes_stale_mq_auth_secrets_when_kind_changes() {
         let path = temp_db_path("mq-auth-kind-change");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage.save_connections(&[mq_connection("pulsar", "old-token")]).await.unwrap();
         let mut config = mq_connection("pulsar", "");
         config.external_config = Some(serde_json::json!({
@@ -10350,7 +10517,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_mq_token_signing_key_to_secret_table_and_restores_it() {
         let path = temp_db_path("mq-token-signing-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = mq_connection("pulsar", "");
         config.external_config = Some(serde_json::json!({
             "systemKind": "pulsar",
@@ -10380,7 +10547,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_nacos_auth_password_to_secret_table_and_restores_it() {
         let path = temp_db_path("nacos-auth-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_connections(&[nacos_connection("nacos", "nacos-secret")]).await.unwrap();
 
@@ -10401,7 +10568,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_moves_separate_rnacos_console_password_to_secret_table() {
         let path = temp_db_path("rnacos-console-auth-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection("rnacos", "");
         config.external_config = Some(serde_json::json!({
             "implementation": "rnacos",
@@ -10434,7 +10601,7 @@ mod tests {
     #[tokio::test]
     async fn save_connections_does_not_persist_nacos_passwords_when_save_password_is_false() {
         let path = temp_db_path("nacos-auth-no-save");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection_with_console_auth("nacos", "primary-secret", "console-secret");
         config.save_password = false;
 
@@ -10450,7 +10617,7 @@ mod tests {
     #[tokio::test]
     async fn switching_nacos_password_saving_off_removes_all_stored_auth_secrets() {
         let path = temp_db_path("nacos-auth-disable-save");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection_with_console_auth("nacos", "primary-secret", "console-secret");
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
         assert!(storage.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap().is_some());
@@ -10466,7 +10633,7 @@ mod tests {
     #[tokio::test]
     async fn metadata_sync_removes_nacos_auth_secrets_when_password_saving_is_disabled() {
         let path = temp_db_path("nacos-auth-no-save-metadata-sync");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection_with_console_auth("nacos", "primary-secret", "console-secret");
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
 
@@ -10483,7 +10650,7 @@ mod tests {
     #[tokio::test]
     async fn load_connections_cleans_legacy_nacos_passwords_when_saving_is_disabled() {
         let path = temp_db_path("nacos-auth-no-save-legacy-cleanup");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = nacos_connection_with_console_auth("nacos", "legacy-primary-secret", "legacy-console-secret");
         config.save_password = false;
         insert_raw_connection(&storage, &config).await;
@@ -10504,7 +10671,7 @@ mod tests {
     #[tokio::test]
     async fn load_connections_migrates_legacy_nacos_auth_password_out_of_config_json() {
         let path = temp_db_path("nacos-auth-legacy-migration");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         insert_raw_connection(&storage, &nacos_connection("nacos", "legacy-nacos-secret")).await;
 
         let loaded = storage.load_connections().await.unwrap();
@@ -10523,7 +10690,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_default_to_background_enabled() {
         let path = temp_db_path("desktop-settings-default");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_desktop_settings().await.unwrap(), DesktopSettings::default());
     }
@@ -10531,7 +10698,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_global_policy_defaults_unconfigured_and_roundtrips_atomically() {
         let path = temp_db_path("mcp-global-policy");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(
             storage.load_mcp_global_policy().await.unwrap(),
@@ -10589,7 +10756,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_global_policy_fails_closed_on_malformed_settings() {
         let path = temp_db_path("mcp-global-policy-malformed");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
                 conn.execute(
@@ -10609,7 +10776,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_app_settings_cannot_be_silently_replaced_by_an_unrelated_save() {
         let path = temp_db_path("mcp-global-policy-invalid-settings-shape");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
                 conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", ["[]"])
@@ -10636,7 +10803,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_global_policy_defaults_dangerous_sql_to_disabled_for_existing_settings() {
         let path = temp_db_path("mcp-global-policy-existing");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
                 conn.execute(
@@ -10658,7 +10825,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_connection_mutations_are_atomic_and_recheck_policy() {
         let path = temp_db_path("mcp-connection-mutation-guard");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let kept = mq_connection("kept", "kept-token");
         let removed = mq_connection("removed", "removed-token");
         storage.save_connections(&[kept.clone(), removed.clone()]).await.unwrap();
@@ -10712,7 +10879,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_fall_back_to_legacy_background_preference() {
         let path = temp_db_path("desktop-settings-legacy-background");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut settings = serde_json::Map::new();
         settings.insert("run_in_background".to_string(), serde_json::Value::Bool(false));
         storage.save_app_settings_json(&settings).await.unwrap();
@@ -10734,7 +10901,7 @@ mod tests {
     #[tokio::test]
     async fn schema_cache_prunes_expired_rows_on_write_without_maintaining_during_reads() {
         let path = temp_db_path("schema-cache-ttl-prune");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .save_schema_cache(
                 "object-ddl:v1:conn-a:db:public:old::TABLE:",
@@ -10786,7 +10953,7 @@ mod tests {
     #[tokio::test]
     async fn schema_cache_budget_covers_multiple_connections_objects_and_facets() {
         let path = temp_db_path("schema-cache-capacity");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let policy = super::SchemaCachePolicy {
             max_total_bytes: 1_100,
             max_connection_bytes: 700,
@@ -10828,7 +10995,7 @@ mod tests {
     #[tokio::test]
     async fn schema_cache_lru_keeps_recently_accessed_entries() {
         let path = temp_db_path("schema-cache-lru");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let policy = super::SchemaCachePolicy {
             max_total_bytes: i64::MAX,
             max_connection_bytes: i64::MAX,
@@ -10866,7 +11033,7 @@ mod tests {
         const ENTRY_COUNT: usize = 50_000;
         const SAMPLE_COUNT: usize = 40;
         let path = temp_db_path("schema-cache-50k-read-performance");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
                 let transaction = conn
@@ -10924,7 +11091,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_preserve_existing_password_hash() {
         let path = temp_db_path("desktop-settings-preserve-password");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_password_hash("hash-1").await.unwrap();
         storage
@@ -10974,7 +11141,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_roundtrip_custom_ai_skill_root() {
         let path = temp_db_path("desktop-settings-custom-ai-skill-root");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_desktop_settings(&DesktopSettings {
@@ -11014,7 +11181,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_save_removes_legacy_background_preference() {
         let path = temp_db_path("desktop-settings-remove-legacy-background");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut settings = serde_json::Map::new();
         settings.insert("run_in_background".to_string(), serde_json::Value::Bool(false));
         storage.save_app_settings_json(&settings).await.unwrap();
@@ -11041,7 +11208,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_persist_sidebar_table_page_size() {
         let path = temp_db_path("desktop-settings-sidebar-page-size");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_desktop_settings(&DesktopSettings { sidebar_table_page_size: 1234, ..DesktopSettings::default() })
@@ -11054,7 +11221,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_settings_persist_duckdb_worker_max_processes() {
         let path = temp_db_path("desktop-settings-duckdb-worker-max-processes");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_desktop_settings(&DesktopSettings { duckdb_worker_max_processes: 8, ..DesktopSettings::default() })
@@ -11067,7 +11234,7 @@ mod tests {
     #[tokio::test]
     async fn max_agent_turns_defaults_and_persists_clamped() {
         let path = temp_db_path("max-agent-turns");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_max_agent_turns().await.unwrap(), crate::agent_loop::DEFAULT_MAX_AGENT_TURNS);
 
@@ -11084,7 +11251,7 @@ mod tests {
     #[tokio::test]
     async fn max_retries_defaults_and_persists_clamped() {
         let path = temp_db_path("max-retries");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_max_retries().await.unwrap(), crate::ai::DEFAULT_MAX_RETRIES);
 
@@ -11100,9 +11267,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugin_ai_tools_and_data_grants_persist_and_survive_legacy_settings_saves() {
+        let path = temp_db_path("plugin-permissions");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        assert!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap().is_empty());
+        assert!(storage.load_plugin_data_grants("io.dbx.chart").await.unwrap().is_empty());
+
+        assert_eq!(storage.set_ai_plugin_tool_plugin_enabled("io.dbx.ssh", true).await.unwrap(), ["io.dbx.ssh"]);
+        storage.set_ai_plugin_tool_plugin_enabled("io.dbx.kafka", true).await.unwrap();
+        storage.set_ai_plugin_tool_plugin_enabled("io.dbx.ssh", true).await.unwrap();
+        assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.kafka", "io.dbx.ssh"]);
+
+        storage.set_plugin_data_grant("io.dbx.chart", "conn-b", true).await.unwrap();
+        assert_eq!(storage.set_plugin_data_grant("io.dbx.chart", "conn-a", true).await.unwrap(), ["conn-a", "conn-b"]);
+        storage.set_plugin_data_grant("io.dbx.other", "conn-a", true).await.unwrap();
+
+        // A settings writer that rebuilds the whole JSON map must not drop the
+        // dedicated permission keys.
+        storage.save_password_hash("hash").await.unwrap();
+        storage.save_app_settings_json(&serde_json::Map::new()).await.unwrap();
+        assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.kafka", "io.dbx.ssh"]);
+        assert_eq!(storage.load_plugin_data_grants("io.dbx.chart").await.unwrap(), ["conn-a", "conn-b"]);
+
+        assert_eq!(storage.set_plugin_data_grant("io.dbx.chart", "conn-b", false).await.unwrap(), ["conn-a"]);
+        assert_eq!(storage.set_ai_plugin_tool_plugin_enabled("io.dbx.kafka", false).await.unwrap(), ["io.dbx.ssh"]);
+        assert!(storage.set_plugin_data_grant("io.dbx.chart", " ", true).await.is_err());
+
+        storage.set_ai_plugin_tool_plugin_enabled("io.dbx.chart", true).await.unwrap();
+        storage.forget_plugin_permissions("io.dbx.chart").await.unwrap();
+        assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.ssh"]);
+        assert!(storage.load_plugin_data_grants("io.dbx.chart").await.unwrap().is_empty());
+        assert_eq!(storage.load_plugin_data_grants("io.dbx.other").await.unwrap(), ["conn-a"]);
+    }
+
+    #[tokio::test]
     async fn max_retries_survives_stale_app_settings_save() {
         let path = temp_db_path("max-retries-stale-save");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let stale_settings = storage.load_app_settings_json().await.unwrap();
 
         storage.save_max_retries(7).await.unwrap();
@@ -11114,7 +11315,7 @@ mod tests {
     #[tokio::test]
     async fn sql_file_upload_max_mb_defaults_and_persists_clamped() {
         let path = temp_db_path("sql-file-upload-max-mb");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(
             storage.load_sql_file_upload_max_mb().await.unwrap(),
@@ -11135,7 +11336,7 @@ mod tests {
     #[tokio::test]
     async fn sql_file_upload_max_mb_survives_stale_app_settings_save() {
         let path = temp_db_path("sql-file-upload-max-mb-stale-save");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let stale_settings = storage.load_app_settings_json().await.unwrap();
 
         storage.save_sql_file_upload_max_mb(256).await.unwrap();
@@ -11147,7 +11348,7 @@ mod tests {
     #[tokio::test]
     async fn password_hash_preserves_existing_desktop_settings() {
         let path = temp_db_path("password-preserve-desktop-settings");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_desktop_settings(&DesktopSettings {
@@ -11173,7 +11374,7 @@ mod tests {
     #[tokio::test]
     async fn pinned_tree_node_ids_default_to_empty() {
         let path = temp_db_path("pinned-tree-default");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_pinned_tree_node_ids().await.unwrap(), Vec::<String>::new());
     }
@@ -11181,7 +11382,7 @@ mod tests {
     #[tokio::test]
     async fn pinned_tree_node_ids_roundtrip_and_preserve_password_hash() {
         let path = temp_db_path("pinned-tree-roundtrip");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_password_hash("hash-3").await.unwrap();
         storage.save_pinned_tree_node_ids(&["conn-1".to_string(), "conn-1:db:main".to_string()]).await.unwrap();
@@ -11196,7 +11397,7 @@ mod tests {
     #[tokio::test]
     async fn app_state_roundtrips_without_polluting_app_settings() {
         let path = temp_db_path("app-state-roundtrip");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage.save_password_hash("hash-4").await.unwrap();
         storage
@@ -11270,7 +11471,7 @@ mod tests {
     #[tokio::test]
     async fn ai_chat_selection_roundtrips_in_local_app_state() {
         let path = temp_db_path("ai-chat-selection");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let selection = AiChatSelectionState {
             version: 1,
             active: Some(AiActiveModelSelection { config_id: "config-1".to_string(), model_id: "model-1".to_string() }),
@@ -11297,7 +11498,7 @@ mod tests {
     #[tokio::test]
     async fn ai_chat_selection_loads_legacy_payload_without_template_defaults() {
         let path = temp_db_path("ai-chat-selection-legacy");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let legacy = serde_json::json!({
             "version": 1,
             "active": { "configId": "config-1", "modelId": "model-1" },
@@ -11328,7 +11529,7 @@ mod tests {
     #[tokio::test]
     async fn tab_runtime_cache_roundtrips_binary_payloads() {
         let path = temp_db_path("tab-runtime-cache");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         storage
             .save_tab_runtime_cache("tab:1:result", vec![1, 2, 3, 4], 10, 3, Some("connection-1".to_string()))
@@ -11352,7 +11553,7 @@ mod tests {
     #[tokio::test]
     async fn tab_runtime_cache_pruning_retains_live_entries_and_enforces_byte_budget() {
         let path = temp_db_path("tab-runtime-cache-prune");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         for (key, size) in [("live", 6usize), ("old", 5), ("new", 4)] {
             storage.save_tab_runtime_cache(key, vec![1; size], 1, 1, Some("connection-1".to_string())).await.unwrap();
         }
@@ -11378,7 +11579,7 @@ mod tests {
     #[tokio::test]
     async fn tab_runtime_cache_pruning_respects_orphan_grace_period() {
         let path = temp_db_path("tab-runtime-cache-orphan-grace");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         storage.save_tab_runtime_cache("fresh", vec![1], 1, 1, None).await.unwrap();
         storage.save_tab_runtime_cache("crash-leftover", vec![2], 1, 1, None).await.unwrap();
         storage
@@ -11413,7 +11614,7 @@ mod tests {
                 .unwrap();
         }
 
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let entry = storage.load_tab_runtime_cache("legacy").await.unwrap().unwrap();
 
         assert_eq!(entry.payload, vec![1, 2]);
@@ -11450,7 +11651,7 @@ mod tests {
                 .unwrap();
         }
 
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let loaded = storage.load_saved_sql_file("legacy-sql").await.unwrap().unwrap();
 
         assert_eq!(loaded.database, "sales");
@@ -11460,7 +11661,7 @@ mod tests {
     #[tokio::test]
     async fn saved_sql_summary_omits_sql_text_and_loads_file_on_demand() {
         let path = temp_db_path("saved-sql-summary");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let file = SavedSqlFile {
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
@@ -11501,7 +11702,7 @@ mod tests {
     #[tokio::test]
     async fn saved_sql_metadata_update_preserves_unloaded_sql_text() {
         let path = temp_db_path("saved-sql-preserve-unloaded-text");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut file = SavedSqlFile {
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
@@ -11566,7 +11767,7 @@ mod tests {
                 .unwrap();
         }
 
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let legacy = storage.load_saved_sql_file("legacy").await.unwrap().unwrap();
         assert_eq!(legacy.catalog, None);
 
@@ -11589,7 +11790,7 @@ mod tests {
         storage.save_saved_sql_file(&external).await.unwrap();
         drop(storage);
 
-        let reopened = Storage::open(&path).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&path).await.unwrap();
         assert_eq!(reopened.load_saved_sql_file("legacy").await.unwrap().unwrap().catalog, None);
         assert_eq!(
             reopened.load_saved_sql_file("external").await.unwrap().unwrap().catalog.as_deref(),
@@ -11649,7 +11850,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_save_load_roundtrip() {
         let db = temp_db_path("ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("test-config", true);
         cfg.config.provider = AiProvider::ClaudeCodeCli;
@@ -11682,7 +11883,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_ai_and_tunnel_inline_secrets_are_migrated_on_reopen() {
         let db = temp_db_path("legacy-config-secret-migration");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut ai = make_ai_config("legacy", true);
         storage.save_ai_config_item(&ai).await.unwrap();
@@ -11707,7 +11908,7 @@ mod tests {
             .unwrap();
         drop(storage);
 
-        let reopened = Storage::open(&db).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
         let raw_ai = reopened
             .with_conn(|conn| {
                 conn.query_row("SELECT config_json FROM ai_configs WHERE id = 'cfg-legacy'", [], |row| {
@@ -11748,7 +11949,7 @@ mod tests {
     #[tokio::test]
     async fn opencode_cli_ai_config_roundtrip() {
         let db = temp_db_path("opencode-cli-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("opencode-cli", true);
         cfg.config.provider = AiProvider::OpenCodeCli;
@@ -11775,7 +11976,7 @@ mod tests {
     #[tokio::test]
     async fn cursor_cli_ai_config_roundtrip() {
         let db = temp_db_path("cursor-cli-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("cursor-cli", true);
         cfg.config.provider = AiProvider::CursorCli;
@@ -11802,7 +12003,7 @@ mod tests {
     #[tokio::test]
     async fn grok_cli_ai_config_roundtrip() {
         let db = temp_db_path("grok-cli-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("grok-cli", true);
         cfg.config.provider = AiProvider::GrokCli;
@@ -11826,7 +12027,7 @@ mod tests {
     #[tokio::test]
     async fn codebuddy_cli_ai_config_roundtrip() {
         let db = temp_db_path("codebuddy-cli-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("codebuddy-cli", true);
         cfg.config.provider = AiProvider::CodeBuddyCli;
@@ -11853,7 +12054,7 @@ mod tests {
     #[tokio::test]
     async fn anthropic_compatible_ai_config_roundtrip() {
         let db = temp_db_path("anthropic-compatible-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("anthropic-compatible", true);
         cfg.config.provider = AiProvider::AnthropicCompatible;
@@ -11879,7 +12080,7 @@ mod tests {
     #[tokio::test]
     async fn minimax_ai_config_roundtrip() {
         let db = temp_db_path("minimax-ai-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let mut cfg = make_ai_config("minimax", true);
         cfg.config.provider = AiProvider::MiniMax;
@@ -11903,7 +12104,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_only_one_default() {
         let db = temp_db_path("ai-one-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("config-a", true);
         let cfg2 = make_ai_config("config-b", true);
@@ -11923,7 +12124,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_update_existing_to_default() {
         let db = temp_db_path("ai-update-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("config-a", true);
         let cfg2 = make_ai_config("config-b", false);
@@ -11946,7 +12147,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_duplicate_name_error() {
         let db = temp_db_path("ai-dup-name");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("same-name", false);
         storage.save_ai_config_item(&cfg1).await.unwrap();
@@ -11963,7 +12164,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_set_default_switches() {
         let db = temp_db_path("ai-set-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("first", true);
         let cfg2 = make_ai_config("second", false);
@@ -11985,7 +12186,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_delete_default_no_cascade() {
         let db = temp_db_path("ai-delete-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("default-one", true);
         let cfg2 = make_ai_config("other", false);
@@ -12006,7 +12207,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_save_configs_batch() {
         let db = temp_db_path("ai-batch");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let configs =
             vec![make_ai_config("batch-a", true), make_ai_config("batch-b", false), make_ai_config("batch-c", false)];
@@ -12021,7 +12222,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_secret_fields_are_not_written_to_config_json() {
         let db = temp_db_path("ai-secret-at-rest");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         let config = make_ai_config("secret-config", true);
         storage.save_ai_configs(std::slice::from_ref(&config)).await.unwrap();
         let raw = storage
@@ -12053,7 +12254,7 @@ mod tests {
     #[tokio::test]
     async fn ai_config_save_configs_clears_old_tables() {
         let db = temp_db_path("ai-clear-old");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         // Pre-populate old tables as if migration hasn't run yet
         storage.save_ai_config(&make_ai_config("legacy-active", false).config).await.unwrap();
@@ -12081,7 +12282,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_new_creates_timestamps() {
         let db = temp_db_path("pt-save-new");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let result = storage.save_prompt_template("t1", "Production Rules", "SELECT 1").await.unwrap();
 
@@ -12104,7 +12305,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_update_preserves_created_at() {
         let db = temp_db_path("pt-save-update");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let first = storage.save_prompt_template("t1", "Original Name", "Original content").await.unwrap();
         // Ensure some time passes so updated_at changes
@@ -12129,7 +12330,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_blank_name() {
         let db = temp_db_path("pt-name-blank");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let err = storage.save_prompt_template("t1", "", "content").await.unwrap_err();
         assert!(err.contains("cannot be empty"), "expected 'cannot be empty', got: {err}");
@@ -12143,7 +12344,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_long_name() {
         let db = temp_db_path("pt-name-long");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let long_name = "a".repeat(51);
         let err = storage.save_prompt_template("t1", &long_name, "content").await.unwrap_err();
@@ -12155,7 +12356,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_accepts_multi_byte_characters_within_char_limit() {
         let db = temp_db_path("pt-multibyte-name");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         // 25 Chinese characters = 75 bytes but only 25 chars — should be allowed under 50 char limit
         let name25 = "数".repeat(25); // 25 chars, 75 bytes
@@ -12177,7 +12378,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_long_content() {
         let db = temp_db_path("pt-content-long");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let long_content = "a".repeat(8001);
         let err = storage.save_prompt_template("t1", "Valid Name", &long_content).await.unwrap_err();
@@ -12189,7 +12390,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_duplicate_name_case_insensitive() {
         let db = temp_db_path("pt-dup-name");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         storage.save_prompt_template("t1", "Production Rules", "content 1").await.unwrap();
 
@@ -12208,7 +12409,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_save_rejects_duplicate_name_unicode_case_folding() {
         let db = temp_db_path("pt-dup-unicode");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         // SQLite LOWER() is ASCII-only (U+00C4 'Ä' → no change), but Rust
         // str::to_lowercase() does full Unicode case folding (Ä → ä).
@@ -12219,7 +12420,7 @@ mod tests {
 
         // Reverse: lower-case first, upper-case second.
         let db = temp_db_path("pt-dup-unicode-2");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         storage.save_prompt_template("t1", "ä规则", "content-lower").await.unwrap();
         let err = storage.save_prompt_template("t2", "Ä规则", "content-upper").await.unwrap_err();
         assert!(err.contains("duplicate"), "expected 'duplicate', got: {err}");
@@ -12230,7 +12431,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_load_order_is_stable() {
         let db = temp_db_path("pt-load-order");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         // Insert in reverse order of created_at by sleeping between inserts
         storage.save_prompt_template("a", "Template A", "a").await.unwrap();
@@ -12264,7 +12465,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_delete_unknown_id_errors() {
         let db = temp_db_path("pt-delete-unknown");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let err = storage.delete_prompt_template("nonexistent").await.unwrap_err();
         assert!(err.contains("not found"), "expected 'not found', got: {err}");
@@ -12275,7 +12476,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_template_delete_existing_removes() {
         let db = temp_db_path("pt-delete-existing");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         storage.save_prompt_template("t1", "Template", "content").await.unwrap();
         assert_eq!(storage.load_prompt_templates().await.unwrap().len(), 1);
@@ -12291,7 +12492,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_set_get_roundtrip() {
         let db = temp_db_path("gi-roundtrip");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let instructions = "Amounts are in cents. Always filter by date range.";
         storage.save_ai_global_custom_instructions(instructions).await.unwrap();
@@ -12305,7 +12506,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_defaults_to_empty() {
         let db = temp_db_path("gi-default");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
         assert_eq!(loaded, "");
@@ -12316,7 +12517,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_rejects_too_long() {
         let db = temp_db_path("gi-too-long");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         let long = "a".repeat(8001);
         let err = storage.save_ai_global_custom_instructions(&long).await.unwrap_err();
@@ -12328,7 +12529,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_empty_string_clears() {
         let db = temp_db_path("gi-clear");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         storage.save_ai_global_custom_instructions("Some instructions").await.unwrap();
         assert_eq!(storage.load_ai_global_custom_instructions().await.unwrap(), "Some instructions");
@@ -12343,7 +12544,7 @@ mod tests {
     #[tokio::test]
     async fn global_instructions_whitespace_only_trims() {
         let db = temp_db_path("gi-whitespace");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
 
         storage.save_ai_global_custom_instructions("   \n  \t  ").await.unwrap();
         let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
@@ -12355,11 +12556,11 @@ mod tests {
     #[tokio::test]
     async fn pending_snippet_cleanup_survives_restart_and_clears_only_when_matched() {
         let db = temp_db_path("snippet-cleanup-restart");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         storage.save_snippet_migration_state("github", "replacement-id", "legacy-id", "content-hash").await.unwrap();
         drop(storage);
 
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         let state = storage.load_snippet_sync_state("github").await.unwrap();
         assert_eq!(state.snippet_id.as_deref(), Some("replacement-id"));
         let pending = state.pending_cleanup.unwrap();
@@ -12379,7 +12580,7 @@ mod tests {
     #[tokio::test]
     async fn connection_secrets_are_encrypted_at_rest_and_legacy_rows_migrate() {
         let db = temp_db_path("secret-store-at-rest");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         let mut url_config = plain_connection("url-params", "url-password");
         url_config.url_params = Some("applicationName=dbx&PASSWORD=url-password&sslmode=require".to_string());
         storage.save_connections(std::slice::from_ref(&url_config)).await.unwrap();
@@ -12455,7 +12656,7 @@ mod tests {
         // already lived in the secret store therefore lost it on upgrade.
         let id = "legacy-inline-url-params";
         let db = temp_db_path("legacy-connection-config-keeps-password");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         let mut config = plain_connection(id, "saved-password");
         config.url_params = Some("authSource=dbx_test".to_string());
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
@@ -12478,7 +12679,7 @@ mod tests {
             .unwrap();
         drop(storage);
 
-        let reopened = Storage::open(&db).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
         let raw = raw_connection_json(&reopened, id).await;
         assert!(!raw.contains("authSource=dbx_test"));
         assert_eq!(reopened.get_secret(id, "password").await.unwrap().as_deref(), Some("saved-password"));
@@ -12493,7 +12694,7 @@ mod tests {
     async fn legacy_connection_config_migration_still_drops_password_when_not_saved() {
         let id = "legacy-inline-url-params-unsaved";
         let db = temp_db_path("legacy-connection-config-drops-unsaved-password");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         let mut config = plain_connection(id, "saved-password");
         config.url_params = Some("authSource=dbx_test".to_string());
         storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
@@ -12517,7 +12718,7 @@ mod tests {
 
         // "Don't save password" must keep winning: the restore path must not
         // resurrect a credential this connection is configured not to keep.
-        let reopened = Storage::open(&db).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
         assert!(reopened.get_secret(id, "password").await.unwrap().is_none());
         std::fs::remove_file(&db).ok();
     }
@@ -12525,7 +12726,7 @@ mod tests {
     #[tokio::test]
     async fn mqtt_password_is_encrypted_at_rest_and_hydrated_on_load() {
         let path = temp_db_path("mqtt-password-secret");
-        let storage = Storage::open(&path).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut config = plain_connection("mqtt-password", "");
         config.db_type = DatabaseType::Mqtt;
         config.external_config = Some(serde_json::json!({
@@ -12547,7 +12748,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_plaintext_secrets_are_migrated_during_reopen() {
         let db = temp_db_path("secret-store-startup-migration");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         storage
             .with_conn(|conn| {
                 conn.execute(
@@ -12561,7 +12762,7 @@ mod tests {
             .unwrap();
         drop(storage);
 
-        let reopened = Storage::open(&db).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
         let row = reopened
             .with_conn(|conn| {
                 conn.query_row(
@@ -12582,7 +12783,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_sync_credentials_are_migrated_from_app_settings_on_reopen() {
         let db = temp_db_path("legacy-app-settings-secrets");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         storage
             .with_conn(|conn| {
                 conn.execute(
@@ -12601,7 +12802,7 @@ mod tests {
             .unwrap();
         drop(storage);
 
-        let reopened = Storage::open(&db).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
         let settings = reopened.load_app_settings_json().await.unwrap();
         assert!(!settings.contains_key("local_device_secret"));
         assert!(!settings.contains_key("webdav_sync_secrets_passphrase"));
@@ -12632,11 +12833,11 @@ mod tests {
     #[tokio::test]
     async fn legacy_inline_connection_secrets_are_migrated_during_reopen() {
         let db = temp_db_path("inline-secret-startup-migration");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         insert_raw_connection(&storage, &plain_connection("legacy-inline", "old-inline-secret")).await;
         drop(storage);
 
-        let reopened = Storage::open(&db).await.unwrap();
+        let reopened = crate::persistence::test_storage::open(&db).await.unwrap();
         let raw = raw_connection_json(&reopened, "legacy-inline").await;
         assert!(!raw.contains("old-inline-secret"));
         assert_eq!(reopened.load_connections().await.unwrap()[0].password, "old-inline-secret");
@@ -12660,8 +12861,10 @@ mod tests {
     async fn sync_import_transaction_rolls_back_metadata_when_later_write_fails() {
         let directory = tempfile::tempdir().unwrap();
         let db = directory.path().join("dbx.db");
-        let storage =
-            Storage::open_unmigrated(&db).await.unwrap().with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        let storage = crate::persistence::test_storage::open_unmigrated(&db)
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
         storage.save_connections(&[plain_connection("existing", "old-secret")]).await.unwrap();
         let settings = storage.load_desktop_settings().await.unwrap();
         let mut incoming = plain_connection("incoming", "new-secret");

@@ -477,7 +477,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&tmp).unwrap();
         let db_path = tmp.join("test_governance.db");
-        let storage = Arc::new(Storage::open(&db_path).await.unwrap());
+        let storage = Arc::new(crate::persistence::test_storage::open(&db_path).await.unwrap());
         std::mem::forget(tmp);
         storage
     }
@@ -972,7 +972,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let db_path = tmp.join("test_snapshot.db");
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let storage = Arc::new(rt.block_on(Storage::open(&db_path)).unwrap());
+        let storage = Arc::new(rt.block_on(crate::persistence::test_storage::open(&db_path)).unwrap());
         std::mem::forget(tmp);
         storage
     }

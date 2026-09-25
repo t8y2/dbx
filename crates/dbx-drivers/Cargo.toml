@@ -7,17 +7,27 @@ publish = false
 
 [features]
 default = []
-duckdb-sidecar = ["dbx-sql/duckdb-sidecar"]
+duckdb-sidecar = []
 dynamodb = ["dep:aws-sdk-dynamodb"]
 mq-admin = ["dbx-types/mq-admin"]
 sqlite-bundled = ["rusqlite/bundled"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 sqlite-multiple-ciphers = ["dep:libsqlite3-hotbundle"]
-test-support = ["dbx-platform/test-support"]
+test-support = ["dbx-driver-agent/test-support", "dbx-driver-mysql/test-support", "dbx-driver-redis/test-support", "dbx-driver-support/test-support", "dbx-platform/test-support"]
 
 [dependencies]
+dbx-driver-agent = { path = "../dbx-driver-agent" }
+dbx-driver-support = { path = "../dbx-driver-support" }
+dbx-driver-elasticsearch = { path = "../dbx-driver-elasticsearch" }
+dbx-driver-mongodb = { path = "../dbx-driver-mongodb" }
+dbx-driver-mysql = { path = "../dbx-driver-mysql" }
+dbx-driver-postgres = { path = "../dbx-driver-postgres" }
+dbx-driver-redis = { path = "../dbx-driver-redis" }
+dbx-driver-sqlserver = { path = "../dbx-driver-sqlserver" }
 dbx-types = { path = "../dbx-types", default-features = false }
-dbx-sql = { path = "../dbx-sql", default-features = false }
+dbx-sql-core = { path = "../dbx-sql-core" }
+dbx-sql-data = { path = "../dbx-sql-data" }
+dbx-sql-dialect = { path = "../dbx-sql-dialect" }
 dbx-platform = { path = "../dbx-platform", features = ["host-prompts", "downloads"] }
 dbx-sqlite-worker = { path = "../dbx-sqlite-worker", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
@@ -43,13 +53,11 @@ rusqlite = { version = "0.32", default-features = false, features = ["load_exten
 libsqlite3-hotbundle = { git = "https://github.com/zipg/libsqlite3-hotbundle.git", rev = "7f12f203b4f4694a273410bd9b02d77f82b6114e", features = ["cipher-sqlcipher"], optional = true }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = { version = "0.62.0", features = ["visitor"] }
-redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2"
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "sql-browser-tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }
 futures = "0.3"
-mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
 aws-sdk-dynamodb = { version = "=1.104.0", optional = true }
 russh = "0.60"
 pageant = "0.2"
@@ -69,6 +77,7 @@ tempfile = "3"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
 
 [dev-dependencies]
+dbx-driver-support = { path = "../dbx-driver-support", features = ["test-support"] }
 dbx-platform = { path = "../dbx-platform", features = ["test-support"] }
 mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
 tokio = { version = "1", features = ["test-util"] }

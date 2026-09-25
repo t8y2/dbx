@@ -529,9 +529,8 @@ mod tests {
     }
 
     async fn make_2pc() -> (TwoPhaseCommit, std::path::PathBuf) {
-        use crate::storage::Storage;
         let path = std::env::temp_dir().join(format!("test_2pc_{}.db", uuid::Uuid::new_v4()));
-        let storage = Arc::new(Storage::open(&path).await.unwrap());
+        let storage = Arc::new(crate::persistence::test_storage::open(&path).await.unwrap());
         let backend: Arc<dyn StateBackend> = Arc::new(crate::state_persistence::LocalBackend::new(storage));
         (TwoPhaseCommit::new(backend), path)
     }

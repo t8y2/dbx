@@ -108,8 +108,8 @@ test("recognizes extracted core crates and their database sources", () => {
   const result = evaluatePullRequestLabels({
     title: "fix(sql): preserve PostgreSQL query contracts",
     changedFiles: [
-      "crates/dbx-drivers/src/db/postgres.rs",
-      "crates/dbx-sql/src/sql.rs",
+      "crates/dbx-driver-postgres/src/postgres.rs",
+      "crates/dbx-sql-core/src/sql.rs",
       "crates/dbx-types/src/types.rs",
       "crates/dbx-platform/src/process.rs",
       "crates/dbx-ai-provider/src/ai.rs",
@@ -129,7 +129,7 @@ test("collapses broad area and database changes", () => {
     changedFiles: [
       "agents/drivers/mysql/build.gradle",
       "apps/desktop/src/components/grid/GeometryViewer.vue",
-      "crates/dbx-drivers/src/db/postgres.rs",
+      "crates/dbx-driver-postgres/src/postgres.rs",
       "crates/dbx-mcp/src/main.rs",
       "crates/dbx-web/src/main.rs",
       "docs/content/docs/geometry.mdx",

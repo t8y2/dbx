@@ -193,7 +193,6 @@ fn field_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::Storage;
 
     fn config() -> crate::models::connection::ConnectionConfig {
         serde_json::from_value(serde_json::json!({
@@ -269,7 +268,7 @@ mod tests {
     #[tokio::test]
     async fn saved_but_disconnected_context_is_rejected_without_creating_a_pool() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.path().join("plugins"));
         let config = config();
         state.configs.write().await.insert(config.id.clone(), config);

@@ -3,6 +3,7 @@ import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
 import { createPluginAiConversation, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
+import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_SQL_CHARS, MAX_PLUGIN_DATA_TIMEOUT_MS, PLUGIN_DATA_ACCESS_NOT_GRANTED, PLUGIN_DATA_CAPABILITY, PLUGIN_DATA_READ_PERMISSION, type PluginDataQueryRequest, type PluginDataQueryResult } from "@/types/pluginData";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -14,6 +15,12 @@ const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
 const MAX_BRIDGE_SAVE_BYTES = 512 * 1024 * 1024;
 // Mirrors MAX_PLUGIN_PLAN_NAME_CHARS in crates/dbx-core/src/query/plugin_plan.rs.
 const MAX_PLUGIN_PLAN_IDENTIFIER_CHARS = 256;
+/**
+ * In-flight `host.queryData` calls per bridge. Plugin queries share the
+ * connection pool with the user's own tabs, so a runaway plugin must not be
+ * able to occupy it.
+ */
+export const MAX_CONCURRENT_PLUGIN_DATA_QUERIES = 4;
 
 // Clipboard reads are the one permission that hands environment data (the
 // system clipboard) to plugin code with no user interaction on each call, so
@@ -160,6 +167,22 @@ export interface PluginHostBridgeApi {
   explainPlan?(request: PluginPlanRequest): Promise<PluginPlanResult>;
   /** Read-only table schema metadata over an already-open Host connection. */
   getTableMetadata?(context: PluginTableContext): Promise<PluginTableMetadata>;
+  /**
+   * One read-only SQL statement on a connection the user granted to the
+   * plugin (`host.data:read`). The backend re-checks the permission, the
+   * grant, the open connection, and the read-only statement gate.
+   */
+  queryData?(pluginId: string, request: PluginDataQueryRequest): Promise<PluginDataQueryResult>;
+  /** Whether the user already granted `pluginId` data access to `connectionId`. */
+  hasDataGrant?(pluginId: string, connectionId: string): Promise<boolean>;
+  /**
+   * Asks the user whether `pluginId` may read `connectionId`. Resolves true to
+   * allow; the bridge then persists the grant through `grantDataAccess`. A
+   * host without a consent surface must omit it so the bridge denies.
+   */
+  confirmDataAccess?(pluginId: string, pluginName: string, connectionId: string): Promise<boolean> | boolean;
+  /** Persists the grant the user just allowed. */
+  grantDataAccess?(pluginId: string, connectionId: string): Promise<void>;
   closeTab?(): Promise<void> | void;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
@@ -217,6 +240,16 @@ export class PluginHostBridge {
   private theme?: PluginBridgeTheme;
   /** Consent + audit + rate state for clipboard reads; lives for the bridge lifetime. */
   private clipboardReadGate = createClipboardReadGate();
+  /**
+   * Data-access answers for this bridge lifetime, per connection. A denial is
+   * remembered so a plugin cannot re-prompt in a loop; an iframe reload builds
+   * a new bridge and may ask again. Grants live in the backend; this only
+   * spares a lookup per query.
+   */
+  private dataAccess = new Map<string, "granted" | "denied">();
+  /** One consent prompt per connection at a time; concurrent queries share it. */
+  private pendingDataAccess = new Map<string, Promise<void>>();
+  private inFlightDataQueries = 0;
 
   /** Bounded audit trail of this session's clipboard read attempts (oldest first). */
   get clipboardAudit(): readonly PluginClipboardAuditEntry[] {
@@ -364,6 +397,7 @@ export class PluginHostBridge {
         downloadFile: !!this.api.downloadFile,
         planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
         [PLUGIN_SCHEMA_METADATA_CAPABILITY]: !!this.api.getTableMetadata,
+        [PLUGIN_DATA_CAPABILITY]: !!this.api.queryData && !!this.api.hasDataGrant && !!this.api.confirmDataAccess && !!this.api.grantDataAccess,
         storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
         ai: !!this.api.openAiConversation,
         // Additive with the same "absence means unsupported" contract: an older
@@ -528,6 +562,26 @@ export class PluginHostBridge {
       if (!this.api.getTableMetadata) throw new Error("Host schema metadata API is unavailable");
       return this.api.getTableMetadata(requirePluginTableContext(requireRecord(params, "host.getTableMetadata params")));
     }
+    if (method === "host.queryData") {
+      this.requirePermission(PLUGIN_DATA_READ_PERMISSION);
+      if (!this.api.queryData) throw new Error("Host data API is unavailable");
+      const request = requirePluginDataQueryRequest(requireRecord(params, "host.queryData params"));
+      await this.ensureDataAccess(request.connectionId);
+      if (this.inFlightDataQueries >= MAX_CONCURRENT_PLUGIN_DATA_QUERIES) {
+        throw new Error(`At most ${MAX_CONCURRENT_PLUGIN_DATA_QUERIES} data queries may run at once; wait for one to finish`);
+      }
+      this.inFlightDataQueries += 1;
+      try {
+        return await this.api.queryData(this.plugin.manifest.id, request);
+      } catch (error) {
+        // The grant was revoked while this workbench stayed open: forget the
+        // cached answer so the next query asks the user again.
+        if ((error instanceof Error ? error.message : String(error)).includes(PLUGIN_DATA_ACCESS_NOT_GRANTED)) this.dataAccess.delete(request.connectionId);
+        throw error;
+      } finally {
+        this.inFlightDataQueries -= 1;
+      }
+    }
     if (method === "host.saveFile") {
       const input = isRecord(params) ? params : {};
       // The sandboxed iframe cannot trigger downloads (WKWebView cancels blob
@@ -657,6 +711,35 @@ export class PluginHostBridge {
 
   private requirePermission(permission: string): void {
     if (!this.hasPermission(permission)) throw new Error(`Plugin has not declared permission '${permission}'`);
+  }
+
+  /** Resolves once the user allowed this plugin to read `connectionId`; rejects on denial. */
+  private async ensureDataAccess(connectionId: string): Promise<void> {
+    const known = this.dataAccess.get(connectionId);
+    if (known === "granted") return;
+    if (known === "denied") throw new Error("Data access to this connection was denied for this plugin session");
+    let pending = this.pendingDataAccess.get(connectionId);
+    if (!pending) {
+      pending = this.requestDataAccess(connectionId).finally(() => this.pendingDataAccess.delete(connectionId));
+      this.pendingDataAccess.set(connectionId, pending);
+    }
+    await pending;
+  }
+
+  private async requestDataAccess(connectionId: string): Promise<void> {
+    const pluginId = this.plugin.manifest.id;
+    if (this.api.hasDataGrant && (await this.api.hasDataGrant(pluginId, connectionId))) {
+      this.dataAccess.set(connectionId, "granted");
+      return;
+    }
+    // A host that cannot ask denies; it never grants silently.
+    const allowed = this.api.confirmDataAccess && this.api.grantDataAccess ? (await this.api.confirmDataAccess(pluginId, this.plugin.manifest.name, connectionId)) === true : false;
+    if (!allowed || !this.api.grantDataAccess) {
+      this.dataAccess.set(connectionId, "denied");
+      throw new Error("Data access to this connection was denied");
+    }
+    await this.api.grantDataAccess(pluginId, connectionId);
+    this.dataAccess.set(connectionId, "granted");
   }
 
   private hasPermission(permission: string): boolean {
@@ -977,6 +1060,9 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       explainPlan: (planRequest) => request('host.explainPlan', planRequest),
       // Read-only metadata; the host enforces the permission and open-session gate.
       getTableMetadata: (tableContext) => request('host.getTableMetadata', tableContext),
+      // One read-only statement on a connection the user granted to this
+      // plugin (host.data:read); the first query per connection asks the user.
+      queryData: (dataRequest) => request('host.queryData', dataRequest),
       saveFile: (options = {}, data) => {
         if (data === undefined) return request('host.saveFile', options);
         if (typeof data === 'string') return request('host.saveFile', { ...(options || {}), dataBase64: data });
@@ -1187,6 +1273,42 @@ function requirePluginPlanRequest(input: Record<string, unknown>): PluginPlanReq
     request.timeoutMs = clampPluginPlanTimeout(input.timeoutMs);
   }
   return request;
+}
+
+/**
+ * Validates one `host.queryData` request: a connection reference, optional
+ * scope, one SQL text, and optional bounds. The backend re-checks every bound
+ * and owns the read-only decision; this only refuses malformed input early.
+ */
+function requirePluginDataQueryRequest(input: Record<string, unknown>): PluginDataQueryRequest {
+  if (typeof input.sql !== "string") throw new Error("host.queryData requires sql");
+  const sql = input.sql.trim();
+  if (!sql) throw new Error("host.queryData requires a non-empty sql");
+  if (sql.length > MAX_PLUGIN_DATA_SQL_CHARS) throw new Error(`sql must be at most ${MAX_PLUGIN_DATA_SQL_CHARS} characters`);
+  const request: PluginDataQueryRequest = { connectionId: requirePluginDataName(input.connectionId, "connectionId"), sql };
+  for (const key of ["database", "schema"] as const) {
+    const value = input[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string") throw new Error(`${key} must be a string`);
+    if (value.trim()) request[key] = requirePluginDataName(value, key);
+  }
+  if (input.maxRows !== undefined && input.maxRows !== null) {
+    if (typeof input.maxRows !== "number" || !Number.isFinite(input.maxRows)) throw new Error("maxRows must be a number");
+    request.maxRows = Math.min(MAX_PLUGIN_DATA_MAX_ROWS, Math.max(1, Math.floor(input.maxRows)));
+  }
+  if (input.timeoutMs !== undefined && input.timeoutMs !== null) {
+    if (typeof input.timeoutMs !== "number" || !Number.isFinite(input.timeoutMs)) throw new Error("timeoutMs must be a number");
+    request.timeoutMs = Math.min(MAX_PLUGIN_DATA_TIMEOUT_MS, Math.max(1, Math.round(input.timeoutMs)));
+  }
+  return request;
+}
+
+function requirePluginDataName(value: unknown, label: string): string {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  const name = value.trim();
+  if (!name) throw new Error(`${label} must not be empty`);
+  if (Array.from(name).length > MAX_PLUGIN_DATA_NAME_CHARS) throw new Error(`${label} must be at most ${MAX_PLUGIN_DATA_NAME_CHARS} characters`);
+  return name;
 }
 
 /** Pre-clamps to the host ceiling; the backend additionally clamps to the connection's own timeout. */

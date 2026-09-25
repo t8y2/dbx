@@ -519,10 +519,17 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             + "ORDER BY c.colid";
     }
 
+    // sysobjects.xtype codes for the object kinds the object browser and the
+    // tree both ask object source for: P = stored procedure, FN = scalar
+    // function, V = view, TR = trigger. Views were missing, so "view DDL" on a
+    // SQL Server legacy connection failed with "Unsupported object type: VIEW"
+    // instead of returning the definition stored in syscomments (#10162).
     private static String sqlServer2000ObjectXtype(String objectType) {
         return switch (objectType) {
             case "PROCEDURE" -> "P";
             case "FUNCTION" -> "FN";
+            case "VIEW" -> "V";
+            case "TRIGGER" -> "TR";
             default -> null;
         };
     }

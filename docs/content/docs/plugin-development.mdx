@@ -120,6 +120,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.schema:read",
     "host.storage",
     "host.clipboard:read",
+    "host.data:read",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -140,6 +141,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `host.storage` gives the workbench UI a persistent key-value store scoped to this plugin (see [Persistent UI State](#persistent-ui-state)). Values never leave the plugin's own data directory.
 - `host.ai` lets the plugin open a conversation with a data snapshot in the built-in DBX AI panel, using its model selector, history, follow-up messages, cancellation and export. Older DBX builds reject the unknown permission at install time, so plugins that must install everywhere should treat `host.ai` as optional.
 - `host.clipboard:read` allows reading the system clipboard from the workbench UI (see [System Clipboard](#system-clipboard)). Clipboard writes need no permission; reads hand user data (passwords, tokens) to plugin code, so they are gated.
+- `host.data:read` allows `window.dbxPlugin.queryData` to run one read-only SQL statement on a connection the user granted to the plugin (see [Read-only Data Queries](#read-only-data-queries)). Every connection needs the user's consent; it never grants writes, DDL, or reconnects.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -348,7 +350,8 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
 | `getTableMetadata({ connectionId, database?, schema?, table })` | Reads narrow table schema metadata from an already-open connection; requires `host.schema:read`. |
-| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, storage, ai, clipboardWrite, clipboardRead }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` | Runs one read-only SQL statement on a connection the user granted to the plugin; requires `host.data:read`. |
+| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, clipboardWrite, clipboardRead }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
 | `ai.openConversation({ title, prompt, context, send? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false`, or starts analysis when `true`; requires `host.ai` and is advertised as `capabilities.ai` — gate on it instead of probing, since older hosts omit it. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
@@ -455,6 +458,49 @@ if (window.dbxPlugin.capabilities.schemaMetadataApi) {
 - This API is read-only. DBX reuses only an already-open Host connection/session; a plugin cannot trigger an implicit reconnect, create a pool, or execute arbitrary SQL. A saved-but-disconnected connection is rejected with `Connection is not open`; a requested database without a matching open session is also rejected instead of being routed to another connection.
 
 This API is part of Host API 1.3. A plugin that cannot work without it should declare `"engines": { "host_api": "^1.3" }` and still read `capabilities.schemaMetadataApi`, because older hosts omit that field. Without `host.schema:read`, the host rejects the request before it reaches the backend.
+
+### Read-only Data Queries
+
+A plugin can run one read-only SQL statement on a DBX connection the user granted to it, without a driver, a pool, a credential, or a connection string. Declare the permission and gate the call on the capability:
+
+```json
+{
+  "engines": { "host_api": "^1.4" },
+  "permissions": ["host.data:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.dataApi) {
+  const result = await window.dbxPlugin.queryData({
+    connectionId,
+    database,
+    sql: "SELECT status, count(*) AS total FROM orders GROUP BY status",
+    maxRows: 200
+  });
+  renderChart(result.columns, result.rows);
+}
+```
+
+`queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` returns:
+
+```json
+{
+  "dbType": "postgres",
+  "columns": [{ "name": "status", "dataType": "text" }, { "name": "total", "dataType": "int8" }],
+  "rows": [["paid", 1204], ["refunded", 37]],
+  "truncated": false,
+  "elapsedMs": 12
+}
+```
+
+- **Consent per connection.** The first query for a connection opens a host dialog that names the plugin and the connection. An allow is persisted and listed under the plugin in Plugin Center → Installed, where the user can revoke it at any time; a denial is remembered for the workbench session. A plugin cannot grant itself access.
+- **Read-only, one statement.** The host accepts exactly one statement that DBX's SQL risk classifier rates read-only — the same gate as MCP read-only access and the AI agent. Writes, DDL, `SELECT … FOR UPDATE`, multiple statements, and session database switches such as `USE` are rejected. Pass `database` instead of switching.
+- **Open connections only.** Like the plan and schema metadata APIs, DBX never connects on the plugin's behalf: a saved but closed connection is rejected with `Connection is not open`. Redis, MongoDB, search engines, and other non-SQL connections are not served.
+- **Bounded.** `maxRows` defaults to 500 and is capped at 5000; the serialized rows are capped at 8 MiB; `timeoutMs` is clamped to the connection timeout and a 60-second ceiling. `truncated` is `true` whenever rows were cut.
+- **No credentials.** The response carries columns and rows only. A revoked grant fails with an error that starts with `PLUGIN_DATA_ACCESS_NOT_GRANTED`; the next query asks the user again.
+
+This API is Host API 1.4. Keep both the `engines.host_api` floor and the `capabilities.dataApi` runtime check; web hosts that cannot show a consent dialog deny the request instead of granting it.
 
 ### System Clipboard
 
@@ -646,6 +692,23 @@ Sidecar rules: reserve stdout for protocol messages and write logs to stderr; co
 Every sidecar starts with `DBX_PLUGIN_DATA_DIR` set to a persistent directory reserved for this plugin (`plugin-data/<id>`, a sibling of the installed package). It survives version upgrades and uninstall, is shared by all of the plugin's sidecar runs, and is the right home for caches, tokens, and databases the backend manages — create it before the first write; the host does not pre-create it. The Go SDK exposes it as `dbxpluginsdk.DataDir()` / `EnsureDataDir()`. Workbench UIs reach a small JSON-backed store inside the same directory through `host.storage` instead of touching these files (see [Persistent UI State](#persistent-ui-state)).
 
 The example can replace the Rust template's `backend/src/main.rs`; keep its Cargo package version equal to the Manifest. Go templates use `dbxpluginsdk.NewServer(metadata, handler).Serve()`. The current Go SDK supports JSONL; the Rust SDK also supports framed transport. Changing a Go Manifest's transport alone does not implement binary framing. See the [Rust SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/rust/dbx-plugin-sdk) and [Go SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/go/dbx-plugin-sdk) for complete interfaces.
+
+## Tools for the DBX AI Assistant
+
+A plugin with a native backend can expose tools that the built-in DBX AI assistant calls in Agent mode, so a question like "why is the orders API slow?" can combine database tools with your plugin's metrics, logs, or shell access. The sidecar implements two methods:
+
+- `mcp/tools` returns `{ "tools": [{ "name", "description", "inputSchema", "annotations"? }] }` in MCP tool format. DBX passes `{ "connectionId" }` for the connection it is binding, so a plugin may hide write tools on read-only connections.
+- `mcp/call` receives `{ "tool", "arguments", "lifecycle" }` and returns an MCP `CallToolResult` (`{ "content": [{ "type": "text", "text": "..." }], "isError": false }`). `lifecycle` is the same payload as `connection/connect` for the open connection — credentials resolved by the host and the runtime endpoint after SSH or proxy layers — so tools never take secrets as arguments.
+
+What the host adds on top:
+
+- **Opt-in.** Nothing is exposed until the user enables the plugin under Plugin Center → Installed → Built-in AI tools; the same panel lists the tools and marks which ones need approval.
+- **Open connections only.** Tools are offered for the plugin connections the user currently has open. DBX binds the connection itself: it strips `connectionId` / `connectionName` from the schema the model sees and injects the bound `connectionId` into the forwarded arguments when your schema declares it. With several open connections the model picks one through an added `dbx_connection` argument.
+- **Approval by default.** Only tools whose entry sets `"annotations": { "readOnlyHint": true }` run without asking. Every other call pauses the run and shows the exact arguments to the user, who allows it once or denies it; an unanswered request is denied after five minutes. Mark genuinely read-only tools, and keep your own guards (read-only connection flags, two-phase confirmations) — the approval covers model mistakes, not your plugin's own safety rules.
+- **Portable schemas.** Tool names are exposed as `<prefix>__<tool>` (for example `ssh__ssh_exec`), and schemas are reduced to the subset every supported model provider accepts: `type`, `description`, `properties`, `required`, `items`, string `enum`, and numeric/length/item bounds. Keep argument names to letters, digits, and underscores.
+- **Bounded results.** Calls time out after 120 seconds and results are compacted before they reach the model. Start long jobs as background tasks and return a handle instead of blocking.
+
+The built-in agent treats tool output as untrusted data. Return facts, not instructions, and never echo secrets in results.
 
 ## Create a Plugin
 

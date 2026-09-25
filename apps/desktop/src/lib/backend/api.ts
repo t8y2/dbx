@@ -1,7 +1,6 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
-import { useSettingsStore } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 
 // ---------------------------------------------------------------------------
@@ -135,6 +134,7 @@ export const uninstallJdbcPlugin = forward("uninstallJdbcPlugin");
 export const listInstalledAgentsLocal = forward("listInstalledAgentsLocal");
 export async function listInstalledAgents() {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.listInstalledAgents(useSettingsStore().editorSettings.updateDownloadSource);
 }
 export const isAgentInstalled = forward("isAgentInstalled");
@@ -145,10 +145,12 @@ export const stopDriverRuntime = forward("stopDriverRuntime");
 export const restartDriverRuntime = forward("restartDriverRuntime");
 export async function installAgent(dbType: string, operationId?: string) {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.installAgent(dbType, useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export async function upgradeAllAgents(operationId?: string) {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.upgradeAllAgents(useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export const cancelAgentInstall = forward("cancelAgentInstall");
@@ -168,6 +170,7 @@ export const importAgentDriver = forward("importAgentDriver");
 export const importAgentJar = importAgentDriver;
 export async function reinstallJre(jreKey?: string, operationId?: string) {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.reinstallJre(jreKey, useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export const uninstallJre = forward("uninstallJre");
@@ -257,6 +260,7 @@ export const listDialectDataTypes = forward("listDialectDataTypes");
 
 // Docs
 export const collectDocsSnapshot = forward("collectDocsSnapshot");
+export const collectDocsSnapshotForExport = forward("collectDocsSnapshotForExport");
 export const loadDocsAnnotations = forward("loadDocsAnnotations");
 export const applyDocsAnnotations = forward("applyDocsAnnotations");
 export const saveDocsAnnotations = forward("saveDocsAnnotations");
@@ -287,6 +291,9 @@ export const buildExplainSql = forward("buildExplainSql");
 export const getExplainInfo = forward("getExplainInfo");
 export const getPluginPlanCapabilities = forward("getPluginPlanCapabilities");
 export const getPluginEstimatedPlan = forward("getPluginEstimatedPlan");
+export const queryPluginData = forward("queryPluginData");
+export const getPluginDataGrants = forward("getPluginDataGrants");
+export const setPluginDataGrant = forward("setPluginDataGrant");
 export const buildCreateUserSql = forward("buildCreateUserSql");
 export const buildDroppedFilePreviewSql = forward("buildDroppedFilePreviewSql");
 export const buildTableSelectSql = forward("buildTableSelectSql");
@@ -350,6 +357,10 @@ export const aiComplete = forward("aiComplete");
 export const aiStream = forward("aiStream");
 export const aiAgentStream = forward("aiAgentStream");
 export const aiCancelStream = forward("aiCancelStream");
+export const resolveAiToolApproval = forward("resolveAiToolApproval");
+export const getAiPluginToolPlugins = forward("getAiPluginToolPlugins");
+export const setAiPluginToolPluginEnabled = forward("setAiPluginToolPluginEnabled");
+export const previewPluginAiTools = forward("previewPluginAiTools");
 export const aiTestConnection = forward("aiTestConnection");
 export const aiListModels = forward("aiListModels");
 export const aiResolveModelEffort = forward("aiResolveModelEffort");
@@ -598,6 +609,7 @@ export const redisSetExpireAt = forward("redisSetExpireAt");
 export const redisSetKeysTtl = forward("redisSetKeysTtl");
 export const redisSetKeysExpireAt = forward("redisSetKeysExpireAt");
 export const redisDeleteKeys = forward("redisDeleteKeys");
+export const redisDeleteKeysByPattern = forward("redisDeleteKeysByPattern");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
 export const redisLoadMore = forward("redisLoadMore");
@@ -915,7 +927,9 @@ export const deleteHistoryEntry = forward("deleteHistoryEntry");
 // Updates
 export const checkMcpServerStatus = forward("checkMcpServerStatus");
 export const installMcpServer = forward("installMcpServer");
+export const installNativeMcpServer = forward("installNativeMcpServer");
 export const uninstallMcpServer = forward("uninstallMcpServer");
+export const uninstallNpmMcpServer = forward("uninstallNpmMcpServer");
 export const loadMcpHttpServerSettings = forward("loadMcpHttpServerSettings");
 export const saveMcpHttpServerSettings = forward("saveMcpHttpServerSettings");
 export const mcpHttpServerStatus = forward("mcpHttpServerStatus");

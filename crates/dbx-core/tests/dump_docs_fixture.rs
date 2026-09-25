@@ -10,7 +10,6 @@ use dbx_core::docs::annotations::{
     AnnotationFile, ColumnAnnotation, GroupAnnotation, ProjectAnnotation, TableAnnotation,
 };
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-use dbx_core::storage::Storage;
 use std::collections::BTreeMap;
 
 fn live_postgres_config(
@@ -140,7 +139,7 @@ async fn dump_keycloak_fixture() {
 
     let dir = std::env::temp_dir().join(format!("dbx-dump-docs-fixture-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config.clone());
 

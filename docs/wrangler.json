@@ -7,6 +7,8 @@
     "binding": "ASSETS",
     "not_found_handling": "404-page",
     "run_worker_first": [
+      "/install-mcp",
+      "/install-mcp.ps1",
       "/api/*",
       "/cn/plugins/*",
       "/en/plugins/*",

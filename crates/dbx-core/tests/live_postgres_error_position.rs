@@ -20,7 +20,6 @@ use dbx_core::db::postgres;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::{execute_multi_core_with_options_for_client_and_progress_typed, QueryExecutionOptions};
 use dbx_core::sql_error_position::{encode_marker, take_message_position, SqlErrorPosition, SQL_ERROR_POSITION_MARKER};
-use dbx_core::storage::Storage;
 
 fn live_env() -> (String, u16, String, String, String) {
     let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -110,7 +109,7 @@ async fn live_pg_multi_core_reports_error_position_in_the_backend_envelope() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-pg-position-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     let connection_id = "live-pg-position";
     state.configs.write().await.insert(

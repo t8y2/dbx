@@ -307,7 +307,7 @@ mod tests {
         resolve_mongo_database, resolve_mongo_target_values, write_port_file, AppState,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-    use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy, Storage};
+    use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
     use std::sync::Arc;
 
     fn mysql_config(read_only: bool) -> ConnectionConfig {
@@ -413,7 +413,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let storage = Storage::open(&root.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&root.join("storage.db")).await.unwrap();
         let mut config = mysql_config(false);
         storage.save_connections(&[config.clone()]).await.unwrap();
         let state = Arc::new(AppState::new_with_plugin_dir(storage, root.join("plugins")));
@@ -502,7 +502,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let storage = Storage::open(&root.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&root.join("storage.db")).await.unwrap();
         let mut config = mysql_config(false);
         config.id = "conn-1".to_string();
         storage.save_connections(&[config]).await.unwrap();

@@ -160,6 +160,10 @@ jobs:
       - name: GitHub script tests
         run: node --test .github/scripts/*.test.mjs
 
+      - name: PowerShell MCP installer tests
+        shell: pwsh
+        run: ./.github/scripts/install-mcp-powershell.test.ps1
+
   packages:
     needs: changes
     if: needs.changes.outputs.packages == 'true'
@@ -956,7 +960,8 @@ jobs:
               - 'scripts/run-check.mjs'
               - 'crates/dbx-core/src/**'
               - 'crates/dbx-drivers/src/**'
-              - 'crates/dbx-sql/src/**'
+              - 'crates/dbx-driver-*/src/**'
+              - 'crates/dbx-sql*/src/**'
               - 'crates/dbx-formats/src/**'
               - 'crates/dbx-types/src/**'
               - 'crates/dbx-plugin-runtime/src/**'
@@ -998,7 +1003,7 @@ jobs:
               - '.github/workflows/ci.yml'
             agents:
               - 'agents/**'
-              - 'crates/dbx-drivers/assets/agent-protocol-v2.json'
+              - 'crates/dbx-driver-agent/assets/agent-protocol-v2.json'
               - 'crates/dbx-core/Cargo.toml'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -1041,6 +1046,7 @@ jobs:
               - 'src-tauri/src/commands/update.rs'
               - 'crates/dbx-core/Cargo.toml'
               - 'crates/dbx-drivers/**'
+              - 'crates/dbx-driver-*/**'
               - 'crates/dbx-platform/**'
               - 'crates/dbx-core/src/host/update.rs'
               - 'Cargo.toml'
@@ -1052,6 +1058,9 @@ jobs:
               - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
+              - 'docs/public/install-mcp*'
+              - '.github/workflows/mcp-release.yml'
+              - '.github/workflows/publish-packages.yml'
               - '.github/workflows/plugin-release-reusable.yml'
               - '.github/workflows/ci.yml'
               - 'apps/desktop/src/types/database.ts'

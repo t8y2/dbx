@@ -17,11 +17,11 @@ import {
   type PluginSaveFileResult,
   type PluginWorkbenchContext,
 } from "@/lib/plugins/pluginHostBridge";
+import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { downloadPluginFile, cancelPluginDownload } from "@/lib/plugins/pluginFileDownload";
 import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
-import { getCachedPluginUiHtml, setCachedPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -60,6 +60,10 @@ let bridge: PluginHostBridge | undefined;
 let unsubscribeEvents: (() => void) | undefined;
 let disposed = false;
 let loadGeneration = 0;
+// Boot timing (§8.3 loading lifecycle): one console.debug line per iframe load
+// so panel-open latency can be attributed (doc cache / sandbox doc / parse+exec).
+let bootStartedAt = 0;
+let bootCacheHit = false;
 
 // --- Plugin file-transfer bridge (native dialogs + OS file drops) ---------
 // The sandboxed iframe cannot reach local files, so handles live here: Tauri
@@ -399,6 +403,14 @@ function createBridge() {
       getPlanCapabilities: (connectionId) => api.getPluginPlanCapabilities(connectionId),
       explainPlan: (request) => api.getPluginEstimatedPlan(request),
       getTableMetadata: (context) => api.getPluginTableMetadata(context),
+      // host.data:read — the bridge asks for consent per connection before the
+      // first query; the backend enforces the persisted grant on every call.
+      queryData: (pluginId, request) => api.queryPluginData(pluginId, request),
+      hasDataGrant: async (pluginId, connectionId) => (await api.getPluginDataGrants(pluginId)).some((grant) => grant.connectionId === connectionId),
+      confirmDataAccess: (_pluginId, pluginName, connectionId) => confirmPluginDataAccess(pluginName, connectionId),
+      grantDataAccess: async (pluginId, connectionId) => {
+        await api.setPluginDataGrant(pluginId, connectionId, true);
+      },
       closeTab: () => emit("closeTab"),
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
@@ -436,6 +448,22 @@ function createBridge() {
     if (!connectionId) return;
     await useConnectionStore().repushPluginConnection(connectionId);
   };
+}
+
+/**
+ * Consent for `host.data:read`: names the plugin and the connection so the
+ * user sees exactly what is shared. An allow is persisted as a grant the
+ * Plugin Center can revoke; the web host asks through the browser dialog.
+ */
+async function confirmPluginDataAccess(pluginName: string, connectionId: string): Promise<boolean> {
+  const connectionName = useConnectionStore().getConfig(connectionId)?.name || connectionId;
+  const message = t("pluginPlatform.dataAccessConsent", { name: pluginName, connection: connectionName });
+  const title = t("pluginPlatform.dataAccessConsentTitle");
+  if (isTauriRuntime()) {
+    const { ask } = await import("@tauri-apps/plugin-dialog");
+    return (await ask(message, { title, kind: "warning" })) === true;
+  }
+  return window.confirm(`${title}\n\n${message}`);
 }
 
 /** Keep a plugin-supplied name from smuggling path separators or traversal into the save dialog. */
@@ -477,65 +505,6 @@ async function savePluginFile(request: PluginSaveFileRequest, data: Uint8Array):
   return { path: fileName };
 }
 
-function localUiAssetPath(source: string): string | undefined {
-  const trimmed = source.trim();
-  if (!trimmed || /^(?:blob:|data:|https?:|\/\/)/i.test(trimmed)) return undefined;
-  try {
-    const resolved = new URL(trimmed, "https://dbx-plugin.invalid/");
-    if (resolved.origin !== "https://dbx-plugin.invalid") return undefined;
-    const path = decodeURIComponent(resolved.pathname).replace(/^\/+/, "");
-    if (!path || path.split("/").some((segment) => segment === "..")) return undefined;
-    return path;
-  } catch {
-    return undefined;
-  }
-}
-
-async function inlineLocalUiAssets(html: string, pluginId: string): Promise<{ html: string; entryDirectory: string }> {
-  // Shipped ui builds usually inline every asset into one HTML document.
-  // Parsing and re-serializing a multi-megabyte document is pure overhead when
-  // there is nothing local to inline — pre-check before touching DOMParser.
-  if (!/<script\b[^>]*\bsrc=/i.test(html) && !/<link\b[^>]*rel=["']?stylesheet/i.test(html)) {
-    return { html, entryDirectory: "" };
-  }
-  const document = new DOMParser().parseFromString(html, "text/html");
-  const resources = [...document.querySelectorAll("script[src], link[rel='stylesheet'][href]")];
-  // Dynamic-import chunks and CSS url() references live next to the entry
-  // script; its directory is the <base> the sandbox document needs to resolve
-  // them through the dbx-plugin scheme.
-  let entryDirectory = "";
-  // Fetch every referenced asset concurrently — these are bridge round-trips
-  // into the sidecar, and panels reopen this path on every workbench (re)load.
-  const fetched = await Promise.all(
-    resources.map((resource) => {
-      const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
-      const path = source ? localUiAssetPath(source) : undefined;
-      if (!path) return Promise.resolve({ resource, content: null });
-      if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
-      return api.readPluginUiAsset(pluginId, path).then((asset) => ({
-        resource,
-        content: new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0))),
-      }));
-    }),
-  );
-  for (const { resource, content } of fetched) {
-    if (content === null) continue;
-    if (resource.tagName === "SCRIPT") {
-      const script = document.createElement("script");
-      for (const attribute of [...resource.attributes]) {
-        if (attribute.name !== "src") script.setAttribute(attribute.name, attribute.value);
-      }
-      script.textContent = content;
-      resource.replaceWith(script);
-    } else {
-      const style = document.createElement("style");
-      style.textContent = content;
-      resource.replaceWith(style);
-    }
-  }
-  return { html: document.documentElement.outerHTML, entryDirectory };
-}
-
 /**
  * Base URL prefix for lazy-loaded plugin UI assets. wry serves custom schemes
  * natively on WKWebView/webkit2gtk but maps them onto http(s) subdomains on
@@ -548,8 +517,6 @@ function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | und
   return entryDirectory ? `${origin}${entryDirectory}/` : origin;
 }
 
-// Inlined plugin ui html per `${pluginId}:${version}` (see loadWorkbench).
-
 async function loadWorkbench() {
   const generation = ++loadGeneration;
   bridge?.dispose();
@@ -557,28 +524,32 @@ async function loadWorkbench() {
   loading.value = true;
   frameReady.value = false;
   error.value = "";
+  bootStartedAt = performance.now();
+  bootCacheHit = true;
   try {
     if (!props.plugin.compatibility.compatible) throw new Error((props.plugin.compatibility.errors || []).join("; ") || t("pluginPlatform.pluginIncompatible"));
     // The read/decode/inline pipeline over a multi-megabyte ui build dominates
     // workbench open time; cache the inlined html per plugin id+version so
     // reopening panels (new dock entries, workbench reloads) skips it. Theme
     // is applied per load via the sandbox document, so the cache never pins a
-    // stale appearance.
+    // stale appearance. getOrLoadPluginUiHtml coalesces with an in-flight
+    // warm (dock "+" picker) so the panel never duplicates a running pipeline.
     const htmlCacheKey = `${props.plugin.manifest.id}:${props.plugin.manifest.version}`;
     let cachedHtml = getCachedPluginUiHtml(htmlCacheKey);
     if (!cachedHtml) {
-      const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
+      bootCacheHit = false;
+      cachedHtml = await getOrLoadPluginUiHtml(htmlCacheKey, props.plugin.manifest.id);
       if (disposed || generation !== loadGeneration) return;
-      const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
-      const inlined = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
-      if (disposed || generation !== loadGeneration) return;
-      cachedHtml = inlined;
-      setCachedPluginUiHtml(htmlCacheKey, cachedHtml);
     }
     const { html, entryDirectory } = cachedHtml;
-    source.value = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
-      baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
-    });
+    // The final sandbox document is cached alongside the html: generating it
+    // re-runs megabyte-scale string surgery on every boot.
+    if (!cachedHtml.sandboxDoc) {
+      cachedHtml.sandboxDoc = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
+        baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
+      });
+    }
+    source.value = cachedHtml.sandboxDoc;
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
     createBridge();
@@ -596,6 +567,13 @@ function onMessage(event: MessageEvent) {
 }
 
 function onFrameLoad() {
+  if (bootStartedAt) {
+    const endedAt = performance.now();
+    const bootMs = Math.round(endedAt - bootStartedAt);
+    performance.measure(`pluginUi:boot:${props.plugin.manifest.id}`, { start: bootStartedAt, end: endedAt });
+    bootStartedAt = 0;
+    console.debug(`[plugin-ui-boot] ${props.plugin.manifest.id}@${props.plugin.manifest.version} iframeLoad=${bootMs}ms cacheHit=${bootCacheHit}`);
+  }
   // The load event can precede the webview's first actual paint (notably on
   // WKWebView); reveal after two animation frames, with a timer fallback
   // because rAF stalls in occluded/background webviews. Guarded by generation

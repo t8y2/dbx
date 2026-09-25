@@ -1,12 +1,12 @@
 {
   "name": "dbx",
-  "version": "0.6.22",
+  "version": "0.6.23",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --config apps/desktop/vite.config.ts",
-    "dev:tauri": "tauri dev",
+    "dev:tauri": "node scripts/dev-tauri.mjs",
     "dev:web": "vite --config apps/desktop/vite.config.ts --port 5173 --mode web",
     "dev:backend": "node scripts/dev-backend.mjs",
     "dev:full:win": ".\\scripts\\dev-full.bat",
@@ -39,6 +39,7 @@
     "bench:redis-key-search": "node scripts/bench/redis-key-search.mjs",
     "bench:mongodb-count": "node scripts/bench/mongodb-count.mjs",
     "bench:sidebar-large-schema": "vitest bench apps/desktop/src/lib/sidebar/sidebarLargeSchema.bench.ts",
+    "bench:startup": "node --import tsx scripts/bench/startup-bundle.mjs",
     "bench:table-import": "cargo run -p dbx-core --no-default-features --example table_import_bench --release --",
     "lint": "oxlint --vue-plugin apps/desktop/src",
     "fmt": "oxfmt \"apps/desktop/src/**/*.{ts,vue}\"",

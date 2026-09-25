@@ -402,6 +402,15 @@ describe("UpdateDialog release notes safety", () => {
     expect(document.body.querySelector("script, img")).toBeNull();
     expect(Array.from(document.body.querySelectorAll("a")).every((anchor) => anchor.href.startsWith("https://"))).toBe(true);
   });
+
+  it("hides HTML comments such as the CNB mirror marker instead of rendering them as text", async () => {
+    await mountDialog(0, { releaseNotes: "### 安装\n- 条目\n\n<!-- dbx-cnb-mirror -->\n> 国内下载：[CNB 镜像](https://cnb.cool/dbxio.com/dbx/-/releases)" });
+    await vi.waitFor(() => {
+      expect(document.body.querySelector('a[href^="https://cnb.cool"]')).not.toBeNull();
+    });
+    expect(document.body.textContent).not.toContain("dbx-cnb-mirror");
+    expect(document.body.textContent).not.toContain("<!--");
+  });
 });
 
 describe("UpdateDialog older versions", () => {
@@ -615,7 +624,7 @@ describe("UpdateDialog aggregate update center", () => {
     await mountDialog(0, {}, undefined, {
       driverUpdates: [{ db_type: "mysql", label: "MySQL", version: "9.0.0", installed_version: "8.0.0", update_available: true }],
       jdbcUpdate: { installed: true, version: "0.1.0", latest_version: "0.2.0", update_available: true, compatible: true, path: "/tmp/jdbc" },
-      mcpUpdate: { installed: true, npm_available: true, current_version: "1.0.0", latest_version: "1.1.0", update_available: true },
+      mcpUpdate: { installed: true, installation_source: "npm", npm_available: true, npm_installed: true, current_version: "1.0.0", latest_version: "1.1.0", update_available: true },
       pluginUpdates: [
         {
           key: "official:example",
@@ -677,7 +686,7 @@ describe("UpdateDialog aggregate update center", () => {
 
     // "Update all" skips the changed-source plugin, so the dialog has to explain why it stays.
     const hint = "Confirm the change in the Plugin Center first";
-    const rows = [...document.body.querySelectorAll<HTMLElement>(".rounded-md.border.p-3")];
+    const rows = [...document.body.querySelectorAll<HTMLElement>("[data-update-entry]")];
     const rowFor = (name: string) => rows.find((row) => row.textContent?.includes(name));
     expect(rowFor("moved plugin")?.textContent).toContain(hint);
     expect(rowFor("same plugin")?.textContent).not.toContain(hint);

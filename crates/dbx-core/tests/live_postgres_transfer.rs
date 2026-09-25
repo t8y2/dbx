@@ -1,7 +1,6 @@
 use dbx_core::connection::{AppState, PoolKind};
 use dbx_core::db::postgres;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-use dbx_core::storage::Storage;
 use dbx_core::transfer::{
     drop_backup_tables, get_db_type, rename_tables_to_backup, transfer_postgres_schema_dependencies,
     transfer_postgres_schema_objects, transfer_table, TransferContent, TransferMode, TransferObjectKind,
@@ -216,7 +215,7 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-always-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let source_connection_id = "live-always-source";
     let target_connection_id = "live-always-target";
@@ -393,7 +392,7 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-structure-only-transfer-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let source_connection_id = "live-structure-only-source";
     let target_connection_id = "live-structure-only-target";
@@ -675,7 +674,7 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-transfer-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
 
     let source_connection_id = "live-source";
@@ -977,7 +976,7 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-existing-transfer-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
 
     let source_connection_id = "live-existing-source";
@@ -1103,7 +1102,7 @@ async fn live_postgres_transfer_creates_selected_sequence_before_referencing_tab
 
     let dir = std::env::temp_dir().join(format!("dbx-live-sequence-transfer-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let source_connection_id = "live-sequence-source";
     let target_connection_id = "live-sequence-target";
@@ -1305,7 +1304,7 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-drop-rebuild-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
 
@@ -1496,7 +1495,9 @@ impl PostgresRebuildFixture {
         let source_pool_key = format!("{source_connection_id}:{source_database}");
         let target_pool_key = format!("{target_connection_id}:{target_database}");
         let storage_dir = tempfile::tempdir().unwrap();
-        let state = Arc::new(AppState::new(Storage::open(&storage_dir.path().join("storage.db")).await.unwrap()));
+        let state = Arc::new(AppState::new(
+            dbx_core::persistence::test_storage::open(&storage_dir.path().join("storage.db")).await.unwrap(),
+        ));
         state
             .update_connection_pools(|connections| {
                 connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
@@ -1816,7 +1817,7 @@ async fn live_postgres_keyset_pagination_copies_every_row() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-pg-keyset-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let source_connection_id = "live-pg-keyset-source";
     let target_connection_id = "live-pg-keyset-target";
@@ -1928,7 +1929,7 @@ async fn live_postgres_progress_read_survives_total_duration_beyond_timeout() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-pg-progress-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let source_connection_id = "live-pg-progress-source";
     let target_connection_id = "live-pg-progress-target";
@@ -2034,7 +2035,7 @@ async fn live_postgres_keyset_large_batch_copies_every_row() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-pg-largebatch-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let source_connection_id = "live-pg-largebatch-source";
     let target_connection_id = "live-pg-largebatch-target";

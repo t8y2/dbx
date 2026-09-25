@@ -53,6 +53,15 @@ impl PluginConnectionHandle {
         self.session.as_ref().is_none_or(|session| session.status().state == PluginSessionState::Running)
     }
 
+    /// The lifecycle payload this connection was opened with: provider,
+    /// hydrated connection, and the runtime endpoint *after* DBX transport
+    /// layers. Host-initiated calls that act on an open connection (for
+    /// example plugin MCP tools) must reuse it instead of rebuilding a payload
+    /// from the saved config, which would bypass the tunnel.
+    pub fn lifecycle_params(&self) -> &serde_json::Value {
+        &self.params
+    }
+
     pub async fn disconnect(&self) -> Result<(), String> {
         let Some(session) = &self.session else {
             return Ok(());

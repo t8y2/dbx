@@ -244,7 +244,7 @@ mod tests {
 
     async fn state_fixture() -> (Arc<AppState>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
-        let storage = crate::storage::Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = Arc::new(AppState::new_with_plugin_dir(storage, directory.path().join("plugins")));
         (state, directory)
     }

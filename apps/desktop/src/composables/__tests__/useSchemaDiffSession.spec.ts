@@ -322,3 +322,47 @@ test("skips table list loading for routines-only compares", async () => {
   assert.equal(apiMock.listFunctions.mock.calls.length, 2);
   assert.deepEqual(apiMock.prepareSchemaDiff.mock.calls[0]?.[0]?.sourceTables, []);
 });
+
+test("resolves the JDBC engine dialect from the connection's product type", async () => {
+  // 「Oracle (JDBC)」这类连接的 db_type 是 jdbc，后端 DialectKind 认不出它：对话框把产品类型
+  // 解析出来传进 sourceEngineDbType/targetEngineDbType 后，方言（以及视图比较）才成立。
+  apiMock.prepareSchemaDiff.mockClear();
+  apiMock.prepareSchemaDiff.mockResolvedValue({
+    diffs: [],
+    functionDiffs: [],
+    sequenceDiffs: [],
+    ruleDiffs: [],
+    ownerDiffs: [],
+    renameCandidates: [],
+    syncSql: "",
+    rollbackSyncSql: "",
+  });
+
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "jdbc-src",
+      sourceDatabase: "XE",
+      sourceSchema: "DBX_TEST",
+      targetConnectionId: "jdbc-dst",
+      targetDatabase: "XE",
+      targetSchema: "DBX_TGT",
+      sourceDbType: "jdbc",
+      targetDbType: "jdbc",
+      sourceEngineDbType: "oracle",
+      targetEngineDbType: "oracle",
+      options: {},
+      ignoreComments: false,
+      label: "jdbc oracle",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+
+  await waitForSession(session);
+
+  assert.equal(session.status, "completed");
+  const payload = apiMock.prepareSchemaDiff.mock.calls[0]?.[0];
+  assert.equal(payload?.sourceDialect, "oracle");
+  assert.equal(payload?.targetDialect, "oracle");
+  // 部署脚本按目标产品类型（而不是 jdbc）生成。
+  assert.equal(payload?.databaseType, "oracle");
+});

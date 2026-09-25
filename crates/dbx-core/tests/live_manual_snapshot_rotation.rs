@@ -5,7 +5,6 @@ use dbx_core::query::{
     execute_in_manual_transaction_with_options, execute_sql_statement, rollback_manual_transaction,
     ManualTransactionExecutionOptions,
 };
-use dbx_core::storage::Storage;
 use std::sync::Arc;
 
 fn live_config(prefix: &str, database_type: DatabaseType, default_port: u16) -> ConnectionConfig {
@@ -29,7 +28,9 @@ fn live_config(prefix: &str, database_type: DatabaseType, default_port: u16) -> 
 
 async fn setup(config: ConnectionConfig) -> (Arc<AppState>, std::path::PathBuf, String) {
     let storage_path = std::env::temp_dir().join(format!("dbx-snapshot-rotation-{}.db", uuid::Uuid::new_v4().simple()));
-    let state = Arc::new(AppState::new(Storage::open(&storage_path).await.expect("temporary storage")));
+    let state = Arc::new(AppState::new(
+        dbx_core::persistence::test_storage::open(&storage_path).await.expect("temporary storage"),
+    ));
     let table_name = format!("dbx_pr9434_{}", uuid::Uuid::new_v4().simple());
     let database = config.database.clone().expect("database");
     state.configs.write().await.insert(config.id.clone(), config.clone());

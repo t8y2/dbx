@@ -7,7 +7,7 @@ import java.util.List;
 /**
  * Decode PostGIS EWKB / WKB byte streams (and PGgeometry / hex strings) into
  * OGC Well-Known Text. Behaves identically to the Rust implementation in
- * {@code crates/dbx-drivers/src/db/postgres.rs::ewkb_to_wkt}, including the
+ * {@code crates/dbx-driver-support/src/wkb.rs::wkb_to_wkt}, including the
  * {@code Z} / {@code M} / {@code ZM} dimension suffixes and {@code EMPTY}
  * geometries. Used by the JDBC agent layer so that PostgresLike databases
  * such as HighGo / KingBase / Vastbase / openGauss / GaussDB return WKT for

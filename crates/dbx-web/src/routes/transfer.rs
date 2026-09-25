@@ -667,7 +667,6 @@ mod tests {
         default_connect_timeout_secs, default_idle_timeout_secs, default_keepalive_interval_secs,
         default_query_timeout_secs, ConnectionConfig, DatabaseType,
     };
-    use dbx_core::storage::Storage;
     use dbx_core::transfer::{
         TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
     };
@@ -742,7 +741,7 @@ mod tests {
     async fn test_web_state() -> (Arc<WebState>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("dbx-web-transfer-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         (state, dir)

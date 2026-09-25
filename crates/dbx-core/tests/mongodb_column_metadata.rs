@@ -11,12 +11,11 @@ use dbx_core::db::mongo_driver;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::mongo_ops::mongo_run_command_core;
 use dbx_core::schema::get_columns_core;
-use dbx_core::storage::Storage;
 use serde_json::json;
 
 async fn state_with_pool(pool: PoolKind, db_type: DatabaseType, database: &str) -> (Arc<AppState>, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let config: ConnectionConfig = serde_json::from_value(json!({
         "id": "metadata", "name": "Column metadata regression", "db_type": db_type,

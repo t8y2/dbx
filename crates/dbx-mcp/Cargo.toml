@@ -1,6 +1,6 @@
 [package]
 name = "dbx-mcp"
-version = "0.4.96"
+version = "0.4.97"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -8,6 +8,8 @@ license = "Apache-2.0"
 default = ["duckdb-sidecar", "mq-admin", "sqlite-bundled"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 mq-admin = ["dbx-core/mq-admin"]
+# `--no-default-features` runs (skip DuckDB) must re-add this via
+# `--features sqlite-bundled`, otherwise tests/bins link the system SQLite.
 sqlite-bundled = ["dbx-core/sqlite-bundled"]
 # Native macOS/Windows builds enable this so CLI/MCP can read the OS
 # keychain key Desktop provisioned during the data security upgrade; the

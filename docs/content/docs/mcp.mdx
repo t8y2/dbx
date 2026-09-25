@@ -14,7 +14,36 @@ AI agent → DBX MCP → your database → results
                     ↘ DBX desktop app (open or display results)
 ```
 
-## Quick Start
+## Native installation (recommended)
+
+No Node.js is required. On macOS or Linux:
+
+```bash
+curl -fsSL https://dbxio.com/install-mcp | sh
+```
+
+On Windows, run in PowerShell:
+
+```powershell
+irm https://dbxio.com/install-mcp.ps1 | iex
+```
+
+The installer verifies the download, installs `dbx-mcp` into `~/.dbx/bin`, and prints ready-to-paste Claude Code, Cursor, Codex, ZCode, and generic MCP configurations. Use the **expanded absolute executable path** it prints, not `~` or the bare `dbx-mcp` command: GUI clients do not necessarily inherit your shell's PATH. Existing environment settings such as `DBX_DATA_DIR` remain applicable. DBX desktop settings prefer a discovered native binary, with the existing npm launcher as fallback.
+
+Rerun the same install command to upgrade. A matching version reports `already up to date`. Version probing uses `dbx-mcp --version`, falling back to `~/.dbx/bin/.dbx-mcp-version` for older binaries. Offline installation fails without replacing an existing binary. Download sources are tried in order: npmjs, npmmirror, then GitHub Releases; an integrity mismatch stops installation.
+
+Homebrew is also available on macOS and Linux:
+
+```bash
+brew install t8y2/tap/dbx-mcp
+brew upgrade t8y2/tap/dbx-mcp
+```
+
+For Homebrew client configurations, use the absolute path printed by `echo "$(brew --prefix)/bin/dbx-mcp"`. This installs the MCP server, not the separate `dbx` CLI.
+
+The npm/npx channel remains supported unchanged. DBX desktop now installs the standalone native server by default and shows existing npm users a recommended native migration action. Migration keeps the npm package as a fallback and does not rewrite external client files automatically: replace their launch command with the generated native absolute path, remove Node/npx arguments, and preserve `env`. Removing the old global package with `npm rm -g @dbx-app/mcp-server` remains optional. The desktop can update and uninstall the active standalone or Homebrew native installation; uninstalling a standalone native installation reveals any retained npm installation again.
+
+## Quick Start with npm
 
 <Steps>
   <Step>
@@ -122,6 +151,19 @@ DBX MCP provides the following tools (availability depends on build features and
 - `max_rows`: 1–1000, defaults to 100. Out-of-range values are clamped, not rejected. It applies to SQL connections only — MongoDB shell commands always return at most 100 rows, and multi-statement scripts routed to the batch executor return at most 100 rows per statement.
 
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
+
+## Resources
+
+Clients that support MCP Resources can read the connection catalog and expand templates for database metadata:
+
+| Resource URI | Description |
+| --- | --- |
+| `dbx://connections` | Connections visible to the current MCP scope |
+| `dbx://connections/{connection_id}/databases` | Databases visible through one connection |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | Tables and views in an optional database/schema |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | Column definitions for a table; `table` is required |
+
+Resource discovery and reads reuse the corresponding Tool allowlist plus connection, group, database, and runtime scopes. Query parameter values must be URI encoded. SQL execution and all write-capable operations remain Tools.
 
 ## Read Kafka Messages
 

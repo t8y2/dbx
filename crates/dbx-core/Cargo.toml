@@ -5,6 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [features]
+test-support = []
 default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-sidecar = ["dbx-sql/duckdb-sidecar", "dbx-drivers/duckdb-sidecar"]
 dynamodb = ["dbx-drivers/dynamodb"]
@@ -92,6 +93,7 @@ tempfile = "3"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
 
 [dev-dependencies]
+dbx-core = { path = ".", default-features = false, features = ["test-support"] }
 zstd = "0.13"
 dbx-drivers = { path = "../dbx-drivers", default-features = false, features = ["test-support"] }
 dbx-plugin-runtime = { path = "../dbx-plugin-runtime", features = ["test-support"] }

@@ -114,7 +114,7 @@ mod tests {
     #[tokio::test]
     async fn ddl_schema_cache_encoding_and_connection_isolation() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let id = "conn:% 中文";
         assert_eq!(metadata_cache_segment(id), "conn%3A%25%20%E4%B8%AD%E6%96%87");
         let prefix = object_metadata_cache_prefix(id, "db% name");

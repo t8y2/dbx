@@ -6925,7 +6925,6 @@ mod tests {
     };
     use crate::query;
     use crate::schema;
-    use crate::storage::Storage;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -7139,7 +7138,7 @@ mod tests {
     async fn apply_session_credential_injects_saved_password_only_for_no_save_connections() {
         let dir = std::env::temp_dir().join(format!("dbx-core-session-cred-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let _ = state.session_credentials.set("", "conn-a", "s3cret");
 
@@ -7173,7 +7172,7 @@ mod tests {
     async fn apply_session_credential_reads_owner_scoped_credentials_only() {
         let dir = std::env::temp_dir().join(format!("dbx-core-session-cred-owner-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
 
         let mut config = mysql_config(None);
@@ -7205,7 +7204,7 @@ mod tests {
     async fn pool_credential_owner_mismatch_prevents_cross_session_pool_reuse() {
         let dir = std::env::temp_dir().join(format!("dbx-core-pool-owner-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
 
         let mut config = mysql_config(None);
@@ -7820,7 +7819,7 @@ mod tests {
     async fn test_app_state() -> (AppState, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("dbx-core-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         (AppState::new(storage), dir)
     }
 
@@ -8064,7 +8063,7 @@ mod tests {
     async fn app_state_uses_explicit_agent_dir() {
         let dir = std::env::temp_dir().join(format!("dbx-core-agent-dir-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let agent_dir = dir.join("agents");
 
         let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
@@ -8329,7 +8328,7 @@ mod tests {
     async fn jdbc_plugin_env_uses_managed_jre_when_installed() {
         let dir = std::env::temp_dir().join(format!("dbx-core-jdbc-managed-jre-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             dir.join("plugins"),
@@ -8349,7 +8348,7 @@ mod tests {
     async fn jdbc_plugin_env_keeps_wrapper_fallback_when_managed_jre_is_missing() {
         let dir = std::env::temp_dir().join(format!("dbx-core-jdbc-missing-jre-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             dir.join("plugins"),
@@ -8367,7 +8366,7 @@ mod tests {
     async fn jdbc_plugin_env_uses_custom_java_runtime() {
         let dir = std::env::temp_dir().join(format!("dbx-core-jdbc-custom-jre-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             dir.join("plugins"),

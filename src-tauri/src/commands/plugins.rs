@@ -282,11 +282,16 @@ pub async fn uninstall_plugin(
     }
     let root_dir = state.plugins.root_dir().to_path_buf();
     let app_version = state.plugins.app_version().to_string();
+    let uninstalled_id = plugin_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.uninstall(&plugin_id)
+        PluginPackageInstaller::new(root_dir, app_version)?.uninstall(&uninstalled_id)
     })
     .await
     .map_err(|error| error.to_string())??;
+    // A reinstall must ask for AI tool access and data grants again.
+    if let Err(error) = state.storage.forget_plugin_permissions(&plugin_id).await {
+        log::warn!("Failed to clear permissions of uninstalled plugin {plugin_id}: {error}");
+    }
     list_plugins(state).await
 }
 

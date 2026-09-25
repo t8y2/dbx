@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { reactive, readonly } from "vue";
-import { PLUGIN_CLIPBOARD_AUDIT_CAPACITY, PluginHostBridge, clipboardReadGateAllows, createClipboardReadGate, pluginSandboxDocument, pluginSdkSource, recordClipboardRead } from "./pluginHostBridge";
+import { MAX_CONCURRENT_PLUGIN_DATA_QUERIES, PLUGIN_CLIPBOARD_AUDIT_CAPACITY, PluginHostBridge, clipboardReadGateAllows, createClipboardReadGate, pluginSandboxDocument, pluginSdkSource, recordClipboardRead } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginResultViewContribution, PluginWorkbenchContribution } from "@/types/database";
 
 function plugin(permissions: string[] = [], contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
@@ -1169,6 +1169,127 @@ describe("PluginHostBridge", () => {
   function readTextFromSharedBridgeAudit(bridge: PluginHostBridge) {
     return bridge.clipboardAudit.map((entry) => entry.outcome);
   }
+
+  function dataApi(overrides: Record<string, unknown> = {}) {
+    return {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      queryData: vi.fn().mockResolvedValue({ dbType: "postgres", columns: [{ name: "id" }], rows: [[1]], truncated: false, elapsedMs: 3 }),
+      hasDataGrant: vi.fn().mockResolvedValue(false),
+      confirmDataAccess: vi.fn().mockResolvedValue(true),
+      grantDataAccess: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+  }
+
+  function dataHarness(permissions: string[], api: ReturnType<typeof dataApi>) {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(permissions), workbench, {}, () => target, api);
+    const query = async (id: string, params: unknown) => {
+      bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method: "host.queryData", params } } as MessageEvent);
+      await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === id)).toBe(true));
+      return messages.find((message) => (message as { id?: string }).id === id) as { result?: unknown; error?: string };
+    };
+    return { bridge, messages, query };
+  }
+
+  it("serves host.queryData only with host.data:read and after the user's consent", async () => {
+    const withoutPermission = dataHarness([], dataApi());
+    expect(await withoutPermission.query("no-permission", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Plugin has not declared permission 'host.data:read'" });
+
+    const api = dataApi();
+    const { query } = dataHarness(["host.data:read"], api);
+    const first = await query("first", { connectionId: " conn-1 ", sql: " SELECT id FROM users ", maxRows: 99_999, database: " " });
+    expect(first).toMatchObject({ result: { rows: [[1]] } });
+    expect(api.confirmDataAccess).toHaveBeenCalledWith("sample", expect.any(String), "conn-1");
+    expect(api.grantDataAccess).toHaveBeenCalledWith("sample", "conn-1");
+    // Bound to the owning plugin, trimmed, and pre-clamped to the host row cap.
+    expect(api.queryData).toHaveBeenCalledWith("sample", { connectionId: "conn-1", sql: "SELECT id FROM users", maxRows: 5_000 });
+
+    // The consent is remembered for this connection; another connection asks again.
+    await query("second", { connectionId: "conn-1", sql: "SELECT 2" });
+    expect(api.confirmDataAccess).toHaveBeenCalledTimes(1);
+    expect(api.hasDataGrant).toHaveBeenCalledTimes(1);
+    await query("other-connection", { connectionId: "conn-2", sql: "SELECT 3" });
+    expect(api.confirmDataAccess).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips the prompt for an existing grant and asks again after the backend reports a revocation", async () => {
+    const api = dataApi({
+      hasDataGrant: vi.fn().mockResolvedValue(true),
+      queryData: vi
+        .fn()
+        .mockResolvedValueOnce({ dbType: "mysql", columns: [], rows: [], truncated: false, elapsedMs: 1 })
+        .mockRejectedValueOnce(new Error("PLUGIN_DATA_ACCESS_NOT_GRANTED: the user has not granted this plugin access to the connection"))
+        .mockResolvedValue({ dbType: "mysql", columns: [], rows: [], truncated: false, elapsedMs: 1 }),
+    });
+    const { query } = dataHarness(["host.data:read"], api);
+    await query("granted", { connectionId: "conn-1", sql: "SELECT 1" });
+    expect(api.confirmDataAccess).not.toHaveBeenCalled();
+    expect(await query("revoked", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: expect.stringContaining("PLUGIN_DATA_ACCESS_NOT_GRANTED") });
+    await query("after-revoke", { connectionId: "conn-1", sql: "SELECT 1" });
+    expect(api.hasDataGrant).toHaveBeenCalledTimes(2);
+  });
+
+  it("remembers a declined data access and never queries without consent", async () => {
+    const api = dataApi({ confirmDataAccess: vi.fn().mockResolvedValue(false) });
+    const { query } = dataHarness(["host.data:read"], api);
+    expect(await query("declined", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Data access to this connection was denied" });
+    expect(await query("declined-again", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Data access to this connection was denied for this plugin session" });
+    expect(api.confirmDataAccess).toHaveBeenCalledTimes(1);
+    expect(api.grantDataAccess).not.toHaveBeenCalled();
+    expect(api.queryData).not.toHaveBeenCalled();
+
+    // A host without a consent surface denies instead of granting silently.
+    const noSurface = dataApi({ confirmDataAccess: undefined });
+    const { query: queryWithoutSurface } = dataHarness(["host.data:read"], noSurface);
+    expect(await queryWithoutSurface("no-surface", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Data access to this connection was denied" });
+    expect(noSurface.queryData).not.toHaveBeenCalled();
+  });
+
+  it("caps concurrent data queries per bridge so a plugin cannot occupy the shared pool", async () => {
+    const pending: Array<(value: unknown) => void> = [];
+    const api = dataApi({
+      hasDataGrant: vi.fn().mockResolvedValue(true),
+      queryData: vi.fn().mockImplementation(() => new Promise((resolve) => pending.push(resolve))),
+    });
+    const { bridge, messages } = dataHarness(["host.data:read"], api);
+    const target = (bridge as unknown as { targetWindow: () => Window }).targetWindow();
+    const start = (id: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method: "host.queryData", params: { connectionId: "conn-1", sql: "SELECT 1" } } } as MessageEvent);
+    for (let index = 0; index < MAX_CONCURRENT_PLUGIN_DATA_QUERIES; index += 1) start(`running-${index}`);
+    await vi.waitFor(() => expect(api.queryData).toHaveBeenCalledTimes(MAX_CONCURRENT_PLUGIN_DATA_QUERIES));
+    start("over-limit");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "over-limit")).toBe(true));
+    expect(messages.find((message) => (message as { id?: string }).id === "over-limit")).toMatchObject({ error: expect.stringContaining("data queries may run at once") });
+
+    // A finished query frees its slot.
+    pending.shift()?.({ dbType: "postgres", columns: [], rows: [], truncated: false, elapsedMs: 1 });
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "running-0")).toBe(true));
+    start("after-slot");
+    await vi.waitFor(() => expect(api.queryData).toHaveBeenCalledTimes(MAX_CONCURRENT_PLUGIN_DATA_QUERIES + 1));
+  });
+
+  it("rejects malformed data requests and advertises dataApi only with a complete consent surface", async () => {
+    const api = dataApi();
+    const { query, bridge, messages } = dataHarness(["host.data:read"], api);
+    expect(await query("no-sql", { connectionId: "conn-1" })).toMatchObject({ error: "host.queryData requires sql" });
+    expect(await query("blank-sql", { connectionId: "conn-1", sql: "  " })).toMatchObject({ error: "host.queryData requires a non-empty sql" });
+    expect(await query("no-connection", { sql: "SELECT 1" })).toMatchObject({ error: "connectionId must be a string" });
+    expect(await query("huge-sql", { connectionId: "conn-1", sql: "x".repeat(100_001) })).toMatchObject({ error: "sql must be at most 100000 characters" });
+    expect(api.queryData).not.toHaveBeenCalled();
+
+    bridge.sendInit();
+    const init = messages.find((message) => (message as { type?: string }).type === "init") as { capabilities?: Record<string, boolean> };
+    expect(init.capabilities?.dataApi).toBe(true);
+
+    const partial = dataHarness(["host.data:read"], dataApi({ grantDataAccess: undefined }));
+    partial.bridge.sendInit();
+    const partialInit = partial.messages.find((message) => (message as { type?: string }).type === "init") as { capabilities?: Record<string, boolean> };
+    expect(partialInit.capabilities?.dataApi).toBe(false);
+  });
 
   it("denies clipboard reads on hosts without a consent surface and rate-limits repeated reads", async () => {
     const messages: unknown[] = [];

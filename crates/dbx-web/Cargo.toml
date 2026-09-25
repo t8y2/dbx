@@ -1,6 +1,6 @@
 [package]
 name = "dbx-web"
-version = "0.6.22"
+version = "0.6.23"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -15,6 +15,10 @@ dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin", "dbx-mcp/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
 system-fonts = ["dbx-core/system-fonts"]
+# Embed the frontend build output (../../dist) into the binary. When enabled
+# and DBX_STATIC_DIR is not set, the embedded files are served by default.
+# Requires the frontend to have been built before invoking cargo.
+embed-static = ["dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
 dbx-core = { path = "../dbx-core", default-features = false, features = ["openapi"] }
@@ -42,6 +46,10 @@ base64 = "0.22"
 pbkdf2 = "0.12"
 sha2 = "0.10"
 tempfile = "3"
+rust-embed = { version = "8", features = ["debug-embed"], optional = true }
+mime_guess = { version = "2", optional = true }
+
 
 [dev-dependencies]
+dbx-core = { path = "../dbx-core", default-features = false, features = ["test-support"] }
 reqwest = { version = "0.12", default-features = false, features = ["multipart"] }

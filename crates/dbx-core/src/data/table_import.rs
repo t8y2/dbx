@@ -7507,7 +7507,6 @@ where
 mod tests {
     use super::*;
     use crate::models::connection::{ConnectionConfig, DatabaseType};
-    use crate::storage::Storage;
     use crate::xlsx_export::{build_xlsx_workbook_multi, XlsxWorksheetData};
     use std::io::{Cursor, Write};
 
@@ -9493,7 +9492,7 @@ mod tests {
     #[tokio::test]
     async fn truncate_xlsx_with_malformed_tail_preserves_existing_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "xlsx-truncate-tail";
         let pool_key = format!("{connection_id}:session:import");
@@ -9585,7 +9584,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_xlsx_after_validation_prevents_non_transactional_truncate() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "cancel-xlsx-after-validation";
         let pool_key = format!("{connection_id}:session:import");
@@ -9673,7 +9672,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_before_first_truncate_batch_preserves_existing_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "cancel-truncate-first-batch";
         let pool_key = format!("{connection_id}:session:import");
@@ -11312,7 +11311,7 @@ mod tests {
     #[tokio::test]
     async fn sqlserver_staging_cleanup_failure_invalidates_cached_pool() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let pool_key = "sqlserver-cleanup-failure";
         let database_path = dir.path().join("target.db");
@@ -11360,7 +11359,7 @@ mod tests {
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let pool_key = "cancel-sql-sub-batches:session:import";
         let database_path = dir.path().join("target.db");
@@ -11427,7 +11426,7 @@ mod tests {
     #[tokio::test]
     async fn pending_postgres_copy_is_not_flushed_after_cancellation() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut accumulator = Some(PostgresCopyAccumulator::with_limits("COPY items".to_string(), 1024, 100));
         accumulator.as_mut().unwrap().append_row(b"1\n");
@@ -11455,7 +11454,7 @@ mod tests {
     #[tokio::test]
     async fn postgres_copy_internal_flush_stops_before_write_when_cancelled() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let plan = CompiledImportPlan {
             mapped_source_indexes: vec![0],
@@ -11579,7 +11578,7 @@ mod tests {
     impl SqliteAppendTestContext {
         async fn new(test_name: &str, max_rows: usize) -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+            let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
             let state = AppState::new(storage);
             let pool_key = format!("{test_name}:session:import");
             let database_path = dir.path().join("target.db");
@@ -11695,7 +11694,7 @@ mod tests {
     #[tokio::test]
     async fn delimited_sqlite_append_import_flushes_the_final_window() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-delimited-append";
         let pool_key = format!("{connection_id}:session:import");
@@ -11929,7 +11928,7 @@ mod tests {
     #[tokio::test]
     async fn oracle_jdbc_import_maps_xls_rows_to_insert_all() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "oracle-jdbc-import";
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({

@@ -149,7 +149,7 @@ const patterns: [RegExp, string][] = [
   // Legacy bundled DuckDB error kept for compatibility with older backends.
   [/^The previous DuckDB query is still stopping\. Please try again shortly\.$/, "editor.duckdbDraining"],
 
-  // Driver / JRE management (crates/dbx-drivers/src/agent_service.rs, routes/agents.rs)
+  // Driver / JRE management (crates/dbx-driver-agent/src/agent_service.rs, routes/agents.rs)
   // The Windows variant is multi-line, so it must be tried before the single-line one.
   [/^Failed to remove the old JRE directory: (.+)\nPossible causes:[\s\S]*\(original error: ([\s\S]+)\)$/, "driverStore.jreDirRemoveFailedWindows"],
   [/^Failed to remove the old JRE directory: (.+) \(original error: ([\s\S]+)\)$/, "driverStore.jreDirRemoveFailed"],

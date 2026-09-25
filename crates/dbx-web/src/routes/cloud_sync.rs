@@ -387,7 +387,6 @@ mod tests {
     use axum::Json;
     use dbx_core::cloud_sync::SnippetProvider;
     use dbx_core::connection::AppState;
-    use dbx_core::storage::Storage;
 
     use crate::state::WebState;
 
@@ -396,11 +395,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dbx-web-snippet-cleanup-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("storage.db");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&db).await.unwrap();
         storage.save_snippet_migration_state("github", "replacement-id", "legacy-id", "content-hash").await.unwrap();
         drop(storage);
 
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&db).await.unwrap();
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         let Json(settings) = super::snippet_sync_settings(

@@ -1623,6 +1623,16 @@ fn writable_transfer_columns(
         .collect()
 }
 
+fn mysql_generated_only_transfer(
+    columns: &[db::ColumnInfo],
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> bool {
+    matches!((source_db_type, target_db_type), (DatabaseType::Mysql, DatabaseType::Mysql))
+        && !columns.is_empty()
+        && columns.iter().all(|column| is_mysql_generated_column_extra(column.extra.as_deref()))
+}
+
 fn transfer_column_names_match(
     target_db_type: &DatabaseType,
     quote_target_column_names: bool,
@@ -2239,7 +2249,7 @@ fn postgres_index_column_sql(
 ) -> String {
     // The base key text: a real column is quoted as an identifier; an expression/functional
     // key part arrives as raw expression text (the per-column `pg_get_indexdef` omits the
-    // opclass — see `crates/dbx-drivers/src/db/postgres.rs`), so quoting the whole thing as
+    // opclass — see `crates/dbx-driver-postgres/src/postgres.rs`), so quoting the whole thing as
     // an identifier would turn it into a nonexistent column reference (#6295).
     let base = if is_expression { column.to_string() } else { quote_identifier(column, &DatabaseType::Postgres) };
     // The opclass is read separately from `pg_index.indclass` for every key position
@@ -9087,7 +9097,8 @@ where
     }
 
     let writable_columns = writable_transfer_columns(&columns, source_db_type, target_db_type);
-    if writable_columns.is_empty() {
+    let default_rows_only = mysql_generated_only_transfer(&columns, source_db_type, target_db_type);
+    if writable_columns.is_empty() && !default_rows_only {
         return Err(format!("No writable columns found for table {table}"));
     }
 
@@ -9213,7 +9224,8 @@ where
     // A preexisting target also needs its columns read, even for a data-only
     // transfer: the write SQL has to address the target's declared column
     // names, which can differ from the source in case (#9320).
-    let needs_target_columns = target_table_preexisting
+    let needs_target_columns = default_rows_only
+        || target_table_preexisting
         || (request.mode == TransferMode::Upsert
             && !matches!(
                 target_db_type,
@@ -9239,6 +9251,15 @@ where
     } else {
         Vec::new()
     };
+
+    // Empty-column INSERTs are safe only when the target also computes every
+    // value. Reject incompatible data-only targets before an overwrite truncates
+    // them; otherwise ordinary columns could silently receive defaults instead.
+    if default_rows_only && !mysql_generated_only_transfer(&target_columns, target_db_type, target_db_type) {
+        return Err(format!(
+            "Target table '{target_table}' must contain only generated columns for default-row transfer"
+        ));
+    }
 
     // The user asked DBX to sync structure (create_table), but the target
     // table already existed so the create-table DDL above was skipped (see
@@ -9437,7 +9458,7 @@ where
                 return Err("Cancelled".to_string());
             }
 
-            let (result, mysql_spatial_markers) = if let Some(sql) = hive_server_transfer_sql.as_deref() {
+            let (mut result, mysql_spatial_markers) = if let Some(sql) = hive_server_transfer_sql.as_deref() {
                 (
                     fetch_hive_server_transfer_batch(
                         state,
@@ -9451,7 +9472,17 @@ where
                     false,
                 )
             } else {
-                let sql = if keyset_indexes.is_some() {
+                let sql = if default_rows_only {
+                    // Preserve row multiplicity without reading generated values
+                    // (which must never be assigned on the target).
+                    let source_table = qualified_table(
+                        table,
+                        &request.source_schema,
+                        source_db_type,
+                        request.source_catalog.as_deref(),
+                    );
+                    format!("SELECT 1 FROM {source_table} LIMIT {batch_size} OFFSET {offset}")
+                } else if keyset_indexes.is_some() {
                     keyset_pagination_sql(
                         &col_names,
                         table,
@@ -9502,6 +9533,14 @@ where
                 }
             }
 
+            if default_rows_only {
+                // The existing batching formatter emits () for each empty row:
+                // MySQL INSERT INTO table () VALUES (), (). Keep its size limits,
+                // progress accounting and cancellation checks for this path too.
+                for row in &mut result.rows {
+                    row.clear();
+                }
+            }
             let write_statements = generate_transfer_write_sql_batches_with_column_quoting(
                 &effective_mode,
                 &write_col_names,
@@ -10871,7 +10910,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     async fn test_app_state() -> (AppState, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("dbx-transfer-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         (AppState::new(storage), dir)
     }
 
@@ -12396,6 +12435,64 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         let writable = writable_transfer_columns(&columns, &DatabaseType::SqlServer, &DatabaseType::SqlServer);
 
         assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn mysql_generated_only_transfer_requires_nonempty_same_engine_generated_metadata() {
+        let generated = vec![
+            db::ColumnInfo { extra: Some("STORED GENERATED".into()), ..test_column("a", "int") },
+            db::ColumnInfo { extra: Some("VIRTUAL GENERATED".into()), ..test_column("b", "int") },
+        ];
+        assert!(mysql_generated_only_transfer(&generated, &DatabaseType::Mysql, &DatabaseType::Mysql));
+        assert!(!mysql_generated_only_transfer(&[], &DatabaseType::Mysql, &DatabaseType::Mysql));
+        assert!(!mysql_generated_only_transfer(&generated, &DatabaseType::Mysql, &DatabaseType::Postgres));
+        assert!(!mysql_generated_only_transfer(&generated, &DatabaseType::Postgres, &DatabaseType::Mysql));
+        for extra in [None, Some("DEFAULT_GENERATED"), Some("auto_increment")] {
+            let mut mixed = generated.clone();
+            mixed.push(db::ColumnInfo { extra: extra.map(str::to_string), ..test_column("writable", "int") });
+            assert!(!mysql_generated_only_transfer(&mixed, &DatabaseType::Mysql, &DatabaseType::Mysql));
+        }
+    }
+
+    #[test]
+    fn mysql_generated_only_transfer_default_rows_use_existing_batch_limits() {
+        let rows = vec![Vec::new(); 5];
+        let batches = generate_insert_typed_sql_batches(
+            &[],
+            &[],
+            &rows,
+            "all`generated",
+            "target",
+            &DatabaseType::Mysql,
+            None,
+            SqlBatchLimits { max_rows: 2, target_sql_bytes: 1024, hard_sql_bytes: None },
+        )
+        .unwrap();
+        assert_eq!(
+            batches,
+            vec![
+                ("INSERT INTO `all``generated` () VALUES\n(),\n()".into(), 2),
+                ("INSERT INTO `all``generated` () VALUES\n(),\n()".into(), 2),
+                ("INSERT INTO `all``generated` () VALUES\n()".into(), 1),
+            ]
+        );
+        for mode in [TransferMode::Append, TransferMode::Overwrite] {
+            assert!(generate_transfer_write_sql_batches(
+                &mode,
+                &[],
+                &[],
+                &[],
+                "empty",
+                "target",
+                &DatabaseType::Mysql,
+                &[],
+                None,
+                false,
+                false,
+            )
+            .unwrap()
+            .is_empty());
+        }
     }
 
     #[test]

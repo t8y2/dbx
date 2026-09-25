@@ -108,6 +108,21 @@ describe("settingsTransfer", () => {
     expect(result.error.detail).toContain("wordWrap");
   });
 
+  it("transfers the column header hover tooltip preference as a data setting", () => {
+    expect(transferCategoryForKey("showColumnHeaderTooltips")).toBe("data");
+
+    const result = parseSettingsTransferFile(fileWith({ showColumnHeaderTooltips: false }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.showColumnHeaderTooltips).toBe(false);
+    expect(result.value.categories).toContain("data");
+
+    const rejected = parseSettingsTransferFile(fileWith({ showColumnHeaderTooltips: "no" }));
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) return;
+    expect(rejected.error.detail).toContain("showColumnHeaderTooltips");
+  });
+
   it("rejects toolbar items whose known keys are not booleans", () => {
     const result = parseSettingsTransferFile(fileWith({ toolbarItems: { dataTransfer: "yes" } }));
     expect(result.ok).toBe(false);

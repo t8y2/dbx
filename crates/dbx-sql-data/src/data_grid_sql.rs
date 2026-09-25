@@ -3416,10 +3416,19 @@ fn find_column_index(database_type: Option<DatabaseType>, columns: &[Option<Stri
     }
     // PostgreSQL can have distinct `id` and quoted `"ID"` columns. Only
     // dialects whose result metadata is known to drift in case may fall back,
-    // and even then a case-only match must be unique.
+    // and even then a case-only match must be unique. Vastbase reports result
+    // labels upper-cased (`ID`) while primary-key metadata keeps the stored
+    // spelling (`id`), so the grid's primary-key badge and the save path have
+    // to agree on the same column (#8797).
     if !matches!(
         database_type,
-        Some(DatabaseType::Goldendb | DatabaseType::Kingbase | DatabaseType::Tdengine | DatabaseType::Hive)
+        Some(
+            DatabaseType::Goldendb
+                | DatabaseType::Kingbase
+                | DatabaseType::Tdengine
+                | DatabaseType::Hive
+                | DatabaseType::Vastbase
+        )
     ) {
         return None;
     }
@@ -6835,6 +6844,84 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn vastbase_column_index_prefers_exact_case_and_rejects_ambiguous_fallback() {
+        let columns = vec![Some("id".to_string()), Some("ID".to_string())];
+
+        assert_eq!(find_column_index(Some(DatabaseType::Vastbase), &columns, "ID"), Some(1));
+        assert_eq!(find_column_index(Some(DatabaseType::Vastbase), &columns[..1], "ID"), Some(0));
+        assert_eq!(
+            find_column_index(Some(DatabaseType::Vastbase), &[Some("id".to_string()), Some("Id".to_string())], "ID"),
+            None
+        );
+    }
+
+    /// Vastbase reports `SELECT *` labels upper-cased while the primary-key
+    /// metadata keeps the stored lower-case spelling (#8797). The grid badges
+    /// the column as the primary key, so the backend has to resolve it through
+    /// the same unique case-insensitive fallback instead of refusing the edit.
+    #[test]
+    fn vastbase_save_uses_unique_case_insensitive_primary_key_from_uppercased_labels() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Vastbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app_support".to_string()),
+                table_name: "auth_mobile_user".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "varchar", false, None), column("third_id", "varchar", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "THIRD_ID".to_string()],
+            source_columns: Some(vec![Some("ID".to_string()), Some("THIRD_ID".to_string())]),
+            rows: vec![vec![json!("207515959510335490"), json!("88271")]],
+            dirty_rows: vec![(0, vec![(1, json!("88272"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"app_support\".\"auth_mobile_user\" SET \"THIRD_ID\" = '88272' WHERE \"id\" = '207515959510335490';"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_vastbase_save_when_case_insensitive_primary_key_match_is_ambiguous() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Vastbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app_support".to_string()),
+                table_name: "auth_mobile_user".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "varchar", false, None),
+                    column("ID", "varchar", false, None),
+                    column("third_id", "varchar", true, None),
+                ]),
+            },
+            columns: vec!["Id".to_string(), "iD".to_string(), "THIRD_ID".to_string()],
+            source_columns: Some(vec![Some("Id".to_string()), Some("iD".to_string()), Some("THIRD_ID".to_string())]),
+            rows: vec![vec![json!("1"), json!("2"), json!("88271")]],
+            dirty_rows: vec![(0, vec![(2, json!("88272"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert!(result.validation_error.as_deref().is_some_and(|error| error.contains("missing: id")));
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
     }
 
     #[test]

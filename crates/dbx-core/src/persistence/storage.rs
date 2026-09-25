@@ -1255,8 +1255,15 @@ impl Storage {
         if let Some(cached) = self.cached_secret_codec() {
             return Ok(cached);
         }
+        let key_files = self.key_file_digests();
         let codec = self.resolve_secret_key(allow_create).map(|resolved| resolved.codec)?;
-        self.cache_secret_codec(codec);
+        // Pair the codec with the pre-resolve digests, and only when the key
+        // files are unchanged across the resolve. A pair taken after resolving
+        // could combine a stale codec with fresh digests, which the use-time
+        // digest check would then never reject.
+        if self.key_file_digests() == key_files {
+            self.cache_secret_codec(codec, key_files);
+        }
         Ok(codec)
     }
 
@@ -1273,8 +1280,8 @@ impl Storage {
         Some(codec)
     }
 
-    fn cache_secret_codec(&self, codec: SecretCodec) {
-        let entry = CachedSecretCodec { codec, key_files: self.key_file_digests() };
+    fn cache_secret_codec(&self, codec: SecretCodec, key_files: Vec<(PathBuf, Option<[u8; 32]>)>) {
+        let entry = CachedSecretCodec { codec, key_files };
         *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entry);
     }
 
@@ -8642,7 +8649,7 @@ mod tests {
         let file_codec = storage.secret_codec(false).unwrap();
         let envelope = file_codec.encrypt("connection", "password", "secret").unwrap();
 
-        storage.cache_secret_codec(SecretCodec::new([7u8; 32]));
+        storage.cache_secret_codec(SecretCodec::new([7u8; 32]), storage.key_file_digests());
         // Business reads answer from the cached codec instead of re-reading the
         // key file, so an envelope sealed with the file key stays shut.
         assert_eq!(open_with_resolved_codec(&storage, &envelope), Err("secret decryption failed".to_string()));

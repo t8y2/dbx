@@ -136,7 +136,7 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps the code snapshot dialog layout on the global legacy dialog fallbacks", () => {
-    expect(codeSnapshotDialogSource).toContain('class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]"');
+    expect(codeSnapshotDialogSource).toContain('class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]"');
     expect(codeSnapshotDialogSource).not.toContain("dbx-legacy-webview");
     expect(codeSnapshotDialogSource).not.toContain("@media");
     expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[860px]"]');

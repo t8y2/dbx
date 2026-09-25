@@ -67,6 +67,7 @@ import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
+import { appTabActiveBackground, appTabActiveIndicator } from "@/lib/tabs/tabPresentation";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -166,10 +167,9 @@ function specialPageTabClass(active: boolean): string[] {
 
 function specialPageTabStyle(active: boolean) {
   if (!active) return undefined;
-  const activeBackground = "color-mix(in srgb, var(--foreground) 18%, var(--background))";
   if (isVerticalLayout.value) return { "--app-tab-background": "var(--accent)" };
-  if (!isClassicLayout.value) return { "--app-tab-background": activeBackground, borderColor: "var(--ring)" };
-  return { "--app-tab-background": activeBackground, boxShadow: "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)" };
+  if (!isClassicLayout.value) return { "--app-tab-background": appTabActiveBackground(), borderColor: "var(--ring)" };
+  return { "--app-tab-background": appTabActiveBackground(), boxShadow: appTabActiveIndicator() };
 }
 const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacement === "left" || settingsStore.editorSettings.tabPlacement === "right");
 const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");

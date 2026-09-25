@@ -326,7 +326,10 @@
 }
 
 .app-tab-pill[data-active-tab="false"]:hover {
-  background-color: var(--app-tab-hover-background, color-mix(in oklch, var(--foreground) 8%, transparent));
+  /* The fallback must parse on WebKit without color-mix() (macOS 12 Safari
+   * < 16.2): a color-mix() fallback would invalidate the whole declaration
+   * there and uncolored tabs would get no hover feedback at all. */
+  background-color: var(--app-tab-hover-background, rgba(var(--dbx-foreground-rgb), 0.08));
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .app-tab-pill {
@@ -1016,6 +1019,15 @@
 
 .vertical-tab-layout .tab-group-tab[data-active-tab="true"] {
   background-color: var(--tab-group-soft);
+}
+
+/* WebKit without color-mix() (macOS 12 Safari < 16.2) drops the color-mix
+ * declarations above, leaving the active vertical tab unpainted; restore the
+ * background and border over the same tokens. The composite box-shadow stays
+ * out — losing it is cosmetic, and a partial shadow list is all-or-nothing. */
+html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[data-active-tab="true"] {
+  background-color: rgba(var(--dbx-foreground-rgb), 0.16) !important;
+  border-color: rgba(var(--dbx-foreground-rgb), 0.32) !important;
 }
 
 .vertical-tab-layout .app-tab-scroll > * {

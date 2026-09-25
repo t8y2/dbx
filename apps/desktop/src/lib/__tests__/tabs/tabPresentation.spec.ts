@@ -685,10 +685,43 @@ describe("shared tab presentation helpers", () => {
   });
 
   it("builds active/inactive color styles for classic and non-classic layouts", () => {
-    const activeClassic = tabColorStyle(queryTab({}), true, true);
-    expect(activeClassic?.boxShadow).toContain("var(--foreground)");
-    const inactiveModern = tabColorStyle(queryTab({}), false, false);
-    expect(inactiveModern?.borderColor).toBeUndefined();
+    // Node has no window/CSS globals: pin both to modern-engine answers.
+    vi.stubGlobal("CSS", { supports: () => true });
+    vi.stubGlobal("window", {
+      matchMedia: (query: string) => ({
+        media: query,
+        matches: true,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    });
+    try {
+      const activeClassic = tabColorStyle(queryTab({}), true, true);
+      expect(activeClassic?.boxShadow).toContain("var(--foreground)");
+      const inactiveModern = tabColorStyle(queryTab({}), false, false);
+      expect(inactiveModern?.borderColor).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("swaps inline color-mix tab colors for concrete rgba on legacy WebViews", () => {
+    // WebKit without color-mix() invalidates the inline values at computed-value
+    // time, which left the active tab with no background at all (macOS 12); and
+    // it cannot substitute var() inside inline custom properties, so the legacy
+    // branch resolves the token to concrete rgb. Node has no document: the
+    // helper falls back to the default theme's foreground (10, 10, 10).
+    vi.stubGlobal("CSS", { supports: () => false });
+    try {
+      const pill = tabColorStyle(queryTab({}), true, false);
+      expect(pill?.["--app-tab-background"]).toBe("rgba(10, 10, 10, 0.18)");
+      expect(pill?.borderColor).toBe("var(--ring)");
+      const classic = tabColorStyle(queryTab({}), true, true);
+      expect(classic?.["--app-tab-background"]).toBe("rgba(10, 10, 10, 0.18)");
+      expect(classic?.boxShadow).toBe("inset 0 -2px 0 rgba(10, 10, 10, 0.72)");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("resolves MQ driver icons from the connection store", () => {

@@ -9179,11 +9179,37 @@ async fn get_table_ddl_core_with_options(
         .await?;
         return Ok(source.source);
     }
+    if let Some(kind) = object_type.clone().filter(ddl_kind_uses_object_source) {
+        // Routines, packages, triggers, types and the other schema objects have no
+        // table DDL: `SHOW CREATE TABLE` or the columns/indexes renderer can only
+        // fabricate `CREATE TABLE <name> ()` for them. Ask for the definition
+        // instead, and keep the previous behaviour when the driver cannot produce
+        // one (engine without a source query, empty definition, …).
+        match get_object_source_core(state, connection_id, database, schema, table, kind, None, None).await {
+            Ok(source) if !source.source.trim().is_empty() => return Ok(source.source),
+            Ok(_) => {}
+            Err(error) => {
+                log::debug!(
+                    "[schema][get_table_ddl:object-source-kind-fallback-failed] connection_id={connection_id} database={database} schema={schema} table={table} error={error}"
+                );
+            }
+        }
+    }
 
     retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
         get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
     })
     .await
+}
+
+/// Whether the DDL of this object kind is its own definition, rather than the
+/// table DDL built from columns and indexes.
+///
+/// Views and materialized views are excluded because they have dedicated
+/// branches in [`get_table_ddl_core_with_options`]: a view is re-wrapped into a
+/// `CREATE ... VIEW` statement, and a materialized view returns the raw source.
+fn ddl_kind_uses_object_source(kind: &db::ObjectSourceKind) -> bool {
+    !matches!(kind, db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView)
 }
 
 /// `pg_ddl_with_partitions` when the caller wants the whole partition tree,
@@ -11827,6 +11853,31 @@ mod object_source_tests {
 #[cfg(test)]
 mod ddl_tests {
     use super::*;
+
+    /// Ctrl/Cmd+click on a routine, trigger or package sends its object kind to
+    /// the DDL endpoint. Those requests must be answered from the object source:
+    /// the table renderer can only fabricate `CREATE TABLE <name> ()` for them.
+    #[test]
+    fn ddl_object_kinds_that_need_the_object_source() {
+        for kind in [
+            db::ObjectSourceKind::Procedure,
+            db::ObjectSourceKind::Function,
+            db::ObjectSourceKind::Trigger,
+            db::ObjectSourceKind::Event,
+            db::ObjectSourceKind::Sequence,
+            db::ObjectSourceKind::Synonym,
+            db::ObjectSourceKind::Job,
+            db::ObjectSourceKind::Package,
+            db::ObjectSourceKind::PackageBody,
+            db::ObjectSourceKind::Type,
+            db::ObjectSourceKind::TypeBody,
+        ] {
+            assert!(ddl_kind_uses_object_source(&kind), "{kind:?} must use the object source");
+        }
+        // Views and materialized views keep their dedicated branches.
+        assert!(!ddl_kind_uses_object_source(&db::ObjectSourceKind::View));
+        assert!(!ddl_kind_uses_object_source(&db::ObjectSourceKind::MaterializedView));
+    }
 
     fn column(name: &str, data_type: &str) -> db::ColumnInfo {
         db::ColumnInfo {

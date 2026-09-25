@@ -9,6 +9,7 @@ import { useI18n } from "vue-i18n";
 import { ChevronDown, ChevronUp, Maximize2, Minimize2, Plus, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -370,9 +371,14 @@ function onResizeHandlePointerDown(event: PointerEvent) {
   startResize(event);
 }
 
-// "+" picker menu: anchored below the + button, bottom-stuck inside the dock,
-// growing upward with content (capped by the dock body), closed by selecting
-// an item or clicking anywhere else.
+// "+" picker menu (host DropdownMenu, reka-ui): collision-aware placement —
+// the menu flips/shifts to stay inside the window instead of running off the
+// edge when the "+" sits near the strip's end. open is controlled so opening
+// can run side effects (launch options fetch, panel html warm), and closing
+// stays driven by the menu itself (outside pointerdown incl. the trigger,
+// Escape, item selection). The window-blur closer covers the cross-document
+// iframe case: a click inside a plugin terminal never reaches this document,
+// it only moves focus out of it.
 const plusOpen = ref(false);
 // Generic list filter for the "+" picker: purely client-side label matching so
 // any plugin's long option/target list stays usable without the host knowing
@@ -385,15 +391,20 @@ function plusMatches(label: string): boolean {
   return !plusQuery.value || label.toLowerCase().includes(plusQuery.value);
 }
 const visibleLaunchOptions = computed(() => launchOptionEntries.value.filter((option) => plusMatches(option.label)));
-const visibleConnectionTargets = computed(() => connectionTargets.value.filter((target) => plusMatches(target.label)));
-const plusRoot = ref<HTMLElement>();
-function togglePlusMenu() {
-  plusOpen.value = !plusOpen.value;
+const visibleConnectionTargets = computed(() => connectionTargets.value.filter((target) => plusMatches(optionLabel(target))));
+function optionLabel(target: { label: string }): string {
+  return target.label;
+}
+function setPlusOpen(open: boolean) {
+  plusOpen.value = open;
   plusFilter.value = "";
-  if (plusOpen.value) {
+  if (open) {
     void loadLaunchOptions();
     warmActivePluginPanelHtml();
   }
+}
+function closePlusMenu() {
+  plusOpen.value = false;
 }
 
 // Hide the first-open html pipeline under the time the user spends reading the
@@ -407,28 +418,12 @@ function warmActivePluginPanelHtml() {
   if (!plugin) return;
   void getOrLoadPluginUiHtml(`${plugin.manifest.id}:${plugin.manifest.version}`, plugin.manifest.id).catch(() => undefined);
 }
-function closePlusMenu() {
-  plusOpen.value = false;
-}
-const onPlusMenuOutsidePointerDown = (event: PointerEvent) => {
-  const root = plusRoot.value;
-  if (plusOpen.value && root && !root.contains(event.target as Node)) closePlusMenu();
-};
-window.addEventListener("pointerdown", onPlusMenuOutsidePointerDown, true);
 // Plugin terminal panels live in cross-document iframes: a click inside one
-// never reaches the host window's pointerdown closer above, but it does move
-// focus out of the host document — close on blur. Escape covers keyboard users.
+// never reaches this document (no outside-pointerdown, no Escape keyup), but
+// it does move focus out of the host document — close on blur.
 const onPlusMenuWindowBlur = () => closePlusMenu();
-const onPlusMenuKeydown = (event: KeyboardEvent) => {
-  if (plusOpen.value && event.key === "Escape") closePlusMenu();
-};
 window.addEventListener("blur", onPlusMenuWindowBlur);
-window.addEventListener("keydown", onPlusMenuKeydown, true);
-onScopeDispose(() => {
-  window.removeEventListener("pointerdown", onPlusMenuOutsidePointerDown, true);
-  window.removeEventListener("blur", onPlusMenuWindowBlur);
-  window.removeEventListener("keydown", onPlusMenuKeydown, true);
-});
+onScopeDispose(() => window.removeEventListener("blur", onPlusMenuWindowBlur));
 </script>
 
 <template>
@@ -488,35 +483,41 @@ onScopeDispose(() => {
       </div>
       <!-- The "+" sits flush after the tab list (new-terminal affordance where
            the tabs end), not pushed to the far right edge; it lives OUTSIDE
-           the tabs' scroll container so its dropdown menu renders unclipped. -->
-      <div v-if="activeCommand" ref="plusRoot" class="relative shrink-0">
-        <Tooltip :delay-duration="200">
-          <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-7 w-7" :aria-label="t('pluginDock.newTerminal')" :aria-expanded="plusOpen" @click="togglePlusMenu">
-              <Plus class="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{{ t("pluginDock.newTerminal") }}</TooltipContent>
-        </Tooltip>
-        <div v-if="plusOpen" data-plugin-dock-plus-menu class="absolute right-0 top-full z-30 mt-1 max-h-[50vh] w-64 overflow-y-auto rounded-md border bg-background p-1 shadow-lg" role="menu">
+           the tabs' scroll container so the dropdown never scrolls with it.
+           Reka-ui collision detection keeps the menu inside the window: it
+           aligns to the trigger's start edge and flips/shifts near the
+           viewport edge instead of running off-screen. -->
+      <DropdownMenu v-if="activeCommand" :open="plusOpen" @update:open="setPlusOpen">
+        <DropdownMenuTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-7 w-7" :aria-label="t('pluginDock.newTerminal')" :aria-expanded="plusOpen">
+            <Plus class="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <!-- sideFlip=false pins the menu below the "+": the dock panel body
+             below it is the intended scroll area, so flipping upward over the
+             workbench (the default when the panel is short) reads as the menu
+             "growing from the mouse". Cross-axis shift stays on, so the menu
+             still hugs the window edge instead of overflowing it; height
+             follows the popper's available space below the trigger. -->
+        <DropdownMenuContent align="start" :side-offset="4" :side-flip="false" class="max-h-(--reka-dropdown-menu-content-available-height) w-64" data-plugin-dock-plus-menu>
           <!-- Generic list filter (appears only for long lists): the host filters
                by label without knowing what the entries mean. -->
           <input v-if="plusItemCount > PLUS_FILTER_THRESHOLD" v-model="plusFilter" class="mb-1 w-full rounded-md border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary/40" :placeholder="t('pluginDock.filter')" spellcheck="false" @keydown.stop />
-          <button v-if="plusMatches(t('pluginDock.newTerminal'))" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction('replay')">
+          <DropdownMenuItem v-if="plusMatches(t('pluginDock.newTerminal'))" @select="onPlusAction('replay')">
             <Plus class="h-3.5 w-3.5 shrink-0" />
             <span class="truncate">{{ t("pluginDock.newTerminal") }}</span>
-          </button>
-          <button v-for="option in visibleLaunchOptions" :key="option.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction(option.key)">
+          </DropdownMenuItem>
+          <DropdownMenuItem v-for="option in visibleLaunchOptions" :key="option.key" @select="onPlusAction(option.key)">
             <span class="truncate">{{ option.label }}</span>
-          </button>
-          <button v-for="target in visibleConnectionTargets" :key="target.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" :title="target.connection.name" @click="onPlusAction(target.key)">
+          </DropdownMenuItem>
+          <DropdownMenuItem v-for="target in visibleConnectionTargets" :key="target.key" :title="target.connection.name" @select="onPlusAction(target.key)">
             <span class="truncate">{{ t("pluginDock.connectionTerminal") }} · {{ target.label }}</span>
-          </button>
+          </DropdownMenuItem>
           <div v-if="plusQuery && !plusMatches(t('pluginDock.newTerminal')) && !visibleLaunchOptions.length && !visibleConnectionTargets.length" class="px-2 py-1.5 text-xs text-muted-foreground">
             {{ t("pluginDock.noMatch") }}
           </div>
-        </div>
-      </div>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <div class="min-w-0 flex-1" />
       <Tooltip :delay-duration="200">
         <TooltipTrigger as-child>

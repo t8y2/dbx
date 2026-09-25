@@ -1174,6 +1174,46 @@ fn builds_iris_table_data_sql_with_literal_top_and_ordinary_object() {
 }
 
 #[test]
+fn iris_table_data_pages_use_a_vid_window_instead_of_a_repeated_top() {
+    let options = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Iris),
+        schema: Some("Ens".to_string()),
+        table_name: "AlarmResponse".to_string(),
+        table_type: None,
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "Status".to_string()],
+        fallback_order_columns: Vec::new(),
+        order_by: Some("ID ASC".to_string()),
+        limit: Some(25),
+        offset: Some(0),
+        where_input: Some("WHERE Status = 'Open'".to_string()),
+        include_row_id: false,
+        ..Default::default()
+    };
+    // First page keeps the historical TOP-only statement.
+    assert_eq!(
+        build_table_data_select_sql(options.clone()),
+        "SELECT TOP 25 * FROM Ens.AlarmResponse WHERE (Status = 'Open') ORDER BY ID ASC"
+    );
+    // Later pages must move the window: InterSystems SQL has no OFFSET clause,
+    // so the page is derived from TOP(offset + limit) and `%VID` drops the rows
+    // before the offset (#8929).
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions { offset: Some(100), ..options.clone() }),
+        "SELECT * FROM (SELECT TOP 125 * FROM Ens.AlarmResponse WHERE (Status = 'Open') ORDER BY ID ASC) WHERE %VID > 100"
+    );
+    // The JDBC driver applies the offset itself, so its statement stays unwrapped.
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            offset: Some(100),
+            use_driver_row_offset: true,
+            ..options
+        }),
+        "SELECT * FROM Ens.AlarmResponse WHERE (Status = 'Open') ORDER BY ID ASC"
+    );
+}
+
+#[test]
 fn iris_table_data_sql_quotes_only_delimited_object_names() {
     let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(DatabaseType::Iris),

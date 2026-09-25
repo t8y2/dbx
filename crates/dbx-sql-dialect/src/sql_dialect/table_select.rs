@@ -335,7 +335,7 @@ pub fn build_table_data_select_sql_with_database(
             if options.use_driver_row_offset {
                 format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order}")
             } else {
-                format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}")
+                build_iris_table_select_sql(&select_columns, &table_alias, &where_clause, &order, limit, offset)
             }
         }
         TablePaginationStrategy::InformixFirst => {
@@ -668,6 +668,31 @@ fn quoted_table_columns_or_star(database_type: Option<DatabaseType>, columns: &[
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Builds one page of a Caché/IRIS table read.
+///
+/// InterSystems SQL has `TOP` but no `OFFSET` clause — both Caché 2016 and IRIS
+/// reject `SELECT TOP n ... OFFSET m` — so later pages bound a derived table
+/// with `TOP(offset + limit)` and drop the leading rows with `%VID`, the row
+/// number InterSystems assigns to the rows a query produces. Running the same
+/// `TOP limit` statement for every page was the reason the grid kept showing
+/// the first page (#8929).
+fn build_iris_table_select_sql(
+    select_columns: &str,
+    table_alias: &str,
+    where_clause: &str,
+    order: &str,
+    limit: usize,
+    offset: usize,
+) -> String {
+    if offset == 0 {
+        return format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}");
+    }
+    let window = offset.saturating_add(limit);
+    format!(
+        "SELECT * FROM (SELECT TOP {window} {select_columns} FROM {table_alias}{where_clause}{order}) WHERE %VID > {offset}"
+    )
 }
 
 fn build_rownum_table_select_sql(

@@ -1060,25 +1060,17 @@ fn is_sqlserver_legacy_profile(driver_profile: Option<&str>) -> bool {
 }
 
 pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
-    let table = if crate::sql_dialect::uses_connection_identifier_quote(
+    // Keep the reference identical to the one the grid's SELECT uses: Caché/IRIS
+    // reject quoted ordinary names when delimited identifiers are disabled, so
+    // the count must not be the only statement that quotes them (#8929).
+    let table = data_grid_qualified_table_name(
         options.database_type,
+        options.catalog.as_deref(),
+        options.schema.as_deref(),
+        options.database.as_deref(),
+        &options.table_name,
         options.identifier_quote.as_deref(),
-    ) {
-        crate::sql_dialect::table_data_qualified_table_name(
-            options.database_type,
-            options.schema.as_deref(),
-            &options.table_name,
-            options.identifier_quote.as_deref(),
-        )
-    } else {
-        crate::sql_dialect::qualified_table_name_with_catalog(
-            options.database_type,
-            options.catalog.as_deref(),
-            options.schema.as_deref(),
-            options.database.as_deref(),
-            &options.table_name,
-        )
-    };
+    );
     let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     let hint = options.count_hint.as_deref().unwrap_or("");
@@ -3977,6 +3969,10 @@ mod tests {
 
     #[test]
     fn iris_data_grid_count_queries_the_table_without_wrapping_top_sql() {
+        // Caché 2016 runs with delimited identifiers disabled, where a quoted
+        // ordinary name is not a table reference — the count must use the same
+        // unquoted spelling as the grid SELECT (#8929). Delimited names keep
+        // their quotes.
         assert_eq!(
             build_data_grid_count_sql(DataGridCountSqlOptions {
                 database_type: Some(DatabaseType::Iris),
@@ -3988,7 +3984,20 @@ mod tests {
                 where_input: Some("SSUSR_IsActive = 'Y'".to_string()),
                 count_hint: None,
             }),
-            "SELECT COUNT(*) AS cnt FROM \"SS\".\"SS_User\" WHERE (SSUSR_IsActive = 'Y')"
+            "SELECT COUNT(*) AS cnt FROM SS.SS_User WHERE (SSUSR_IsActive = 'Y')"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Iris),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("App Schema".to_string()),
+                table_name: "Patient Record".to_string(),
+                where_input: None,
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM \"App Schema\".\"Patient Record\""
         );
     }
 

@@ -5126,6 +5126,8 @@ export default withEnglishFallback({
     deleteKey: "키 삭제",
     deleteGroupDetails: "{target}\n키 {count}개",
     deleteLoadedSearchKeysDetails: "{target}\n로드된 일치 키 {count}개",
+    deleteGroupSubtreeDetails: "{target}\n이 그룹 아래의 모든 키를 삭제합니다(로드됨 {count}개)",
+    deleteGroupSubtreeSuccess: "키 {count}개를 삭제했습니다",
     batchExpiry: "만료 시간 설정",
     batchExpiryTitle: "만료 시간 일괄 설정",
     batchExpirySelected: "키 {count}개 선택됨",

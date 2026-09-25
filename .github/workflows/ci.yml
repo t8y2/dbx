@@ -160,6 +160,10 @@ jobs:
       - name: GitHub script tests
         run: node --test .github/scripts/*.test.mjs
 
+      - name: PowerShell MCP installer tests
+        shell: pwsh
+        run: ./.github/scripts/install-mcp-powershell.test.ps1
+
   packages:
     needs: changes
     if: needs.changes.outputs.packages == 'true'
@@ -1052,6 +1056,9 @@ jobs:
               - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
+              - 'docs/public/install-mcp*'
+              - '.github/workflows/mcp-release.yml'
+              - '.github/workflows/publish-packages.yml'
               - '.github/workflows/plugin-release-reusable.yml'
               - '.github/workflows/ci.yml'
               - 'apps/desktop/src/types/database.ts'

@@ -14,7 +14,36 @@ AI 助手 → DBX MCP → 你的数据库 → 返回结果
                     ↘ DBX 桌面端（打开或展示结果）
 ```
 
-## 快速开始
+## 原生安装（推荐）
+
+无需 Node.js。macOS 或 Linux 执行：
+
+```bash
+curl -fsSL https://dbxio.com/install-mcp | sh
+```
+
+Windows 在 PowerShell 中执行：
+
+```powershell
+irm https://dbxio.com/install-mcp.ps1 | iex
+```
+
+脚本校验下载内容，将 `dbx-mcp` 安装到 `~/.dbx/bin`，并打印 Claude Code、Cursor、Codex、ZCode 和通用 MCP 配置。请使用输出中**展开后的可执行文件绝对路径**，不要填写 `~` 或裸命令 `dbx-mcp`：GUI 客户端不一定继承 shell 的 PATH。已有的 `DBX_DATA_DIR` 等环境配置继续有效。DBX 桌面设置优先使用发现的原生二进制，找不到时保留原有 npm 启动方式。
+
+重跑同一安装命令即可升级；版本相同时提示 `already up to date`。版本优先读取 `dbx-mcp --version`，旧版二进制不支持时回退读取 `~/.dbx/bin/.dbx-mcp-version`。断网时安装失败但不会替换现有二进制。下载源依次为 npmjs、npmmirror、GitHub Releases；内容校验不匹配时立即拒绝安装。
+
+macOS 和 Linux 也可以使用 Homebrew：
+
+```bash
+brew install t8y2/tap/dbx-mcp
+brew upgrade t8y2/tap/dbx-mcp
+```
+
+Homebrew 安装后，客户端配置使用 `echo "$(brew --prefix)/bin/dbx-mcp"` 输出的绝对路径。此通道只安装 MCP 服务器，不安装独立的 `dbx` CLI。
+
+npm/npx 通道保持兼容。DBX 桌面端现在默认安装独立原生服务，并为已有 npm 用户显示推荐的原生迁移入口。迁移会保留 npm 包作为兜底，也不会自动改写外部客户端文件：请将启动命令替换为页面生成的原生绝对路径，删除 Node/npx 参数并保留 `env`。仍可选择执行 `npm rm -g @dbx-app/mcp-server` 清理旧包。桌面端可以更新和卸载当前的独立原生或 Homebrew 安装；卸载独立原生版本后，保留的 npm 安装会重新成为兜底。
+
+## npm 快速开始
 
 <Steps>
   <Step>
@@ -122,6 +151,19 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 - `max_rows`：取值 1–1000，默认 100。越界值会被夹取到范围内，而不是报错。仅对 SQL 连接生效——MongoDB shell 命令始终最多返回 100 行，路由到批量执行器的多语句脚本每条语句最多返回 100 行。
 
 启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
+
+## Resources
+
+支持 MCP Resources 的客户端可以读取连接目录，并通过模板获取数据库元数据：
+
+| Resource URI | 说明 |
+| --- | --- |
+| `dbx://connections` | 当前 MCP 范围内可见的连接 |
+| `dbx://connections/{connection_id}/databases` | 指定连接中可见的数据库 |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | 可选数据库或 Schema 中的表和视图 |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | 指定表的字段定义；`table` 为必填参数 |
+
+Resource 的发现和读取会复用对应 Tool 的白名单，以及连接、分组、数据库和运行时范围限制。查询参数值必须进行 URI 编码。SQL 执行和所有可写操作仍只通过 Tool 提供。
 
 ## 读取 Kafka 消息
 

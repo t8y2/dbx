@@ -3655,6 +3655,10 @@ export async function redisDeleteKeys(connectionId: string, db: number, keyRaws:
   return post("/api/redis/delete-keys", { connectionId, db, keyRaws });
 }
 
+export async function redisDeleteKeysByPattern(connectionId: string, db: number, pattern: string): Promise<number> {
+  return post("/api/redis/delete-keys-by-pattern", { connectionId, db, pattern });
+}
+
 export async function redisFlushDb(connectionId: string, db: number): Promise<void> {
   return post("/api/redis/flush-db", { connectionId, db });
 }
@@ -5196,7 +5200,9 @@ export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/c
 export async function checkMcpServerStatus(): Promise<import("@/lib/backend/tauri").McpServerStatus> {
   return {
     installed: false,
+    installation_source: null,
     npm_available: false,
+    npm_installed: false,
     node_path: null,
     node_version: null,
     current_version: null,
@@ -5217,8 +5223,16 @@ export async function installMcpServer(): Promise<string> {
   throw new Error("MCP Server installation is only available in the desktop app.");
 }
 
+export async function installNativeMcpServer(): Promise<string> {
+  throw new Error("Native MCP Server installation is only available in the desktop app.");
+}
+
 export async function uninstallMcpServer(): Promise<string> {
   throw new Error("MCP Server uninstallation is only available in the desktop app.");
+}
+
+export async function uninstallNpmMcpServer(): Promise<string> {
+  throw new Error("MCP Server npm fallback removal is only available in the desktop app.");
 }
 
 export async function getSystemProxyUrl(): Promise<string | null> {

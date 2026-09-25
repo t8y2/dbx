@@ -5474,6 +5474,8 @@ export default withEnglishFallback({
     deleteKey: "Excluir chave",
     deleteGroupDetails: "{target}\n{count} chaves",
     deleteLoadedSearchKeysDetails: "{target}\n{count} chaves correspondentes carregadas",
+    deleteGroupSubtreeDetails: "{target}\nTodas as chaves deste grupo serão excluídas ({count} carregadas)",
+    deleteGroupSubtreeSuccess: "{count} chaves excluídas",
     batchExpiry: "Definir expiração",
     batchExpiryTitle: "Expiração em lote",
     batchExpirySelected: "{count} chaves selecionadas",

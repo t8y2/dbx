@@ -291,6 +291,14 @@ pub struct RedisKeysRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisKeysByPatternRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub pattern: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisDbRequest {
     pub connection_id: String,
     pub db: u32,
@@ -853,6 +861,22 @@ pub async fn delete_keys(
         dbx_core::redis_ops::redis_delete_keys_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raws)
             .await
             .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn delete_keys_by_pattern(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisKeysByPatternRequest>,
+) -> Result<Json<u64>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete keys").await?;
+    let result = dbx_core::redis_ops::redis_delete_keys_by_pattern_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.pattern,
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 

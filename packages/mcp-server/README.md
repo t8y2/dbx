@@ -175,6 +175,19 @@ When connection scoping is enabled, mutating connection tools and desktop UI too
 
 Salesforce connections take SOQL through `dbx_execute_query` and list objects through `dbx_list_tables`. `dbx_execute_batch` and `dbx_open_session` are refused: SOQL is read-only, and every call is a stateless REST request with no session to pin. A record write is a two-step confirmed operation — `dbx_salesforce_prepare_write` returns a summary plus a single-use `confirm_token` that expires after 5 minutes, a person approves that summary, and `dbx_salesforce_apply_write` sends exactly the prepared statement. Preparing needs the per-connection **Allow DML** switch in DBX Settings → MCP, which is off by default, and Salesforce cannot roll an applied write back.
 
+## Resources
+
+Clients that support MCP Resources can read the connection catalog and expand templates for database metadata:
+
+| Resource URI | Description |
+| --- | --- |
+| `dbx://connections` | Connections visible to the current MCP scope |
+| `dbx://connections/{connection_id}/databases` | Databases visible through one connection |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | Tables and views in an optional database/schema |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | Column definitions for a table; `table` is required |
+
+Resource discovery and reads reuse the corresponding Tool allowlist plus connection, group, database, and runtime scopes. Query parameter values must be URI encoded. SQL execution and all write-capable operations remain Tools.
+
 ## Execution Modes
 
 ### Local native mode
@@ -557,6 +570,19 @@ MCP 配置：
 `dbx_list_databases` 只返回该连接 MCP 数据库范围内允许访问的名称。`dbx_send_message` 仅在 Server 构建时包含消息队列支持时可用。
 
 Salesforce 连接通过 `dbx_execute_query` 执行 SOQL，通过 `dbx_list_tables` 列出对象。`dbx_execute_batch` 与 `dbx_open_session` 会被拒绝：SOQL 只读，且每次调用都是无状态 REST 请求，没有可固定的会话。写入记录是两步确认操作——`dbx_salesforce_prepare_write` 返回摘要和一次性 `confirm_token`（5 分钟后过期），由人确认该摘要后，`dbx_salesforce_apply_write` 才会发送那条已准备好的语句。准备写入需要在 DBX 设置 → MCP 中为该连接开启 **允许 DML**（默认关闭），且 Salesforce 无法回滚已应用的写入。
+
+### Resources
+
+支持 MCP Resources 的客户端可以读取连接目录，并通过模板获取数据库元数据：
+
+| Resource URI | 说明 |
+| --- | --- |
+| `dbx://connections` | 当前 MCP 范围内可见的连接 |
+| `dbx://connections/{connection_id}/databases` | 指定连接中可见的数据库 |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | 可选数据库或 Schema 中的表和视图 |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | 指定表的字段定义；`table` 为必填参数 |
+
+Resource 的发现和读取会复用对应 Tool 的白名单，以及连接、分组、数据库和运行时范围限制。查询参数值必须进行 URI 编码。SQL 执行和所有可写操作仍只通过 Tool 提供。
 
 ### 本地数据目录
 

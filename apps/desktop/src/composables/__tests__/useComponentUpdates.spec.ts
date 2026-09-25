@@ -33,7 +33,9 @@ vi.mock("@/lib/plugins/pluginMarketplace", async (importOriginal) => ({ ...(awai
 
 const mcpStatus = {
   installed: true,
+  installation_source: "npm",
   npm_available: true,
+  npm_installed: true,
   current_version: "1.0.0",
   latest_version: "1.1.0",
   update_available: true,

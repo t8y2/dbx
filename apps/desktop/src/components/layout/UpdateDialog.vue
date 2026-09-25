@@ -259,7 +259,8 @@ watch(
         image: ({ text }) => escapeHtml(text),
       },
     });
-    renderedNotes.value = marked.parse(notes) as string;
+    // 已发布正文里的 HTML 注释（如 CNB 镜像幂等标记）在 GitHub 上不可见，转义前先剥离，避免以字面文本露出
+    renderedNotes.value = marked.parse(notes.replace(/<!--[\s\S]*?-->/g, "")) as string;
   },
   { immediate: true },
 );

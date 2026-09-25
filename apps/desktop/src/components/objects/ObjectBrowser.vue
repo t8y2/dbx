@@ -1606,6 +1606,11 @@ async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditin
   sourceEditableText.value = "";
   sourceDraft.value = "";
   sourceSaveError.value = "";
+  // A new source context owns the save spinner: the previous save's finally()
+  // can no longer run once this load starts (the guard epoch moved on) — the
+  // success path itself closes the panel, which bumps the epoch — so without
+  // this reset the Save button would spin and stay disabled for good.
+  sourceSaving.value = false;
   sourceLoading.value = true;
   const connectionId = props.connection.id;
   const database = props.database;

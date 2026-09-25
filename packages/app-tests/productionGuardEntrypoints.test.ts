@@ -150,7 +150,8 @@ test("mongo data-grid index deletions stay production-gated and refresh metadata
     assert.match(body, /finally\s*\{[\s\S]*?refreshMongoIndexMetadataAfterMutation/, `${name} must refresh index metadata even when deletion fails`);
     assert.ok(body.indexOf("runMongoMutation") < body.indexOf("api.mongoDropIndexes"), `production confirmation must wrap ${name}`);
   }
-  const refreshBody = functionBody(source, "refreshMongoIndexMetadataAfterMutation");
+  const metadataSource = readSource("apps/desktop/src/composables/useDataGridTableMetadataLoaders.ts");
+  const refreshBody = functionBody(metadataSource, "refreshMongoIndexMetadataAfterMutation");
   assert.match(refreshBody, /reloadIndexes/, "data-grid metadata must refresh after index deletion");
   assert.match(refreshBody, /refreshLoadedMongoIndexes/, "the loaded sidebar index tree must refresh after data-grid deletion");
   assert.match(functionBody(source, "confirmDropAllMongoIndexes"), /api\.mongoDropIndexes\([^;]*undefined,\s*false\)/, "drop all must use MongoDB wildcard semantics instead of the currently loaded index nodes");

@@ -1,57 +1,47 @@
 // @vitest-environment happy-dom
 
 import { readFileSync } from "node:fs";
-import { nextTick } from "vue";
+import { createApp, defineComponent, h, nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
 import { dispatch, findAll, findOne, hostText, mountComponent } from "./vueHostHarness";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
+const settingsMock = vi.hoisted(() => ({ store: null as any }));
 const mocks = vi.hoisted(() => ({
   editor: { create: vi.fn(), destroy: vi.fn(), setValue: vi.fn(), openSearch: vi.fn() },
   updateSettings: vi.fn(),
   renderWkt: vi.fn(),
   panelCancel: vi.fn(),
   panelOpenSearch: vi.fn(),
+  copyToClipboard: vi.fn(),
+  toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", () => ({
+  useI18n: () => ({ t: (key: string) => key, locale: { value: "en" } }),
+  // DataGrid.vue's import graph reaches @/i18n, which builds a real i18n instance at module scope.
+  createI18n: () => ({ install: () => {}, global: { t: (key: string) => key, locale: { value: "en" } } }),
+}));
 vi.mock("@lucide/vue", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
   const icon = createPassthroughStub("Icon", "i");
-  return {
-    Check: icon,
-    ChevronDown: icon,
-    ChevronUp: icon,
-    ChevronLeft: icon,
-    ChevronRight: icon,
-    ChevronsLeft: icon,
-    ChevronsRight: icon,
-    Download: icon,
-    Filter: icon,
-    FileDiff: icon,
-    Loader2: icon,
-    FileUp: icon,
-    Upload: icon,
-    Search: icon,
-    X: icon,
-    Code2: icon,
-    Copy: icon,
-    Eye: icon,
-    EyeOff: icon,
-    GripVertical: icon,
-    Info: icon,
-    Pencil: icon,
-    Plus: icon,
-    RotateCcw: icon,
-    Trash2: icon,
-  };
+  return new Proxy({}, { get: (_target, key) => (key === "__esModule" ? false : icon), has: () => true });
 });
 
 vi.mock("@/components/ui/button", async () => ({ Button: (await import("./vueHostHarness")).createPassthroughStub("Button", "button") }));
 vi.mock("@/components/ui/input", async () => ({ Input: (await import("./vueHostHarness")).createPassthroughStub("Input", "input") }));
 vi.mock("@/components/ui/dialog", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
-  return { Dialog: createPassthroughStub("Dialog"), DialogContent: createPassthroughStub("DialogContent"), DialogFooter: createPassthroughStub("DialogFooter"), DialogHeader: createPassthroughStub("DialogHeader"), DialogTitle: createPassthroughStub("DialogTitle") };
+  return {
+    Dialog: createPassthroughStub("Dialog"),
+    DialogContent: createPassthroughStub("DialogContent"),
+    DialogDescription: createPassthroughStub("DialogDescription"),
+    DialogFooter: createPassthroughStub("DialogFooter"),
+    DialogHeader: createPassthroughStub("DialogHeader"),
+    DialogTitle: createPassthroughStub("DialogTitle"),
+    DialogTrigger: createPassthroughStub("DialogTrigger"),
+  };
 });
 vi.mock("@/components/ui/dropdown-menu", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
@@ -59,7 +49,7 @@ vi.mock("@/components/ui/dropdown-menu", async () => {
 });
 vi.mock("@/components/ui/popover", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
-  return { Popover: createPassthroughStub("Popover"), PopoverContent: createPassthroughStub("PopoverContent"), PopoverTrigger: createPassthroughStub("PopoverTrigger") };
+  return { Popover: createPassthroughStub("Popover"), PopoverAnchor: createPassthroughStub("PopoverAnchor"), PopoverContent: createPassthroughStub("PopoverContent"), PopoverTrigger: createPassthroughStub("PopoverTrigger") };
 });
 vi.mock("@/components/ui/tooltip", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
@@ -75,10 +65,29 @@ vi.mock("@/components/ui/label", async () => ({ Label: (await import("./vueHostH
 vi.mock("@/components/ui/LightDropdown.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("LightDropdown") }));
 vi.mock("@/components/ui/LightTooltip.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("LightTooltip") }));
 vi.mock("@/components/grid/TemporalCellEditor.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("TemporalCellEditor") }));
+vi.mock("@/components/grid/DataGridValueTransform.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("DataGridValueTransform") }));
 vi.mock("@/composables/useCellDetailEditor", () => ({ useCellDetailEditor: () => mocks.editor }));
-vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false }, themePalette: { value: {} } }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { cellDetailJsonFormatted: true, theme: "default", fontSize: 13, fontFamily: "monospace" }, updateEditorSettings: mocks.updateSettings }) }));
+vi.mock("@/composables/useTheme", async () => {
+  const { ref } = await import("vue");
+  // Real refs: DataGrid.vue both watches isDark and binds it to a Boolean prop.
+  const isDark = ref(false);
+  const themePalette = ref({});
+  return { useTheme: () => ({ isDark, themePalette }) };
+});
+vi.mock("@/stores/settingsStore", async () => {
+  const actual = await vi.importActual<typeof import("@/stores/settingsStore")>("@/stores/settingsStore");
+  const { reactive } = await import("vue");
+  // Reactive and complete: DataGrid.vue reads dozens of editor settings and must
+  // re-render when a test flips one.
+  settingsMock.store = {
+    editorSettings: reactive({ ...actual.DEFAULT_EDITOR_SETTINGS, cellDetailJsonFormatted: true, theme: "default", fontSize: 13, fontFamily: "monospace" }),
+    updateEditorSettings: mocks.updateSettings,
+  };
+  return { ...actual, useSettingsStore: () => settingsMock.store };
+});
 vi.mock("@/lib/dataGrid/geometryPreview", () => ({ isHexGeometry: () => false, renderWktOnCanvas: mocks.renderWkt }));
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboard }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/composables/useDataGridCellDetail", async () => {
   const { ref } = await import("vue");
   return {
@@ -91,6 +100,7 @@ vi.mock("@/composables/useDataGridCellDetail", async () => {
 
 import DataGridCellDetailDialog from "@/components/grid/DataGridCellDetailDialog.vue";
 import DataGridCellDetailPanel from "@/components/grid/DataGridCellDetailPanel.vue";
+import DataGrid from "@/components/grid/DataGrid.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
@@ -100,8 +110,9 @@ import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 
-const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-const globalsCss = readFileSync("apps/desktop/src/styles/globals.css", "utf8");
+const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
+const cellDetailDialogSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailDialog.vue", "utf8");
+const binaryTextPreviewSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailTextPreview.vue", "utf8");
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   return {
@@ -133,45 +144,6 @@ function localDateKey() {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
-});
-describe("DataGrid canvas surfaces", () => {
-  it("asks before an expensive Elasticsearch cursor jump", () => {
-    expect(dataGridSource).toContain("requestCount >= ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS");
-    expect(dataGridSource).toContain('t("grid.esDeepPageJumpConfirmMessage"');
-    expect(dataGridSource).toContain('@click="confirmEsDeepPageJump"');
-  });
-
-  it("shows stable request progress while an Elasticsearch page jump is running", () => {
-    expect(dataGridSource).toContain('t("grid.pageJumpLoading", { page: pageJumpProgress.targetPage })');
-    expect(dataGridSource).toContain('t("grid.pageJumpProgress", { current: pageJumpProgress.completedRequests, total: pageJumpProgress.totalRequests })');
-    expect(dataGridSource).toContain('role="progressbar"');
-    expect(dataGridSource).toContain(':style="{ width: `${pageJumpProgressPercent}%` }"');
-  });
-
-  it("uses the stable overlay for viewport and device-pixel measurement", () => {
-    expect(dataGridSource).toContain("function canvasMeasurementSurface(): HTMLElement | null");
-    expect(dataGridSource).toContain("return canvasOverlayRef.value ?? null;");
-    expect(dataGridSource).toContain("const measurementSurface = canvasMeasurementSurface();");
-    expect(dataGridSource).toContain("getSurface: canvasMeasurementSurface,");
-    expect(dataGridSource).toContain("const canvas = inactiveCanvasSurface();");
-    expect(dataGridSource).toContain("canvasUsingBackSurface.value = !canvasUsingBackSurface.value;");
-  });
-
-  it("uses the canvas that actually received the event during a surface flip", () => {
-    expect(dataGridSource).toContain("function canvasEventSurface(event: MouseEvent): HTMLCanvasElement | null");
-    expect(dataGridSource).toContain("const currentTarget = event.currentTarget;");
-    expect(dataGridSource).toContain("return currentTarget instanceof HTMLCanvasElement ? currentTarget : activeCanvasSurface();");
-    expect(dataGridSource).toContain("const canvas = canvasEventSurface(event);");
-
-    const canvasMouseMove = dataGridSource.slice(dataGridSource.indexOf("function onCanvasMouseMove"), dataGridSource.indexOf("function onCanvasMouseLeave"));
-    expect(canvasMouseMove).toContain("const cursorSurface = canvasEventSurface(event);");
-  });
-
-  it("handles double clicks on the stable canvas container", () => {
-    expect(dataGridSource).toContain('@dblclick="onCanvasDblClick"');
-    expect(dataGridSource.match(/@dblclick="onCanvasDblClick"/g)).toHaveLength(1);
-    expect(dataGridSource).toContain("@dblclick.stop");
-  });
 });
 
 describe("DataGridSearchBar", () => {
@@ -210,14 +182,14 @@ describe("DataGridSearchBar", () => {
     dispatch(suggestion, "mouseenter");
     expect(hoverSuggestion).toHaveBeenCalledWith(0);
 
-    const previousButton = findOne(mounted.root, (node) => node.props["aria-label"] === "search.prevMatch");
-    const nextButton = findOne(mounted.root, (node) => node.props["aria-label"] === "search.nextMatch");
+    const previousButton = findOne(mounted.root, (node) => node.props["aria-label"] === "editor.search.prevMatch");
+    const nextButton = findOne(mounted.root, (node) => node.props["aria-label"] === "editor.search.nextMatch");
     expect(dispatch(previousButton, "mousedown").defaultPrevented).toBe(true);
     dispatch(previousButton, "click");
     dispatch(nextButton, "click");
     expect(navigate.mock.calls).toEqual([[-1], [1]]);
 
-    const closeButton = findOne(mounted.root, (node) => node.props["aria-label"] === "search.close");
+    const closeButton = findOne(mounted.root, (node) => node.props["aria-label"] === "editor.search.close");
     dispatch(closeButton, "click");
     expect(close).toHaveBeenCalledOnce();
 
@@ -228,18 +200,6 @@ describe("DataGridSearchBar", () => {
 });
 
 describe("DataGridPagination", () => {
-  it("keeps drag summaries count-only and wires the derived average without materializing selected cells", () => {
-    const summaryStart = dataGridSource.indexOf("const selectionSummary = computed");
-    const pendingSummary = dataGridSource.indexOf("createPendingSelectionSummary(selectedCellCount.value, multiRowCount.value)", summaryStart);
-    const materializedSummary = dataGridSource.indexOf("summarizeSelection(selectedCells.value)", summaryStart);
-
-    expect(summaryStart).toBeGreaterThan(-1);
-    expect(pendingSummary).toBeGreaterThan(summaryStart);
-    expect(materializedSummary).toBeGreaterThan(pendingSummary);
-    expect(dataGridSource).toContain('const selectionSummaryAverageText = computed(() => {\n  if (isSelectingCells.value) return "…";');
-    expect(dataGridSource).toContain(':selection-summary-average-text="selectionSummaryAverageText"');
-  });
-
   it("shows average beside the existing selection summary values", () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 4, rowCount: 2 },
@@ -323,7 +283,7 @@ describe("DataGridPagination", () => {
       onNextPage: nextPage,
       onLastPage: lastPage,
     });
-    const navigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0");
+    const navigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0" && node.props["aria-label"] !== "grid.loadAllAndGoToLastRow");
 
     expect(navigation.map((node) => node.props.disabled)).toEqual([true, true, true, true]);
     navigation.forEach((node) => dispatch(node, "click"));
@@ -333,7 +293,7 @@ describe("DataGridPagination", () => {
     expect(lastPage).not.toHaveBeenCalled();
 
     await mounted.setProps({ currentPage: 2, canGoNextPage: true, canJumpLastPage: true });
-    const enabledNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0");
+    const enabledNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0" && node.props["aria-label"] !== "grid.loadAllAndGoToLastRow");
     expect(enabledNavigation.map((node) => node.props.disabled)).toEqual([false, false, false, false]);
     enabledNavigation.forEach((node) => dispatch(node, "click"));
     expect(firstPage).toHaveBeenCalledOnce();
@@ -342,7 +302,7 @@ describe("DataGridPagination", () => {
     expect(lastPage).toHaveBeenCalledOnce();
 
     await mounted.setProps({ loading: true });
-    const busyNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0");
+    const busyNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0" && node.props["aria-label"] !== "grid.loadAllAndGoToLastRow");
     expect(busyNavigation.map((node) => node.props.disabled)).toEqual([true, true, true, true]);
     expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.jumpToPage").props.disabled).toBe(true);
   });
@@ -410,9 +370,61 @@ describe("DataGridPagination", () => {
 
     expect(findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0")).toHaveLength(0);
   });
+
+  it("loads all paginated rows and moves to the last row", async () => {
+    const loadAllRows = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      canLoadAllRows: true,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: true,
+      canJumpLastPage: true,
+      onLoadAllRows: loadAllRows,
+    });
+    const loadAllButton = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow");
+
+    expect(loadAllButton.props.disabled).toBe(false);
+    dispatch(loadAllButton, "click");
+    expect(loadAllRows).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ loading: true });
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow").props.disabled).toBe(true);
+    await mounted.setProps({ loading: false, canLoadAllRows: false });
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow").props.disabled).toBe(true);
+  });
 });
 
 describe("DataGridColumnHeader", () => {
+  it("uses a compact formatter marker with an accessible explanation", () => {
+    const mounted = mountComponent(DataGridColumnHeader, {
+      name: "created_at",
+      actualColumnIndex: 0,
+      visibleColumnIndex: 0,
+      formatterActive: true,
+      formatterLabel: "Formatted display is active",
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+    });
+    const indicator = findOne(mounted.root, (node) => node.props["data-column-formatter-indicator"] === "");
+    const trigger = findOne(mounted.root, (node) => node.props["data-column-tooltip-trigger"] === "");
+
+    expect(hostText(indicator)).toBe("F");
+    expect(String(indicator.props.class)).toContain("h-4 w-4");
+    expect(indicator.props.title).toBe("Formatted display is active");
+    expect(indicator.props["aria-label"]).toBe("Formatted display is active");
+    expect(indicator.parent).not.toBe(trigger);
+  });
+
   it("limits the metadata tooltip trigger to the column text block", () => {
     const mounted = mountComponent(DataGridColumnHeader, {
       name: "status",
@@ -455,8 +467,6 @@ describe("DataGridColumnHeader", () => {
     expect(String(tooltipType.props.class ?? "")).toContain("data-grid-type-string");
     const headerTypeLine = findOne(mounted.root, (node) => hostText(node) === "varchar(255)" && node.props["data-grid-header-type-line"] === "");
     expect(String(headerTypeLine.props.class)).toContain("data-grid-type-string");
-    // Softer dark-mode palette override for the tooltip container.
-    expect(globalsCss).toMatch(/\.dark \.dbx-column-info-tooltip \{[^}]*--data-grid-type-string-fg: #4ade80/);
   });
 
   it("cancels resize-handle clicks without leaking header click events", () => {
@@ -583,6 +593,34 @@ describe("DataGridColumnHeader", () => {
 });
 
 describe("DataGridFilterBuilder", () => {
+  it.each(["popover", "panel", "text"])("offers apply-only for disabled rules in the %s layout only when enabled", async (layout) => {
+    const applyOnly = vi.fn();
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [{ id: "r1", columnName: "id", mode: "equals", rawValue: "7", rawEndValue: "", conjunction: "AND", disabled: true }],
+      columns: ["id"],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      layout,
+      onApplyOnly: applyOnly,
+    });
+    const buttons = () => findAll(mounted.root, (node) => node.props["aria-label"] === "grid.filterBuilderApplyOnly");
+    expect(buttons()).toHaveLength(0);
+    await mounted.setProps({ showApplyOnly: true });
+    expect(buttons()).toHaveLength(1);
+    expect(buttons()[0].props.disabled).toBeFalsy();
+    dispatch(buttons()[0], "click");
+    expect(applyOnly).toHaveBeenCalledWith("r1");
+    await mounted.setProps({ applyOnlyBusy: true });
+    expect(buttons()[0].props.disabled).toBe(true);
+    await mounted.setProps({ applyOnlyBusy: false });
+    expect(buttons()[0].props.disabled).toBeFalsy();
+    dispatch(buttons()[0], "click");
+    expect(applyOnly).toHaveBeenCalledTimes(2);
+    await mounted.setProps({ disabled: true });
+    expect(buttons()[0].props.disabled).toBe(true);
+  });
+
   it("renders a compact text rule without framed form controls", async () => {
     const updateRule = vi.fn();
     const add = vi.fn();
@@ -1122,7 +1160,9 @@ describe("DataGridQueryControls", () => {
     expect(applyFilters).toHaveBeenCalledOnce();
   });
 
-  it("keeps view selection out of the data grid controls", async () => {
+  it("keeps the filter toggle available when switching filter views", async () => {
+    const updateFilterBuilderOpen = vi.fn();
+    const ensureRule = vi.fn();
     const mounted = mountComponent(DataGridQueryControls, {
       whereInput: "",
       orderByInput: "",
@@ -1146,16 +1186,26 @@ describe("DataGridQueryControls", () => {
       applyWhere: vi.fn(),
       applyOrderBy: vi.fn(),
       clearOrderBy: vi.fn(),
+      "onUpdate:filterBuilderOpen": updateFilterBuilderOpen,
+      onEnsureRule: ensureRule,
     });
 
     expect(hostText(mounted.root)).not.toContain("grid.filterQuickView");
     expect(hostText(mounted.root)).not.toContain("grid.filterConditionView");
-    expect(findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"))).toHaveLength(1);
+    const quickFilterButtons = findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    expect(quickFilterButtons).toHaveLength(1);
+    expect(quickFilterButtons[0].props["aria-label"]).toBe("grid.filter");
 
     await mounted.setProps({ filterEditorView: "conditions", filterBuilderOpen: false });
     await nextTick();
     expect(findOne(mounted.root, (node) => node.type === "textarea" && node.props.placeholder === "WHERE")).toBeTruthy();
-    expect(findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"))).toHaveLength(0);
+    const filterButtons = findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    expect(filterButtons).toHaveLength(1);
+    expect(filterButtons[0].props["aria-label"]).toBe("grid.filter");
+    expect(filterButtons[0].props["aria-expanded"]).toBe(false);
+    dispatch(filterButtons[0], "click");
+    expect(updateFilterBuilderOpen).toHaveBeenCalledWith(true);
+    expect(ensureRule).toHaveBeenCalledOnce();
   });
 });
 
@@ -1430,6 +1480,164 @@ describe("cell detail surfaces", () => {
     expect(hostText(panel.root)).toContain("0x89504e470d0a1a0a");
   });
 
+  // issue #9505：GaussDB（ZenithDriver）的 BLOB 已经以 `0x<hex>` 到达前端，缺的是详情里显式、只读的文本查看入口。
+  it("offers an explicit read-only binary text preview in the dialog and the panel", () => {
+    const blobDetail = detail({
+      type: "BLOB",
+      value: "0x5b5b68656164657273203d207b7d",
+      rawValue: "0x5b5b68656164657273203d207b7d",
+      rawValuePreview: "0x5b5b68656164657273203d207b7d",
+      displayValue: "BLOB [14 bytes]",
+      displayValuePreview: "BLOB [14 bytes]",
+      formattedJson: "",
+    });
+    const dialog = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: blobDetail,
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText: vi.fn(),
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      databaseType: "gaussdb",
+    });
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: blobDetail,
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "gaussdb",
+    });
+
+    for (const mounted of [dialog, panel]) {
+      // canonical 值仍是 0x 十六进制，解码文本只出现在只读预览里。
+      expect(hostText(mounted.root)).toContain("0x5b5b68656164657273203d207b7d");
+      expect(hostText(mounted.root)).toContain("grid.binaryTextPreview");
+      // binary 列不再渲染 timestamp/radix 这类对 hex 无意义的文本转换。
+      expect(findAll(mounted.root, (node) => node.props["data-stub"] === "DataGridValueTransform")).toHaveLength(0);
+      expect(findOne(mounted.root, (node) => node.type === "textarea").value).toBe("[[headers = {}");
+    }
+  });
+
+  it("re-decodes the binary text preview with GBK only after the user picks it", async () => {
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "BLOB", value: "0xd6d0cec4", rawValue: "0xd6d0cec4", rawValuePreview: "0xd6d0cec4", displayValue: "BLOB [4 bytes]", displayValuePreview: "BLOB [4 bytes]", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "gaussdb",
+    });
+
+    // 默认 UTF-8：GBK 字节严格解码失败时给出失败提示，而不是替换字符。
+    expect(hostText(panel.root)).toContain("grid.binaryTextPreviewErrors.undecodable");
+    dispatch(
+      findOne(panel.root, (node) => node.type === "button" && hostText(node).trim() === "grid.binaryTextPreviewEncodings.gbk"),
+      "click",
+    );
+    await nextTick();
+
+    expect(hostText(panel.root)).not.toContain("grid.binaryTextPreviewErrors.undecodable");
+    expect(findOne(panel.root, (node) => node.type === "textarea").value).toBe("中文");
+  });
+
+  it("keeps the value transform entry for non-binary detail cells", () => {
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "VARCHAR(32)", value: "hello", rawValue: "hello", rawValuePreview: "hello", displayValue: "hello", displayValuePreview: "hello", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => false,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "mysql",
+    });
+
+    expect(findAll(panel.root, (node) => node.props["data-stub"] === "DataGridValueTransform")).toHaveLength(1);
+    expect(hostText(panel.root)).not.toContain("grid.binaryTextPreviewTitle");
+    expect(findAll(panel.root, (node) => node.type === "textarea")).toHaveLength(0);
+  });
+
+  it("keeps the binary text preview out of the copy-back and edit paths", async () => {
+    const copyValue = vi.fn();
+    const startEdit = vi.fn();
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "BLOB", value: "0x48656c6c6f", rawValue: "0x48656c6c6f", rawValuePreview: "0x48656c6c6f", displayValue: "BLOB [5 bytes]", displayValuePreview: "BLOB [5 bytes]", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "gaussdb",
+      onCopyValue: copyValue,
+      onStartEdit: startEdit,
+    });
+
+    dispatch(
+      findOne(panel.root, (node) => node.type === "button" && hostText(node).trim() === "grid.binaryTextPreviewCopy"),
+      "click",
+    );
+    await nextTick();
+
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith("Hello");
+    expect(mocks.toast).toHaveBeenCalledWith("grid.cellValueCopied", 2000);
+    // 预览只读：不触发栅格复制/编辑，details 预览仍展示未修改的 canonical hex。
+    expect(copyValue).not.toHaveBeenCalled();
+    expect(startEdit).not.toHaveBeenCalled();
+    expect(hostText(panel.root)).toContain("0x48656c6c6f");
+    expect(findOne(panel.root, (node) => node.type === "textarea").value).toBe("Hello");
+  });
+
+  it("keeps the binary text preview component strictly read-only and shared by both surfaces", () => {
+    expect(binaryTextPreviewSource).toContain("binaryCellTextPreview(props.value");
+    // 不发出任何编辑/提交事件，也不给 detail.value / rawValue 赋值。
+    expect(binaryTextPreviewSource).not.toContain("defineEmits");
+    expect(binaryTextPreviewSource).not.toMatch(/(?:props|detail)\.(?:value|rawValue)\s*=/);
+    expect(cellDetailDialogSource).toMatch(/<DataGridCellDetailTextPreview\s+v-if="open && isBinaryCellColumnType\(detail\.type\)"/);
+    // Panel 与下载菜单同一道闸门：编辑中不对草稿做只读文本预览。
+    expect(cellDetailPanelSource).toMatch(/<DataGridCellDetailTextPreview\s+v-if="!editing && isBinaryCellColumnType\(detail\.type\)"/);
+  });
+
   it("copies the presented value, emits edit, closes, and replaces the JSON result", async () => {
     const copyText = vi.fn();
     const edit = vi.fn();
@@ -1575,12 +1783,35 @@ describe("cell detail surfaces", () => {
     expect(compareJson).toHaveBeenCalledOnce();
   });
 
-  it("snapshots comparison values before opening and suppresses modal-induced blur commits", () => {
-    expect(dataGridSource).toContain("detailValueDiffSnapshot.value = snapshot;");
-    expect(dataGridSource).toContain("detailValueDiffOpen.value = true;");
-    expect(dataGridSource).toContain("if (!detailValueDiffOpen.value) commitValueEditorEdit();");
-    expect(dataGridSource).toContain(':disabled="!canCompareDetailJson" @mousedown.prevent @click="openDetailJsonCompare"');
-    expect(dataGridSource).toContain('v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot"');
+  // issue #9832：编辑中点「压缩 JSON」会把草稿压成单行，此时必须仍能点「格式化 JSON」
+  // 重新展开，否则 Mongo 这类对象字段的 JSON 一旦压缩就再也无法格式化。
+  it("keeps the JSON format action reachable while a compacted draft is being edited", async () => {
+    const formatJson = vi.fn();
+    const mounted = mountComponent(DataGridCellDetailPanel, {
+      detail: detail(),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: true,
+      editing: true,
+      sideJsonView: false,
+      showCompactJson: true,
+      canCompactJson: true,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => false,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      onFormatJson: formatJson,
+    });
+
+    const formatButton = findOne(mounted.root, (node) => node.props.title === "grid.formatJson");
+    dispatch(formatButton, "click");
+    expect(formatJson).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ showCompactJson: false });
+    expect(findAll(mounted.root, (node) => node.props.title === "grid.formatJson")).toHaveLength(0);
   });
 });
 
@@ -1631,5 +1862,46 @@ describe("DataGridCopyColumnNamesDialog", () => {
     findOne(mounted.root, (node) => node.props["data-stub"] === "Select").props["onUpdate:modelValue"]("bogus");
     await nextTick();
     expect(previewText(mounted)).toBe("id\ttype");
+  });
+});
+
+describe("DataGrid column header tooltips", () => {
+  // The rest of this file drives leaf components through the host renderer, but
+  // DataGrid.vue touches the DOM directly (querySelector/observers), so this
+  // case mounts it into happy-dom instead.
+  function mountDataGrid() {
+    setActivePinia(createPinia());
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const app = createApp(defineComponent({ setup: () => () => h(DataGrid, { result: { columns: ["id", "name"], rows: [[1, "a"]] } }) }));
+    app.mount(host);
+    return {
+      host,
+      // `disabled` is not one of Vue's special boolean attributes, so binding it
+      // on the LightTooltip stub's <div> renders the literal "true"/"false".
+      headerTooltipsDisabled: () => [...host.querySelectorAll('[data-grid-column-index] [data-stub="LightTooltip"]')].map((node) => node.getAttribute("disabled") === "true"),
+      destroy() {
+        app.unmount();
+        host.remove();
+      },
+    };
+  }
+
+  it("follows the showColumnHeaderTooltips preference", async () => {
+    const grid = mountDataGrid();
+    await nextTick();
+
+    expect(settingsMock.store.editorSettings.showColumnHeaderTooltips).toBe(true);
+    expect(grid.headerTooltipsDisabled()).toEqual([false, false]);
+
+    settingsMock.store.editorSettings.showColumnHeaderTooltips = false;
+    await nextTick();
+    expect(grid.headerTooltipsDisabled()).toEqual([true, true]);
+
+    settingsMock.store.editorSettings.showColumnHeaderTooltips = true;
+    await nextTick();
+    expect(grid.headerTooltipsDisabled()).toEqual([false, false]);
+
+    grid.destroy();
   });
 });

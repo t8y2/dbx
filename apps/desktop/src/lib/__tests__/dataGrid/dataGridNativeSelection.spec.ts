@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { beginDataGridNativeSelectionBlock, DATA_GRID_NATIVE_SELECTION_BLOCK_CLASS, DATA_GRID_NATIVE_SELECTION_RELEASE_DELAY_MS, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 
-function selectionEnvironment() {
+function selectionEnvironment(options: { editableActiveElement?: boolean } = {}) {
   const classes = new Set<string>();
   const removeAllRanges = vi.fn();
   return {
@@ -16,6 +16,11 @@ function selectionEnvironment() {
             remove: (className: string) => classes.delete(className),
           },
         },
+        activeElement: options.editableActiveElement
+          ? {
+              closest: vi.fn(() => ({})),
+            }
+          : null,
       },
       getSelection: () => ({ removeAllRanges }),
       setTimeout,
@@ -37,6 +42,16 @@ describe("data grid native selection block", () => {
 
     expect(classes.has(DATA_GRID_NATIVE_SELECTION_BLOCK_CLASS)).toBe(true);
     expect(removeAllRanges).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the native selection while an editable control is focused", () => {
+    const { classes, removeAllRanges, environment } = selectionEnvironment({ editableActiveElement: true });
+    const owner = {};
+
+    beginDataGridNativeSelectionBlock(owner, environment);
+
+    expect(classes.has(DATA_GRID_NATIVE_SELECTION_BLOCK_CLASS)).toBe(true);
+    expect(removeAllRanges).not.toHaveBeenCalled();
   });
 
   it("keeps the application-level block across a fast component replacement", () => {

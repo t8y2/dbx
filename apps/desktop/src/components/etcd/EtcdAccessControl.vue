@@ -9,23 +9,25 @@ import { Input } from "@/components/ui/input";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 type AccessView = "users" | "roles";
 type PermissionAccess = "read" | "write" | "readwrite";
 type PermissionResource = "all" | "key" | "prefix";
 
 const props = defineProps<{ connectionId: string }>();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ view?: AccessView; selectedUser?: string; selectedRole?: string }>({}, "EtcdAccessControl");
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
-const view = ref<AccessView>("users");
+const view = ref<AccessView>(restoredUiState.view === "roles" ? "roles" : "users");
 const loading = ref(false);
 const busy = ref(false);
 const error = ref("");
 const notice = ref("");
 const users = ref<string[]>([]);
 const roles = ref<string[]>([]);
-const selectedUser = ref("");
-const selectedRole = ref("");
+const selectedUser = ref(restoredUiState.selectedUser ?? "");
+const selectedRole = ref(restoredUiState.selectedRole ?? "");
 const userDetail = ref<api.EtcdAuthUserDetail | null>(null);
 const roleDetail = ref<api.EtcdAuthRoleDetail | null>(null);
 const detailLoading = ref(false);
@@ -52,6 +54,8 @@ const approvalText = ref("");
 const approvalExpected = ref("");
 let pendingApproval: (() => Promise<void>) | null = null;
 let detailRequest = 0;
+
+trackUiState(() => ({ view: view.value, selectedUser: selectedUser.value, selectedRole: selectedRole.value }));
 
 const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 const selectedUserRoles = computed(() => userDetail.value?.roles ?? []);

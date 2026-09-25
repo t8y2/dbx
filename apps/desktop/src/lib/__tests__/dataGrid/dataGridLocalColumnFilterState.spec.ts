@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { restoreDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
+import { buildDataGridLocalFilterOptions, dataGridLocalFilterKey, restoreDataGridLocalColumnFilters, rowMatchesDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters, sortDataGridLocalFilterOptions, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
+
+function filterOption(label: string, count: number | null): DataGridLocalFilterOption {
+  return { key: `str:${label}`, label, count, value: label };
+}
 
 describe("data grid local column filter state", () => {
   it("round-trips selected values so a remounted grid restores its filters", () => {
@@ -26,5 +30,77 @@ describe("data grid local column filter state", () => {
     );
 
     expect(restored).toEqual({});
+  });
+
+  it("maps a saved filter to its current column after a dynamic column reorder", () => {
+    const restored = restoreDataGridLocalColumnFilters(
+      {
+        "1": ["str:open"],
+        "2": ["str:stale"],
+      },
+      3,
+      ["id", "name", "status"],
+      ["id", "status", "removed"],
+    );
+
+    expect(restored).toEqual({ 2: new Set(["str:open"]) });
+  });
+
+  it("builds stable keys and filters rows across multiple columns", () => {
+    expect(dataGridLocalFilterKey(null)).toBe("__dbx_null__");
+    expect(dataGridLocalFilterKey(true)).toBe("bool:true");
+    expect(dataGridLocalFilterKey(42)).toBe("num:42");
+    expect(dataGridLocalFilterKey("active")).toBe("str:active");
+
+    expect(rowMatchesDataGridLocalColumnFilters(["active", 42], { 0: new Set(["str:active"]), 1: new Set(["num:42"]) })).toBe(true);
+    expect(rowMatchesDataGridLocalColumnFilters(["active", 7], { 0: new Set(["str:active"]), 1: new Set(["num:42"]) })).toBe(false);
+  });
+
+  it("deduplicates local filter options and sorts null first", () => {
+    const options = buildDataGridLocalFilterOptions({
+      rows: [{ values: ["beta"] }, { values: [null] }, { values: ["beta"] }],
+      newRows: [["alpha"]],
+      columnIndex: 0,
+      getRowData: (row) => row.values,
+      formatValue: (value) => String(value),
+    });
+
+    expect(options).toEqual([
+      { key: "__dbx_null__", label: "NULL", count: 1, value: null },
+      { key: "str:alpha", label: "alpha", count: 1, value: "alpha" },
+      { key: "str:beta", label: "beta", count: 2, value: "beta" },
+    ]);
+  });
+
+  it("sorts filter options by count in both directions and treats a missing count as zero", () => {
+    const options = [filterOption("beta", 2), filterOption("alpha", 5), filterOption("delta", null), filterOption("gamma", 1)];
+
+    expect(sortDataGridLocalFilterOptions(options, { field: "count", direction: "asc" }).map((option) => option.label)).toEqual(["delta", "gamma", "beta", "alpha"]);
+    expect(sortDataGridLocalFilterOptions(options, { field: "count", direction: "desc" }).map((option) => option.label)).toEqual(["alpha", "beta", "gamma", "delta"]);
+  });
+
+  it("breaks equal-count ties by value ascending regardless of the count direction", () => {
+    const options = [filterOption("delta", 3), filterOption("beta", 3), filterOption("alpha", 3)];
+
+    expect(sortDataGridLocalFilterOptions(options, { field: "count", direction: "asc" }).map((option) => option.label)).toEqual(["alpha", "beta", "delta"]);
+    expect(sortDataGridLocalFilterOptions(options, { field: "count", direction: "desc" }).map((option) => option.label)).toEqual(["alpha", "beta", "delta"]);
+  });
+
+  it("keeps null first for value ascending and last for value descending", () => {
+    const options: DataGridLocalFilterOption[] = [filterOption("alpha", 1), { key: "__dbx_null__", label: "NULL", count: null, value: null }, filterOption("beta", 1)];
+
+    expect(sortDataGridLocalFilterOptions(options, { field: "value", direction: "asc" }).map((option) => option.value)).toEqual([null, "alpha", "beta"]);
+    expect(sortDataGridLocalFilterOptions(options, { field: "value", direction: "desc" }).map((option) => option.value)).toEqual(["beta", "alpha", null]);
+  });
+
+  it("returns a new sorted array without mutating the input options", () => {
+    const options = [filterOption("beta", 2), filterOption("alpha", 5)];
+    const snapshot = options.map((option) => ({ ...option }));
+
+    const sorted = sortDataGridLocalFilterOptions(options, { field: "count", direction: "desc" });
+
+    expect(sorted).not.toBe(options);
+    expect(sorted.map((option) => option.label)).toEqual(["alpha", "beta"]);
+    expect(options).toEqual(snapshot);
   });
 });

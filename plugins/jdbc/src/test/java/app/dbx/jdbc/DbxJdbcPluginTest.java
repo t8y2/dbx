@@ -11,6 +11,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.Clob;
 import java.sql.DatabaseMetaData;
@@ -721,6 +722,29 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void readValueUsesStringAccessorForLongVarcharColumns() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        ResultSet rs = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getString" -> "Cache LONGVARCHAR text";
+                case "getObject" -> throw new AssertionError("LONGVARCHAR must use getString");
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+
+        assertEquals("Cache LONGVARCHAR text", method.invoke(null, rs, columnMeta(Types.LONGVARCHAR), 1, false));
+    }
+
+    @Test
     void readValueConvertsGaussDbBooleanBytesWithoutCollapsingMultiBitValues() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod(
             "readValue",
@@ -735,6 +759,108 @@ final class DbxJdbcPluginTest {
         assertEquals(false, method.invoke(null, objectResultSet(new byte[] { 'f' }), columnMeta(Types.BIT), 1, false));
         assertEquals(null, method.invoke(null, objectResultSet(null), columnMeta(Types.BIT), 1, false));
         assertEquals("0x0102", method.invoke(null, objectResultSet(new byte[] { 1, 2 }), columnMeta(Types.BIT), 1, false));
+    }
+
+    @Test
+    void readValueRendersBitFieldColumnsAsBitStrings() throws Exception {
+        Method method = bitStringReadValue();
+
+        // MySQL Connector/J 对 bit(n) 直接返回裸位字段，DBX 之前会渲染成 `0x..`。
+        assertEquals("0", method.invoke(null, bytesResultSet(new byte[] { 0x00 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        assertEquals("1", method.invoke(null, bytesResultSet(new byte[] { 0x01 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        assertEquals("10101010", method.invoke(null, bytesResultSet(new byte[] { (byte) 0xaa }), columnMeta(Types.BIT, "BIT", 8), 1, false, null, true));
+        assertEquals("0000000100000010", method.invoke(null, bytesResultSet(new byte[] { 0x01, 0x02 }), columnMeta(Types.BIT, "BIT", 16), 1, false, null, true));
+        assertEquals(null, method.invoke(null, bytesResultSet(null), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+    }
+
+    @Test
+    void readValueRendersTextBitPayloadsAsBitStrings() throws Exception {
+        Method method = bitStringReadValue();
+
+        // 金仓/PostgreSQL 驱动把 bit(n) 当 `0`/`1` 文本返回，getBytes 给出 ASCII 位串。
+        assertEquals("0", method.invoke(null, bytesResultSet(new byte[] { '0' }), columnMeta(Types.BIT, "bit", 1), 1, false, null, true));
+        assertEquals("1", method.invoke(null, bytesResultSet(new byte[] { '1' }), columnMeta(Types.BIT, "bit", 1), 1, false, null, true));
+        assertEquals("10101010", method.invoke(null, bytesResultSet("10101010".getBytes(StandardCharsets.US_ASCII)), columnMeta(Types.BIT, "bit", 8), 1, false, null, true));
+        assertEquals("101", method.invoke(null, bytesResultSet("101".getBytes(StandardCharsets.US_ASCII)), columnMeta(Types.OTHER, "varbit", 3), 1, false, null, true));
+        // 布尔位串按 `t`/`f` 返回时保持布尔语义。
+        assertEquals(true, method.invoke(null, bytesResultSet(new byte[] { 't' }), columnMeta(Types.BIT, "bit", 1), 1, false, null, true));
+        assertEquals(false, method.invoke(null, bytesResultSet(new byte[] { 'f' }), columnMeta(Types.BIT, "bit", 1), 1, false, null, true));
+        // 位宽超出载荷容量（不可信的元数据）时保持原来的 `0x..` 展示。
+        assertEquals("0x0102", method.invoke(null, bytesResultSet(new byte[] { 0x01, 0x02 }), columnMeta(Types.BIT, "BIT", 24), 1, false, null, true));
+        // 没有声明位宽时按数值的最短位宽展开。
+        assertEquals("100000010", method.invoke(null, bytesResultSet(new byte[] { 0x01, 0x02 }), columnMeta(Types.BIT, "BIT", 0), 1, false, null, true));
+    }
+
+    @Test
+    void readValueRendersTinyInt1BitColumnsAsNumbers() throws Exception {
+        Method method = bitStringReadValue();
+
+        // Connector/J 默认把 tinyint(1) 上报成 Types.BIT（位宽 1），超出 0/1 的载荷是数值列，
+        // 截成单个比特会静默丢数据（2 显示成 "0"、3 显示成 "1"），必须按有符号字节十进制展示。
+        assertEquals(Byte.valueOf((byte) 2), method.invoke(null, bytesResultSet(new byte[] { 2 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        assertEquals(Byte.valueOf((byte) 127), method.invoke(null, bytesResultSet(new byte[] { 127 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        assertEquals(Byte.valueOf((byte) -1), method.invoke(null, bytesResultSet(new byte[] { (byte) 0xff }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        // 真正的 bit(1) 载荷仍是 0/1，按位串展示。
+        assertEquals("0", method.invoke(null, bytesResultSet(new byte[] { 0x00 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        assertEquals("1", method.invoke(null, bytesResultSet(new byte[] { 0x01 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+    }
+
+    @Test
+    void readValueDoesNotTreatMultiBitPayloadsAsBooleanText() throws Exception {
+        Method method = bitStringReadValue();
+
+        // bit(8) 的裸载荷恰好等于 't'/'f' 的字节值时是位字段而不是布尔文本，按位串展开。
+        assertEquals("01110100", method.invoke(null, bytesResultSet(new byte[] { 't' }), columnMeta(Types.BIT, "BIT", 8), 1, false, null, true));
+        assertEquals("01100110", method.invoke(null, bytesResultSet(new byte[] { 'f' }), columnMeta(Types.BIT, "BIT", 8), 1, false, null, true));
+    }
+
+    @Test
+    void readValueKeepsDriverBooleanWhenBitColumnCannotBeReadAsBytes() throws Exception {
+        Method method = bitStringReadValue();
+        // mssql-jdbc 拒绝把 BIT 读成 byte[]，此时必须保持驱动返回的布尔值。
+        ResultSet rs = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getBytes" -> throw new SQLException("The conversion from bit to byte[] is not supported.");
+                case "getObject" -> Boolean.TRUE;
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+
+        assertEquals(true, method.invoke(null, rs, columnMeta(Types.BIT, "bit", 1), 1, false, null, true));
+    }
+
+    @Test
+    void readValueKeepsBooleanSourceColumnBoolean() throws Exception {
+        Method method = bitStringReadValue();
+        // 金仓的布尔列同样上报 Types.BIT，不能被当成位字段。
+        ResultSet rs = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getBytes" -> new byte[] { 't' };
+                case "getObject" -> Boolean.TRUE;
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+
+        assertEquals(true, method.invoke(null, rs, columnMeta(Types.BIT, "bool", 1), 1, false, null, true));
+    }
+
+    @Test
+    void bitStringColumnsMatchOnlyBitFieldDialects() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("usesBitStringColumns", JsonNode.class);
+        method.setAccessible(true);
+
+        assertTrue((Boolean) method.invoke(null, MAPPER.readTree("{ \"connection_string\": \"jdbc:mysql://db:3306/demo\" }")));
+        assertTrue((Boolean) method.invoke(null, MAPPER.readTree("{ \"connection_string\": \"jdbc:mariadb://db:3306/demo\" }")));
+        assertTrue((Boolean) method.invoke(null, MAPPER.readTree("{ \"connection_string\": \"jdbc:kingbase8://db:54321/demo\" }")));
+        assertTrue((Boolean) method.invoke(null, MAPPER.readTree("{ \"connection_string\": \"jdbc:postgresql://db:5432/demo\" }")));
+        assertTrue((Boolean) method.invoke(null, MAPPER.readTree("{ \"connection_string\": \"jdbc:vastbase://db:5432/demo\" }")));
+        assertFalse((Boolean) method.invoke(null, MAPPER.readTree("{ \"connection_string\": \"jdbc:sqlserver://db:1433;databaseName=demo\" }")));
+        assertFalse((Boolean) method.invoke(null, MAPPER.readTree("{ \"connection_string\": \"jdbc:oracle:thin:@db:1521/XE\" }")));
+        assertFalse((Boolean) method.invoke(null, MAPPER.readTree("{ \"connection_string\": \"jdbc:h2:mem:dbx\" }")));
     }
 
     @Test
@@ -2172,6 +2298,43 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void getObjectSourceReturnsHive2ViewDdlFromShowCreateTable() throws Exception {
+        List<String> executedSql = new ArrayList<>();
+        Driver driver = new Hive2ViewDdlDriver(executedSql);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:hive2://hive2-view-ddl-test:10000/default"
+            }
+            """;
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "ods",
+                  "schema": "",
+                  "name": "active_users",
+                  "object_type": "VIEW"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(List.of("SHOW CREATE TABLE `ods`.`active_users`"), executedSql);
+            assertEquals(
+                "CREATE VIEW `ods`.`active_users` AS SELECT 1\n",
+                response.path("result").path("source").asText()
+            );
+            assertEquals("VIEW", response.path("result").path("object_type").asText());
+            assertEquals("active_users", response.path("result").path("name").asText());
+        } finally {
+            request("close", """
+                { "connection": %s }
+                """.formatted(connection));
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
     void listDataTypesUsesJdbcTypeInfo() throws Exception {
         JsonNode response = request("listDataTypes", """
             { "connection": %s }
@@ -3149,6 +3312,23 @@ final class DbxJdbcPluginTest {
         return columnMeta(columnType, "");
     }
 
+    private static ResultSetMetaData columnMeta(int columnType, String typeName, int precision) {
+        return (ResultSetMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSetMetaData.class },
+            (proxy, method, args) -> {
+                return switch (method.getName()) {
+                    case "getColumnCount" -> 1;
+                    case "getColumnLabel", "getColumnName" -> "FLAG";
+                    case "getColumnType" -> columnType;
+                    case "getColumnTypeName" -> typeName;
+                    case "getPrecision" -> precision;
+                    default -> defaultValue(method.getReturnType());
+                };
+            }
+        );
+    }
+
     private static ResultSetMetaData columnMeta(int columnType, String typeName) {
         return (ResultSetMetaData) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
@@ -3179,6 +3359,33 @@ final class DbxJdbcPluginTest {
             new Class<?>[] { Connection.class },
             (proxy, method, args) -> switch (method.getName()) {
                 case "getMetaData" -> metadata;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Method bitStringReadValue() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class,
+            ZoneId.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        return method;
+    }
+
+    private static ResultSet bytesResultSet(byte[] value) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                // 真实驱动会同时通过 getBytes/getObject 暴露二进制载荷。
+                case "getBytes", "getObject" -> value;
+                case "wasNull" -> value == null;
                 default -> defaultValue(method.getReturnType());
             }
         );
@@ -4674,6 +4881,99 @@ final class DbxJdbcPluginTest {
         return null;
     }
 
+    private static final class Hive2ViewDdlDriver implements Driver {
+        private final List<String> executedSql;
+
+        private Hive2ViewDdlDriver(List<String> executedSql) {
+            this.executedSql = executedSql;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            if (!acceptsURL(url)) {
+                return null;
+            }
+            return (Connection) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Connection.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "createStatement" -> hive2ViewDdlStatement(executedSql);
+                    case "isClosed" -> false;
+                    case "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:hive2://hive2-view-ddl-test:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Statement hive2ViewDdlStatement(List<String> executedSql) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "executeQuery" -> {
+                    executedSql.add(String.valueOf(args[0]));
+                    yield hive2ViewDdlResultSet();
+                }
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet hive2ViewDdlResultSet() {
+        final String[] lines = {
+            "CREATE VIEW `ods`.`active_users` AS SELECT 1"
+        };
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            new java.lang.reflect.InvocationHandler() {
+                private int index = -1;
+
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "next" -> ++index < lines.length;
+                        case "getString" -> lines[index];
+                        case "close" -> null;
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
+            }
+        );
+    }
+
     private static final class AdhocFailingHiveDriver implements Driver {
         private final List<String> executedSql;
 
@@ -5001,5 +5301,93 @@ final class DbxJdbcPluginTest {
             .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
         String once = DbxJdbcPlugin.enrichDriverHint(connection, "Unsupported charset: ZHS16GBK");
         assertEquals(once, DbxJdbcPlugin.enrichDriverHint(connection, once));
+    }
+
+    @Test
+    void getObjectSourceBuildsExecutableTableDdlForPlainJdbcDrivers() throws Exception {
+        String sourceDb = "jdbc:h2:mem:dbx_ddl_src;DB_CLOSE_DELAY=-1";
+        try (Statement st = DriverManager.getConnection(sourceDb, "sa", "").createStatement()) {
+            st.execute("CREATE TABLE \"dbx_ddl_parent\"(id BIGINT NOT NULL, CONSTRAINT pk_ddl_parent PRIMARY KEY(id))");
+            st.execute("CREATE TABLE \"dbx_ddl_child\"("
+                + "id BIGINT NOT NULL, name VARCHAR(50) NOT NULL DEFAULT 'x', parent_id BIGINT, "
+                + "CONSTRAINT pk_ddl_child PRIMARY KEY(id), "
+                + "CONSTRAINT fk_ddl_child FOREIGN KEY(parent_id) REFERENCES \"dbx_ddl_parent\"(id))");
+            st.execute("CREATE UNIQUE INDEX \"uq_ddl_child_name\" ON \"dbx_ddl_child\"(name)");
+        }
+
+        JsonNode response = request("getObjectSource", """
+            {
+              "connection": { "connection_string": "%s", "username": "sa", "connect_timeout_secs": 30 },
+              "name": "dbx_ddl_child",
+              "object_type": "TABLE"
+            }
+            """.formatted(sourceDb));
+
+        assertFalse(response.has("error"), response.toString());
+        JsonNode result = response.path("result");
+        assertEquals("TABLE", result.path("object_type").asText());
+        String source = result.path("source").asText();
+        assertTrue(source.startsWith("CREATE TABLE "), source);
+        assertTrue(source.contains("PRIMARY KEY"), source);
+        assertTrue(source.contains("NOT NULL"), source);
+        assertTrue(source.contains("DEFAULT"), source);
+        assertTrue(source.contains("FOREIGN KEY"), source);
+        assertTrue(source.contains("REFERENCES"), source);
+        assertTrue(source.contains("CREATE UNIQUE INDEX"), source);
+
+        // The generated DDL must be executable: rebuild the child table in a
+        // fresh database that only has the parent, then verify the rebuilt
+        // structure matches the original (columns, PK, FK, unique index).
+        String targetUrl = "jdbc:h2:mem:dbx_ddl_tgt;DB_CLOSE_DELAY=-1";
+        try (Statement st = DriverManager.getConnection(targetUrl, "sa", "").createStatement()) {
+            st.execute("CREATE TABLE \"dbx_ddl_parent\"(id BIGINT NOT NULL, CONSTRAINT pk_ddl_parent PRIMARY KEY(id))");
+            for (String statement : source.split(";")) {
+                if (!statement.isBlank()) {
+                    st.execute(statement);
+                }
+            }
+        }
+        try (Statement st = DriverManager.getConnection(targetUrl, "sa", "").createStatement();
+             ResultSet rs = st.executeQuery("""
+                SELECT
+                  (SELECT COUNT(*) FROM information_schema.columns
+                     WHERE table_name = 'dbx_ddl_child') AS column_count,
+                  (SELECT COUNT(*) FROM information_schema.table_constraints
+                     WHERE table_name = 'dbx_ddl_child' AND constraint_type = 'PRIMARY KEY') AS pk_count,
+                  (SELECT COUNT(*) FROM information_schema.table_constraints
+                     WHERE table_name = 'dbx_ddl_child' AND constraint_type = 'FOREIGN KEY') AS fk_count,
+                  (SELECT COUNT(*) FROM information_schema.indexes
+                     WHERE table_name = 'dbx_ddl_child' AND index_name = 'uq_ddl_child_name') AS uq_index_count
+                """)) {
+            assertTrue(rs.next());
+            assertEquals(3, rs.getInt("column_count"));
+            assertEquals(1, rs.getInt("pk_count"));
+            assertEquals(1, rs.getInt("fk_count"));
+            assertEquals(1, rs.getInt("uq_index_count"));
+        }
+
+        request("close", """
+            { "connection": { "connection_string": "%s", "username": "sa" } }
+            """.formatted(sourceDb));
+        request("close", """
+            { "connection": { "connection_string": "%s", "username": "sa" } }
+            """.formatted(targetUrl));
+    }
+
+    @Test
+    void getObjectSourceKeepsUnsupportedObjectTypesOnPlainJdbcDrivers() throws Exception {
+        JsonNode response = request("getObjectSource", """
+            {
+              "connection": %s,
+              "name": "some_view",
+              "object_type": "VIEW"
+            }
+            """.formatted(CONNECTION));
+
+        assertTrue(response.has("error"), response.toString());
+        assertEquals(
+            "Object source is not supported by this JDBC driver",
+            response.path("error").path("message").asText()
+        );
     }
 }

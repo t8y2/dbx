@@ -8,6 +8,8 @@ require (
 	github.com/gurkankaymak/hocon v1.3.0
 	github.com/jcmturner/gofork v1.7.6
 	github.com/jcmturner/gokrb5/v8 v8.4.4
+	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
+	software.sslmate.com/src/go-pkcs12 v0.7.3
 )
 
 require (
@@ -23,7 +25,7 @@ require (
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/crypto v0.6.0 // indirect
-	golang.org/x/net v0.7.0 // indirect
+	golang.org/x/crypto v0.11.0 // indirect
+	golang.org/x/net v0.10.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 )

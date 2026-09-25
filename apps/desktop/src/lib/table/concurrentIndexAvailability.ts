@@ -43,16 +43,19 @@ export function getConcurrentIndexAvailability(input: ConcurrentIndexAvailabilit
 }
 
 /**
- * Unquoted index names referenced by `CREATE [UNIQUE] INDEX CONCURRENTLY`
- * statements, used to detect same-name INVALID leftovers before applying a
- * concurrent build. The PG builder emits the index name as a single
- * double-quoted identifier (optionally schema-qualified).
+ * Index names referenced by `CREATE [UNIQUE] INDEX CONCURRENTLY` statements,
+ * used to detect same-name INVALID leftovers before applying a concurrent
+ * build. The PG builder emits the index name as a double-quoted identifier
+ * (optionally schema-qualified); when the identifier-quote preference is off,
+ * the structure editor dequotes safe names before these statements reach this
+ * check, so unquoted names are accepted as well.
  */
 export function concurrentIndexNamesInStatements(statements: string[]): string[] {
   const names: string[] = [];
   for (const sql of statements) {
-    const match = sql.match(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:(?:"[^"]+")\s*\.\s*)?"([^"]+)"/i);
-    if (match?.[1]) names.push(match[1]);
+    const match = sql.match(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*)?(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_$]*))/i);
+    const name = match?.[1] ?? match?.[2];
+    if (name) names.push(name);
   }
   return names;
 }

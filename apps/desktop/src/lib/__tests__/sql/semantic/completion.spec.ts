@@ -60,6 +60,15 @@ describe("semantic SQL completion candidates", () => {
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).not.toContain("legacy_id");
   });
 
+  it("shows the column comment inline in the completion detail", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", [{ name: "nickname", table: "users", schema: "public", dataType: "text", comment: "用户昵称" }]]]);
+
+    const { items } = semanticCompletion("SELECT nick| FROM users", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    const nickname = items.find((item) => item.type === "column" && item.label === "nickname");
+    expect(nickname?.detail).toContain("-- 用户昵称");
+  });
+
   it("ignores line-comment semicolons after a real statement boundary", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["codex_completion_a", [{ name: "legacy_id", table: "codex_completion_a", schema: "public" }]],
@@ -432,6 +441,26 @@ WHERE a.id = b.fk_kpi_set_score_id`,
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "user_name"]);
   });
 
+  it("keeps projected aliases from a multiline derived table", () => {
+    const { items } = semanticCompletion(
+      `SELECT
+  t.DEPTNO,
+  t.|
+FROM (
+  SELECT
+    DEPTNO,
+    AVG(SAL) avg_sal,
+    RANK() OVER (ORDER BY AVG(SAL) DESC) AS rnk
+  FROM emp
+  GROUP BY DEPTNO
+) AS t`,
+      {},
+      { databaseType: "mysql", dialect: "mysql" },
+    );
+
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["DEPTNO", "avg_sal", "rnk"]);
+  });
+
   it("expands alias star from only the qualified row source", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["users", ["id", "name"].map((name) => ({ name, table: "users" }))],
@@ -446,13 +475,13 @@ WHERE a.id = b.fk_kpi_set_score_id`,
   });
 
   it.each([
-    ["Oracle", "oracle", "mysql", '"ID", o."created at", o."SELECT", o.safe_name'],
-    ["MySQL", "mysql", "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name"],
-    ["PostgreSQL", "postgres", "postgres", '"ID", o."created at", o."SELECT", o.safe_name'],
-    ["SQL Server", "sqlserver", "sqlserver", "[ID], o.[created at], o.[SELECT], o.safe_name"],
-    ["dialect fallback", undefined, "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name"],
+    ["Oracle", "oracle", "mysql", 'ID, o."created at", o."SELECT", o."safe_name", o."OrderId", o."order_id"'],
+    ["MySQL", "mysql", "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name, o.`OrderId`, o.order_id"],
+    ["PostgreSQL", "postgres", "postgres", '"ID", o."created at", o."SELECT", o.safe_name, o."OrderId", o.order_id'],
+    ["SQL Server", "sqlserver", "sqlserver", "[ID], o.[created at], o.[SELECT], o.safe_name, o.[OrderId], o.order_id"],
+    ["dialect fallback", undefined, "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name, o.`OrderId`, o.order_id"],
   ] as const)("uses %s identifier quoting in qualified star completion items", (_label, databaseType, dialect, expected) => {
-    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["ID", "created at", "SELECT", "safe_name"].map((name) => ({ name, table: "orders" }))]]);
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["ID", "created at", "SELECT", "safe_name", "OrderId", "order_id"].map((name) => ({ name, table: "orders" }))]]);
 
     const starItems = semanticCompletion("SELECT o.*| FROM orders o", { columnsByTable }, { databaseType, dialect }).items;
     const selectAllItems = semanticCompletion("SELECT o.| FROM orders o", { columnsByTable }, { databaseType, dialect }).items;
@@ -463,13 +492,13 @@ WHERE a.id = b.fk_kpi_set_score_id`,
 
   it("uses Oracle quoting for an unqualified multi-table star completion item", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
-      ["ORDERS", ["ID", "created at"].map((name) => ({ name, table: "ORDERS" }))],
-      ["AUDIT", ["ID", "SELECT"].map((name) => ({ name, table: "AUDIT" }))],
+      ["ORDERS", ["ID", "created at", "OrderId"].map((name) => ({ name, table: "ORDERS" }))],
+      ["AUDIT", ["ID", "SELECT", "order_id"].map((name) => ({ name, table: "AUDIT" }))],
     ]);
 
     const { items } = semanticCompletion("SELECT *| FROM ORDERS o JOIN AUDIT a ON a.ID = o.ID", { columnsByTable }, { databaseType: "oracle", dialect: "mysql" });
 
-    expect(items.find((item) => item.label === "* \u2192 columns")?.apply).toBe('o."ID", o."created at", a."ID", a."SELECT"');
+    expect(items.find((item) => item.label === "* \u2192 columns")?.apply).toBe('o.ID, o."created at", o."OrderId", a.ID, a."SELECT", a."order_id"');
   });
 
   it("generates collision-free table aliases from semantic row sources", () => {
@@ -478,7 +507,99 @@ WHERE a.id = b.fk_kpi_set_score_id`,
       autoAliasTables: true,
     });
 
-    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi2");
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi2");
+  });
+
+  it("omits generated aliases on a DELETE target table (issue #9186)", () => {
+    const { items } = semanticCompletion("DELETE FROM DH|_MODEL_CAP", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on a schema-qualified DELETE target table", () => {
+    const { items } = semanticCompletion("DELETE FROM DH.DH_MODEL_CAP|", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases while the DELETE target schema is being typed", () => {
+    const { items } = semanticCompletion("DELETE FROM DH.DH|", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    // The qualifier resolves to the delete target itself, so no alias is offered.
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on an empty-prefix DELETE target (manual trigger)", () => {
+    const { items } = semanticCompletion("DELETE FROM |", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on an empty-prefix schema-qualified DELETE target", () => {
+    const { items } = semanticCompletion("DELETE FROM DH.|", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on empty-prefix UPDATE and INSERT targets", () => {
+    const updated = semanticCompletion("UPDATE |", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+    const inserted = semanticCompletion("INSERT INTO |", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(updated.items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+    expect(inserted.items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("keeps generated aliases on JOIN sources inside a DELETE statement", () => {
+    const { items } = semanticCompletion("DELETE t1 FROM t1 JOIN ord|", {
+      tables: [{ name: "order_items", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi");
+  });
+
+  it("keeps generated aliases after a multi-table DELETE target list", () => {
+    const { items } = semanticCompletion("DELETE t1 FROM |", {
+      tables: [{ name: "order_items", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi");
+  });
+
+  it("keeps generated aliases on FROM and JOIN sources", () => {
+    const joined = semanticCompletion("SELECT * FROM DH_MODEL_CAP JOIN ord|", {
+      tables: [{ name: "order_items", type: "table" }],
+      autoAliasTables: true,
+    });
+    const queried = semanticCompletion("SELECT * FROM DH|_MODEL_CAP", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(joined.items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi");
+    expect(queried.items.find((item) => item.label === "DH_MODEL_CAP")?.apply).toBe("DH_MODEL_CAP dmc");
   });
 
   it("preserves dialect-aware identifier quoting in apply text", () => {

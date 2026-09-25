@@ -1,4 +1,5 @@
-import { createApp, type ShallowRef } from "vue";
+import { applyDdlStoragePreference, supportsDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { watch, createApp, getCurrentScope, onScopeDispose, type ShallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import i18n from "@/i18n";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
@@ -13,11 +14,24 @@ import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { sidebarStructureExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
+import { sidebarStructureExportTargets, sidebarTableDataExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
+import { forceCsvTextForTemporalColumns } from "@/lib/dataGrid/columnFormatter";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
-import { isLoadingStructurePreview, showStructureDocCopyDialog, showStructurePreviewDialog, structureDocCopyText, structureDocCopyTitle, structurePreviewDefaultFileName, structurePreviewError, structurePreviewSql, structurePreviewTitle } from "@/components/sidebar/sidebarTreeDialogState";
+import {
+  isLoadingStructurePreview,
+  showStructureDocCopyDialog,
+  showStructurePreviewDialog,
+  structureDocCopyText,
+  structureDocCopyTitle,
+  structurePreviewDefaultFileName,
+  structurePreviewError,
+  structurePreviewSql,
+  structurePreviewTitle,
+  structurePreviewDdlStorageType,
+} from "@/components/sidebar/sidebarTreeDialogState";
+import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 
 type StructureCopyFormat = "tsv" | "markdown";
 
@@ -29,6 +43,7 @@ interface SidebarTreeExportRuntimeOptions {
 }
 
 interface SidebarTableExportTarget {
+  nodeId: string;
   connectionId: string;
   database: string;
   schema?: string;
@@ -41,6 +56,45 @@ interface SidebarTableExportTarget {
   identifierQuote?: string;
   batchSize: number;
   rowLimit: number | null;
+  csvQuoteMode: CsvQuoteMode;
+  fileNameBase?: string;
+}
+
+function tableExportTargetCacheKey(target: Pick<SidebarTableExportTarget, "nodeId">): string {
+  return target.nodeId;
+}
+
+/**
+ * Batch exports share one output directory, so same-name tables from different
+ * schemas would silently overwrite each other. Qualify colliding names with
+ * their schema and fall back to numeric suffixes for remaining collisions.
+ */
+function applyTableExportFileBaseNames(targets: readonly SidebarTableExportTarget[]): void {
+  const tableNameCounts = new Map<string, number>();
+  for (const target of targets) tableNameCounts.set(target.tableName, (tableNameCounts.get(target.tableName) ?? 0) + 1);
+
+  const usedNames = new Set<string>();
+  for (const target of targets) {
+    const base = (tableNameCounts.get(target.tableName) ?? 0) > 1 && target.schema ? `${target.schema}.${target.tableName}` : target.tableName;
+    let name = base;
+    let suffix = 2;
+    while (usedNames.has(name)) name = `${base}-${suffix++}`;
+    usedNames.add(name);
+    target.fileNameBase = name;
+  }
+}
+
+interface ExportTableDataOptions {
+  columnInfos?: ColumnInfo[];
+  headerMode?: XlsxHeaderMode;
+  autoFilter?: boolean;
+  outputDirectory?: string;
+  suppressDoneToast?: boolean;
+}
+
+function joinExportFilePath(directory: string, fileName: string): string {
+  const separator = directory.includes("\\") ? "\\" : "/";
+  return directory.endsWith(separator) ? `${directory}${fileName}` : `${directory}${separator}${fileName}`;
 }
 
 export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOptions) {
@@ -80,28 +134,66 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return sidebarStructureExportTargets(activeNode.value, connectionStore.treeNodes, options.acceptedSelectionIds() ?? connectionStore.selectedTreeNodeIds);
   }
 
+  function tableDataExportTargets(): Array<TreeNode & { connectionId: string; database: string }> {
+    return sidebarTableDataExportTargets(activeNode.value, connectionStore.treeNodes, options.acceptedSelectionIds() ?? connectionStore.selectedTreeNodeIds);
+  }
+
+  let structureSource: Array<{ ddl: string; databaseType: ReturnType<typeof effectiveDatabaseTypeForConnection> }> = [];
+  let structureRequestId = 0;
+  function invalidateStructureRequest() {
+    structureRequestId++;
+    structureSource = [];
+    isLoadingStructurePreview.value = false;
+  }
+  watch(
+    showStructurePreviewDialog,
+    (visible) => {
+      if (!visible) invalidateStructureRequest();
+    },
+    { flush: "sync" },
+  );
+  if (getCurrentScope()) onScopeDispose(invalidateStructureRequest);
+  function renderStructurePreview() {
+    structurePreviewSql.value = joinExportedDdls(structureSource.map(({ ddl, databaseType }) => applyDdlStoragePreference(ddl, databaseType, settingsStore.editorSettings.excludeDdlStorage)));
+  }
+  watch(
+    () => settingsStore.editorSettings.excludeDdlStorage,
+    () => {
+      if (showStructurePreviewDialog.value && structureSource.length) renderStructurePreview();
+    },
+  );
+
   async function exportStructure() {
     const targets = structureExportTargets();
     if (!targets.length) return;
+    const requestId = ++structureRequestId;
+    const requestSource: typeof structureSource = [];
     isLoadingStructurePreview.value = true;
     structurePreviewError.value = "";
     structurePreviewSql.value = "";
+    structurePreviewDdlStorageType.value = undefined;
+    structureSource = [];
     structurePreviewTitle.value = targets.length === 1 ? t("contextMenu.exportStructurePreviewTitle", { name: targets[0]!.label }) : t("contextMenu.exportStructurePreviewTitleMultiple", { count: targets.length });
     structurePreviewDefaultFileName.value = targets.length === 1 ? `${targets[0]!.label}.sql` : "structures.sql";
     showStructurePreviewDialog.value = true;
     try {
-      const parts: string[] = [];
       for (const target of targets) {
         await connectionStore.ensureConnected(target.connectionId);
+        if (requestId !== structureRequestId) return;
         const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, tableDdlObjectTypeForNode(target.type), target.catalog, true);
-        parts.push(ddl.trim());
+        if (requestId !== structureRequestId) return;
+        const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId));
+        requestSource.push({ ddl, databaseType });
       }
-      structurePreviewSql.value = joinExportedDdls(parts);
+      structureSource = requestSource;
+      structurePreviewDdlStorageType.value = requestSource.map(({ databaseType }) => databaseType).find(supportsDdlStoragePreference);
+      renderStructurePreview();
     } catch (error: any) {
+      if (requestId !== structureRequestId) return;
       structurePreviewError.value = error?.message || String(error);
       console.error("Export structure failed:", error);
     } finally {
-      isLoadingStructurePreview.value = false;
+      if (requestId === structureRequestId) isLoadingStructurePreview.value = false;
     }
   }
 
@@ -217,41 +309,68 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     }
   }
 
-  async function exportDataLegacy(format: "json") {
-    const node = activeNode.value;
-    if (!node.connectionId || !node.database) return;
-    const connectionId = node.connectionId;
-    const database = node.database;
+  async function pickTableExportDirectory(): Promise<string | null> {
+    if (!isTauriRuntime()) return "";
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({ directory: true, multiple: false, title: t("contextMenu.exportDataSelectDirectory") });
+    return typeof selected === "string" ? selected : null;
+  }
+
+  function exportFilterName(format: string): string {
+    if (format === "csv") return "CSV";
+    if (format === "json") return "JSON";
+    if (format === "ndjson") return "NDJSON";
+    if (format === "bson" || format === "bson.gz") return "MongoDB BSON dump";
+    if (format === "xlsx") return "Excel";
+    return "SQL";
+  }
+
+  async function resolveExportOutputPath(fileNameBase: string, format: string, outputDirectory?: string): Promise<string | null> {
+    const fileName = `${fileNameBase}.${format}`;
+    if (outputDirectory !== undefined) {
+      return outputDirectory ? joinExportFilePath(outputDirectory, fileName) : fileName;
+    }
+    if (isTauriRuntime()) {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const path = await save({
+        defaultPath: fileName,
+        filters: [{ name: exportFilterName(format), extensions: [format === "bson.gz" ? "gz" : format] }],
+      });
+      return path ? String(path) : null;
+    }
+    return fileName;
+  }
+
+  async function resolveTableExportOutputPath(target: SidebarTableExportTarget, format: string, outputDirectory?: string): Promise<string | null> {
+    return resolveExportOutputPath(target.fileNameBase ?? target.tableName, format, outputDirectory);
+  }
+
+  async function exportDataLegacyForTarget(target: SidebarTableExportTarget, outputDirectory?: string, suppressDoneToast = false) {
+    const { connectionId, database } = target;
     const config = connectionStore.getConfig(connectionId);
-    if (!config) return;
+    if (!config) return false;
 
     try {
       await connectionStore.ensureConnected(connectionId);
-      const queryColumns = config.db_type === "neo4j" ? (await api.getColumns(connectionId, database, node.schema || database, node.label)).map((column) => column.name) : undefined;
-      const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+      const queryColumns = config.db_type === "neo4j" ? (await api.getColumns(connectionId, database, target.metadataSchema, target.tableName, target.catalog)).map((column) => column.name) : undefined;
       const result = await fetchTableDataForExport({
-        databaseType: effectiveDbType,
-        identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
-        schema: node.schema,
-        tableName: node.label,
-        tableType: node.tableType,
+        databaseType: target.databaseType,
+        identifierQuote: target.identifierQuote,
+        schema: target.schema,
+        tableName: target.tableName,
+        tableType: target.tableType,
         columns: queryColumns,
         executePage: (sql) => api.executeQuery(connectionId, database, sql),
       });
 
-      if (format === "json") {
-        let outputPath = `${node.label}.json`;
-        if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({ defaultPath: outputPath, filters: [{ name: "JSON", extensions: ["json"] }] });
-          if (!path) return;
-          outputPath = path as string;
-        }
-        await api.exportQueryResultJson(outputPath, result.columns, result.rows);
-        toast(t("grid.exported"));
-      }
+      const outputPath = await resolveTableExportOutputPath(target, "json", outputDirectory);
+      if (!outputPath) return false;
+      await api.exportQueryResultJson(outputPath, result.columns, result.rows);
+      if (!suppressDoneToast) toast(t("grid.exported"));
+      return true;
     } catch (error: any) {
       toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
+      return false;
     }
   }
 
@@ -280,8 +399,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     });
   }
 
-  function currentTableExportTarget(): SidebarTableExportTarget | null {
-    const node = activeNode.value;
+  function tableExportTargetFromNode(node: TreeNode): SidebarTableExportTarget | null {
     if (!node.connectionId || !node.database) return null;
     const connectionId = node.connectionId;
     const database = node.database;
@@ -290,6 +408,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     const editorSettings = settingsStore.editorSettings;
 
     return {
+      nodeId: node.id,
       connectionId,
       database,
       schema: node.schema || undefined,
@@ -302,26 +421,26 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       identifierQuote: connectionStore.connectionIdentifierQuote(connectionId),
       batchSize: editorSettings.exportBatchSize,
       rowLimit: editorSettings.exportRowLimitEnabled ? editorSettings.exportRowLimit : null,
+      csvQuoteMode: editorSettings.csvQuoteMode,
     };
   }
 
-  async function exportTableData(target: SidebarTableExportTarget, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name", autoFilter = true) {
+  function currentTableExportTargets(): SidebarTableExportTarget[] {
+    const targets = tableDataExportTargets()
+      .map((node) => tableExportTargetFromNode(node))
+      .filter((target): target is SidebarTableExportTarget => target != null);
+    applyTableExportFileBaseNames(targets);
+    return targets;
+  }
+
+  async function exportTableData(target: SidebarTableExportTarget, format: "csv" | "xlsx" | "sql", exportOptions: ExportTableDataOptions = {}) {
+    const { columnInfos, headerMode = "name", autoFilter = true, outputDirectory, suppressDoneToast = false } = exportOptions;
     const { connectionId, database } = target;
 
     let task: ExportTask | null = null;
     try {
-      // Choose the destination before registering a background task so cancellation creates no orphan tracker entry.
-      let outputPath = `${target.tableName}.${format}`;
-      if (isTauriRuntime()) {
-        const { save } = await import("@tauri-apps/plugin-dialog");
-        const filterName = format === "csv" ? "CSV" : format === "xlsx" ? "Excel" : "SQL";
-        const path = await save({
-          defaultPath: outputPath,
-          filters: [{ name: filterName, extensions: [format] }],
-        });
-        if (!path) return;
-        outputPath = path as string;
-      }
+      const outputPath = await resolveTableExportOutputPath(target, format, outputDirectory);
+      if (!outputPath) return false;
 
       await connectionStore.ensureConnected(connectionId);
       task = addExportTask(target.tableName, format, outputPath);
@@ -338,17 +457,17 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           executePage: (sql) => api.executeQuery(connectionId, database, sql),
         });
         if (format === "csv") {
-          await api.exportQueryResultCsv(outputPath, result.columns, result.rows);
+          await api.exportQueryResultCsv(outputPath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), target.csvQuoteMode);
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
-          await api.exportQueryResultXlsx(outputPath, target.tableName, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter);
+          await api.exportQueryResultXlsx(outputPath, target.tableName, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter, settingsStore.editorSettings.globalDateTimeExportFormat || undefined);
         }
         currentTask.status = "Done";
         currentTask.rowsExported = result.rows.length;
         currentTask.totalRows = result.rows.length;
-        toast(t("grid.exported"));
-        return;
+        if (!suppressDoneToast) toast(t("grid.exported"));
+        return true;
       }
       const columnComments =
         format === "xlsx" && exportColumnInfos
@@ -367,10 +486,12 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         tableName: target.tableName,
         filePath: outputPath,
         format,
+        csvQuoteMode: target.csvQuoteMode,
         columns: queryColumns,
         columnComments,
         autoFilter: format === "xlsx" ? autoFilter : undefined,
         primaryKeys,
+        excludePrimaryKeys: settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert === true,
         batchSize: target.batchSize,
         skipCount: format === "sql",
         rowLimit: target.rowLimit,
@@ -378,41 +499,135 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
 
       await api.startTableExport(request, (progress) => {
         updateTableExportTask(currentTask.exportId, progress);
-        if (progress.status === "Done") toast(t("grid.exported"));
-        else if (progress.status === "Error") toast(t("grid.exportFailed", { message: translateBackendError(t, progress.errorMessage || "") }), 5000);
+        if (progress.status === "Done") {
+          if (!suppressDoneToast) toast(t("grid.exported"));
+        } else if (progress.status === "Error") toast(t("grid.exportFailed", { message: translateBackendError(t, progress.errorMessage || "") }), 5000);
       });
+      return true;
     } catch (error: any) {
       if (task) {
         task.status = "Error";
         task.errorMessage = error?.message || String(error);
       }
       toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
+      return false;
+    }
+  }
+
+  async function resolveMultiTableExportDirectory(targetCount: number): Promise<string | undefined | null> {
+    if (targetCount <= 1) return undefined;
+    if (!isTauriRuntime()) return "";
+    return pickTableExportDirectory();
+  }
+
+  async function exportMongoCollection(outputFormat: "csv" | "ndjson" | "bson" | "bsonGzip") {
+    const node = activeNode.value;
+    if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return;
+    const format: api.MongoExportFormat = outputFormat === "bsonGzip" ? "bson" : outputFormat;
+    const fileExtension = outputFormat === "bsonGzip" ? "bson.gz" : outputFormat;
+    const outputPath = await resolveExportOutputPath(node.label, fileExtension);
+    if (!outputPath) return;
+    let task: ExportTask | null = null;
+    try {
+      await connectionStore.ensureConnected(node.connectionId);
+      task = addExportTask(node.label, format, outputPath);
+      const currentTask = task;
+      await api.exportMongodbQuery(
+        {
+          exportId: currentTask.exportId,
+          connectionId: node.connectionId,
+          database: node.database,
+          collection: node.label,
+          format,
+          includeHeader: true,
+          gzip: outputFormat === "bsonGzip",
+          filePath: outputPath,
+        },
+        (progress) => {
+          currentTask.rowsExported = progress.documentsRead;
+          currentTask.totalRows = progress.totalDocuments ?? null;
+          if (progress.status === "running") currentTask.status = "Writing";
+          else if (progress.status === "done") {
+            currentTask.status = "Done";
+            currentTask.finishedAt = Date.now();
+          } else if (progress.status === "error") {
+            currentTask.status = "Error";
+            currentTask.errorMessage = progress.errorMessage ?? null;
+          } else if (progress.status === "cancelled") currentTask.status = "Cancelled";
+        },
+      );
+      toast(t("grid.exported"));
+    } catch (error: unknown) {
+      if (task) {
+        task.status = "Error";
+        task.errorMessage = error instanceof Error ? error.message : String(error);
+      }
+      toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
     }
   }
 
   async function exportData(format: "csv" | "json" | "sql") {
-    if (format === "json") await exportDataLegacy(format);
-    else {
-      const target = currentTableExportTarget();
-      if (target) await exportTableData(target, format);
+    const targets = currentTableExportTargets();
+    if (!targets.length) return;
+
+    const outputDirectory = await resolveMultiTableExportDirectory(targets.length);
+    if (outputDirectory === null) return;
+
+    if (format === "json") {
+      let exported = 0;
+      for (const target of targets) {
+        if (await exportDataLegacyForTarget(target, outputDirectory, targets.length > 1)) exported += 1;
+      }
+      if (targets.length > 1 && exported > 0) toast(t("contextMenu.exportDataMultipleSuccess", { count: exported }));
+      return;
     }
+
+    let exported = 0;
+    for (const target of targets) {
+      if (await exportTableData(target, format, { outputDirectory, suppressDoneToast: targets.length > 1 })) exported += 1;
+    }
+    if (targets.length > 1 && exported > 0) toast(t("contextMenu.exportDataMultipleSuccess", { count: exported }));
   }
 
   async function exportDataXlsx() {
-    const target = currentTableExportTarget();
-    if (!target) return;
+    const targets = currentTableExportTargets();
+    if (!targets.length) return;
 
-    let columnInfos: ColumnInfo[] | undefined;
-    try {
-      await connectionStore.ensureConnected(target.connectionId);
-      columnInfos = await api.getColumns(target.connectionId, target.database, target.metadataSchema, target.tableName, target.catalog);
-    } catch {
-      // Export still works with field-name headers when column metadata is unavailable.
+    const columnInfosByTarget = new Map<string, ColumnInfo[] | undefined>();
+    let hasComments = false;
+    for (const target of targets) {
+      let columnInfos: ColumnInfo[] | undefined;
+      try {
+        await connectionStore.ensureConnected(target.connectionId);
+        columnInfos = await api.getColumns(target.connectionId, target.database, target.metadataSchema, target.tableName, target.catalog);
+        if (hasXlsxHeaderComments(columnInfos.map((column) => column.comment))) hasComments = true;
+      } catch {
+        // Export still works with field-name headers when column metadata is unavailable.
+      }
+      columnInfosByTarget.set(tableExportTargetCacheKey(target), columnInfos);
     }
 
-    const exportOptions = await showSidebarTreeXlsxHeaderDialog(hasXlsxHeaderComments(columnInfos?.map((column) => column.comment)));
-    if (exportOptions === null) return;
-    await exportTableData(target, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter);
+    const xlsxOptions = await showSidebarTreeXlsxHeaderDialog(hasComments);
+    if (xlsxOptions === null) return;
+
+    const outputDirectory = await resolveMultiTableExportDirectory(targets.length);
+    if (outputDirectory === null) return;
+
+    let exported = 0;
+    for (const target of targets) {
+      if (
+        await exportTableData(target, "xlsx", {
+          columnInfos: columnInfosByTarget.get(tableExportTargetCacheKey(target)),
+          headerMode: xlsxOptions.headerMode,
+          autoFilter: xlsxOptions.autoFilter,
+          outputDirectory,
+          suppressDoneToast: targets.length > 1,
+        })
+      ) {
+        exported += 1;
+      }
+    }
+    if (targets.length > 1 && exported > 0) toast(t("contextMenu.exportDataMultipleSuccess", { count: exported }));
   }
 
   return {
@@ -421,6 +636,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     copyStructurePreview,
     exportData,
     exportDataXlsx,
+    exportMongoCollection,
     exportStructure,
     saveStructurePreview,
     selectTextareaContent,

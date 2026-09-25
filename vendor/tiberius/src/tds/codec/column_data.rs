@@ -301,19 +301,13 @@ impl<'a> Encode<BytesMutWithTypeInfo<'a>> for ColumnData<'a> {
                     || vlc.r#type() == VarLenType::BigVarChar =>
             {
                 if let Some(str) = opt {
-                    let mut encoder = vlc.collation().as_ref().unwrap().encoding()?.new_encoder();
-                    let len = encoder
-                        .max_buffer_length_from_utf8_without_replacement(str.len())
-                        .unwrap();
-                    let mut bytes = Vec::with_capacity(len);
-                    let (res, _) = encoder.encode_from_utf8_to_vec_without_replacement(
-                        str.as_ref(),
-                        &mut bytes,
-                        true,
-                    );
-                    if let encoding_rs::EncoderResult::Unmappable(_) = res {
-                        return Err(crate::Error::Encoding("unrepresentable character".into()));
-                    }
+                    let bytes = vlc
+                        .collation()
+                        .as_ref()
+                        .unwrap()
+                        .codec()?
+                        .encode_from_utf8(str.as_ref())
+                        .ok_or_else(|| crate::Error::Encoding("unrepresentable character".into()))?;
 
                     if bytes.len() > vlc.len() {
                         return Err(crate::Error::BulkInput(
@@ -762,6 +756,99 @@ mod tests {
 
             assert_eq!(decoded_string(value).as_deref(), Some("\u{fffd}"));
         }
+    }
+
+    #[tokio::test]
+    async fn varchar_replaces_invalid_collation_bytes() {
+        // CP936/GB18030 (sort ID 198): 0x81 starts a two-byte sequence, and
+        // 0x40..0x7e is a valid trail byte, so 0x81 0x20 is invalid. A legacy
+        // varchar column can still hold those bytes when an application wrote
+        // them under a different codepage.
+        let value = decode_wire(
+            VarLenType::BigVarChar,
+            20,
+            Some(Collation::new(0x804, 198)),
+            &short_string_wire(b"ok\x81\x20ok"),
+        )
+        .await
+        .expect("undecodable varchar bytes must not fail the whole result set");
+
+        let decoded = decoded_string(value).expect("varchar row value");
+        assert!(decoded.starts_with("ok"), "readable bytes are preserved: {decoded:?}");
+        assert!(decoded.ends_with("ok"), "bytes after the bad sequence are preserved: {decoded:?}");
+        assert!(decoded.contains('\u{fffd}'), "the bad sequence is replaced: {decoded:?}");
+    }
+
+    #[tokio::test]
+    async fn text_replaces_invalid_collation_bytes() {
+        let value = decode_wire(
+            VarLenType::Text,
+            0,
+            Some(Collation::new(0x804, 198)),
+            &ntext_wire(b"ok\x81\x20ok"),
+        )
+        .await
+        .expect("undecodable text bytes must not fail the whole result set");
+
+        let decoded = decoded_string(value).expect("text row value");
+        assert!(decoded.starts_with("ok"), "readable bytes are preserved: {decoded:?}");
+        assert!(decoded.ends_with("ok"), "bytes after the bad sequence are preserved: {decoded:?}");
+        assert!(decoded.contains('\u{fffd}'), "the bad sequence is replaced: {decoded:?}");
+    }
+
+    #[tokio::test]
+    async fn varchar_gb18030_does_not_sniff_a_utf8_bom() {
+        // EF BB BF is fully valid GB18030 data: EF BB and BF 61 form two
+        // two-byte sequences (锘縜) followed by ASCII "bc". The collation
+        // already names the encoding, so the lossy decoder must not let
+        // encoding_rs sniff those bytes as a UTF-8 BOM and return "abc".
+        let (text, had_errors) = Collation::new(0x804, 198)
+            .codec()
+            .unwrap()
+            .decode_lossy(b"\xef\xbb\xbfabc");
+        assert_eq!(text, "锘縜bc");
+        assert!(!had_errors, "the bytes are valid GB18030");
+
+        let value = decode_wire(
+            VarLenType::BigVarChar,
+            20,
+            Some(Collation::new(0x804, 198)),
+            &short_string_wire(b"\xef\xbb\xbfabc"),
+        )
+        .await
+        .expect("BOM-like varchar bytes must decode as ordinary GB18030 data");
+
+        assert_eq!(decoded_string(value).as_deref(), Some("锘縜bc"));
+    }
+
+    #[tokio::test]
+    async fn varchar_cp850_collation_decodes_french_text() {
+        // SQL_1xCompat_CP850_CI_AS: LCID 0x409, sort ID 49. The DOS codepages
+        // behind legacy SQL collations are not implemented by encoding_rs.
+        let value = decode_wire(
+            VarLenType::BigVarChar,
+            10,
+            Some(Collation::new(0x409, 49)),
+            &short_string_wire(b"Caf\x82 \x87\x85"),
+        )
+        .await
+        .expect("CP850 varchar row values must decode");
+
+        assert_eq!(decoded_string(value).as_deref(), Some("Café çà"));
+    }
+
+    #[tokio::test]
+    async fn text_cp850_collation_decodes_french_text() {
+        let value = decode_wire(
+            VarLenType::Text,
+            0,
+            Some(Collation::new(0x409, 49)),
+            &ntext_wire(b"Caf\x82 \x87\x85"),
+        )
+        .await
+        .expect("CP850 text row values must decode");
+
+        assert_eq!(decoded_string(value).as_deref(), Some("Café çà"));
     }
 
     #[tokio::test]

@@ -1,13 +1,14 @@
+/** @vitest-environment happy-dom */
+
 import { beforeEach, describe, expect, it } from "vitest";
-import { clearDataGridStructuredFilterStatesForTab, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { clearDataGridStructuredFilterStates, clearDataGridStructuredFilterStatesForTab, dropDataGridStructuredFilterMemoryCache, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 
 describe("data grid structured filter persistence", () => {
   const cacheKey = "issue-436-filter-view";
   const scopeKey = "mysql\0demo\0users";
 
   beforeEach(() => {
-    clearDataGridStructuredFilterStatesForTab("issue-436-filter-view");
-    clearDataGridStructuredFilterStatesForTab("lru-tab");
+    clearDataGridStructuredFilterStates();
     saveDataGridStructuredFilterState(cacheKey, {
       scopeKey,
       manualWhereInput: "tenant_id = 7",
@@ -77,5 +78,120 @@ describe("data grid structured filter persistence", () => {
 
     expect(loadDataGridStructuredFilterState("lru-tab-0", scopeKey)).toBeDefined();
     expect(loadDataGridStructuredFilterState("lru-tab-1", scopeKey)).toBeUndefined();
+  });
+
+  it("restores visual filter rules after a process restart instead of the combined WHERE (#8831)", () => {
+    saveDataGridStructuredFilterState("data-tab-orders", {
+      scopeKey,
+      manualWhereInput: "",
+      rules: [{ id: "r-id", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" }],
+      appliedWhereInput: "`id` = 1",
+      serverColumnFilters: {},
+    });
+
+    dropDataGridStructuredFilterMemoryCache();
+
+    const restored = loadDataGridStructuredFilterState("data-tab-orders", scopeKey);
+    expect(restored).toMatchObject({
+      manualWhereInput: "",
+      appliedWhereInput: "`id` = 1",
+      rules: [{ columnName: "id", mode: "equals", rawValue: "1" }],
+    });
+  });
+
+  it("keeps a closed tab's filters off disk after restart", () => {
+    saveDataGridStructuredFilterState("tab-1-run-1-0", {
+      scopeKey,
+      manualWhereInput: "id > 1",
+      rules: [],
+      appliedWhereInput: "id > 1",
+      serverColumnFilters: {},
+    });
+    clearDataGridStructuredFilterStatesForTab("tab-1");
+    dropDataGridStructuredFilterMemoryCache();
+
+    expect(loadDataGridStructuredFilterState("tab-1-run-1-0", scopeKey)).toBeUndefined();
+    expect(loadDataGridStructuredFilterState(cacheKey, scopeKey)?.manualWhereInput).toBe("tenant_id = 7");
+  });
+
+  it("does not let a scope-miss empty builder overwrite visual rules (#8831)", () => {
+    saveDataGridStructuredFilterState("data-tab-orders", {
+      scopeKey,
+      manualWhereInput: "",
+      rules: [{ id: "r-id", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" }],
+      appliedWhereInput: "`id` = 1",
+      serverColumnFilters: {},
+    });
+
+    saveDataGridStructuredFilterState("data-tab-orders", {
+      scopeKey: `${scopeKey}\0pending-columns`,
+      manualWhereInput: "`id` = 1",
+      rules: [{ id: "empty", columnName: "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      appliedWhereInput: "",
+      serverColumnFilters: {},
+    });
+
+    dropDataGridStructuredFilterMemoryCache();
+
+    expect(loadDataGridStructuredFilterState("data-tab-orders", scopeKey)).toMatchObject({
+      manualWhereInput: "",
+      appliedWhereInput: "`id` = 1",
+      rules: [{ columnName: "id", mode: "equals", rawValue: "1" }],
+    });
+  });
+
+  it("still replaces visual rules when the same scope is cleared", () => {
+    saveDataGridStructuredFilterState(cacheKey, {
+      scopeKey,
+      manualWhereInput: "",
+      rules: [{ id: "empty", columnName: "", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      appliedWhereInput: "",
+      serverColumnFilters: {},
+    });
+
+    dropDataGridStructuredFilterMemoryCache();
+
+    expect(loadDataGridStructuredFilterState(cacheKey, scopeKey)).toMatchObject({
+      manualWhereInput: "",
+      appliedWhereInput: "",
+      rules: [{ columnName: "" }],
+    });
+  });
+
+  it("ignores corrupt stored payloads", () => {
+    localStorage.setItem("dbx-data-grid-structured-filters", "{not json");
+    dropDataGridStructuredFilterMemoryCache();
+    expect(loadDataGridStructuredFilterState(cacheKey, scopeKey)).toBeUndefined();
+  });
+
+  it("keeps valid filter rules when a stored rule is invalid", () => {
+    localStorage.setItem(
+      "dbx-data-grid-structured-filters",
+      JSON.stringify({
+        version: 1,
+        entries: [
+          [
+            cacheKey,
+            {
+              scopeKey,
+              manualWhereInput: "",
+              appliedWhereInput: "`id` = 1",
+              rules: [
+                { id: "bad", columnName: "status", mode: "not-a-mode", rawValue: "open", rawEndValue: "", conjunction: "AND" },
+                { id: "r-id", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" },
+              ],
+              serverColumnFilters: { x: { condition: "bad" }, 0: { condition: "`id` = 1", keys: ["1"], labels: ["1"] } },
+            },
+          ],
+        ],
+      }),
+    );
+    dropDataGridStructuredFilterMemoryCache();
+
+    expect(loadDataGridStructuredFilterState(cacheKey, scopeKey)).toMatchObject({
+      appliedWhereInput: "`id` = 1",
+      rules: [{ id: "r-id", columnName: "id", rawValue: "1" }],
+      serverColumnFilters: { 0: { condition: "`id` = 1", keys: ["1"], labels: ["1"] } },
+    });
   });
 });

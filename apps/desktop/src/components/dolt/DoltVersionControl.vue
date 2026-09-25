@@ -65,6 +65,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { doltCellCopyText, type DoltCellSide, type DoltDiffCellTarget } from "@/lib/dolt/doltCellDiff";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connectionId: string;
@@ -80,6 +81,26 @@ function baseDatabaseName(database: string): string {
   const slash = database.indexOf("/");
   return slash > 0 ? database.slice(0, slash) : database;
 }
+
+interface DoltVersionControlTabUiState {
+  selectedRef?: string;
+  selectedRevisionKeys?: string[];
+  comparedFrom?: string;
+  comparedTo?: string;
+  selectedTableName?: string;
+  tableDiffPage?: number;
+  tableDiffPageSize?: number;
+  refFilter?: string;
+  refListTab?: "branches" | "tags";
+  branchTreeView?: boolean;
+  collapsedBranchPaths?: string[];
+  mainTopPaneSize?: number;
+  leftPaneSize?: number;
+  commitMessageDraft?: string;
+}
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<DoltVersionControlTabUiState>({}, "DoltVersionControl");
+const uiStateReady = ref(false);
 const loading = ref(false);
 const graphLoading = ref(false);
 const comparisonLoading = ref(false);
@@ -97,7 +118,7 @@ const branches = ref<DoltRef[]>([]);
 const tags = ref<DoltRef[]>([]);
 const commits = ref<DoltCommit[]>([]);
 const workingChanges = ref<DoltWorkingChange[]>([]);
-const selectedRef = ref("");
+const selectedRef = ref(restoredUiState.selectedRef ?? "");
 const selectedRevisionKeys = ref<string[]>([]);
 const comparedFrom = ref("");
 const comparedTo = ref("");
@@ -108,10 +129,10 @@ const selectedDiffCell = ref<DoltDiffCellTarget | null>(null);
 const diffCellContextTarget = ref<DoltDiffCellTarget | null>(null);
 const diffCellDetailTarget = ref<DoltDiffCellTarget | null>(null);
 const diffCellDetailOpen = ref(false);
-const refFilter = ref("");
-const refListTab = ref<"branches" | "tags">("branches");
-const branchTreeView = ref(true);
-const collapsedBranchPaths = ref<Set<string>>(new Set());
+const refFilter = ref(restoredUiState.refFilter ?? "");
+const refListTab = ref<"branches" | "tags">(restoredUiState.refListTab === "tags" ? "tags" : "branches");
+const branchTreeView = ref(restoredUiState.branchTreeView ?? true);
+const collapsedBranchPaths = ref<Set<string>>(new Set(restoredUiState.collapsedBranchPaths ?? []));
 const branchDialog = ref<"create" | "merge" | "delete" | "create-tag" | "delete-tag" | null>(null);
 const branchNameDraft = ref("");
 const branchSourceRevision = ref("HEAD");
@@ -119,7 +140,7 @@ const branchActionTarget = ref("");
 const mutationLoading = ref(false);
 const mutationError = ref("");
 const commitDialogOpen = ref(false);
-const commitMessageDraft = ref("");
+const commitMessageDraft = ref(restoredUiState.commitMessageDraft ?? "");
 const commitError = ref("");
 const commitHistoryOperation = ref<"revert" | "hard-reset" | null>(null);
 const commitHistoryTarget = ref<DoltCommit | null>(null);
@@ -137,8 +158,12 @@ const DOLT_DIFF_DEFAULT_PAGE_SIZE = 100;
 const DOLT_LEFT_PANE_DEFAULT_SIZE = 20;
 const DOLT_LEFT_PANE_MIN_SIZE = 15;
 const DOLT_LEFT_PANE_MAX_SIZE = 40;
+const DOLT_MAIN_TOP_PANE_DEFAULT_SIZE = 64;
+const DOLT_MAIN_TOP_PANE_MIN_SIZE = 38;
+const DOLT_MAIN_TOP_PANE_MAX_SIZE = 78;
 const GRAPH_COLORS = ["#2f6fdb", "#1f8f55", "#b7791f", "#c2413a", "#7c3aed", "#0f766e", "#b45309", "#0891b2", "#be185d", "#4d7c0f", "#4338ca", "#a16207", "#0e7490", "#9f1239", "#166534", "#6d28d9", "#92400e", "#475569"];
-const doltLeftPaneSize = ref(DOLT_LEFT_PANE_DEFAULT_SIZE);
+const doltMainTopPaneSize = ref(Math.min(DOLT_MAIN_TOP_PANE_MAX_SIZE, Math.max(DOLT_MAIN_TOP_PANE_MIN_SIZE, restoredUiState.mainTopPaneSize ?? DOLT_MAIN_TOP_PANE_DEFAULT_SIZE)));
+const doltLeftPaneSize = ref(Math.min(DOLT_LEFT_PANE_MAX_SIZE, Math.max(DOLT_LEFT_PANE_MIN_SIZE, restoredUiState.leftPaneSize ?? DOLT_LEFT_PANE_DEFAULT_SIZE)));
 
 const allRefs = computed(() => [...branches.value, ...tags.value]);
 const normalizedRefFilter = computed(() => refFilter.value.trim().toLowerCase());
@@ -237,7 +262,8 @@ let diffScrollSyncRetry = 0;
 let diffScrollSyncRetryTimer = 0;
 let diffScrollSyncing = false;
 const tableDiffPage = ref(1);
-const tableDiffPageSize = ref(DOLT_DIFF_DEFAULT_PAGE_SIZE);
+const restoredTableDiffPageSize = restoredUiState.tableDiffPageSize;
+const tableDiffPageSize = ref(Number.isSafeInteger(restoredTableDiffPageSize) && restoredTableDiffPageSize! > 0 ? restoredTableDiffPageSize! : DOLT_DIFF_DEFAULT_PAGE_SIZE);
 const tableDiffTotalRows = ref(0);
 const tableDiffMaximumPage = computed(() => Math.max(1, Math.ceil(tableDiffTotalRows.value / tableDiffPageSize.value)));
 const selectedRevisionKeySet = computed(() => new Set(selectedRevisionKeys.value));
@@ -270,6 +296,44 @@ const commitHistoryOperationSql = computed(() => {
   return commitHistoryOperation.value === "hard-reset" ? doltHardResetSql(commit.hash) : doltRevertCommitSql(commit.hash);
 });
 const discardWorkingTreeSqlPreview = computed(() => doltDiscardWorkingTreeSql());
+
+trackUiState(() =>
+  uiStateReady.value
+    ? {
+        selectedRef: selectedRef.value,
+        selectedRevisionKeys: selectedRevisionKeys.value,
+        comparedFrom: comparedFrom.value,
+        comparedTo: comparedTo.value,
+        selectedTableName: selectedTableName.value,
+        tableDiffPage: tableDiffPage.value,
+        tableDiffPageSize: tableDiffPageSize.value,
+        refFilter: refFilter.value,
+        refListTab: refListTab.value,
+        branchTreeView: branchTreeView.value,
+        collapsedBranchPaths: [...collapsedBranchPaths.value],
+        mainTopPaneSize: doltMainTopPaneSize.value,
+        leftPaneSize: doltLeftPaneSize.value,
+        commitMessageDraft: commitMessageDraft.value,
+      }
+    : restoredUiState,
+);
+
+type SplitpanesResizeEvent = { panes?: Array<{ size?: number }> };
+
+function firstPaneSize(event: SplitpanesResizeEvent): number | undefined {
+  const size = Number(event.panes?.[0]?.size);
+  return Number.isFinite(size) ? size : undefined;
+}
+
+function handleMainSplitResized(event: SplitpanesResizeEvent) {
+  const size = firstPaneSize(event);
+  if (size !== undefined) doltMainTopPaneSize.value = Math.min(DOLT_MAIN_TOP_PANE_MAX_SIZE, Math.max(DOLT_MAIN_TOP_PANE_MIN_SIZE, size));
+}
+
+function handleLeftSplitResized(event: SplitpanesResizeEvent) {
+  const size = firstPaneSize(event);
+  if (size !== undefined) doltLeftPaneSize.value = Math.min(DOLT_LEFT_PANE_MAX_SIZE, Math.max(DOLT_LEFT_PANE_MIN_SIZE, size));
+}
 
 const graphEdges = computed(() => {
   const edges: Array<{ key: string; path: string; color: string; diagonal: boolean }> = [];
@@ -478,6 +542,24 @@ async function reloadDatabaseContext(database: string, requestedBranch = props.i
   } finally {
     if (generation === databaseSwitchGeneration) databaseSwitching.value = false;
   }
+}
+
+async function restoreNavigationAfterInitialLoad() {
+  const restoredFrom = restoredUiState.comparedFrom?.trim();
+  const restoredTo = restoredUiState.comparedTo?.trim();
+  if (restoredFrom && restoredTo && restoredFrom !== restoredTo && (restoredFrom !== comparedFrom.value || restoredTo !== comparedTo.value)) {
+    await loadComparison(restoredFrom, restoredTo);
+  }
+
+  const restoredTable = restoredUiState.selectedTableName;
+  const change = restoredTable ? changes.value.find((item) => item.tableName === restoredTable) : undefined;
+  if (change) {
+    const requestedPage = Number.isSafeInteger(restoredUiState.tableDiffPage) && restoredUiState.tableDiffPage! > 0 ? restoredUiState.tableDiffPage! : 1;
+    await loadTableDiff(change, comparisonGeneration, { page: requestedPage, countTotal: selectedTableName.value !== change.tableName });
+  }
+
+  const restoredSelections = restoredUiState.selectedRevisionKeys?.filter((key) => !!selectionForKey(key)) ?? [];
+  selectedRevisionKeys.value = restoredSelections;
 }
 
 async function loadGraph(revision: string, parentGeneration = ++loadGeneration) {
@@ -1196,11 +1278,13 @@ watch(
   () => clearDiffCellInteraction(),
 );
 
-onMounted(() => {
+onMounted(async () => {
   selectedDatabase.value = baseDatabaseName(props.database);
   const tab = workspaceTab();
   if (tab && tab.database !== selectedDatabase.value) queryStore.updateDatabase(tab.id, selectedDatabase.value);
-  void reloadDatabaseContext(props.database, props.initialBranch);
+  await reloadDatabaseContext(props.database, props.initialBranch);
+  await restoreNavigationAfterInitialLoad();
+  uiStateReady.value = true;
   scheduleDiffScrollSync();
 });
 
@@ -1255,9 +1339,9 @@ onUnmounted(() => {
 
     <div v-if="error" class="shrink-0 border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{{ error }}</div>
 
-    <Splitpanes horizontal class="dolt-main-splitpanes min-h-0 flex-1">
-      <Pane :size="64" :min-size="38">
-        <Splitpanes class="dolt-diff-splitpanes h-full min-h-0">
+    <Splitpanes horizontal class="dolt-main-splitpanes min-h-0 flex-1" @resized="handleMainSplitResized">
+      <Pane :size="doltMainTopPaneSize" :min-size="DOLT_MAIN_TOP_PANE_MIN_SIZE">
+        <Splitpanes class="dolt-diff-splitpanes h-full min-h-0" @resized="handleLeftSplitResized">
           <Pane :size="doltLeftPaneSize" :min-size="DOLT_LEFT_PANE_MIN_SIZE" :max-size="DOLT_LEFT_PANE_MAX_SIZE">
             <section class="flex h-full min-h-0 flex-col">
               <div class="flex h-8 shrink-0 items-center gap-1.5 border-b px-2 text-xs font-medium">
@@ -1343,8 +1427,8 @@ onUnmounted(() => {
         </Splitpanes>
       </Pane>
 
-      <Pane :size="36" :min-size="22">
-        <Splitpanes class="dolt-history-splitpanes h-full min-h-0">
+      <Pane :size="100 - doltMainTopPaneSize" :min-size="100 - DOLT_MAIN_TOP_PANE_MAX_SIZE">
+        <Splitpanes class="dolt-history-splitpanes h-full min-h-0" @resized="handleLeftSplitResized">
           <Pane :size="doltLeftPaneSize" :min-size="DOLT_LEFT_PANE_MIN_SIZE" :max-size="DOLT_LEFT_PANE_MAX_SIZE">
             <aside class="flex h-full min-h-0 flex-col bg-muted/10">
               <div class="flex items-center gap-1.5 border-b p-2">

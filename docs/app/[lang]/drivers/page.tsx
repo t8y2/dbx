@@ -2,6 +2,7 @@ import { DriversClient } from "./DriversClient";
 import { fetchAgentDownloadCatalog } from "@/lib/agentRegistrySource";
 import { buildMetadata } from "@/lib/metadata";
 import type { Metadata } from "next";
+import { resolveLang } from "@/lib/i18n";
 
 const pageMeta = {
   en: {
@@ -16,7 +17,7 @@ const pageMeta = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const meta = pageMeta[l];
 
   return buildMetadata({

@@ -187,7 +187,12 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
-            informix_server: String::new(),            external_config: None,
+            informix_server: String::new(),
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
+            external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -211,7 +216,7 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
-        ..Default::default()
+            ..Default::default()
         }
     }
 
@@ -293,6 +298,7 @@ mod tests {
             db::TableInfo {
                 name: "USERS".to_string(),
                 table_type: "TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -300,6 +306,7 @@ mod tests {
             db::TableInfo {
                 name: "BIN$abc123==$0".to_string(),
                 table_type: "TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,

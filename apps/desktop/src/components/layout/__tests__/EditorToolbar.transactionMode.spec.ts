@@ -1,43 +1,165 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+// @vitest-environment happy-dom
+import { createApp, nextTick } from "vue";
+import { createPinia, setActivePinia } from "pinia";
+import { createI18n } from "vue-i18n";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const toolbarSource = readFileSync(new URL("../EditorToolbar.vue", import.meta.url), "utf8");
+vi.mock("@/components/ui/button", () => ({
+  Button: {
+    name: "ButtonStub",
+    template: `<button><slot /></button>`,
+  },
+}));
 
-describe("EditorToolbar transaction mode control", () => {
-  it("shows an A or M badge next to Tx instead of relying on color alone", () => {
-    expect(toolbarSource).toContain('const transactionModeBadge = computed(() => (isManualTransactionMode.value ? "M" : "A"));');
-    expect(toolbarSource).toContain('<span class="text-[11px] font-bold">Tx:</span>');
-    expect(toolbarSource).toContain(">{{ transactionModeBadge }}</span>");
+vi.mock("@/components/ui/searchable-select", () => ({
+  SearchableSelect: {
+    name: "SearchableSelectStub",
+    template: `<div />`,
+  },
+}));
+
+vi.mock("@/components/ui/tooltip", () => ({
+  Tooltip: {
+    name: "TooltipStub",
+    template: `<span><slot /></span>`,
+  },
+  TooltipTrigger: {
+    name: "TooltipTriggerStub",
+    template: `<span><slot /></span>`,
+  },
+  TooltipContent: {
+    name: "TooltipContentStub",
+    template: `<span><slot /></span>`,
+  },
+}));
+
+vi.mock("@/components/ui/TruncatedTextTooltip.vue", () => ({
+  default: {
+    name: "TruncatedTextTooltipStub",
+    template: `<span />`,
+  },
+}));
+
+vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
+  default: {
+    name: "DatabaseIconStub",
+    template: `<span />`,
+  },
+}));
+
+vi.mock("@/components/connection/ConnectionTreeSelect.vue", () => ({
+  default: {
+    name: "ConnectionTreeSelectStub",
+    template: `<div />`,
+  },
+}));
+
+vi.mock("@/components/common/ProductionContextBadge.vue", () => ({
+  default: {
+    name: "ProductionContextBadgeStub",
+    template: `<span />`,
+  },
+}));
+
+import EditorToolbar from "../EditorToolbar.vue";
+import { useConnectionStore } from "@/stores/connectionStore";
+
+function createHost(): HTMLDivElement {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  return host;
+}
+
+describe("EditorToolbar commit/rollback visibility", () => {
+  let pinia: ReturnType<typeof createPinia>;
+  let i18n: ReturnType<typeof createI18n>;
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    pinia = createPinia();
+    setActivePinia(pinia);
+    i18n = createI18n({
+      legacy: false,
+      locale: "en",
+      messages: { en: {} },
+    });
   });
 
-  it("exposes the transaction mode to assistive technology", () => {
-    expect(toolbarSource).toContain('class="ml-1 flex items-center gap-0.5 border-l border-border/60 pl-1" role="group" :aria-label="transactionTooltip"');
-    expect(toolbarSource).toContain(':aria-label="transactionTooltip"');
-    expect(toolbarSource).toContain(':aria-pressed="isManualTransactionMode"');
-    expect(toolbarSource).toContain(":aria-label=\"t('toolbar.commit')\"");
-    expect(toolbarSource).toContain(":aria-label=\"t('toolbar.rollback')\"");
+  async function mountToolbar(props: { dbType: string; stickyProvenReadOnlyState: boolean; txnPossiblyDirty?: boolean; txnSessionId?: string }) {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "conn-1",
+        name: "conn",
+        db_type: props.dbType,
+        color: "",
+      } as never,
+    ];
+
+    const host = createHost();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-1",
+        title: "SQL",
+        connectionId: "conn-1",
+        database: "db",
+        sql: "SELECT 1",
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig("conn-1"),
+      executableSql: "SELECT 1",
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: false,
+      txnSessionId: props.txnSessionId,
+      txnAutoRolledBack: false,
+      txnPossiblyDirty: props.txnPossiblyDirty,
+      stickyProvenReadOnlyState: props.stickyProvenReadOnlyState,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+    return host;
+  }
+
+  const commitSelector = `button[aria-label="toolbar.commit"]`;
+  const rollbackSelector = `button[aria-label="toolbar.rollback"]`;
+
+  it.each([undefined, "active-session"])("only opens independent multi-db transactions when the source has no active session (%s)", async (txnSessionId) => {
+    const host = await mountToolbar({ dbType: "oceanbase-oracle", stickyProvenReadOnlyState: true, txnSessionId });
+    const multiDb = host.querySelector<HTMLButtonElement>('button[aria-label="toolbar.multiDbExecute"]');
+    expect(multiDb).not.toBeNull();
+    expect(multiDb!.disabled).toBe(!!txnSessionId);
+    host.remove();
   });
 
-  it("places the transaction controls at the end in mode, commit, rollback order", () => {
-    const multiExecuteIndex = toolbarSource.indexOf("@click=\"emit('multiExecute')\"");
-    const transactionToggleIndex = toolbarSource.indexOf("@click=\"emit('update:autoCommit', autoCommit === false)\"");
-    const commitIndex = toolbarSource.indexOf("@click=\"emit('commit')\"");
-    const rollbackIndex = toolbarSource.indexOf("@click=\"emit('rollback')\"");
-    const actionGroupEndIndex = toolbarSource.indexOf('<span class="flex-1 min-w-0" />');
+  it("hides Commit/Rollback for a clean MySQL sticky manual session", async () => {
+    const host = await mountToolbar({ dbType: "mysql", stickyProvenReadOnlyState: true, txnPossiblyDirty: false, txnSessionId: "txn-1" });
 
-    expect(multiExecuteIndex).toBeGreaterThan(-1);
-    expect(transactionToggleIndex).toBeGreaterThan(multiExecuteIndex);
-    expect(commitIndex).toBeGreaterThan(transactionToggleIndex);
-    expect(rollbackIndex).toBeGreaterThan(commitIndex);
-    expect(actionGroupEndIndex).toBeGreaterThan(rollbackIndex);
+    expect(host.querySelector(commitSelector)).toBeNull();
+    expect(host.querySelector(rollbackSelector)).toBeNull();
+    host.remove();
   });
 
-  it("hides Commit/Rollback for a clean Oracle manual session only", () => {
-    expect(toolbarSource).toContain("const showTxnActions = computed(() => {");
-    expect(toolbarSource).toContain("if (props.isOracleManualTransaction) return isTransactionActive.value && props.oracleTxnPossiblyDirty === true;");
-    expect(toolbarSource).toContain("return isTransactionActive.value;");
-    // Both buttons are driven by the combined condition.
-    expect(toolbarSource).toContain('<Tooltip v-if="showTxnActions">');
-    expect(toolbarSource.match(/<Tooltip v-if="showTxnActions">/g)).toHaveLength(2);
+  it("shows Commit/Rollback once the MySQL sticky session is dirty", async () => {
+    const host = await mountToolbar({ dbType: "mysql", stickyProvenReadOnlyState: true, txnPossiblyDirty: true, txnSessionId: "txn-1" });
+
+    expect(host.querySelector(commitSelector)).not.toBeNull();
+    expect(host.querySelector(rollbackSelector)).not.toBeNull();
+    host.remove();
+  });
+
+  it("keeps the legacy always-visible rule for non-sticky dialects with a session", async () => {
+    const host = await mountToolbar({ dbType: "jdbc", stickyProvenReadOnlyState: false, txnPossiblyDirty: false, txnSessionId: "txn-1" });
+
+    expect(host.querySelector(commitSelector)).not.toBeNull();
+    expect(host.querySelector(rollbackSelector)).not.toBeNull();
+    host.remove();
   });
 });

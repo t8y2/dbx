@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
+import { TriangleAlert } from "@lucide/vue";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/composables/useToast";
@@ -11,13 +12,22 @@ import { apiUrl } from "@/lib/common/webPath";
 
 interface SshPromptRequest {
   id: string;
-  kind: "HostKeyVerify" | "SecretInput" | "WorkerUploadConsent";
+  kind: "HostKeyVerify" | "HostKeyChanged" | "SecretInput" | "WorkerUploadConsent" | "UserInput";
   host: string;
   port: number;
   key_type?: string | null;
   fingerprint?: string | null;
+  previous_fingerprint?: string | null;
   prompt?: string | null;
   echo?: boolean;
+  /** UserInput: who asked (plugin display name). */
+  source?: string | null;
+  /** UserInput: caller-provided heading, already localized by the caller. */
+  title?: string | null;
+  /** UserInput: preset answer offered in the input. */
+  default_value?: string | null;
+  /** UserInput: fixed answers; empty means free-form input. */
+  options?: Array<{ value: string; label: string }> | null;
 }
 
 interface SshHostKeyNotice {
@@ -37,7 +47,39 @@ const { toast } = useToast();
 const queue = ref<SshPromptRequest[]>([]);
 const current = computed<SshPromptRequest | null>(() => queue.value[0] ?? null);
 const isSecretPrompt = computed(() => current.value?.kind === "SecretInput");
+const isPluginInputPrompt = computed(() => current.value?.kind === "UserInput");
+const isTextPrompt = computed(() => isSecretPrompt.value || isPluginInputPrompt.value);
 const isWorkerUploadPrompt = computed(() => current.value?.kind === "WorkerUploadConsent");
+const isHostKeyChanged = computed(() => current.value?.kind === "HostKeyChanged");
+const promptOptions = computed(() => current.value?.options ?? []);
+const titleKey = computed(() => {
+  if (isSecretPrompt.value) return "connection.sshInteractiveTitle";
+  if (isPluginInputPrompt.value) return "connection.sshPluginInputTitle";
+  if (isWorkerUploadPrompt.value) return "connection.sshWorkerUploadConsentTitle";
+  if (isHostKeyChanged.value) return "connection.sshHostKeyChangedTitle";
+  return "connection.sshHostKeyVerifyTitle";
+});
+const messageKey = computed(() => {
+  if (isSecretPrompt.value) return "connection.sshInteractiveMessage";
+  if (isPluginInputPrompt.value) return "connection.sshPluginInputMessage";
+  if (isWorkerUploadPrompt.value) return "connection.sshWorkerUploadConsentMessage";
+  if (isHostKeyChanged.value) return "connection.sshHostKeyChangedMessage";
+  return "connection.sshHostKeyVerifyMessage";
+});
+/**
+ * A plugin's question carries its own heading and body, so the dialog shows
+ * what was asked instead of the host's SSH wording. The origin line names the
+ * plugin so a bastion MFA prompt is never mistaken for a host-owned one.
+ */
+const dialogTitle = computed(() => current.value?.title?.trim() || t(titleKey.value));
+const dialogDescription = computed(() => {
+  if (isPluginInputPrompt.value) {
+    const source = current.value?.source?.trim();
+    return source ? t("connection.sshPluginInputMessage", { source }) : t("connection.sshPluginInputMessageNoSource");
+  }
+  return t(messageKey.value, { host: current.value?.host ?? "", port: current.value?.port ?? "" });
+});
+const promptBody = computed(() => (isPluginInputPrompt.value ? current.value?.prompt?.trim() || t("connection.sshInteractiveDefaultPrompt") : ""));
 const visible = ref(false);
 
 const remember = ref(true);
@@ -221,10 +263,26 @@ function dismissPrompt(id: string) {
 
 function resetPromptState() {
   remember.value = true;
-  secretCode.value = "";
+  // A caller may suggest an answer (e.g. a remembered bastion account); the
+  // user still has to submit it.
+  secretCode.value = current.value?.kind === "UserInput" ? (current.value?.default_value ?? "") : "";
+}
+
+function fingerprintBody(value: string | null | undefined): string {
+  return (value ?? "").replace(/^SHA256:/i, "");
 }
 
 function accept() {
+  void resolve("accept");
+}
+
+function acceptSessionOnly() {
+  remember.value = false;
+  void resolve("accept");
+}
+
+function acceptAndUpdate() {
+  remember.value = true;
   void resolve("accept");
 }
 
@@ -235,6 +293,19 @@ function reject() {
 function submitSecret() {
   void resolve("secret");
 }
+
+/** A fixed-choice plugin prompt is answered by picking an option. */
+function submitOption(value: string) {
+  secretCode.value = value;
+  void resolve("secret");
+}
+
+// Every prompt gets a clean slate (and its own preset answer) when it reaches
+// the front of the queue.
+watch(
+  () => current.value?.id,
+  () => resetPromptState(),
+);
 </script>
 
 <template>
@@ -250,16 +321,35 @@ function submitSecret() {
     100). -->
     <DialogContent class="flex max-h-[min(36rem,calc(var(--dbx-viewport-height)-2rem))] w-full max-w-[32rem] flex-col gap-4 overflow-hidden" overlay-class="z-[200]" portal-class="z-[200]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
       <DialogHeader class="shrink-0">
-        <DialogTitle>
-          {{ t(isSecretPrompt ? "connection.sshInteractiveTitle" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentTitle" : "connection.sshHostKeyVerifyTitle") }}
-        </DialogTitle>
+        <DialogTitle>{{ dialogTitle }}</DialogTitle>
         <DialogDescription class="text-muted-foreground">
-          {{ t(isSecretPrompt ? "connection.sshInteractiveMessage" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentMessage" : "connection.sshHostKeyVerifyMessage", { host: current?.host ?? "", port: current?.port ?? "" }) }}
+          {{ dialogDescription }}
         </DialogDescription>
       </DialogHeader>
 
       <div v-if="current" class="min-h-0 flex-1 space-y-3 overflow-y-auto py-1">
-        <div v-if="current.kind === 'HostKeyVerify' || current.kind === 'WorkerUploadConsent'" class="space-y-3 rounded-md border border-border bg-muted/40 p-3 text-sm">
+        <div v-if="isHostKeyChanged" class="space-y-3">
+          <div class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <TriangleAlert class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <div class="space-y-0.5">
+              <div class="font-medium">{{ t("connection.sshHostKeyChangedTitle") }}</div>
+              <div class="text-destructive/90">{{ t("connection.sshHostKeyChangedMessage", { host: current.host, port: current.port }) }}</div>
+            </div>
+          </div>
+          <div class="space-y-2 text-sm">
+            <div class="space-y-1">
+              <div class="text-muted-foreground">{{ t("connection.sshHostKeyChangedCurrent", { keyType: current.key_type || "—" }) }}</div>
+              <div class="break-all rounded-md border border-border bg-muted/40 px-3 py-2 font-mono text-xs font-medium leading-5">{{ fingerprintBody(current.fingerprint) || "—" }}</div>
+            </div>
+            <div class="space-y-1">
+              <div class="text-destructive">{{ t("connection.sshHostKeyChangedSaved") }}</div>
+              <div class="break-all rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 font-mono text-xs font-medium leading-5 text-destructive">{{ fingerprintBody(current.previous_fingerprint) || "—" }}</div>
+            </div>
+            <p class="text-xs text-muted-foreground">{{ t("connection.sshHostKeyChangedWarning") }}</p>
+          </div>
+        </div>
+
+        <div v-else-if="current.kind === 'HostKeyVerify' || current.kind === 'WorkerUploadConsent'" class="space-y-3 rounded-md border border-border bg-muted/40 p-3 text-sm">
           <div class="space-y-1">
             <div class="text-muted-foreground">{{ current.kind === "WorkerUploadConsent" ? t("connection.sshWorkerUploadConsentDigest") : t("connection.sshHostKeyVerifyKeyType") }}</div>
             <div class="break-all font-mono text-xs font-medium leading-5">{{ current.kind === "WorkerUploadConsent" ? current.fingerprint || "—" : current.key_type || "—" }}</div>
@@ -274,6 +364,24 @@ function submitSecret() {
           <input type="checkbox" v-model="remember" class="h-4 w-4 rounded border-border accent-primary" />
           <span>{{ current.kind === "WorkerUploadConsent" ? t("connection.sshWorkerUploadConsentRemember") : t("connection.sshHostKeyVerifyRemember") }}</span>
         </label>
+
+        <div v-else-if="isPluginInputPrompt" class="space-y-3">
+          <p class="whitespace-pre-wrap text-sm text-muted-foreground">{{ promptBody }}</p>
+          <div v-if="promptOptions.length" class="flex flex-col gap-2">
+            <Button v-for="option in promptOptions" :key="option.value" variant="outline" class="h-auto w-full justify-start py-2 text-left whitespace-normal" :disabled="resolving" @click="submitOption(option.value)">
+              {{ option.label }}
+            </Button>
+          </div>
+          <input
+            v-else
+            v-model="secretCode"
+            :type="current.echo ? 'text' : 'password'"
+            autocomplete="one-time-code"
+            class="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
+            :placeholder="t('connection.sshInteractivePlaceholder')"
+            @keydown.enter="submitSecret"
+          />
+        </div>
 
         <div v-else-if="current.kind === 'SecretInput'" class="space-y-2">
           <p class="whitespace-pre-wrap text-sm text-muted-foreground">
@@ -292,13 +400,23 @@ function submitSecret() {
 
       <DialogFooter class="shrink-0">
         <Button variant="outline" :disabled="resolving" @click="reject">
-          {{ t(isSecretPrompt ? "connection.sshInteractiveCancel" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentReject" : "connection.sshHostKeyVerifyReject") }}
+          {{ t(isTextPrompt ? "connection.sshInteractiveCancel" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentReject" : isHostKeyChanged ? "connection.sshHostKeyChangedClose" : "connection.sshHostKeyVerifyReject") }}
         </Button>
-        <Button v-if="current?.kind !== 'SecretInput'" :disabled="resolving" @click="accept">
+        <template v-if="isHostKeyChanged">
+          <Button variant="outline" :disabled="resolving" @click="acceptSessionOnly">
+            {{ t("connection.sshHostKeyChangedContinue") }}
+          </Button>
+          <Button :disabled="resolving" @click="acceptAndUpdate">
+            {{ t("connection.sshHostKeyChangedUpdate") }}
+          </Button>
+        </template>
+        <!-- A fixed-choice plugin prompt is answered by the option buttons in
+        the body, so it needs no submit button here. -->
+        <Button v-else-if="isTextPrompt && !(isPluginInputPrompt && promptOptions.length)" :disabled="resolving || !secretCode" @click="submitSecret">
+          {{ t(isSecretPrompt ? "connection.sshInteractiveSubmit" : "connection.sshPluginInputSubmit") }}
+        </Button>
+        <Button v-else-if="!isTextPrompt" :disabled="resolving" @click="accept">
           {{ t(isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentAccept" : "connection.sshHostKeyVerifyAccept") }}
-        </Button>
-        <Button v-else :disabled="resolving || !secretCode" @click="submitSecret">
-          {{ t("connection.sshInteractiveSubmit") }}
         </Button>
       </DialogFooter>
     </DialogContent>

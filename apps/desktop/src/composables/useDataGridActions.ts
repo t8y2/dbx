@@ -1,3 +1,4 @@
+import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
 import { type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -7,13 +8,13 @@ import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/table
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
-import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { editablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import * as api from "@/lib/backend/api";
-import type { QueryTab } from "@/types/database";
+import type { ColumnInfo, QueryTab } from "@/types/database";
 import { useToast } from "@/composables/useToast";
 import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
-import { loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS } from "@/lib/metadata/tableMetadataCache";
+import { invalidateTableMetadataCache, loadTableColumns, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS } from "@/lib/metadata/tableMetadataCache";
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
 import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
@@ -24,6 +25,8 @@ import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPrese
 import { sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
 
 const DATA_TAB_METADATA_TTL_MS = TABLE_METADATA_CACHE_TTL_MS;
+
+type TableMetadataColumns = ColumnInfo[];
 
 function visibleQuerySortColumns(columns: string[], hiddenColumnIndexes: number[] | undefined, columnIndex: number): { resultColumns: string[]; columnIndex: number } | undefined {
   const hiddenIndexes = new Set(hiddenColumnIndexes ?? []);
@@ -44,6 +47,23 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
+  const pendingDataReloads = new Set<QueryTab>();
+  const metadataRequests = new WeakMap<QueryTab, object>();
+
+  // A data-grid action names the tab that emitted the event, so a queued
+  // or late-routed event cannot fall back to whichever tab is active now.
+  function resolveActionTab(tabId: string | undefined): QueryTab | undefined {
+    if (!tabId) {
+      return activeTab.value;
+    }
+    const fromStore = queryStore.tabs.find((candidate) => candidate.id === tabId);
+    if (fromStore) {
+      return fromStore;
+    }
+    // Hosts may hold the acting tab outside the store array; identity comes
+    // from the captured id either way.
+    return activeTab.value?.id === tabId ? activeTab.value : undefined;
+  }
 
   function activeQueryTargetOptions(tab: QueryTab) {
     const executionTarget = queryStore.activeResultExecutionTarget(tab.id);
@@ -58,17 +78,46 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return quoteTableDataIdentifier(effectiveDatabaseTypeForConnection(config), name, connectionStore.connectionIdentifierQuote?.(tab.connectionId));
   }
 
+  function tableDataPageLimit(tab: QueryTab): number {
+    return tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+  }
+
+  function reconcileOracleTableType(tab: QueryTab): void {
+    const config = connectionStore.getConfig(tab.connectionId);
+    const databaseType = effectiveDatabaseTypeForConnection(config);
+    if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle") return;
+    const tableMeta = tab.tableMeta;
+    if (!tableMeta?.tableName) return;
+
+    const normalize = (value: string | undefined) => value?.trim().toLowerCase() ?? "";
+    const resolvedSchema = tableMeta.schema?.trim() || config?.default_schema?.trim();
+    const matches = connectionStore
+      .lookupLocalCompletionTables(tab.connectionId, tableMeta.database ?? tab.database, tableMeta.tableName, 20, resolvedSchema, tableMeta.catalog)
+      .filter((candidate) => normalize(candidate.name) === normalize(tableMeta.tableName) && normalize(candidate.schema) === normalize(resolvedSchema) && normalize(candidate.catalog) === normalize(tableMeta.catalog));
+    if (matches.length !== 1) return;
+
+    const objectType = matches[0]?.type;
+    const resolvedTableType = objectType === "view" ? "VIEW" : objectType === "materialized_view" ? "MATERIALIZED_VIEW" : objectType === "table" ? "TABLE" : undefined;
+    if (!resolvedTableType || tableMeta.tableType?.trim().toUpperCase() === resolvedTableType) return;
+    queryStore.setTableMeta(tab.id, { ...tableMeta, tableType: resolvedTableType });
+  }
+
+  function resultSortPagination(tab: QueryTab): { limit: number; offset: number } | undefined {
+    const limit = tab.resultPageLimit;
+    return typeof limit === "number" && limit > 0 ? { limit, offset: 0 } : undefined;
+  }
+
   function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {}): Promise<string> {
     const config = connectionStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
-    const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta?.tableType);
+    const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType);
     // 列投影只信任真实元数据列：tableMetaForDataTab 的 fallback 列来自查询
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *
     const realColumns = tab.tableMeta?.columns.length ? tab.tableMeta.columns : undefined;
-    const limit = options.limit ?? tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+    const limit = options.limit ?? tableDataPageLimit(tab);
     return buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config?.driver_profile,
@@ -84,189 +133,300 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       includeRowId: useRowId,
       limit,
+      injectDefaultTimeSeriesWhere: true,
       ...options,
     });
   }
 
-  async function refreshDataTabTableMeta(tab: QueryTab, options: { force?: boolean; trace?: { traceId: string; elapsed: () => string } } = {}): Promise<boolean> {
+  async function refreshDataTabTableMeta(tab: QueryTab, options: { force?: boolean; columnsOnly?: boolean; trace?: { traceId: string; elapsed: () => string } } = {}): Promise<boolean> {
     if (tab.mode !== "data" || !tab.connectionId || !tab.database) return false;
     const tableMeta = tableMetaForDataTab(tab);
     if (!tableMeta?.tableName) return false;
     const target = {
       tabId: tab.id,
       connectionId: tab.connectionId,
-      database: tab.database,
+      database: tableMeta.database ?? tab.database,
       catalog: tableMeta.catalog,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
     };
+    // Cache invalidation prevents stale cache writes, but an older caller can
+    // still receive its result. Only the latest request may update this tab.
+    const requestToken = {};
+    metadataRequests.set(tab, requestToken);
+    tab.tableMetaPending = true;
     const metadataGenerationAtStart = connectionStore.metadataGenerationFor(target.connectionId, target.database);
     const trace = options.trace;
 
     console.info("[DBX][reloadData:metadata:ensure-connected:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed() });
     await connectionStore.ensureConnected(target.connectionId);
     console.info("[DBX][reloadData:metadata:ensure-connected:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed() });
-    if (connectionStore.metadataGenerationFor(target.connectionId, target.database) !== metadataGenerationAtStart) {
+    if (metadataRequests.get(tab) !== requestToken || connectionStore.metadataGenerationFor(target.connectionId, target.database) !== metadataGenerationAtStart) {
       console.info("[DBX][reloadData:metadata:superseded-by-connection-generation]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), table: target.tableName });
       return false;
     }
     const config = connectionStore.getConfig(target.connectionId);
     const querySchema = metadataSchemaForConnection(config, target.database, target.schema);
-    console.info("[DBX][reloadData:metadata:get-columns:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), schema: querySchema, table: target.tableName });
+    console.info("[DBX][reloadData:metadata:get-columns:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), schema: querySchema, table: target.tableName, columnsOnly: options.columnsOnly === true });
     // 复用共享表元数据缓存（30s TTL + in-flight 去重），多个入口对同一张表
     // 不再各自往返 getColumns/listIndexes。跨连接生命周期的强制重建走 force，
     // 避免同一共享缓存把断链前的旧列再次交回本次 reload。
-    const { metadata } = await loadTableMetadata({
-      connectionId: target.connectionId,
-      database: target.database,
-      schema: querySchema,
-      tableName: target.tableName,
-      tableType: target.tableType,
-      databaseType: effectiveDatabaseTypeForConnection(config) ?? config?.db_type ?? "",
-      driverProfile: config?.driver_profile || config?.db_type,
-      catalog: target.catalog,
-      force: options.force === true,
-    });
-    const columns = metadata.columns;
+    const loaded: { columns: TableMetadataColumns; primaryKeys: string[]; rowIdentityResolved: boolean } = options.columnsOnly
+      ? await (async () => {
+          const { columns } = await loadTableColumns({
+            connectionId: target.connectionId,
+            database: target.database,
+            schema: querySchema,
+            tableName: target.tableName,
+            tableType: target.tableType,
+            databaseType: effectiveDatabaseTypeForConnection(config) ?? config?.db_type ?? "",
+            driverProfile: config?.driver_profile || config?.db_type,
+            catalog: target.catalog,
+            force: options.force === true,
+          });
+          const primaryKeys = editablePrimaryKeys(effectiveDatabaseTypeForConnection(config), columns, target.tableType);
+          return { columns, primaryKeys, rowIdentityResolved: false };
+        })()
+      : await (async () => {
+          const { metadata } = await loadTableMetadata({
+            connectionId: target.connectionId,
+            database: target.database,
+            schema: querySchema,
+            tableName: target.tableName,
+            tableType: target.tableType,
+            databaseType: effectiveDatabaseTypeForConnection(config) ?? config?.db_type ?? "",
+            driverProfile: config?.driver_profile || config?.db_type,
+            catalog: target.catalog,
+            force: options.force === true,
+          });
+          return { columns: metadata.columns, primaryKeys: metadata.primaryKeys, rowIdentityResolved: metadata.rowIdentityResolved !== false };
+        })();
+    const columns = loaded.columns;
     console.info("[DBX][reloadData:metadata:get-columns:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), columnCount: columns.length });
-    if (connectionStore.metadataGenerationFor(target.connectionId, target.database) !== metadataGenerationAtStart) {
+    if (metadataRequests.get(tab) !== requestToken || connectionStore.metadataGenerationFor(target.connectionId, target.database) !== metadataGenerationAtStart) {
       console.info("[DBX][reloadData:metadata:superseded-by-connection-generation]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), table: target.tableName });
       return false;
     }
     const current = queryStore.tabs.find((item) => item.id === target.tabId);
     const currentMeta = current ? tableMetaForDataTab(current) : undefined;
-    if (!current || current.mode !== "data" || current.connectionId !== target.connectionId || current.database !== target.database || currentMeta?.tableName !== target.tableName || (currentMeta.schema ?? "") !== (target.schema ?? "") || (currentMeta.catalog ?? "") !== (target.catalog ?? "")) {
+    const currentSourceDatabase = currentMeta?.database ?? current?.database;
+    if (
+      !current ||
+      current !== tab ||
+      current.mode !== "data" ||
+      current.connectionId !== target.connectionId ||
+      currentSourceDatabase !== target.database ||
+      currentMeta?.tableName !== target.tableName ||
+      (currentMeta.schema ?? "") !== (target.schema ?? "") ||
+      (currentMeta.catalog ?? "") !== (target.catalog ?? "")
+    ) {
       console.info("[DBX][reloadData:metadata:stale-tab]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), table: target.tableName });
       return false;
     }
-    const primaryKeys = metadata.primaryKeys;
-    queryStore.setTableMeta(target.tabId, {
+    const primaryKeys = loaded.primaryKeys;
+    const refreshedMeta = {
       catalog: target.catalog,
+      database: target.database,
       schema: target.schema,
       tableName: target.tableName,
       tableType: target.tableType,
       columns,
       primaryKeys,
-    });
+    };
+    if (loaded.rowIdentityResolved) {
+      queryStore.setTableMeta(target.tabId, refreshedMeta);
+    } else {
+      queryStore.setTableMeta(target.tabId, refreshedMeta, { rowIdentityPending: true });
+    }
     return true;
   }
 
-  async function onExecuteSql(sql: string) {
-    const tab = activeTab.value;
+  async function onExecuteSql(tabId: string, sql: string) {
+    const tab = resolveActionTab(tabId);
     if (!tab) return;
     queryStore.updateSql(tab.id, sql);
     await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });
   }
 
-  async function onReloadData(sql?: string, _searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) {
-    const tab = activeTab.value;
+  async function onReloadData(tabId: string | undefined, sql?: string, _searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) {
+    const tab = resolveActionTab(tabId);
     if (!tab) return;
     const traceId = uuid().slice(0, 8);
     const startedAt = performance.now();
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     if (tab.mode === "data" && tableMetaForDataTab(tab)) {
-      tab.whereInput = whereInput ?? "";
-      queryStore.clearInvalidDataTabSort(tab.id);
-      const realColumnNames = tab.tableMeta?.columns.map((column) => column.name) ?? [];
-      let incomingSortMissing = realColumnNames.length > 0 && simpleDataGridOrderByReferencesMissingColumn(orderBy, realColumnNames);
-      if (incomingSortMissing) tab.orderByInput = undefined;
-      const pageLimit = limit ?? tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
-      const pageOffset = offset ?? 0;
-      console.info("[DBX][reloadData:start]", {
-        traceId,
-        tabId: tab.id,
-        connectionId: tab.connectionId,
-        database: tab.database,
-        table: tableMetaForDataTab(tab)?.tableName,
-        elapsed: elapsed(),
-      });
-      queryStore.setExecuting(tab.id, true);
-      const metadataAgeMs = tab.tableMetaUpdatedAt ? Date.now() - tab.tableMetaUpdatedAt : Number.POSITIVE_INFINITY;
-      // 判断元数据是否真实存在必须用原始 tab.tableMeta：tableMetaForDataTab 会在
-      // 真实列缺失时用查询结果列合成 columns（包括失败结果的 ["Error"] 列），
-      // 不能据此跳过刷新，否则恢复/失败后的重试会被 TTL 卡住
-      const hasRealTableMetaColumns = !!tab.tableMeta?.columns.length;
-      if (hasRealTableMetaColumns) {
-        try {
-          console.info("[DBX][reloadData:ensure-connected:start]", { traceId, elapsed: elapsed() });
-          await connectionStore.ensureConnected(tab.connectionId);
-          console.info("[DBX][reloadData:ensure-connected:done]", { traceId, elapsed: elapsed() });
-        } catch (e: any) {
-          console.warn("[DBX][reloadData:ensure-connected:error]", { traceId, elapsed: elapsed(), error: e });
-          queryStore.setExecuting(tab.id, false);
-          toast(e?.message || String(e), 5000);
-          throw e;
-        }
-      }
-      const connectionGeneration = connectionStore.metadataGenerationFor(tab.connectionId, tab.database);
-      const lifecycleStale = isDataTabMetadataLifecycleStale(tab, connectionGeneration);
-      const shouldRefreshMetadata = lifecycleStale || !hasRealTableMetaColumns || metadataAgeMs > DATA_TAB_METADATA_TTL_MS;
-      // Dameng 元数据必须与数据查询串行（同 useSidebarDataOpenRuntime），
-      // 延后到查询完成后再启动。跨生命周期的强制重建除外：必须先拿到新列再
-      // 构建 SQL，否则第一次 toolbar reload 仍会沿用断链前的显式列列表。
-      const deferMetadataRefresh = !lifecycleStale && effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId)) === "dameng";
-      const startMetadataRefresh = () => {
-        console.info("[DBX][reloadData:metadata:background:start]", { traceId, elapsed: elapsed(), reason: hasRealTableMetaColumns ? "stale" : "missing", metadataAgeMs });
-        void refreshDataTabTableMeta(tab, { force: lifecycleStale, trace: { traceId, elapsed } })
-          .then(() => {
-            console.info("[DBX][reloadData:metadata:background:done]", { traceId, elapsed: elapsed() });
-          })
-          .catch((e: any) => {
-            console.warn("[DBX][reloadData:metadata:background:error]", { traceId, elapsed: elapsed(), error: e });
-            toast(e?.message || String(e), 5000);
-          });
+      if (pendingDataReloads.has(tab)) return;
+      pendingDataReloads.add(tab);
+      const registered = queryStore.tabs.includes(tab);
+      const currentTab = () => (registered ? queryStore.tabs.find((item) => item.id === tab.id) : resolveActionTab(tab.id));
+      const source = tableMetaForDataTab(tab)!;
+      const target = { connectionId: tab.connectionId, database: tab.database, sourceDatabase: source.database ?? tab.database, tableName: source.tableName, schema: source.schema, catalog: source.catalog };
+      const stillCurrent = () => {
+        const meta = tableMetaForDataTab(tab);
+        return (
+          currentTab() === tab &&
+          tab.mode === "data" &&
+          tab.connectionId === target.connectionId &&
+          tab.database === target.database &&
+          (meta?.database ?? tab.database) === target.sourceDatabase &&
+          meta?.tableName === target.tableName &&
+          meta?.schema === target.schema &&
+          meta?.catalog === target.catalog
+        );
       };
-      if (lifecycleStale) {
-        if (!hasRealTableMetaColumns) tab.tableMetaPending = true;
-        console.info("[DBX][reloadData:metadata:await:start]", { traceId, elapsed: elapsed(), reason: hasRealTableMetaColumns ? "lifecycle-stale" : "missing", metadataAgeMs });
+      const stopPreparing = () => {
+        // A late request must not reset a replacement tab's execution state.
+        if (currentTab() === tab) queryStore.setExecuting(tab.id, false);
+      };
+      try {
+        reconcileOracleTableType(tab);
+        tab.whereInput = whereInput ?? "";
+        queryStore.clearInvalidDataTabSort(tab.id);
+        const realColumnNames = tab.tableMeta?.columns.map((column) => column.name) ?? [];
+        let incomingSortMissing = realColumnNames.length > 0 && simpleDataGridOrderByReferencesMissingColumn(orderBy, realColumnNames);
+        if (incomingSortMissing) tab.orderByInput = undefined;
+        const pageLimit = limit ?? tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+        const pageOffset = offset ?? 0;
+        console.info("[DBX][reloadData:start]", {
+          traceId,
+          tabId: tab.id,
+          connectionId: tab.connectionId,
+          database: tab.database,
+          table: tableMetaForDataTab(tab)?.tableName,
+          elapsed: elapsed(),
+        });
+        queryStore.setExecuting(tab.id, true);
+        const metadataAgeMs = tab.tableMetaUpdatedAt ? Date.now() - tab.tableMetaUpdatedAt : Number.POSITIVE_INFINITY;
+        // 判断元数据是否真实存在必须用原始 tab.tableMeta：tableMetaForDataTab 会在
+        // 真实列缺失时用查询结果列合成 columns（包括失败结果的 ["Error"] 列），
+        // 不能据此跳过刷新，否则恢复/失败后的重试会被 TTL 卡住
+        const hasRealTableMetaColumns = !!tab.tableMeta?.columns.length;
+        if (hasRealTableMetaColumns) {
+          try {
+            console.info("[DBX][reloadData:ensure-connected:start]", { traceId, elapsed: elapsed() });
+            await connectionStore.ensureConnected(tab.connectionId);
+            console.info("[DBX][reloadData:ensure-connected:done]", { traceId, elapsed: elapsed() });
+          } catch (e: any) {
+            console.warn("[DBX][reloadData:ensure-connected:error]", { traceId, elapsed: elapsed(), error: e });
+            stopPreparing();
+            toast(e?.message || String(e), 5000);
+            throw e;
+          }
+        }
+        if (!stillCurrent()) {
+          stopPreparing();
+          return;
+        }
+        const connectionGeneration = connectionStore.metadataGenerationFor(tab.connectionId, tab.database);
+        const lifecycleStale = isDataTabMetadataLifecycleStale(tab, connectionGeneration);
+        const shouldRefreshMetadata = lifecycleStale || tab.tableMetaPending || !hasRealTableMetaColumns || metadataAgeMs > DATA_TAB_METADATA_TTL_MS;
+        // Dameng 元数据必须与数据查询串行（同 useSidebarDataOpenRuntime），
+        // 延后到查询完成后再启动。主动刷新和跨生命周期重建除外：必须先拿到新列再
+        // 构建 SQL，否则第一次 toolbar reload 仍会沿用断链前的显式列列表。
+        const deferMetadataRefresh = intent !== "refresh" && !lifecycleStale && effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId)) === "dameng";
+        const startMetadataRefresh = () => {
+          console.info("[DBX][reloadData:metadata:background:start]", { traceId, elapsed: elapsed(), reason: hasRealTableMetaColumns ? "stale" : "missing", metadataAgeMs });
+          void refreshDataTabTableMeta(tab, { force: lifecycleStale, trace: { traceId, elapsed } })
+            .then(() => {
+              console.info("[DBX][reloadData:metadata:background:done]", { traceId, elapsed: elapsed() });
+            })
+            .catch((e: any) => {
+              console.warn("[DBX][reloadData:metadata:background:error]", { traceId, elapsed: elapsed(), error: e });
+              toast(e?.message || String(e), 5000);
+            });
+        };
+        if (lifecycleStale || intent === "refresh") {
+          tab.tableMetaPending = true;
+          console.info("[DBX][reloadData:metadata:await:start]", { traceId, elapsed: elapsed(), reason: intent === "refresh" ? "manual-refresh" : "lifecycle-stale", metadataAgeMs });
+          try {
+            if (intent === "refresh") {
+              const meta = tableMetaForDataTab(tab)!;
+              const config = connectionStore.getConfig(tab.connectionId);
+              const match = {
+                connectionId: tab.connectionId,
+                database: meta.database ?? tab.database,
+                schema: metadataSchemaForConnection(config, meta.database ?? tab.database, meta.schema),
+                tableName: meta.tableName,
+              };
+              invalidateTableMetadataCache(match);
+              // 持久缓存（object-meta L2）删除只服务后续结构面板/DDL 读取的
+              // 新鲜度，不参与本次查询构建：移出关键路径 fire-and-forget，
+              // 失败不再中断刷新（网格侧已由上面的内存失效保证列新鲜）。
+              console.info("[DBX][reloadData:object-cache-invalidate:start]", { traceId, elapsed: elapsed() });
+              invalidateObjectMetadataCache(match).catch((e: unknown) => {
+                console.warn("[DBX][reloadData:object-cache-invalidate:error]", { traceId, elapsed: elapsed(), error: e });
+              });
+              if (!stillCurrent() || connectionStore.metadataGenerationFor(tab.connectionId, tab.database) !== connectionGeneration) {
+                stopPreparing();
+                return;
+              }
+            }
+            // 手动刷新等待段只拉列（getColumns），不等 listIndexes：列投影决定
+            // 本次 SELECT 的正确性；主键/索引用旧值与新列求交，PK 名不进 SQL
+            // 文本（仅作大值预览保护集合），查询本身不受索引元数据延迟影响。
+            const rebuilt = await refreshDataTabTableMeta(tab, { force: true, columnsOnly: intent === "refresh" && !lifecycleStale && hasRealTableMetaColumns, trace: { traceId, elapsed } });
+            console.info("[DBX][reloadData:metadata:await:done]", { traceId, elapsed: elapsed(), rebuilt });
+            if (!rebuilt) {
+              stopPreparing();
+              return;
+            }
+          } catch (e: any) {
+            console.warn("[DBX][reloadData:metadata:await:error]", { traceId, elapsed: elapsed(), error: e });
+            stopPreparing();
+            toast(e?.message || String(e), 5000);
+            throw e;
+          }
+          queryStore.clearInvalidDataTabSort(tab.id);
+          const rebuiltColumnNames = tab.tableMeta?.columns.map((column) => column.name) ?? [];
+          incomingSortMissing = rebuiltColumnNames.length > 0 && simpleDataGridOrderByReferencesMissingColumn(orderBy, rebuiltColumnNames);
+          if (incomingSortMissing) tab.orderByInput = undefined;
+          if (intent === "refresh" && !lifecycleStale) {
+            void refreshDataTabTableMeta(tab, { force: false, trace: { traceId, elapsed } })
+              .then(() => {
+                console.info("[DBX][reloadData:metadata:background-indexes:done]", { traceId, elapsed: elapsed() });
+              })
+              .catch((e: any) => {
+                console.warn("[DBX][reloadData:metadata:background-indexes:error]", { traceId, elapsed: elapsed(), error: e });
+              });
+          }
+        } else if (shouldRefreshMetadata) {
+          // 元数据缺失（如重启恢复的标签页只持久化了占位身份）时行标识未知：
+          // 挂起等待，防止数据查询先返回后编辑/保存以空 primaryKeys 短暂可用，
+          // 走整行 WHERE 保存路径（#3727）。真实元数据经 setTableMeta 落地后解除
+          if (!hasRealTableMetaColumns) tab.tableMetaPending = true;
+          if (!deferMetadataRefresh) startMetadataRefresh();
+        } else {
+          console.info("[DBX][reloadData:metadata:skip]", { traceId, elapsed: elapsed(), columnCount: tab.tableMeta!.columns.length, metadataAgeMs });
+        }
         try {
-          const rebuilt = await refreshDataTabTableMeta(tab, { force: true, trace: { traceId, elapsed } });
-          console.info("[DBX][reloadData:metadata:await:done]", { traceId, elapsed: elapsed(), rebuilt });
-          if (!rebuilt) {
-            queryStore.setExecuting(tab.id, false);
+          console.info("[DBX][reloadData:build-sql:start]", { traceId, elapsed: elapsed() });
+          const nextSql = await buildTableSql(tab, { whereInput, orderBy: incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset });
+          console.info("[DBX][reloadData:build-sql:done]", { traceId, elapsed: elapsed() });
+          if (!stillCurrent() || connectionStore.metadataGenerationFor(tab.connectionId, tab.database) !== connectionGeneration) {
+            stopPreparing();
             return;
           }
-        } catch (e: any) {
-          console.warn("[DBX][reloadData:metadata:await:error]", { traceId, elapsed: elapsed(), error: e });
-          queryStore.setExecuting(tab.id, false);
-          toast(e?.message || String(e), 5000);
+          queryStore.updateSql(tab.id, nextSql);
+          console.info("[DBX][reloadData:execute:start]", { traceId, elapsed: elapsed() });
+          await queryStore.executeTabSql(tab.id, nextSql, {
+            pagination: { limit: pageLimit, offset: pageOffset },
+            preserveResultDuringExecution: true,
+          });
+          console.info("[DBX][reloadData:execute:done]", { traceId, elapsed: elapsed() });
+        } catch (e) {
+          console.error("[DBX][reloadData:error]", { traceId, elapsed: elapsed(), error: e });
+          stopPreparing();
+          if (shouldRefreshMetadata && deferMetadataRefresh) startMetadataRefresh();
           throw e;
         }
-        queryStore.clearInvalidDataTabSort(tab.id);
-        const rebuiltColumnNames = tab.tableMeta?.columns.map((column) => column.name) ?? [];
-        incomingSortMissing = rebuiltColumnNames.length > 0 && simpleDataGridOrderByReferencesMissingColumn(orderBy, rebuiltColumnNames);
-        if (incomingSortMissing) tab.orderByInput = undefined;
-      } else if (shouldRefreshMetadata) {
-        // 元数据缺失（如重启恢复的标签页只持久化了占位身份）时行标识未知：
-        // 挂起等待，防止数据查询先返回后编辑/保存以空 primaryKeys 短暂可用，
-        // 走整行 WHERE 保存路径（#3727）。真实元数据经 setTableMeta 落地后解除
-        if (!hasRealTableMetaColumns) tab.tableMetaPending = true;
-        if (!deferMetadataRefresh) startMetadataRefresh();
-      } else {
-        console.info("[DBX][reloadData:metadata:skip]", { traceId, elapsed: elapsed(), columnCount: tab.tableMeta!.columns.length, metadataAgeMs });
-      }
-      try {
-        console.info("[DBX][reloadData:build-sql:start]", { traceId, elapsed: elapsed() });
-        const nextSql = await buildTableSql(tab, { whereInput, orderBy: incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset });
-        console.info("[DBX][reloadData:build-sql:done]", { traceId, elapsed: elapsed() });
-        queryStore.updateSql(tab.id, nextSql);
-        console.info("[DBX][reloadData:execute:start]", { traceId, elapsed: elapsed() });
-        await queryStore.executeTabSql(tab.id, nextSql, {
-          pagination: { limit: pageLimit, offset: pageOffset },
-          preserveResultDuringExecution: true,
-        });
-        console.info("[DBX][reloadData:execute:done]", { traceId, elapsed: elapsed() });
-      } catch (e) {
-        console.error("[DBX][reloadData:error]", { traceId, elapsed: elapsed(), error: e });
-        queryStore.setExecuting(tab.id, false);
         if (shouldRefreshMetadata && deferMetadataRefresh) startMetadataRefresh();
-        throw e;
+        return;
+      } finally {
+        pendingDataReloads.delete(tab);
       }
-      if (shouldRefreshMetadata && deferMetadataRefresh) startMetadataRefresh();
-      return;
     }
-    if (intent === "refresh" && tab.mode === "query" && (tab.results?.length ?? 0) > 1) {
+    if ((intent === "refresh" || intent === "auto-refresh") && tab.mode === "query" && (tab.results?.length ?? 0) > 1) {
       const resultGroupSql = tab.resultBaseSql || tab.lastExecutedSql || tab.sql;
       if (!resultGroupSql.trim()) return;
       tab.resultSortColumn = undefined;
@@ -305,21 +465,23 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       return;
     }
     if (sql?.trim()) {
+      const hasMultiResults = tab.mode === "query" && (tab.results?.length ?? 0) > 1;
       await queryStore.executeTabSql(tab.id, sql, {
         ...(tab.mode === "query" ? activeQueryTargetOptions(tab) : {}),
         resultBaseSql: sql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
+        ...(hasMultiResults ? { replaceActiveResultInGroup: true, preserveActiveResultIndex: true } : {}),
       });
       return;
     }
     await queryStore.executeCurrentTab();
   }
 
-  async function onPaginate(offset: number, limit: number, whereInput?: string, orderBy?: string) {
-    const tab = activeTab.value;
+  async function onPaginate(tabId: string | undefined, offset: number, limit: number, whereInput?: string, orderBy?: string, appendRequested = false) {
+    const tab = resolveActionTab(tabId);
     if (!tab) return;
-    const appendResult = settingsStore.editorSettings.infiniteScroll && offset > 0 && offset === tab.result?.rows.length;
+    const appendResult = (appendRequested || settingsStore.editorSettings.infiniteScroll) && offset > 0 && offset === tab.result?.rows.length;
     const appendOptions = appendResult
       ? {
           appendResult: {
@@ -368,7 +530,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       // request per skipped page (page 1 -> 101 sends 100 requests);
       // retainDisplayedResult only hides those intermediate pages from the UI.
       const currentResultSessionId = tab.resultSessionId ?? tab.result?.session_id;
-      if (usesElasticsearchCursor && !appendResult && typeof expectedNextOffset === "number" && limit === tab.resultPageLimit && currentResultSessionId) {
+      if (usesElasticsearchCursor && tab.result?.has_more === true && !appendResult && typeof expectedNextOffset === "number" && limit === tab.resultPageLimit && currentResultSessionId) {
         let nextOffset = expectedNextOffset;
         let nextSessionId: string | undefined = currentResultSessionId;
         const currentPage = Math.floor(nextOffset / limit);
@@ -435,18 +597,23 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
 
     if (!tableMetaForDataTab(tab)) return;
     tab.whereInput = whereInput ?? "";
-    const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy });
+    const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy: orderBy ?? tab.orderByInput });
     queryStore.updateSql(tab.id, sql);
+    const expectedNextOffset = appendResult ? tab.result?.rows.length : (tab.resultPageOffset ?? 0) + (tab.resultPageLimit ?? limit);
+    const continuesResultSession = offset === expectedNextOffset && limit === tab.resultPageLimit;
+    const connection = useConnectionStore().getConfig(tab.connectionId);
+    const isSqlServerLegacy = connection?.db_type === "sqlserver" && connection.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
+    const sessionId = isSqlServerLegacy && tab.result?.has_more && tab.result.session_id && continuesResultSession ? tab.result.session_id : undefined;
     await queryStore.executeTabSql(tab.id, sql, {
-      pagination: { offset, limit },
+      pagination: { offset, limit, sessionId, clientSessionId: sessionId ? tab.resultClientSessionId : undefined },
       ...appendOptions,
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,
     });
   }
 
-  async function onSort(column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database") {
-    const tab = activeTab.value;
+  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database") {
+    const tab = resolveActionTab(tabId);
     if (!tab) return;
     tab.resultSortColumn = direction ? column : undefined;
     tab.resultSortColumnIndex = direction ? columnIndex : undefined;
@@ -468,20 +635,29 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const config = connectionStore.getConfig(tab.connectionId);
       const quotedColumn = quoteIdent(tab, column);
       const orderBy = direction ? `${config?.db_type === "neo4j" ? `n.${quotedColumn}` : quotedColumn} ${direction.toUpperCase()}` : undefined;
-      const sql = await buildTableSql(tab, { orderBy, whereInput });
+      const limit = tableDataPageLimit(tab);
+      const pagination = { limit, offset: 0 };
+      tab.orderByInput = orderBy;
+      const sql = await buildTableSql(tab, { orderBy, whereInput, limit, offset: pagination.offset });
       queryStore.updateSql(tab.id, sql);
-      await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });
+      await queryStore.executeTabSql(tab.id, sql, {
+        pagination,
+        preserveResultDuringExecution: true,
+        preserveTotalRowCountDuringExecution: true,
+      });
       return;
     }
 
     const baseSql = queryResultBaseSql(tab);
     if (!baseSql.trim()) return;
+    const pagination = resultSortPagination(tab);
 
     if (!direction) {
       await queryStore.executeTabSql(tab.id, baseSql, {
         ...activeQueryTargetOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: undefined,
+        ...(pagination ? { pagination } : {}),
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
         replaceActiveResultInGroup: true,
@@ -502,6 +678,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         ...activeQueryTargetOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: sortedSql,
+        ...(pagination ? { pagination } : {}),
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
         replaceActiveResultInGroup: true,
@@ -531,6 +708,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         ...activeQueryTargetOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: built.sql,
+        ...(pagination ? { pagination } : {}),
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
         replaceActiveResultInGroup: true,
@@ -546,6 +724,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         column,
         direction,
       },
+      ...(pagination ? { pagination } : {}),
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,
       replaceActiveResultInGroup: true,

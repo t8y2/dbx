@@ -67,7 +67,12 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private static final String AGENT_VERSION = "9999.06.04.1-fix-default";
     private static final int DBMS_OUTPUT_ENABLE_TIMEOUT_SECS = 5;
     private static final int DBMS_OUTPUT_ENABLE_NETWORK_TIMEOUT_MILLIS = 5_000;
+    private static final int VIEW_VALIDITY_BATCH_SIZE = 500;
     private static final Pattern DATABASE_VERSION_MAJOR_PATTERN = Pattern.compile("(\\d+)\\.");
+    // Word-boundary match so a type or default merely containing the letters is not mistaken
+    // for the IDENTITY keyword.
+    private static final Pattern DDL_IDENTITY_KEYWORD_PATTERN =
+        Pattern.compile("(?i)(?<![A-Z0-9_$#])IDENTITY(?![A-Z0-9_$#])");
     private static final JdbcAgentProfile DM6_METADATA_PROFILE = new JdbcAgentProfile(
         "dm6.jdbc.driver.DmDriver",
         "jdbc:dm6://{host}:{port}/{database}",
@@ -109,6 +114,19 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private URLClassLoader externalDriverLoader;
     private List<URL> externalDriverUrls;
     private String externalDriverClass;
+
+    @Override
+    protected JdbcExecutor.ResultValueReader resultValueReader() {
+        return (JdbcExecutor.ColumnAwareResultValueReader) this::readDamengValue;
+    }
+
+    private Object readDamengValue(ResultSet resultSet, int index, int sqlType, String columnTypeName) throws SQLException {
+        if ("VARCHAR2".equalsIgnoreCase(columnTypeName == null ? "" : columnTypeName.trim())) {
+            String value = resultSet.getString(index);
+            return resultSet.wasNull() ? null : value;
+        }
+        return super.resultValue(resultSet, index, sqlType);
+    }
     private volatile boolean legacyJdbcMetadata;
     private volatile boolean dbmsOutputInitializationSupported = true;
     private final Map<Object, Boolean> dbmsOutputInitializedConnections =
@@ -461,7 +479,21 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (legacyJdbcMetadata) {
             return unchecked(() -> listJdbcSchemas().stream().map(DatabaseInfo::new).toList());
         }
-        return unchecked(() -> listVisibleUsers().stream().map(DatabaseInfo::new).toList());
+        // DM8 ALL_USERS is privilege-filtered: a normal user only sees itself, so prefer the
+        // full SYS.SYSOBJECTS catalog (mirroring listSchemas; newer/hardened builds require
+        // the SOI role) and fall back to ALL_USERS when the catalog is not readable.
+        return unchecked(() -> {
+            try {
+                return listVisibleSchemas().stream().map(DatabaseInfo::new).toList();
+            } catch (SQLException catalogError) {
+                try {
+                    return listVisibleUsers().stream().map(DatabaseInfo::new).toList();
+                } catch (Exception fallbackError) {
+                    catalogError.addSuppressed(fallbackError);
+                    throw catalogError;
+                }
+            }
+        });
     }
 
     @Override
@@ -537,19 +569,20 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return queryConstrainedTables(schema, MetadataListConstraints.orNone(constraints));
     }
 
-    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+    private List<TableInfo> queryConstrainedTables(String rawSchema, MetadataListConstraints constraints) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
-            return executeJdbcMetadataTables(schema, constraints);
+            return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
         }
         if (!constraints.includesTableLikeTypes()) {
             return List.of();
         }
         RuntimeException permissionError;
         try {
-            return executeConstrainedTables(buildConstrainedTablesQuery(schema, constraints), constraints);
+            return withViewValidity(executeConstrainedTables(buildConstrainedTablesQuery(schema, constraints), constraints), schema);
         } catch (RuntimeException e) {
             if (isDamengInvalidDatetimeMetadataError(e)) {
-                return executeJdbcMetadataTables(schema, constraints);
+                return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
             }
             if (!isDamengMetadataPermissionError(e)) {
                 throw e;
@@ -558,13 +591,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         if (needsMaterializedViewClassification(constraints)) {
             try {
-                return executeConstrainedTables(
+                return withViewValidity(executeConstrainedTables(
                     buildAccessibleConstrainedTablesQuery(schema, constraints),
                     constraints
-                );
+                ), schema);
             } catch (RuntimeException e) {
                 if (isDamengInvalidDatetimeMetadataError(e)) {
-                    return executeJdbcMetadataTables(schema, constraints);
+                    return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
                 }
                 if (!isDamengMetadataPermissionError(e)) {
                     throw e;
@@ -574,13 +607,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
             try {
-                return executeConstrainedTables(
+                return withViewValidity(executeConstrainedTables(
                     buildConstrainedTablesQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
                     constraints
-                );
+                ), schema);
             } catch (RuntimeException e) {
                 if (isDamengInvalidDatetimeMetadataError(e)) {
-                    return executeJdbcMetadataTables(schema, constraints);
+                    return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
                 }
                 if (!isDamengMetadataPermissionError(e)) {
                     throw e;
@@ -589,10 +622,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         try {
-            return executeRawConstrainedTables(schema, constraints);
+            return withViewValidity(executeRawConstrainedTables(schema, constraints), schema);
         } catch (RuntimeException e) {
             if (isDamengInvalidDatetimeMetadataError(e)) {
-                return executeJdbcMetadataTables(schema, constraints);
+                return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
             }
             if (!isDamengMetadataPermissionError(e)) {
                 throw e;
@@ -600,7 +633,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
             permissionError.addSuppressed(e);
         }
         try {
-            return executeJdbcMetadataTables(schema, constraints);
+            return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
         } catch (RuntimeException e) {
             e.addSuppressed(permissionError);
             throw e;
@@ -722,7 +755,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     || normalized.contains("all_views")
                     || normalized.contains("all_triggers")
                     || normalized.contains("all_sequences")
-                    || normalized.contains("systexts");
+                    || normalized.contains("systexts")
+                    // DM8 may report a view's metadata failure as an internal
+                    // index lookup error without mentioning DBMS_METADATA.
+                    || normalized.contains("内部索引")
+                    || normalized.contains("internal index");
                 boolean permissionDenied = normalized.contains("权限")
                     || normalized.contains("privilege")
                     || normalized.contains("permission")
@@ -731,6 +768,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 boolean missingObject = normalized.contains("解析失败")
                     || normalized.contains("无法解析")
                     || normalized.contains("不存在")
+                    || normalized.contains("未找到")
                     || normalized.contains("not exist")
                     || normalized.contains("does not exist")
                     || normalized.contains("not found")
@@ -866,6 +904,43 @@ public final class DamengAgent extends AbstractJdbcAgent {
             && schema != null
             && !connectedUsername.isBlank()
             && schema.equalsIgnoreCase(connectedUsername);
+    }
+
+    /**
+     * DM resolves an unqualified object name in the session's current schema, and dbx sends an
+     * unqualified metadata request whenever the editor's source table has no schema selected
+     * (the same Oracle-like contract `oracle` and `oceanbase-oracle` follow). Looking up
+     * `OWNER = ''` instead reported "no columns" for tables that exist, so column comments never
+     * reached the result-column tooltip (issue #10221).
+     */
+    private String normalizeSchema(String schema) {
+        if (schema != null && !schema.isBlank()) {
+            return schema;
+        }
+        return effectiveMetadataSchema(currentSchemaOrBlank(), connectedUsername);
+    }
+
+    static String effectiveMetadataSchema(String currentSchema, String connectedUsername) {
+        if (currentSchema != null && !currentSchema.isBlank()) {
+            return currentSchema;
+        }
+        return connectedUsername == null ? "" : connectedUsername;
+    }
+
+    private String currentSchemaOrBlank() {
+        try (Statement stmt = requireConnected().createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")) {
+            if (rs.next()) {
+                String current = rs.getString(1);
+                if (current != null && !current.isBlank()) {
+                    return current;
+                }
+            }
+        } catch (SQLException error) {
+            // A server without SYS_CONTEXT support still resolves an unqualified name to the
+            // connected user, which is what the caller falls back to.
+        }
+        return "";
     }
 
     private static boolean includesSupportedObjectTypes(MetadataListConstraints constraints) {
@@ -1058,7 +1133,14 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return queryConstrainedObjects(schema, MetadataListConstraints.orNone(constraints));
     }
 
-    private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+    private List<ObjectInfo> queryConstrainedObjects(String rawSchema, MetadataListConstraints constraints) {
+        final String schema = normalizeSchema(rawSchema);
+        List<ObjectInfo> objects = queryConstrainedObjectsWithoutValidity(schema, constraints);
+        applyViewValidity(objects, schema);
+        return objects;
+    }
+
+    private List<ObjectInfo> queryConstrainedObjectsWithoutValidity(String schema, MetadataListConstraints constraints) {
         if (legacyJdbcMetadata) {
             return executeJdbcMetadataObjects(schema, constraints);
         }
@@ -1122,9 +1204,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (!constraints.includesTableLikeTypes()) {
             return List.of();
         }
-        return executeJdbcMetadataTables(schema, constraints).stream()
-            .map(table -> new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()))
-            .toList();
+        List<ObjectInfo> objects = new ArrayList<>();
+        for (TableInfo table : executeJdbcMetadataTables(schema, constraints)) {
+            objects.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
+        }
+        return objects;
     }
 
     private List<ObjectInfo> executeConstrainedObjects(
@@ -1149,6 +1233,81 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
             return constraints.withoutPaging().filterObjects(result);
         });
+    }
+
+    private void applyViewValidity(List<ObjectInfo> objects, String schema) {
+        List<String> viewNames = objects.stream()
+            .filter(object -> "VIEW".equals(object.getObject_type()))
+            .map(ObjectInfo::getName)
+            .toList();
+        Map<String, Boolean> validityByName = loadViewValidity(schema, viewNames);
+        for (ObjectInfo object : objects) {
+            if ("VIEW".equals(object.getObject_type())) {
+                object.setValid(validityByName.get(object.getName()));
+            }
+        }
+    }
+
+    private List<TableInfo> withViewValidity(List<TableInfo> tables, String schema) {
+        applyTableViewValidity(tables, schema);
+        return tables;
+    }
+
+    private void applyTableViewValidity(List<TableInfo> tables, String schema) {
+        List<String> viewNames = tables.stream()
+            .filter(table -> "VIEW".equals(table.getTable_type()))
+            .map(TableInfo::getName)
+            .toList();
+        Map<String, Boolean> validityByName = loadViewValidity(schema, viewNames);
+        for (TableInfo table : tables) {
+            if ("VIEW".equals(table.getTable_type())) {
+                table.setValid(validityByName.get(table.getName()));
+            }
+        }
+    }
+
+    private Map<String, Boolean> loadViewValidity(String schema, List<String> viewNames) {
+        Map<String, Boolean> validityByName = new HashMap<>();
+        List<String> names = new ArrayList<>(new LinkedHashSet<>(viewNames));
+        for (int offset = 0; offset < names.size(); offset += VIEW_VALIDITY_BATCH_SIZE) {
+            List<String> batch = names.subList(offset, Math.min(offset + VIEW_VALIDITY_BATCH_SIZE, names.size()));
+            try {
+                unchecked(() -> {
+                    try (PreparedStatement stmt = requireConnected().prepareStatement(
+                        "SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, STATUS "
+                            + "FROM DBA_OBJECTS "
+                            + "WHERE OBJECT_TYPE = 'VIEW' AND OWNER = ? AND OBJECT_NAME IN ("
+                            + String.join(", ", Collections.nCopies(batch.size(), "?")) + ")"
+                    )) {
+                        stmt.setString(1, schema);
+                        for (int index = 0; index < batch.size(); index++) {
+                            stmt.setString(index + 2, batch.get(index));
+                        }
+                        try (ResultSet rs = stmt.executeQuery()) {
+                            while (rs.next()) {
+                                String name = rs.getString("OBJECT_NAME");
+                                String status = rs.getString("STATUS");
+                                if (name == null || status == null) {
+                                    continue;
+                                }
+                                Boolean valid = switch (status.trim().toUpperCase(Locale.ROOT)) {
+                                    case "VALID" -> Boolean.TRUE;
+                                    case "INVALID" -> Boolean.FALSE;
+                                    default -> null;
+                                };
+                                if (valid != null) {
+                                    validityByName.put(name, valid);
+                                }
+                            }
+                        }
+                    }
+                    return null;
+                });
+            } catch (RuntimeException error) {
+                LOGGER.log(Level.FINE, "Unable to load Dameng view validity for schema " + schema, error);
+            }
+        }
+        return validityByName;
     }
 
     private List<ObjectInfo> executeRawConstrainedObjects(String schema, MetadataListConstraints constraints) {
@@ -1229,7 +1388,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public ObjectSource getObjectSource(String schema, String name, String objectType) {
+    public ObjectSource getObjectSource(String rawSchema, String name, String objectType) {
+        final String schema = normalizeSchema(rawSchema);
         return unchecked(() -> {
             String dbmsType = damengDdlObjectType(objectType);
             RuntimeException dbmsError;
@@ -1274,7 +1434,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
      *   <li>TRIGGER → ALL_TRIGGERS.TRIGGER_BODY</li>
      *   <li>SEQUENCE → 由 ALL_SEQUENCES 元数据重建 CREATE SEQUENCE 语句</li>
      *   <li>PROCEDURE/FUNCTION/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → ALL_SOURCE 按 LINE 拼接，
-     *       再以 SYS.SYSOBJECTS + SYS.SYSTEXTS 作为最后一层</li>
+     *       再以 SYS.SYSOBJECTS + SYS.SYSTEXTS(TXT/SEQNO) 作为最后一层</li>
      * </ul>
      * 所有字典来源都不可用时返回带原因说明的占位源码（不可编辑），避免双击对象查看源码直接报错；
      * 连接类错误（断连/超时等）不属于元数据不可用，继续上抛由上层处理会话。
@@ -1418,9 +1578,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
         try {
             String type = normalizeObjectSourceType(objectType);
             List<String> typeCandidates = switch (type) {
-                // 不同 DM 版本对函数/过程的 TYPE 取值不一致（有的统一为 PROCEDURE），逐一尝试。
-                case "FUNCTION" -> List.of("FUNCTION", "PROCEDURE");
-                case "PROCEDURE" -> List.of("PROCEDURE", "FUNCTION");
+                case "FUNCTION", "PROCEDURE" -> List.of("PROC", type);
                 case "PACKAGE" -> List.of("PACKAGE");
                 case "PACKAGE_BODY" -> List.of("PACKAGE BODY", "PACKAGE_BODY");
                 case "TYPE" -> List.of("TYPE");
@@ -1429,14 +1587,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
             };
             for (String candidate : typeCandidates) {
                 String source = readAllSourceLines(schema, name, candidate);
-                if (notBlank(source)) {
+                if (notBlank(source) && routineSourceMatchesRequestedType(schema, name, type, candidate, source)) {
                     return catalogRoutineObjectSource(schema, name, objectType, source);
                 }
-            }
-            // 兜底：忽略 TYPE 过滤按名称读取全部源码行（同一 schema 内对象名唯一）。
-            String anyTypeSource = readAllSourceLines(schema, name, null);
-            if (notBlank(anyTypeSource)) {
-                return catalogRoutineObjectSource(schema, name, objectType, anyTypeSource);
             }
             return null;
         } catch (RuntimeException error) {
@@ -1447,16 +1600,12 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private String readAllSourceLines(String schema, String name, String sourceType) throws Exception {
-        String sql = sourceType == null
-            ? "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? ORDER BY LINE"
-            : "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? AND TYPE = ? ORDER BY LINE";
+        String sql = "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? AND TYPE = ? ORDER BY LINE";
         StringBuilder source = new StringBuilder();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
             stmt.setString(1, schema);
             stmt.setString(2, name);
-            if (sourceType != null) {
-                stmt.setString(3, sourceType);
-            }
+            stmt.setString(3, sourceType);
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     String line = coalesce(readTextColumn(rs, 1));
@@ -1468,6 +1617,66 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         return source.toString();
+    }
+
+    private boolean routineSourceMatchesRequestedType(
+        String schema,
+        String name,
+        String objectType,
+        String sourceType,
+        String source
+    ) {
+        if (!("FUNCTION".equals(objectType) || "PROCEDURE".equals(objectType))
+            || !"PROC".equalsIgnoreCase(sourceType)) {
+            return true;
+        }
+        String catalogType = readDamengRoutineObjectType(schema, name);
+        return catalogType != null
+            ? objectType.equals(catalogType)
+            : routineSourceStartsWithType(source, objectType);
+    }
+
+    private String readDamengRoutineObjectType(String schema, String name) {
+        String sql = """
+            SELECT o.INFO1
+            FROM SYS.SYSOBJECTS o
+            JOIN SYS.SYSOBJECTS s ON s.ID = o.SCHID AND s.TYPE$ = 'SCH'
+            WHERE o.SUBTYPE$ = 'PROC' AND s.NAME = ? AND o.NAME = ?
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, name);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                String info1 = rs.getString(1);
+                return switch (info1 == null ? "" : info1.trim()) {
+                    case "0" -> "FUNCTION";
+                    case "1" -> "PROCEDURE";
+                    default -> "PROCEDURE";
+                };
+            }
+        } catch (RuntimeException error) {
+            if (isDamengConnectionError(error)) {
+                throw error;
+            }
+            return null;
+        } catch (Exception error) {
+            if (isDamengConnectionError(error)) {
+                throw new RuntimeException(error);
+            }
+            return null;
+        }
+    }
+
+    private static boolean routineSourceStartsWithType(String source, String objectType) {
+        String normalizedSource = source.stripLeading().toUpperCase(Locale.ROOT);
+        String normalizedType = objectType.toUpperCase(Locale.ROOT);
+        return startsWithRoutineDeclaration(normalizedSource, normalizedType)
+            || startsWithRoutineDeclaration(normalizedSource, "CREATE " + normalizedType)
+            || startsWithRoutineDeclaration(normalizedSource, "CREATE OR REPLACE " + normalizedType)
+            || startsWithRoutineDeclaration(normalizedSource, "ALTER " + normalizedType);
     }
 
     private static ObjectSource catalogRoutineObjectSource(
@@ -1505,12 +1714,12 @@ public final class DamengAgent extends AbstractJdbcAgent {
             // DM 将过程/函数/包/类型的定义文本按行存放在 SYS.SYSTEXTS，
             // SYS.SYSOBJECTS 的 SCHID 关联所属 schema；适用于 ALL_SOURCE 不可用的实例。
             String sql = """
-                SELECT t.TEXT
+                SELECT t.TXT
                 FROM SYS.SYSTEXTS t
                 JOIN SYS.SYSOBJECTS o ON o.ID = t.ID
                 JOIN SYS.SYSOBJECTS s ON s.ID = o.SCHID AND s.TYPE$ = 'SCH' AND s.NAME = ?
                 WHERE o.NAME = ?
-                ORDER BY t.LINE
+                ORDER BY t.SEQNO
                 """.stripIndent().trim();
             StringBuilder source = new StringBuilder();
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
@@ -1527,6 +1736,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 }
             }
             return notBlank(source.toString())
+                && routineSourceMatchesRequestedType(
+                    schema,
+                    name,
+                    normalizeObjectSourceType(objectType),
+                    "PROC",
+                    source.toString()
+                )
                 ? catalogRoutineObjectSource(schema, name, objectType, source.toString())
                 : null;
         } catch (RuntimeException error) {
@@ -1599,7 +1815,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public String getTableDdl(String schema, String table) {
+    public String getTableDdl(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return super.getTableDdl(schema, table);
         }
@@ -1627,6 +1844,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
             if (!isDamengMetadataUnavailableError(error)) {
                 throw error;
             }
+            String catalogDdl = catalogTableLikeDdl(schema, table);
+            if (catalogDdl != null) {
+                return catalogDdl;
+            }
             try {
                 return super.getTableDdl(schema, table);
             } catch (RuntimeException fallbackError) {
@@ -1636,8 +1857,61 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
     }
 
+    /**
+     * DBMS_METADATA.GET_DDL('TABLE', ...) is also used for views by the generic
+     * table-DDL endpoint. DM8 can reject that call with an internal-index error,
+     * even though the view definition is available in ALL_VIEWS.
+     */
+    private String catalogTableLikeDdl(String schema, String table) throws RuntimeException {
+        if (schemaMatchesConnectedUser(schema)) {
+            try {
+                String materializedQuery = readCatalogText(
+                    "SELECT QUERY FROM USER_MVIEWS WHERE MVIEW_NAME = ?",
+                    table
+                );
+                if (notBlank(materializedQuery)) {
+                    return buildCatalogTableLikeDdl(schema, table, "MATERIALIZED VIEW", materializedQuery);
+                }
+            } catch (RuntimeException error) {
+                if (!isDamengMetadataUnavailableError(error)) {
+                    throw error;
+                }
+            }
+        }
+
+        String viewText = readCatalogText(
+            "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?",
+            schema,
+            table
+        );
+        if (notBlank(viewText)) {
+            return buildCatalogTableLikeDdl(schema, table, "VIEW", viewText);
+        }
+        return null;
+    }
+
+    private String readCatalogText(String sql, String... params) {
+        return unchecked(() -> {
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+                for (int i = 0; i < params.length; i++) {
+                    stmt.setString(i + 1, params[i]);
+                }
+                try (ResultSet rs = stmt.executeQuery()) {
+                    return rs.next() ? coalesce(readTextColumn(rs, 1)) : "";
+                }
+            }
+        });
+    }
+
+    private static String buildCatalogTableLikeDdl(String schema, String table, String objectType, String body) {
+        String normalizedBody = body.trim();
+        String statement = "CREATE " + objectType + " " + qualifiedName(schema, table) + " AS " + normalizedBody;
+        return ensureStatementTerminator(statement);
+    }
+
     @Override
-    public List<ColumnInfo> getColumns(String schema, String table) {
+    public List<ColumnInfo> getColumns(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return StandardJdbcMetadata.INSTANCE.getColumns(
                 requireConnected(),
@@ -1662,6 +1936,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
                         pkColumns.add(rs.getString(1));
                     }
                 }
+            }
+            if (pkColumns.isEmpty()) {
+                // ALL_CONS_COLUMNS/ALL_CONSTRAINTS return no rows — rather than an error — for
+                // accounts that cannot see the constraint dictionary, which is indistinguishable
+                // from a table that genuinely has no primary key. Re-ask through the driver,
+                // which reports primary keys to the table owner regardless of dictionary grants.
+                pkColumns.addAll(primaryKeyColumnsFromJdbcMetadata(schema, table));
             }
 
             Set<String> identityColumns = identityColumns(schema, table);
@@ -1724,6 +2005,23 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private Set<String> identityColumns(String schema, String table) {
+        try {
+            return identityColumnsFromSystemCatalog(schema, table);
+        } catch (Exception systemCatalogError) {
+            // SYS.SYSCOLUMNS is not granted to PUBLIC, so ordinary (non-DBA) accounts fail here
+            // with a permission error. Reporting that as an empty set is indistinguishable from
+            // "this table has no identity column", and the data grid then sends the identity
+            // value on INSERT — which the server rejects, while leaving it out trips the NOT NULL
+            // check. Fall back to the table DDL, which the table owner can always read.
+            //
+            // Any failure triggers the fallback, not just a permission error: the server message
+            // is localized, so matching on its text would silently stop working on a non-Chinese
+            // server, and every other failure mode wants the same fallback anyway.
+            return identityColumnsFromTableDdl(schema, table);
+        }
+    }
+
+    private Set<String> identityColumnsFromSystemCatalog(String schema, String table) throws Exception {
         Set<String> result = new java.util.HashSet<>();
         String sql = """
             SELECT /*+ PARALLEL(1) */ c.NAME
@@ -1743,14 +2041,184 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     }
                 }
             }
+        }
+        return result;
+    }
+
+    private Set<String> identityColumnsFromTableDdl(String schema, String table) {
+        String ddl = null;
+        String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, "TABLE");
+            stmt.setString(2, table);
+            stmt.setString(3, schema);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    ddl = readTextColumn(rs, 1);
+                }
+            }
         } catch (Exception ignored) {
-            // Some Dameng versions or users do not expose SYS.SYSCOLUMNS.
+            // DBMS_METADATA is unavailable on some deployments (and on views); identity
+            // information stays unknown, which is the best this path can do.
+        }
+        return identityColumnsFromDdlText(ddl);
+    }
+
+    /**
+     * Reads the identity columns out of a {@code CREATE TABLE} statement, e.g.
+     * {@code "ID" INT IDENTITY(1, 1) NOT NULL}. Quoted names and string defaults are skipped so a
+     * column called {@code "IDENTITY"} or a default of {@code 'IDENTITY(1,1)'} is not misread.
+     */
+    static Set<String> identityColumnsFromDdlText(String ddl) {
+        Set<String> result = new java.util.HashSet<>();
+        for (String definition : splitTableDdlDefinitions(ddl)) {
+            String trimmed = definition.trim();
+            if (trimmed.isEmpty() || trimmed.charAt(0) != '"') {
+                // Table-level constraint (PRIMARY KEY(...), CHECK(...)), not a column definition.
+                continue;
+            }
+            StringBuilder name = new StringBuilder();
+            int index = 1;
+            while (index < trimmed.length()) {
+                char ch = trimmed.charAt(index);
+                if (ch == '"') {
+                    if (index + 1 < trimmed.length() && trimmed.charAt(index + 1) == '"') {
+                        name.append('"');
+                        index += 2;
+                        continue;
+                    }
+                    break;
+                }
+                name.append(ch);
+                index++;
+            }
+            if (index >= trimmed.length() || name.length() == 0) {
+                continue;
+            }
+            String rest = stripSingleQuotedLiterals(trimmed.substring(index + 1));
+            if (DDL_IDENTITY_KEYWORD_PATTERN.matcher(rest).find()) {
+                result.add(name.toString());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Splits the column list of a {@code CREATE TABLE} statement on its top-level commas, so that
+     * {@code IDENTITY(1, 1)} and {@code VARCHAR(64)} stay attached to their column.
+     */
+    private static List<String> splitTableDdlDefinitions(String ddl) {
+        List<String> definitions = new ArrayList<>();
+        if (ddl == null) {
+            return definitions;
+        }
+        StringBuilder current = new StringBuilder();
+        int depth = 0;
+        boolean inLiteral = false;
+        boolean inQuotedName = false;
+        for (int i = 0; i < ddl.length(); i++) {
+            char ch = ddl.charAt(i);
+            if (inLiteral) {
+                current.append(ch);
+                if (ch == '\'') {
+                    inLiteral = false;
+                }
+                continue;
+            }
+            if (inQuotedName) {
+                current.append(ch);
+                if (ch == '"') {
+                    inQuotedName = false;
+                }
+                continue;
+            }
+            if (ch == '\'') {
+                inLiteral = true;
+                current.append(ch);
+                continue;
+            }
+            if (ch == '"') {
+                inQuotedName = true;
+                current.append(ch);
+                continue;
+            }
+            if (ch == '(') {
+                depth++;
+                if (depth == 1) {
+                    // Opening paren of the column list; drop the CREATE TABLE prefix before it.
+                    current.setLength(0);
+                } else {
+                    current.append(ch);
+                }
+                continue;
+            }
+            if (ch == ')') {
+                depth--;
+                if (depth == 0) {
+                    addTableDdlDefinition(definitions, current);
+                    break;
+                }
+                current.append(ch);
+                continue;
+            }
+            if (ch == ',' && depth == 1) {
+                addTableDdlDefinition(definitions, current);
+                continue;
+            }
+            if (depth > 0) {
+                current.append(ch);
+            }
+        }
+        return definitions;
+    }
+
+    private static void addTableDdlDefinition(List<String> definitions, StringBuilder current) {
+        String definition = current.toString().trim();
+        current.setLength(0);
+        if (!definition.isEmpty()) {
+            definitions.add(definition);
+        }
+    }
+
+    private static String stripSingleQuotedLiterals(String text) {
+        StringBuilder out = new StringBuilder(text.length());
+        boolean inLiteral = false;
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (inLiteral) {
+                if (ch == '\'') {
+                    inLiteral = false;
+                }
+                continue;
+            }
+            if (ch == '\'') {
+                inLiteral = true;
+                out.append(' ');
+                continue;
+            }
+            out.append(ch);
+        }
+        return out.toString();
+    }
+
+    private Set<String> primaryKeyColumnsFromJdbcMetadata(String schema, String table) {
+        Set<String> result = new java.util.HashSet<>();
+        try (ResultSet rs = requireConnected().getMetaData().getPrimaryKeys(null, schema, table)) {
+            while (rs.next()) {
+                String column = rs.getString("COLUMN_NAME");
+                if (notBlank(column)) {
+                    result.add(column);
+                }
+            }
+        } catch (Exception ignored) {
+            // The table is then reported without a primary key, as before this fallback existed.
         }
         return result;
     }
 
     @Override
-    public List<IndexInfo> listIndexes(String schema, String table) {
+    public List<IndexInfo> listIndexes(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return StandardJdbcMetadata.INSTANCE.listIndexes(
                 requireConnected(),
@@ -1762,16 +2230,24 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         return unchecked(() -> {
             List<IndexInfo> result = new ArrayList<>();
+            // The LEFT JOIN also matches 'U': a UNIQUE constraint owns its backing index the same
+            // way a primary key does, and neither can be altered with index-level DDL (#7959).
+            // The constraint type therefore drives two flags — IS_PK (only 'P') and
+            // CONSTRAINT_BACKED ('P' or 'U'), the same split `independentIndexes` already uses to
+            // keep constraint-backed indexes out of the generated table DDL. A unique index
+            // created with CREATE UNIQUE INDEX has no ALL_CONSTRAINTS row, so it stays false and
+            // keeps the index-level DDL path.
             String sql = """
                 SELECT /*+ PARALLEL(1) */ i.INDEX_NAME,
                     LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
                     i.UNIQUENESS,
                     CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK,
-                    i.INDEX_TYPE
+                    i.INDEX_TYPE,
+                    CASE WHEN c.CONSTRAINT_TYPE IN ('P', 'U') THEN 1 ELSE 0 END AS CONSTRAINT_BACKED
                 FROM ALL_INDEXES i
                 JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
                 LEFT JOIN ALL_CONSTRAINTS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_OWNER = c.OWNER
-                    AND c.CONSTRAINT_TYPE = 'P'
+                    AND c.CONSTRAINT_TYPE IN ('P', 'U')
                 WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
                 GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE
                 ORDER BY i.INDEX_NAME
@@ -1781,7 +2257,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new IndexInfo(
+                        IndexInfo index = new IndexInfo(
                             rs.getString(1),
                             splitNonEmpty(coalesce(rs.getString(2)), ","),
                             "UNIQUE".equals(rs.getString(3)),
@@ -1790,7 +2266,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                             rs.getString(5),
                             null,
                             null
-                        ));
+                        );
+                        index.setConstraint_backed("1".equals(rs.getString(6)));
+                        result.add(index);
                     }
                 }
             }
@@ -1799,7 +2277,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public List<ForeignKeyInfo> listForeignKeys(String schema, String table) {
+    public List<ForeignKeyInfo> listForeignKeys(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return StandardJdbcMetadata.INSTANCE.listForeignKeys(requireConnected(), schema, table);
         }
@@ -1833,7 +2312,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public List<TriggerInfo> listTriggers(String schema, String table) {
+    public List<TriggerInfo> listTriggers(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return StandardJdbcMetadata.INSTANCE.listTriggers(schema, table);
         }

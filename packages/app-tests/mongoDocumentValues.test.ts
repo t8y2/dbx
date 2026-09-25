@@ -8,7 +8,14 @@ import {
   buildMongoInsertDocument,
   buildMongoUpdateDocument,
   formatMongoShellLiteral,
+  MONGO_DOCUMENT_GRID_NULL,
   mongoDocumentDisplayValue,
+  mongoDocumentGridDisplayText,
+  mongoDocumentGridClipboardText,
+  mongoDocumentGridEditorText,
+  mongoDocumentGridExternalValue,
+  mongoDocumentGridInputValue,
+  mongoDocumentGridValue,
   mongoDocumentGridColumnTypes,
   mongoDocumentIdForGrid,
   parseMongoDocumentInputValue,
@@ -40,10 +47,7 @@ test("infers only consistently numeric Mongo grid columns", () => {
     },
   ];
 
-  assert.deepEqual(
-    mongoDocumentGridColumnTypes(documents, ["native", "int32", "int64", "double", "decimal", "mixedNumeric", "numericString", "mixed", "empty", "missing"]),
-    ["number", "int32", "int64", "double", "decimal128", "number", "", "", "", ""],
-  );
+  assert.deepEqual(mongoDocumentGridColumnTypes(documents, ["native", "int32", "int64", "double", "decimal", "mixedNumeric", "numericString", "mixed", "empty", "missing"]), ["number", "int32", "int64", "double", "decimal128", "number", "", "", "", ""]);
 });
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
@@ -59,6 +63,13 @@ test("preserves date-shaped Mongo strings instead of guessing Date", () => {
   assert.equal(parseMongoDocumentInputValue("2025-08-14 02:25:43.718"), "2025-08-14 02:25:43.718");
   assert.equal(parseMongoDocumentInputValue("2025-04-01 19:46:03"), "2025-04-01 19:46:03");
   assert.equal(parseMongoDocumentInputValue('"2025-08-14 02:25:43.718"'), "2025-08-14 02:25:43.718");
+});
+
+test("preserves plain text that only resembles Mongo JSON input", () => {
+  for (const value of ["{plain text", "[plain text", '"plain text']) {
+    assert.doesNotThrow(() => parseMongoDocumentInputValue(value));
+    assert.equal(parseMongoDocumentInputValue(value), value);
+  }
 });
 
 test("preserves existing date-shaped Mongo string fields on grid update", () => {
@@ -322,7 +333,9 @@ test("formats other extended JSON values through EJSON.deserialize", () => {
 });
 
 test("keeps normal Mongo values readable and unsafe Int64 editable", () => {
-  assert.equal(mongoDocumentDisplayValue(null), "NULL");
+  assert.equal(mongoDocumentDisplayValue(null), null);
+  assert.equal(mongoDocumentGridValue(null), MONGO_DOCUMENT_GRID_NULL);
+  assert.equal(mongoDocumentGridValue("NULL"), "NULL");
   assert.equal(mongoDocumentDisplayValue(undefined), undefined);
   assert.equal(mongoDocumentDisplayValue(42), 42);
   assert.equal(mongoDocumentDisplayValue(3.5), 3.5);
@@ -346,17 +359,59 @@ test("builds edits for Int32, Double, Date, and unsafe Int64", () => {
 test("keeps explicit Mongo null fields distinct from missing fields during grid edits", () => {
   const columns = ["_id", "nullable", "missing"];
 
-  assert.deepEqual(buildMongoUpdateDocument(new Map([[1, "NULL"]]), columns, { _id: "1", nullable: null }), {
+  assert.deepEqual(buildMongoUpdateDocument(new Map([[1, MONGO_DOCUMENT_GRID_NULL]]), columns, { _id: "1", nullable: null }), {
     $set: { nullable: null },
   });
   assert.deepEqual(buildMongoUpdateDocument(new Map([[1, "NULL"]]), columns, { _id: "1", nullable: "NULL" }), {
     $set: { nullable: "NULL" },
   });
+  assert.deepEqual(buildMongoUpdateDocument(new Map([[1, "NULL"]]), columns, { _id: "1", nullable: null }), {
+    $set: { nullable: null },
+  });
   assert.deepEqual(buildMongoUpdateDocument(new Map([[2, null]]), columns, { _id: "1", nullable: null }), {
     $unset: { missing: "" },
   });
-  assert.deepEqual(applyMongoGridChangesToDocument({ _id: "1", nullable: null }, new Map([[1, "NULL"]]), columns), {
+  assert.deepEqual(applyMongoGridChangesToDocument({ _id: "1", nullable: null }, new Map([[1, MONGO_DOCUMENT_GRID_NULL]]), columns), {
     _id: "1",
     nullable: null,
   });
+  assert.deepEqual(buildMongoInsertDocument(["1", MONGO_DOCUMENT_GRID_NULL, null], columns), {
+    nullable: null,
+  });
+  assert.deepEqual(buildMongoCopyInsertDocument(["1", MONGO_DOCUMENT_GRID_NULL, null], columns), {
+    _id: 1,
+    nullable: null,
+  });
+  assert.deepEqual(buildMongoCopyDocumentFromOriginal({ _id: "1", nullable: "before" }, ["1", MONGO_DOCUMENT_GRID_NULL], columns, [false, true, false]), {
+    _id: "1",
+    nullable: null,
+  });
+});
+
+test("escapes Mongo collection-grid values reserved for BSON null state", () => {
+  const columns = ["_id", "value"];
+  const reservedString = MONGO_DOCUMENT_GRID_NULL;
+  const gridValue = mongoDocumentGridValue(reservedString);
+
+  assert.notEqual(gridValue, reservedString);
+  assert.equal(mongoDocumentGridEditorText(gridValue), reservedString);
+  assert.equal(mongoDocumentGridDisplayText(gridValue), JSON.stringify(reservedString));
+  assert.equal(mongoDocumentGridExternalValue(gridValue), reservedString);
+  assert.equal(mongoDocumentGridInputValue(reservedString), reservedString);
+  assert.equal(mongoDocumentGridInputValue(gridValue as string), gridValue);
+  assert.deepEqual(buildMongoUpdateDocument(new Map([[1, gridValue as string]]), columns, { _id: "1", value: reservedString }), {
+    $set: { value: reservedString },
+  });
+});
+
+test("keeps BSON null empty in editors while preserving a copy marker", () => {
+  assert.equal(mongoDocumentGridEditorText(MONGO_DOCUMENT_GRID_NULL), "");
+  assert.equal(mongoDocumentGridClipboardText(MONGO_DOCUMENT_GRID_NULL), "NULL");
+  assert.equal(mongoDocumentGridEditorText("NULL"), undefined);
+  assert.equal(mongoDocumentGridClipboardText("NULL"), undefined);
+});
+
+test("restores internal Mongo collection-grid values for external output", () => {
+  assert.equal(mongoDocumentGridExternalValue(MONGO_DOCUMENT_GRID_NULL), null);
+  assert.equal(mongoDocumentGridExternalValue("NULL"), "NULL");
 });

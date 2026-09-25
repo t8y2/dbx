@@ -21,6 +21,7 @@ import java.nio.file.attribute.FileTime;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarOutputStream;
+import java.util.jar.Manifest;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -128,6 +129,89 @@ class H2AgentMigrationTest {
     }
 
     @Test
+    void closedFileConnectionsDoNotPinTheDetectedVersion() throws Exception {
+        Path base = tempDirectory.resolve("replaceable");
+        H2Agent first = new H2Agent();
+        first.connect(profileParams("h2", "file:" + base));
+        first.disconnect();
+        Files.delete(Path.of(base + ".mv.db"));
+        H2Agent older = new H2Agent();
+        older.connect(profileParams("h2-v2", "file:" + base));
+        older.disconnect();
+        H2Agent detected = new H2Agent();
+        try {
+            detected.connect(profileParams("h2", "file:" + base + ";IFEXISTS=TRUE"));
+            Assertions.assertEquals(H2DriverVersion.V2, detected.driverVersion());
+        } finally {
+            detected.disconnect();
+        }
+    }
+
+    @Test
+    void activeFileRejectsDifferentDriverAndWrongCredentials() {
+        Path base = tempDirectory.resolve("protected");
+        H2Agent owner = new H2Agent();
+        H2Agent other = new H2Agent();
+        try {
+            ConnectParams params = profileParams("h2-v3", "file:" + base);
+            params.setPassword("owner-secret");
+            owner.connect(params);
+            RuntimeException mismatch = Assertions.assertThrows(RuntimeException.class,
+                () -> other.connect(profileParams("h2-v2", "file:" + base)));
+            Assertions.assertTrue(hasCauseMessage(mismatch, "different driver"));
+            Assertions.assertThrows(RuntimeException.class,
+                () -> other.testConnectionWithInfo(profileParams("h2", "file:" + base)));
+            Assertions.assertEquals(List.of(List.of(1)), owner.executeQuery("SELECT 1", null, new ExecuteQueryOptions()).getRows());
+        } finally {
+            other.disconnect();
+            owner.disconnect();
+        }
+    }
+
+    @Test
+    void autoServerOptionsUseH2ParsingRules() throws Exception {
+        String base = "file:" + tempDirectory.resolve("options");
+        Assertions.assertFalse(H2DriverLoader.autoServerEnabled(profileParams("h2", base)));
+        Assertions.assertFalse(H2DriverLoader.autoServerEnabled(profileParams("h2", base + ";AUTO_SERVER=FALSE")));
+        Assertions.assertTrue(H2DriverLoader.autoServerEnabled(profileParams("h2", base + ";auto_server=TRUE")));
+        Assertions.assertTrue(H2DriverLoader.autoServerEnabled(profileParams("h2", base + ";AUTO_SERVER=1")));
+        Assertions.assertFalse(H2DriverLoader.autoServerEnabled(profileParams("h2", base
+            + ";INIT=SET @NOTE 'x\\;AUTO_SERVER=TRUE'")));
+        Assertions.assertThrows(Exception.class, () -> H2DriverLoader.autoServerEnabled(profileParams("h2", base
+            + ";AUTO_SERVER=FALSE;AUTO_SERVER=TRUE")));
+    }
+
+    @Test
+    void autoServerLockDoesNotBypassCorruptHeaderValidation() throws Exception {
+        Path base = tempDirectory.resolve("corrupt-auto-server");
+        Path file = Path.of(base + ".mv.db");
+        byte[] corrupt = new byte[8192];
+        java.util.Arrays.fill(corrupt, (byte) 0x5a);
+        Files.write(file, corrupt);
+        Files.writeString(Path.of(base + ".lock.db"), "server=127.0.0.1:1\nid=test-key\n");
+        String url = "jdbc:h2:file:" + base + ";AUTO_SERVER=TRUE";
+        Assertions.assertTrue(H2FileFormatDetector.hasAutoServerLock(url));
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class,
+            () -> new H2Agent().connect(profileParams("h2", "file:" + base + ";AUTO_SERVER=TRUE")));
+        Assertions.assertTrue(hasCauseMessage(error, "Cannot determine the H2 MVStore format"));
+        Assertions.assertArrayEquals(corrupt, Files.readAllBytes(file));
+    }
+
+    @Test
+    void autoServerLockRequiresValidServerAndKeyProperties() throws Exception {
+        Path base = tempDirectory.resolve("invalid-lock");
+        Path lock = Path.of(base + ".lock.db");
+        String url = "jdbc:h2:file:" + base;
+        Assertions.assertFalse(H2FileFormatDetector.hasAutoServerLock(url));
+        Files.writeString(lock, "server=127.0.0.1:1\n");
+        Assertions.assertFalse(H2FileFormatDetector.hasAutoServerLock(url));
+        Files.writeString(lock, "id=test-key\n");
+        Assertions.assertFalse(H2FileFormatDetector.hasAutoServerLock(url));
+        Files.writeString(lock, "server=\\uZZZZ\nid=test-key\n");
+        Assertions.assertFalse(H2FileFormatDetector.hasAutoServerLock(url));
+    }
+
+    @Test
     void autoRejectsCorruptMvStoreWithoutModifyingIt() throws Exception {
         Path base = tempDirectory.resolve("corrupt");
         Path file = Path.of(base + ".mv.db");
@@ -232,6 +316,23 @@ class H2AgentMigrationTest {
     }
 
     @Test
+    void customDriverPreservesManifestRelativeClasspath() throws Exception {
+        Path driverJar = copyBundledDriver("h2-2.1.214.jar");
+        Path entryJar = tempDirectory.resolve("driver-entry.jar");
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
+        manifest.getMainAttributes().putValue("Class-Path", driverJar.getFileName().toString());
+        try (JarOutputStream ignored = new JarOutputStream(Files.newOutputStream(entryJar), manifest)) {
+        }
+        H2DriverLoader.LoadedDriver driver = H2DriverLoader.loadExternal(List.of(entryJar.toString()), "org.h2.Driver");
+        try (java.sql.Connection connection = driver.driver().connect("jdbc:h2:mem:manifest-classpath", new java.util.Properties())) {
+            Assertions.assertTrue(connection.getMetaData().getDriverVersion().startsWith("2.1.214"));
+        } finally {
+            driver.classLoader().close();
+        }
+    }
+
+    @Test
     void loadsCustomH2DriverFromExternalClasspath() throws Exception {
         Path helperJar = tempDirectory.resolve("helper.jar");
         try (JarOutputStream ignored = new JarOutputStream(Files.newOutputStream(helperJar))) {
@@ -250,6 +351,30 @@ class H2AgentMigrationTest {
             Assertions.assertEquals(List.of("CUSTOM_DRIVER_PROBE"), agent.listTables("PUBLIC").stream().map(TableInfo::getName).toList());
         } finally {
             agent.disconnect();
+            H2DriverLoader.loadExternal(params.getJdbc_driver_paths(), params.getJdbc_driver_class()).classLoader().close();
+        }
+    }
+
+    @Test
+    void customFileConnectionsShareDriver() throws Exception {
+        Path jar = copyBundledDriver("h2-2.1.214.jar");
+        ConnectParams params = profileParams("h2-custom", "file:" + tempDirectory.resolve("custom-shared"));
+        params.setJdbc_driver_paths(List.of(jar.toString()));
+        params.setJdbc_driver_class("org.h2.Driver");
+        H2Agent first = new H2Agent();
+        H2Agent second = new H2Agent();
+        try {
+            first.connect(params);
+            first.executeQuery("CREATE TABLE SHARED_CUSTOM (ID INT)", null, new ExecuteQueryOptions());
+            first.executeQuery("INSERT INTO SHARED_CUSTOM VALUES (42)", null, new ExecuteQueryOptions());
+            second.connect(params);
+            Assertions.assertEquals(List.of(List.of(42)), second.executeQuery("SELECT ID FROM SHARED_CUSTOM", null, new ExecuteQueryOptions()).getRows());
+            first.disconnect();
+            Assertions.assertEquals(List.of(List.of(42)), second.executeQuery("SELECT ID FROM SHARED_CUSTOM", null, new ExecuteQueryOptions()).getRows());
+        } finally {
+            first.disconnect();
+            second.disconnect();
+            H2DriverLoader.loadExternal(params.getJdbc_driver_paths(), params.getJdbc_driver_class()).classLoader().close();
         }
     }
 
@@ -355,6 +480,128 @@ class H2AgentMigrationTest {
 }
 
 class H2VersionMatrixTest {
+    @Test
+    void tableDdlPreservesGeneratedColumnsConstraintsAndComments() {
+        for (String profile : List.of("h2-v1", "h2-v2", "h2-v3")) {
+            ConnectParams params = new ConnectParams("", 0, "mem:ddl-" + profile, "sa", "", "", "", false);
+            params.setDriver_profile(profile);
+            H2Agent agent = new H2Agent();
+            agent.connect(params);
+            try {
+                ExecuteQueryOptions options = new ExecuteQueryOptions();
+                agent.executeQuery("CREATE SCHEMA \"Source\"; CREATE SCHEMA \"Target\"", null, options);
+                agent.executeQuery("CREATE SEQUENCE \"Source\".UNUSED; CREATE SEQUENCE \"Source\".SHARED START WITH 10", null, options);
+                agent.executeQuery("CREATE TABLE \"Source\".PARENT (ID INT PRIMARY KEY, TOKEN BIGINT DEFAULT NEXT VALUE FOR \"Source\".SHARED)", null, options);
+                agent.executeQuery("CREATE TABLE \"Source\".CHILD (ID INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
+                    + "PARENT_ID INT, QTY INT DEFAULT 1 CHECK (QTY > 0), TOTAL INT AS (QTY * 2), RAW_BYTES BINARY(8), "
+                    + "TOKEN BIGINT DEFAULT NEXT VALUE FOR \"Source\".SHARED, NOTE VARCHAR(128) DEFAULT 'NEXT VALUE FOR \"Source\".\"UNUSED\"', "
+                    + "CONSTRAINT FK_PARENT FOREIGN KEY (PARENT_ID) REFERENCES \"Source\".PARENT(ID) ON DELETE CASCADE)", null, options);
+                agent.executeQuery("COMMENT ON COLUMN \"Source\".CHILD.QTY IS 'quantity'; COMMENT ON TABLE \"Source\".CHILD IS 'child table'", null, options);
+                agent.executeQuery("CREATE INDEX \"Source\".IDX_QTY ON \"Source\".CHILD(QTY DESC)", null, options);
+                List<ColumnInfo> columns = agent.getColumns("Source", "CHILD");
+                Assertions.assertTrue(columns.get(0).getExtra().contains("identity"), profile);
+                Assertions.assertEquals("computed", columns.get(3).getExtra(), profile);
+                Assertions.assertEquals("quantity", columns.get(2).getComment(), profile);
+
+                for (String table : List.of("PARENT", "CHILD")) {
+                    String ddl = agent.getTableDdl("Source", table);
+                    Assertions.assertFalse(ddl.contains("CREATE USER"), ddl);
+                    Assertions.assertFalse(ddl.contains("CREATE SCHEMA"), ddl);
+                    Assertions.assertFalse(ddl.contains("INSERT INTO"), ddl);
+                    Assertions.assertFalse(ddl.contains("CREATE SEQUENCE IF NOT EXISTS \"Source\".\"UNUSED\""), ddl);
+                    if (table.equals("PARENT")) {
+                        Assertions.assertFalse(ddl.contains("SYSTEM_SEQUENCE_"), ddl);
+                    }
+                    agent.executeQuery(ddl.replace("\"Source\".", "\"Target\"."), null, options);
+                }
+                agent.executeQuery("INSERT INTO \"Target\".PARENT(ID) VALUES (1)", null, options);
+                agent.executeQuery("INSERT INTO \"Target\".CHILD(PARENT_ID) VALUES (1)", null, options);
+                Assertions.assertEquals(List.of(List.of(1, 1, 2)), agent.executeQuery("SELECT ID, QTY, TOTAL FROM \"Target\".CHILD", null, options).getRows(), profile);
+                Assertions.assertEquals("11", agent.executeQuery("SELECT TOKEN FROM \"Target\".CHILD", null, options).getRows().get(0).get(0).toString(), profile);
+                Assertions.assertThrows(RuntimeException.class, () -> agent.executeQuery("INSERT INTO \"Target\".CHILD(QTY) VALUES (-1)", null, options), profile);
+                Assertions.assertTrue(agent.getTableDdl("Target", "CHILD").contains("\"QTY\" DESC"), profile);
+                Assertions.assertEquals("quantity", agent.getColumns("Target", "CHILD").get(2).getComment(), profile);
+                agent.executeQuery("DELETE FROM \"Target\".PARENT", null, options);
+                Assertions.assertTrue(agent.executeQuery("SELECT * FROM \"Target\".CHILD", null, options).getRows().isEmpty(), profile);
+            } finally {
+                agent.disconnect();
+            }
+        }
+    }
+
+    @Test
+    void generatedAlwaysIdentityAcceptsExplicitInsertWithOverride() {
+        for (String profile : List.of("h2-v2", "h2-v3")) {
+            H2Agent agent = connect(profile);
+            try {
+                ExecuteQueryOptions options = new ExecuteQueryOptions();
+                agent.executeQuery("CREATE TABLE ALWAYS_ID (ID INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, V INT)", null, options);
+                Assertions.assertEquals("generated always as identity", agent.getColumns("PUBLIC", "ALWAYS_ID").get(0).getExtra());
+                agent.executeQuery("INSERT INTO ALWAYS_ID(ID, V) OVERRIDING SYSTEM VALUE VALUES (42, 7)", null, options);
+                Assertions.assertEquals(List.of(List.of(42, 7)), agent.executeQuery("SELECT ID, V FROM ALWAYS_ID", null, options).getRows());
+            } finally {
+                agent.disconnect();
+            }
+        }
+    }
+
+    @Test
+    void transferMetadataAndWritesRespectCustomSchemasAcrossBundledVersions() {
+        for (String profile : List.of("h2-v1", "h2-v2", "h2-v3")) {
+            ConnectParams params = new ConnectParams("", 0, "mem:transfer-" + profile, "sa", "", "", "", false);
+            params.setDriver_profile(profile);
+            H2Agent agent = new H2Agent();
+            agent.connect(params);
+            try {
+                ExecuteQueryOptions options = new ExecuteQueryOptions();
+                agent.executeQuery("CREATE SCHEMA \"TransferTarget\"", null, options);
+                agent.executeQuery("CREATE TABLE PUBLIC.ITEMS (PUBLIC_ONLY INT)", null, options);
+                agent.executeQuery(
+                    "CREATE TABLE \"TransferTarget\".ITEMS (ID INT, PART INT, NAME VARCHAR(1024), AMOUNT DECIMAL(12, 2), PRIMARY KEY (ID, PART))",
+                    null, options
+                );
+                agent.executeQuery("CREATE INDEX \"TransferTarget\".IDX_NAME ON \"TransferTarget\".ITEMS(NAME)", null, options);
+                agent.executeQuery("CREATE UNIQUE HASH INDEX \"TransferTarget\".IDX_PART ON \"TransferTarget\".ITEMS(PART)", null, options);
+
+                Assertions.assertTrue(agent.listSchemas().contains("TransferTarget"), profile);
+                Assertions.assertTrue(agent.listTables("TransferTarget").stream().anyMatch(table -> table.getName().equals("ITEMS")), profile);
+                Assertions.assertTrue(agent.listTables("MISSING_SCHEMA").isEmpty(), profile);
+                Assertions.assertEquals(List.of("PUBLIC_ONLY"), agent.getColumns(null, "ITEMS").stream().map(ColumnInfo::getName).toList(), profile);
+                List<ColumnInfo> columns = agent.getColumns("TransferTarget", "ITEMS");
+                Assertions.assertEquals(List.of("ID", "PART", "NAME", "AMOUNT"), columns.stream().map(ColumnInfo::getName).toList(), profile);
+                Assertions.assertEquals(1024, columns.get(2).getCharacter_maximum_length(), profile);
+                Assertions.assertEquals(12, columns.get(3).getNumeric_precision(), profile);
+                Assertions.assertEquals(2, columns.get(3).getNumeric_scale(), profile);
+                Assertions.assertTrue(agent.listIndexes("TransferTarget", "ITEMS").stream().anyMatch(index -> index.getName().equals("IDX_NAME")), profile);
+                agent.executeQuery("CREATE SCHEMA \"TransferCopy\"", null, options);
+                String ddl = agent.getTableDdl("TransferTarget", "ITEMS");
+                agent.executeQuery(ddl.replace("\"TransferTarget\".", "\"TransferCopy\"."), null, options);
+                Assertions.assertEquals(1024, agent.getColumns("TransferCopy", "ITEMS").get(2).getCharacter_maximum_length(), profile);
+                Assertions.assertTrue(agent.listIndexes("TransferCopy", "ITEMS").stream().anyMatch(index -> index.getName().equals("IDX_NAME")), profile);
+                Assertions.assertTrue(agent.listIndexes("TransferCopy", "ITEMS").stream().anyMatch(index -> index.getName().equals("IDX_PART") && index.getIs_unique()), profile);
+                agent.executeQuery("INSERT INTO \"TransferCopy\".ITEMS VALUES (1, 1, 'first', 1.00)", null, options);
+                Assertions.assertThrows(RuntimeException.class, () -> agent.executeQuery("INSERT INTO \"TransferCopy\".ITEMS VALUES (2, 1, 'duplicate', 2.00)", null, options), profile);
+
+                agent.executeQuery("INSERT INTO \"TransferTarget\".ITEMS VALUES (1, 1, 'old', 1.00)", null, options);
+                agent.executeQuery(
+                    "MERGE INTO \"TransferTarget\".\"ITEMS\" (\"ID\", \"PART\", \"NAME\", \"AMOUNT\") KEY (\"ID\", \"PART\") VALUES "
+                        + "(1, 1, 'updated', 12.34), (1, 2, 'new', 56.78)",
+                    null, options
+                );
+                QueryResult result = agent.executeQuery("SELECT NAME, CAST(AMOUNT AS VARCHAR) FROM \"TransferTarget\".ITEMS ORDER BY PART", null, options);
+                Assertions.assertEquals(List.of(List.of("updated", "12.34"), List.of("new", "56.78")), result.getRows(), profile);
+                agent.executeQuery("TRUNCATE TABLE \"TransferTarget\".ITEMS", null, options);
+                Assertions.assertTrue(agent.executeQuery("SELECT * FROM \"TransferTarget\".ITEMS", null, options).getRows().isEmpty(), profile);
+                agent.executeQuery("CREATE TABLE \"TransferTarget\".PAYLOADS (LABEL VARCHAR(128), DATA JSON, RAW_BYTES VARBINARY)", null, options);
+                agent.executeQuery("INSERT INTO \"TransferTarget\".PAYLOADS VALUES ('C:\\tmp\\o''clock', JSON '[1,2]', X'00ff')", null, options);
+                QueryResult payload = agent.executeQuery("SELECT * FROM \"TransferTarget\".PAYLOADS", null, options);
+                Assertions.assertEquals(List.of(List.of("C:\\tmp\\o'clock", "[1,2]", "0x00ff")), payload.getRows(), profile);
+            } finally {
+                agent.disconnect();
+            }
+        }
+    }
+
     @Test
     void metadataAndExecutionWorkAcrossBundledVersions() {
         for (String profile : List.of("h2-v1", "h2-v2", "h2-v3")) {

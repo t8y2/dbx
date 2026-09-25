@@ -3,6 +3,7 @@ import * as api from "@/lib/backend/api.ts";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql.ts";
 import { uuid } from "@/lib/common/utils.ts";
 import { SINGLE_DATABASE_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
 
 export const DATABASE_EXPORT_ROW_LIMIT = 10_000;
 export const DATABASE_EXPORT_PAGE_SIZE = 500;
@@ -46,6 +47,8 @@ export interface BuildExportInsertStatementsOptions {
   spatialColumns?: QueryResult["spatial_columns"];
   spatialValues?: QueryResult["spatial_values"];
   rows: QueryResult["rows"];
+  /** 生成 INSERT 时需要排除的列名（例如导出时不带主键），忽略大小写匹配。 */
+  excludeColumns?: string[];
   batchSize?: number;
 }
 
@@ -74,6 +77,19 @@ export interface AllDatabaseExportPlanItem {
   schema: string;
   fileStem: string;
   displayName: string;
+}
+
+/**
+ * Return schemas that can be exported as ordinary schema-owned objects.
+ *
+ * Xugu exposes database-global namespaces (public synonyms and scheduler jobs)
+ * through reserved synthetic schema names so the sidebar can reuse its normal
+ * tree loading path. They are not real schemas and must not be offered by the
+ * schema export selector.
+ */
+export function filterExportableSchemas(schemas: readonly string[], databaseType?: DatabaseType): string[] {
+  if (databaseType !== "xugu") return [...schemas];
+  return schemas.filter((schema) => !isXuguSyntheticScope(schema));
 }
 
 export interface DatabaseBackupSnapshotOptions {
@@ -152,8 +168,19 @@ export function buildAllDatabaseExportPlan(options: AllDatabaseExportPlanInput):
       displayName: schema,
     }));
   }
+  // PostgreSQL supports multiple schemas in one database. Keep the database
+  // as the export unit so the backend can produce one restore script for all
+  // schemas instead of one file per schema.
+  if (options.dbType === "postgres" && options.schemaAware) {
+    return options.databases.map((database) => ({
+      database,
+      schema: "",
+      fileStem: database,
+      displayName: database,
+    }));
+  }
   return options.databases.flatMap((database) => {
-    const schemas = options.schemaAware ? (options.schemasByDatabase?.[database] ?? []).filter((schema) => schema.trim()) : [database];
+    const schemas = options.schemaAware ? filterExportableSchemas(options.schemasByDatabase?.[database] ?? [], options.dbType).filter((schema) => schema.trim()) : [database];
     const exportSchemas = schemas.length > 0 ? schemas : [database];
     const includeSchemaInFileName = options.schemaAware && exportSchemas.length > 1;
 

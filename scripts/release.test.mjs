@@ -41,7 +41,7 @@ function createMockGh() {
       "  const version = tagName.slice(1);",
       "  const assets = [",
       '    "latest.json",',
-      '    "DBX_" + version + "_aarch64.dmg",',
+      '    "DBX_" + version + "_" + (process.env.MOCK_ARM64_DMG_ARCH || "arm64") + ".dmg",',
       '    "DBX_" + version + "_x64.dmg",',
       '    "DBX_" + version + "_x64-setup.exe",',
       '    "DBX_" + version + "_arm64-setup.exe",',
@@ -100,6 +100,33 @@ test("rollback rejects a target that is not older than latest", () => {
   assert.match(result.stderr, /must be older than the current latest release v0\.5\.64/);
 });
 
+test("rollback accepts pre-rename releases that ship the aarch64 dmg asset", () => {
+  const mockBin = createMockGh();
+  const logPath = join(mockBin, "gh.log");
+  const result = runRelease(["rollback", "v0.5.63", "--yes", "--skip-fetch"], {
+    PATH: `${mockBin}:${process.env.PATH}`,
+    GH_LOG: logPath,
+    MOCK_LATEST_TAG: "v0.5.64",
+    MOCK_ARM64_DMG_ARCH: "aarch64",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const commands = readFileSync(logPath, "utf8").trim().split("\n");
+  assert.equal(commands.length, 3);
+});
+
+test("rollback rejects a release missing both arm64 dmg asset names", () => {
+  const mockBin = createMockGh();
+  const result = runRelease(["rollback", "v0.5.63", "--yes", "--skip-fetch"], {
+    PATH: `${mockBin}:${process.env.PATH}`,
+    MOCK_LATEST_TAG: "v0.5.64",
+    MOCK_ARM64_DMG_ARCH: "armv7",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing required distribution assets: DBX_0\.5\.63_arm64\.dmg or DBX_0\.5\.63_aarch64\.dmg/);
+});
+
 test("rollback rejects prerelease tag syntax", () => {
   const result = runRelease(["rollback", "v0.5.63-rc.1", "--dry-run", "--skip-fetch"]);
 
@@ -133,7 +160,12 @@ test("Windows 7 release build does not use sccache", () => {
 
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
-  const win7Job = workflow.slice(start, end);
+  const win7Job = workflow
+    .slice(start, end)
+    // Ignore comments; the job itself documents why sccache is absent.
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .join("\n");
   assert.doesNotMatch(win7Job, /RUSTC_WRAPPER|SCCACHE_|sccache/i);
 });
 

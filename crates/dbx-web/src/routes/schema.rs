@@ -64,6 +64,16 @@ pub async fn list_database_storage(
     Ok(Json(result))
 }
 
+pub async fn list_xugu_tablespaces(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Vec<dbx_core::db::XuguTablespaceInfo>>, AppError> {
+    let result = dbx_core::schema::list_xugu_tablespaces_core(&state.app, &q.connection_id, q.database.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn get_sqlserver_completion_context(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -392,25 +402,8 @@ pub async fn get_custom_type_details(
     Ok(Json(result))
 }
 
-const OBJECT_METADATA_CACHE_PREFIX: &str = "object-meta:v1";
-
-fn metadata_cache_segment(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' => {
-                encoded.push(byte as char)
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push(HEX[(byte >> 4) as usize] as char);
-                encoded.push(HEX[(byte & 0x0f) as usize] as char);
-            }
-        }
-    }
-    encoded
-}
+pub(crate) use dbx_core::object_cache::object_metadata_cache_prefix;
+use dbx_core::object_cache::{metadata_cache_segment, OBJECT_METADATA_CACHE_PREFIX};
 
 fn metadata_cache_key(
     connection_id: &str,
@@ -431,15 +424,6 @@ fn metadata_cache_key(
         String::new(),
     ]
     .join(":")
-}
-
-pub(crate) fn object_metadata_cache_prefix(connection_id: &str, database: &str) -> String {
-    format!(
-        "{}:{}:{}:",
-        OBJECT_METADATA_CACHE_PREFIX,
-        metadata_cache_segment(connection_id),
-        metadata_cache_segment(database)
-    )
 }
 
 fn decode_metadata_cache<T: DeserializeOwned>(value: serde_json::Value) -> Option<T> {
@@ -476,6 +460,15 @@ where
 
 fn should_cache_columns(client_session_id: Option<&str>) -> bool {
     client_session_id.is_none()
+}
+
+pub async fn get_plugin_table_metadata(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<dbx_core::schema::plugin_metadata::PluginTableContext>,
+) -> Result<Json<dbx_core::schema::plugin_metadata::PluginTableMetadata>, AppError> {
+    let result =
+        dbx_core::schema::plugin_metadata::get_table_metadata(&state.app, request).await.map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn list_columns(
@@ -719,6 +712,19 @@ pub async fn get_table_partition_status(
         .map_err(AppError::from)
 }
 
+pub async fn get_table_partitioning(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::db::PgTablePartitioning>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    dbx_core::schema::get_table_partitioning_core(&state.app, &q.connection_id, database, schema, table)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
 pub async fn list_invalid_indexes(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -878,6 +884,17 @@ pub async fn list_available_extensions(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let database = q.database.as_deref().unwrap_or("");
     let result = dbx_core::schema::list_available_extensions_core(&state.app, &q.connection_id, database)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn list_event_triggers(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let result = dbx_core::schema::list_event_triggers_core(&state.app, &q.connection_id, database)
         .await
         .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))

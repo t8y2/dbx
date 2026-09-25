@@ -1,3 +1,5 @@
+import { AI_RICH_BLOCK_HANDLERS, type AiMessageChartSegment, type AiMessageHtmlSegment, type AiRichBlockHandler } from "@/lib/ai/richContent/aiRichContent";
+
 export interface AiMessageTextSegment {
   type: "text";
   content: string;
@@ -14,7 +16,7 @@ export interface AiMessageCodeSegment {
   pending: boolean;
 }
 
-export type AiMessageRenderSegment = AiMessageTextSegment | AiMessageCodeSegment;
+export type AiMessageRenderSegment = AiMessageTextSegment | AiMessageCodeSegment | AiMessageChartSegment | AiMessageHtmlSegment;
 
 interface MessageSegment {
   type: "text" | "code";
@@ -36,6 +38,8 @@ export interface AiMessageRendererOptions {
   maxCacheChars?: number;
   markdown: (text: string) => string;
   highlightCode?: (content: string, lang: string) => string;
+  /** Resolves a fenced raw lang to a rich handler (chart-json, ...). */
+  richHandlers?: Record<string, AiRichBlockHandler>;
 }
 
 const DEFAULT_MAX_ENTRIES = 100;
@@ -46,6 +50,9 @@ const DEFAULT_MAX_CACHE_CHARS = 400_000;
 const STREAM_BLOCK_MIN_CHARS = 240;
 const BLANK_LINE_RE = /\n{2,}/g;
 const FENCE_LINE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const INLINE_LANGUAGE_FENCE_RE = /^(.*?)(```[a-zA-Z0-9_+.-]+)[ \t]*(\r?)$/;
+const MARKDOWN_CONTAINER_PREFIX_RE = /^[>*+\d.)-]+$/;
+const STANDALONE_CLOSING_FENCE_RE = /^```[ \t]*\r?$/;
 // Definitions inside block containers still apply to the whole document. Container indentation
 // may exceed three columns, so this prefix is intentionally conservative: a false positive only
 // disables streaming splits, while a false negative changes reference-link rendering.
@@ -53,6 +60,7 @@ const LINK_REFERENCE_RE = /^(?:[ \t]*(?:>[ \t]?|(?:[*+-]|\d{1,9}[.)])[ \t]+))*[ 
 // Raw HTML blocks stay open across blank lines, which no block boundary may cut:
 // comments, processing instructions, declarations, CDATA and the raw-text elements.
 const RAW_HTML_BLOCK_RE = /<!--|<\?|<!\[CDATA\[|<![A-Za-z]|<\/?(?:script|style|pre|textarea)\b/i;
+const HTML_TAG_RE = /<\/?[A-Za-z][^<>\n]*>/;
 const SQL_LANGUAGES = new Map([
   ["sql", "SQL"],
   ["mysql", "MYSQL"],
@@ -77,6 +85,8 @@ interface SegmentRenderFlags {
   pending: boolean;
   /** The segment is the growing tail of a streaming message. */
   live: boolean;
+  /** True once the closing fence has arrived (rich handlers require it). */
+  closed?: boolean;
 }
 
 export function createAiMessageRenderer(options: AiMessageRendererOptions) {
@@ -90,10 +100,22 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
   // Bounded by the one answer being streamed, and dropped as soon as another answer starts.
   const streamBlocks = new Map<string, AiMessageRenderSegment>();
   let streamContent = "";
+  // Rich blocks are dispatched by their raw fenced language tag (lowercased,
+  // trimmed) BEFORE normalizeAiCodeLanguage's SQL/SHELL label map, so the
+  // shared code path for SQL/SHELL buckets is untouched.
+  const richHandlers = options.richHandlers ?? AI_RICH_BLOCK_HANDLERS;
 
   function renderSegment(segment: MessageSegment, flags: SegmentRenderFlags): AiMessageRenderSegment {
     if (segment.type === "text") {
       return { type: "text", content: segment.content, html: options.markdown(segment.content) };
+    }
+    const rawLang = (segment.lang || "").trim().toLowerCase();
+    const handler = richHandlers[rawLang];
+    if (handler) {
+      // The `closed` flag gates the handler call: an unfinished fence
+      // (streaming) always routes back to the plain code segment.
+      const rich = flags.closed ? handler.parse(segment.content, { closed: true }) : null;
+      if (rich) return rich;
     }
     const lang = normalizeAiCodeLanguage(segment.lang);
     // Highlighting a block that is still streaming is wasted work: it is re-highlighted once the fence closes.
@@ -121,12 +143,16 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
     if (segment.content.length > maxCacheableChars) return renderSegment(segment, flags);
 
     // Length-prefixed so no field separator can be forged by segment content.
-    const key = `${segment.type}|${segment.lang ?? ""}|${flags.pending ? 1 : 0}|${segment.content.length}|${segment.content}`;
+    // `closed` also participates in the key so an open chart-json fence caches
+    // as plain code and the closed fence caches as its rich chart segment.
+    const key = `${segment.type}|${segment.lang ?? ""}|${flags.pending ? 1 : 0}|${flags.closed ? 1 : 0}|${segment.content.length}|${segment.content}`;
     const cached = segmentCache.get(key);
     if (cached) return cached;
 
     const rendered = renderSegment(segment, flags);
-    segmentCache.set(key, rendered, segment.content.length + rendered.html.length);
+    // Rich chart segments carry their parsed spec instead of an html string.
+    const size = segment.content.length + ("html" in rendered ? rendered.html.length : 0);
+    segmentCache.set(key, rendered, size);
     return rendered;
   }
 
@@ -152,7 +178,7 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
       const live = blocks[blocks.length - 1];
       return [...blocks.slice(0, -1).map(renderStreamingBlock), renderSegment({ type: "text", content: live }, { pending: false, live: true })];
     }
-    return [renderSegment(segment, { pending, live: true })];
+    return [renderSegment(segment, { pending, live: true, closed: segment.closed === true })];
   }
 
   function render(content: string, renderOptions: AiMessageRenderOptions = {}): AiMessageRenderSegment[] {
@@ -171,11 +197,12 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
     const rendered = segments.flatMap((segment, index): AiMessageRenderSegment[] => {
       if (streaming && index === lastIndex) return renderTail(segment);
       const pending = segment.type === "code" && segment.closed !== true;
-      return [renderCachedSegment(segment, { pending, live: false })];
+      return [renderCachedSegment(segment, { pending, live: false, closed: segment.closed === true })];
     });
 
     // Charge for the HTML the entry pins, not just for the source text.
-    if (cacheable) cache.set(content, rendered, content.length + rendered.reduce((sum, segment) => sum + segment.html.length, 0));
+    // Chart segments carry a parsed spec, not html — fall back to content length.
+    if (cacheable) cache.set(content, rendered, content.length + rendered.reduce((sum, segment) => sum + ("html" in segment ? segment.html.length : 0), 0));
     return rendered;
   }
 
@@ -302,7 +329,7 @@ function createRenderCache<T>(maxEntries: number, maxChars: number) {
 
 export function parseAiMessage(text: string): MessageSegment[] {
   const segments: MessageSegment[] = [];
-  const lines = text.split("\n");
+  const lines = recoverInlineLanguageFences(text).split("\n");
   let i = 0;
 
   while (i < lines.length) {
@@ -331,6 +358,44 @@ export function parseAiMessage(text: string): MessageSegment[] {
   }
 
   return segments;
+}
+
+function recoverInlineLanguageFences(text: string): string {
+  if (RAW_HTML_BLOCK_RE.test(text) || HTML_TAG_RE.test(text)) return text;
+  const normalized: string[] = [];
+  let outerFence: FenceState = null;
+  const lines = text.split("\n");
+  const compatibleClosingFenceAhead = Array.from({ length: lines.length }, () => false);
+  let nextFenceIsCompatibleClose = false;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    compatibleClosingFenceAhead[index] = nextFenceIsCompatibleClose;
+    if (STANDALONE_CLOSING_FENCE_RE.test(lines[index])) nextFenceIsCompatibleClose = true;
+    else if (FENCE_LINE_RE.test(lines[index])) nextFenceIsCompatibleClose = false;
+  }
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const nextOuterFence = trackFenceState(line, outerFence);
+    if (outerFence || nextOuterFence) {
+      normalized.push(line);
+      outerFence = nextOuterFence;
+      continue;
+    }
+
+    const match = line.match(INLINE_LANGUAGE_FENCE_RE);
+    const rawProse = match?.[1] ?? "";
+    const prose = match?.[1].trimEnd();
+    if (!match || !prose || prose.endsWith("\\") || MARKDOWN_CONTAINER_PREFIX_RE.test(rawProse.replace(/[ \t]/g, "")) || !compatibleClosingFenceAhead[index]) {
+      normalized.push(line);
+      continue;
+    }
+
+    const carriageReturn = match[3];
+    normalized.push(`${prose}${carriageReturn}`, `${match[2]}${carriageReturn}`);
+    outerFence = { marker: "`", length: 3 };
+  }
+
+  return normalized.join("\n");
 }
 
 export function normalizeAiCodeLanguage(lang?: string): string {

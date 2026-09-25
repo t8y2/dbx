@@ -125,6 +125,11 @@ export interface EnqueuedTaskSummary {
   enqueuedAt?: string | null;
 }
 
+export interface MeilisearchCreateIndexInput {
+  uid: string;
+  primaryKey?: string;
+}
+
 export interface TaskListInput {
   selector: TaskSelector;
   from?: number | null;

@@ -17,6 +17,18 @@ function backend(name: ResultCacheBackend["name"], overrides: Partial<ResultCach
 }
 
 describe("tab result cache statement execution metadata", () => {
+  it("retains timing details for active, array and historical results through cache restore", async () => {
+    const { buildTabResultSnapshot } = await import("@/lib/tabs/tabResultCache");
+    const timing = { query_timings_ms: { agent_total: 40, pool_acquire: 20, pool_release: 2 }, client_prepare_ms: 3, client_result_ms: 4, timing_page_count: 2 };
+    const result = { columns: ["N"], rows: [[1]], affected_rows: 0, execution_time_ms: 50, ...timing };
+    const tab = { result, results: [result], resultRuns: [{ id: "timed-run", title: "Run", sequence: 1, sql: "SELECT 1", createdAt: 1, result, results: [result] }] };
+    const snapshot = buildTabResultSnapshot(tab as Parameters<typeof buildTabResultSnapshot>[0])!;
+    expect(snapshot.result?.query_timings_ms).not.toBe(result.query_timings_ms);
+    const restored = decodeTabResultSnapshot(encodeTabResultSnapshot(snapshot));
+    for (const value of [restored.result, restored.results?.[0], restored.resultRuns?.[0].result, restored.resultRuns?.[0].results?.[0]]) {
+      expect(value).toMatchObject({ rows: [[1]], ...timing });
+    }
+  });
   it("selects one authoritative backend before fallback", () => {
     expect(resultCacheBackendOrder(true)).toEqual(["runtime", "indexed-db"]);
     expect(resultCacheBackendOrder(false)).toEqual(["indexed-db", "runtime"]);
@@ -81,6 +93,8 @@ describe("tab result cache statement execution metadata", () => {
           rows: [[1]],
           affected_rows: 0,
           execution_time_ms: 1,
+          server_execute_time_us: 370,
+          client_request_wait_ms: 45,
           statement_index: 0,
           sourceStatement: "SELECT 1",
         },
@@ -101,6 +115,7 @@ describe("tab result cache statement execution metadata", () => {
     const restored = decodeTabResultSnapshot(encoded);
 
     expect(restored?.resultEditorFingerprint).toBe("15:0123456789abcdef");
+    expect(restored?.results?.[0]).toMatchObject({ server_execute_time_us: 370, client_request_wait_ms: 45 });
     expect(restored?.results?.map((result) => ({ statementIndex: result.statement_index, error: result.execution_error }))).toEqual([
       { statementIndex: 0, error: undefined },
       { statementIndex: 1, error: true },

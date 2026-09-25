@@ -36,6 +36,9 @@ export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>
       const editor = useCellDetailEditor({ onChange: (value) => (options.editValue.value = value), onEscape: options.onCancel, ...editorOptions() });
       detailsEditor = editor;
       await editor.create(element, options.editValue.value, options.detail.value.type);
+      if (detailsEditor === editor && editor.getValue() !== options.editValue.value) {
+        editor.setValue(options.editValue.value, options.detail.value.type);
+      }
       if (detailsEditor === editor) editor.view.value?.focus();
     } else if (!element && detailsEditor) {
       detailsEditor.destroy();
@@ -45,8 +48,13 @@ export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>
 
   watch(sideJsonPreviewContainer, async (element) => {
     if (element && !sideJsonEditor) {
-      sideJsonEditor = useCellDetailEditor({ language: "json", readOnly: true, ...editorOptions() });
-      await sideJsonEditor.create(element, options.detail.value.formattedJson ?? "", "json");
+      const editor = useCellDetailEditor({ language: "json", readOnly: true, ...editorOptions() });
+      sideJsonEditor = editor;
+      await editor.create(element, options.detail.value.formattedJson ?? "", "json");
+      if (sideJsonEditor === editor) {
+        const value = options.detail.value.formattedJson ?? "";
+        if (editor.getValue() !== value) editor.setValue(value, "json");
+      }
     } else if (!element && sideJsonEditor) {
       sideJsonEditor.destroy();
       sideJsonEditor = null;

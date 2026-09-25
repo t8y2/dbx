@@ -1,13 +1,8 @@
-import { readFileSync } from "node:fs";
 import { toggleLineComment } from "@codemirror/commands";
 import { sql } from "@codemirror/lang-sql";
 import { EditorState, Prec, type Transaction } from "@codemirror/state";
 import { describe, expect, it, vi } from "vitest";
-import { queryEditorCommentTokens, queryEditorLineCommentToken } from "@/lib/editor/queryEditorLineComment";
-
-const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
-const editorThemesSource = readFileSync(new URL("../../editor/editorThemes.ts", import.meta.url), "utf8");
-const shellHighlightSource = readFileSync(new URL("../../editor/codemirrorShellLineCommentHighlight.ts", import.meta.url), "utf8");
+import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 
 function runToggleLineComment(doc: string, commentToken: string) {
   let state = EditorState.create({
@@ -47,25 +42,30 @@ describe("queryEditorLineCommentToken", () => {
   });
 });
 
+describe("QueryEditor word selection", () => {
+  it("includes the @ prefix in SQL Server variable words", () => {
+    const sqlServer = EditorState.create({ doc: "@name", extensions: [EditorState.languageData.of(() => queryEditorWordLanguageData("sqlserver"))] });
+    const mysql = EditorState.create({ doc: "@name", extensions: [EditorState.languageData.of(() => queryEditorWordLanguageData("mysql"))] });
+    const systemVariable = EditorState.create({ doc: "@@ROWCOUNT", extensions: [EditorState.languageData.of(() => queryEditorWordLanguageData("sqlserver"))] });
+
+    for (let position = 0; position <= 5; position += 1) expect(sqlServer.wordAt(position)).toMatchObject({ from: 0, to: 5 });
+    expect(mysql.wordAt(2)).toMatchObject({ from: 1, to: 5 });
+    expect(systemVariable.wordAt(1)).toMatchObject({ from: 0, to: 10 });
+  });
+
+  it("includes the # prefix in SQL Server temp table words", () => {
+    const create = (doc: string, dbType: "sqlserver" | "mysql") => EditorState.create({ doc, extensions: [EditorState.languageData.of(() => queryEditorWordLanguageData(dbType))] });
+    const local = create("#order", "sqlserver");
+    const global = create("##order", "sqlserver");
+    const mysql = create("#order", "mysql");
+
+    for (let position = 0; position <= 6; position += 1) expect(local.wordAt(position)).toMatchObject({ from: 0, to: 6 });
+    for (let position = 0; position <= 7; position += 1) expect(global.wordAt(position)).toMatchObject({ from: 0, to: 7 });
+    expect(mysql.wordAt(3)).toMatchObject({ from: 1, to: 6 });
+  });
+});
+
 describe("QueryEditor line comment", () => {
-  it("overrides the language comment tokens in the SQL language compartment", () => {
-    expect(queryEditorSource).toContain("Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(props.databaseType) }]))");
-  });
-
-  it("highlights // comments with the theme's comment style", () => {
-    expect(queryEditorSource).toContain('queryEditorLineCommentToken(props.databaseType) === "//" ? shellLineCommentHighlightPlugin : []');
-    expect(queryEditorSource).toContain("const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });");
-    expect(queryEditorSource).toContain("shellLineCommentTheme(EditorView),");
-    expect(editorThemesSource).toContain('".cm-shell-line-comment *"');
-    expect(editorThemesSource).toContain('color: "inherit !important"');
-  });
-
-  it("bounds shell comment scanning to syntax-aware visible lines", () => {
-    expect(shellHighlightSource).toContain("view.state.doc.lineAt(visibleRange.from).from");
-    expect(shellHighlightSource).toContain("tree.resolveInner(absoluteFrom, 1)");
-    expect(shellHighlightSource).not.toContain("sliceString(0, end)");
-  });
-
   it("comments a MongoDB line with //", () => {
     const result = runToggleLineComment("db.users.find({})", "//");
 

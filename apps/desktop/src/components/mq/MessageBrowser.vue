@@ -7,6 +7,7 @@ import { mqPeekMessages } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildKafkaMessageSearchText, kafkaMessageSearchTextMatches, normalizeKafkaMessageSearchQuery } from "@/lib/mq/kafkaMessageSearch";
+import { sortKafkaMessagesByPublishTime, type KafkaMessageDisplayOrder } from "@/lib/mq/kafkaMessageSort";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
 import { useToast } from "@/composables/useToast";
 import { Button } from "@/components/ui/button";
@@ -40,6 +41,7 @@ const advancedExpanded = ref(false);
 const messageSearchQuery = ref("");
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
 const kafkaStartPosition = ref<KafkaPeekStartPosition>("latest");
+const kafkaMessageDisplayOrder = ref<KafkaMessageDisplayOrder>("newest");
 let messageRequestVersion = 0;
 
 const isKafka = computed(() => props.mqSystemKind === "kafka");
@@ -57,6 +59,7 @@ const filteredMessages = computed(() => {
   if (!query) return messages.value;
   return searchableMessages.value.filter(({ searchText }) => kafkaMessageSearchTextMatches(searchText, query)).map(({ message }) => message);
 });
+const displayedMessages = computed(() => (isKafka.value ? sortKafkaMessagesByPublishTime(filteredMessages.value, kafkaMessageDisplayOrder.value) : filteredMessages.value));
 
 function peekGroupName(): string {
   if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_viewer__";
@@ -224,6 +227,18 @@ watch(kafkaStartPosition, () => {
         </Select>
       </label>
       <label v-if="isKafka">
+        <span>{{ t("mqMessages.timeOrder") }}</span>
+        <Select v-model="kafkaMessageDisplayOrder">
+          <SelectTrigger data-testid="kafka-message-display-order" class="message-browser-start-position">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper" class="message-browser-start-position-content">
+            <SelectItem value="newest">{{ t("mqMessages.newestFirst") }}</SelectItem>
+            <SelectItem value="oldest">{{ t("mqMessages.oldestFirst") }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </label>
+      <label v-if="isKafka">
         <span>{{ t("mqMessages.partition") }}</span>
         <input v-model="partition" data-testid="kafka-peek-partition" type="number" min="0" :placeholder="t('mqMessages.partitionPlaceholderAll')" :disabled="loading" />
       </label>
@@ -263,7 +278,7 @@ watch(kafkaStartPosition, () => {
     <div v-else-if="!messages.length" class="message-empty">{{ t("mqMessages.noMessages") }}</div>
     <div v-else-if="!filteredMessages.length" class="message-empty" data-testid="kafka-message-filter-empty">{{ t("mqMessages.noMatchingMessages") }}</div>
     <div v-else class="message-list">
-      <article v-for="message in filteredMessages" :key="`${message.properties?.partition ?? 'p'}-${message.messageId || message.position}`" class="message-row">
+      <article v-for="message in displayedMessages" :key="`${message.properties?.partition ?? 'p'}-${message.messageId || message.position}`" class="message-row">
         <div class="message-meta">
           <span>#{{ message.position }}</span>
           <span v-if="message.properties?.partition != null">{{ t("mqMessages.metaPartition", { partition: message.properties.partition }) }}</span>

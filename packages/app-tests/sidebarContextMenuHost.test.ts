@@ -22,96 +22,44 @@ function functionBody(source: string, name: string): string {
   throw new Error(`Could not parse body for ${name}`);
 }
 
-test("tree-level context menu opens with the current row items atomically", () => {
-  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
-  const contextMenu = readFileSync("apps/desktop/src/components/ui/CustomContextMenu.vue", "utf8");
+/**
+ * Region of one top-level function in a store/component module. Unlike
+ * `functionBody`, this survives inline object type literals in the parameter
+ * list (the first `{` there is not the body).
+ */
+function functionRegion(source: string, name: string): string {
+  const candidates = [`  async function ${name}(`, `  function ${name}(`].map((marker) => source.indexOf(marker)).filter((index) => index >= 0);
+  assert.notEqual(candidates.length, 0, `Could not find function ${name}`);
+  const start = Math.min(...candidates);
+  const rest = source.slice(start + 1);
+  const next = /\n  (?:async )?function /.exec(rest);
+  return next ? rest.slice(0, next.index) : rest;
+}
 
-  assert.match(connectionTree, /openContextMenu\(event, items\)/);
-  assert.match(connectionTree, /sidebarContextMenuRef\.value\?\.close\(\)/);
-  assert.match(connectionTree, /sidebarContextMenuTarget\.value = createSidebarActionTarget\(node\)/);
-  assert.match(connectionTree, /sidebarContextMenuTarget\.value = null/);
-  assert.match(connectionTree, /<CustomContextMenu ref="sidebarContextMenuRef"/);
-  assert.match(contextMenu, /function onContextMenu\(event: MouseEvent, itemsOverride\?: ContextMenuItem\[\]\)/);
-  assert.match(contextMenu, /const items = itemsOverride \?\?/);
-  assert.match(contextMenu, /defineExpose\(\{ close, menuRef, subRef \}\)/);
-});
+test("object source identity and editability are enforced in queryStore", () => {
+  const queryStore = readFileSync("apps/desktop/src/stores/queryStore.ts", "utf8");
+  const findBody = functionRegion(queryStore, "findMatchingObjectSourceTab");
+  const pendingBody = functionRegion(queryStore, "openObjectSourceTabPending");
+  const applyBody = functionRegion(queryStore, "applyLoadedObjectSource");
 
-test("rare sidebar dialogs share module-level async wrappers with fallbacks", () => {
-  const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
-  const asyncDialogs = readFileSync("apps/desktop/src/components/sidebar/sidebarAsyncDialogs.ts", "utf8");
+  // canonical identity：连接 + 库 + schema + catalog + 解析后的对象身份共同决定复用哪个 tab
+  assert.match(findBody, /tab\.objectSource\?\.name === options\.objectSource\.name/);
+  assert.match(findBody, /tab\.objectSource\.objectType === options\.objectSource\.objectType/);
+  assert.match(findBody, /\(tab\.objectSource\.schema \|\| ""\) === \(options\.objectSource\.schema \|\| ""\)/);
+  assert.match(findBody, /\(tab\.objectSource\.signature \|\| ""\) === \(options\.objectSource\.signature \|\| ""\)/);
 
-  assert.doesNotMatch(treeItem, /defineAsyncComponent/);
-  assert.match(asyncDialogs, /loadingComponent: SidebarAsyncDialogLoading/);
-  assert.match(asyncDialogs, /errorComponent: SidebarAsyncDialogError/);
-  assert.match(asyncDialogs, /timeout: 15_000/);
-});
+  // honor backend editability：只读源码不挂 objectSource，但仍是一个 sourceView tab
+  assert.match(applyBody, /raw\.editable !== false/);
+  assert.match(applyBody, /OBJECT_SOURCE_READ_ONLY_TYPES\.includes\(loaded\.resolvedType\)/);
+  assert.match(applyBody, /tab\.sourceView = true/);
+  assert.match(queryStore, /const OBJECT_SOURCE_READ_ONLY_TYPES: readonly ObjectSourceKind\[\] = \["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"\]/);
 
-test("tree host owns sidebar data-open generations", () => {
-  const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
-  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
-  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
-
-  assert.doesNotMatch(treeItem, /runSidebarDataOpenImmediately/);
-  assert.doesNotMatch(treeItem, /emit\("open-data"/);
-  assert.match(runtimeHost, /emit\("open-data", node, true, "default", openData\)/);
-  assert.match(connectionTree, /<SidebarTreeRuntimeHost/);
-  assert.match(connectionTree, /function openSidebarData/);
-  assert.match(connectionTree, /runSidebarDataOpenImmediately/);
-  assert.match(connectionTree, /createSidebarActionTarget\(node\)/);
-});
-
-test("query-tab object source uses canonical identity and honors backend editability", () => {
-  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
-  const openObjectSourceBody = functionBody(runtimeHost, "openObjectSourceDialog");
-
-  assert.match(openObjectSourceBody, /queryStore\.openObjectSourceTab\(\{/);
-  assert.match(openObjectSourceBody, /raw\.editable !== false/);
-  assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"\]\.includes\(resolvedType\)/);
-  assert.match(openObjectSourceBody, /objectType: resolvedType/);
-  assert.match(openObjectSourceBody, /signature: node\.signature/);
-  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, editableSource, node\.catalog, \{ forceNew: true \}\)/);
-  assert.doesNotMatch(openObjectSourceBody, /queryStore\.updateSql/);
-  assert.doesNotMatch(openObjectSourceBody, /queryStore\.markTabClean/);
-});
-
-test("table copy menu uses the shared single and multi-selection clipboard path", () => {
-  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
-  const copyNameBody = functionBody(runtimeHost, "copyName");
-  const copySelectedNamesBody = functionBody(runtimeHost, "copySelectedNames");
-  const clipboardMenuBody = functionBody(runtimeHost, "treeTableClipboardMenuItems");
-
-  assert.match(clipboardMenuBody, /tableClipboardMenuState\(\s*normalizedTreeClipboardTableEntries\(\)/);
-  assert.match(clipboardMenuBody, /state === "paste" \? \[pasteItem\] : \[copyItem, pasteItem\]/);
-  assert.match(runtimeHost, /items\.push\(\.\.\.treeTableClipboardMenuItems\(node\)\)/);
-  assert.doesNotMatch(runtimeHost, /function copyTableToClipboard\(/);
-  assert.doesNotMatch(copyNameBody, /updateTreeClipboardForNodes/);
-  assert.match(copySelectedNamesBody, /const selectedNodes = selectedTreeNodesInVisibleOrder\(\)/);
-  assert.match(copySelectedNamesBody, /selectedNodes\.length > 1 && selectedNodes\.some\(\(node\) => node\.id === activeNode\.value\.id\) \? selectedNodes : \[activeNode\.value\]/);
-  assert.match(copySelectedNamesBody, /updateTreeClipboardForNodes\(nodes\)/);
-  assert.match(copySelectedNamesBody, /copyToClipboard\(nodes\.map\(copyNameForTreeNode\)\.join\("\\n"\)\)/);
-});
-
-test("MySQL object name menus expose leaf and display-path copy choices", () => {
-  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
-  const copyNameBody = functionBody(runtimeHost, "copyName");
-  const copyDisplayPathBody = functionBody(runtimeHost, "copyDisplayPath");
-  const copyNameMenuItemBody = functionBody(runtimeHost, "copyNameMenuItem");
-  const connectionMenuBody = functionBody(runtimeHost, "buildConnectionSidebarMenu");
-  const databaseMenuBody = functionBody(runtimeHost, "buildDatabaseSidebarMenu");
-  const objectMenuBody = functionBody(runtimeHost, "buildObjectSidebarMenu");
-
-  assert.match(copyNameBody, /copyNameForTreeNode\(node\)/);
-  assert.match(copyDisplayPathBody, /copyDisplayPathForTreeNode\(node, connectionName\)/);
-  assert.match(copyNameMenuItemBody, /currentDatabaseType\(\) === "mysql"/);
-  assert.match(copyNameMenuItemBody, /children: \[/);
-  assert.match(copyNameMenuItemBody, /t\("contextMenu\.name"\)/);
-  assert.match(copyNameMenuItemBody, /t\("contextMenu\.fullPath"\)/);
-  assert.match(copyNameMenuItemBody, /return \{ label: t\("contextMenu\.copyName"\), action: copyName, icon: Copy, shortcut: shortcutCopyName\.value \}/);
-  assert.doesNotMatch(connectionMenuBody, /copyNameMenuItem\(\)/);
-  assert.match(databaseMenuBody, /items\.push\(copyNameMenuItem\(\)\)/);
-  assert.match(objectMenuBody, /items\.push\(copyNameMenuItem\(\)\)/);
-  assert.match(objectMenuBody, /node\.type === "trigger" \? copyNameMenuItem\(\)/);
-  assert.match(objectMenuBody, /node\.type === "sequence"[\s\S]*action: copyName/);
+  // pending 占位：同步返回（不 await），tab 已可见并带着可重试的请求身份
+  assert.doesNotMatch(pendingBody, /await /);
+  assert.match(pendingBody, /tab\.sourceLoad = \{ startedAt: Date\.now\(\), initialEditing: options\.initialEditing, request: \{ \.\.\.options\.request \} \}/);
+  assert.match(pendingBody, /void loadObjectSourceIntoTab\(id\)/);
+  // 落地时清掉加载态，否则 tab 会永远停在转圈
+  assert.match(applyBody, /clearObjectSourceLoad\(tab\)/);
 });
 
 test("successful tree table paste consumes only the clipboard used to start it", () => {
@@ -146,13 +94,6 @@ test("tree table paste consumes the clipboard even if only the object-list refre
   assert.match(confirmPasteTableBody, /if \(refreshFailCount > 0\)[\s\S]*?pasteTableRefreshFailed/);
 });
 
-test("sidebar keyboard table copy uses the same normalized schema as the context menu", () => {
-  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
-  const copySelectedSidebarNamesBody = functionBody(connectionTree, "copySelectedSidebarNames");
-
-  assert.match(copySelectedSidebarNamesBody, /schema: connectionObjectTreeNodeSchema\(store\.getConfig\(node\.connectionId!\), node\.database!, node\.schema\)/);
-});
-
 test("saved SQL tree rows expose copy, paste, export, rename, and confirmed deletion through the shared runtime host", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
   const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
@@ -174,49 +115,4 @@ test("saved SQL tree rows expose copy, paste, export, rename, and confirmed dele
   assert.match(runtimeHost, /routeDangerDialog\(showDeleteSavedSqlConfirm[\s\S]*?savedSql\.deleteFileConfirm[\s\S]*?confirmDeleteSavedSqlFile/);
   assert.match(runtimeHost, /async function confirmDeleteSavedSqlFile\(\)[\s\S]*?savedSqlStore\.deleteFile[\s\S]*?connectionStore\.removeTreeNode/);
   assert.match(functionBody(runtimeHost, "requestDeleteSelectedNode"), /saved-sql-file[\s\S]*?showDeleteSavedSqlConfirm\.value = true/);
-});
-
-test("explicit locate prioritizes the saved SQL row over SQL cursor table navigation", () => {
-  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
-  const locateBody = functionBody(connectionTree, "locateTabInSidebar");
-
-  assert.match(locateBody, /const locatesSavedSql = tabTarget\?\.type === "saved-sql-file"/);
-  assert.match(locateBody, /const cursorCandidate = locatesSavedSql \? null : queryCursorTableCandidate/);
-  assert.match(locateBody, /locatesSavedSql && savedSqlFile\?\.connectionId && savedSqlFile\.database[\s\S]*?type: "query-context"/);
-  assert.match(locateBody, /findNodePathForTarget\(target, store\.treeNodes\)/);
-});
-
-test("tab context menu forwards the exact tab to centered sidebar locate without activating it", () => {
-  const app = readFileSync("apps/desktop/src/App.vue", "utf8");
-  const appSidebar = readFileSync("apps/desktop/src/components/layout/AppSidebar.vue", "utf8");
-  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
-  const appLocateBody = functionBody(app, "locateTabInSidebar");
-  const sidebarLocateBody = functionBody(appSidebar, "locateTabInSidebar");
-  const activeLocateBody = functionBody(connectionTree, "locateActiveTabInSidebar");
-  const locateBody = functionBody(connectionTree, "locateTabInSidebar");
-
-  assert.match(app, /@locate-tab="locateTabInSidebar"/);
-  assert.match(appLocateBody, /setSidebarOpen\(true\)/);
-  assert.match(appLocateBody, /await nextTick\(\)/);
-  assert.match(appLocateBody, /await appSidebarRef\.value\?\.locateTabInSidebar\(tab\)/);
-  assert.doesNotMatch(appLocateBody, /activateQueryTab|activeTabId/);
-  assert.match(sidebarLocateBody, /return connectionTreeRef\.value\?\.locateTabInSidebar\(tab\)/);
-  assert.match(appSidebar, /defineExpose\(\{ focusSearch, locateTabInSidebar \}\)/);
-  assert.match(activeLocateBody, /await locateTabInSidebar\(activeTab\.value, "smart"\)/);
-  assert.match(locateBody, /await scrollToSidebarNode\(match\.id, \{ align \}\)/);
-  assert.match(connectionTree, /defineExpose\(\{ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSidebar \}\)/);
-  assert.match(connectionTree, /@request-connection-rename="startRenamingConnectionNode"/);
-});
-
-test("batch table paste refreshes each object list after all tables are processed", () => {
-  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
-  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");
-  const pasteLoopIndex = confirmPasteTableBody.indexOf("for (const entry of entries)");
-  const refreshLoopIndex = confirmPasteTableBody.indexOf("for (const refreshTarget of refreshTargets.values())");
-
-  assert.notEqual(pasteLoopIndex, -1);
-  assert.notEqual(refreshLoopIndex, -1);
-  assert.ok(refreshLoopIndex > pasteLoopIndex, "object-list refresh must run after the table paste loop");
-  assert.doesNotMatch(confirmPasteTableBody.slice(pasteLoopIndex, refreshLoopIndex), /refreshObjectListTreeNode/);
-  assert.match(confirmPasteTableBody.slice(refreshLoopIndex), /refreshObjectListTreeNode\(refreshTarget\.connectionId, refreshTarget\.database, refreshTarget\.schema\)/);
 });

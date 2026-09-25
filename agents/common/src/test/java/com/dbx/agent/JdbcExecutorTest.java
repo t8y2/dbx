@@ -27,6 +27,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcExecutorTest {
     @Test
+    void statementRowLimitIncludesOverflowProbeWithoutIntegerOverflow() {
+        assertEquals(2, JdbcExecutor.statementMaxRows(0));
+        assertEquals(JdbcExecutor.DEFAULT_MAX_ROWS + 1,
+            JdbcExecutor.statementMaxRows(JdbcExecutor.DEFAULT_MAX_ROWS));
+        assertEquals(Integer.MAX_VALUE, JdbcExecutor.statementMaxRows(Integer.MAX_VALUE));
+    }
+
+    @Test
     void blobResultValuesPreferBlobObjectsWhenGetBytesFails() throws Exception {
         ResultSet rs = resultSet(
             new SerialBlob(new byte[]{0x01, 0x2A, (byte) 0xFF}),
@@ -109,6 +117,26 @@ class JdbcExecutorTest {
         assertEquals(Arrays.asList(Arrays.asList(1, "Ada"), Arrays.asList(2, "Grace")), result.getRows());
         assertEquals(1, fixture.getMetaDataCalls());
         assertEquals(2, fixture.getColumnTypeCalls());
+    }
+
+    @Test
+    void executeCountsRowRetrievalInExecutionTime() {
+        // `stmt.execute()` returns before the rows are consumed, so a driver
+        // that only timed that call reported a handful of milliseconds for a
+        // statement whose fetch took seconds. Row retrieval has to be part of
+        // the duration the caller waited for.
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(true, -1, null, new AtomicInteger(), slowResultSet(30L), null),
+            "SELECT * FROM slow_table",
+            "",
+            schema -> ""
+        );
+
+        assertEquals(Arrays.asList(Arrays.asList(1, "Ada"), Arrays.asList(2, "Grace")), result.getRows());
+        assertTrue(
+            result.getExecution_time_ms() >= 25L,
+            "row retrieval must count toward execution_time_ms but was " + result.getExecution_time_ms() + "ms"
+        );
     }
 
     @Test
@@ -240,6 +268,47 @@ class JdbcExecutorTest {
 
         assertEquals(Arrays.asList("id", "name"), result.getColumns());
         assertEquals(Arrays.asList(Arrays.asList(1, "Ada")), result.getRows());
+    }
+
+    @Test
+    void executeAdvancesPastUpdateCountsToTheFollowingResultSet() {
+        CountingResultSetFixture fixture = countingResultSet(new Object[][]{{42, "Bill_Record"}});
+
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            updateThenResultSetConnection(1, fixture.resultSet()),
+            "DECLARE @tables TABLE (id INT, name NVARCHAR(128)); INSERT INTO @tables VALUES (42, 'Bill_Record'); SELECT * FROM @tables;",
+            "",
+            schema -> "",
+            () -> "",
+            100,
+            null,
+            0,
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            JdbcExecutor.StatementMessageReader.NONE,
+            true
+        );
+
+        assertEquals(Arrays.asList("id", "name"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList(42, "Bill_Record")), result.getRows());
+    }
+
+    @Test
+    void executePageAdvancesPastUpdateCountsToTheFollowingResultSet() {
+        CountingResultSetFixture fixture = countingResultSet(new Object[][]{{42, "Bill_Record"}});
+
+        QueryPageResult result = JdbcExecutor.INSTANCE.executePage(
+            updateThenResultSetConnection(1, fixture.resultSet()),
+            "DECLARE @tables TABLE (id INT, name NVARCHAR(128)); INSERT INTO @tables VALUES (42, 'Bill_Record'); SELECT * FROM @tables;",
+            "",
+            schema -> "",
+            () -> "",
+            new QueryPageOptions(100, null, 100),
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            true
+        );
+
+        assertEquals(Arrays.asList("id", "name"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList(42, "Bill_Record")), result.getRows());
     }
 
     @Test
@@ -383,6 +452,69 @@ class JdbcExecutorTest {
         return rows[rowIndex][columnIndex - 1];
     }
 
+    /** Result set whose cursor advances slowly, emulating a remote fetch. */
+    private static ResultSet slowResultSet(long perRowDelayMs) {
+        Object[][] rows = {
+            {1, "Ada"},
+            {2, "Grace"}
+        };
+        String[] labels = {"id", "name"};
+        int[] sqlTypes = {Types.INTEGER, Types.VARCHAR};
+        String[] typeNames = {"INTEGER", "VARCHAR"};
+        AtomicInteger cursor = new AtomicInteger(-1);
+
+        InvocationHandler metaHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "getColumnCount":
+                    return labels.length;
+                case "getColumnLabel":
+                    return labels[(Integer) args[0] - 1];
+                case "getColumnType":
+                    return sqlTypes[(Integer) args[0] - 1];
+                case "getColumnTypeName":
+                    return typeNames[(Integer) args[0] - 1];
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        ResultSetMetaData metadata = (ResultSetMetaData) Proxy.newProxyInstance(
+            ResultSetMetaData.class.getClassLoader(),
+            new Class<?>[]{ResultSetMetaData.class},
+            metaHandler
+        );
+
+        InvocationHandler resultSetHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "getMetaData":
+                    return metadata;
+                case "next":
+                    int nextIndex = cursor.incrementAndGet();
+                    if (nextIndex >= rows.length) {
+                        return false;
+                    }
+                    Thread.sleep(perRowDelayMs);
+                    return true;
+                case "getObject":
+                case "getInt":
+                case "getString":
+                    Object cell = currentCell(rows, cursor.get(), (Integer) args[0]);
+                    if (method.getName().equals("getInt")) {
+                        return ((Number) cell).intValue();
+                    }
+                    return method.getName().equals("getObject") ? cell : String.valueOf(cell);
+                case "wasNull":
+                    return false;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        return (ResultSet) Proxy.newProxyInstance(
+            ResultSet.class.getClassLoader(),
+            new Class<?>[]{ResultSet.class},
+            resultSetHandler
+        );
+    }
+
     private static ResultSet resultSet(Object objectValue, StringSupplier stringSupplier, boolean wasNull) {
         byte[] bytesValue = objectValue instanceof byte[] ? (byte[]) objectValue : null;
         return resultSet(objectValue, bytesValue, stringSupplier, wasNull, null);
@@ -443,6 +575,42 @@ class JdbcExecutorTest {
                 case "clearWarnings":
                     clearWarningsCalls.incrementAndGet();
                     return null;
+                case "close":
+                    return null;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        Statement statement = (Statement) Proxy.newProxyInstance(
+            Statement.class.getClassLoader(),
+            new Class<?>[]{Statement.class},
+            statementHandler
+        );
+        InvocationHandler connectionHandler = (Object unused, Method method, Object[] args) -> {
+            if (method.getName().equals("createStatement")) {
+                return statement;
+            }
+            return defaultValue(method.getReturnType());
+        };
+        return (Connection) Proxy.newProxyInstance(
+            Connection.class.getClassLoader(),
+            new Class<?>[]{Connection.class},
+            connectionHandler
+        );
+    }
+
+    private static Connection updateThenResultSetConnection(int updateCount, ResultSet resultSet) {
+        AtomicInteger resultIndex = new AtomicInteger();
+        InvocationHandler statementHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "execute":
+                    return false;
+                case "getUpdateCount":
+                    return resultIndex.get() == 0 ? updateCount : -1;
+                case "getMoreResults":
+                    return resultIndex.incrementAndGet() == 1;
+                case "getResultSet":
+                    return resultSet;
                 case "close":
                     return null;
                 default:

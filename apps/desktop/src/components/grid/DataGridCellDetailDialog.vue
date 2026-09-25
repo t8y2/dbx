@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
+import DataGridValueTransform from "@/components/grid/DataGridValueTransform.vue";
 import { computed, nextTick, ref, watch } from "vue";
 import { Code2, Copy, Download, Eye, FileUp, Info, Pencil } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
@@ -9,7 +11,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { BINARY_CELL_DOWNLOAD_MODES, binaryCellUtf8Text, isBlobCellColumnType, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
+import { BINARY_CELL_DOWNLOAD_MODES, isBinaryCellColumnType, binaryCellUtf8Text, isBlobCellColumnType, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
 import { isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { isHexGeometry, renderWktOnCanvas } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
@@ -149,6 +151,17 @@ watch(
           <div class="flex items-center justify-between gap-2">
             <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
             <div class="flex items-center gap-1">
+              <!-- Binary cells keep `0x<hex>` as the canonical value; the transform kinds below
+                   (timestamp/JSON/radix…) have text semantics and would misread hex. Offer the
+                   explicit, read-only bytes decode instead. -->
+              <DataGridCellDetailTextPreview v-if="open && isBinaryCellColumnType(detail.type)" :identity="`${detail.rowId}:${detail.colIndex}`" :value="detail.value" :column-type="detail.type" :database-type="databaseType" :incomplete="detail.isSourceTruncated" />
+              <DataGridValueTransform
+                v-else-if="open"
+                :source="(detail.isNull ?? detail.value === null) ? null : detail.rawValue"
+                :identity="`${detail.rowId}:${detail.colIndex}`"
+                :incomplete="detail.isSourceTruncated"
+                :unsafe-number="typeof detail.value === 'number' && Number.isInteger(detail.value) && !Number.isSafeInteger(detail.value)"
+              />
               <Button v-if="detail.formattedJson" :variant="jsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('grid.formattedJson')" @click="toggleJsonFormatted">
                 <Code2 class="h-3 w-3" />
                 {{ t("grid.formattedJson") }}

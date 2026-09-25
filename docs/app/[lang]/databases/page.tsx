@@ -8,6 +8,7 @@ import { RevealSection } from "@/components/landing/RevealSection";
 import { ExpandableDatabaseGrid } from "@/components/landing/ExpandableDatabaseGrid";
 import { databaseSupport } from "@/data/databaseSupport";
 import { buildMetadata } from "@/lib/metadata";
+import { resolveLang } from "@/lib/i18n";
 
 const i18n = {
   en: {
@@ -32,7 +33,7 @@ const i18n = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const t = i18n[l];
 
   return buildMetadata({
@@ -45,11 +46,11 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
 
 export default async function DatabasesPage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const t = i18n[l];
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={l} active="databases" />
 
       {/* Hero */}

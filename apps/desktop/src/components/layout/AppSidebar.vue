@@ -8,6 +8,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import PluginShortcutBar from "@/components/plugins/PluginShortcutBar.vue";
+import { useSettingsStore } from "@/stores/settingsStore";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
 import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
@@ -23,16 +25,17 @@ defineProps<{
 const emit = defineEmits<{
   import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip"];
   export: [];
-  startResize: [event: MouseEvent];
+  startResize: [event: PointerEvent];
   collapse: [];
   "open-settings": [initialTab: string];
-  "add-to-ai": [node: TreeNode];
+  "add-to-ai": [nodes: TreeNode | TreeNode[]];
 }>();
 
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const connectionTreeRef = ref<InstanceType<typeof ConnectionTree>>();
 const showDeleteSelectedConfirm = ref(false);
@@ -110,8 +113,8 @@ function collapseAllTreeNodes() {
   connectionTreeRef.value?.collapseAllTreeNodes();
 }
 
-function focusSearch(): boolean {
-  return connectionTreeRef.value?.focusSearch() ?? false;
+function focusSearch(target: Element | null = null): boolean {
+  return connectionTreeRef.value?.focusSearch(target) ?? false;
 }
 
 function locateTabInSidebar(tab: QueryTab) {
@@ -153,7 +156,8 @@ async function confirmDeleteSelectedConnections() {
   try {
     await connectionStore.removeConnections(ids);
     for (const connectionId of ids) {
-      connectionStore.disconnect(connectionId).catch((error) => {
+      // 页签已由 removeConnections 按「删除连接」策略处理，这里只清会话。
+      connectionStore.disconnect(connectionId, { skipTabHandling: true }).catch((error) => {
         console.warn("[DBX][connection:delete:disconnect-failed]", { connectionId, error });
       });
     }
@@ -197,7 +201,7 @@ defineExpose({ focusSearch, locateTabInSidebar });
 </script>
 
 <template>
-  <div class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'rounded-md border border-border/80 bg-background'" :style="{ width: sidebarWidth + 'px' }" @keydown="onSidebarKeydown">
+  <div data-app-sidebar class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'rounded-md border border-border/80 bg-background'" :style="{ width: sidebarWidth + 'px' }" @keydown="onSidebarKeydown">
     <div class="h-full flex flex-col overflow-hidden">
       <div class="app-sidebar-toolbar flex items-center gap-px px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20" :class="classicLayout ? 'h-9' : 'h-10'">
         <span v-if="showConnectionMultiSelectToolbar" class="flex min-w-0 self-stretch items-center" data-tauri-drag-region>
@@ -268,33 +272,36 @@ defineExpose({ focusSearch, locateTabInSidebar });
           </LightTooltip>
         </template>
         <template v-else>
-          <LightTooltip :text="t('sidebar.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="collapseAllTreeNodes">
-              <ChevronsDownUp class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('connectionGroup.createGroup')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="createNewGroup">
-              <FolderPlus class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('contextMenu.refreshChildren')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
-              <RefreshCw class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('sidebar.collapse')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('collapse')">
-              <ChevronsLeft class="h-3.5 w-3.5" />
-            </Button>
-          </LightTooltip>
+          <span data-sidebar-toolbar-actions class="flex shrink-0 items-center gap-0.5">
+            <LightTooltip :text="t('sidebar.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-5 w-5" @click="collapseAllTreeNodes">
+                <ChevronsDownUp class="h-3 w-3" />
+              </Button>
+            </LightTooltip>
+            <LightTooltip :text="t('connectionGroup.createGroup')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-5 w-5" @click="createNewGroup">
+                <FolderPlus class="h-3 w-3" />
+              </Button>
+            </LightTooltip>
+            <LightTooltip :text="t('contextMenu.refreshChildren')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
+                <RefreshCw class="h-3 w-3" />
+              </Button>
+            </LightTooltip>
+            <LightTooltip :text="t('sidebar.collapse')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('collapse')">
+                <ChevronsLeft class="h-3.5 w-3.5" />
+              </Button>
+            </LightTooltip>
+          </span>
         </template>
       </div>
       <div class="flex-1 min-h-0">
-        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(node) => emit('add-to-ai', node)" />
+        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(nodes) => emit('add-to-ai', nodes)" />
       </div>
+      <PluginShortcutBar v-if="settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === 'sidebar-bottom'" position="sidebar-bottom" />
     </div>
-    <div class="panel-resize-handle panel-resize-handle--right" @mousedown="emit('startResize', $event)" />
+    <div class="panel-resize-handle panel-resize-handle--right" @pointerdown="emit('startResize', $event)" />
     <Dialog v-model:open="showDeleteSelectedConfirm">
       <DialogContent class="sm:max-w-[400px]">
         <DialogHeader>

@@ -3,24 +3,25 @@ import type { ReactNode } from "react";
 import type { Metadata, Viewport } from "next";
 import { RouteProgress } from "@/components/RouteProgress";
 import { buildMetadata, DEFAULT_DESCRIPTION, getHtmlLang, SITE_NAME, SITE_URL } from "@/lib/metadata";
-import { buildSiteStructuredData } from "@/lib/structuredData";
+import { buildSiteStructuredData, serializeStructuredData } from "@/lib/structuredData";
+import { i18n, resolveLang } from "@/lib/i18n";
 
 const LOCALE_MAP: Record<string, { locale: string; title: string; description: string }> = {
   en: {
     locale: "en_US",
-    title: "DBX - 20 MB to manage 90+ databases",
+    title: "DBX - 25 MB to manage 90+ databases",
     description: DEFAULT_DESCRIPTION,
   },
   cn: {
     locale: "zh_CN",
-    title: "DBX - 20MB，管理90+种数据库",
-    description: "90+ 种数据库，仅 20 MB。支持桌面与 Docker 自托管，内置 AI 助手。",
+    title: "DBX - 25MB，管理90+种数据库",
+    description: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 90+ 种数据系统，提供 SQL 编辑、AI 助手、MCP 与 Docker 自托管。",
   },
 };
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const meta = LOCALE_MAP[l];
 
   const pageMetadata = buildMetadata({
@@ -42,7 +43,6 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
       shortcut: "/favicon-64.png",
       apple: "/logo.png",
     },
-    robots: { index: true, follow: true },
     openGraph: { ...pageMetadata.openGraph, locale: meta.locale },
   };
 }
@@ -51,13 +51,13 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#08080a",
+  themeColor: "#161616",
   colorScheme: "dark light",
 };
 
 export default async function LangLayout({ params, children }: { params: Promise<{ lang: string }>; children: ReactNode }) {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
   const siteStructuredData = buildSiteStructuredData();
 
   return (
@@ -70,7 +70,7 @@ export default async function LangLayout({ params, children }: { params: Promise
           data-domains="dbxio.com,www.dbxio.com"
         />
         {siteStructuredData.map((structuredData) => (
-          <script key={structuredData["@id"]} type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }} />
+          <script key={structuredData["@id"]} type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeStructuredData(structuredData) }} />
         ))}
       </head>
       <body className="flex min-h-screen flex-col">
@@ -82,5 +82,5 @@ export default async function LangLayout({ params, children }: { params: Promise
 }
 
 export function generateStaticParams() {
-  return [{ lang: "en" }, { lang: "cn" }];
+  return i18n.languages.map((lang) => ({ lang }));
 }

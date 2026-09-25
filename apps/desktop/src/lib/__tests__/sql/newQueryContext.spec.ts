@@ -204,12 +204,35 @@ describe("buildSelectAllSql", () => {
     expect(buildSelectAllSql("mysql", { database: "mydb", tableName: "users" }, undefined, undefined, true)).toBe("SELECT * FROM `mydb`.`users`");
   });
 
-  it("qualifies and quotes a PostgreSQL table with its schema", () => {
-    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" })).toBe('SELECT * FROM "public"."users"');
+  it("omits the PostgreSQL schema qualifier by default; including it is opt-in (#9110)", () => {
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" })).toBe('SELECT * FROM "users"');
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, true)).toBe('SELECT * FROM "public"."users"');
   });
 
-  it("preserves the Phoenix schema for new-query prefill", () => {
-    expect(buildSelectAllSql("jdbc", { schema: "APP", tableName: "USERS" }, '"', "phoenix")).toBe('SELECT * FROM "APP"."USERS"');
+  it("can omit identifier quotes for a PostgreSQL table", () => {
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, true, false)).toBe("SELECT * FROM public.users");
+  });
+
+  it("preserves the Phoenix schema for new-query prefill when qualification is on", () => {
+    expect(buildSelectAllSql("jdbc", { schema: "APP", tableName: "USERS" }, '"', "phoenix", true)).toBe('SELECT * FROM "APP"."USERS"');
+  });
+
+  it("prefills Phoenix tables unqualified by default (#9110)", () => {
+    expect(buildSelectAllSql("jdbc", { schema: "APP", tableName: "USERS" }, '"', "phoenix")).toBe('SELECT * FROM "USERS"');
+  });
+
+  it("scopes InfluxDB 1.x / 2.x prefill to a rolling InfluxQL window", () => {
+    // Without a time predicate the InfluxQL query would scan every shard
+    // for the measurement before LIMIT clips the tail; the 5-minute
+    // window matches the sidebar quick-open default so users can run
+    // the prefill safely.
+    expect(buildSelectAllSql("influxdb", { tableName: "cpu" })).toBe('SELECT * FROM "cpu" WHERE time > now() - 5m ORDER BY time DESC LIMIT 100');
+  });
+
+  it("scopes InfluxDB 3.x prefill to a rolling DataFusion INTERVAL window", () => {
+    // v3 goes through DataFusion SQL and needs an ANSI INTERVAL literal
+    // rather than the InfluxQL Go-duration form used by v1 / v2.
+    expect(buildSelectAllSql("influxdb3", { tableName: "cpu" })).toBe(`SELECT * FROM "cpu" WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100`);
   });
 
   it("bracket-quotes a SQL Server table", () => {
@@ -225,13 +248,15 @@ describe("buildSelectAllSql", () => {
     expect(buildSelectAllSql("starrocks", { catalog: "paimon_catalog", database: "bi", tableName: "events" })).toBe("SELECT * FROM `paimon_catalog`.`bi`.`events`");
   });
   it("uses the driver-reported identifier quote for Kingbase MySQL compat mode", () => {
-    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, "`")).toBe("SELECT * FROM `audit_schema`.`events`");
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, "`", undefined, true)).toBe("SELECT * FROM `audit_schema`.`events`");
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, "`")).toBe("SELECT * FROM `events`");
   });
   it("uses the driver-reported identifier quote for Kingbase PostgreSQL mode", () => {
-    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, '"')).toBe('SELECT * FROM "audit_schema"."events"');
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, '"', undefined, true)).toBe('SELECT * FROM "audit_schema"."events"');
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, '"')).toBe('SELECT * FROM "events"');
   });
   it("falls back to double quotes for Kingbase when no identifier quote is reported", () => {
-    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" })).toBe('SELECT * FROM "audit_schema"."events"');
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, undefined, undefined, true)).toBe('SELECT * FROM "audit_schema"."events"');
   });
 });
 
@@ -254,7 +279,7 @@ describe("isNewQueryPrefillSupported", () => {
 });
 
 describe("resolveNewQueryInitialSql", () => {
-  it("prefills SQL from the active table when enabled", () => {
+  it("prefills bare table SQL from the active table by default; the database name is opt-in", () => {
     expect(
       resolveNewQueryInitialSql({
         activeTab: dataTab(),
@@ -263,7 +288,31 @@ describe("resolveNewQueryInitialSql", () => {
         targetDatabase: "app_db",
         databaseType: "postgres",
       }),
+    ).toBe('SELECT * FROM "users"');
+    expect(
+      resolveNewQueryInitialSql({
+        activeTab: dataTab(),
+        prefillEnabled: true,
+        targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
+        databaseType: "postgres",
+        includeDatabaseName: true,
+      }),
     ).toBe('SELECT * FROM "public"."users"');
+  });
+
+  it("omits identifier quotes when configured for new-query prefill", () => {
+    expect(
+      resolveNewQueryInitialSql({
+        activeTab: dataTab(),
+        prefillEnabled: true,
+        targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
+        databaseType: "postgres",
+        includeDatabaseName: true,
+        quoteIdentifiers: false,
+      }),
+    ).toBe("SELECT * FROM public.users");
   });
 
   it("passes the Phoenix driver profile into the initial SQL builder", () => {
@@ -277,7 +326,7 @@ describe("resolveNewQueryInitialSql", () => {
         driverProfile: "phoenix",
         identifierQuote: '"',
       }),
-    ).toBe('SELECT * FROM "APP"."USERS"');
+    ).toBe('SELECT * FROM "USERS"');
   });
 
   it("leaves new queries empty when the setting is disabled", () => {

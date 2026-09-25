@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isXuguPublicSynonymScope, isXuguPublicSynonymTreeNode, sortXuguSchemaInfos, XUGU_PUBLIC_SYNONYM_SCOPE, xuguSchemaDisplayName } from "@/lib/sidebar/xuguPublicSynonyms";
+import { isXuguPublicSynonymScope, isXuguPublicSynonymTreeNode, isXuguSchedulerJobScope, isXuguSyntheticTreeNode, sortXuguSchemaInfos, XUGU_PUBLIC_SYNONYM_SCOPE, XUGU_SCHEDULER_JOB_SCOPE, xuguSchemaDisplayName } from "@/lib/sidebar/xuguPublicSynonyms";
 import { compareSidebarNames } from "@/lib/database/databaseTree";
 
 describe("Xugu public synonym scope", () => {
@@ -33,6 +33,15 @@ describe("Xugu public synonym scope", () => {
     ];
 
     expect(sortXuguSchemaInfos(schemas, compareSidebarNames).map((schema) => schema.name)).toEqual(["AppSchema", "GUEST", "SYSDBA", XUGU_PUBLIC_SYNONYM_SCOPE]);
+  });
+
+  it("places the database-scoped scheduler root after real schemas and public synonyms", () => {
+    const schemas = [{ name: XUGU_SCHEDULER_JOB_SCOPE }, { name: "APP_TEST" }, { name: XUGU_PUBLIC_SYNONYM_SCOPE }];
+
+    expect(isXuguSchedulerJobScope(XUGU_SCHEDULER_JOB_SCOPE)).toBe(true);
+    expect(xuguSchemaDisplayName(XUGU_SCHEDULER_JOB_SCOPE)).toBe("Scheduled jobs");
+    expect(isXuguSyntheticTreeNode("xugu", "schema", XUGU_SCHEDULER_JOB_SCOPE)).toBe(true);
+    expect(sortXuguSchemaInfos(schemas, compareSidebarNames).map((schema) => schema.name)).toEqual(["APP_TEST", XUGU_PUBLIC_SYNONYM_SCOPE, XUGU_SCHEDULER_JOB_SCOPE]);
   });
 
   it("does not treat the real GUEST schema as a public-synonym scope", () => {

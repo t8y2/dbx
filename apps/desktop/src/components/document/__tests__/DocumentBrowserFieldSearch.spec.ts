@@ -21,6 +21,10 @@ const documentJsonEditor = vi.hoisted(() => ({
   openSearch: vi.fn().mockReturnValue(true),
 }));
 
+const clipboard = vi.hoisted(() => ({
+  copyToClipboard: vi.fn(),
+}));
+
 const dataGrid = vi.hoisted(() => ({
   fullExportResult: undefined as
     | ((onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<
@@ -93,6 +97,10 @@ vi.mock("@/stores/settingsStore", () => ({
   TABLE_FONT_SIZE_MIN: 8,
   TABLE_FONT_SIZE_MAX: 16,
   useSettingsStore: () => settings,
+}));
+
+vi.mock("@/lib/common/clipboard", () => ({
+  copyToClipboard: clipboard.copyToClipboard,
 }));
 
 vi.mock("@/components/grid/DataGrid.vue", () => {
@@ -272,7 +280,22 @@ async function flushUi() {
   for (let index = 0; index < 4; index++) {
     await Promise.resolve();
     await nextTick();
+    // The mount chain (ensureConnected → load → render) spans more than a fixed
+    // number of microtask rounds once a real timer is in it, and DocumentBrowser
+    // renders from state those steps produce. Yielding to the macrotask queue
+    // lets each of them settle instead of leaving the component half-loaded.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
+}
+
+// flushUi only drains microtasks; popovers that mount through a timer need
+// polling or the query below races the render and returns null under load.
+async function waitForElement<T extends Element>(selector: string): Promise<T> {
+  return vi.waitFor(() => {
+    const element = document.body.querySelector<T>(selector);
+    if (!element) throw new Error(`element not rendered yet: ${selector}`);
+    return element;
+  });
 }
 
 function buttonWithTitle(title: string): HTMLButtonElement {
@@ -324,6 +347,8 @@ beforeEach(async () => {
   dataGrid.paginate = undefined;
   dataGrid.editable = true;
   documentJsonEditor.openSearch.mockClear();
+  clipboard.copyToClipboard.mockReset();
+  clipboard.copyToClipboard.mockResolvedValue(undefined);
   backend.documentDeleteDocument.mockResolvedValue(undefined);
   backend.documentInsertDocument.mockResolvedValue("created");
   backend.documentUpdateDocument.mockResolvedValue(1);
@@ -388,6 +413,33 @@ afterEach(() => {
 });
 
 describe("DocumentBrowser Elasticsearch field search", () => {
+  it("passes Elasticsearch mapping types through to the table grid", async () => {
+    app?.unmount();
+    backend.getColumns.mockResolvedValue([
+      { name: "profile", data_type: "object" },
+      { name: "profile.name", data_type: "keyword" },
+      { name: "title", data_type: "text" },
+    ]);
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: "document-1", title: "Example", profile: { name: "Ada" } }],
+      raw_documents: [],
+      total: 1,
+      total_is_exact: true,
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "connection-1",
+      database: "",
+      collection: "orders",
+      databaseType: "elasticsearch",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const types = JSON.parse(root!.querySelector<HTMLElement>("[data-testid='data-grid']")!.dataset.resultColumnTypes ?? "[]");
+
+    expect(types).toEqual(["keyword", "text", "object"]);
+  });
+
   it("migrates hidden columns and passes a stable index layout scope without changing the query result", async () => {
     app?.unmount();
     const legacyScopeKey = documentGridColumnVisibilityScopeKey({
@@ -1000,6 +1052,53 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(JSON.parse(filter)).toEqual({ _id: "1" });
   });
 
+  it("keeps the filter builder open and says why a rejected rule did not apply", async () => {
+    app?.unmount();
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: 1, title: "Numeric id" }],
+      raw_documents: [],
+      total: 1,
+      total_is_exact: true,
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "numeric_ids",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
+
+    const valueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
+    valueInput.value = "abc";
+    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+
+    const callsBeforeApply = backend.documentFindDocuments.mock.calls.length;
+    buttonWithText("grid.applyFilter").click();
+    await flushUi();
+
+    // The shared error banner sits in the document pane, which this popover covers, so the
+    // reason has to appear inside the builder or the click reads as a dead button.
+    expect(document.body.querySelector("[data-document-filter-builder-error]")?.textContent).toContain("number");
+    expect(document.body.querySelector('[data-testid="popover-content"]')).not.toBeNull();
+    expect(backend.documentFindDocuments.mock.calls.length).toBe(callsBeforeApply);
+
+    // Correcting the rule drops the stale message.
+    valueInput.value = "1";
+    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    expect(document.body.querySelector("[data-document-filter-builder-error]")).toBeNull();
+
+    buttonWithText("grid.applyFilter").click();
+    await flushUi();
+    expect(JSON.parse(backend.documentFindDocuments.mock.calls.at(-1)?.[5])).toEqual({ _id: 1 });
+  });
+
   it("exposes the applicable shared table view options", async () => {
     app?.unmount();
     app = createApp(DocumentBrowser, {
@@ -1045,7 +1144,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
 
     root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
     await flushUi();
-    const valueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
+    const valueInput = await waitForElement<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]');
     const callsBeforeEnter = backend.documentFindDocuments.mock.calls.length;
     valueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await flushUi();
@@ -1053,7 +1152,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
 
     root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
     await flushUi();
-    const reopenedValueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
+    const reopenedValueInput = await waitForElement<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]');
     reopenedValueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
     await flushUi();
     expect(document.body.querySelectorAll('input[placeholder="grid.filterBuilderValue"]')).toHaveLength(2);
@@ -1086,6 +1185,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     const jsonText = viewer.querySelector<HTMLElement>(".cm-line .json-string")!;
     const documentId = root!.querySelector<HTMLInputElement>('input[aria-label^="_id:"]')!;
     expect(root!.firstElementChild?.classList.contains("select-none")).toBe(true);
+    expect(viewer.classList.contains("select-text")).toBe(true);
     expect(documentId.readOnly).toBe(true);
     expect(documentId.value).toBe("document-1");
     expect(documentId.classList.contains("select-text")).toBe(true);
@@ -1096,6 +1196,10 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.readOnly).toBe("true");
     expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.lineNumbers).toBe("false");
     expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.presentation).toBe("viewer");
+
+    buttonWithTitle("grid.copy").click();
+    await flushUi();
+    expect(clipboard.copyToClipboard).toHaveBeenCalledWith(expect.stringContaining('"_id": "document-1"'));
 
     documentId.setSelectionRange(0, documentId.value.length);
     expect(documentId.selectionStart).toBe(0);

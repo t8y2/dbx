@@ -37,6 +37,15 @@ pub async fn list_database_storage(
 }
 
 #[tauri::command]
+pub async fn list_xugu_tablespaces(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+) -> Result<Vec<db::XuguTablespaceInfo>, String> {
+    dbx_core::schema::list_xugu_tablespaces_core(&state, &connection_id, database.as_deref()).await
+}
+
+#[tauri::command]
 pub async fn get_sqlserver_completion_context(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -379,6 +388,16 @@ pub async fn get_columns(
     .await
 }
 
+/// Read-only Plugin Host API over the existing connection. The core function
+/// performs the open-connection gate before entering the ordinary metadata path.
+#[tauri::command]
+pub async fn get_plugin_table_metadata(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::schema::plugin_metadata::PluginTableContext,
+) -> Result<dbx_core::schema::plugin_metadata::PluginTableMetadata, String> {
+    dbx_core::schema::plugin_metadata::get_table_metadata(&state, request).await
+}
+
 #[tauri::command]
 pub async fn get_all_columns(
     state: State<'_, Arc<AppState>>,
@@ -537,6 +556,17 @@ pub async fn list_invalid_indexes(
 }
 
 #[tauri::command]
+pub async fn get_table_partitioning(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<dbx_core::db::PgTablePartitioning, String> {
+    dbx_core::schema::get_table_partitioning_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
 pub async fn list_subpartitions(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -643,4 +673,13 @@ pub async fn list_available_extensions(
     database: String,
 ) -> Result<Vec<db::ExtensionInfo>, String> {
     dbx_core::schema::list_available_extensions_core(&state, &connection_id, &database).await
+}
+
+#[tauri::command]
+pub async fn list_event_triggers(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<Vec<db::EventTriggerInfo>, String> {
+    dbx_core::schema::list_event_triggers_core(&state, &connection_id, &database).await
 }

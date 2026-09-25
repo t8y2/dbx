@@ -1,23 +1,25 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, FileCode, FolderClosed, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, FilePlus, Pencil } from "@lucide/vue";
+import { FolderOpen, FileCode, FolderClosed, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { forgetExternalSqlFileTarget, moveExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
-import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
+import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath } from "@/lib/sql/sqlFileOpen";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
-import { getSqlFileFolderPaths, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
+import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
 
 const emit = defineEmits<{
@@ -27,6 +29,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { toast } = useToast();
 
 interface FolderState {
@@ -38,6 +41,9 @@ interface FolderState {
 }
 
 const folders = ref<FolderState[]>([]);
+const filterSettingsOpen = ref(false);
+const fileFilterDraft = ref(getSqlFileFilter());
+const fileFilterRegexExample = ".*[.](sql|sh|py)$";
 
 // Right-click target. `kind` discriminates between a folder header, a tree
 // directory entry, and a tree file entry. `folderPath` is the owning top-level
@@ -112,12 +118,12 @@ async function addFolder(folderPath: string) {
 // Re-scan a single top-level folder and replace its entries. Mutated via the
 // reactive proxy (folders.value[idx]) so Vue tracks the change — see the note
 // in addFolder above.
-async function loadFolderEntries(folderPath: string) {
+async function loadFolderEntries(folderPath: string): Promise<string | null> {
   const idx = folders.value.findIndex((f) => f.path === folderPath);
-  if (idx === -1) return;
+  if (idx === -1) return null;
   folders.value[idx].loading = true;
   try {
-    const entries = await api.listSqlFilesInFolder(folderPath);
+    const entries = await api.listSqlFilesInFolder(folderPath, getSqlFileFilter());
     const target = folders.value.findIndex((f) => f.path === folderPath);
     if (target !== -1) {
       folders.value[target].entries = entries;
@@ -132,13 +138,16 @@ async function loadFolderEntries(folderPath: string) {
       folders.value[target].expanded = nextExpanded;
     }
   } catch (e: any) {
-    toast(t("sqlFileTree.loadFailed", { message: e?.message || String(e) }), 5000);
+    const message = e?.message || String(e);
+    toast(t("sqlFileTree.loadFailed", { message }), 5000);
+    return message;
   } finally {
     const target = folders.value.findIndex((f) => f.path === folderPath);
     if (target !== -1) {
       folders.value[target].loading = false;
     }
   }
+  return null;
 }
 
 function collectPaths(entries: SqlFileEntry[], into: Set<string>) {
@@ -156,6 +165,24 @@ async function refreshFolder(folderPath: string) {
 
 async function refreshAll() {
   await Promise.all(folders.value.map((f) => loadFolderEntries(f.path)));
+  notifySqlFileFoldersChanged();
+  toast(t("sqlFileTree.refreshed"), 1500);
+}
+
+async function saveFileFilter() {
+  const previousFilter = getSqlFileFilter();
+  saveSqlFileFilter(fileFilterDraft.value);
+  const errors = await Promise.all(folders.value.map((f) => loadFolderEntries(f.path)));
+  // An unparsable pattern must not survive in localStorage: it would fail
+  // every later refresh and silently empty Quick Open until it is fixed.
+  const invalidFilter = errors.find((message) => message?.startsWith("Invalid file filter"));
+  if (invalidFilter) {
+    saveSqlFileFilter(previousFilter);
+    await Promise.all(folders.value.map((f) => loadFolderEntries(f.path)));
+    toast(t("sqlFileTree.filterInvalid", { message: invalidFilter }), 5000);
+    return;
+  }
+  filterSettingsOpen.value = false;
   notifySqlFileFoldersChanged();
   toast(t("sqlFileTree.refreshed"), 1500);
 }
@@ -228,11 +255,11 @@ function collectDirPaths(entries: SqlFileEntry[], into: Set<string>) {
 async function openFile(path: string) {
   if (!isTauriRuntime()) return;
   try {
-    const snapshot = await api.readExternalSqlFileSnapshot(path);
+    const snapshot = await api.readExternalSqlFileSnapshot(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog);
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog, target.schema);
   } catch (e: any) {
-    if (isExternalSqlFileTooLargeError(e)) {
+    if (isExternalSqlFileTooLargeError(e) && isSqlFilePath(path)) {
       executeFile(path);
       toast(t("sqlFile.largeFileExecutionOpened", { size: formatSqlFileSize(e.sizeBytes) }), 6000);
       return;
@@ -351,7 +378,12 @@ function handlePanelClick(event: MouseEvent) {
 
 function normalizedSqlFileName(name: string) {
   const trimmed = name.trim();
-  return /\.sql$/i.test(trimmed) ? trimmed : `${trimmed}.sql`;
+  return isSqlFilePath(trimmed) ? trimmed : `${trimmed}.sql`;
+}
+
+function normalizedRenamedFileName(name: string, currentName: string) {
+  const trimmed = name.trim();
+  return isSqlFilePath(currentName) ? normalizedSqlFileName(trimmed) : trimmed;
 }
 
 function openCreateDialog(rootPath: string, directoryPath: string) {
@@ -384,7 +416,7 @@ async function renameSqlFile() {
   const target = renameTarget.value;
   if (!target || !fileNameInput.value.trim()) return;
   try {
-    const nextPath = await api.renameSqlFileInFolder(target.folderPath, target.entry.path, normalizedSqlFileName(fileNameInput.value));
+    const nextPath = await api.renameSqlFileInFolder(target.folderPath, target.entry.path, normalizedRenamedFileName(fileNameInput.value, target.entry.name));
     // Renaming does not change content, and re-reading here would make a
     // successful rename appear to fail for files too large for the editor.
     queryStore.relocateExternalSqlFilePath(target.entry.path, nextPath);
@@ -462,9 +494,11 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
   }
 
   // file
-  return [
-    { label: t("sqlFileTree.openFile"), action: () => openFile(target.entry.path), icon: FileCode },
-    { label: t("sqlFileTree.executeSqlFile"), action: () => executeFile(target.entry.path), icon: Play },
+  const items: ContextMenuItem[] = [{ label: t("sqlFileTree.openFile"), action: () => openFile(target.entry.path), icon: FileCode }];
+  if (isSqlFilePath(target.entry.name)) {
+    items.push({ label: t("sqlFileTree.executeSqlFile"), action: () => executeFile(target.entry.path), icon: Play });
+  }
+  items.push(
     { label: "", separator: true },
     { label: t("sqlFileTree.revealInFileManager"), action: () => revealInFileManager(target.entry.path), icon: FolderSearch },
     { label: t("sqlFileTree.copyPath"), action: () => copyPath(target.entry.path), icon: Copy },
@@ -472,7 +506,8 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
     { label: t("sqlFileTree.renameFile"), action: () => openRenameDialog(target), icon: Pencil },
     { label: "", separator: true },
     { label: t("sqlFileTree.deleteFile"), action: () => openDeleteDialog(target), icon: Trash2, variant: "destructive" },
-  ];
+  );
+  return items;
 });
 
 function expandSubtree(target: Extract<ContextTarget, { kind: "dir" }>) {
@@ -507,6 +542,19 @@ function clearContextTarget() {
     <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
       <span class="text-[13px] font-medium">{{ t("sqlFileTree.title") }}</span>
       <span class="flex-1" />
+      <LightTooltip :text="t('sqlFileTree.filterSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="h-5 w-5"
+          @click="
+            fileFilterDraft = getSqlFileFilter();
+            filterSettingsOpen = true;
+          "
+        >
+          <Settings class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
       <LightTooltip v-if="folders.length > 0" :text="t('sqlFileTree.refreshAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshAll">
           <RefreshCw class="h-3 w-3" />
@@ -648,6 +696,23 @@ function clearContextTarget() {
         </div>
       </template>
     </CustomContextMenu>
+
+    <Dialog v-model:open="filterSettingsOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{{ t("sqlFileTree.filterSettings") }}</DialogTitle>
+        </DialogHeader>
+        <div class="grid gap-2 py-2">
+          <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
+          <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
+          <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" @click="filterSettingsOpen = false">{{ t("common.cancel") }}</Button>
+          <Button type="button" @click="saveFileFilter">{{ t("common.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog :open="showCreateDialog" @update:open="(open) => (showCreateDialog = open)">
       <DialogContent class="sm:max-w-[380px]">

@@ -50,7 +50,7 @@ capabilities:
   tableDataEdit: true
   tableStructureEdit: true
   tableImport: false
-  dataTransfer: false
+  dataTransfer: true
   sqlFileExecution: true
   databaseCreate: false
   fieldLineage: false

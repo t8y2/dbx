@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -7,7 +8,8 @@ use tokio::net::TcpListener;
 
 use super::connection::AppState;
 
-use dbx_core::storage::McpGlobalPolicy;
+use dbx_core::mcp_policy::McpConnectionGroupPath;
+use dbx_core::storage::{McpDatabaseScope, McpGlobalPolicy};
 
 const BIND_ADDR: &str = "127.0.0.1:0";
 const MCP_BRIDGE_PORT_FILE: &str = "mcp-bridge-port";
@@ -230,6 +232,10 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
 
                 if first_line.starts_with("POST /open-table") {
                     handle_open_table(&app, &st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /call-plugin-tool") {
+                    handle_call_plugin_tool(&app, &st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /list-plugin-connections") {
+                    handle_list_plugin_connections(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/list-tables") {
                     handle_list_tables_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/describe-table") {
@@ -294,12 +300,14 @@ fn find_config_by_name<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_connection_in_mcp_scope, ensure_mcp_connection_sql_write_allowed, ensure_mcp_execute_and_show_supported,
-        ensure_mcp_sql_database_switch_allowed, mongo_filter_is_effectively_unbounded, mongo_pipeline_has_write_stage,
-        resolve_connection, resolve_mongo_database, resolve_mongo_target_values, write_port_file, AppState,
+        effective_database_execution_policy, ensure_connection_in_mcp_scope, ensure_mcp_connection_sql_write_allowed,
+        ensure_mcp_execute_and_show_supported, ensure_mcp_mongo_pipeline_target_allowed_by_id,
+        ensure_mcp_sql_database_switch_allowed, is_terminal_routed_exec, mongo_filter_is_effectively_unbounded,
+        mongo_pipeline_has_write_stage, plugin_connection_summaries, plugin_connection_summary, resolve_connection,
+        resolve_mongo_database, resolve_mongo_target_values, write_port_file, AppState,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-    use dbx_core::storage::{McpGlobalPolicy, Storage};
+    use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
     use std::sync::Arc;
 
     fn mysql_config(read_only: bool) -> ConnectionConfig {
@@ -335,6 +343,19 @@ mod tests {
         assert!(!default_data_dir.join("mcp-bridge-port").exists());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_ssh_exec_tools_may_open_the_workbench_terminal() {
+        // The workbench open (and its tab churn) exists solely so a
+        // terminal-routed exec lands in a real PTY; forwarded sftp/metrics
+        // calls are hidden-channel by design and must never trigger it,
+        // whatever runInTerminal says.
+        assert!(is_terminal_routed_exec("ssh_exec"));
+        assert!(is_terminal_routed_exec("ssh_exec_sudo"));
+        assert!(!is_terminal_routed_exec("sftp_list_dir"));
+        assert!(!is_terminal_routed_exec("ssh_metrics"));
+        assert!(!is_terminal_routed_exec("mcp_exec"));
     }
 
     #[test]
@@ -392,7 +413,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let storage = Storage::open(&root.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&root.join("storage.db")).await.unwrap();
         let mut config = mysql_config(false);
         storage.save_connections(&[config.clone()]).await.unwrap();
         let state = Arc::new(AppState::new_with_plugin_dir(storage, root.join("plugins")));
@@ -424,7 +445,7 @@ mod tests {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: None,
-            query_timeout_secs: None,
+            ..Default::default()
         };
         assert!(ensure_connection_in_mcp_scope(&all, "conn-1").is_ok());
 
@@ -432,7 +453,7 @@ mod tests {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec!["conn-1".to_string()]),
-            query_timeout_secs: None,
+            ..Default::default()
         };
         assert!(ensure_connection_in_mcp_scope(&subset, "conn-1").is_ok());
         assert!(ensure_connection_in_mcp_scope(&subset, "conn-2").unwrap_err().starts_with("CONNECTION_OUT_OF_SCOPE:"));
@@ -441,9 +462,85 @@ mod tests {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(Vec::new()),
-            query_timeout_secs: None,
+            ..Default::default()
         };
         assert!(ensure_connection_in_mcp_scope(&none, "conn-1").is_err());
+    }
+
+    #[test]
+    fn database_execution_policy_overrides_connection_and_global_defaults() {
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            connection_policies: vec![McpConnectionPolicy {
+                connection_id: "conn-1".to_string(),
+                read_only: false,
+                allow_dangerous_sql: false,
+                execution_mode_configured: true,
+                execution_mode_policy_version: Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION),
+                database_scope: McpDatabaseScope::Selected,
+                allowed_databases: vec!["aa".to_string(), "aaa".to_string()],
+                database_policies: vec![
+                    McpDatabasePolicy { database_name: "aa".to_string(), read_only: false, allow_dangerous_sql: true },
+                    McpDatabasePolicy { database_name: "aaa".to_string(), read_only: true, allow_dangerous_sql: false },
+                ],
+                allow_salesforce_dml: false,
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(effective_database_execution_policy(&policy, "conn-1", "aa"), (false, true));
+        assert_eq!(effective_database_execution_policy(&policy, "conn-1", "aaa"), (true, false));
+        assert_eq!(effective_database_execution_policy(&policy, "conn-1", "unconfigured"), (false, false));
+    }
+
+    #[tokio::test]
+    async fn database_execution_policy_blocks_cross_database_mongo_aggregate_output() {
+        let root = std::env::temp_dir().join(format!(
+            "dbx-mcp-bridge-database-policy-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&root.join("storage.db")).await.unwrap();
+        let mut config = mysql_config(false);
+        config.id = "conn-1".to_string();
+        storage.save_connections(&[config]).await.unwrap();
+        storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                connection_policies: vec![McpConnectionPolicy {
+                    connection_id: "conn-1".to_string(),
+                    read_only: false,
+                    allow_dangerous_sql: true,
+                    execution_mode_configured: true,
+                    execution_mode_policy_version: Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION),
+                    database_scope: McpDatabaseScope::Selected,
+                    allowed_databases: vec!["operations".to_string(), "reporting".to_string()],
+                    database_policies: vec![McpDatabasePolicy {
+                        database_name: "operations".to_string(),
+                        read_only: false,
+                        allow_dangerous_sql: true,
+                    }],
+                    allow_salesforce_dml: false,
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, root.join("plugins")));
+
+        let error = ensure_mcp_mongo_pipeline_target_allowed_by_id(
+            &state,
+            "conn-1",
+            "operations",
+            r#"[{"$merge":{"into":{"db":"reporting","coll":"archive"}}}]"#,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.starts_with("DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE:"), "{error}");
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -500,6 +597,80 @@ mod tests {
             assert!(!mongo_filter_is_effectively_unbounded(filter), "{filter}");
         }
     }
+
+    fn plugin_connection_config(id: &str, name: &str, external_config: serde_json::Value) -> ConnectionConfig {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": name,
+            "db_type": "plugin",
+            "plugin_id": "io.dbx.ssh",
+            "plugin_connection_type": "ssh",
+            "host": "server.example.com",
+            "port": 2222,
+            "username": "deploy",
+            "password": "",
+            "connection_secrets": { "password": "hunter2", "totp_secret": "otpauth://secret" },
+            "external_config": external_config
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn plugin_connection_summary_is_metadata_only() {
+        let config = plugin_connection_config(
+            "conn-ssh-1",
+            "prod-bastion",
+            serde_json::json!({ "authentication": "private-key", "read_only": true, "agent_socket": "/tmp/agent" }),
+        );
+        let value = serde_json::to_value(plugin_connection_summary(&config)).unwrap();
+        let object = value.as_object().unwrap();
+        let keys: std::collections::HashSet<_> = object.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            ["id", "name", "host", "port", "username", "authentication", "readOnly"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+        assert_eq!(value["id"], "conn-ssh-1");
+        assert_eq!(value["host"], "server.example.com");
+        assert_eq!(value["port"], 2222);
+        assert_eq!(value["username"], "deploy");
+        assert_eq!(value["authentication"], "private-key");
+        assert_eq!(value["readOnly"], true);
+        let rendered = value.to_string();
+        for secret in ["hunter2", "otpauth", "password", "connection_secrets", "external_config", "agent_socket"] {
+            assert!(!rendered.contains(secret), "summary must not leak {secret}");
+        }
+    }
+
+    #[test]
+    fn plugin_connection_summary_falls_back_to_safe_defaults() {
+        let mut config = plugin_connection_config("conn-ssh-2", "fallback", serde_json::json!({}));
+        config.read_only = true;
+        let value = serde_json::to_value(plugin_connection_summary(&config)).unwrap();
+        assert_eq!(value["authentication"], "password");
+        assert_eq!(value["readOnly"], true);
+    }
+
+    #[test]
+    fn plugin_connection_summaries_filter_by_plugin_and_sort_by_name() {
+        let ssh_b = plugin_connection_config("b", "Beta", serde_json::json!({}));
+        let ssh_a = plugin_connection_config("a", "alpha", serde_json::json!({}));
+        let mut ldap = plugin_connection_config("l", "zeta", serde_json::json!({}));
+        ldap.plugin_id = Some("io.dbx.ldap".to_string());
+        let mysql = mysql_config(false);
+
+        let summaries = plugin_connection_summaries(&[ssh_b, ldap, mysql, ssh_a], "io.dbx.ssh");
+        let names: Vec<_> = summaries.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "Beta"]);
+
+        assert!(plugin_connection_summaries(
+            &[plugin_connection_config("a", "alpha", serde_json::json!({}))],
+            "io.dbx.files"
+        )
+        .is_empty());
+    }
 }
 
 async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
@@ -526,14 +697,14 @@ async fn resolve_connection(
     connection_id: Option<&str>,
     connection_name: &str,
 ) -> Result<crate::models::connection::ConnectionConfig, String> {
-    let policy = load_mcp_policy(state).await?;
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
     let configs = state.storage.load_connections().await.map_err(|e| mcp_policy_unavailable(e.to_string()))?;
     let config = if let Some(id) = connection_id.filter(|s| !s.is_empty()) {
         configs.iter().find(|c| c.id == id).ok_or_else(|| format!("Connection with id '{}' not found", id))?
     } else {
         find_config_by_name(&configs, connection_name).ok_or_else(|| "Connection not found".to_string())?
     };
-    ensure_connection_in_mcp_scope(&policy, &config.id)?;
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_paths.get(&config.id), &config.id)?;
     let mut state_configs = state.configs.write().await;
     if !state_configs.contains_key(&config.id) {
         state_configs.insert(config.id.clone(), config.clone());
@@ -551,6 +722,24 @@ async fn load_mcp_policy(state: &Arc<AppState>) -> Result<McpGlobalPolicy, Strin
         .map_err(|error| mcp_policy_unavailable(error.to_string()))
 }
 
+async fn load_mcp_policy_context(
+    state: &Arc<AppState>,
+) -> Result<(McpGlobalPolicy, HashMap<String, McpConnectionGroupPath>), String> {
+    let policy = load_mcp_policy(state).await?;
+    let group_paths = match state.storage.load_sidebar_layout().await {
+        Ok(Some(layout)) => dbx_core::mcp_policy::connection_group_paths(&layout),
+        Ok(None) => Ok(HashMap::new()),
+        Err(error) => Err(error),
+    };
+    match group_paths {
+        Ok(paths) => Ok((policy, paths)),
+        Err(error) if dbx_core::mcp_policy::policy_uses_connection_groups(&policy) => {
+            Err(mcp_policy_unavailable(error))
+        }
+        Err(_) => Ok((policy, HashMap::new())),
+    }
+}
+
 fn mcp_policy_unavailable(error: String) -> String {
     if error.starts_with("MCP_POLICY_UNAVAILABLE:") {
         error
@@ -559,13 +748,54 @@ fn mcp_policy_unavailable(error: String) -> String {
     }
 }
 
+#[cfg(test)]
 fn ensure_connection_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str) -> Result<(), String> {
-    if policy.allowed_connection_ids.as_ref().is_some_and(|allowed| !allowed.iter().any(|id| id == connection_id)) {
+    ensure_connection_in_mcp_scope_with_groups(policy, None, connection_id)
+}
+
+fn ensure_connection_in_mcp_scope_with_groups(
+    policy: &McpGlobalPolicy,
+    group_path: Option<&McpConnectionGroupPath>,
+    connection_id: &str,
+) -> Result<(), String> {
+    if !dbx_core::mcp_policy::policy_allows_connection(policy, group_path, connection_id) {
         return Err(format!(
             "CONNECTION_OUT_OF_SCOPE: connection '{connection_id}' is not allowed by DBX MCP settings"
         ));
     }
     Ok(())
+}
+
+fn ensure_database_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str, database: &str) -> Result<(), String> {
+    let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == connection_id) else {
+        return Ok(());
+    };
+    let allowed = match rule.database_scope {
+        McpDatabaseScope::All => true,
+        McpDatabaseScope::Selected => rule.allowed_databases.iter().any(|allowed| allowed == database),
+        McpDatabaseScope::None => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "DATABASE_OUT_OF_SCOPE: database '{database}' is not allowed by DBX MCP settings for connection '{connection_id}'"
+        ))
+    }
+}
+
+#[cfg(test)]
+fn effective_database_execution_policy(policy: &McpGlobalPolicy, connection_id: &str, database: &str) -> (bool, bool) {
+    effective_database_execution_policy_with_groups(policy, &[], connection_id, database)
+}
+
+fn effective_database_execution_policy_with_groups(
+    policy: &McpGlobalPolicy,
+    group_ids: &[String],
+    connection_id: &str,
+    database: &str,
+) -> (bool, bool) {
+    dbx_core::mcp_policy::effective_database_execution_policy_with_groups(policy, group_ids, connection_id, database)
 }
 
 async fn ensure_mcp_write_allowed(
@@ -584,12 +814,19 @@ async fn ensure_mcp_write_allowed_with_risk(
     action: &str,
     dangerous: bool,
 ) -> Result<(), String> {
-    let policy = load_mcp_policy(state).await?;
-    ensure_connection_in_mcp_scope(&policy, &config.id)?;
-    if policy.read_only {
-        return Err(format!("MCP_READ_ONLY: DBX MCP read-only mode is enabled. {action} blocked."));
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
+    let group_path = group_paths.get(&config.id);
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_path, &config.id)?;
+    ensure_database_in_mcp_scope(&policy, &config.id, database)?;
+    let group_ids = group_path.map(|path| path.ids.as_slice()).unwrap_or_default();
+    let (read_only, allow_dangerous_sql) =
+        effective_database_execution_policy_with_groups(&policy, group_ids, &config.id, database);
+    if read_only {
+        return Err(format!(
+            "MCP_READ_ONLY: MCP execution permission for database '{database}' is read-only. {action} blocked."
+        ));
     }
-    if dangerous && !policy.allow_dangerous_sql {
+    if dangerous && !allow_dangerous_sql {
         return Err(format!("SQL_BLOCKED: High-risk operation '{action}' is disabled in DBX MCP settings."));
     }
     if config.read_only {
@@ -609,8 +846,9 @@ pub(crate) async fn ensure_mcp_read_allowed_by_id(
     connection_id: &str,
     database: &str,
 ) -> Result<(), String> {
-    let policy = load_mcp_policy(state).await?;
-    ensure_connection_in_mcp_scope(&policy, connection_id)?;
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_paths.get(connection_id), connection_id)?;
+    ensure_database_in_mcp_scope(&policy, connection_id, database)?;
     let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
     let config = configs
         .iter()
@@ -643,6 +881,12 @@ async fn ensure_mcp_mongo_pipeline_target_allowed_by_id(
     database: &str,
     pipeline_json: &str,
 ) -> Result<(), String> {
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_paths.get(connection_id), connection_id)?;
+    dbx_core::mcp_policy::ensure_mongo_database_execution_scope(&policy, connection_id, database, pipeline_json)?;
+    for target_database in mongo_pipeline_output_databases(pipeline_json, database)? {
+        ensure_database_in_mcp_scope(&policy, connection_id, &target_database)?;
+    }
     let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
     let config = configs
         .iter()
@@ -654,6 +898,10 @@ async fn ensure_mcp_mongo_pipeline_target_allowed_by_id(
         );
     }
     Ok(())
+}
+
+fn mongo_pipeline_output_databases(pipeline_json: &str, active_database: &str) -> Result<Vec<String>, String> {
+    dbx_core::mcp_policy::mongo_pipeline_output_databases(pipeline_json, active_database)
 }
 
 async fn ensure_mcp_write_allowed_by_id_with_risk(
@@ -682,6 +930,25 @@ pub(crate) async fn ensure_mcp_mongo_filtered_write_allowed_by_id(
         ensure_mcp_dangerous_write_allowed_by_id(state, connection_id, database, action).await
     } else {
         ensure_mcp_write_allowed_by_id(state, connection_id, database, action).await
+    }
+}
+
+/// A bulk write is as dangerous as its least-bounded operation.
+pub(crate) async fn ensure_mcp_mongo_bulk_write_allowed_by_id(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    operations_json: &str,
+) -> Result<(), String> {
+    let command = dbx_core::mongo_shell::MongoCommand::BulkWrite {
+        collection: String::new(),
+        operations: operations_json.to_string(),
+        options: None,
+    };
+    if command.has_effectively_unbounded_filter() {
+        ensure_mcp_dangerous_write_allowed_by_id(state, connection_id, database, "BulkWrite").await
+    } else {
+        ensure_mcp_write_allowed_by_id(state, connection_id, database, "BulkWrite").await
     }
 }
 
@@ -918,14 +1185,37 @@ async fn ensure_mcp_sql_allowed(
     database: &str,
     sql: &str,
 ) -> Result<(), String> {
-    let policy = load_mcp_policy(state).await?;
-    ensure_connection_in_mcp_scope(&policy, &config.id)?;
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
+    let group_path = group_paths.get(&config.id);
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_path, &config.id)?;
+    ensure_database_in_mcp_scope(&policy, &config.id, database)?;
+    if let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == config.id) {
+        if rule.database_scope == McpDatabaseScope::Selected
+            && dbx_core::production_safety::sql_references_disallowed_database(
+                sql,
+                &config.db_type,
+                database,
+                &rule.allowed_databases,
+            )
+        {
+            return Err(
+                "DATABASE_OUT_OF_SCOPE: SQL references a database that is not allowed by DBX MCP settings for this connection."
+                    .to_string(),
+            );
+        }
+    }
     ensure_mcp_sql_database_switch_allowed(config.db_type, sql)?;
     let is_write = dbx_core::query_execution_sql::is_write_sql_for_database(sql, config.db_type);
-    if policy.read_only && is_write {
-        return Err("MCP_READ_ONLY: DBX MCP read-only mode is enabled. SQL write blocked.".to_string());
+    dbx_core::mcp_policy::ensure_sql_database_execution_scope(&policy, config, database, sql)?;
+    let group_ids = group_path.map(|path| path.ids.as_slice()).unwrap_or_default();
+    let (read_only, allow_dangerous_sql) =
+        effective_database_execution_policy_with_groups(&policy, group_ids, &config.id, database);
+    if read_only && is_write {
+        return Err(format!(
+            "MCP_READ_ONLY: MCP execution permission for database '{database}' is read-only. SQL write blocked."
+        ));
     }
-    if !policy.allow_dangerous_sql && dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type) {
+    if !allow_dangerous_sql && dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type) {
         return Err("SQL_BLOCKED: High-risk SQL is disabled in DBX MCP settings.".to_string());
     }
     ensure_mcp_connection_sql_write_allowed(config, is_write)?;
@@ -1024,6 +1314,201 @@ async fn handle_open_table(app: &AppHandle, state: &Arc<AppState>, body: &str, s
     };
     let _ = app.emit("mcp-open-table", &event);
     respond(stream, "200 OK", "ok").await;
+}
+
+#[derive(Deserialize)]
+struct CallPluginToolRequest {
+    connection_id: String,
+    tool: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+    plugin_id: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+/// Tools whose terminal routing (`runInTerminal` / terminal MCP mode) can
+/// require the workbench terminal to exist. Every other forwarded tool runs
+/// on the hidden channel by design and must never open the workbench.
+fn is_terminal_routed_exec(tool: &str) -> bool {
+    tool == "ssh_exec" || tool == "ssh_exec_sudo"
+}
+
+/// Asks the plugin for a connection's terminal MCP mode (the toggle in the
+/// SSH terminal toolbar). Any failure — an older plugin without the probe
+/// route, a busy sidecar — degrades to off, so the silent path can never
+/// regress into opening the workbench.
+async fn plugin_agent_mode_on(state: &Arc<AppState>, plugin_id: &str, connection_id: &str) -> bool {
+    let probe: Result<serde_json::Value, String> = state
+        .plugin_host
+        .invoke(
+            plugin_id,
+            "ssh/agent/mode/get",
+            serde_json::json!({ "connectionId": connection_id }),
+            None,
+            Some(std::time::Duration::from_secs(5)),
+        )
+        .await;
+    probe
+        .ok()
+        .and_then(|value| value.get("agentTerminalMode").and_then(serde_json::Value::as_str).map(str::to_string))
+        .is_some_and(|mode| mode == "auto" || mode == "strict")
+}
+
+/// POST /call-plugin-tool: runs a plugin MCP tool on the desktop app's own
+/// plugin session — the same sidecar process the workbench talks to. The
+/// connection's workbench tab is opened only when the call will route into
+/// the visible terminal (ssh runInTerminal / terminal MCP mode), so
+/// agent-terminal commands execute in a real PTY while silent hidden-channel
+/// calls never open or focus the app. The lifecycle payload comes from the
+/// saved connection config, so callers never pass credentials.
+async fn handle_call_plugin_tool(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    body: &str,
+    stream: &mut tokio::net::TcpStream,
+) {
+    let req: CallPluginToolRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_error(stream, "400 Bad Request", &format!("invalid body: {e}")).await;
+            return;
+        }
+    };
+    let config = match resolve_connection(state, Some(&req.connection_id), "").await {
+        Ok(c) => c,
+        Err(e) => {
+            respond_error(stream, "404 Not Found", &e).await;
+            return;
+        }
+    };
+    let plugin_id = req.plugin_id.or_else(|| config.plugin_id.clone()).unwrap_or_default();
+    if plugin_id.is_empty() {
+        respond_error(stream, "400 Bad Request", "connection is not bound to a plugin").await;
+        return;
+    }
+    // The workbench tab only needs to exist when the forwarded call will
+    // actually route into the visible terminal: an explicit runInTerminal,
+    // or no flag plus the connection's terminal MCP mode being on (asked
+    // from the plugin, so the toggle in the terminal UI owns the decision).
+    // Everything else — sftp listings, silent execs on the hidden channel —
+    // must not open (let alone focus) the app while the agent works.
+    let route_terminal = is_terminal_routed_exec(&req.tool)
+        && match req.arguments.get("runInTerminal").and_then(serde_json::Value::as_bool) {
+            Some(explicit) => explicit,
+            None => plugin_agent_mode_on(state, &plugin_id, &config.id).await,
+        };
+    if route_terminal {
+        let _ = app.emit("mcp-open-connection-workbench", serde_json::json!({ "connection_id": config.id }));
+    }
+    let lifecycle = match state.plugin_host.connection_params_standalone(&config) {
+        Ok(l) => l,
+        Err(e) => {
+            respond_error(stream, "500 Internal Server Error", &e).await;
+            return;
+        }
+    };
+    let params = serde_json::json!({
+        "tool": req.tool,
+        "arguments": req.arguments,
+        "lifecycle": lifecycle,
+    });
+    // Long ceiling: agent-terminal calls may sit in a workbench approval
+    // prompt (default 120s) before the command even starts.
+    let timeout = std::time::Duration::from_millis(req.timeout_ms.unwrap_or(300_000).clamp(1_000, 600_000));
+    let result: Result<serde_json::Value, String> =
+        state.plugin_host.invoke(&plugin_id, "mcp/call", params, None, Some(timeout)).await;
+    match result {
+        Ok(value) => respond_json(stream, &value).await,
+        Err(e) => respond_error(stream, "502 Bad Gateway", &e).await,
+    }
+}
+
+#[derive(Deserialize)]
+struct ListPluginConnectionsRequest {
+    plugin_id: String,
+}
+
+/// Metadata-only view of a saved plugin connection. This is a deliberate
+/// field whitelist: credentials (`password`, `connection_secrets`, private
+/// keys, `sudo_password`, `totp_secret`, ...) can never reach the response
+/// because they are not part of this struct and `external_config` is only
+/// probed for the two safe keys below.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginConnectionSummary {
+    id: String,
+    name: String,
+    host: String,
+    port: u16,
+    username: String,
+    authentication: String,
+    read_only: bool,
+}
+
+fn plugin_connection_summary(config: &crate::models::connection::ConnectionConfig) -> PluginConnectionSummary {
+    let external = config.external_config.as_ref();
+    // The dialog persists every declared config-bound field (including
+    // defaults), so `authentication` is normally present; fall back to the
+    // provider's historical default ("password") for pre-existing rows.
+    let authentication = external
+        .and_then(|v| v.get("authentication"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("password")
+        .to_string();
+    let read_only =
+        external.and_then(|v| v.get("read_only")).and_then(serde_json::Value::as_bool).unwrap_or(config.read_only);
+    PluginConnectionSummary {
+        id: config.id.clone(),
+        name: config.name.clone(),
+        host: config.host.clone(),
+        port: config.port,
+        username: config.username.clone(),
+        authentication,
+        read_only,
+    }
+}
+
+fn plugin_connection_summaries(
+    configs: &[crate::models::connection::ConnectionConfig],
+    plugin_id: &str,
+) -> Vec<PluginConnectionSummary> {
+    let mut summaries: Vec<PluginConnectionSummary> = configs
+        .iter()
+        .filter(|c| {
+            c.db_type == crate::models::connection::DatabaseType::Plugin && c.plugin_id.as_deref() == Some(plugin_id)
+        })
+        .map(plugin_connection_summary)
+        .collect();
+    summaries.sort_by_key(|summary| summary.name.to_lowercase());
+    summaries
+}
+
+/// POST /list-plugin-connections: returns saved connection metadata for one
+/// plugin so standalone stdio MCP agents can pick a connection without
+/// reading the SQLite store. Metadata only — this route never returns
+/// credentials; connecting still goes through /call-plugin-tool, whose
+/// lifecycle payload comes from the host-side saved config.
+async fn handle_list_plugin_connections(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: ListPluginConnectionsRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_error(stream, "400 Bad Request", &format!("invalid body: {e}")).await;
+            return;
+        }
+    };
+    if req.plugin_id.trim().is_empty() {
+        respond_error(stream, "400 Bad Request", "plugin_id is required").await;
+        return;
+    }
+    let configs = match state.storage.load_connections().await {
+        Ok(c) => c,
+        Err(e) => {
+            respond_error(stream, "500 Internal Server Error", &e).await;
+            return;
+        }
+    };
+    let connections = plugin_connection_summaries(&configs, req.plugin_id.trim());
+    respond_json(stream, &serde_json::json!({ "connections": connections })).await;
 }
 
 async fn handle_execute_query(app: &AppHandle, state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {

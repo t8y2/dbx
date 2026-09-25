@@ -34,6 +34,7 @@ const DRIVER_STARTUP_FLOOR_TYPES = new Set<DatabaseType>([
   "hive",
   "kyuubi",
   "impala",
+  "argo",
   "spark",
   "db2",
   "informix",

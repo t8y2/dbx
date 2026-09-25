@@ -10,22 +10,51 @@ description: Export database connections with AES-256-GCM encrypted passwords. M
 ## Export
 
 <Steps>
-  <Step>### Start Export Click the **Export** button in the sidebar header.</Step>
-  <Step>### Select Connections Choose one or more connections. All connections are selected by default. Only the selected connections, their sidebar groups and ordering, and referenced tunnel profiles are exported.</Step>
-  <Step>
-    ### Choose Export Protection Enter a passphrase to encrypt your passwords. For a one-time migration in a trusted environment, you may instead choose **Export without encryption** and confirm the warning. The plaintext file may contain database passwords, SSH Tunnel credentials, and other
-    sensitive information.
+<Step>
+    ### Start Export
+
+    Click the **Export** button in the sidebar header.
   </Step>
-  <Step>### Save File Choose a save location. The exported file contains only the selected connections, their related layout, and referenced tunnel profiles. Encrypted export is recommended.</Step>
+<Step>
+    ### Select Connections
+
+    Choose one or more connections. All connections are selected by default. Only the selected connections, their sidebar groups and ordering, and referenced tunnel profiles are exported.
+  </Step>
+<Step>
+    ### Choose Export Protection
+
+    Enter a passphrase to encrypt your passwords. For a one-time migration in a trusted environment, you may instead choose **Export without encryption** and confirm the warning. The plaintext file may contain database passwords, SSH Tunnel credentials, and other sensitive information.
+  </Step>
+<Step>
+    ### Save File
+
+    Choose a save location. The exported file contains only the selected connections, their related layout, and referenced tunnel profiles. Encrypted export is recommended.
+  </Step>
 </Steps>
 
 ## Import
 
 <Steps>
-  <Step>### Start Import Click the **Import** button in the sidebar header.</Step>
-  <Step>### Select File and Decrypt Select the exported file. DBX automatically detects encrypted and plain configuration files. Encrypted files ask for the passphrase first so DBX can decrypt and preview them without writing anything yet.</Step>
-  <Step>### Select Connections Choose which connections from the file to import. All connections are selected by default.</Step>
-  <Step>### Done Only the selected connections are imported, with passwords restored. Deduplicated by name + host + port. Sidebar groups and ordering for the selected connections can still be applied after import.</Step>
+<Step>
+    ### Start Import
+
+    Click the **Import** button in the sidebar header.
+  </Step>
+<Step>
+    ### Select File and Decrypt
+
+    Select the exported file. DBX automatically detects encrypted and plain configuration files. Encrypted files ask for the passphrase first so DBX can decrypt and preview them without writing anything yet.
+  </Step>
+<Step>
+    ### Select Connections
+
+    Choose which connections from the file to import. All connections are selected by default.
+  </Step>
+<Step>
+    ### Done
+
+    Only the selected connections are imported, with passwords restored. Deduplicated by name + host + port. Sidebar groups and ordering for the selected connections can still be applied after import.
+  </Step>
 </Steps>
 
 ## Security

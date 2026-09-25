@@ -27,4 +27,27 @@ describe("sidebar active-tab targets", () => {
     expect(matchesTarget(icebergDatabase, target!)).toBe(false);
     expect(matchesTarget(defaultDatabase, target!)).toBe(false);
   });
+
+  it("uses data-tab table metadata as the locate identity after a reload", () => {
+    const target = activeTabSidebarTarget({
+      mode: "data",
+      connectionId: "dm-1",
+      database: "SERVICE_DB",
+      schema: "APP_OWNER",
+      title: "ORDERS",
+      sql: "SELECT * FROM APP_OWNER.ORDERS",
+      tableMeta: {
+        database: "APP_OWNER",
+        schema: "APP_OWNER",
+        tableName: "ORDERS",
+        tableType: "TABLE",
+        columns: [{ name: "ID", data_type: "INTEGER", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        primaryKeys: ["ID"],
+      },
+    } as QueryTab);
+
+    expect(target).toEqual({ type: "table", connectionId: "dm-1", database: "APP_OWNER", schema: "APP_OWNER", tableName: "ORDERS" });
+    expect(matchesTarget({ id: "dm-1:APP_OWNER:APP_OWNER:tables:ORDERS", label: "ORDERS", type: "table", connectionId: "dm-1", database: "APP_OWNER", schema: "APP_OWNER" } as TreeNode, target!)).toBe(true);
+    expect(matchesTarget({ id: "dm-1:SERVICE_DB", label: "SERVICE_DB", type: "database", connectionId: "dm-1", database: "SERVICE_DB" } as TreeNode, target!)).toBe(false);
+  });
 });

@@ -4,6 +4,8 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { externalSqlFileContentMatchesBaseline, externalSqlFileMetadataMatches, externalSqlFileVersionWasIgnored } from "@/lib/sql/externalSqlFileChanges";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
 import type { ExternalSqlFileSnapshot } from "@/lib/backend/tauri";
 import type { QueryTab } from "@/types/database";
 
@@ -64,6 +66,7 @@ function delay(ms: number) {
 export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOptions) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
+  const settingsStore = useSettingsStore();
   const pendingPrompt = ref<ExternalSqlFilePrompt | null>(null);
   const checkingTabIds = new Set<string>();
   let promptResolver: ((decision: ExternalSqlFilePromptDecision) => void) | null = null;
@@ -83,12 +86,13 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
   }
 
   async function readStableSnapshot(path: string) {
+    const maxSizeBytes = externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb);
     try {
-      return await api.readExternalSqlFileSnapshot(path);
+      return await api.readExternalSqlFileSnapshot(path, maxSizeBytes);
     } catch (firstError) {
       await delay(MISSING_FILE_RECHECK_DELAY_MS);
       try {
-        return await api.readExternalSqlFileSnapshot(path);
+        return await api.readExternalSqlFileSnapshot(path, maxSizeBytes);
       } catch {
         throw firstError;
       }

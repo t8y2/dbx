@@ -19,3 +19,7 @@ LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"
 
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+# Increase main-thread stack from the Windows default of 1 MiB to 8 MiB.
+# Large Rust projects in debug mode overflow the 1 MiB stack when DB query
+# paths pull in deep serde/driver call stacks. This embeds the size in the PE.
+rustflags = ["-C", "link-arg=/STACK:8388608"]

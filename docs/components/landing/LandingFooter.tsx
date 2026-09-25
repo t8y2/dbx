@@ -1,12 +1,13 @@
 import Link from "next/link";
+import type { DocsLang } from "@/lib/i18n";
 
 const i18n = {
   en: {
-    tagline: "20 MB to manage 90+ databases.",
+    tagline: "25 MB to manage 90+ databases.",
     copyright: `© ${new Date().getFullYear()} DBX. All rights reserved.`,
   },
   cn: {
-    tagline: "20MB，管理90+种数据库。",
+    tagline: "25MB，管理90+种数据库。",
     copyright: `© ${new Date().getFullYear()} DBX.`,
   },
 };
@@ -19,11 +20,11 @@ function GithubIcon() {
   );
 }
 
-export function LandingFooter({ lang }: { lang: "en" | "cn" }) {
+export function LandingFooter({ lang }: { lang: DocsLang }) {
   const t = i18n[lang];
 
   return (
-    <footer className="border-t border-[var(--color-landing-line)] bg-[#08080a]">
+    <footer className="border-t border-[var(--color-landing-line)] bg-landing-bg">
       <div className="max-w-[1180px] mx-auto px-7 py-7 max-[760px]:px-[18px]">
         <div className="flex items-center justify-between gap-4 max-[760px]:flex-col max-[760px]:gap-3 max-[760px]:text-center">
           {/* Logo */}

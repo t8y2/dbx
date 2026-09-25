@@ -2,7 +2,7 @@ import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { matchQuickOpenText, useQuickOpen } from "@/composables/useQuickOpen";
 import * as api from "@/lib/backend/api";
-import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
+import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 
@@ -17,11 +17,13 @@ vi.mock("@/stores/savedSqlStore", () => ({
 vi.mock("@/lib/backend/api", () => ({
   listSqlFilesInFolder: vi.fn(),
   readExternalSqlFile: vi.fn(),
+  listPlugins: vi.fn(),
 }));
 
 vi.mock("@/lib/sqlFile/sqlFileFolders", async () => {
   const { ref } = await import("vue");
   return {
+    getSqlFileFilter: vi.fn(() => "*.sql"),
     getSqlFileFolderPaths: vi.fn(),
     sqlFileFoldersVersion: ref(0),
   };
@@ -68,7 +70,7 @@ describe("useQuickOpen", () => {
 
       const { filteredItems, loadExternalSqlFiles, setQuery } = useQuickOpen();
       const initialLoad = loadExternalSqlFiles();
-      expect(api.listSqlFilesInFolder).toHaveBeenCalledWith("/old");
+      expect(api.listSqlFilesInFolder).toHaveBeenCalledWith("/old", getSqlFileFilter());
 
       sqlFileFoldersVersion.value++;
       await nextTick();
@@ -76,7 +78,7 @@ describe("useQuickOpen", () => {
       await initialLoad;
 
       expect(api.listSqlFilesInFolder).toHaveBeenCalledTimes(2);
-      expect(api.listSqlFilesInFolder).toHaveBeenLastCalledWith("/new");
+      expect(api.listSqlFilesInFolder).toHaveBeenLastCalledWith("/new", getSqlFileFilter());
       setQuery(".sql");
       expect(filteredItems.value.map((item) => item.label)).toContain("new.sql");
       expect(filteredItems.value.map((item) => item.label)).not.toContain("old.sql");
@@ -112,6 +114,30 @@ describe("useQuickOpen", () => {
       expect(matchQuickOpenText("define", label)?.kind).toBe("substring");
       expect(matchQuickOpenText("shop", label)?.kind).toBe("substring");
       expect(matchQuickOpenText("cardshoplog", label)?.kind).toBe("fuzzy");
+    });
+
+    it("matches Chinese table names by pinyin initials (issue #7912)", () => {
+      // Reported: 全局搜索中文表名输入首字母模糊搜索搜不出来
+      expect(matchQuickOpenText("zzj", "总租金")?.kind).toBe("initials");
+      expect(matchQuickOpenText("yhmx", "用户明细")?.kind).toBe("initials");
+    });
+
+    it("matches Chinese table names by a non-contiguous pinyin-initials subsequence", () => {
+      const match = matchQuickOpenText("zj", "总租金");
+      expect(match?.kind).toBe("fuzzy");
+      expect(match?.indices.map((index) => "总租金"[index]).join("")).toBe("总租金".slice(0, 1) + "总租金".slice(2, 3));
+    });
+
+    it("keeps pinyin-initials highlight indices aligned across unmapped supplementary-plane characters", () => {
+      const match = matchQuickOpenText("bx", "𠮷表x");
+      expect(match?.kind).toBe("fuzzy");
+      expect(match?.indices).toEqual([2, 3]);
+    });
+
+    it("prefers a literal prefix match over pinyin-initials for mixed Han+Latin names", () => {
+      const literal = matchQuickOpenText("abc", "abc表");
+      expect(literal?.kind).toBe("prefix");
+      expect(literal?.score).toBeLessThan(250);
     });
 
     it("puts the exact shop result before prefixed and containing names", () => {
@@ -504,6 +530,65 @@ describe("useQuickOpen", () => {
           expect(filteredItems.value.indexOf(connectionItem)).toBeLessThan(filteredItems.value.indexOf(databaseItem));
         }
       }
+    });
+  });
+
+  describe("plugin workbenches", () => {
+    function installedPluginFixture(id: string, name: string, contributions: any[]) {
+      return {
+        manifest: { id, name, version: "1.0.0", contributions },
+        compatibility: { compatible: true },
+      } as any;
+    }
+
+    it("lists standalone workbenches and skips ones bound to a connection provider", async () => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      vi.mocked(api.listPlugins).mockResolvedValue([
+        installedPluginFixture("io.leetcode", "LeetCode", [{ type: "workbench", id: "main", label: "LeetCode" }]),
+        installedPluginFixture("io.kafka", "Kafka", [
+          { type: "connection-provider", id: "kafka", label: "Kafka", database_type: "kafka", fields: [], workbench: "browser" },
+          { type: "workbench", id: "browser", label: "Kafka Browser" },
+        ]),
+        installedPluginFixture("io.terminal", "Terminal", [
+          { type: "connection-provider", id: "ssh", label: "SSH", database_type: "ssh", fields: [] },
+          { type: "workbench", id: "shell", label: "Terminal" },
+        ]),
+        installedPluginFixture("io.mixed", "Mixed", [
+          { type: "connection-provider", id: "cp", label: "Mixed", database_type: "mixed", fields: [], workbench: "bound" },
+          { type: "workbench", id: "bound", label: "Bound Panel" },
+          { type: "workbench", id: "free", label: "Free Panel" },
+        ]),
+      ]);
+
+      const { filteredItems, loadPluginWorkbenches } = useQuickOpen();
+      await loadPluginWorkbenches();
+
+      const labels = filteredItems.value.map((item) => item.label);
+      expect(labels).toContain("LeetCode");
+      // A provider without a workbench pointer leaves its sibling workbench standalone.
+      expect(labels).toContain("Terminal");
+      // Only the unbound workbench of a mixed plugin is listed.
+      expect(labels).toContain("Free Panel");
+      expect(labels).not.toContain("Kafka Browser");
+      expect(labels).not.toContain("Bound Panel");
+    });
+
+    it("finds workbenches by plugin name and carries the dispatch fields", async () => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      vi.mocked(api.listPlugins).mockResolvedValue([installedPluginFixture("io.leetcode", "LeetCode", [{ type: "workbench", id: "main", label: "刷题面板", icon: "assets/icon.png" }])]);
+
+      const { filteredItems, loadPluginWorkbenches, setQuery } = useQuickOpen();
+      await loadPluginWorkbenches();
+
+      setQuery("leetcode");
+      expect(filteredItems.value.length).toBe(1);
+      const item = filteredItems.value[0];
+      expect(item.type).toBe("plugin_workbench");
+      expect(item.pluginId).toBe("io.leetcode");
+      expect(item.contributionId).toBe("main");
+      expect(item.description).toBe("LeetCode");
+      expect(item.pluginIcon).toBe("assets/icon.png");
+      expect(item.connectionId).toBe("");
     });
   });
 

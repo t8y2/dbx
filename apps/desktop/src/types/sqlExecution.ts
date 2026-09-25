@@ -1,4 +1,4 @@
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 
 export interface MultiDbExecutionTarget {
   connectionId: string;
@@ -19,7 +19,14 @@ export interface SqlExecutionTargetGroup {
 
 export type SqlExecutionTargetValidationState = "valid" | "invalid" | "needsRecheck";
 
-export type MultiDbExecutionItemStatus = "pending" | "running" | "success" | "failed" | "skipped" | "cancelled" | "not_executed";
+export type MultiDbExecutionItemStatus = "pending" | "running" | "pending_commit" | "rolled_back" | "success" | "failed" | "skipped" | "cancelled" | "not_executed";
+
+/** An individual target owns its session until it is explicitly settled. */
+export interface MultiDbManualTransaction {
+  canCommit: boolean;
+  /** Returns a warning if the session ended but its commit outcome is unknown. */
+  finish: (action: "commit" | "rollback") => Promise<string | void>;
+}
 
 export interface MultiDbResultRunExecution {
   kind: "multi-db";
@@ -35,6 +42,9 @@ export interface MultiDbTargetExecutionResult {
   status: Exclude<MultiDbExecutionItemStatus, "pending" | "running" | "not_executed">;
   errorMessage?: string;
   durationMs?: number;
+  transaction?: MultiDbManualTransaction;
+  /** Result produced on this target; feeds the merged multi-source view. */
+  result?: QueryResult;
 }
 
 export interface SqlExecutionTargetValidation {

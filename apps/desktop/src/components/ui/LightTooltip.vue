@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { cn } from "@/lib/common/utils";
 import { floatingArrowOffset, floatingViewportShift } from "@/lib/common/floatingViewportPosition";
 
 const props = withDefaults(
@@ -13,6 +14,7 @@ const props = withDefaults(
     openOnFocus?: boolean;
     nowrap?: boolean;
     surface?: "foreground" | "popover";
+    contentClass?: string;
   }>(),
   {
     disabled: false,
@@ -77,7 +79,7 @@ const arrowClass = computed(() => {
   }
 });
 
-const tooltipSurfaceClass = computed(() => (props.surface === "popover" ? "bg-popover text-popover-foreground" : "bg-foreground text-background"));
+const tooltipSurfaceClass = computed(() => (props.surface === "popover" ? "bg-popover text-popover-foreground" : "bg-foreground text-background-solid"));
 
 const arrowSurfaceClass = computed(() => (props.surface === "popover" ? "bg-popover border-border" : "bg-foreground border-foreground"));
 
@@ -279,7 +281,7 @@ watch(
       v-if="show"
       ref="tooltipRef"
       class="fixed z-50 rounded-md text-xs"
-      :class="[tooltipSurfaceClass, slots.content ? '' : ['inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', nowrap ? 'whitespace-nowrap' : ''], tooltipTransformClass]"
+      :class="cn([tooltipSurfaceClass, slots.content ? '' : ['inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', nowrap ? 'whitespace-nowrap' : ''], tooltipTransformClass], contentClass)"
       :style="{ left: `${x}px`, top: `${y}px` }"
       role="tooltip"
       @mouseenter="clearCloseTimer"

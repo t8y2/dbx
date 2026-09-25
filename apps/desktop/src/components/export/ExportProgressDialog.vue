@@ -3,12 +3,13 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle2, XCircle, AlertCircle, FolderOpen, Minimize2, X } from "@lucide/vue";
+import { Loader2, CheckCircle2, XCircle, AlertCircle, FolderOpen, Minimize2, Wrench, X } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { formatDataTransferDuration } from "@/composables/useExportTracker";
+import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -38,11 +39,13 @@ const props = defineProps<{
   finishedAt?: number;
   disableCancel?: boolean;
   canMinimize?: boolean;
+  connectionId?: string;
 }>();
 
 const emit = defineEmits<{
   cancel: [];
   minimize: [];
+  changeQueryTimeout: [];
   "update:open": [value: boolean];
 }>();
 
@@ -59,6 +62,7 @@ const displayName = computed(() => {
 });
 const isActive = computed(() => props.status === "Running" || props.status === "Writing");
 const isFinished = computed(() => props.status === "Done" || props.status === "Error" || props.status === "Cancelled");
+const canChangeQueryTimeout = computed(() => props.status === "Error" && !!props.connectionId && !!props.errorMessage && isQueryTimeoutErrorMessage(props.errorMessage));
 const canRevealFile = computed(() => props.status === "Done" && !!props.filePath && isTauriRuntime());
 const progressPercent = computed(() => {
   if (!props.totalRows || props.totalRows <= 0) return 0;
@@ -163,6 +167,10 @@ async function revealExportFile() {
           </Button>
         </template>
         <template v-else-if="isFinished">
+          <Button v-if="canChangeQueryTimeout" variant="outline" size="sm" @click="emit('changeQueryTimeout')">
+            <Wrench class="mr-1 h-3.5 w-3.5" />
+            {{ t("editor.changeQueryTimeout") }}
+          </Button>
           <Button v-if="canRevealFile" size="sm" :disabled="isRevealing" @click="revealExportFile">
             <Loader2 v-if="isRevealing" class="mr-1 h-3.5 w-3.5 animate-spin" />
             <FolderOpen v-else class="mr-1 h-3.5 w-3.5" />

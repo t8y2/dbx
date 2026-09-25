@@ -137,6 +137,13 @@ profiles:
     port: 9200
     user: ""
     category: document
+  - id: solr
+    dbType: solr
+    label: Apache Solr
+    icon: solr
+    port: 8983
+    user: ""
+    category: document
   - id: meilisearch
     dbType: meilisearch
     label: Meilisearch
@@ -470,6 +477,15 @@ profiles:
     user: ""
     urlParams: auth=NONE
     category: analytics
+  - id: argo
+    dbType: argo
+    label: ArgoDB (Transwarp)
+    icon: hive
+    port: 10000
+    user: ""
+    urlParams: auth=noSasl
+    category: domestic
+    pickerLabel: ArgoDB
   - id: impala
     dbType: impala
     label: Apache Impala
@@ -613,6 +629,12 @@ profiles:
     port: 2379
     user: ""
     category: registry_config
+  - id: etcd-v2
+    dbType: etcd
+    label: etcd 2.x (v2 API)
+    icon: etcd
+    port: 2379
+    user: ""
   - id: zookeeper
     dbType: zookeeper
     label: Apache ZooKeeper
@@ -684,12 +706,27 @@ profiles:
     port: 1972
     user: _SYSTEM
     category: sql
+  - id: cache
+    dbType: iris
+    label: InterSystems Caché
+    icon: cache
+    port: 1972
+    user: _SYSTEM
+    category: sql
   - id: influxdb
     dbType: influxdb
     label: InfluxDB
     icon: InfluxDB
     pickerIcon: influxdb
     port: 8086
+    user: ""
+    category: timeseries
+  - id: influxdb3
+    dbType: influxdb3
+    label: InfluxDB 3.x
+    icon: InfluxDB
+    pickerIcon: influxdb
+    port: 8181
     user: ""
     category: timeseries
   - id: victoriametrics
@@ -699,6 +736,13 @@ profiles:
     port: 8428
     user: ""
     category: timeseries
+  - id: salesforce
+    dbType: salesforce
+    label: Salesforce
+    icon: salesforce
+    port: 443
+    user: ""
+    category: analytics
   - id: custom_mysql
     dbType: mysql
     label: Custom

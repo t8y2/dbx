@@ -7,10 +7,11 @@ export interface ExternalSqlFileTarget {
   connectionId: string;
   database: string;
   catalog?: string;
+  schema?: string;
 }
 
 export function unassociatedExternalSqlFileTarget(): ExternalSqlFileTarget {
-  return { connectionId: "", database: "", catalog: undefined };
+  return { connectionId: "", database: "", catalog: undefined, schema: undefined };
 }
 
 interface StoredExternalSqlFileTarget extends ExternalSqlFileTarget {
@@ -23,8 +24,18 @@ function loadExternalSqlFileTargets(): StoredExternalSqlFileTarget[] {
     const parsed = JSON.parse(localStorage.getItem(EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY) || "[]");
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter((item) => typeof item?.path === "string" && typeof item?.connectionId === "string" && typeof item?.database === "string" && (item?.catalog === undefined || typeof item.catalog === "string") && typeof item?.updatedAt === "number")
-      .map((item) => ({ ...item, catalog: item.catalog })) as StoredExternalSqlFileTarget[];
+      .filter(
+        (item) =>
+          typeof item?.path === "string" &&
+          typeof item?.connectionId === "string" &&
+          typeof item?.database === "string" &&
+          (item?.catalog === undefined || typeof item.catalog === "string") &&
+          // Targets written before schemas were remembered carry no schema key at
+          // all, so an absent schema stays valid and simply restores as undefined.
+          (item?.schema === undefined || typeof item.schema === "string") &&
+          typeof item?.updatedAt === "number",
+      )
+      .map((item) => ({ ...item, catalog: item.catalog, schema: item.schema })) as StoredExternalSqlFileTarget[];
   } catch {
     return [];
   }
@@ -71,5 +82,5 @@ export function resolveExternalSqlFileTarget(path: string, connectionExists: (co
   const normalizedPath = normalizeExternalSqlPath(path);
   const saved = loadExternalSqlFileTargets().find((item) => item.path === normalizedPath);
   if (!saved || !connectionExists(saved.connectionId)) return fallback;
-  return { connectionId: saved.connectionId, database: saved.database, catalog: saved.catalog };
+  return { connectionId: saved.connectionId, database: saved.database, catalog: saved.catalog, schema: saved.schema };
 }

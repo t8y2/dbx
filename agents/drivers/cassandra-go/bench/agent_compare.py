@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import os
-import shlex
 import statistics
 import subprocess
 import sys
@@ -16,7 +15,21 @@ class Candidate:
     name: str
     command: list[str]
     artifact: Path
-    rss_command: str = ""
+
+
+def command_env_list(name: str) -> list[str]:
+    """Reads a command from an env var holding a JSON argv array.
+
+    Command env vars take JSON arrays so no shell is implied; operators who
+    need shell features pass ["sh", "-c", "..."] explicitly.
+    """
+    raw = os.getenv(name, "")
+    if not raw:
+        return []
+    value = json.loads(raw)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must be a JSON array of strings")
+    return [item for item in value]
 
 
 class AgentProcess:
@@ -81,9 +94,6 @@ class AgentProcess:
             return response.get("result")
 
     def rss_kib(self) -> int:
-        if self.candidate.rss_command:
-            output = subprocess.check_output(self.candidate.rss_command, shell=True, text=True).strip()
-            return int(output)
         output = subprocess.check_output(
             ["ps", "-o", "rss=", "-p", str(self.process.pid)],
             text=True,
@@ -168,12 +178,11 @@ def configured_candidates() -> list[Candidate]:
     candidates = []
     if "go" in selected:
         artifact = required_path("GO_AGENT")
-        candidates.append(Candidate("go-native", [str(artifact)], artifact, os.getenv("GO_RSS_COMMAND", "")))
+        candidates.append(Candidate("go-native", [str(artifact)], artifact))
     if "jdbc" in selected:
         artifact = required_path("JDBC_AGENT_JAR")
-        raw_command = os.getenv("JDBC_AGENT_COMMAND", "")
-        command = shlex.split(raw_command) if raw_command else [env_default("JAVA_BIN", "java"), "-jar", str(artifact)]
-        candidates.append(Candidate("jdbc-java", command, artifact, os.getenv("JDBC_RSS_COMMAND", "")))
+        command = command_env_list("JDBC_AGENT_COMMAND") or [env_default("JAVA_BIN", "java"), "-jar", str(artifact)]
+        candidates.append(Candidate("jdbc-java", command, artifact))
     if not candidates:
         raise ValueError("BENCH_CANDIDATES selected no candidates")
     return candidates

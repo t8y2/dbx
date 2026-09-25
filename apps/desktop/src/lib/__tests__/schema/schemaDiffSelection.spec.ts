@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { convertToSchemaDiffObjects, normalizeSchemaDiffDependencyGraph, selectSchemaDiffInput, selectSchemaDiffInputForObject, setSchemaDiffObjectSelected, type SchemaDiffPreparation } from "../../schema/schemaDiff";
+import { convertToSchemaDiffObjects, normalizeSchemaDiffDependencyGraph, schemaDiffObjectSelectionState, selectSchemaDiffInput, selectSchemaDiffInputForObject, setSchemaDiffObjectSelected, type SchemaDiffPreparation } from "../../schema/schemaDiff";
 
 function createPreparation(): SchemaDiffPreparation {
   return {
@@ -21,6 +21,31 @@ function createPreparation(): SchemaDiffPreparation {
       },
     ],
     syncSql: "-- table_a and table_b",
+  };
+}
+
+function createDuplicateForeignKeyPreparation(): SchemaDiffPreparation {
+  return {
+    diffs: [
+      {
+        type: "modified",
+        objectType: "table",
+        name: "orders",
+        foreignKeys: [
+          {
+            type: "removed",
+            name: "fk_customer",
+            target: { name: "fk_customer", column: "legacy_customer_id", ref_table: "customers", ref_column: "id" },
+          },
+          {
+            type: "added",
+            name: "fk_customer",
+            source: { name: "fk_customer", column: "customer_id", ref_table: "customers", ref_column: "id" },
+          },
+        ],
+      },
+    ],
+    syncSql: "-- orders",
   };
 }
 
@@ -60,6 +85,34 @@ describe("schema diff SQL selection projections", () => {
     expect(selectedInput.diffs.map((diff) => diff.name)).toEqual(["table_a"]);
     expect(selectedInput.diffs[0]?.columns?.map((column) => column.name)).toEqual(["a_other_col"]);
     expect(focusedInput.diffs[0]?.columns?.map((column) => column.name)).toEqual(["a_col", "a_other_col"]);
+  });
+
+  it("selects duplicate-name foreign keys independently and projects only the selected one", () => {
+    const result = createDuplicateForeignKeyPreparation();
+    const objects = convertToSchemaDiffObjects(result.diffs);
+    const tableObject = objects[0]!;
+    const [legacyForeignKey, currentForeignKey] = tableObject.children ?? [];
+    const foreignKeyIds = tableObject.children?.map((child) => child.id) ?? [];
+
+    expect(foreignKeyIds).toHaveLength(2);
+    expect(new Set(foreignKeyIds).size).toBe(2);
+    expect(schemaDiffObjectSelectionState(tableObject)).toEqual({ checked: true, indeterminate: false });
+
+    expect(legacyForeignKey && setSchemaDiffObjectSelected(objects, legacyForeignKey.id, false)).toBe(true);
+    expect(legacyForeignKey?.selected).toBe(false);
+    expect(currentForeignKey?.selected).toBe(true);
+    expect(tableObject.selected).toBe(false);
+    expect(schemaDiffObjectSelectionState(tableObject)).toEqual({ checked: false, indeterminate: true });
+
+    const selectedInput = selectSchemaDiffInput(result, objects);
+    expect(selectedInput.diffs[0]?.foreignKeys?.map((foreignKey) => foreignKey.source?.column)).toEqual(["customer_id"]);
+
+    expect(currentForeignKey && setSchemaDiffObjectSelected(objects, currentForeignKey.id, false)).toBe(true);
+    expect(schemaDiffObjectSelectionState(tableObject)).toEqual({ checked: false, indeterminate: false });
+    expect(selectSchemaDiffInput(result, objects).diffs).toEqual([]);
+
+    const rebuiltObjects = convertToSchemaDiffObjects(result.diffs);
+    expect(rebuiltObjects[0]?.children?.map((child) => child.id)).toEqual(foreignKeyIds);
   });
 
   it("returns an empty input for an object that is no longer present", () => {

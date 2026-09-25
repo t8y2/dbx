@@ -152,6 +152,13 @@ describe("SQL Server routine execution SQL", () => {
     expect(metadataSql).toContain("p.precision AS precision");
     expect(metadataSql).toContain("p.scale AS scale");
   });
+
+  it("quotes Oracle routine metadata aliases for legacy Oracle syntax", () => {
+    const sql = routineParametersQuery({ database: "XE", databaseType: "oracle", schema: "DBX_TEST", routineName: "demo" });
+
+    expect(sql).toContain('ARGUMENT_NAME AS "name"');
+    expect(sql).toContain('DEFAULTED AS "has_default"');
+  });
 });
 
 describe("XuguDB routine parameter metadata", () => {

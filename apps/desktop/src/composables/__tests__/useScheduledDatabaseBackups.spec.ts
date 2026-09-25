@@ -1,137 +1,190 @@
-import { describe, expect, it, vi } from "vitest";
-import type { DatabaseBackupExecutionConfig, DatabaseBackupRun } from "../../lib/backup/scheduledDatabaseBackup";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { DatabaseBackupRun, DatabaseBackupSchedule } from "../../lib/backup/scheduledDatabaseBackup";
+import type { DatabaseBackupSnapshot } from "../../lib/backup/backgroundDatabaseBackup";
 
 const mocks = vi.hoisted(() => ({
-  connection: { id: "mysql-1", name: "Local MySQL", db_type: "mysql" },
-  listDatabases: vi.fn(async () => [{ name: "app" }]),
-  beginSnapshot: vi.fn(async () => ({ sessionId: "snapshot-1" })),
-  rollbackSnapshot: vi.fn(async () => {}),
-  deleteFiles: vi.fn(async () => 0),
-  cancelExport: vi.fn(async () => {}),
-  exportDatabase: vi.fn(),
-  runDatabaseExport: vi.fn(),
+  command: vi.fn(),
+  legacySchedules: vi.fn(() => []),
+  legacyRuns: vi.fn(() => []),
+  desktop: true,
   addTask: vi.fn(),
-  registerCancel: vi.fn(),
-  unregisterCancel: vi.fn(),
   updateTask: vi.fn(),
-  nextId: 0,
+  cancelTask: vi.fn(),
+  register: vi.fn(),
+  unregister: vi.fn(),
 }));
-
-vi.mock("@/lib/backend/api", () => ({
-  listDatabases: mocks.listDatabases,
-  beginDatabaseBackupSnapshot: mocks.beginSnapshot,
-  rollbackManualTransaction: mocks.rollbackSnapshot,
-  deleteDatabaseBackupFiles: mocks.deleteFiles,
-  cancelDatabaseExport: mocks.cancelExport,
-}));
-
-vi.mock("@/lib/export/databaseExport", () => ({
-  buildAllDatabaseExportPlan: () => [{ database: "app", schema: "app", fileStem: "app", displayName: "app" }],
-  generateDatabaseExportId: () => `run-${++mocks.nextId}`,
-  runDatabaseExportUntilTerminal: mocks.runDatabaseExport,
-}));
-
-vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
-vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({
-    getConfig: () => mocks.connection,
-    ensureConnected: vi.fn(async () => {}),
-    initFromDisk: vi.fn(async () => {}),
-  }),
-}));
+vi.mock("vue", async () => ({ ...(await vi.importActual("vue")), onMounted: vi.fn(), onUnmounted: vi.fn() }));
+vi.mock("@/lib/backend/api", () => ({ databaseBackupCommand: mocks.command }));
+vi.mock("@/lib/backend/debugLog", () => ({ appendDebugLog: vi.fn() }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => mocks.desktop }));
+vi.mock("@/lib/backup/scheduledDatabaseBackup", () => ({ readDatabaseBackupSchedules: mocks.legacySchedules, readDatabaseBackupRuns: mocks.legacyRuns }));
 vi.mock("@/composables/useExportTracker", () => ({
   useExportTracker: () => ({
     addDatabaseExportTask: mocks.addTask,
-    registerTaskCancelHandler: mocks.registerCancel,
-    unregisterTaskCancelHandler: mocks.unregisterCancel,
     updateDatabaseExportTask: mocks.updateTask,
+    markDatabaseExportTaskCancelling: mocks.cancelTask,
+    registerTaskCancelHandler: mocks.register,
+    unregisterTaskCancelHandler: mocks.unregister,
   }),
 }));
 
-import { useScheduledDatabaseBackups } from "../useScheduledDatabaseBackups";
+let snapshot: DatabaseBackupSnapshot;
+function run(status: DatabaseBackupRun["status"] = "running"): DatabaseBackupRun {
+  return { id: "run-1", scheduleId: "schedule-1", scheduleName: "Daily", connectionId: "mysql", connectionName: "Local", destinationDirectory: "/backups", source: "scheduled", trigger: "manual", status, startedAt: "2026-09-12T00:00:00Z", files: [], progressPercent: 45 };
+}
+async function create() {
+  return (await import("../useScheduledDatabaseBackups")).useScheduledDatabaseBackups();
+}
 
-const config: DatabaseBackupExecutionConfig = {
-  connectionId: "mysql-1",
-  databases: ["app"],
-  tableFilterMode: "all",
-  tablePatterns: [],
-  destinationDirectory: "/backups",
-  includeStructure: true,
-  includeData: true,
-  includeObjects: true,
-  dropTableIfExists: false,
-};
+beforeEach(() => {
+  vi.resetModules();
+  vi.clearAllMocks();
+  mocks.desktop = true;
+  snapshot = { schedules: [], runs: [], migrated: true, heartbeat: "2026-09-12T00:00:00Z", destinationRoot: null };
+  mocks.command.mockImplementation(async (command) => (command.action === "snapshot" ? structuredClone(snapshot) : null));
+});
 
-describe("useScheduledDatabaseBackups one-shot execution", () => {
-  it("executes one-shot backups through the shared exporter without a schedule", async () => {
-    mocks.runDatabaseExport.mockImplementationOnce(async (_request: unknown, onProgress: (progress: unknown) => void) => {
-      onProgress({ status: "Done", objectIndex: 1, totalObjects: 1, currentObject: "app" });
-      return { status: "Done", objectIndex: 1, totalObjects: 1, currentObject: "app" };
-    });
-
-    const backup = useScheduledDatabaseBackups();
-    const scheduleCountBefore = backup.schedules.value.length;
-    const run = await backup.runOneShot(config, "One-time backup");
-
-    expect(run).toEqual(expect.objectContaining({ status: "success", source: "one-shot", trigger: "manual", scheduleId: undefined }));
-    expect(run).not.toHaveProperty("nextRunAt");
-    expect(backup.schedules.value).toHaveLength(scheduleCountBefore);
-    expect(mocks.addTask).toHaveBeenCalledWith(expect.any(String), "One-time backup", "/backups", "manual");
+describe("backend-owned scheduled database backups", () => {
+  it("reconnects to running backups without starting another export", async () => {
+    snapshot.runs = [run()];
+    const backups = await create();
+    await backups.processDueSchedules();
+    await backups.processDueSchedules();
+    expect(backups.activeRunIds.has("run-1")).toBe(true);
+    expect(backups.activeScheduleIds.has("schedule-1")).toBe(true);
+    expect(mocks.addTask).toHaveBeenCalledTimes(1);
+    expect(mocks.command.mock.calls.every(([c]) => c.action === "snapshot")).toBe(true);
+    expect(mocks.updateTask).toHaveBeenLastCalledWith("run-1", expect.objectContaining({ status: "Running", overallPercent: 45 }));
   });
 
-  it("prevents a second one-shot while one is already running", async () => {
-    const backup = useScheduledDatabaseBackups();
-    const activeRun = {
-      id: "active-one-shot",
-      scheduleName: "One-time backup",
-      connectionId: "mysql-1",
-      connectionName: "Local MySQL",
-      trigger: "manual",
-      source: "one-shot",
-      status: "running",
-      startedAt: new Date().toISOString(),
-      files: [],
-    } satisfies DatabaseBackupRun;
-    backup.runs.value.push(activeRun);
-    backup.activeRunIds.add(activeRun.id);
-    const exportCallCount = mocks.runDatabaseExport.mock.calls.length;
-
-    try {
-      expect(await backup.runOneShot(config, "One-time backup")).toBeNull();
-      expect(mocks.runDatabaseExport).toHaveBeenCalledTimes(exportCallCount);
-    } finally {
-      backup.activeRunIds.delete(activeRun.id);
-      backup.runs.value = backup.runs.value.filter((run: DatabaseBackupRun) => run.id !== activeRun.id);
-    }
+  it("reflects completion from a worker that runs independently of the UI", async () => {
+    snapshot.runs = [run()];
+    const backups = await create();
+    await backups.processDueSchedules();
+    snapshot.runs[0] = { ...run("success"), progressPercent: 100 };
+    await backups.processDueSchedules();
+    expect(backups.activeRunIds.size).toBe(0);
+    expect(backups.activeScheduleIds.size).toBe(0);
+    expect(mocks.updateTask).toHaveBeenLastCalledWith("run-1", expect.objectContaining({ status: "Done", overallPercent: 100 }));
   });
 
-  it("cancels an active one-shot through the shared export cancellation path", async () => {
-    mocks.cancelExport.mockClear();
-    mocks.deleteFiles.mockClear();
-    let resolveExport!: (progress: { status: "Cancelled"; objectIndex: number; totalObjects: number; currentObject: string }) => void;
-    mocks.runDatabaseExport.mockImplementationOnce(
-      (_request: unknown, onProgress: (progress: unknown) => void) =>
-        new Promise((resolve) => {
-          resolveExport = (progress) => {
-            onProgress(progress);
-            resolve(progress);
-          };
+  it("waits for durable cancellation acceptance before showing cancellation", async () => {
+    snapshot.runs = [run()];
+    const backups = await create();
+    await backups.processDueSchedules();
+    mocks.command.mockRejectedValueOnce(new Error("offline"));
+    await expect(backups.cancelRun("run-1")).rejects.toThrow("offline");
+    expect(backups.cancellingRunIds.size).toBe(0);
+    mocks.command.mockResolvedValueOnce(true);
+    expect(await backups.cancelRun("run-1")).toBe(true);
+    expect(backups.cancellingRunIds.has("run-1")).toBe(true);
+    expect(mocks.command).toHaveBeenLastCalledWith({ action: "cancel", id: "run-1" });
+  });
+
+  it("deletes by server record IDs, never by client supplied file paths", async () => {
+    snapshot.runs = [run("success")];
+    const backups = await create();
+    await backups.processDueSchedules();
+    await backups.deleteRuns(["run-1"]);
+    expect(mocks.command).toHaveBeenCalledWith({ action: "deleteRuns", ids: ["run-1"] });
+  });
+
+  it("preserves optimistic concurrency timestamps and saved time zones", async () => {
+    const schedule = { id: "schedule-1", name: "Daily", timeZone: "Asia/Tokyo", updatedAt: "2026-09-01T00:00:00Z" } as DatabaseBackupSchedule;
+    const backups = await create();
+    await backups.saveSchedule(schedule);
+    expect(mocks.command).toHaveBeenCalledWith({ action: "save", schedule });
+  });
+
+  it("does not overwrite local state after a failed save", async () => {
+    snapshot.schedules = [{ id: "schedule-1", name: "Original" } as DatabaseBackupSchedule];
+    const backups = await create();
+    await backups.processDueSchedules();
+    mocks.command.mockRejectedValueOnce(new Error("schedule changed"));
+    await expect(backups.saveSchedule({ ...snapshot.schedules[0], name: "New" })).rejects.toThrow("schedule changed");
+    expect(backups.schedules.value[0].name).toBe("Original");
+  });
+
+  it("reloads after a save even when an older poll finishes later", async () => {
+    const backups = await create();
+    const oldSnapshot = structuredClone(snapshot);
+    let release!: (value: DatabaseBackupSnapshot) => void;
+    mocks.command.mockImplementationOnce(
+      () =>
+        new Promise<DatabaseBackupSnapshot>((resolve) => {
+          release = resolve;
         }),
     );
+    const polling = backups.processDueSchedules();
+    const schedule = { id: "schedule-1", name: "New", timeZone: "Asia/Shanghai" } as DatabaseBackupSchedule;
+    mocks.command.mockImplementation(async (command) => {
+      if (command.action === "save") {
+        snapshot.schedules = [schedule];
+        return schedule;
+      }
+      return structuredClone(snapshot);
+    });
+    const saving = backups.saveSchedule(schedule);
+    release(oldSnapshot);
+    await polling;
+    await saving;
+    expect(backups.schedules.value).toEqual([schedule]);
+    expect(mocks.command.mock.calls.filter(([command]) => command.action === "snapshot")).toHaveLength(2);
+  });
 
-    const backup = useScheduledDatabaseBackups();
-    const pendingRun = backup.runOneShot(config, "One-time backup");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const activeRunId = [...backup.activeRunIds][0];
-    expect(activeRunId).toBeTruthy();
+  it("does not lose a newly queued run to a stale in-flight snapshot", async () => {
+    const backups = await create();
+    const oldSnapshot = structuredClone(snapshot);
+    let release!: (value: DatabaseBackupSnapshot) => void;
+    mocks.command.mockImplementationOnce(
+      () =>
+        new Promise<DatabaseBackupSnapshot>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const polling = backups.processDueSchedules();
+    mocks.command.mockImplementation(async (command) => {
+      if (command.action === "run") {
+        snapshot.runs = [run("success")];
+        return run();
+      }
+      return structuredClone(snapshot);
+    });
+    const running = backups.runSchedule("schedule-1");
+    release(oldSnapshot);
+    await polling;
+    expect(await running).toEqual(run("success"));
+  });
 
-    await backup.cancelRun(activeRunId!);
-    expect(mocks.cancelExport).toHaveBeenCalledWith(`${activeRunId}-1`);
-    resolveExport({ status: "Cancelled", objectIndex: 0, totalObjects: 1, currentObject: "app" });
+  it("marks migration only after the backend accepts it", async () => {
+    snapshot.migrated = false;
+    const backups = await create();
+    mocks.command.mockImplementation(async (command) => {
+      if (command.action === "migrate") throw new Error("database locked");
+      return structuredClone(snapshot);
+    });
+    await expect(backups.processDueSchedules()).rejects.toThrow("database locked");
+    expect(mocks.legacySchedules).toHaveBeenCalledTimes(1);
+    expect(backups.error.value).toBe("database locked");
+    mocks.command.mockImplementation(async (command) => {
+      if (command.action === "migrate") {
+        snapshot.migrated = true;
+        return null;
+      }
+      return structuredClone(snapshot);
+    });
+    await backups.processDueSchedules();
+    await backups.processDueSchedules();
+    expect(mocks.legacySchedules).toHaveBeenCalledTimes(2);
+  });
 
-    const finishedRun = await pendingRun;
-    expect(finishedRun).toEqual(expect.objectContaining({ status: "cancelled", source: "one-shot", files: [] }));
-    expect(mocks.deleteFiles).toHaveBeenCalledWith([expect.stringContaining(activeRunId!)]);
-    expect(backup.runs.value.find((run) => run.id === activeRunId)).toEqual(expect.objectContaining({ status: "cancelled", files: [] }));
+  it("never migrates browser-local paths into a server", async () => {
+    mocks.desktop = false;
+    snapshot.migrated = false;
+    const backups = await create();
+    await backups.processDueSchedules();
+    expect(mocks.legacySchedules).not.toHaveBeenCalled();
+    expect(mocks.legacyRuns).not.toHaveBeenCalled();
+    expect(mocks.command).toHaveBeenCalledWith({ action: "migrate", migration: { schedules: [], runs: [] } });
   });
 });

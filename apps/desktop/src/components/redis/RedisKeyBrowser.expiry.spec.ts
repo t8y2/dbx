@@ -19,12 +19,24 @@ const mocks = vi.hoisted(() => ({
   redisStreamAdd: vi.fn(),
   redisSetTtl: vi.fn(),
   redisSetExpireAt: vi.fn(),
+  redisSetKeysTtl: vi.fn(),
+  redisSetKeysExpireAt: vi.fn(),
   redisCheckJsonModule: vi.fn(),
   redisDeleteKey: vi.fn(),
   redisDeleteKeys: vi.fn(),
   redisExecuteCommand: vi.fn(),
   saveHistory: vi.fn(),
   canBuildRedisFuzzyTree: vi.fn((loadedKeyCount: number) => loadedKeyCount <= 200_000),
+  buildRedisKeySnapshotCooperatively: vi.fn(),
+  createRedisKeyTreeIndex: vi.fn(),
+  flattenVisibleRedisKeyTree: vi.fn(),
+  scrollerUpdateVisibleItems: vi.fn(),
+  scrollerScrollToItem: vi.fn(),
+  scrollerCallOrder: [] as string[],
+  scrollerVisiblePositions: [] as number[],
+  scrollerRefreshSnapshots: [] as Array<{ length: number; ids: Array<string | undefined>; hasHoles: boolean }>,
+  scrollerItems: [] as unknown[][],
+  scrollerVisibleStartIndex: 0,
   toast: vi.fn(),
   updateRedisDbKeyStats: vi.fn(),
   listRedisCompletionCommandDocs: vi.fn(),
@@ -33,6 +45,7 @@ const mocks = vi.hoisted(() => ({
   infiniteScroll: false,
   queryResultMaxRowsEnabled: true,
   queryResultMaxRows: 5000,
+  loadedTtl: -1,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -47,6 +60,8 @@ vi.mock("@/lib/backend/api", () => ({
   redisStreamAdd: mocks.redisStreamAdd,
   redisSetTtl: mocks.redisSetTtl,
   redisSetExpireAt: mocks.redisSetExpireAt,
+  redisSetKeysTtl: mocks.redisSetKeysTtl,
+  redisSetKeysExpireAt: mocks.redisSetKeysExpireAt,
   redisCheckJsonModule: mocks.redisCheckJsonModule,
   redisDeleteKey: mocks.redisDeleteKey,
   redisDeleteKeys: mocks.redisDeleteKeys,
@@ -56,7 +71,16 @@ vi.mock("@/lib/backend/api", () => ({
 
 vi.mock("@/lib/redis/redisKeyTree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/redis/redisKeyTree")>();
-  return { ...actual, canBuildRedisFuzzyTree: mocks.canBuildRedisFuzzyTree };
+  mocks.createRedisKeyTreeIndex.mockImplementation(actual.createRedisKeyTreeIndex);
+  mocks.flattenVisibleRedisKeyTree.mockImplementation(actual.flattenVisibleRedisKeyTree);
+  mocks.buildRedisKeySnapshotCooperatively.mockImplementation(actual.buildRedisKeySnapshotCooperatively);
+  return {
+    ...actual,
+    canBuildRedisFuzzyTree: mocks.canBuildRedisFuzzyTree,
+    buildRedisKeySnapshotCooperatively: mocks.buildRedisKeySnapshotCooperatively,
+    createRedisKeyTreeIndex: mocks.createRedisKeyTreeIndex,
+    flattenVisibleRedisKeyTree: mocks.flattenVisibleRedisKeyTree,
+  };
 });
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -287,7 +311,26 @@ vi.mock("@/components/editor/DangerConfirmDialog.vue", async () => {
 
 vi.mock("./RedisValueViewer.vue", async () => {
   const { defineComponent, h } = await import("vue");
-  return { default: defineComponent({ setup: () => () => h("div") }) };
+  return {
+    default: defineComponent({
+      props: { keyDisplay: String, keyRaw: String },
+      emits: ["loaded"],
+      setup(props, { emit }) {
+        return () =>
+          h("button", {
+            "data-test-emit-key-loaded": "",
+            onClick: () =>
+              emit("loaded", {
+                key_display: props.keyDisplay,
+                key_raw: props.keyRaw,
+                ttl: mocks.loadedTtl,
+                redis_type: "hash",
+                data: { kind: "hash", items: [] },
+              }),
+          });
+      },
+    }),
+  };
 });
 
 vi.mock("./RedisPubSubPanel.vue", async () => {
@@ -301,21 +344,57 @@ vi.mock("./RedisSlowlogPanel.vue", async () => {
 });
 
 vi.mock("vue-virtual-scroller", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { defineComponent, h, shallowRef, watch } = await import("vue");
   return {
     RecycleScroller: defineComponent({
       inheritAttrs: false,
       props: { items: { type: Array, default: () => [] } },
-      setup(props, { attrs, slots }) {
+      setup(props, { attrs, slots, expose }) {
         // Mirror the real scroller: interaction tests should render a viewport,
         // not every row in a deliberately large result set.
         const visibleItemCount = 50;
-        return () =>
-          h(
+        let layoutItemCount = props.items.length;
+        const renderedItems = shallowRef<unknown[]>([]);
+        const bindVisibleItems = () => {
+          renderedItems.value = props.items.slice(mocks.scrollerVisibleStartIndex, mocks.scrollerVisibleStartIndex + visibleItemCount);
+        };
+        watch(() => props.items, bindVisibleItems, { immediate: true });
+        expose({
+          updateVisibleItems: (itemsChanged?: boolean) => {
+            mocks.scrollerUpdateVisibleItems(itemsChanged);
+            mocks.scrollerCallOrder.push(`update:${(props.items[mocks.scrollerVisibleStartIndex] as { id?: string } | undefined)?.id ?? "missing"}`);
+            const viewportItems = props.items.slice(mocks.scrollerVisibleStartIndex, mocks.scrollerVisibleStartIndex + visibleItemCount) as Array<{ id?: string } | undefined>;
+            mocks.scrollerRefreshSnapshots.push({
+              length: props.items.length,
+              ids: Array.from(viewportItems, (item) => item?.id),
+              hasHoles: Array.from(viewportItems).some((item) => item === undefined),
+            });
+            // The real scroller keeps a keyed view pool when false. Rebind only
+            // when callers identify in-place item changes explicitly.
+            if (itemsChanged) bindVisibleItems();
+            layoutItemCount = props.items.length;
+          },
+          getScroll: () => ({ start: mocks.scrollerVisibleStartIndex * 30, end: (mocks.scrollerVisibleStartIndex + visibleItemCount) * 30 }),
+          findItemIndex: (offset: number) => Math.floor(offset / 30),
+          scrollToItem: (index: number, options?: { align?: string }) => {
+            mocks.scrollerScrollToItem(index, options);
+            mocks.scrollerCallOrder.push(`scroll:${(props.items[index] as { id?: string } | undefined)?.id ?? "missing"}`);
+            // A browser clamps scrollTop to the currently rendered spacer.
+            // The scroller's reactive total size reaches the DOM only after
+            // updateVisibleItems, so model that old-layout constraint here.
+            mocks.scrollerVisibleStartIndex = Math.min(index, Math.max(0, layoutItemCount - 1));
+            mocks.scrollerVisiblePositions.push(mocks.scrollerVisibleStartIndex);
+            bindVisibleItems();
+          },
+        });
+        return () => {
+          mocks.scrollerItems.push(props.items as unknown[]);
+          return h(
             "div",
             attrs,
-            props.items.slice(0, visibleItemCount).map((item) => slots.default?.({ item })),
+            renderedItems.value.map((item) => slots.default?.({ item })),
           );
+        };
       },
     }),
   };
@@ -354,6 +433,26 @@ function redisKeyInfo(keyType = "json") {
   return { key_display: KEY_NAME, key_raw: KEY_RAW, key_type: keyType, ttl: 90, size: 7, value_preview: "{}" };
 }
 
+function redisFlatRow(id: string, label: string, keyRaw = id) {
+  return {
+    id,
+    depth: 0,
+    node: {
+      kind: "leaf" as const,
+      id,
+      label,
+      fullKeyDisplay: label,
+      keyRaw,
+      db: 0,
+      keyType: "string",
+      ttl: -1,
+      size: 0,
+      valuePreview: "",
+      pathSegments: [label],
+    },
+  };
+}
+
 const completionCommands = [
   { name: "GET", group: "string", arity: 2, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
   { name: "GETEX", group: "string", arity: -2, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
@@ -379,6 +478,12 @@ function resetApiMocks() {
   mocks.infiniteScroll = false;
   mocks.queryResultMaxRowsEnabled = true;
   mocks.queryResultMaxRows = 5000;
+  mocks.loadedTtl = -1;
+  mocks.scrollerItems.length = 0;
+  mocks.scrollerCallOrder.length = 0;
+  mocks.scrollerVisiblePositions.length = 0;
+  mocks.scrollerRefreshSnapshots.length = 0;
+  mocks.scrollerVisibleStartIndex = 0;
   mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
   mocks.redisGetValue.mockImplementation((_connectionId: string, _db: number, keyRaw: string) => Promise.resolve(redisValue(keyRaw)));
   mocks.redisSetString.mockResolvedValue(undefined);
@@ -390,6 +495,8 @@ function resetApiMocks() {
   mocks.redisStreamAdd.mockResolvedValue(undefined);
   mocks.redisSetTtl.mockResolvedValue(undefined);
   mocks.redisSetExpireAt.mockResolvedValue(undefined);
+  mocks.redisSetKeysTtl.mockResolvedValue({ applied: 0, missing_key_raws: [] });
+  mocks.redisSetKeysExpireAt.mockResolvedValue({ applied: 0, missing_key_raws: [] });
   mocks.redisCheckJsonModule.mockResolvedValue(true);
   mocks.redisDeleteKey.mockResolvedValue(undefined);
   mocks.redisDeleteKeys.mockResolvedValue(0);
@@ -398,6 +505,14 @@ function resetApiMocks() {
   mocks.listRedisCompletionCommandDocs.mockResolvedValue(completionCommands);
   mocks.listRedisCompletionKeys.mockResolvedValue(["user:1"]);
   mocks.canBuildRedisFuzzyTree.mockImplementation((loadedKeyCount: number) => loadedKeyCount <= 200_000);
+}
+
+function resetScrollerObservations() {
+  mocks.scrollerUpdateVisibleItems.mockClear();
+  mocks.scrollerScrollToItem.mockClear();
+  mocks.scrollerCallOrder.length = 0;
+  mocks.scrollerVisiblePositions.length = 0;
+  mocks.scrollerRefreshSnapshots.length = 0;
 }
 
 function mountBrowser(withDeleteDetails = false) {
@@ -409,6 +524,9 @@ function mountBrowser(withDeleteDetails = false) {
       redis: {
         deleteGroupDetails: withDeleteDetails ? "{target}\n{count} keys" : "redis.deleteGroupDetails",
         keys: "{count} keys",
+        batchExpirySelected: "redis.batchExpirySelected",
+        batchExpirySuccess: "applied {count}",
+        batchExpiryPartial: "applied {success} failed {failed}",
       },
     },
   };
@@ -673,6 +791,80 @@ describe("RedisKeyBrowser scope changes", () => {
 });
 
 describe("RedisKeyBrowser TTL list badges and no-expiry filter", () => {
+  it("refreshes one key's metadata without rebuilding the loaded tree", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({
+      cursor: 0,
+      keys: [{ ...redisKeyInfo("string"), ttl: -1 }],
+      total_keys: 1,
+    });
+    mountBrowser();
+    await settle();
+
+    const keyCheckbox = requiredElement<HTMLInputElement>(`[data-redis-leaf="${KEY_RAW}"]`);
+    const keyRow = keyCheckbox.parentElement?.parentElement?.parentElement;
+    expect(keyRow).toBeInstanceOf(HTMLElement);
+    keyRow?.click();
+    await settle();
+
+    const buildsBeforeDetailLoaded = mocks.createRedisKeyTreeIndex.mock.calls.length;
+    const flattensBeforeDetailLoaded = mocks.flattenVisibleRedisKeyTree.mock.calls.length;
+    requiredElement<HTMLButtonElement>("[data-test-emit-key-loaded]").click();
+    await settle();
+
+    expect(mocks.createRedisKeyTreeIndex).toHaveBeenCalledTimes(buildsBeforeDetailLoaded);
+    expect(mocks.flattenVisibleRedisKeyTree).toHaveBeenCalledTimes(flattensBeforeDetailLoaded);
+    expect(keyRow?.textContent).toContain("hash");
+    expect(keyRow?.textContent).toContain("redis.noExpiry");
+  });
+
+  it("refreshes no-expiry membership when detail metadata changes TTL", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({
+      cursor: 0,
+      keys: [redisKeyInfo("string")],
+      total_keys: 1,
+    });
+    mountBrowser();
+    await settle();
+
+    requiredElement<HTMLInputElement>(`[data-redis-leaf="${KEY_RAW}"]`).closest<HTMLElement>(".group")?.click();
+    await settle();
+    requiredElement<HTMLButtonElement>("[data-redis-no-expiry-filter]").click();
+    await settle();
+    expect(document.body.textContent).toContain("redis.noExpiryKeysEmpty");
+
+    requiredElement<HTMLButtonElement>("[data-test-emit-key-loaded]").click();
+    await settle();
+
+    expect(document.querySelector(`[data-redis-leaf="${KEY_RAW}"]`)).not.toBeNull();
+    expect(document.body.textContent).toContain("redis.noExpiry");
+  });
+
+  it("starts the local TTL countdown when detail metadata gains an expiry", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.redisScanKeysBatch.mockResolvedValue({
+        cursor: 0,
+        keys: [{ ...redisKeyInfo("string"), ttl: -1 }],
+        total_keys: 1,
+      });
+      mountBrowser();
+      await settle();
+
+      requiredElement<HTMLInputElement>(`[data-redis-leaf="${KEY_RAW}"]`).closest<HTMLElement>(".group")?.click();
+      await settle();
+      mocks.loadedTtl = 2;
+      requiredElement<HTMLButtonElement>("[data-test-emit-key-loaded]").click();
+      await settle();
+      expect(document.body.textContent).toContain("redis.ttlSecond");
+
+      await vi.advanceTimersByTimeAsync(3000);
+      await settle();
+      expect(document.body.textContent).toContain("redis.expired");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders TTL badges per row and filters rows to keys without expiry", async () => {
     mocks.redisScanKeysBatch.mockResolvedValue({
       cursor: 0,
@@ -1058,6 +1250,16 @@ describe("RedisKeyBrowser command console echo", () => {
 });
 
 describe("RedisKeyBrowser expiry creation", () => {
+  it("opens the create-key dialog with an empty key name", async () => {
+    mountBrowser();
+    await settle();
+
+    requiredElement<HTMLButtonElement>('button[title="redis.createKey"]').click();
+    await settle();
+
+    expect(requiredElement<HTMLInputElement>('input[placeholder="redis.createKeyNamePlaceholder"]').value).toBe("");
+  });
+
   it.each(["string", "hash", "list", "set", "zset", "stream", "json"] as const)("writes %s before applying one relative TTL", async (type) => {
     mountBrowser();
     await settle();
@@ -1157,6 +1359,198 @@ describe("RedisKeyBrowser expiry creation", () => {
 
     expect(mocks.updateRedisDbKeyStats).not.toHaveBeenCalledWith("connection", 0, { loaded: 0, totalDelta: -1 });
     expect(mocks.toast).toHaveBeenCalledWith("TTL command failed", 5000);
+  });
+});
+
+describe("RedisKeyBrowser batch expiration", () => {
+  const batchKeys = [
+    { key_display: "alpha", key_raw: "YWxwaGE=", key_type: "string", ttl: -1 },
+    { key_display: "bravo", key_raw: "YnJhdm8=", key_type: "string", ttl: -1 },
+  ];
+
+  function batchExpiryButton(): HTMLButtonElement | null {
+    return document.querySelector<HTMLButtonElement>("[data-redis-batch-expiry]");
+  }
+
+  async function openBatchExpiryDialog(rows = batchKeys) {
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: rows, total_keys: rows.length });
+    mountBrowser();
+    await settle();
+    requiredElement<HTMLButtonElement>("[data-redis-select-all]").click();
+    await settle();
+    requiredElement<HTMLButtonElement>("[data-redis-batch-expiry]").click();
+    await settle();
+  }
+
+  async function applyBatchExpiry() {
+    requiredElement<HTMLButtonElement>("[data-redis-batch-expiry-apply]").click();
+    await settle();
+  }
+
+  function rowTtlBadge(label: string): HTMLElement | null {
+    return groupRow(label).querySelector<HTMLElement>("span[title]");
+  }
+
+  it("only offers the action for a non-empty selection and applies one TTL to every key", async () => {
+    mocks.redisSetKeysTtl.mockResolvedValue({ applied: 2, missing_key_raws: [] });
+    await openBatchExpiryDialog();
+
+    expect(document.body.textContent).toContain("redis.batchExpirySelected");
+    await select("ttl");
+    await setInput("[data-redis-batch-expiry-ttl]", "3600");
+    await applyBatchExpiry();
+
+    // One request for the whole selection, never one call per key.
+    expect(mocks.redisSetKeysTtl).toHaveBeenCalledTimes(1);
+    expect(mocks.redisSetKeysTtl).toHaveBeenCalledWith("connection", 0, ["YWxwaGE=", "YnJhdm8="], 3600);
+    expect(mocks.redisSetKeysExpireAt).not.toHaveBeenCalled();
+    expect(mocks.toast).toHaveBeenCalledWith("applied 2", 3000);
+    // A fully applied batch releases the selection like a completed batch delete does.
+    expect(document.querySelector("[data-redis-batch-delete]")).toBeNull();
+    expect(document.querySelector("[data-test-dialog]")).toBeNull();
+  });
+
+  it("applies PERSIST to every selected key when no expiry is chosen", async () => {
+    mocks.redisSetKeysTtl.mockResolvedValue({ applied: 2, missing_key_raws: [] });
+    await openBatchExpiryDialog();
+
+    await applyBatchExpiry();
+
+    expect(mocks.redisSetKeysTtl).toHaveBeenCalledWith("connection", 0, ["YWxwaGE=", "YnJhdm8="], -1);
+    expect(mocks.redisSetKeysExpireAt).not.toHaveBeenCalled();
+  });
+
+  it("applies the same absolute expiration time to every selected key", async () => {
+    mocks.redisSetKeysExpireAt.mockResolvedValue({ applied: 2, missing_key_raws: [] });
+    await openBatchExpiryDialog();
+
+    await select("at");
+    requiredElement<HTMLButtonElement>("[data-test-absolute-date]").click();
+    await settle();
+    await applyBatchExpiry();
+
+    const expireAt = calendarDateTimeToUnixSeconds(new CalendarDateTime(2030, 1, 2, 3, 4, 5));
+    expect(mocks.redisSetKeysExpireAt).toHaveBeenCalledTimes(1);
+    expect(mocks.redisSetKeysExpireAt).toHaveBeenCalledWith("connection", 0, ["YWxwaGE=", "YnJhdm8="], expireAt);
+    expect(mocks.redisSetKeysTtl).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid TTL before reaching the backend and keeps the dialog open", async () => {
+    await openBatchExpiryDialog();
+
+    await select("ttl");
+    await setInput("[data-redis-batch-expiry-ttl]", "0");
+    await applyBatchExpiry();
+
+    expect(mocks.redisSetKeysTtl).not.toHaveBeenCalled();
+    expect(mocks.toast).toHaveBeenCalledWith("redis.expiryTtlInvalid", 3000);
+    expect(document.querySelector("[data-redis-batch-expiry-apply]")).not.toBeNull();
+  });
+
+  it("keeps only the keys the server did not update selected so they can be retried", async () => {
+    mocks.redisSetKeysTtl.mockResolvedValueOnce({ applied: 1, missing_key_raws: ["YnJhdm8="] });
+    mocks.redisSetKeysTtl.mockResolvedValueOnce({ applied: 1, missing_key_raws: [] });
+    await openBatchExpiryDialog();
+
+    await select("ttl");
+    await setInput("[data-redis-batch-expiry-ttl]", "3600");
+    await applyBatchExpiry();
+
+    expect(mocks.toast).toHaveBeenCalledWith("applied 1 failed 1", 5000);
+    expect(requiredElement<HTMLElement>("[data-redis-batch-delete]").textContent).toContain("1");
+
+    // Retrying only targets the key the server missed.
+    requiredElement<HTMLButtonElement>("[data-redis-batch-expiry]").click();
+    await settle();
+    await select("ttl");
+    await setInput("[data-redis-batch-expiry-ttl]", "120");
+    await applyBatchExpiry();
+
+    expect(mocks.redisSetKeysTtl).toHaveBeenNthCalledWith(2, "connection", 0, ["YnJhdm8="], 120);
+    expect(document.querySelector("[data-redis-batch-delete]")).toBeNull();
+  });
+
+  it("reports a failed chunk together with the keys an earlier chunk already updated", async () => {
+    mocks.redisSetKeysTtl.mockResolvedValueOnce({ applied: 1_000, missing_key_raws: [] });
+    mocks.redisSetKeysTtl.mockRejectedValueOnce(new Error("connection lost"));
+    const rows = Array.from({ length: 1_001 }, (_, index) => ({
+      key_display: `batch:${String(index).padStart(4, "0")}`,
+      key_raw: `cmF3LWJhdGNoLS${index}`,
+      key_type: "string",
+      ttl: -1,
+    }));
+    await openBatchExpiryDialog(rows);
+
+    await select("ttl");
+    await setInput("[data-redis-batch-expiry-ttl]", "3600");
+    await applyBatchExpiry();
+
+    // Bounded chunks keep a 1001-key selection to two requests.
+    expect(mocks.redisSetKeysTtl.mock.calls.map((call) => call[2].length)).toEqual([1_000, 1]);
+    expect(mocks.toast).toHaveBeenCalledWith("applied 1000 failed 1", 5000);
+    expect(mocks.toast).toHaveBeenCalledWith("connection lost", 5000);
+    expect(requiredElement<HTMLElement>("[data-redis-batch-delete]").textContent).toContain("1");
+  });
+
+  it("does not start a second request while the batch is still running", async () => {
+    const pending = deferred<{ applied: number; missing_key_raws: string[] }>();
+    mocks.redisSetKeysTtl.mockReturnValue(pending.promise);
+    await openBatchExpiryDialog();
+
+    await select("ttl");
+    await setInput("[data-redis-batch-expiry-ttl]", "3600");
+
+    const applyButton = requiredElement<HTMLButtonElement>("[data-redis-batch-expiry-apply]");
+    applyButton.click();
+    await settle();
+    applyButton.click();
+    await settle();
+
+    expect(mocks.redisSetKeysTtl).toHaveBeenCalledTimes(1);
+    // A conflicting batch delete stays blocked while the expiry request owns the selection.
+    expect(requiredElement<HTMLButtonElement>("[data-redis-batch-delete]").disabled).toBe(true);
+
+    pending.resolve({ applied: 2, missing_key_raws: [] });
+    await settle();
+    expect(mocks.toast).toHaveBeenCalledWith("applied 2", 3000);
+  });
+
+  it("updates the loaded TTL badge without rescanning the key list", async () => {
+    const rows = [{ key_display: "alpha", key_raw: "YWxwaGE=", key_type: "string", ttl: -1 }];
+    mocks.redisSetKeysTtl.mockResolvedValue({ applied: 1, missing_key_raws: [] });
+    await openBatchExpiryDialog(rows);
+
+    expect(rowTtlBadge("alpha")?.textContent).toContain("redis.noExpiry");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+
+    await select("ttl");
+    await setInput("[data-redis-batch-expiry-ttl]", "3600");
+    await applyBatchExpiry();
+
+    // The applied TTL is reflected locally instead of one refresh request per key.
+    expect(rowTtlBadge("alpha")?.textContent).toContain("redis.ttlHour");
+    expect(rowTtlBadge("alpha")?.textContent).not.toContain("redis.noExpiry");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+
+    // PERSIST flips the same badge back to the no-expiry label.
+    requiredElement<HTMLButtonElement>("[data-redis-select-all]").click();
+    await settle();
+    requiredElement<HTMLButtonElement>("[data-redis-batch-expiry]").click();
+    await settle();
+    await applyBatchExpiry();
+
+    expect(mocks.redisSetKeysTtl).toHaveBeenLastCalledWith("connection", 0, ["YWxwaGE="], -1);
+    expect(rowTtlBadge("alpha")?.textContent).toContain("redis.noExpiry");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the action while nothing is selected", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: batchKeys, total_keys: batchKeys.length });
+    mountBrowser();
+    await settle();
+
+    expect(batchExpiryButton()).toBeNull();
+    expect(document.querySelector("[data-redis-batch-expiry-apply]")).toBeNull();
   });
 });
 
@@ -1668,7 +2062,428 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
   });
 });
 
+describe("RedisKeyBrowser KeepAlive scan budget (issue #7779)", () => {
+  it("does not replenish an exhausted automatic budget after deactivate/reactivate and resize", async () => {
+    const originalClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("redis-key-scroller") ? 1000 : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("redis-key-scroller") ? 90 : 0;
+      },
+    });
+
+    try {
+      mocks.infiniteScroll = true;
+      mocks.redisScanPageSize = 1000;
+      let call = 0;
+      mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+        call++;
+        return Promise.resolve({ cursor: cursor + 1, keys: call === 1 ? [{ key_display: "seed", key_raw: "c2VlZA==", key_type: "string", ttl: -1 }] : [], total_keys: 5_000_000 });
+      });
+
+      const browser = mountKeptAliveBrowser();
+      await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(8));
+      await settle();
+      const callsAtBudget = mocks.redisScanKeysBatch.mock.calls.length;
+
+      await browser.deactivate();
+      await browser.activate();
+      requiredElement<HTMLElement>(".redis-key-scroller").dispatchEvent(new Event("resize"));
+      await settle();
+
+      expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(callsAtBudget);
+    } finally {
+      if (originalClientHeight) Object.defineProperty(HTMLElement.prototype, "clientHeight", originalClientHeight);
+      if (originalScrollHeight) Object.defineProperty(HTMLElement.prototype, "scrollHeight", originalScrollHeight);
+    }
+  });
+});
+
 describe("RedisKeyBrowser interrupted Fetch All", () => {
+  it("keeps the complete snapshot when a group is opened during preparation", async () => {
+    const initial = { key_display: "group:first", key_raw: btoa("group:first"), key_type: "string", ttl: -1 };
+    const buffered = { key_display: "group:second", key_raw: btoa("group:second"), key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [initial], total_keys: 2 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    const buildStarted = deferred<void>();
+    const releaseBuild = deferred<void>();
+    const buildSnapshot = mocks.buildRedisKeySnapshotCooperatively.getMockImplementation()!;
+    mocks.buildRedisKeySnapshotCooperatively.mockImplementationOnce(async (...args) => {
+      buildStarted.resolve();
+      await releaseBuild.promise;
+      return buildSnapshot(...args);
+    });
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fetchAllKeys");
+    await buildStarted.promise;
+    groupRow("group").click();
+    releaseBuild.resolve();
+    await settle();
+    await vi.waitFor(() => expect(document.body.textContent).not.toContain("redis.stopFetchAll"));
+    await submitKeySearch("group:second");
+
+    expect(document.querySelector(`[data-redis-leaf="${buffered.key_raw}"]`)).not.toBeNull();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain("redis.fetchAllKeys");
+  });
+
+  it("filters a completed Fetch All snapshot while editing a key search", async () => {
+    const unrelated = { key_display: "session:unrelated", key_raw: "c2Vzc2lvbjp1bnJlbGF0ZWQ=", key_type: "string", ttl: -1 };
+    const target = { key_display: "prod:login_fail_count", key_raw: "cHJvZDpsb2dpbl9mYWlsX2NvdW50", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [unrelated], total_keys: 2 } : { cursor: 0, keys: [target], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+
+    clickButtonWithText("redis.fetchAllKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(document.body.textContent).not.toContain("redis.stopFetchAll"));
+    const scanCalls = mocks.redisScanKeysBatch.mock.calls.length;
+
+    await setInput("[data-redis-search-input]", "prod:login_fail_count");
+
+    expect(document.body.textContent).toContain(target.key_display);
+    expect(document.body.textContent).not.toContain(unrelated.key_display);
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+    const input = requiredElement<HTMLInputElement>("[data-redis-search-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+    expect(document.body.textContent).toContain(target.key_display);
+    requiredElement<HTMLButtonElement>("[data-redis-select-all]").click();
+    await settle();
+    expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain("1");
+    expect(document.querySelector("[data-redis-select-all]")).toBeNull();
+
+    await setInput("[data-redis-search-input]", "");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+    expect(mocks.scrollerItems[mocks.scrollerItems.length - 1]).toHaveLength(2);
+  });
+
+  it("publishes Fetch All rows through one stable Array facade and explicitly refreshes its viewport", async () => {
+    const initial = { key_display: "initial", key_raw: "aW5pdGlhbA==", key_type: "string", ttl: -1 };
+    const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [initial], total_keys: 2 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+    const itemsBeforeFetchAll = mocks.scrollerItems[mocks.scrollerItems.length - 1];
+    resetScrollerObservations();
+
+    clickButtonWithText("redis.fetchAllKeys");
+    await vi.waitFor(() => expect(mocks.scrollerUpdateVisibleItems).toHaveBeenCalled());
+
+    const publishedItems = mocks.scrollerItems[mocks.scrollerItems.length - 1];
+    expect(publishedItems).toBe(itemsBeforeFetchAll);
+    expect(Array.isArray(publishedItems)).toBe(true);
+    expect(publishedItems).toHaveLength(2);
+    expect((publishedItems[0] as { id?: string } | undefined)?.id).toBeTruthy();
+    expect([...(publishedItems as Array<{ node: { label: string } }>)].map((row) => row.node.label).sort()).toEqual(["buffered", "initial"]);
+    expect(mocks.scrollerUpdateVisibleItems).toHaveBeenCalledWith(true);
+    expect((publishedItems as Array<{ node: { label: string } }>).some((row) => row.node.label === "buffered")).toBe(true);
+    expect(document.body.textContent).toContain("initial");
+    expect(document.body.textContent).not.toContain("redis.stopFetchAll");
+  });
+
+  it("rebinds rendered labels from a complete large facade source without exposing holes", async () => {
+    const initial = { key_display: "initial", key_raw: "aW5pdGlhbA==", key_type: "string", ttl: -1 };
+    const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [initial], total_keys: 2 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+    resetScrollerObservations();
+
+    const visibleRows = Array.from({ length: 25_001 }, (_, index) => {
+      const label = `next-${String(index).padStart(5, "0")}`;
+      return {
+        id: `leaf:0:${label}`,
+        depth: 0,
+        node: {
+          kind: "leaf" as const,
+          id: `leaf:0:${label}`,
+          label,
+          fullKeyDisplay: label,
+          keyRaw: label,
+          db: 0,
+          keyType: "string",
+          ttl: -1,
+          size: 0,
+          valuePreview: "",
+          pathSegments: [label],
+        },
+      };
+    });
+    mocks.buildRedisKeySnapshotCooperatively.mockResolvedValueOnce({
+      flatKeys: [initial, buffered],
+      flatKeyByRaw: new Map([
+        [initial.key_raw, initial],
+        [buffered.key_raw, buffered],
+      ]),
+      loadedKeyRaws: new Set([initial.key_raw, buffered.key_raw]),
+      filteredKeyCount: 2,
+      treeIndex: null,
+      expandedGroupIds: new Set(),
+      visibleRows,
+    });
+
+    clickButtonWithText("redis.fetchAllKeys");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("next-00000"));
+    await vi.waitFor(() => expect(document.body.textContent).not.toContain("redis.stopFetchAll"));
+
+    expect(mocks.scrollerUpdateVisibleItems).toHaveBeenCalledTimes(1);
+    expect(mocks.scrollerUpdateVisibleItems.mock.calls.every(([itemsChanged]) => itemsChanged === true)).toBe(true);
+    expect(mocks.scrollerRefreshSnapshots[0]).toMatchObject({ length: 25_001, hasHoles: false });
+    expect(document.body.textContent).toContain("next-00049");
+    expect(document.body.textContent).not.toContain("initial");
+  });
+
+  it("restores a visible row by stable ID when final ordering moves it across publication chunks", async () => {
+    const initialKeys = [
+      { key_display: "a-before", key_raw: "YS1iZWZvcmU=", key_type: "string", ttl: -1 },
+      { key_display: "m-anchor", key_raw: "bS1hbmNob3I=", key_type: "string", ttl: -1 },
+      { key_display: "z-after", key_raw: "ei1hZnRlcg==", key_type: "string", ttl: -1 },
+    ];
+    const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: initialKeys, total_keys: 4 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+    resetScrollerObservations();
+
+    const initialRows = mocks.scrollerItems[mocks.scrollerItems.length - 1] as Array<{ id: string }>;
+    const anchorRowId = initialRows[1]?.id;
+    expect(anchorRowId).toBeTruthy();
+    mocks.scrollerVisibleStartIndex = 1;
+    const visibleRows = Array.from({ length: 25_001 }, (_, index) => redisFlatRow(`next:${index}`, `next-${index}`));
+    visibleRows[25_000] = redisFlatRow(anchorRowId!, "m-anchor", initialKeys[1]!.key_raw);
+    mocks.buildRedisKeySnapshotCooperatively.mockResolvedValueOnce({
+      flatKeys: [...initialKeys, buffered],
+      flatKeyByRaw: new Map([...initialKeys, buffered].map((key) => [key.key_raw, key])),
+      loadedKeyRaws: new Set([...initialKeys, buffered].map((key) => key.key_raw)),
+      filteredKeyCount: 4,
+      treeIndex: null,
+      expandedGroupIds: new Set(),
+      visibleRows,
+    });
+
+    clickButtonWithText("redis.fetchAllKeys");
+    await vi.waitFor(() => expect(mocks.scrollerScrollToItem).toHaveBeenCalled());
+
+    expect(mocks.scrollerScrollToItem).toHaveBeenCalledWith(25_000, { align: "start" });
+    expect(mocks.scrollerVisiblePositions).toEqual([2, 25_000]);
+    expect(mocks.scrollerCallOrder).toEqual([`scroll:${anchorRowId}`, "update:next:2", `scroll:${anchorRowId}`, `update:${anchorRowId}`]);
+    expect(document.body.textContent).toContain("m-anchor");
+  });
+
+  it("does not move the viewport when its stable row anchor is absent from the final projection", async () => {
+    const initialKeys = [
+      { key_display: "a-before", key_raw: "YS1iZWZvcmU=", key_type: "string", ttl: -1 },
+      { key_display: "m-missing", key_raw: "bS1taXNzaW5n", key_type: "string", ttl: -1 },
+    ];
+    const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: initialKeys, total_keys: 3 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+    resetScrollerObservations();
+    mocks.scrollerVisibleStartIndex = 1;
+    mocks.buildRedisKeySnapshotCooperatively.mockResolvedValueOnce({
+      flatKeys: [...initialKeys, buffered],
+      flatKeyByRaw: new Map([...initialKeys, buffered].map((key) => [key.key_raw, key])),
+      loadedKeyRaws: new Set([...initialKeys, buffered].map((key) => key.key_raw)),
+      filteredKeyCount: 3,
+      treeIndex: null,
+      expandedGroupIds: new Set(),
+      visibleRows: [redisFlatRow("replacement", "replacement")],
+    });
+
+    clickButtonWithText("redis.fetchAllKeys");
+    await vi.waitFor(() => expect(mocks.scrollerUpdateVisibleItems).toHaveBeenCalled());
+
+    expect(mocks.scrollerScrollToItem).not.toHaveBeenCalled();
+  });
+
+  it("prefers the latest visible stable row when the user scrolls between publication chunks", async () => {
+    const initialKeys = Array.from({ length: 20 }, (_, index) => ({
+      key_display: `initial-${String(index).padStart(2, "0")}`,
+      key_raw: `initial-raw-${index}`,
+      key_type: "string",
+      ttl: -1,
+    }));
+    const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: initialKeys, total_keys: 21 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+    resetScrollerObservations();
+
+    const initialRows = mocks.scrollerItems[mocks.scrollerItems.length - 1] as Array<{ id: string }>;
+    const initialRowId = initialRows[0]!.id;
+    const latestAnchorRowId = initialRows[10]!.id;
+    const visibleRows = Array.from({ length: 25_001 }, (_, index) => redisFlatRow(`next:${index}`, `next-${index}`));
+    visibleRows[5] = redisFlatRow(latestAnchorRowId, "initial-10", initialKeys[10]!.key_raw);
+    visibleRows[25_000] = redisFlatRow(initialRowId, "initial-00", initialKeys[0]!.key_raw);
+    mocks.buildRedisKeySnapshotCooperatively.mockResolvedValueOnce({
+      flatKeys: [...initialKeys, buffered],
+      flatKeyByRaw: new Map([...initialKeys, buffered].map((key) => [key.key_raw, key])),
+      loadedKeyRaws: new Set([...initialKeys, buffered].map((key) => key.key_raw)),
+      filteredKeyCount: 21,
+      treeIndex: null,
+      expandedGroupIds: new Set(),
+      visibleRows,
+    });
+    const pendingFrames: FrameRequestCallback[] = [];
+    const originalRequestAnimationFrame = window.requestAnimationFrame;
+    window.requestAnimationFrame = (callback: FrameRequestCallback) => {
+      pendingFrames.push(callback);
+      return pendingFrames.length;
+    };
+
+    try {
+      clickButtonWithText("redis.fetchAllKeys");
+      await vi.waitFor(() => expect(pendingFrames).toHaveLength(1));
+      expect(mocks.scrollerUpdateVisibleItems).not.toHaveBeenCalled();
+      mocks.scrollerVisibleStartIndex = 10;
+      requiredElement<HTMLElement>(".redis-key-scroller").dispatchEvent(new Event("scroll"));
+      pendingFrames[0]!(0);
+      await vi.waitFor(() => expect(mocks.scrollerUpdateVisibleItems).toHaveBeenCalledTimes(2));
+
+      expect(mocks.scrollerScrollToItem).toHaveBeenCalledTimes(2);
+      expect(mocks.scrollerScrollToItem).toHaveBeenCalledWith(5, { align: "start" });
+      expect(mocks.scrollerCallOrder).toEqual([`scroll:${latestAnchorRowId}`, `update:${latestAnchorRowId}`, `scroll:${latestAnchorRowId}`, `update:${latestAnchorRowId}`]);
+    } finally {
+      window.requestAnimationFrame = originalRequestAnimationFrame;
+    }
+  });
+
+  it("keeps stable Fetch All rows for metadata-only detail updates and exits them for no-expiry membership changes", async () => {
+    const initial = { key_display: "initial", key_raw: "aW5pdGlhbA==", key_type: "string", ttl: -1 };
+    const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [initial], total_keys: 2 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+    resetScrollerObservations();
+    requiredElement<HTMLButtonElement>("[data-redis-no-expiry-filter]").click();
+    await settle();
+    resetScrollerObservations();
+
+    clickButtonWithText("redis.fetchAllKeys");
+    await vi.waitFor(() => expect(mocks.scrollerUpdateVisibleItems).toHaveBeenCalled());
+    const stableItems = mocks.scrollerItems[mocks.scrollerItems.length - 1];
+    expect((stableItems as Array<{ node: { keyRaw?: string } }>).some((row) => row.node.keyRaw === buffered.key_raw)).toBe(true);
+    requiredElement<HTMLElement>(`[data-redis-leaf="${initial.key_raw}"]`).closest<HTMLElement>(".group")?.click();
+    await settle();
+
+    mocks.loadedTtl = -1;
+    requiredElement<HTMLButtonElement>("[data-test-emit-key-loaded]").click();
+    await settle();
+    expect(mocks.scrollerItems[mocks.scrollerItems.length - 1]).toBe(stableItems);
+
+    mocks.loadedTtl = 60;
+    requiredElement<HTMLButtonElement>("[data-test-emit-key-loaded]").click();
+    await settle();
+    expect(mocks.scrollerItems[mocks.scrollerItems.length - 1]).toBe(stableItems);
+    expect(document.querySelector(`[data-redis-leaf="${initial.key_raw}"]`)).toBeNull();
+    expect((mocks.scrollerItems[mocks.scrollerItems.length - 1] as Array<{ node: { keyRaw?: string } }>).some((row) => row.node.keyRaw === buffered.key_raw)).toBe(true);
+  });
+
+  it("keeps the previously published rows when Fetch All is stopped during cooperative preparation", async () => {
+    const initial = { key_display: "initial", key_raw: "aW5pdGlhbA==", key_type: "string", ttl: -1 };
+    const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [initial], total_keys: 2 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    const buildStarted = deferred<void>();
+    const releaseBuild = deferred<void>();
+    const buildSnapshot = mocks.buildRedisKeySnapshotCooperatively.getMockImplementation();
+    expect(buildSnapshot).toBeDefined();
+    mocks.buildRedisKeySnapshotCooperatively.mockImplementationOnce(async (...args) => {
+      buildStarted.resolve();
+      await releaseBuild.promise;
+      return buildSnapshot!(...args);
+    });
+    mountBrowser();
+    await settle();
+    resetScrollerObservations();
+
+    clickButtonWithText("redis.fetchAllKeys");
+    await buildStarted.promise;
+    clickButtonWithText("redis.stopFetchAll");
+    releaseBuild.resolve();
+    await settle();
+
+    expect(document.body.textContent).toContain("initial");
+    expect(document.body.textContent).not.toContain("buffered");
+    expect(document.body.textContent).toContain("redis.fetchAllKeys");
+    expect(mocks.scrollerScrollToItem).not.toHaveBeenCalled();
+    expect((mocks.scrollerItems[mocks.scrollerItems.length - 1] as Array<{ node: { label: string } }>).map((row) => row.node.label)).toEqual(["initial"]);
+  });
+
+  it("keeps the old facade source when Fetch All is stopped during cooperative anchor resolution", async () => {
+    const initial = { key_display: "initial", key_raw: "aW5pdGlhbA==", key_type: "string", ttl: -1 };
+    const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [initial], total_keys: 2 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+    resetScrollerObservations();
+
+    const row = {
+      id: "leaf:0:buffered",
+      depth: 0,
+      node: {
+        kind: "leaf" as const,
+        id: "leaf:0:buffered",
+        label: "buffered",
+        fullKeyDisplay: "buffered",
+        keyRaw: buffered.key_raw,
+        db: 0,
+        keyType: "string",
+        ttl: -1,
+        size: 0,
+        valuePreview: "",
+        pathSegments: ["buffered"],
+      },
+    };
+    mocks.buildRedisKeySnapshotCooperatively.mockResolvedValueOnce({
+      flatKeys: [initial, buffered],
+      flatKeyByRaw: new Map([
+        [initial.key_raw, initial],
+        [buffered.key_raw, buffered],
+      ]),
+      loadedKeyRaws: new Set([initial.key_raw, buffered.key_raw]),
+      filteredKeyCount: 2,
+      treeIndex: null,
+      expandedGroupIds: new Set(),
+      visibleRows: Array.from({ length: 25_001 }, () => row),
+    });
+    const pendingFrames: FrameRequestCallback[] = [];
+    const originalRequestAnimationFrame = window.requestAnimationFrame;
+    window.requestAnimationFrame = (callback: FrameRequestCallback) => {
+      pendingFrames.push(callback);
+      return pendingFrames.length;
+    };
+
+    try {
+      clickButtonWithText("redis.fetchAllKeys");
+      await vi.waitFor(() => expect(pendingFrames).toHaveLength(1));
+      expect(mocks.scrollerUpdateVisibleItems).not.toHaveBeenCalled();
+      clickButtonWithText("redis.stopFetchAll");
+      expect(pendingFrames).toHaveLength(1);
+      pendingFrames[0](0);
+      await settle();
+
+      expect(document.body.textContent).toContain("initial");
+      expect(document.body.textContent).not.toContain("buffered");
+      expect(document.body.textContent).toContain("redis.fetchAllKeys");
+      expect(mocks.scrollerScrollToItem).not.toHaveBeenCalled();
+      expect((mocks.scrollerItems[mocks.scrollerItems.length - 1] as Array<{ node: { label: string } }>).map((item) => item.node.label)).toEqual(["initial"]);
+      expect(mocks.scrollerRefreshSnapshots.every((snapshot) => !snapshot.ids.includes(row.id))).toBe(true);
+    } finally {
+      window.requestAnimationFrame = originalRequestAnimationFrame;
+    }
+  });
+
   it("reloads instead of advancing past an uncommitted buffered page after reactivation", async () => {
     const bufferedPage = deferred<{ cursor: number; keys: Array<{ key_display: string; key_raw: string; key_type: string; ttl: number }>; total_keys: number }>();
     let returnFreshPage = false;

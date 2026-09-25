@@ -142,6 +142,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
     case "elasticsearch":
     case "easysearch":
     case "meilisearch":
+    case "solr":
     case "qdrant":
     case "milvus":
     case "weaviate":
@@ -151,6 +152,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
     case "dynamodb":
     case "mq":
     case "consul":
+    case "salesforce":
       return connection.ssl ? "https" : "http";
     case "cloudflare-d1":
       return "https";
@@ -161,7 +163,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
   }
 }
 
-export function connectionUrlPlaceholder(dbType: DatabaseType): string {
+export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: string): string {
   switch (dbType) {
     case "mysql":
     case "doris":
@@ -233,6 +235,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "meilisearch":
       return "http://host:port/base/path";
 
+    case "solr":
+      return "http://user:password@host:8983";
+
     case "dameng":
       return "dm://user:password@host:port";
 
@@ -258,13 +263,19 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
       return "spanner:///projects/{project}/instances/{instance}/databases/{database}";
 
     case "iris":
-      return "iris://user:password@host:port/namespace";
+      return driverProfile === "cache" ? "cache://user:password@host:port/namespace" : "iris://user:password@host:port/namespace";
 
     case "influxdb":
       return "influxdb://user:password@host:port/database";
 
+    case "influxdb3":
+      return "influxdb3://token@host:8181/database";
+
     case "victoriametrics":
       return "http://user:password@host:port/prometheus";
+
+    case "salesforce":
+      return "https://acme.my.salesforce.com";
 
     case "jdbc":
       return "jdbc:mysql://host:3306/database";

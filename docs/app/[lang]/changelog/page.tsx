@@ -1,9 +1,10 @@
 import { LandingNav } from "@/components/landing/LandingNav";
 import { LandingFooter } from "@/components/landing/LandingFooter";
 import { ChangelogRuntime } from "@/components/landing/ChangelogRuntime";
-import { loadChangelogBootstrap } from "@/lib/changelog";
+import { changelogDataLang, loadChangelogBootstrap } from "@/lib/changelog";
 import { buildMetadata } from "@/lib/metadata";
 import type { Metadata } from "next";
+import { resolveLang } from "@/lib/i18n";
 
 const i18n = {
   en: {
@@ -18,7 +19,7 @@ const i18n = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const t = i18n[l];
 
   return buildMetadata({
@@ -31,12 +32,12 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
 
 export default async function ChangelogPage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const t = i18n[l];
-  const initialData = await loadChangelogBootstrap(l);
+  const initialData = await loadChangelogBootstrap(changelogDataLang(l));
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={l} active="changelog" />
 
       {/* 视觉隐藏：页面不再展示大标题，但保留语义 landmark 与 SEO */}

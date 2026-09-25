@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/backend/api", () => mocks);
 
 import { cancelObjectMetadataLoadsForConnection, getObjectMetadataCacheDebugStateForTests, invalidateObjectMetadataCache, loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { isObjectCacheInvalidationError } from "@/lib/metadata/objectCacheInvalidationError";
 import { clearMetadataRuntimeCache } from "@/lib/metadata/metadataRuntimeCache";
 
 const request = { connectionId: "c1", database: "app", schema: "public", tableName: "users", catalog: "analytics" } as const;
@@ -28,6 +29,30 @@ describe("objectMetadataCache", () => {
         if (cacheKey === prefix || cacheKey.startsWith(prefix)) mocks.persisted.delete(cacheKey);
       }
     });
+  });
+
+  it("reports deletion failures only to strict callers sharing the same invalidation", async () => {
+    let reject!: (error: Error) => void;
+    mocks.deleteSchemaCachePrefix.mockReturnValueOnce(
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+    );
+    const bestEffort = invalidateObjectMetadataCache(request);
+    const strict = invalidateObjectMetadataCache(request, { strict: true });
+    const failure = new Error("storage unavailable");
+    const rejected = expect(strict).rejects.toMatchObject({ name: "ObjectCacheInvalidationError", reason: failure });
+    await vi.waitFor(() => expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledTimes(1));
+    reject(failure);
+    await rejected;
+    await expect(bestEffort).resolves.toBeUndefined();
+    await expect(invalidateObjectMetadataCache(request, { strict: true })).resolves.toBeUndefined();
+    expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps forced facet reads best effort if deletion fails", async () => {
+    mocks.deleteSchemaCachePrefix.mockRejectedValueOnce(new Error("storage unavailable"));
+    await expect(loadObjectMetadataFacet(request, "columns", async () => ["fresh"], { force: true })).resolves.toEqual({ value: ["fresh"], cacheStatus: "remote" });
   });
 
   it("reads a facet from disk without invoking the loader", async () => {
@@ -251,5 +276,33 @@ describe("objectMetadataCache", () => {
     await expect(loadObjectMetadataFacet(request, "columns", loader)).resolves.toMatchObject({ value: ["new session"], cacheStatus: "remote" });
     expect(loader).toHaveBeenCalledTimes(2);
     expect(mocks.deleteSchemaCachePrefix).not.toHaveBeenCalledWith("object-meta:v1:c1:");
+  });
+
+  describe("strict invalidation", () => {
+    it("rejects with a marked object cache error in strict mode and stays best-effort by default", async () => {
+      mocks.deleteSchemaCachePrefix.mockRejectedValue(new Error("sqlite locked"));
+
+      const failure = await invalidateObjectMetadataCache({ connectionId: "c1" }, { strict: true }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect(isObjectCacheInvalidationError(failure)).toBe(true);
+      expect((failure as Error).message).toBe("sqlite locked");
+      expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith("object-meta:v1:c1:");
+
+      mocks.deleteSchemaCachePrefix.mockClear();
+      mocks.deleteSchemaCachePrefix.mockRejectedValue(new Error("sqlite locked"));
+      await expect(invalidateObjectMetadataCache({ connectionId: "c1" })).resolves.toBeUndefined();
+      expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith("object-meta:v1:c1:");
+    });
+
+    it("force facet loads tolerate a failed persisted deletion", async () => {
+      mocks.deleteSchemaCachePrefix.mockRejectedValue(new Error("locked"));
+      const loader = vi.fn().mockResolvedValue(["fresh"]);
+
+      await expect(loadObjectMetadataFacet(request, "columns", loader, { force: true })).resolves.toEqual({ value: ["fresh"], cacheStatus: "remote" });
+      expect(loader).toHaveBeenCalledTimes(1);
+    });
   });
 });

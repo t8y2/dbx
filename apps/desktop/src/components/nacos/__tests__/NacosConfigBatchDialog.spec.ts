@@ -4,7 +4,20 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import NacosConfigBatchDialog from "@/components/nacos/NacosConfigBatchDialog.vue";
-import type { NacosBatchReport, NacosConfigKey } from "@/types/nacos";
+import type { NacosBatchPreview, NacosBatchReport, NacosConfigKey } from "@/types/nacos";
+
+vi.mock("@/components/nacos/NacosConfigDiffDialog.vue", () => ({
+  default: defineComponent({
+    props: {
+      open: Boolean,
+      before: String,
+      after: String,
+      format: String,
+      showConfirm: Boolean,
+    },
+    template: '<div v-if="open" data-testid="nacos-preview-diff" :data-before="before" :data-after="after" :data-format="format" :data-show-confirm="showConfirm" />',
+  }),
+}));
 
 const mountedApps: App[] = [];
 
@@ -16,6 +29,7 @@ async function mountDialog(
   ],
   report: NacosBatchReport | null = null,
   selectedKeys: NacosConfigKey[] = [{ namespace: "shared", group: "DEFAULT_GROUP", dataId: "app.yaml" }],
+  preview: NacosBatchPreview | null = null,
 ) {
   const onTargetConnectionChange = vi.fn();
   const onPreview = vi.fn();
@@ -39,7 +53,7 @@ async function mountDialog(
           sourceConnectionId: "source",
           currentNamespace: "shared",
           namespaces,
-          preview: null,
+          preview,
           report,
           onTargetConnectionChange,
           onPreview,
@@ -231,5 +245,33 @@ describe("NacosConfigBatchDialog cross-connection sync", () => {
     expect(document.body.textContent).toContain("Skipped");
     expect(document.body.textContent).toContain("Failed");
     expect(document.body.textContent).toContain("target unavailable");
+  });
+
+  it("opens a read-only diff for a conflicting copy preview", async () => {
+    await mountDialog("remote", undefined, null, undefined, {
+      planHash: "preview-hash",
+      total: 1,
+      created: 0,
+      conflicts: 1,
+      invalid: 0,
+      items: [
+        {
+          namespace: "shared",
+          group: "DEFAULT_GROUP",
+          dataId: "app.yaml",
+          status: "conflict",
+          diff: { beforeContent: "port: 8080", afterContent: "port: 9090", format: "yaml" },
+        },
+      ],
+    });
+
+    (document.body.querySelector('[aria-label="Config Content Compare"]') as HTMLButtonElement).click();
+    await nextTick();
+
+    const diff = document.body.querySelector("[data-testid=nacos-preview-diff]") as HTMLElement;
+    expect(diff.dataset.before).toBe("port: 8080");
+    expect(diff.dataset.after).toBe("port: 9090");
+    expect(diff.dataset.format).toBe("yaml");
+    expect(diff.dataset.showConfirm).toBe("false");
   });
 });

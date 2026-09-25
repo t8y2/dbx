@@ -35,7 +35,11 @@ function isLinuxTauriRuntime() {
 const savedThemeMode = safeLocalStorageGet(APP_THEME_STORAGE_KEY);
 const themeMode = ref<AppThemeMode>(normalizeAppThemeMode(savedThemeMode));
 const savedThemePalette = safeLocalStorageGet(APP_THEME_PALETTE_STORAGE_KEY);
-const themePalette = ref<AppThemePalette>(normalizeAppThemePalette(savedThemePalette));
+const savedThemePaletteValue = ref<AppThemePalette>(normalizeAppThemePalette(savedThemePalette));
+const previewedThemePalette = ref<AppThemePalette | null>(null);
+// Consumers use the effective palette so editor and canvas surfaces preview in
+// lockstep with the document-level theme classes.
+const themePalette = computed<AppThemePalette>(() => previewedThemePalette.value ?? savedThemePaletteValue.value);
 function parseStoredCustomUiColors(raw: string | null): AppCustomUiColors | null {
   if (!raw) return null;
   try {
@@ -53,6 +57,44 @@ if (savedThemeMode && savedThemeMode !== themeMode.value) safeLocalStorageSet(AP
 if (savedCornerStyle && savedCornerStyle !== cornerStyle.value) safeLocalStorageSet(APP_CORNER_STYLE_STORAGE_KEY, cornerStyle.value);
 const systemPrefersDark = ref(readSystemPrefersDark());
 const isDark = computed(() => resolveAppThemeAppearance(themeMode.value, systemPrefersDark.value) === "dark");
+// Bumped at the end of every applyTheme(): theme changes are DOM mutations
+// (classes / inline vars), so watchers keyed on reactive sources like isDark
+// miss palette switches and custom-color edits. Consumers that mirror the
+// resolved token set (plugin iframe bridge) watch this revision instead.
+const themeRevision = ref(0);
+
+// Token mutations on the root that happen outside applyTheme() — e.g. the UI
+// and editor font settings write --font-sans / --font-mono inline — bump this
+// so open plugin workbench bridges re-read and re-push the resolved tokens.
+function bumpThemeRevision() {
+  themeRevision.value += 1;
+}
+
+let pendingBumpTimer: ReturnType<typeof setTimeout> | undefined;
+
+// The one sanctioned way to write a design token onto the root outside
+// applyTheme(): writes the inline override AND bumps the theme revision.
+// Writing root tokens directly (documentElement.style.setProperty) skips the
+// bump and open plugin bridges keep stale tokens — always go through here.
+// `debounceMs` coalesces rapid writes (font-family preview keystrokes) into
+// one bump; an immediate write afterwards supersedes the pending one.
+function writeRootToken(cssVar: string, value: string, options?: { debounceMs?: number }) {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(cssVar, value);
+  if (options?.debounceMs) {
+    if (pendingBumpTimer) clearTimeout(pendingBumpTimer);
+    pendingBumpTimer = setTimeout(() => {
+      pendingBumpTimer = undefined;
+      bumpThemeRevision();
+    }, options.debounceMs);
+    return;
+  }
+  if (pendingBumpTimer) {
+    clearTimeout(pendingBumpTimer);
+    pendingBumpTimer = undefined;
+  }
+  bumpThemeRevision();
+}
 
 let mediaQuery: MediaQueryList | null = null;
 let isListeningForSystemTheme = false;
@@ -75,6 +117,16 @@ function setupSystemThemeListener() {
   isListeningForSystemTheme = true;
 }
 
+function applyThemePalette() {
+  if (typeof document === "undefined") return;
+
+  const doc = document.documentElement;
+  for (const className of APP_THEME_PALETTE_CLASS_NAMES) doc.classList.remove(className);
+  const paletteClass = getAppThemePaletteClass(themePalette.value);
+  if (paletteClass) doc.classList.add(paletteClass);
+  applyCustomUiColors();
+}
+
 function applyTheme() {
   if (typeof document === "undefined") return;
 
@@ -83,15 +135,13 @@ function applyTheme() {
 
   doc.classList.add("disable-transitions");
   doc.classList.toggle("dark", dark);
-  for (const className of APP_THEME_PALETTE_CLASS_NAMES) doc.classList.remove(className);
-  const paletteClass = getAppThemePaletteClass(themePalette.value);
-  if (paletteClass) doc.classList.add(paletteClass);
+  applyThemePalette();
   doc.dataset.cornerStyle = cornerStyle.value;
   doc.style.colorScheme = dark ? "dark" : "light";
-  applyCustomUiColors();
 
   // force reflow so the class toggle takes effect before re-enabling transitions
   doc.offsetHeight; // eslint-disable-line @typescript-eslint/no-unused-expressions
+  themeRevision.value += 1;
   requestAnimationFrame(() => doc.classList.remove("disable-transitions"));
   if (!isTauriRuntime()) return;
 
@@ -123,9 +173,24 @@ function setThemeMode(mode: AppThemeMode) {
 }
 
 function setThemePalette(palette: AppThemePalette) {
-  themePalette.value = palette;
+  savedThemePaletteValue.value = palette;
+  previewedThemePalette.value = null;
   safeLocalStorageSet(APP_THEME_PALETTE_STORAGE_KEY, palette);
   applyTheme();
+}
+
+function previewThemePalette(palette: AppThemePalette) {
+  if (themePalette.value === palette) return;
+  previewedThemePalette.value = palette;
+  // Palette previews do not change the OS/window mode, so avoid the native
+  // Tauri write performed by applyTheme().
+  applyThemePalette();
+}
+
+function clearThemePalettePreview() {
+  if (previewedThemePalette.value === null) return;
+  previewedThemePalette.value = null;
+  applyThemePalette();
 }
 
 function applyCustomUiColors() {
@@ -180,5 +245,25 @@ export function useTheme() {
     setThemeMode(isDark.value ? "light" : "dark");
   }
 
-  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, cornerStyle, applyTheme, setThemeMode, setThemePalette, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
+  return {
+    isDark,
+    themeMode,
+    themePalette,
+    customUiColors,
+    customUiColorsDark,
+    activeCustomUiColors,
+    themeRevision,
+    bumpThemeRevision,
+    writeRootToken,
+    cornerStyle,
+    applyTheme,
+    setThemeMode,
+    setThemePalette,
+    previewThemePalette,
+    clearThemePalettePreview,
+    setCustomUiColors,
+    resetCustomUiColors,
+    setCornerStyle,
+    toggleTheme,
+  };
 }

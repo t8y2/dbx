@@ -14,8 +14,15 @@ pub async fn begin_database_backup_snapshot(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
+    export_id: Option<String>,
 ) -> Result<DatabaseBackupSnapshot, String> {
-    dbx_core::database_export::begin_database_backup_snapshot_core(&state, &connection_id, &database).await
+    dbx_core::database_export::begin_database_backup_snapshot_core_for_export(
+        &state,
+        &connection_id,
+        &database,
+        export_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -27,7 +34,9 @@ pub async fn export_database_sql(
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
 
-    tokio::spawn(async move {
+    // Exports interleave async fetches with synchronous row formatting and
+    // buffered disk writes; run them off the async workers (see spawn_export_task).
+    dbx_core::export_runtime::spawn_export_task(async move {
         let result = dbx_core::database_export::export_database_sql_core(&state, &request, |progress| {
             emit_progress(&app, progress)
         })
@@ -50,6 +59,8 @@ pub async fn export_database_sql(
                     status: ExportStatus::Error,
                     error: Some(e),
                     preparing: false,
+                    error_count: 0,
+                    error_summary: None,
                 },
             );
         }
@@ -64,6 +75,23 @@ pub async fn export_database_sql(
 pub async fn cancel_database_export(export_id: String) -> Result<(), String> {
     dbx_core::database_export::set_export_cancelled(&export_id).await;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_database_export_cancellation(export_id: String) -> Result<(), String> {
+    dbx_core::database_export::clear_export_cancelled(&export_id).await;
+    Ok(())
+}
+
+/// Returns whether a scheduled backup destination must be explicitly selected
+/// again before DBX can replace a legacy macOS filesystem identity.
+#[tauri::command]
+pub async fn database_export_destination_needs_confirmation(
+    state: State<'_, Arc<AppState>>,
+    directory: String,
+) -> Result<bool, String> {
+    dbx_core::database_export::export_destination_identity_needs_confirmation(&state, std::path::Path::new(&directory))
+        .await
 }
 
 /// Records a scheduled backup destination's filesystem identity as soon as

@@ -1,5 +1,6 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
+import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 
@@ -13,6 +14,10 @@ export function isMeilisearchDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "meilisearch";
 }
 
+export function isSolrDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "solr";
+}
+
 export interface SqlSnippet {
   id: string;
   label: string;
@@ -21,12 +26,22 @@ export interface SqlSnippet {
   enabled?: boolean;
 }
 
+export type SqlShortcutKind = "template" | "select-limit";
+
 export interface SqlShortcutAction {
   id: string;
   label: string;
   shortcut: string;
   sql: string;
   enabled?: boolean;
+  /** Empty / omitted = all databases. Non-empty = only these DatabaseType values. */
+  databaseTypes?: DatabaseType[];
+  /** Per-database SQL overrides for custom templates; missing keys fall back to `sql`. */
+  sqlByDatabaseType?: Partial<Record<DatabaseType, string>>;
+  /** `select-limit` builds dialect-aware SELECT * … LIMIT/TOP/ROWNUM at run time (built-in only). */
+  kind?: SqlShortcutKind;
+  /** Row count for `select-limit` (default 10). Ignored for plain templates. */
+  limit?: number;
 }
 
 export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column" | "sequence";
@@ -126,10 +141,15 @@ export interface ConnectionConfig {
   redis_database_aliases?: Record<string, string>;
   /** Key-search templates for the Redis browser. Non-empty overrides global settings. */
   redis_key_templates?: string[];
+  redis_key_grouping?: import("@/lib/redis/redisKeyGrouping").RedisKeyGrouping;
   etcd_endpoints?: string;
   gbase_server?: string;
   informix_server?: string;
   external_config?: unknown;
+  plugin_id?: string;
+  plugin_connection_provider?: string;
+  plugin_connection_type?: string;
+  connection_secrets?: Record<string, string>;
   one_time?: boolean;
   /**
    * Whether the database password may be persisted locally. When false, the
@@ -259,19 +279,510 @@ export interface PluginDriverManifest {
   database_type?: string;
 }
 
+export type PluginFormFieldType = "text" | "password" | "number" | "boolean" | "select" | "radio" | "textarea";
+export type PluginFormFieldBinding = "config" | "secret" | "name" | "host" | "port" | "username" | "password" | "database";
+
+export type PluginFormFieldValue = string | number | boolean | undefined;
+
+export interface LocalSshKey {
+  /** Absolute path to the private key file. */
+  path: string;
+  /** SSH algorithm name (e.g. `ssh-ed25519`); empty when undetectable. */
+  algorithm: string;
+  /** SHA-256 fingerprint (`SHA256:...`); empty when the key could not be decoded. */
+  fingerprint: string;
+  /** Heuristic: the key looks passphrase-protected. */
+  hasPassphrase: boolean;
+}
+
+export interface PluginFormFieldOption {
+  label: string;
+  value: string;
+}
+
+/** A literal a `one_of` clause may list; compared by canonical string form. */
+export type PluginFieldConditionLiteral = string | number | boolean;
+
+/** Legacy single-field clause: `{ field, one_of }`. */
+export interface PluginFieldConditionClause {
+  /** Key of another plugin form field whose current value drives the clause. */
+  field: string;
+  /** The clause matches when the referenced field's value is in this list. */
+  one_of: PluginFieldConditionLiteral[];
+}
+
+/** Every nested condition must match. */
+export interface PluginFieldConditionAllOf {
+  all_of: PluginFieldCondition[];
+}
+
+/** At least one nested condition must match. */
+export interface PluginFieldConditionAnyOf {
+  any_of: PluginFieldCondition[];
+}
+
+/** Inverts the nested condition. */
+export interface PluginFieldConditionNot {
+  not: PluginFieldCondition;
+}
+
+/** Host API 1.1: local-file action on a plugin connection field. */
+export interface PluginFormFieldPicker {
+  /** `directory` is desktop-only. */
+  kind: "file" | "directory";
+  /** Extensions (`.pem`) or MIME types (`text/plain`) offered by the picker. */
+  accept?: string[];
+  /**
+   * Declared sibling field that receives the file content on hosts without a
+   * client filesystem (the browser build). Desktop hosts store the chosen path
+   * in the declaring field and clear this one instead.
+   */
+  content_field?: string;
+}
+
+/**
+ * `visible_when` / `required_when` expression. The legacy `{ field, one_of }`
+ * clause keeps its exact meaning; `all_of` / `any_of` / `not` compose clauses
+ * (e.g. `sudo_source = custom AND read_only = false`).
+ */
+export type PluginFieldCondition = PluginFieldConditionClause | PluginFieldConditionAllOf | PluginFieldConditionAnyOf | PluginFieldConditionNot;
+
+export interface PluginFormField {
+  key: string;
+  label: string;
+  type: PluginFormFieldType;
+  description?: string;
+  placeholder?: string;
+  required?: boolean;
+  /** Declared default. Hosts older than the manifest serialization fix send
+   * `null` for "no default", which the form treats as unset. */
+  default?: PluginFormFieldValue | null;
+  options?: PluginFormFieldOption[];
+  /** Plugin method returning `{ options: [{ value, label }] }` for dynamic
+   * select rendering; falls back to the declared type when unavailable. */
+  options_action?: string;
+  /** Host API 1.1: offer a local-file action on this field. */
+  picker?: PluginFormFieldPicker;
+  binding?: PluginFormFieldBinding;
+  visible_when?: PluginFieldCondition;
+  required_when?: PluginFieldCondition;
+}
+
+export type PluginConnectionCapability = "test" | "connect" | "disconnect";
+export type PluginConnectionActionKind = "test" | "save" | "save-and-connect" | "custom";
+export type PluginConnectionActionVariant = "default" | "outline" | "secondary" | "destructive" | "ghost";
+export type PluginConnectionActionWhen = "always" | "create" | "edit";
+
+export interface PluginConnectionActionContribution {
+  id: string;
+  label: string;
+  description?: string;
+  variant?: PluginConnectionActionVariant;
+  when?: PluginConnectionActionWhen;
+  close_on_success?: boolean;
+  requires_valid_form?: boolean;
+  timeout_ms?: number;
+}
+
+export interface PluginConnectionAction {
+  id: string;
+  kind: PluginConnectionActionKind;
+  label?: string;
+  description?: string;
+  variant?: PluginConnectionActionVariant;
+  when?: PluginConnectionActionWhen;
+  close_on_success?: boolean;
+  requires_valid_form?: boolean;
+  timeout_ms?: number;
+}
+
+export interface PluginConnectionProviderContribution {
+  type: "connection-provider";
+  id: string;
+  label: string;
+  icon?: string;
+  database_type: string;
+  description?: string;
+  fields: PluginFormField[];
+  workbench?: string;
+  filesystem_provider?: string;
+  capabilities?: PluginConnectionCapability[];
+  actions?: PluginConnectionActionContribution[];
+  /** Multi-endpoint providers (Kafka advertised.listeners) receive a SOCKS5 runtime.proxy route over transport layers. */
+  proxy_route?: boolean;
+}
+
+export interface PluginWorkbenchContribution {
+  type: "workbench";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+}
+
+export interface PluginFilesystemProviderContribution {
+  type: "filesystem-provider";
+  id: string;
+  label: string;
+  schemes: string[];
+  description?: string;
+  icon?: string;
+  root_uri?: string;
+  capabilities?: Array<"read" | "write" | "delete" | "rename" | "mkdir">;
+}
+
+export type PluginFilesystemEntryKind = "file" | "directory" | "symlink" | "other";
+
+export interface PluginFilesystemEntry {
+  name: string;
+  uri: string;
+  kind: PluginFilesystemEntryKind;
+  size?: number;
+  modifiedAt?: string;
+  contentType?: string;
+}
+
+export interface PluginFilesystemListResult {
+  entries: PluginFilesystemEntry[];
+  nextCursor?: string;
+}
+
+export interface PluginFilesystemReadResult {
+  dataBase64: string;
+  contentType?: string;
+  truncated: boolean;
+  etag?: string;
+}
+
+export interface PluginFilesystemMutationResult {
+  success: boolean;
+  message?: string;
+  entry?: PluginFilesystemEntry;
+}
+
+export type PluginContextMenuTarget = "connection" | "table";
+
+export interface PluginTableContext {
+  connectionId: string;
+  database?: string;
+  schema?: string;
+  table: string;
+}
+
+export interface PluginContextMenuContribution {
+  type: "context-menu";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+  menu: PluginContextMenuTarget;
+  action?: PluginOpenWorkbenchTarget;
+}
+
+export interface PluginResultViewContribution {
+  type: "result-view";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+}
+
+export type PluginCommandPresentation = "tab" | "panel";
+export type PluginCommandReuse = "singleton" | "new";
+export type PluginCommandRestore = "none";
+
+/** Shared wire-level navigation contract used by commands and context-menu contributions. */
+export interface PluginOpenWorkbenchTarget {
+  type: "open-workbench";
+  /** Workbench contribution of the SAME plugin. */
+  workbench: string;
+}
+
+/** v1 command action extends the shared target with command-specific launch behavior. */
+export interface PluginOpenWorkbenchAction extends PluginOpenWorkbenchTarget {
+  presentation?: PluginCommandPresentation;
+  reuse?: PluginCommandReuse;
+  instance_key?: string;
+  restore?: PluginCommandRestore;
+  /** Opaque plugin payload; the host serves it under `context.plugin`. */
+  context?: Record<string, unknown>;
+  /**
+   * Generic launch-options extension point: sidecar method returning
+   * `{ entries: [{ label, description?, context? }] }` for the dock "+" picker.
+   * The host renders labels and merges the chosen context into the
+   * host-authored panel context — never interpreting the business meaning.
+   */
+  options_action?: string;
+  /** When true, the host also offers the plugin's own saved connections as launch targets. */
+  connection_targets?: boolean;
+}
+
+export type PluginConditionOperator = "equals" | "notEquals" | "oneOf";
+
+/** §5.3 structured condition clause; key/operator are host-reserved word lists — unknown values were rejected at parse time. */
+export interface PluginConditionClause {
+  key: string;
+  operator: PluginConditionOperator;
+  value: string | boolean | string[];
+}
+
+/** enablement/when condition group: implicit AND within `all`; absent field defaults to true. */
+export interface PluginCommandEnablement {
+  all: PluginConditionClause[];
+}
+
+/** Context-key snapshot for condition evaluation (host-provided per scenario; clauses referencing a missing key are always false). */
+export type PluginConditionContextKeys = Record<string, string | boolean | undefined>;
+
+export interface PluginCommandLaunchOption {
+  label: string;
+  description?: string;
+  context?: Record<string, unknown>;
+}
+
+export interface PluginCommandContribution {
+  type: "command";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+  action: PluginOpenWorkbenchAction;
+  enablement?: PluginCommandEnablement;
+}
+
+export type PluginMenuLocation = "commandPalette" | "appToolbar" | "appSidebar";
+
+export interface PluginMenuItem {
+  location: PluginMenuLocation;
+  /** Short command id of the SAME plugin. */
+  command: string;
+  group: string;
+  order: number;
+  /** Toolbar entries default to hidden; sidebar entries default to visible. */
+  default_visible?: boolean;
+  /** Placement visibility condition (defaults to true); evaluated independently from command.enablement. */
+  when?: PluginCommandEnablement;
+}
+
+export interface PluginMenusContribution {
+  type: "menus";
+  id: string;
+  items: PluginMenuItem[];
+}
+
+/**
+ * Contribution types the host renders through the plugin's own UI entrypoint in
+ * a plugin tab. A `workbench` is launched from the sidebar, the plugin center,
+ * or `host.openWorkbench`; a `result-view` is launched from the query-result
+ * toolbar with the current result snapshot as context. Both declare display
+ * metadata only — the opened contribution id is what tells the plugin UI which
+ * of its declared surfaces to render.
+ */
+export type PluginUiContribution = PluginWorkbenchContribution | PluginResultViewContribution;
+
+export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution;
+
+export interface PluginEngines {
+  dbx: string;
+  host_api: string;
+}
+
+export interface PluginBackendEntrypoint {
+  protocol_versions?: number[];
+  transport?: "stdio-jsonl" | "stdio-framed";
+  executable: string;
+}
+
+export interface PluginUiEntrypoint {
+  root?: string;
+  entry: string;
+}
+
+export interface PluginEntrypoints {
+  backend?: PluginBackendEntrypoint;
+  ui?: PluginUiEntrypoint;
+}
+
+export interface PluginFormFieldLocalization {
+  label?: string;
+  description?: string;
+  placeholder?: string;
+  options?: Record<string, string>;
+}
+
+export interface PluginContributionLocalization {
+  label?: string;
+  description?: string;
+  fields?: Record<string, PluginFormFieldLocalization>;
+  actions?: Record<string, { label?: string; description?: string }>;
+}
+
+export interface PluginManifestLocalization {
+  name?: string;
+  description?: string;
+  contributions?: Record<string, PluginContributionLocalization>;
+}
+
+export interface PluginCompatibility {
+  compatible: boolean;
+  errors?: string[];
+  warnings?: string[];
+  target?: string;
+}
+
 export interface PluginManifest {
+  manifest_version?: number;
   id: string;
   name: string;
+  icon?: string;
   version?: string;
+  publisher?: string;
+  engines?: PluginEngines;
+  permissions?: string[];
+  entrypoints?: PluginEntrypoints;
   protocol_version?: number;
   description?: string;
+  source?: string;
+  homepage?: string;
   executable?: string;
   drivers: PluginDriverManifest[];
+  contributions?: PluginContribution[];
+  localizations?: Record<string, PluginManifestLocalization>;
+}
+
+export interface PluginInstallProvenance {
+  repositoryId?: string;
+  publisher?: string;
+  signingKeyId?: string;
+  source?: "marketplace" | "url" | "file" | "unknown";
 }
 
 export interface InstalledPlugin {
   manifest: PluginManifest;
-  path: string;
+  compatibility: PluginCompatibility;
+  path?: string;
+  provenance?: PluginInstallProvenance;
+}
+
+export interface PluginTrustedKey {
+  keyId: string;
+  publicKey: string;
+}
+
+export type PluginRepositoryKind = "official" | "custom" | "enterprise";
+
+export interface PluginRepository {
+  id: string;
+  name: string;
+  kind: PluginRepositoryKind;
+  catalogUrl?: string;
+  enabled: boolean;
+  managed: boolean;
+}
+
+export interface PluginMarketplaceRepositoryMetadata {
+  id: string;
+  name: string;
+  homepage?: string;
+}
+
+export interface PluginMarketplaceLocalization {
+  name?: string;
+  description?: string;
+}
+
+export interface PluginMarketplaceArtifact {
+  target: string;
+  url: string;
+  sha256: string;
+  signingKeyId: string;
+  size?: number;
+}
+
+export interface PluginMarketplaceVersion {
+  version: string;
+  releasedAt?: string;
+  releaseNotes?: string;
+  artifacts: PluginMarketplaceArtifact[];
+}
+
+export interface PluginMarketplacePlugin {
+  id: string;
+  name: string;
+  description: string;
+  publisher: string;
+  verified: boolean;
+  icon?: string;
+  tags: string[];
+  permissions: string[];
+  source?: string;
+  homepage?: string;
+  license?: string;
+  latestVersion: string;
+  versions: PluginMarketplaceVersion[];
+  localizations?: Record<string, PluginMarketplaceLocalization>;
+}
+
+export interface PluginMarketplaceCatalog {
+  catalogVersion: number;
+  repository: PluginMarketplaceRepositoryMetadata;
+  generatedAt?: string;
+  plugins: PluginMarketplacePlugin[];
+}
+
+export interface PluginRepositoryCatalogResult {
+  repository: PluginRepository;
+  target: string;
+  catalog?: PluginMarketplaceCatalog;
+  error?: string;
+}
+
+export interface PluginMarketplaceInstallRequest {
+  repositoryId: string;
+  pluginId: string;
+  version?: string;
+  allowSourceChange?: boolean;
+}
+
+export interface ActivePluginSession {
+  pluginId: string;
+  processId?: number;
+  state: "starting" | "running" | "stopping" | "stopped" | "exited";
+}
+
+export interface PluginUiAssetPayload {
+  contentType: string;
+  dataBase64: string;
+  etag: string;
+}
+
+export interface PluginConnectionActionResult {
+  message?: string;
+  fieldValues?: Record<string, PluginFormFieldValue | null>;
+}
+
+export interface PluginInstallResult {
+  plugin: InstalledPlugin;
+  previousVersion?: string;
+  packageSha256: string;
+  signature: { status: "trusted"; key_id: string } | { status: "unsigned" };
+}
+
+export interface PluginRollbackResult {
+  plugin: InstalledPlugin;
+  previousVersion: string;
+}
+
+export interface PluginEvent {
+  pluginId: string;
+  method: string;
+  params: unknown;
+}
+
+export interface PluginBinaryEvent {
+  pluginId: string;
+  channel: string;
+  dataBase64: string;
 }
 
 export interface JdbcDriverInfo {
@@ -337,11 +848,36 @@ export interface DatabaseInfo {
   comment?: string | null;
   default_charset?: string | null;
   default_collation?: string | null;
+  /** Database-level compatibility mode, for example openGauss A/B/C/PG. */
+  compatibility_mode?: string | null;
 }
 
 export interface DatabaseStorageInfo {
   name: string;
   size_bytes: number | null;
+}
+
+export interface XuguDatafileInfo {
+  node_id: string;
+  space_id: number;
+  path: string;
+  file_no: number;
+  max_size?: number | null;
+  step_size?: number | null;
+  curr_size?: number | null;
+  reserved1?: string | null;
+}
+
+export interface XuguTablespaceInfo {
+  node_id: string;
+  space_id: number;
+  space_name: string;
+  datafile_num: number;
+  space_type: string;
+  media_error?: string | null;
+  total_chunk_num?: number | null;
+  free_chunk_num?: number | null;
+  datafiles: XuguDatafileInfo[];
 }
 
 export interface SqlServerCompletionContext {
@@ -372,12 +908,14 @@ export interface CatalogInfo {
 export interface TableInfo {
   name: string;
   table_type: string;
+  /** Optional validity populated by status-aware object loaders. */
+  valid?: boolean | null;
   comment?: string | null;
   parent_schema?: string | null;
   parent_name?: string | null;
 }
 
-export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface ObjectInfo {
   name: string;
@@ -404,9 +942,21 @@ export interface ObjectStatistics {
   schema?: string | null;
   estimated_rows?: number | null;
   total_bytes?: number | null;
+  data_length?: number | null;
+  engine?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  collation?: string | null;
+  row_format?: string | null;
+  avg_row_length?: number | null;
+  max_data_length?: number | null;
+  check_time?: string | null;
+  index_length?: number | null;
+  auto_increment?: string | null;
+  data_free?: number | null;
 }
 
-export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface ObjectSource {
   name: string;
@@ -529,6 +1079,14 @@ export interface IndexInfo {
   comment?: string | null;
   /** Parallel to `columns`: true at index i means columns[i] is a raw expression, not a plain column name. */
   key_is_expression?: boolean[] | null;
+  /** Parallel to `columns`: operator class name for each key column (PostgreSQL), if non-default. */
+  column_opclasses?: (string | null)[] | null;
+  /**
+   * True when the index is the object behind a PRIMARY KEY / UNIQUE constraint rather than a
+   * standalone index. Carried back to the backend inside the index draft's `original` snapshot:
+   * Dameng only accepts `ALTER TABLE ... ADD/DROP CONSTRAINT` for those indexes.
+   */
+  constraint_backed?: boolean | null;
 }
 
 export interface ReferenceKeyInfo {
@@ -627,6 +1185,18 @@ export interface ExtensionInfo {
   schema?: string | null;
 }
 
+/** PostgreSQL event trigger metadata (`pg_event_trigger`). Database-level DDL trigger. */
+export interface EventTriggerInfo {
+  name: string;
+  event: string;
+  owner?: string | null;
+  function?: string | null;
+  enabled?: string | null;
+  tags?: string[] | null;
+  comment?: string | null;
+  source?: string | null;
+}
+
 export interface OwnerInfo {
   object_name: string;
   object_type: string;
@@ -658,13 +1228,29 @@ export interface QueryResult {
   execution_error?: true;
   /** Set only for SQL Server informational messages emitted by the backend. */
   server_message?: true;
-  /** Oracle-only manual-transaction UX marker: set on a manual-transaction result
-   *  whose statement DBX proved to be an ordinary top-level read. Absent for
-   *  every non-Oracle execution and every unproven Oracle statement. */
+  /** Manual-transaction UX marker for sticky proven-read-only dialects (Oracle,
+   *  OceanBase-Oracle, MySQL, PostgreSQL): set on a manual-transaction result
+   *  whose statement DBX proved to be an ordinary read by that dialect's strict
+   *  heuristic. Absent for unproven statements and non-participating dialects. */
   manual_transaction_proven_read_only?: true;
-  /** Oracle-only manual-transaction UX marker: set on the synthetic successful
-   *  result of an empty/whitespace/comments-only manual script. */
+  /** Manual-transaction UX marker for the same dialects: set on the synthetic
+   *  successful result of an empty/whitespace/comments-only manual script. */
   manual_transaction_no_statement?: true;
+  /** MySQL auto-commit tab session state reported by the backend for this
+   *  execution: true = the tab connection still holds a transaction the user
+   *  opened explicitly (`BEGIN` / `START TRANSACTION`) and DBX kept it open;
+   *  false = the backend settled the connection and no such transaction is
+   *  open. Absent when the execution never observed a tab-scoped MySQL
+   *  connection, so the tab must keep its previous state. */
+  auto_commit_open_transaction?: boolean;
+  /** MySQL auto-commit tab: the backend rolled back a transaction the user
+   *  opened explicitly and left open (the tab did not opt into keeping them). */
+  auto_commit_explicit_transaction_rolled_back?: true;
+  /** MySQL auto-commit tab: the backend rolled back a transaction the session
+   *  opened implicitly because auto-commit was off (`SET autocommit = 0`).
+   *  Nobody typed `BEGIN`, so the tab reports it separately — and only once per
+   *  connection instead of after every execution. */
+  auto_commit_session_autocommit_rolled_back?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
@@ -696,6 +1282,15 @@ export interface QueryResult {
   mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
+  /** OceanBase SQL Audit EXECUTE_TIME for a completed statement, in microseconds. */
+  server_execute_time_us?: number;
+  /** Desktop wait from query request dispatch to the complete result payload; summed across appended pages. Completed query/command requests only. */
+  client_request_wait_ms?: number;
+  /** Measured phases; totals overlap. Missing phases were not measured. */
+  query_timings_ms?: Record<string, number>;
+  client_prepare_ms?: number;
+  client_result_ms?: number;
+  timing_page_count?: number;
   /** Whether a backend-reported result total is exact. */
   total_is_exact?: boolean;
   truncated?: boolean;
@@ -708,10 +1303,21 @@ export interface QueryResult {
    *  the tabular view and the original JSON. */
   elasticsearch_raw_body?: string;
   sourceLabel?: string;
+  /** 结果集来源的库名 / schema（与 sourceLabel 同时写入），供结果集页签按设置决定是否展示。 */
+  sourceQualifier?: string;
+  /** 结果集来源的对象名（通常为表名），关闭“结果集名称包含数据库名”时用于展示短名称。 */
+  sourceName?: string;
   sourceStatement?: string;
   /** Absolute offsets in the editor document at execution time. */
   sourceFrom?: number;
   sourceTo?: number;
+  /**
+   * Frontend-internal: the statement text actually sent for this result when it
+   * differs from `sourceStatement` (pagination wrapping, hidden-key rewrites…).
+   * Backend SQL error positions are relative to this text, so it is needed to
+   * map an error row/column back onto the user's original statement.
+   */
+  executedStatement?: string;
   /** Database server messages (notices, warnings) emitted while producing this result. Omitted when empty. */
   messages?: QueryMessage[];
 }
@@ -752,6 +1358,10 @@ export interface SpatialColumn {
 export interface QueryResultSourceColumnRef {
   sourceKey: string;
   sourceColumn: string;
+  /** Physical source identity for display-only features such as column formatters. */
+  database?: string;
+  schema?: string;
+  tableName?: string;
 }
 
 export interface QueryResultRun {
@@ -762,8 +1372,26 @@ export interface QueryResultRun {
   createdAt: number;
   /** Keeps this result from being replaced by an ordinary query execution. */
   pinned?: boolean;
+  /**
+   * 标题是否由用户/多库执行显式指定（重命名或按目标库命名）。
+   * 为假时 title 只是系统默认的 `Run N`，结果标签应改用来源名显示。
+   */
+  customTitle?: boolean;
   /** Distinguishes successive result payloads that reuse the same run slot. */
   resultGridRevision?: string;
+  /**
+   * 结果来源（库名.表名 / 表名），随批次一起保存。
+   * 非活动批次的结果 payload 会被回收，因此结果标签命名不能依赖 payload。
+   */
+  sourceLabel?: string;
+  sourceName?: string;
+  /**
+   * Logical-result identity for the tab-switch view snapshot cache. Distinct
+   * from `resultGridRevision` (the grid remount key): this one changes on every
+   * dataset replacement, including in-place refresh, and is preserved across
+   * disk eviction/restore. See `dataGridViewStateCache.ts`.
+   */
+  resultViewGeneration?: string;
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
@@ -796,6 +1424,7 @@ export interface QueryResultRun {
   resultEvicted?: boolean;
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
+  queryWriteTargets?: QueryTab["queryWriteTargets"];
   resultColumnComments?: QueryTab["resultColumnComments"];
   queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
@@ -862,6 +1491,8 @@ export type TreeNodeType =
   | "connection"
   | "connection-group"
   | "database"
+  | "tablespace"
+  | "datafile"
   | "doris-catalog"
   | "linked-server-root"
   | "linked-server"
@@ -878,6 +1509,7 @@ export type TreeNodeType =
   | "type-member"
   | "sequence"
   | "synonym"
+  | "job"
   | "package"
   | "package-body"
   | "group-columns"
@@ -889,6 +1521,7 @@ export type TreeNodeType =
   | "group-table-partitions"
   | "group-table-subpartitions"
   | "group-tables"
+  | "table-vgroup"
   | "group-dolt-system-tables"
   | "group-views"
   | "group-materialized-views"
@@ -897,10 +1530,17 @@ export type TreeNodeType =
   | "group-types"
   | "group-sequences"
   | "group-synonyms"
+  | "oracle-db-links"
+  | "oracle-db-link"
+  | "group-jobs"
   | "group-packages"
   | "group-partitions"
   | "group-extensions"
+  | "group-event-triggers"
+  | "group-tablespaces"
+  | "group-datafiles"
   | "extension"
+  | "event-trigger"
   | "object-browser"
   | "user-admin"
   | "dameng-users"
@@ -958,6 +1598,16 @@ export interface SidebarLayout {
   order: SidebarOrderEntry[];
 }
 
+export type TableVGroupOrderEntry = { type: "group"; id: string; children?: TableVGroupOrderEntry[] } | { type: "table"; name: string; /** 行类型（view/procedure/…）。同名双行容器（包 spec/body、type/type-body）靠它区分成员；缺省 = 按名字匹配（历史数据与表）。 */ rowType?: string };
+
+export interface TableVGroupLayout {
+  version?: number;
+  groups: ConnectionGroup[];
+  order: TableVGroupOrderEntry[];
+  /** Toggled by the container context menu to hide groups without deleting them. */
+  enabled?: boolean;
+}
+
 export interface TreeNode {
   id: string;
   label: string;
@@ -970,6 +1620,8 @@ export interface TreeNode {
   pinned?: boolean;
   connectionId?: string;
   database?: string;
+  /** Database-level compatibility mode, for example openGauss A/B/C/PG. */
+  compatibilityMode?: string;
   catalog?: string;
   catalogType?: string;
   linkedServer?: string;
@@ -999,6 +1651,9 @@ export interface TreeNode {
   comment?: string | null;
   valid?: boolean | null;
   sizeBytes?: number | null;
+  xuguTablespace?: XuguTablespaceInfo;
+  xuguDatafile?: XuguDatafileInfo;
+  xuguDatafilePath?: string;
   objectCount?: number;
   loadedKeyCount?: number;
   totalKeyCount?: number;
@@ -1008,7 +1663,11 @@ export interface TreeNode {
   tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
+  /** Set on synthetic table virtual-group container nodes. */
+  vgroupId?: string;
+  /** 投影时盖章的分组类别（tables/views/…），供拖拽落点 O(1) 类别判定。 */
+  vgroupKind?: string;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | EventTriggerInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
   loadMore?: {
     parentId: string;
     offset: number;
@@ -1027,7 +1686,43 @@ export interface TableNameFilter {
   excludePatterns: string[];
 }
 
-export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "ddl";
+export type TableInfoTab = "info" | "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "partitions" | "ddl";
+
+/** PostgreSQL declarative partitioning strategy (`pg_partitioned_table.partstrat`). */
+export type PgPartitionKind = "range" | "list" | "hash";
+
+/** Structured form of a partition's `pg_get_expr(relpartbound)` definition. Values are the SQL literal text PostgreSQL reported (`'2024-01-01'`, `MINVALUE`, `0`). */
+export type PgPartitionBound = { kind: "range"; from: string[]; to: string[] } | { kind: "list"; values: string[] } | { kind: "hash"; modulus: number; remainder: number } | { kind: "default" };
+
+export interface PgPartitionNode {
+  schema: string;
+  name: string;
+  strategy?: PgPartitionKind;
+  keyDefinition?: string;
+  bound?: PgPartitionBound;
+  boundDefinition?: string;
+  isLeaf: boolean;
+  rowEstimate?: number;
+  totalBytes?: number;
+  children: PgPartitionNode[];
+}
+
+export interface PgTablePartitioning {
+  isPartitioned: boolean;
+  isPartition: boolean;
+  parent?: string;
+  parentSchema?: string;
+  parentTable?: string;
+  ownBound?: PgPartitionBound;
+  strategy?: PgPartitionKind;
+  keyDefinition?: string;
+  keyColumns: string[];
+  keyExpression?: string;
+  defaultPartition?: string;
+  partitions: PgPartitionNode[];
+  /** `server_version_num`, used to gate `DETACH PARTITION CONCURRENTLY` (14+). */
+  serverVersionNum?: number;
+}
 
 export interface TableStructureEditorTarget {
   kind: "column" | "index";
@@ -1037,6 +1732,13 @@ export interface TableStructureEditorTarget {
 export interface TableStructureEditorDraft {
   dirty?: boolean;
   activeTab: TableInfoTab;
+  /** DDL as loaded from the database — the baseline `ddlDraft` is compared against. */
+  ddlContent?: string;
+  /** Original DDL and display preference retained so restoring a draft cannot change its baseline. */
+  rawDdlContent?: string;
+  excludeDdlStorage?: boolean;
+  /** Edited DDL script, or null/undefined when the DDL tab was left untouched. */
+  ddlDraft?: string | null;
   newTableName: string;
   tableComment: string;
   originalTableComment: string;
@@ -1053,8 +1755,17 @@ export interface TableStructureEditorDraft {
   constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
+  /** Pending PostgreSQL partition operations (create/attach/detach/drop). */
+  partitionOperations?: import("@/lib/table/tableStructureEditorSql").TablePartitionOperation[];
+  /** Create-mode `PARTITION BY` declaration. */
+  createPartitioningEnabled?: boolean;
+  createPartitioningKind?: import("@/types/database").PgPartitionKind;
+  createPartitioningColumns?: string[];
+  createPartitioningExpression?: string;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
+  /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */
+  appliedInitialTabRequestId?: number;
   initialized: boolean;
 }
 
@@ -1065,9 +1776,20 @@ export interface TableStructureEditorViewport {
 
 export type ObjectBrowserViewMode = "list" | "grid";
 
+export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "events" | "sequences" | "packages" | "types";
+
 export interface ObjectBrowserViewport {
   scrollTop: number;
   viewMode: ObjectBrowserViewMode;
+}
+
+/** Runtime-only viewport state for the selected configuration in a Nacos tab. */
+export interface NacosConfigEditorViewport {
+  namespace: string;
+  dataId: string;
+  group: string;
+  scrollTop: number;
+  scrollLeft: number;
 }
 
 export interface ExternalSqlFileVersion {
@@ -1082,14 +1804,43 @@ export interface QueryPageJumpProgress {
   targetPage: number;
 }
 
+export type TabOutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+
+export type TabPageUiState = Record<string, unknown>;
+
+/** UI-only state that must survive an inactive tab's component being unmounted. */
+export interface TabUiState {
+  activeOutputView?: TabOutputView;
+  resultPaneOpen?: boolean;
+  /** Small JSON-compatible snapshots owned by special-page components. */
+  page?: Record<string, TabPageUiState>;
+}
+
 export interface QueryTab {
   id: string;
+  /** Stable creation time used when tabs are displayed in creation order. */
+  createdAt?: number;
   title: string;
   customTitle?: boolean;
+  /**
+   * 同名标签之间用来区分的稳定编号，以及分配编号时的那个显示标题。
+   *
+   * 编号只在标签首次出现重名时分配一次，之后即使其它重名标签被关闭也不再回收到
+   * 其它标签上：关闭中间的标签不会让后面的标签改名（#9938）。因为标签的显示标题
+   * 会随库名切换、重命名、紧凑标题设置而变，所以用 titleNumberKey 记住分配时的
+   * 标题，标题变了就重新参与分配。
+   */
+  titleNumber?: number;
+  titleNumberKey?: string;
   /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
   forceWordWrap?: boolean;
   connectionId: string;
   database: string;
+  /**
+   * 所属连接被删除后，被保留下来的 SQL 页签会记录原连接名。新建同名连接时按此
+   * 字段把页签重新绑定到新连接上；绑定完成后清空。
+   */
+  detachedConnectionName?: string;
   /** Optional branch context for a driver-profile database workspace. */
   workspaceBranch?: string;
   schema?: string;
@@ -1137,9 +1888,13 @@ export interface QueryTab {
   activeResultIndex?: number;
   /** Distinguishes successive result payloads that reuse the current result slot. */
   resultGridRevision?: string;
+  /** Logical-result identity for the tab-switch view snapshot cache; see QueryResultRun. */
+  resultViewGeneration?: string;
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
+  /** Undefined inherits the default on open; false preserves an explicit per-tab opt-out. */
   resultAutoSave?: boolean;
+  uiState?: TabUiState;
   explainPlan?: import("@/lib/diagram/explainPlan").ParsedExplainPlan;
   /** MySQL's regular EXPLAIN result, kept alongside its JSON visual plan. */
   explainTableResult?: QueryResult;
@@ -1149,6 +1904,7 @@ export interface QueryTab {
   explainTableSql?: string;
   lastExplainedSql?: string;
   isExecuting: boolean;
+  redisMonitorActive?: boolean;
   isCancelling?: boolean;
   queryExecutionStartedAt?: number;
   /** Ephemeral per-statement progress for the latest multi-statement execution. */
@@ -1161,7 +1917,15 @@ export interface QueryTab {
     anchor: number;
     head: number;
   };
+  /** Ephemeral request to move the cursor/scrolling to a specific line/column (e.g. global content search jump). */
+  editorRevealRequest?: {
+    id: number;
+    line: number;
+    column?: number;
+  };
   executionId?: string;
+  /** Ephemeral result run targeted by the current execution; null means a new run is being produced. */
+  executingResultRunId?: string | null;
   isExplaining?: boolean;
   explainExecutionId?: string;
   /** Per-run connection session for explain flows that require session state. */
@@ -1202,7 +1966,24 @@ export interface QueryTab {
     | "sqlserver-trace"
     | "mysql-dashboard"
     | "postgres-dashboard"
-    | "dolt-version-control";
+    | "xugu-dashboard"
+    | "solr-admin"
+    | "dolt-version-control"
+    | "plugin-workbench"
+    | "plugin-filesystem";
+  pluginWorkbench?: {
+    /** Host command that created this tab; distinct commands can share a workbench. */
+    commandId?: string;
+    pluginId: string;
+    contributionId: string;
+    context?: Record<string, unknown>;
+  };
+  pluginFilesystem?: {
+    pluginId: string;
+    providerId: string;
+    rootUri?: string;
+    currentUri?: string;
+  };
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
   mqTenant?: string;
@@ -1214,7 +1995,10 @@ export interface QueryTab {
   nacosTargetGroup?: string;
   nacosTargetKeyword?: string;
   nacosTargetRequestId?: number;
+  nacosConfigEditorViewport?: NacosConfigEditorViewport;
   structureTableName?: string;
+  /** Navigation type of the opened structure object; views matter for "view data" routing. */
+  structureTableType?: "table" | "view";
   structureInitialTab?: TableInfoTab;
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;
@@ -1229,7 +2013,30 @@ export interface QueryTab {
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
     initialObjectFilter?: "tables" | "events";
+    filter?: ObjectBrowserFilter;
+    searchQuery?: string;
     viewport?: ObjectBrowserViewport;
+  };
+  /** Opened to view object source, including objects without editable source metadata. */
+  sourceView?: boolean;
+  ddlViewer?: {
+    schema?: string;
+    tableName: string;
+    objectType?: ObjectSourceKind;
+    formatDialect?: SqlFormatDialect;
+  };
+  /**
+   * 「先出 tab 再加载」的中间态：DDL 新标签已经可见，但 DDL 还在路上
+   * （issue #9387）。让 tab 栏与编辑区在等待期间就有反馈，失败时就地显示
+   * 错误 + Retry，而不是加载完成后才建 tab、失败只弹 toast。
+   *
+   * 纯运行期字段，刻意不进 openTabsPersistence 的落盘白名单：重启后恢复出的
+   * tab 直接使用落盘的 SQL 文本，不会永久停在「加载中」。
+   */
+  ddlLoad?: {
+    startedAt: number;
+    /** 加载失败时写入；保留状态以便就地重试 */
+    error?: string;
   };
   objectSource?: {
     schema?: string;
@@ -1237,6 +2044,32 @@ export interface QueryTab {
     objectType: ObjectSourceKind;
     signature?: string;
   };
+  /**
+   * 「先出 UI 再加载」的中间态：源码 tab 已经可见，但源码还在路上
+   * （ensureConnected + getObjectSource）。让 tab 栏与编辑区在等待期间就有反馈，
+   * 失败时就地显示错误 + Retry，而不是等到加载完才建 tab、失败只弹 toast。
+   *
+   * 纯运行期字段，刻意不进 openTabsPersistence 的落盘白名单：重启后恢复出的
+   * tab 只是普通空 tab，不会永久停在「加载中」。
+   */
+  sourceLoad?: {
+    startedAt: number;
+    /** Whether this request should open an editable object definition instead of the original source. */
+    initialEditing?: boolean;
+    /** 加载失败时写入；保留 request 以便就地重试 */
+    error?: string;
+    /**
+     * 重试所需的请求身份。与 `objectSource` 分开保存：objectType 在这里是
+     * **请求时**的类型，而 `objectSource.objectType` 是 routine fallback
+     * 解析后的类型（PROCEDURE↔FUNCTION、PACKAGE↔PACKAGE_BODY 会被改写）。
+     */
+    request: {
+      name: string;
+      objectType: ObjectSourceKind;
+      signature?: string;
+    };
+  };
+  tableComment?: string | null;
   tableMeta?: {
     schema?: string;
     tableName: string;
@@ -1245,6 +2078,8 @@ export interface QueryTab {
     database?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
+    /** Physical primary keys used for table-open default sorting; excludes unique and synthetic row identifiers. */
+    physicalPrimaryKeys?: string[];
   };
   tableMetaUpdatedAt?: number;
   /** 该 tab 的 tableMeta 是哪个连接元数据代次下写入的：disconnect / 关闭数据库 /
@@ -1304,6 +2139,7 @@ export interface QueryTab {
     }[];
   };
   querySourceColumns?: Array<string | undefined>;
+  queryWriteTargets?: Array<{ tableMeta: NonNullable<QueryTab["tableMeta"]>; sourceColumns: Array<string | undefined> }>;
   /**
    * Column comments for a multi-source query result (e.g. JOIN), indexed by
    * result-column ordinal (projection order). Each entry is the comment of the
@@ -1341,10 +2177,30 @@ export interface QueryTab {
   txnSessionId?: string;
   /** Set to true when a manual transaction was auto-rolled back due to inactivity */
   txnAutoRolledBack?: boolean;
-  /** Oracle-only, non-persisted: whether the current manual Oracle session has
-   *  executed at least one statement DBX cannot prove read-only. Commit/Rollback
-   *  actions are hidden while a session is clean. Never cleared by a later read. */
-  oracleTxnPossiblyDirty?: boolean;
+  /** Sticky proven-read-only dialects (Oracle/OceanBase-Oracle/MySQL/PostgreSQL),
+   *  not persisted: whether the current manual session has executed at least one
+   *  statement DBX cannot prove read-only. Commit/Rollback actions are hidden
+   *  while a session is clean. Never cleared by a later read. */
+  txnPossiblyDirty?: boolean;
+  /** Auto-commit tabs (`Tx:A`) with a MySQL-family connection: whether the tab's
+   *  connection currently holds a transaction the user opened explicitly
+   *  (`BEGIN` / `START TRANSACTION`). The backend reports it on every execution
+   *  that observed the connection; the tab mirrors it into the `Tx` badge and
+   *  the commit/rollback actions. Not persisted. */
+  autoCommitOpenTransaction?: boolean;
+  /** Auto-commit tab: show the notice that the backend rolled back an explicit
+   *  transaction this tab left open, so the cleanup is never silent. */
+  autoCommitTxnRolledBack?: boolean;
+  /** Same cleanup, but the rolled-back transaction came from a session with
+   *  auto-commit turned off (`SET autocommit = 0`) rather than from a `BEGIN`
+   *  the user typed. Shown with its own wording so the notice is not mistaken
+   *  for a lost explicit transaction. */
+  autoCommitSessionTxnRolledBack?: boolean;
+  /** Dedupe marker for {@link autoCommitSessionTxnRolledBack}: an
+   *  auto-commit-off session rolls back an implicit transaction after *every*
+   *  execution, so the notice is raised once and re-armed only after the
+   *  connection stops reporting that rollback. */
+  autoCommitSessionTxnRolledBackNotified?: boolean;
 }
 
 export interface SavedSqlFolder {
@@ -1396,7 +2252,12 @@ export interface TransferTaskConfig {
   content: TransferContent;
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
+  quoteTargetColumnNames: boolean;
   batchSize: number;
+  /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */
+  dropTargetBeforeCreate?: boolean;
+  /** Legacy field only. Saved confirmation is always ignored and reset to false. */
+  dropTargetConfirmed?: boolean;
 }
 
 export interface TransferTask {
@@ -1458,4 +2319,5 @@ export interface CollectionInfo {
   milvusSchema?: MilvusCollectionSchema;
   kind?: MongoCollectionKind | "bucket";
   bucketName?: string;
+  aliases?: string[];
 }

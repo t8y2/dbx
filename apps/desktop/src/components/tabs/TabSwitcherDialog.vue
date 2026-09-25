@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import { useConnectionStore } from "@/stores/connectionStore";
-import { connectionIconType } from "@/lib/connection/connectionPresentation";
+import TabModeIcon from "@/components/layout/TabModeIcon.vue";
 import { hexToRgba } from "@/lib/common/color";
-import { connectionColor, connectionDisplayName, tabDisplayTitle, tabModeLabel } from "@/lib/tabs/tabPresentation";
+import { connectionColor, connectionDisplayName, tabDisplayTitle, tabDisplayTitles, tabModeLabel } from "@/lib/tabs/tabPresentation";
+import { useQueryStore } from "@/stores/queryStore";
 import type { QueryTab } from "@/types/database";
 
 const props = defineProps<{
@@ -22,8 +21,11 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const connectionStore = useConnectionStore();
 const listRef = ref<HTMLElement>();
+// Number from the canonical tab order, not the switcher's most-recent-first
+// list, so suffixes match the tab strip and stay stable while cycling.
+const queryStore = useQueryStore();
+const tabTitles = computed(() => tabDisplayTitles(queryStore.tabs, t));
 
 function tabColor(tab: QueryTab): string {
   return connectionColor(tab.connectionId);
@@ -65,9 +67,9 @@ watch(
             @mouseenter="emit('update:selectedIndex', index)"
             @click="emit('select', tab.id)"
           >
-            <DatabaseIcon :db-type="connectionIconType(connectionStore.getConfig(tab.connectionId))" class="h-4 w-4 shrink-0" />
+            <TabModeIcon :tab="tab" class="h-4 w-4 shrink-0" />
             <div class="min-w-0 flex-1">
-              <div class="truncate text-sm font-medium">{{ tabDisplayTitle(tab, t) }}</div>
+              <div class="truncate text-sm font-medium">{{ tabTitles.get(tab.id) ?? tabDisplayTitle(tab, t) }}</div>
               <div class="truncate text-xs text-muted-foreground">
                 {{ connectionDisplayName(tab.connectionId) }}<template v-if="tab.database"> · {{ tab.database }}</template>
               </div>

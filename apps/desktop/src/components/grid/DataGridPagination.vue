@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Loader2 } from "@lucide/vue";
+import { Check, ChevronLeft, ChevronRight, ChevronsDown, ChevronsLeft, ChevronsRight, Loader2 } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -20,7 +20,11 @@ const props = withDefaults(
     loading: boolean;
     infiniteScrollEnabled: boolean;
     infiniteScrollAllLoaded: boolean;
+    loadAllRowsActive: boolean;
+    loadAllRowsEnabled: boolean;
+    canLoadAllRows: boolean;
     pageSize: number;
+    defaultPageSize: number;
     pageSizeMenuItems: LightDropdownItem[];
     exportMenuItems: LightDropdownItem[];
     currentPage: number;
@@ -28,7 +32,7 @@ const props = withDefaults(
     canGoNextPage: boolean;
     canJumpLastPage: boolean;
   }>(),
-  { paginationEnabled: true },
+  { paginationEnabled: true, loadAllRowsActive: false, loadAllRowsEnabled: true, canLoadAllRows: false },
 );
 
 const customPageSizeInput = defineModel<string>("customPageSizeInput", { default: "" });
@@ -48,7 +52,9 @@ const emit = defineEmits<{
   nextPage: [];
   jumpPage: [page: number];
   lastPage: [];
+  loadAllRows: [];
   selectExport: [value: string];
+  applyCustomPageSizeAndSetDefault: [];
 }>();
 
 watch(
@@ -94,39 +100,44 @@ function handlePageInputKeydown(event: KeyboardEvent) {
       </div>
     </div>
     <Loader2 class="w-3 h-3 text-muted-foreground" :class="loading ? 'animate-spin' : 'invisible'" aria-hidden="true" />
-    <template v-if="paginationEnabled && infiniteScrollEnabled">
+    <template v-if="paginationEnabled && (infiniteScrollEnabled || loadAllRowsActive)">
       <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">{{ t("grid.allLoaded") }}</span>
     </template>
-    <template v-if="paginationEnabled && !infiniteScrollEnabled">
+    <template v-if="paginationEnabled && !infiniteScrollEnabled && !loadAllRowsActive">
       <LightDropdown
         :model-value="String(pageSize)"
         :items="pageSizeMenuItems"
         :trigger-label="`${pageSize}${t('grid.rowsPerPageShort')}`"
         trigger-class="inline-flex h-5 shrink-0 items-center justify-center whitespace-nowrap rounded-md px-1.5 text-xs hover:bg-accent hover:text-accent-foreground"
-        content-class="w-36"
+        content-class="w-52"
         :highlight-selected="false"
         check-position="none"
         align="end"
         @update:model-value="emit('selectPageSize', $event)"
       >
         <div class="bg-border -mx-1 my-1 h-px" />
-        <div class="text-muted-foreground px-1.5 py-1 text-xs">{{ t("grid.customRowsPerPage") }}</div>
-        <div class="flex items-center gap-1 px-1.5 pb-1" @click.stop @keydown.stop>
+        <div class="px-2 pt-2 text-xs font-medium text-foreground">{{ t("grid.customRowsPerPage") }}</div>
+        <div class="px-2 pb-2 text-[11px] text-muted-foreground">{{ t("grid.currentAndDefaultPageSize", { current: pageSize, default: defaultPageSize }) }}</div>
+        <div class="flex items-center gap-1.5 px-2 pb-2" @pointerdown.stop @click.stop @keydown.stop>
           <Input
             v-model="customPageSizeInput"
             type="number"
             inputmode="numeric"
             :min="MIN_RESULT_PAGE_SIZE"
             :max="MAX_RESULT_PAGE_SIZE"
-            class="h-6 w-20 px-1.5 text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+            class="h-7 flex-1 px-2 text-sm tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
             @keydown.enter.prevent.stop="emit('applyCustomPageSize')"
           />
           <Tooltip>
             <TooltipTrigger as-child
-              ><Button variant="outline" size="icon" class="h-6 w-6 shrink-0" :aria-label="t('grid.applyPageSize')" @click.stop="emit('applyCustomPageSize')"><Check class="h-3 w-3" /></Button
+              ><Button variant="outline" size="icon" class="h-7 w-7 shrink-0" :aria-label="t('grid.applyForThisQuery')" @click.stop="emit('applyCustomPageSize')"><Check class="h-3.5 w-3.5" /></Button
             ></TooltipTrigger>
             <TooltipContent side="bottom">{{ t("grid.applyPageSize") }}</TooltipContent>
           </Tooltip>
+        </div>
+        <div class="flex gap-1.5 border-t px-2 py-2">
+          <button type="button" class="flex-1 whitespace-nowrap rounded-md border px-2 py-1.5 text-center text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground" @click.stop="emit('applyCustomPageSize')">{{ t("grid.applyForThisQuery") }}</button>
+          <button type="button" class="flex-1 whitespace-nowrap rounded-md bg-primary px-2 py-1.5 text-center text-xs text-primary-foreground hover:bg-primary/90" @click.stop="emit('applyCustomPageSizeAndSetDefault')">{{ t("grid.applyAndSetDefault") }}</button>
         </div>
       </LightDropdown>
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || currentPage <= 1" @click="emit('firstPage')"><ChevronsLeft class="h-3 w-3" /></Button>
@@ -145,6 +156,14 @@ function handlePageInputKeydown(event: KeyboardEvent) {
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || !canGoNextPage" @click="emit('nextPage')"><ChevronRight class="h-3 w-3" /></Button>
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || !canJumpLastPage" @click="emit('lastPage')"><ChevronsRight class="h-3 w-3" /></Button>
     </template>
+    <Tooltip v-if="paginationEnabled && loadAllRowsEnabled">
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || !canLoadAllRows" :aria-label="t('grid.loadAllAndGoToLastRow')" @click="emit('loadAllRows')">
+          <ChevronsDown class="h-3 w-3" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{{ t("grid.loadAllAndGoToLastRow") }}</TooltipContent>
+    </Tooltip>
     <DataGridExportMenu :items="exportMenuItems" :label="t('grid.export')" :on-select="(value) => emit('selectExport', value)" />
   </div>
 </template>

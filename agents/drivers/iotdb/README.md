@@ -51,6 +51,13 @@ for TLS or mTLS connections.
 - Query results annotate timestamp columns as `TIMESTAMP(ms|us|ns)` using the
   server-reported `TimestampPrecision`. Raw timestamp integers are transported
   as decimal strings so nanosecond values are not rounded by JavaScript.
+- Tree `max_time`/`min_time` aggregates also return epoch values; they are
+  annotated as `TIMESTAMP(ms|us|ns)` too so the grid renders standard times.
+- The pinned client is vendored under `agents/go-common/iotdb-client-go` with
+  one patch: upstream drops the 1.3.x `ColumnNameIndexMap` fallback, which
+  misaligned aggregate result values against the SELECT column order on 1.3.x
+  servers (the patched client maps value columns through the server-provided
+  name index when the ordered index list is absent).
 - The Agent keeps one physical IoTDB session per logical DBX session and
   invalidates that session after cancellation, timeout, or connection failure.
 

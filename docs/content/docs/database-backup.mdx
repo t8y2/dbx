@@ -15,7 +15,7 @@ For a backup that should run only once, use **Back up now** in Settings instead 
 | --- | --- |
 | Databases | MySQL and PostgreSQL |
 | Platform | DBX Desktop |
-| Output | One `.sql` file per database/schema target |
+| Output | The default template creates one directory per scheduled run, containing one `.sql` file per database/schema target; directory and file-name templates can be customized |
 | Frequency | Every N hours, daily at a time, or weekly on a weekday and time |
 | Contents | Table structure, data, database objects, and optional `DROP TABLE IF EXISTS` |
 | Table scope | All, include by pattern, or exclude by pattern |
@@ -68,7 +68,7 @@ For a backup that should run only once, use **Back up now** in Settings instead 
   <Step>
     ### Set directory and frequency
 
-    Select a local destination directory and configure hourly, daily, or weekly timing. DBX previews the next run.
+    Select a local destination directory and configure the output path template, which combines a relative run-directory template with a file-name template. Directory templates support `{schedule}`, `{date}`, `{timestamp}`, and `{runId}`. File-name templates also support `{database}`. DBX previews the complete output path and automatically adds a missing database target. A run ID is included only when `{runId}` is explicitly present in the template; if a template resolves to a path already used by another run, DBX rejects the new run instead of overwriting the existing backup.
 
   </Step>
   <Step>
@@ -118,11 +118,15 @@ Cancellation stops remaining exports. On failure or cancellation, DBX attempts t
 
 ## Retention and History
 
-Each schedule has a retention count. Older runs beyond the limit are pruned from history and their files are deleted. Individual backup runs and files can also be removed manually.
+Each schedule has a retention count. Older runs beyond the limit are pruned from history and their files are deleted. The default run directory includes a unique run ID, while directory templates can be customized to fit your workflow. Individual backup runs and files can also be removed manually.
 
 <Callout type="warn">The destination directory still needs independent OS, NAS, or object-storage backup. Saving to another folder on the same disk does not protect against disk failure, ransomware, or loss of the machine.</Callout>
 
 ## Restore Drills
+
+For MySQL-compatible connections, restore individual tables from a single `.sql` or `.sql.gz` backup. Expand a backup's file list, click **Restore**, then choose **Selected tables** under **Restore scope**. Once the full file has been scanned, search and select the tables to restore. Tables do not need to exist in the destination, and identically named tables in different source databases are listed separately.
+
+Selected-table mode restores table structure, indexes, and data, excluding views, routines, triggers, and events. Database context in the dump still applies; tables without an explicit database use the destination chosen in the dialog. Existing foreign keys or triggers can affect the restore. Choose **All contents** for a complete restore. Statements whose scope cannot be determined cause selective restore to fail before execution.
 
 Generated `.sql` files can be imported through [SQL File Execution](/en/docs/sql-file). Regularly verify in an isolated environment that:
 

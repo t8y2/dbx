@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount, toRaw } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -20,6 +20,7 @@ import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
 import type { DynamoDbIndexInfo, DynamoDbTableDescription } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { getDataGridConditionSuggestionPosition, type DataGridConditionSuggestionPosition } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
 import { ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW, clampDocumentPage, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
@@ -38,6 +39,8 @@ import {
   searchDocumentFieldPathTree,
   documentFilterModeNeedsValue,
   documentFilterModeOptionsFor,
+  documentFilterModeUsesList,
+  documentFilterModeUsesRange,
   documentFilterValueTypeOptions,
   documentStoreProviderFor,
   elasticsearchBoolClauseOptions,
@@ -68,7 +71,8 @@ import {
   stringifyDocumentStoreValue,
   documentStoreValueForGrid,
 } from "@/lib/app/documentJsonValues";
-import { applyDocumentStoreIdentityPlan, formatMeilisearchDocumentOperationPreview, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
+import { applyDocumentStoreIdentityPlan, formatMeilisearchDocumentOperationPreview, formatSolrDocumentOperationPreview, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
+import { restoreDocumentBrowserState, saveDocumentBrowserState, type DocumentBrowserDataSnapshot } from "@/lib/tabs/documentBrowserStateCache";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import {
@@ -77,20 +81,38 @@ import {
   buildMongoUpdateDocument,
   formatMongoShellLiteral,
   mongoDocumentDisplayValue,
+  mongoDocumentGridValue,
   mongoDocumentGridColumnTypes,
   mongoDocumentIdForGrid,
   parseMongoDocumentInputValue,
   serializeMongoDocumentId,
   type MongoInputValue,
 } from "@/lib/mongo/mongoDocumentValues";
+import {
+  buildMongoCompletionItemsFromContext,
+  getMongoDocumentQueryCompletionContext,
+  inferMongoCompletionFields,
+  mongoCompletionNeedsFields,
+  plainMongoCompletionInsertion,
+  readMongoPropertyPrefix,
+  shouldAutoOpenMongoDocumentQueryCompletion,
+  type MongoCompletionField,
+  type MongoCompletionItem,
+  type MongoDocumentQueryKind,
+} from "@/lib/mongo/mongoCompletion";
 import { mongoDocumentsToQueryResult } from "@/lib/mongo/mongoShellCommand";
 import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import type { SerializedDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibilityToLayout } from "@/lib/document/documentGridColumnVisibilityStorage";
+import { matchesElasticsearchIndexPattern, subscribeElasticsearchIndexCleared, type ElasticsearchIndexClearedDetail } from "@/lib/sidebar/elasticsearchIndexActions";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import DocumentQueryCompletionMenu from "./DocumentQueryCompletionMenu.vue";
 import JsonEditNode from "./JsonEditNode.vue";
+
 import type { EditNode } from "@/types/editor";
 import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
@@ -108,11 +130,23 @@ const props = defineProps<{
   collection: string;
   databaseType?: DatabaseType;
   tableMeta?: NonNullable<QueryTab["tableMeta"]>;
+  /** Tab id; query conditions are cached per tab and restored on remount. */
+  stateKey?: string;
 }>();
 
 type JsonRecord = Record<string, unknown>;
 type ViewMode = "document" | "table";
 const DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT = 10_000;
+
+// This component is keyed by tab in ContentArea and unmounted on every tab
+// switch; without restoring from the per-tab cache, coming back to the tab
+// would silently drop the user's filter/sort conditions and re-query the
+// server. Page position and rows only survive for skip-based paging: cursor
+// stores (DynamoDB/Elasticsearch) cannot resume a page without their cursor
+// stacks, and infinite scroll always restarts from the first segment.
+const restoredDocumentBrowserState = props.stateKey ? restoreDocumentBrowserState(props.stateKey) : undefined;
+const skipBasedDocumentStore = ["mongodb", "meilisearch", "solr"].includes(documentStoreProviderFor(props.databaseType).kind);
+const restoresSkipBasedPage = !!restoredDocumentBrowserState && !settingsStore.editorSettings.infiniteScroll && skipBasedDocumentStore;
 
 const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
@@ -127,13 +161,18 @@ const mongoCopyDocumentsAvailable = ref(false);
 const lastGridColumns = ref<string[]>([]);
 const lastGridColumnTypes = ref<string[]>([]);
 const total = ref<number | undefined>(undefined);
+// Logical-result identity for DataGrid's tab-switch view snapshot. A data tab
+// gets this from queryStore.publishResultGeneration; document tabs have no
+// store-side result, so the browser mints one per completed load and inherits
+// it on an infinite-scroll append and on a cache restore.
+const documentViewGeneration = ref<string | undefined>(undefined);
 const totalIsExact = ref(true);
 const paginationTotal = ref<number | undefined>(undefined);
 const loading = ref(false);
 const documentLoadExecutionId = ref("");
 const documentLoadCancelling = ref(false);
 const documentLoadingElapsedSeconds = ref("0.0");
-const page = ref(0);
+const page = ref(restoresSkipBasedPage ? Math.max(0, Math.trunc(restoredDocumentBrowserState!.page)) : 0);
 const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.tableOpenPageSize));
 const selectedIdx = ref<number | null>(null);
 const editJson = ref("");
@@ -153,8 +192,10 @@ const viewMode = computed<ViewMode>({
   get: () => settingsStore.editorSettings.mongoViewMode,
   set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
 });
-const filterInput = ref("");
-const sortInput = ref("");
+const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
+const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
+const localColumnFilters = ref<SerializedDataGridLocalColumnFilters>(restoredDocumentBrowserState?.localColumnFilters ?? {});
+const localColumnFilterColumns = ref<string[] | undefined>(restoredDocumentBrowserState?.localColumnFilterColumns);
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
@@ -280,11 +321,160 @@ type DocumentGridChanges = {
   rows: MongoInputValue[][];
 };
 const documentFilterBuilderOpen = ref(false);
+/// Why an Apply click did not filter. The shared `error` banner lives in the document pane, which
+/// the open filter popover covers, so a rejected rule there reads as a dead button.
+const documentFilterBuilderError = ref("");
 const documentFilterFieldPopoverOpen = ref<Record<string, boolean>>({});
 const documentFilterFieldSearch = ref<Record<string, string>>({});
-const documentFilterRules = ref<DocumentFilterRule[]>([]);
-const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
+const documentFilterRules = ref<DocumentFilterRule[]>(restoredDocumentBrowserState?.documentFilterRules ?? []);
+const appliedDocumentFilter = ref<Record<string, unknown> | null>(restoredDocumentBrowserState?.appliedDocumentFilter ?? null);
+
+// Identity + conditions the currently held rows were loaded under. Rows are
+// only worth replaying while this still matches the live inputs; a filter edit
+// with a load still in flight would otherwise pair new conditions with stale
+// rows on the next remount.
+function documentDataSignature(): string | undefined {
+  try {
+    return JSON.stringify([documentStoreProvider.value.kind, props.connectionId, props.database, props.collection, currentDocumentFilter() ?? null, currentDocumentSortJson(sortInput.value) ?? null, page.value, pageSize.value, settingsStore.editorSettings.infiniteScroll === true]);
+  } catch {
+    // Malformed filter/sort JSON: nothing stable to key rows against.
+    return undefined;
+  }
+}
+
+// Local value filters describe column values, not the rows that happen to be
+// loaded, so paging and page-size changes must not drop them. Only a new query
+// (collection, filter or sort) invalidates the snapshot; restored filters are
+// mapped back by column name, so a changed column set is handled as well.
+function documentLocalColumnFilterSignature(): string | undefined {
+  try {
+    return JSON.stringify([documentStoreProvider.value.kind, props.connectionId, props.database, props.collection, currentDocumentFilter() ?? null, currentDocumentSortJson(sortInput.value) ?? null]);
+  } catch {
+    // Malformed filter/sort JSON: nothing stable to key filters against.
+    return undefined;
+  }
+}
+
+const documentLocalColumnFilterRestoreKey = computed(() => documentLocalColumnFilterSignature());
+
+let loadedDocumentDataSignature: string | undefined;
+
+function captureDocumentBrowserData(): DocumentBrowserDataSnapshot | undefined {
+  // Cursor stores (DynamoDB/Elasticsearch) drop their cursor stacks on unmount
+  // and cannot resume a page without them, so they keep restarting at page 0.
+  if (!skipBasedDocumentStore) return undefined;
+  // Never completed a load, mid-flight, or errored — let the remount retry.
+  if (lastGridColumns.value.length === 0 || loading.value || error.value) return undefined;
+  const signature = documentDataSignature();
+  if (!signature || signature !== loadedDocumentDataSignature) return undefined;
+  return {
+    signature,
+    viewGeneration: documentViewGeneration.value,
+    // Unwrap the reactive proxies: this snapshot outlives the component.
+    documents: toRaw(documents.value),
+    copyDocuments: toRaw(copyDocuments.value),
+    copyDocumentsAvailable: mongoCopyDocumentsAvailable.value,
+    gridColumns: toRaw(lastGridColumns.value),
+    gridColumnTypes: toRaw(lastGridColumnTypes.value),
+    total: total.value,
+    totalIsExact: totalIsExact.value,
+    paginationTotal: paginationTotal.value,
+    selectedIdx: selectedIdx.value,
+  };
+}
+
+function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
+  if (!props.stateKey) return;
+  saveDocumentBrowserState(props.stateKey, {
+    filterInput: filterInput.value,
+    sortInput: sortInput.value,
+    appliedDocumentFilter: appliedDocumentFilter.value,
+    documentFilterRules: documentFilterRules.value,
+    page: page.value,
+    localColumnFilters: localColumnFilters.value,
+    localColumnFilterColumns: localColumnFilterColumns.value,
+    // Any condition change drops the payload; only the unmount capture stores
+    // rows, so a cached page can never outlive the conditions that produced it.
+    data: options.includeData ? captureDocumentBrowserData() : undefined,
+  });
+}
+
+function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFilters) {
+  localColumnFilters.value = Object.fromEntries(Object.entries(filters).map(([columnIndex, values]) => [columnIndex, [...values]]));
+  localColumnFilterColumns.value = Object.keys(filters).length > 0 ? [...gridResult.value.columns] : undefined;
+  // Local value filters only change the client-side view. Keep the loaded rows
+  // in the tab snapshot so returning to the tab does not trigger a reload.
+  persistDocumentBrowserState({ includeData: true });
+}
+
+// Keep these sources in lockstep with documentLocalColumnFilterSignature(): a
+// changed query means the local-filter snapshot no longer describes what the
+// user is looking at.
+watch(
+  [filterInput, sortInput, appliedDocumentFilter],
+  () => {
+    localColumnFilters.value = {};
+    localColumnFilterColumns.value = undefined;
+    persistDocumentBrowserState();
+  },
+  { deep: true },
+);
+// Paging and page-size changes reload rows, but the local value filters stay put.
+watch([page, pageSize, () => settingsStore.editorSettings.infiniteScroll], () => persistDocumentBrowserState());
+watch(documentFilterRules, () => persistDocumentBrowserState(), { deep: true });
+
+// Seed the grid from the cached page so a tab switch costs no round trip
+// (#8679). The signature guard rejects a snapshot whose identity or conditions
+// no longer match — a changed page-size setting, say — and falls through to a
+// normal load.
+const restoredDocumentData = skipBasedDocumentStore && restoredDocumentBrowserState?.data && restoredDocumentBrowserState.data.signature === documentDataSignature() ? restoredDocumentBrowserState.data : undefined;
+if (restoredDocumentData) {
+  // Assign the columns before committing so a collection that loaded empty
+  // stays distinguishable from one that never loaded: commitLoadedDocuments
+  // reads a non-empty lastGridColumns as "a load has completed", which is what
+  // drives the refresh toolbar for an empty collection.
+  lastGridColumns.value = restoredDocumentData.gridColumns;
+  lastGridColumnTypes.value = restoredDocumentData.gridColumnTypes;
+  commitLoadedDocuments(restoredDocumentData.documents, restoredDocumentData.copyDocuments, restoredDocumentData.copyDocumentsAvailable, false, documentStoreProvider.value.kind);
+  total.value = restoredDocumentData.total;
+  totalIsExact.value = restoredDocumentData.totalIsExact;
+  paginationTotal.value = restoredDocumentData.paginationTotal;
+  loadedDocumentDataSignature = restoredDocumentData.signature;
+  // Same rows as before the switch, so the grid may replay its viewport.
+  documentViewGeneration.value = restoredDocumentData.viewGeneration;
+  const restoredSelectedIdx = restoredDocumentData.selectedIdx;
+  if (restoredSelectedIdx !== null && restoredSelectedIdx >= 0 && restoredSelectedIdx < documents.value.length) {
+    selectedIdx.value = restoredSelectedIdx;
+    editJson.value = stringifyDocumentStoreValue(documents.value[restoredSelectedIdx], documentStoreProvider.value.kind, 2);
+  }
+  // Keep the grid's "count total rows" action working without a preceding load.
+  loadedDocumentQueryTotalCountRequest = {
+    connectionId: props.connectionId,
+    database: props.database,
+    collection: props.collection,
+    filter: currentDocumentFilter(),
+    generation: documentRequestGeneration,
+    storeKind: documentStoreProvider.value.kind,
+  };
+}
+
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
+function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
+  const mappingTypes = elasticsearchFieldTypes.value;
+  return columns.map((column) => {
+    // Elasticsearch metadata fields are not part of an index mapping, but they
+    // are textual identifiers in the document grid just like mapped keywords.
+    if (column === "_id" || column === "_routing" || column === "_type") return "keyword";
+    return mappingTypes.get(column) ?? "";
+  });
+}
+const elasticsearchGridColumnTypes = computed(() => elasticsearchGridColumnTypesFor(lastGridColumns.value));
+const solrSchemaFields = ref<ColumnInfo[]>([]);
+const solrFieldTypes = computed(() => new Map(solrSchemaFields.value.map((field) => [field.name, field.data_type])));
+function solrGridColumnTypesFor(columns: readonly string[]): string[] {
+  return columns.map((column) => (column === "_id" ? "string" : (solrFieldTypes.value.get(column) ?? "")));
+}
+const solrGridColumnTypes = computed(() => solrGridColumnTypesFor(lastGridColumns.value));
 const dynamodbTableDescription = ref<DynamoDbTableDescription | null>(null);
 const dynamodbIndexName = ref("__table__");
 const dynamodbPageCursors = ref<Array<string | undefined>>([undefined]);
@@ -355,6 +545,9 @@ const deleteDetails = computed(() => {
       });
     }
     const displayId = mongoDocumentIdForGrid(id);
+    if (props.databaseType === "solr") {
+      return `Solr core: ${props.collection}\nDocument _id: ${String(displayId)}`;
+    }
     if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch") {
       const product = props.databaseType === "easysearch" ? "Easysearch" : props.databaseType === "meilisearch" ? "Meilisearch" : "Elasticsearch";
       return `${product} index: ${props.collection}\nDocument _id: ${String(displayId)}`;
@@ -377,7 +570,12 @@ function documentGridColumns(documentsToRender: JsonRecord[]): string[] {
 
 function documentGridRow(doc: JsonRecord, columns: string[], kind: DocumentStoreKind): QueryResult["rows"][number] {
   return columns.map((column) => {
-    const value = mongoDocumentDisplayValue(doc[column]);
+    const rawValue = doc[column];
+    // MongoDB distinguishes a missing field from an explicit BSON null. Keep a
+    // missing field visually blank; the NULL grid sentinel is reserved for an
+    // existing field whose BSON value is null.
+    if (kind === "mongodb" && rawValue === undefined) return "";
+    const value = kind === "mongodb" ? mongoDocumentGridValue(rawValue) : mongoDocumentDisplayValue(rawValue);
     if (value === undefined || value === null) return null;
     if (column === "_id") return kind === "mongodb" ? mongoDocumentIdForGrid(value) : documentStoreValueForGrid(value, kind);
     if (typeof value === "object") return documentStoreValueForGrid(value, kind);
@@ -393,14 +591,19 @@ function sameGridColumns(left: string[], right: string[]): boolean {
 function commitLoadedDocuments(nextDocuments: JsonRecord[], nextCopyDocuments: JsonRecord[], hasTypePreservingCopyDocuments: boolean, append: boolean, kind: DocumentStoreKind) {
   const previousDocumentCount = documents.value.length;
   const combinedDocuments = append ? [...documents.value, ...nextDocuments] : nextDocuments;
-  const nextColumns = combinedDocuments.length > 0 ? documentGridColumns(combinedDocuments) : lastGridColumns.value;
+  // A collection that has never returned any document (as opposed to one that
+  // returned documents before and is now empty) would otherwise keep
+  // `lastGridColumns` at its initial `[]` forever, which the grid reads as
+  // "no query has completed" and renders without a toolbar/refresh button.
+  const hasEstablishedColumns = lastGridColumns.value.length > 0;
+  const nextColumns = combinedDocuments.length > 0 || !hasEstablishedColumns ? documentGridColumns(combinedDocuments) : lastGridColumns.value;
   const canAppendGridRows = append && gridRows.value.length === previousDocumentCount && sameGridColumns(lastGridColumns.value, nextColumns);
 
   documents.value = combinedDocuments;
   copyDocuments.value = append ? [...copyDocuments.value, ...nextCopyDocuments] : nextCopyDocuments;
   mongoCopyDocumentsAvailable.value = append ? mongoCopyDocumentsAvailable.value && hasTypePreservingCopyDocuments : hasTypePreservingCopyDocuments;
 
-  if (combinedDocuments.length > 0) {
+  if (combinedDocuments.length > 0 || !hasEstablishedColumns) {
     lastGridColumns.value = nextColumns;
     lastGridColumnTypes.value = kind === "mongodb" ? mongoDocumentGridColumnTypes(combinedDocuments, nextColumns) : [];
   }
@@ -417,20 +620,22 @@ function commitLoadedDocuments(nextDocuments: JsonRecord[], nextCopyDocuments: J
 
 const gridResult = computed<QueryResult>(() => {
   const docs = documents.value;
+  const columnTypes = documentStoreProvider.value.kind === "elasticsearch" ? elasticsearchGridColumnTypes.value : documentStoreProvider.value.kind === "solr" ? solrGridColumnTypes.value : lastGridColumnTypes.value;
   if (!docs.length) {
     return {
       columns: lastGridColumns.value,
-      column_types: lastGridColumnTypes.value,
+      column_types: columnTypes,
       rows: [],
       affected_rows: 0,
       execution_time_ms: 0,
       truncated: false,
+      local_column_filters: localColumnFilters.value,
     };
   }
 
   return {
     columns: lastGridColumns.value,
-    column_types: lastGridColumnTypes.value,
+    column_types: columnTypes,
     rows: gridRows.value,
     mongo_documents: docs,
     mongo_copy_documents: copyDocuments.value,
@@ -438,12 +643,13 @@ const gridResult = computed<QueryResult>(() => {
     execution_time_ms: 0,
     truncated: false,
     appended_from_row_count: appendedFromRowCount.value,
+    local_column_filters: localColumnFilters.value,
   };
 });
 
 async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
   const kind = documentStoreProvider.value.kind;
-  if (kind !== "mongodb" && kind !== "dynamodb" && kind !== "elasticsearch") return undefined;
+  if (kind !== "mongodb" && kind !== "dynamodb" && kind !== "elasticsearch" && kind !== "solr") return undefined;
 
   const connectionId = props.connectionId;
   const database = props.database;
@@ -479,7 +685,7 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
         }
       }
 
-      if ((kind === "mongodb" || kind === "elasticsearch") && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
+      if ((kind === "mongodb" || kind === "elasticsearch" || kind === "solr") && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
       onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
 
       if (kind === "dynamodb" || kind === "elasticsearch") {
@@ -511,7 +717,7 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
 
   const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
   if (result.columns.length === 0) result.columns = gridResult.value.columns;
-  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : undefined;
+  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : kind === "solr" ? solrGridColumnTypesFor(result.columns) : undefined;
   result.affected_rows = exportedDocuments.length;
   result.truncated = (kind === "dynamodb" || kind === "elasticsearch") && !!cursor && exportedDocuments.length >= rowLimit;
   result.has_more = result.truncated;
@@ -523,9 +729,18 @@ const elasticsearchFilterFieldNames = computed(() => {
   const names = [...elasticsearchMappingFields.value.map((field) => field.name), ...gridResult.value.columns, "_id", "_routing"];
   return [...new Set(names.filter(Boolean))];
 });
+const solrFilterFieldNames = computed(() => {
+  const names = [...solrSchemaFields.value.map((field) => field.name), ...gridResult.value.columns, "_id"];
+  return [...new Set(names.filter(Boolean))];
+});
 const documentFilterFieldTree = computed<DocumentFieldPathNode[]>(() => {
   if (documentStoreProvider.value.kind === "elasticsearch") {
     return elasticsearchFieldPathTreeFromFieldNames(elasticsearchFilterFieldNames.value, elasticsearchFieldTypes.value);
+  }
+  if (documentStoreProvider.value.kind === "solr") {
+    // Schema fields give the filter builder a complete field list even before
+    // any document page has loaded; unknown Solr types stay leaf-selectable.
+    return elasticsearchFieldPathTreeFromFieldNames(solrFilterFieldNames.value, solrFieldTypes.value);
   }
   const tree = documentFieldPathTreeFromDocuments(documents.value);
   if (tree.length > 0) return tree;
@@ -696,12 +911,14 @@ function documentFilterFieldKindLabel(kind: DocumentFieldPathNode["kind"]): stri
 }
 
 function removeDocumentFilterRule(ruleId: string) {
+  documentFilterBuilderError.value = "";
   documentFilterRules.value = documentFilterRules.value.filter((rule) => rule.id !== ruleId);
   setDocumentFilterFieldPopoverOpen(ruleId, false);
   if (documentFilterRules.value.length === 0) appliedDocumentFilter.value = null;
 }
 
 function updateDocumentFilterRule(ruleId: string, patch: Partial<DocumentFilterRule>) {
+  documentFilterBuilderError.value = "";
   documentFilterRules.value = documentFilterRules.value.map((rule) => {
     if (rule.id !== ruleId) return rule;
     const next = { ...rule, ...patch };
@@ -714,6 +931,7 @@ function updateDocumentFilterRule(ruleId: string, patch: Partial<DocumentFilterR
     } else {
       if (patch.fieldName !== undefined && patch.fieldName !== rule.fieldName) next.valueType = "auto";
       if (!documentFilterModeNeedsValue(next.mode)) next.rawValue = "";
+      if (!documentFilterModeUsesRange(next.mode)) next.rawEndValue = "";
     }
     return next;
   });
@@ -734,6 +952,7 @@ function elasticsearchQueryTypeLabel(queryType: ElasticsearchQueryType): string 
 }
 
 function resetDocumentFilterBuilder() {
+  documentFilterBuilderError.value = "";
   appliedDocumentFilter.value = null;
   documentFilterFieldPopoverOpen.value = {};
   documentFilterFieldSearch.value = {};
@@ -799,6 +1018,8 @@ function resizeDocumentQueryInput(el: HTMLTextAreaElement | undefined) {
 function resizeDocumentQueryInputs() {
   resizeDocumentQueryInput(filterInputRef.value);
   resizeDocumentQueryInput(sortInputRef.value);
+  // A bar that just grew a line moved the menu's anchor with it.
+  repositionOpenDocumentQueryCompletions();
 }
 
 function formatFilterInput() {
@@ -824,6 +1045,330 @@ function formatSortInput() {
 watch([filterInput, sortInput], () => {
   void nextTick(resizeDocumentQueryInputs);
 });
+
+/* ---------------------------------------------------------------- *
+ * Filter / sort bar completion (MongoDB)
+ *
+ * The bars hold a bare query document, so they reuse the same field
+ * and operator tables as the query editor's `find({ … })` completion
+ * — a collection's field names are exactly what is too long to
+ * remember and retype here. Only MongoDB opts in: the other document
+ * stores put their own dialects in these inputs.
+ * ---------------------------------------------------------------- */
+
+type DocumentQueryCompletionTarget = "filter" | "sort";
+
+const DOCUMENT_QUERY_COMPLETION_MENU_LIMIT = 50;
+
+const documentQueryCompletionTarget = ref<DocumentQueryCompletionTarget | null>(null);
+const documentQueryCompletionItems = ref<MongoCompletionItem[]>([]);
+const documentQueryCompletionIndex = ref(0);
+const documentQueryCompletionPosition = ref<DataGridConditionSuggestionPosition>({ left: 0, top: 0, width: 0 });
+const documentQueryCompletionListboxId = `document-query-completions-${uuid()}`;
+const documentQueryCompletionEnabled = computed(() => documentStoreProvider.value.kind === "mongodb");
+const documentQueryCompletionOpen = computed(() => documentQueryCompletionTarget.value !== null && documentQueryCompletionItems.value.length > 0);
+const documentQueryCompletionActiveDescendant = computed(() => (documentQueryCompletionOpen.value ? `${documentQueryCompletionListboxId}-option-${documentQueryCompletionIndex.value}` : undefined));
+// Guards the field lookup: a keystroke that lands while a previous refresh is
+// still awaiting fields must win, and a dismiss must cancel both.
+let documentQueryCompletionRequestId = 0;
+
+function documentQueryCompletionKind(target: DocumentQueryCompletionTarget): MongoDocumentQueryKind {
+  return target === "filter" ? "filter" : "sortKeys";
+}
+
+function documentQueryCompletionInputEl(target: DocumentQueryCompletionTarget): HTMLTextAreaElement | undefined {
+  return target === "filter" ? filterInputRef.value : sortInputRef.value;
+}
+
+function documentQueryCompletionText(target: DocumentQueryCompletionTarget): string {
+  return target === "filter" ? filterInput.value : sortInput.value;
+}
+
+// Walking every loaded document is too much to redo on each keystroke — under
+// infinite scroll `documents` holds every page fetched so far — so the page's
+// fields are derived once per load and reused until the rows change.
+const documentQueryCompletionLocalFields = computed<MongoCompletionField[]>(() => (documentQueryCompletionEnabled.value ? inferMongoCompletionFields(documents.value) : []));
+
+/**
+ * Fields the collection is known to have: those visible in the loaded page,
+ * which carry the types the grid already inferred, plus the store's cached
+ * server-side sample, which also covers fields the current page happens not to
+ * contain.
+ */
+async function documentQueryCompletionFields(): Promise<MongoCompletionField[]> {
+  const byName = new Map(documentQueryCompletionLocalFields.value.map((field) => [field.name, field]));
+  let sampled: MongoCompletionField[] = [];
+  try {
+    sampled = await connectionStore.listMongoCompletionFields(props.connectionId, props.database, props.collection);
+  } catch {
+    sampled = [];
+  }
+  for (const field of sampled) if (!byName.has(field.name)) byName.set(field.name, field);
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function dismissDocumentQueryCompletions() {
+  documentQueryCompletionRequestId++;
+  documentQueryCompletionTarget.value = null;
+  documentQueryCompletionItems.value = [];
+  documentQueryCompletionIndex.value = 0;
+}
+
+async function refreshDocumentQueryCompletions(target: DocumentQueryCompletionTarget, options: { force?: boolean } = {}) {
+  if (!documentQueryCompletionEnabled.value) return;
+  const text = documentQueryCompletionText(target);
+  const cursor = documentQueryCompletionInputEl(target)?.selectionStart ?? text.length;
+  const kind = documentQueryCompletionKind(target);
+
+  // Without `force` (Ctrl/Cmd+Space, or a just-accepted item that opens a new
+  // position) the menu only appears for characters that start something.
+  if (!options.force && !shouldAutoOpenMongoDocumentQueryCompletion(text, cursor, kind)) {
+    dismissDocumentQueryCompletions();
+    return;
+  }
+
+  const context = getMongoDocumentQueryCompletionContext(text, cursor, kind);
+  if (context.mode === "none") {
+    dismissDocumentQueryCompletions();
+    return;
+  }
+
+  const requestId = ++documentQueryCompletionRequestId;
+  const fields = mongoCompletionNeedsFields(context.mode) ? await documentQueryCompletionFields() : [];
+  if (requestId !== documentQueryCompletionRequestId) return;
+
+  const items = buildMongoCompletionItemsFromContext(context, { fields }).slice(0, DOCUMENT_QUERY_COMPLETION_MENU_LIMIT);
+  if (items.length === 0) {
+    dismissDocumentQueryCompletions();
+    return;
+  }
+  documentQueryCompletionTarget.value = target;
+  documentQueryCompletionItems.value = items;
+  documentQueryCompletionIndex.value = 0;
+  updateDocumentQueryCompletionPosition(target);
+}
+
+/**
+ * Anchors the menu to its input in viewport coordinates, which is what a
+ * teleported menu needs: the grid's toolbar clips both axes, so the menu cannot
+ * live next to the input in the DOM.
+ */
+function updateDocumentQueryCompletionPosition(target: DocumentQueryCompletionTarget) {
+  const input = documentQueryCompletionInputEl(target);
+  if (!input) return;
+  documentQueryCompletionPosition.value = getDataGridConditionSuggestionPosition(input.getBoundingClientRect(), {
+    viewportWidth: window.innerWidth,
+    minWidth: 240,
+    maxWidth: 460,
+  });
+}
+
+// Teleported out of the input's box, the menu cannot follow it on its own: the
+// toolbar scrolls horizontally and the window resizes without the input ever
+// being touched.
+function repositionOpenDocumentQueryCompletions() {
+  const target = documentQueryCompletionTarget.value;
+  if (target) updateDocumentQueryCompletionPosition(target);
+}
+
+watch(documentQueryCompletionOpen, (open) => {
+  if (open) {
+    window.addEventListener("scroll", repositionOpenDocumentQueryCompletions, true);
+    window.addEventListener("resize", repositionOpenDocumentQueryCompletions);
+  } else {
+    window.removeEventListener("scroll", repositionOpenDocumentQueryCompletions, true);
+    window.removeEventListener("resize", repositionOpenDocumentQueryCompletions);
+  }
+});
+
+function selectDocumentQueryCompletion(index: number) {
+  if (index < 0 || index >= documentQueryCompletionItems.value.length) return;
+  documentQueryCompletionIndex.value = index;
+  void nextTick(() => {
+    const listbox = document.getElementById(documentQueryCompletionListboxId);
+    const option = document.getElementById(`${documentQueryCompletionListboxId}-option-${index}`);
+    if (!listbox || !option) return;
+    const listboxRect = listbox.getBoundingClientRect();
+    const optionRect = option.getBoundingClientRect();
+    if (optionRect.top < listboxRect.top) listbox.scrollTop -= listboxRect.top - optionRect.top;
+    else if (optionRect.bottom > listboxRect.bottom) listbox.scrollTop += optionRect.bottom - listboxRect.bottom;
+  });
+}
+
+function moveDocumentQueryCompletionSelection(direction: 1 | -1): boolean {
+  if (!documentQueryCompletionOpen.value) return false;
+  const count = documentQueryCompletionItems.value.length;
+  const next = Math.min(Math.max(documentQueryCompletionIndex.value + direction, 0), count - 1);
+  if (next !== documentQueryCompletionIndex.value) selectDocumentQueryCompletion(next);
+  return true;
+}
+
+function documentQueryCompletionInsertion(index = documentQueryCompletionIndex.value) {
+  const target = documentQueryCompletionTarget.value;
+  const item = documentQueryCompletionItems.value[index];
+  if (!target || !item) return null;
+
+  const input = documentQueryCompletionInputEl(target);
+  const text = documentQueryCompletionText(target);
+  const cursor = input?.selectionStart ?? text.length;
+  const context = getMongoDocumentQueryCompletionContext(text, cursor, documentQueryCompletionKind(target));
+  if (context.mode === "none") return null;
+
+  // A quoted key completion writes both of its quotes, so the closing quote the
+  // input already holds has to go with the prefix it belongs to.
+  const to = Math.min((input?.selectionEnd ?? text.length) + (item.replaceClosingQuote ? 1 : 0), text.length);
+  const insertion = plainMongoCompletionInsertion(item.apply ?? item.label, text.slice(to));
+  return { target, text, from: context.from, to, insertion };
+}
+
+function acceptDocumentQueryCompletion(index = documentQueryCompletionIndex.value): boolean {
+  const completion = documentQueryCompletionInsertion(index);
+  if (!completion) return false;
+
+  const { target, text, from, to, insertion } = completion;
+  const next = `${text.slice(0, from)}${insertion.text}${text.slice(to)}`;
+  if (target === "filter") filterInput.value = next;
+  else sortInput.value = next;
+  dismissDocumentQueryCompletions();
+
+  void nextTick(() => {
+    const input = documentQueryCompletionInputEl(target);
+    if (!input) return;
+    input.focus();
+    input.setSelectionRange(from + insertion.selectionStart, from + insertion.selectionEnd);
+    // A field completion ends at `field: `, an operator at its value — both are
+    // fresh positions with their own suggestions, so open the menu again.
+    void refreshDocumentQueryCompletions(target, { force: true });
+  });
+  return true;
+}
+
+/** True when accepting would not change the text, so Enter should run the query instead. */
+function documentQueryCompletionMatchesInput(): boolean {
+  const completion = documentQueryCompletionInsertion();
+  if (!completion) return false;
+  return completion.text.slice(completion.from, completion.to) === completion.insertion.text;
+}
+
+/**
+ * Opens the document around the first character typed into an empty bar, so
+ * `d` becomes `{d}` with the caret left between the braces.
+ *
+ * The bars hold a bare document and a field name only reads as a key once its
+ * braces exist, so typing straight into an empty bar used to land in a position
+ * that classifies as nothing and suggested nothing — the very case #9427
+ * reports. Nothing is lost by writing the braces: an unbraced bar never parses
+ * as a filter either, so that text was a dead query, not a shorter spelling of
+ * one.
+ *
+ * Only a lone character that could start a key qualifies. A paste arrives whole
+ * and usually brings its own braces, and a typed `{` is the user opening the
+ * document themselves — which already suggests.
+ *
+ * The edit has to be an insertion. Backspacing `ab` down to `a` leaves exactly
+ * the same one character and caret as typing `a` into an empty bar, and writing
+ * braces around text the user is in the middle of deleting would hand them two
+ * more characters to delete.
+ */
+function openDocumentQueryDocument(event: InputEvent, target: DocumentQueryCompletionTarget): boolean {
+  if (!documentQueryCompletionEnabled.value) return false;
+  if (!event.inputType?.startsWith("insert")) return false;
+  const text = documentQueryCompletionText(target);
+  const prefix = readMongoPropertyPrefix(text, text.length);
+  if ([...text].length !== 1 || !/^[$_"'\p{L}\p{N}]$/u.test(text) || prefix.from !== 0 || prefix.prefix !== text) return false;
+  if (documentQueryCompletionInputEl(target)?.selectionStart !== text.length) return false;
+
+  if (target === "filter") filterInput.value = `{${text}}`;
+  else sortInput.value = `{${text}}`;
+
+  // Rewriting the model moves the caret to the end, past the `}` we just added,
+  // where there is nothing to complete. Put it back inside before asking.
+  void nextTick(() => {
+    documentQueryCompletionInputEl(target)?.setSelectionRange(text.length + 1, text.length + 1);
+    void refreshDocumentQueryCompletions(target);
+  });
+  return true;
+}
+
+function onDocumentQueryInput(event: Event, target: DocumentQueryCompletionTarget) {
+  // `v-model` holds off on the model until the composition is confirmed, so a
+  // mid-composition refresh would suggest against the text as it was before the
+  // IME opened. Vue re-dispatches `input` once it commits, which is when the
+  // suggestions are worth computing.
+  if ((event as InputEvent).isComposing) return;
+  if (openDocumentQueryDocument(event as InputEvent, target)) return;
+  void refreshDocumentQueryCompletions(target);
+}
+
+/**
+ * Dismissing also cancels whatever refresh is in flight, which is the point:
+ * the target is only set once `documentQueryCompletionFields` has resolved, so
+ * a bar blurred during that first (uncached) backend round trip would otherwise
+ * open its menu afterwards, over a bar that no longer has focus. Nothing else
+ * would take it down — the menu is teleported to `body` and there is no
+ * outside-click handler.
+ */
+function onDocumentQueryBlur(target: DocumentQueryCompletionTarget) {
+  if (documentQueryCompletionTarget.value === null || documentQueryCompletionTarget.value === target) dismissDocumentQueryCompletions();
+}
+
+/**
+ * The suggestions describe the position the caret was in when they were built,
+ * so a caret moved without an edit leaves them describing somewhere else:
+ * accepting one then splices a stale item at a freshly computed offset and
+ * garbles the text. Moving the caret closes the menu instead.
+ */
+function onDocumentQueryCaretMove(target: DocumentQueryCompletionTarget) {
+  if (documentQueryCompletionTarget.value === target) dismissDocumentQueryCompletions();
+}
+
+function onDocumentQueryKeydown(event: KeyboardEvent, target: DocumentQueryCompletionTarget) {
+  if (event.isComposing) return;
+
+  if (documentQueryCompletionEnabled.value) {
+    if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
+      event.preventDefault();
+      void refreshDocumentQueryCompletions(target, { force: true });
+      return;
+    }
+    if (event.key === "Escape" && documentQueryCompletionOpen.value) {
+      event.preventDefault();
+      dismissDocumentQueryCompletions();
+      return;
+    }
+    // These move the caret rather than the selection, so they leave the open
+    // suggestions describing a position the caret has left. The key still does
+    // its normal job — only the menu goes.
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") {
+      onDocumentQueryCaretMove(target);
+      return;
+    }
+    if (event.key === "ArrowDown" && moveDocumentQueryCompletionSelection(1)) {
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "ArrowUp" && moveDocumentQueryCompletionSelection(-1)) {
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "Tab" && !event.shiftKey && documentQueryCompletionOpen.value && acceptDocumentQueryCompletion()) {
+      event.preventDefault();
+      return;
+    }
+    // Enter takes the highlighted suggestion first; a second Enter runs the query.
+    if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && documentQueryCompletionOpen.value && !documentQueryCompletionMatchesInput() && acceptDocumentQueryCompletion()) {
+      event.preventDefault();
+      return;
+    }
+  }
+
+  if (event.key !== "Enter") return;
+  const plainEnter = !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+  if (!plainEnter && !((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey)) return;
+  event.preventDefault();
+  dismissDocumentQueryCompletions();
+  applyFilter();
+}
 
 const documentQueryPreview = computed(() => {
   let filter = "{}";
@@ -860,9 +1405,10 @@ async function applyDocumentStructuredFilters() {
       }))
       .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
+    documentFilterBuilderError.value = e instanceof Error ? e.message : String(e);
     return;
   }
+  documentFilterBuilderError.value = "";
   error.value = "";
   const structured = combineDocumentFilterConditions(
     items.map((item) => item.condition),
@@ -874,12 +1420,16 @@ async function applyDocumentStructuredFilters() {
   applyFilter();
 }
 
-async function loadElasticsearchMappingFields() {
-  if (documentStoreProvider.value.kind !== "elasticsearch") return;
+async function loadDocumentStoreSchemaFields() {
+  const kind = documentStoreProvider.value.kind;
+  if (kind !== "elasticsearch" && kind !== "solr") return;
   try {
-    elasticsearchMappingFields.value = await api.getColumns(props.connectionId, props.database, "", props.collection);
+    const fields = (await api.getColumns(props.connectionId, props.database, "", props.collection)) ?? [];
+    if (kind === "elasticsearch") elasticsearchMappingFields.value = fields;
+    else solrSchemaFields.value = fields;
   } catch {
-    elasticsearchMappingFields.value = [];
+    if (kind === "elasticsearch") elasticsearchMappingFields.value = [];
+    else solrSchemaFields.value = [];
   }
 }
 
@@ -1166,9 +1716,9 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
         const sourceDocument = documents.value[rowIdx];
         if (!sourceDocument) continue;
         const documentId = sourceDocument._id ?? id;
-        const updated = buildPathIdentityUpdatedDocument(sourceDocument, dirtyCols, columns, "meilisearch");
-        const writeDocument = prepareDocumentStoreWriteDocument(updated, { kind: "meilisearch", mode: "update" });
-        stmts.push(formatMeilisearchDocumentOperationPreview({ action: "update", index: coll, id: documentId, document: writeDocument }));
+        const updated = buildPathIdentityUpdatedDocument(sourceDocument, dirtyCols, columns, kind === "solr" ? "solr" : "meilisearch");
+        const writeDocument = prepareDocumentStoreWriteDocument(updated, { kind: kind === "solr" ? "solr" : "meilisearch", mode: "update" });
+        stmts.push(kind === "solr" ? formatSolrDocumentOperationPreview({ action: "update", core: coll, id: documentId, document: writeDocument }) : formatMeilisearchDocumentOperationPreview({ action: "update", index: coll, id: documentId, document: writeDocument }));
       }
     } else {
       const updateDoc = buildMongoUpdateDocument(dirtyCols, columns, documents.value[rowIdx]);
@@ -1186,7 +1736,7 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
         continue;
       }
       if (!isEs) {
-        stmts.push(formatMeilisearchDocumentOperationPreview({ action: "delete", index: coll, id: documents.value[rowIdx]?._id ?? id }));
+        stmts.push(kind === "solr" ? formatSolrDocumentOperationPreview({ action: "delete", core: coll, id: documents.value[rowIdx]?._id ?? id }) : formatMeilisearchDocumentOperationPreview({ action: "delete", index: coll, id: documents.value[rowIdx]?._id ?? id }));
         continue;
       }
       const routing = documentRoutingFromGridRow(row, columns);
@@ -1209,8 +1759,8 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
       }
       if (!isEs) {
         const idValue = idColIdx >= 0 ? newRow[idColIdx] : null;
-        const id = idValue === null || idValue === undefined || idValue === "" ? undefined : parseDocumentStoreInputValue(idValue, "meilisearch");
-        stmts.push(formatMeilisearchDocumentOperationPreview({ action: id === undefined ? "insert" : "upsert", index: coll, id, document: doc }));
+        const id = idValue === null || idValue === undefined || idValue === "" ? undefined : parseDocumentStoreInputValue(idValue, kind === "solr" ? "solr" : "meilisearch");
+        stmts.push(kind === "solr" ? formatSolrDocumentOperationPreview({ action: id === undefined ? "insert" : "upsert", core: coll, id, document: doc }) : formatMeilisearchDocumentOperationPreview({ action: id === undefined ? "insert" : "upsert", index: coll, id, document: doc }));
         continue;
       }
       const id = idColIdx >= 0 ? documentIdFromGridValue(newRow[idColIdx]) : null;
@@ -1396,7 +1946,7 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
     if (documentLoadExecutionId.value !== executionId) return;
     if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;
     const nextDocuments =
-      storeKind === "elasticsearch" && result.raw_documents?.length === result.documents.length
+      (storeKind === "elasticsearch" || storeKind === "solr") && result.raw_documents?.length === result.documents.length
         ? result.raw_documents.map((raw, index) => {
             try {
               return asRecord(parseJsonPreservingLargeNumbers(raw));
@@ -1410,6 +1960,12 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
     // Commit page + rows together so stale rows never briefly show last-page indexes.
     if (options.page !== undefined) page.value = options.page;
     commitLoadedDocuments(nextDocuments, nextCopyDocuments, hasTypePreservingCopyDocuments, options.append === true, storeKind);
+    // Mark which conditions these rows belong to, so the unmount capture can
+    // tell a still-valid page from one the user has since edited away.
+    loadedDocumentDataSignature = documentDataSignature();
+    // A replacement dataset must not adopt the previous viewport; an
+    // infinite-scroll append keeps rendering the same logical result.
+    if (options.append !== true || !documentViewGeneration.value) documentViewGeneration.value = uuid();
     loadedDocumentQueryTotalCountRequest = countRequest;
     if (storeKind === "dynamodb") {
       const nextCursors = dynamodbPageCursors.value.slice(0, requestPage + 1);
@@ -1470,7 +2026,7 @@ async function countExactDocumentTotal(): Promise<number | undefined> {
     paginationTotal.value = totals.paginationTotal;
     return exactCount;
   }
-  const exactCount = request.storeKind === "dynamodb" ? await api.documentCountDocuments(request.connectionId, request.collection, request.filter) : await api.mongoCountDocuments(request.connectionId, request.database, request.collection, request.filter, "accurate");
+  const exactCount = request.storeKind === "dynamodb" || request.storeKind === "solr" ? await api.documentCountDocuments(request.connectionId, request.collection, request.filter) : await api.mongoCountDocuments(request.connectionId, request.database, request.collection, request.filter, "accurate");
   if (!isCurrentDocumentQueryTotalCountRequest(request)) return undefined;
   if (!Number.isFinite(exactCount) || exactCount < 0) {
     throw new Error("invalid count");
@@ -2025,6 +2581,15 @@ function docPreview(doc: JsonRecord): string {
   return `${id} - ${preview}`;
 }
 
+async function copyDocument() {
+  try {
+    await copyToClipboard(editJson.value);
+    toast(t("grid.copied"), 1500);
+  } catch (error: unknown) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 3000);
+  }
+}
+
 function handleDocumentViewerDoubleClick(event: MouseEvent) {
   const target = event.target;
   if (!(target instanceof Element)) return;
@@ -2048,6 +2613,15 @@ function focusSearch(): boolean {
   return documentJsonEditorRef.value?.openSearch() ?? false;
 }
 
+watch(
+  () => connectionStore.mongoImportCompleted,
+  (completed) => {
+    if (!completed) return;
+    if (completed.connectionId !== props.connectionId || completed.database !== props.database || completed.collection !== props.collection) return;
+    void refreshDocuments();
+  },
+);
+
 watch([viewMode, isEditing, selectedIdx], ([mode, editing, index]) => {
   if (mode === "document" && !editing && index !== null) return;
   documentViewerSearchActive.value = false;
@@ -2062,22 +2636,49 @@ async function loadDynamoDbTableDescription() {
   }
 }
 
+/**
+ * The sidebar's "clear index data" action deletes documents behind this tab's
+ * back, so an open browser would keep listing rows that no longer exist.
+ * Reload when the cleared index is the one on screen.
+ */
+function handleElasticsearchIndexCleared(detail: ElasticsearchIndexClearedDetail) {
+  if (detail.connectionId !== props.connectionId) return;
+  // Clearing a grouped node deletes from every index its pattern matches, so a
+  // tab open on any concrete index under the pattern must refresh as well.
+  if (detail.index !== props.collection && !matchesElasticsearchIndexPattern(detail.index, props.collection)) return;
+  void refreshDocuments();
+}
+
+let unsubscribeElasticsearchIndexCleared: (() => void) | undefined;
+
 onMounted(async () => {
   window.addEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
+  unsubscribeElasticsearchIndexCleared = subscribeElasticsearchIndexCleared(handleElasticsearchIndexCleared);
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    // A restored tab issues no query, so a blocking health probe here would be
+    // the only round trip left on the switch.
+    await connectionStore.ensureConnected(props.connectionId, restoredDocumentData ? { verifyHealth: false } : {});
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
   await loadDynamoDbTableDescription();
-  // Mapping metadata enriches the filter builder, but it must not delay the
-  // first page of documents when the mapping endpoint is slow.
-  void loadElasticsearchMappingFields();
-  void load();
+  // Schema metadata enriches the filter builder, but it must not delay the
+  // first page of documents when the schema endpoint is slow.
+  void loadDocumentStoreSchemaFields();
+  // A restored snapshot already holds the rows the last load produced, so a tab
+  // switch must not re-issue the collection query (#8679). Refresh and every
+  // mutation path still force a real load.
+  if (!restoredDocumentData) void load();
   void nextTick(resizeDocumentQueryInputs);
 });
 onBeforeUnmount(() => {
+  persistDocumentBrowserState({ includeData: true });
+  // The open/close watcher cannot run on unmount, so drop the menu's listeners here.
+  window.removeEventListener("scroll", repositionOpenDocumentQueryCompletions, true);
+  window.removeEventListener("resize", repositionOpenDocumentQueryCompletions);
   window.removeEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
+  unsubscribeElasticsearchIndexCleared?.();
+  unsubscribeElasticsearchIndexCleared = undefined;
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
   documentRequestGeneration++;
   loadedDocumentQueryTotalCountRequest = undefined;
@@ -2190,7 +2791,7 @@ defineExpose({ focusSearch });
             <Wrench class="h-4 w-4" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="end" class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+        <PopoverContent align="end" :collision-padding="8" class="w-max min-w-44 max-h-[var(--reka-popover-content-available-height)] max-w-[calc(100vw-2rem)] gap-0 overflow-x-hidden overflow-y-auto rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
           <div class="border-b bg-muted/40 px-3 py-2">
             <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
           </div>
@@ -2344,9 +2945,14 @@ defineExpose({ focusSearch });
       :database="props.database"
       :table-meta="props.tableMeta"
       :column-layout-scope-key="documentColumnLayoutScopeKey"
+      :view-state-key="props.stateKey"
+      :view-generation="documentViewGeneration"
+      :local-column-filter-restore-key="documentLocalColumnFilterRestoreKey"
+      :local-column-filter-columns="localColumnFilterColumns"
       context="results"
       page-size-preference="table-open"
       :database-type="props.databaseType"
+      :mongo-collection-grid="documentStoreProvider.kind === 'mongodb'"
       :mongo-update-target="mongoUpdateTarget"
       :editable="documentStoreEditable"
       :custom-save-handler="customSaveHandler"
@@ -2358,11 +2964,13 @@ defineExpose({ focusSearch });
       :total-row-count-is-exact="totalIsExact"
       :inexact-total-row-count-mode="documentStoreProvider.kind === 'mongodb' ? 'estimated' : 'at-least'"
       :pagination-total-row-count="pageTotal"
+      :load-all-rows-enabled="false"
       :count-total-rows="countExactDocumentTotal"
       :full-export-result="documentStoreProvider.kind === 'mongodb' || documentStoreProvider.kind === 'dynamodb' || documentStoreProvider.kind === 'elasticsearch' ? exportAllDocumentStoreDocuments : undefined"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"
+      @local-column-filters-change="handleLocalColumnFiltersChange"
     >
       <template #search-bar="{ localFilterCount, hasLocalColumnFilters, localFilterSummaries, clearLocalFilter }: { localFilterCount: number; hasLocalColumnFilters: boolean; localFilterSummaries: LocalFilterSummary[]; clearLocalFilter: (columnIndex?: number) => void }">
         <div ref="tableSearchSplitContainerRef" class="flex flex-1 min-w-0">
@@ -2530,8 +3138,39 @@ defineExpose({ focusSearch });
                         </SelectContent>
                       </Select>
 
+                      <div v-if="documentStoreProvider.kind !== 'elasticsearch' && documentFilterModeUsesRange(rule.mode)" class="flex min-w-0 items-center gap-1.5">
+                        <Input
+                          :model-value="rule.rawValue"
+                          class="h-8 min-w-0 flex-1 text-xs"
+                          :placeholder="t('grid.filterBuilderRangeStart')"
+                          @update:model-value="(value) => updateDocumentFilterRule(rule.id, { rawValue: String(value ?? '') })"
+                          @compositionend="endDocumentFilterImeComposition(`value-start:${rule.id}`)"
+                          @compositionstart="startDocumentFilterImeComposition(`value-start:${rule.id}`)"
+                          @keydown="handleDocumentFilterValueKeydown($event, rule.id)"
+                        />
+                        <span class="shrink-0 text-[10px] text-muted-foreground">—</span>
+                        <Input
+                          :model-value="rule.rawEndValue"
+                          class="h-8 min-w-0 flex-1 text-xs"
+                          :placeholder="t('grid.filterBuilderRangeEnd')"
+                          @update:model-value="(value) => updateDocumentFilterRule(rule.id, { rawEndValue: String(value ?? '') })"
+                          @compositionend="endDocumentFilterImeComposition(`value-end:${rule.id}`)"
+                          @compositionstart="startDocumentFilterImeComposition(`value-end:${rule.id}`)"
+                          @keydown="handleDocumentFilterValueKeydown($event, rule.id)"
+                        />
+                      </div>
+                      <textarea
+                        v-else-if="documentStoreProvider.kind !== 'elasticsearch' && documentFilterModeUsesList(rule.mode)"
+                        :value="rule.rawValue"
+                        rows="2"
+                        class="min-h-8 w-full min-w-0 resize-y rounded-md border bg-background px-2 py-1 text-xs outline-none"
+                        :placeholder="t('grid.filterBuilderValues')"
+                        @input="updateDocumentFilterRule(rule.id, { rawValue: ($event.target as HTMLTextAreaElement).value })"
+                        @keydown.ctrl.enter.prevent="applyDocumentStructuredFilters"
+                        @keydown.meta.enter.prevent="applyDocumentStructuredFilters"
+                      />
                       <Input
-                        v-if="documentStoreProvider.kind === 'elasticsearch' ? elasticsearchQueryTypeNeedsValue(rule.elasticsearchQueryType) : documentFilterModeNeedsValue(rule.mode)"
+                        v-else-if="documentStoreProvider.kind === 'elasticsearch' ? elasticsearchQueryTypeNeedsValue(rule.elasticsearchQueryType) : documentFilterModeNeedsValue(rule.mode)"
                         :model-value="rule.rawValue"
                         class="h-8 min-w-0 text-xs"
                         :placeholder="t('grid.filterBuilderValue')"
@@ -2553,6 +3192,10 @@ defineExpose({ focusSearch });
                 <div v-else class="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
                   {{ t("grid.filterBuilderEmpty") }}
                 </div>
+
+                <p v-if="documentFilterBuilderError" data-document-filter-builder-error class="text-xs text-destructive">
+                  {{ documentFilterBuilderError }}
+                </p>
 
                 <div class="flex items-center justify-between gap-2">
                   <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addDocumentFilterRule">
@@ -2580,9 +3223,24 @@ defineExpose({ focusSearch });
               rows="1"
               class="document-query-input flex-1 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
               placeholder="{}"
-              @keydown.enter.exact.prevent="applyFilter"
-              @keydown.ctrl.enter.prevent="applyFilter"
-              @keydown.meta.enter.prevent="applyFilter"
+              :aria-autocomplete="documentQueryCompletionEnabled ? 'list' : undefined"
+              :aria-controls="documentQueryCompletionTarget === 'filter' ? documentQueryCompletionListboxId : undefined"
+              :aria-activedescendant="documentQueryCompletionTarget === 'filter' ? documentQueryCompletionActiveDescendant : undefined"
+              :aria-expanded="documentQueryCompletionEnabled ? documentQueryCompletionTarget === 'filter' : undefined"
+              @blur="onDocumentQueryBlur('filter')"
+              @click="onDocumentQueryCaretMove('filter')"
+              @input="onDocumentQueryInput($event, 'filter')"
+              @keydown="onDocumentQueryKeydown($event, 'filter')"
+            />
+            <DocumentQueryCompletionMenu
+              v-if="documentQueryCompletionOpen && documentQueryCompletionTarget === 'filter'"
+              :items="documentQueryCompletionItems"
+              :selected-index="documentQueryCompletionIndex"
+              :listbox-id="documentQueryCompletionListboxId"
+              :label="documentStoreLabels.filterInputLabel"
+              :position="documentQueryCompletionPosition"
+              @select="selectDocumentQueryCompletion"
+              @accept="acceptDocumentQueryCompletion"
             />
             <button v-if="filterInput.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
               <Braces class="w-3 h-3" />
@@ -2619,9 +3277,24 @@ defineExpose({ focusSearch });
               rows="1"
               class="document-query-input flex-1 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
               placeholder="{}"
-              @keydown.enter.exact.prevent="applyFilter"
-              @keydown.ctrl.enter.prevent="applyFilter"
-              @keydown.meta.enter.prevent="applyFilter"
+              :aria-autocomplete="documentQueryCompletionEnabled ? 'list' : undefined"
+              :aria-controls="documentQueryCompletionTarget === 'sort' ? documentQueryCompletionListboxId : undefined"
+              :aria-activedescendant="documentQueryCompletionTarget === 'sort' ? documentQueryCompletionActiveDescendant : undefined"
+              :aria-expanded="documentQueryCompletionEnabled ? documentQueryCompletionTarget === 'sort' : undefined"
+              @blur="onDocumentQueryBlur('sort')"
+              @click="onDocumentQueryCaretMove('sort')"
+              @input="onDocumentQueryInput($event, 'sort')"
+              @keydown="onDocumentQueryKeydown($event, 'sort')"
+            />
+            <DocumentQueryCompletionMenu
+              v-if="documentQueryCompletionOpen && documentQueryCompletionTarget === 'sort'"
+              :items="documentQueryCompletionItems"
+              :selected-index="documentQueryCompletionIndex"
+              :listbox-id="documentQueryCompletionListboxId"
+              :label="documentStoreLabels.sortInputLabel"
+              :position="documentQueryCompletionPosition"
+              @select="selectDocumentQueryCompletion"
+              @accept="acceptDocumentQueryCompletion"
             />
             <button v-if="sortInput.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatSortInput">
               <Braces class="w-3 h-3" />
@@ -2670,6 +3343,9 @@ defineExpose({ focusSearch });
                 <input class="min-w-0 w-full cursor-text select-text appearance-none border-0 bg-transparent p-0 text-inherit outline-none focus:ring-0" :value="selectedDocumentIdLabel" :aria-label="`_id: ${selectedDocumentIdLabel}`" readonly spellcheck="false" />
               </Badge>
               <span class="flex-1" />
+              <Button v-if="!isEditing" variant="ghost" size="icon" class="h-6 w-7" :title="t('grid.copy')" @click="copyDocument">
+                <Copy class="h-3.5 w-3.5" />
+              </Button>
               <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" :disabled="!documentStoreEditable" :title="documentStoreEditDisabledReason" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">
                 <div class="flex items-center border rounded-md overflow-hidden mr-1">
@@ -2703,7 +3379,7 @@ defineExpose({ focusSearch });
               </div>
             </div>
 
-            <div v-else data-document-json-viewer class="flex-1 min-h-0 bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
+            <div v-else data-document-json-viewer class="flex-1 min-h-0 select-text bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
               <RedisJsonEditor ref="documentJsonEditorRef" :model-value="editJson" read-only :line-numbers="false" presentation="viewer" class="h-full" />
             </div>
           </template>

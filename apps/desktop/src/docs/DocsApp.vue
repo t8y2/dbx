@@ -15,6 +15,7 @@ import { qualifiedTableKey } from "./docsKeys";
 import type { DocsRoute } from "./docsRoute";
 import { groupBySchema, groupByTableGroup } from "./docsIndex";
 import type { AnnotationFile, DocsEdit, GroupAnnotation, SchemaSnapshot } from "./types";
+import { uuid } from "@/lib/common/utils";
 
 const props = withDefaults(
   defineProps<{
@@ -144,7 +145,7 @@ function home(): void {
  */
 function createGroupFor(tableKey: string): void {
   const group: GroupAnnotation = {
-    id: crypto.randomUUID(),
+    id: uuid(),
     // Reuses the picker's own "New group" string rather than adding a locale
     // key for a placeholder the user renames immediately in GroupEditor.
     name: props.translate("docs.newGroup"),

@@ -29,6 +29,7 @@ export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference
 ];
 
 export const DATA_GRID_EXTRACTOR_CONTRACT_VERSION = 1 as const;
+export const DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION = 1 as const;
 
 export const DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS: Record<DataGridCopyExtractorId, { category: DataGridExtractorCategory; separatorBefore?: boolean }> = {
   raw: { category: "raw" },
@@ -87,6 +88,7 @@ export interface DataGridExtractorOptions {
     skipGeneratedColumns: boolean;
     insertMode: DataGridCopyInsertMode;
     excludePrimaryKeysFromInsert: boolean;
+    includeDatabaseName: boolean;
   };
   json: {
     pretty: boolean;
@@ -136,7 +138,7 @@ export const DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS: DataGridExtractorOptions = {
   dsv: {
     columnSeparator: ",",
     rowSeparator: "\n",
-    nullText: "NULL",
+    nullText: "",
     quote: '"',
     quotePolicy: "minimal",
     includeColumnHeader: false,
@@ -147,6 +149,7 @@ export const DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS: DataGridExtractorOptions = {
     skipGeneratedColumns: true,
     insertMode: "merged",
     excludePrimaryKeysFromInsert: false,
+    includeDatabaseName: true,
   },
   json: { pretty: true, camelCaseFieldNames: false },
 };
@@ -177,6 +180,7 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
       skipGeneratedColumns: sql.skipGeneratedColumns !== false,
       insertMode: sql.insertMode === "row-by-row" ? "row-by-row" : "merged",
       excludePrimaryKeysFromInsert: sql.excludePrimaryKeysFromInsert === true,
+      includeDatabaseName: sql.includeDatabaseName !== false,
     },
     json: {
       pretty: json.pretty !== false,

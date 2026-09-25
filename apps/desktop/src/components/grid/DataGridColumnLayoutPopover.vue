@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type CSSProperties } from "vue";
-import { Check, Columns3, GripVertical, Search } from "@lucide/vue";
+import { Check, GripVertical, ListChecks, Search } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -306,7 +306,7 @@ onBeforeUnmount(resetColumnDragState);
         :title="t('grid.columnVisibility')"
         :aria-label="t('grid.columnVisibility')"
       >
-        <Columns3 class="h-3.5 w-3.5" />
+        <ListChecks class="h-3.5 w-3.5" />
         <span v-if="!compact">{{ t("grid.columnVisibility") }}</span>
         <span v-if="!compact && (grid?.hiddenColumnCount ?? 0) > 0" class="tabular-nums"> {{ grid?.visibleColumnCount }}/{{ grid?.displayableColumnCount }} </span>
       </Button>
@@ -367,6 +367,12 @@ onBeforeUnmount(resetColumnDragState);
         <div v-if="columnLayoutOptions.length === 0" class="px-2 py-6 text-center text-xs text-muted-foreground">
           {{ t("grid.noSearchResults") }}
         </div>
+      </div>
+      <div v-if="grid?.autoFitAllColumns" class="flex items-center justify-between gap-2 border-t bg-muted/30 px-2 py-1.5">
+        <span class="text-[11px] leading-4 text-muted-foreground">{{ t("grid.columnWidth") }}</span>
+        <Button variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-xs" data-column-auto-fit-all :title="t('grid.autoFitColumnWidthsHint')" @click="grid?.autoFitAllColumns?.()">
+          {{ t("grid.autoFitColumnWidths") }}
+        </Button>
       </div>
       <div class="flex flex-col gap-1 border-t bg-muted/30 px-2 py-1.5">
         <span class="text-[11px] leading-4 text-muted-foreground">

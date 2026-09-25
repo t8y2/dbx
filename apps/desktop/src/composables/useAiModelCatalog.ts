@@ -53,6 +53,7 @@ function configSignature(config: AiConfigItem): string {
     authMethod: config.authMethod,
     apiStyle: config.apiStyle,
     proxyEnabled: config.proxyEnabled ?? false,
+    skipTlsVerify: config.skipTlsVerify ?? false,
     contextWindow: config.contextWindow ?? null,
     codexCliPath: config.codexCliPath ?? null,
     claudeCodeCliPath: config.claudeCodeCliPath ?? null,

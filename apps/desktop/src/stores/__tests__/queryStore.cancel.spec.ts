@@ -45,6 +45,7 @@ describe("queryStore cancel timeout recovery", () => {
       isExecuting: false,
       isCancelling: false,
       executionId: undefined,
+      executingResultRunId: undefined,
     });
     expect(store.tabs[0]?.result?.rows[0]?.[0]).toContain("Cancel request timed out");
   }, 15_000);
@@ -84,6 +85,7 @@ describe("queryStore cancel timeout recovery", () => {
       isExecuting: false,
       isCancelling: false,
       executionId: undefined,
+      executingResultRunId: undefined,
       batchSqlExecution: {
         finishedAt: expect.any(Number),
         items: [{ status: "cancelled" }, { status: "skipped" }],

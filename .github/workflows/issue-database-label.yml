@@ -38,6 +38,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Assess repair and implementation priority with AI
+        continue-on-error: true
+        timeout-minutes: 2
+        run: node .github/scripts/ai-issue-priority.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ATLASCLOUD_API_KEY: ${{ secrets.ATLASCLOUD_API_KEY }}
+          ISSUE_TRIAGE_MODEL: ${{ vars.ISSUE_TRIAGE_MODEL }}
+
   sync:
     runs-on: ubuntu-latest
     if: ${{ github.event_name != 'issues' }}

@@ -106,6 +106,7 @@ describe("KafkaMessagesPanel", () => {
     const overview = panel.querySelector('[data-testid="kafka-partition-overview"]');
     expect(overview?.textContent).toContain("mqMonitoring.tableBeginOffset");
     expect(overview?.textContent).toContain("mqMonitoring.tableLogEndOffset");
+    expect(overview?.querySelector("button.btn-sm")?.textContent?.trim()).toBe("common.refresh");
     expect(overview?.textContent).toContain("10");
     expect(panel.querySelector('[data-testid="message-browser"]')).not.toBeNull();
     expect(panel.querySelector(".send-message-panel")).not.toBeNull();

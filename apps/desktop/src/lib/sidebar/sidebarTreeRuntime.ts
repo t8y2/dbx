@@ -20,6 +20,7 @@ export interface SidebarTreeRuntimeHost {
   handleRowKeydown(node: TreeNode, event: KeyboardEvent): void;
   openPrimaryVisibleFilter(node: TreeNode): void;
   openDataInNewTab(node: TreeNode): void;
+  openDdlForSelection(node: TreeNode, selectedNodeIds: readonly string[]): Promise<boolean>;
   requestPaste(node: TreeNode): boolean;
   toggleNode(node: TreeNode): void;
 }

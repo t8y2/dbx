@@ -3,9 +3,10 @@ import { connectionObjectTreeNodeSchema, effectiveDatabaseTypeForConnection, met
 import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
 import { canApplyDataTabMetadata, canReuseActiveMongoTab, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
-import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
+import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
-import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { editableRowIdentifierColumns, physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
@@ -22,6 +23,7 @@ export type NavigationTarget = {
   schema?: string;
   tableName: string;
   tableType?: string;
+  comment?: string | null;
   columnName?: string;
   whereInput?: string;
 };
@@ -72,7 +74,10 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   }
   const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data", tableSchema, undefined, undefined, { forceNew: true });
   const targetTab = queryStore.tabs.find((tab) => tab.id === tabId);
-  if (targetTab) targetTab.tableInfoTab = options.tableInfoTab;
+  if (targetTab) {
+    targetTab.tableInfoTab = options.tableInfoTab;
+    targetTab.tableComment = target.comment;
+  }
   // Stamp the new table identity synchronously so SQL rebuilds (refresh,
   // filters, row count) never read a stale tableMeta from a reused tab or
   // fall back to parsing the schema-qualified tab title (issue #3613).
@@ -138,6 +143,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     if (config.db_type === "neo4j") {
       const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
       const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns, undefined, targetTableType);
+      const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, physicalTablePrimaryKeys(columns), identifierQuote);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         driverProfile: config.driver_profile,
@@ -147,9 +153,11 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         database: target.database,
         tableName: target.tableName,
         includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+        injectDefaultTimeSeriesWhere: true,
         tableType: targetTableType,
         columns: columns.map((column) => column.name),
         primaryKeys,
+        orderBy: defaultSort.orderBy,
         whereInput: target.whereInput,
         limit: pageLimit,
       });
@@ -165,24 +173,34 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         primaryKeys,
       });
       firstExecuteStarted = true;
+      if (targetTab) targetTab.orderByInput = defaultSort.orderBy;
       await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
+      if (isCurrentTarget() && targetTab) applyTableDefaultSortResult(targetTab, defaultSort, queryStore.sortTabResultLocally);
       return;
     }
-    const eagerMetadata =
-      effectiveDbType === "mysql" || effectiveDbType === "postgres"
-        ? await loadTableMetadata({
-            connectionId: target.connectionId,
-            database: target.database,
-            schema: querySchema,
-            tableName: target.tableName,
-            tableType: targetTableType,
-            databaseType: effectiveDbType,
-            driverProfile: config.driver_profile || config.db_type,
-            catalog: target.catalog,
-          })
-        : undefined;
+    let eagerMetadata: Awaited<ReturnType<typeof loadTableMetadata>> | undefined;
+    if (requiresEagerTableMetadataForDataOpen(effectiveDbType) || (settingsStore.editorSettings.tableOpenSortMode ?? "none") !== "none") {
+      try {
+        eagerMetadata = await loadTableMetadata({
+          connectionId: target.connectionId,
+          database: target.database,
+          schema: querySchema,
+          tableName: target.tableName,
+          tableType: targetTableType,
+          databaseType: effectiveDbType ?? config.db_type,
+          driverProfile: config.driver_profile || config.db_type,
+          catalog: target.catalog,
+        });
+      } catch (error) {
+        // Metadata is needed for optional default sorting, but it must not
+        // prevent the data preview from opening. The later metadata refresh
+        // keeps the tab pending for edits and can retry independently.
+        console.warn("[DBX] unable to preload table metadata for default sort", error);
+      }
+    }
     const eagerColumns = eagerMetadata?.metadata.columns ?? [];
     const eagerPrimaryKeys = eagerMetadata?.metadata.primaryKeys ?? [];
+    const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, physicalTablePrimaryKeys(eagerColumns, eagerMetadata?.metadata.indexes), identifierQuote);
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config.driver_profile,
@@ -195,6 +213,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       tableType: targetTableType,
       columns: eagerColumns.map((column) => column.name),
       primaryKeys: eagerPrimaryKeys,
+      orderBy: defaultSort.orderBy,
       ...tableDataLargeValuePreviewOptions(effectiveDbType, eagerColumns, eagerPrimaryKeys, pageLimit),
       whereInput: target.whereInput,
       limit: pageLimit,
@@ -214,6 +233,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     // 取消计数快照：isCancelling 是瞬态的（取消失败/查询先完成会被清掉），
     // 比对计数才能跨越 executeTabSql 生命周期识别"执行期间用户请求过停止"
     const cancelCountBeforeExecute = queryStore.tabs.find((tab) => tab.id === tabId)?.cancelRequestCount ?? 0;
+    if (targetTab) targetTab.orderByInput = defaultSort.orderBy;
     await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
     if (!isCurrentTarget()) return;
     // 首次查询被停止/失败（executeTabSql 以 Error 结果表达，不抛出）时，
@@ -223,6 +243,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     const firstResult = tabAfterFirstExecute?.result;
     const cancelRequestedDuringExecute = (tabAfterFirstExecute?.cancelRequestCount ?? 0) > cancelCountBeforeExecute;
     const firstQueryFailed = cancelRequestedDuringExecute || tabAfterFirstExecute?.isCancelling === true || (firstResult !== undefined && isQueryExecutionErrorResult(firstResult));
+    if (!firstQueryFailed && targetTab) applyTableDefaultSortResult(targetTab, defaultSort, queryStore.sortTabResultLocally);
     // executeTabSql surfaces query failures as an "Error" result instead of throwing.
     // A snapshot-less lake table fails the data preview above but its metadata still
     // reads fine — retry with LIMIT 0 so the user sees the table structure (columns +
@@ -240,6 +261,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         database: target.database,
         tableName: target.tableName,
         includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+        injectDefaultTimeSeriesWhere: true,
         tableType: targetTableType,
         whereInput: target.whereInput,
         limit: 0,
@@ -266,7 +288,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       // 异步窗口内 tab 可能已被复用为其他目标：旧请求的元数据不得落地、
       // 不得解除新目标的 pending
       if (!isCurrentTarget() || !isCurrentGeneration()) return;
-      const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, targetTableType);
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType);
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
         catalog: target.catalog,
@@ -286,16 +308,19 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
           database: target.database,
           tableName: target.tableName,
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          injectDefaultTimeSeriesWhere: true,
           tableType: targetTableType,
           whereInput: target.whereInput,
           primaryKeys,
           columns: columns.map((column) => column.name),
           includeRowId: true,
+          orderBy: defaultSort.orderBy,
           limit: pageLimit,
         });
         if (!isCurrentTarget()) return;
         queryStore.updateSql(tabId, newSql);
         await queryStore.executeTabSql(tabId, newSql, { pagination: { limit: pageLimit, offset: 0 } });
+        if (isCurrentTarget() && targetTab) applyTableDefaultSortResult(targetTab, defaultSort, queryStore.sortTabResultLocally);
       }
     } catch (reason) {
       console.error("[DBX] ERROR fetching table metadata:", reason);
@@ -336,6 +361,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
         schema: target.schema,
         catalog: target.catalog,
         tableType: target.tableType,
+        comment: target.comment,
       },
       undefined,
       "default",
@@ -358,14 +384,14 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     await openTableTarget(target);
   }
 
-  async function onStructureEditorSaved(reloadData: () => Promise<void>, toast: (msg: string, duration?: number) => void, context: { connectionId: string; database: string; schema?: string; catalog?: string; tableName: string }, commentChanged?: boolean) {
+  async function onStructureEditorSaved(reloadData: () => Promise<void>, toast: (msg: string, duration?: number) => void, context: { connectionId: string; database: string; schema?: string; catalog?: string; tableName: string }, commentChanged?: boolean, createdTable = false) {
     if (!context.tableName) {
       try {
         await connectionStore.refreshObjectListTreeNode(context.connectionId, context.database, context.schema || undefined);
       } catch {}
       return;
     }
-    if (commentChanged) {
+    if (commentChanged || createdTable) {
       try {
         await connectionStore.refreshObjectListTreeNode(context.connectionId, context.database, context.schema || undefined);
       } catch {}

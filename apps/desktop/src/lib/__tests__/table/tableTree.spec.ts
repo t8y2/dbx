@@ -38,6 +38,57 @@ describe("case-sensitive database objects", () => {
     expect(new Set(viewGroup?.children?.map((node) => node.id) ?? []).size).toBe(2);
   });
 
+  it("preserves view validity in simple and grouped trees", () => {
+    const objects: ObjectInfo[] = [
+      { name: "VALID_VIEW", object_type: "VIEW", schema: "dbx_test", valid: true },
+      { name: "INVALID_VIEW", object_type: "VIEW", schema: "dbx_test", valid: false },
+    ];
+
+    const simple = buildSimpleObjectTreeNodes({ ...context, schema: "dbx_test", objects });
+    expect(simple.map((node) => node.valid)).toEqual([false, true]);
+
+    const grouped = buildGroupedObjectTreeNodes({ ...context, schema: "dbx_test", objects });
+    expect(grouped.find((node) => node.type === "group-views")?.children?.map((node) => node.valid)).toEqual([false, true]);
+  });
+
+  it("preserves view validity when building the table-like tree path", () => {
+    const tables: TableInfo[] = [
+      { name: "VALID_VIEW", table_type: "VIEW", valid: true },
+      { name: "INVALID_VIEW", table_type: "VIEW", valid: false },
+    ];
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "dbx_test",
+      tables,
+    });
+
+    expect(nodes.map((node) => node.valid)).toEqual([false, true]);
+
+    const grouped = buildGroupedObjectTreeNodes({
+      ...context,
+      schema: "dbx_test",
+      objects: mergeTableInfosIntoObjects([], tables, "dbx_test"),
+    });
+    expect(grouped.find((node) => node.type === "group-views")?.children?.map((node) => node.valid)).toEqual([false, true]);
+  });
+
+  it("stores the canonical table name separately from the display label", () => {
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "public",
+      tables: [
+        { name: "users", table_type: "BASE TABLE" },
+        { name: "active_users", table_type: "VIEW" },
+      ],
+    });
+    const table = nodes.find((node) => node.type === "table");
+    const view = nodes.find((node) => node.type === "view");
+
+    expect(table).toMatchObject({ type: "table", label: "users", tableName: "users" });
+    expect(view).toMatchObject({ type: "view", label: "active_users" });
+    expect(view?.tableName).toBeUndefined();
+  });
+
   it("keeps table nodes whose names differ only by case across pages", () => {
     const firstPage = buildTableTreeNodes({
       ...context,
@@ -483,5 +534,27 @@ describe("TDengine table hierarchy", () => {
     });
 
     expect(nodes[0].children?.[0]).toMatchObject({ label: "tree.partitions", isExpanded: false });
+  });
+
+  it("nests second-level partitions under Kingbase-style lowercase parent names", () => {
+    // KingbaseES returns lowercase relation names and a direct `parent_name`;
+    // a partition that is itself a partitioned parent must nest recursively.
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "partition_demo",
+      tables: [
+        { name: "catalog_nested", table_type: "BASE TABLE", comment: null },
+        { name: "catalog_nested_2024", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested" },
+        { name: "catalog_nested_2024_asia", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested_2024" },
+        { name: "catalog_nested_2024_eu", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested_2024" },
+        { name: "catalog_nested_2025", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested" },
+      ],
+    });
+
+    expect(nodes.map((node) => node.label)).toEqual(["catalog_nested"]);
+    const level1 = tablePartitionGroups(nodes[0])[0].children ?? [];
+    expect(level1.map((node) => node.label)).toEqual(["catalog_nested_2024", "catalog_nested_2025"]);
+    const yearPartition = level1.find((node) => node.label === "catalog_nested_2024");
+    expect(tablePartitionGroups(yearPartition!)[0].children?.map((node) => node.label)).toEqual(["catalog_nested_2024_asia", "catalog_nested_2024_eu"]);
   });
 });

@@ -12,6 +12,9 @@ describe("databaseDriverManifest", () => {
     expect(usesAgentCursorForQuery("mysql")).toBe(false);
     expect(usesAgentCursorForQuery("jdbc")).toBe(true);
     expect(usesAgentCursorForQuery("prestosql")).toBe(true);
+    expect(usesAgentCursorForQuery("sqlserver")).toBe(false);
+    expect(usesAgentCursorForQuery("sqlserver", "sqlserver-legacy")).toBe(true);
+    expect(usesAgentCursorForQuery("sqlserver", " SQLSERVER-LEGACY ")).toBe(true);
   });
 
   it("exposes connection defaults from the shared manifest", () => {

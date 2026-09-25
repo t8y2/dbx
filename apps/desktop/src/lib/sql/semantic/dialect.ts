@@ -48,6 +48,12 @@ function roleForGenericQualifier(parts: string[], context: "table" | "column" | 
   return "schema";
 }
 
+function roleForMysqlLikeQualifier(parts: string[], context: "table" | "column" | "routine"): "catalog" | "schema" | "table" | "package" | "unknown" {
+  if (context === "column") return "table";
+  if (context === "routine") return parts.length >= 2 ? "package" : "schema";
+  return parts.length >= 1 ? "schema" : "unknown";
+}
+
 export const SQL_SEMANTIC_DIALECTS: Record<string, SqlSemanticDialectAdapter> = {
   generic: {
     id: "generic",
@@ -77,11 +83,19 @@ export const SQL_SEMANTIC_DIALECTS: Record<string, SqlSemanticDialectAdapter> = 
     projectionAliasVisibility: { where: false, groupBy: true, having: true, orderBy: true },
     normalizeIdentifier: defaultNormalize,
     quoteIdentifier: (identifier) => quoteWith(identifier, "`"),
-    qualifierRole(parts, context) {
-      if (context === "column") return parts.length >= 2 ? "table" : "table";
-      if (context === "routine") return parts.length >= 2 ? "package" : "schema";
-      return parts.length >= 1 ? "schema" : "unknown";
-    },
+    qualifierRole: roleForMysqlLikeQualifier,
+  },
+  doris: {
+    id: "doris",
+    identifierQuotes: [
+      { open: "`", close: "`" },
+      { open: '"', close: '"' },
+    ],
+    supportsAsForTableAlias: true,
+    projectionAliasVisibility: { where: false, groupBy: true, having: true, orderBy: true },
+    normalizeIdentifier: defaultNormalize,
+    quoteIdentifier: (identifier) => quoteWith(identifier, "`"),
+    qualifierRole: roleForMysqlLikeQualifier,
   },
   clickhouse: {
     id: "clickhouse",
@@ -151,16 +165,38 @@ export const SQL_SEMANTIC_DIALECTS: Record<string, SqlSemanticDialectAdapter> = 
       return parts.length >= 1 ? "schema" : "unknown";
     },
   },
+  // SOQL: identifiers are never quoted, field names are case-insensitive, there are
+  // no table aliases or projection aliases, and a qualifier is a relationship path
+  // segment (Account.Owner) that always resolves to a related sObject ("table").
+  soql: {
+    id: "soql",
+    identifierQuotes: [],
+    supportsAsForTableAlias: false,
+    projectionAliasVisibility: { where: false, groupBy: false, having: false, orderBy: false },
+    normalizeIdentifier: (identifier) => identifier.toLowerCase(),
+    quoteIdentifier: (identifier) => identifier,
+    qualifierRole(_parts, context) {
+      if (context === "column") return "table";
+      return "unknown";
+    },
+  },
 };
 
 export function sqlReferenceAnalysisDialectFor(options: { databaseType?: DatabaseType; identifierQuote?: string; fallbackDialect: string }): string {
   if (options.databaseType === "kyuubi") return "spark";
   if (options.databaseType === "kingbase" && options.identifierQuote === "`") return "mysql";
+  if (options.databaseType === "doris" || options.databaseType === "starrocks") return "doris";
   return options.fallbackDialect;
 }
 
-export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" }): SqlSemanticDialectAdapter {
+export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris" | "soql" }): SqlSemanticDialectAdapter {
+  if (options.databaseType === "salesforce") return SQL_SEMANTIC_DIALECTS.soql;
   if (options.databaseType === "clickhouse") return SQL_SEMANTIC_DIALECTS.clickhouse;
+  // Doris/StarRocks connections ride the editor's MySQL fallback dialect (codeMirrorSqlDialect maps
+  // them to "mysql"), so the explicit-dialect branch below would otherwise mask the doris adapter
+  // (LATERAL VIEW modeling, etc.) on the real editor path. Like clickhouse, they win on
+  // databaseType regardless of the passed dialect.
+  if (options.databaseType === "doris" || options.databaseType === "starrocks") return SQL_SEMANTIC_DIALECTS.doris;
   if (options.dialect && SQL_SEMANTIC_DIALECTS[options.dialect]) return SQL_SEMANTIC_DIALECTS[options.dialect];
   switch (options.databaseType) {
     case "postgres":
@@ -171,8 +207,6 @@ export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; di
     case "uxdb":
       return SQL_SEMANTIC_DIALECTS.postgres;
     case "mysql":
-    case "doris":
-    case "starrocks":
       return SQL_SEMANTIC_DIALECTS.mysql;
     case "sqlserver":
       return SQL_SEMANTIC_DIALECTS.sqlserver;
@@ -204,6 +238,6 @@ export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; di
  * "generic" default), matching tokenizeSqlSemantic's default and preserving the behavior callers
  * had before dialect-aware scanning existed.
  */
-export function resolveSqlDialectId(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" }): string {
+export function resolveSqlDialectId(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris" | "soql" }): string {
   return options.databaseType || options.dialect ? sqlSemanticDialectFor(options).id : "mysql";
 }

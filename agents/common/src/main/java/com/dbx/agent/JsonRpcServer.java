@@ -89,6 +89,26 @@ public final class JsonRpcServer {
     }
 
     Object dispatchForRuntime(String method, JsonObject params) throws Exception {
+        boolean timedQuery = agent.supportsQueryTiming()
+            && (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)
+                || AgentProtocol.METHOD_EXECUTE_QUERY_PAGE.equals(method)
+                || AgentProtocol.METHOD_FETCH_QUERY_PAGE.equals(method));
+        try (QueryTiming timing = timedQuery ? QueryTiming.begin() : null) {
+            Object result = dispatchWithConnection(method, params);
+            // Capture after connection return/reset, which runs in the finally
+            // block below. Driver-only snapshots omit that lifecycle work.
+            if (timing != null) {
+                if (result instanceof QueryResult) {
+                    ((QueryResult) result).setQuery_timings_ms(timing.finish());
+                } else if (result instanceof QueryPageResult) {
+                    ((QueryPageResult) result).setQuery_timings_ms(timing.finish());
+                }
+            }
+            return result;
+        }
+    }
+
+    private Object dispatchWithConnection(String method, JsonObject params) throws Exception {
         return AgentExecutionContext.withJdbcExecutor(jdbcExecutor, () -> {
             AbstractJdbcAgent jdbcAgent = pooledJdbcAgent();
             if (AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)
@@ -98,7 +118,12 @@ public final class JsonRpcServer {
             }
             boolean manageConnection = jdbcAgent != null && requiresConnectedConnection(method);
             if (manageConnection) {
-                jdbcAgent.beginPooledRequest();
+                long acquireStarted = System.nanoTime();
+                try {
+                    jdbcAgent.beginPooledRequest();
+                } finally {
+                    QueryTiming.record("pool_acquire", acquireStarted);
+                }
             }
             boolean succeeded = false;
             try {
@@ -107,12 +132,19 @@ public final class JsonRpcServer {
                 return result;
             } finally {
                 if (manageConnection) {
-                    jdbcAgent.finishPooledRequest(
-                        jdbcExecutor,
-                        succeeded,
-                        requiresSessionAffinity(method, params),
-                        evictAfterRequest(method)
-                    );
+                    long releaseStarted = System.nanoTime();
+                    try {
+                        jdbcAgent.finishPooledRequest(
+                            jdbcExecutor,
+                            succeeded,
+                            requiresSessionAffinity(method, params),
+                            evictAfterRequest(method),
+                            endsSessionAffinity(method),
+                            preservesSchemaContext()
+                        );
+                    } finally {
+                        QueryTiming.record("pool_release", releaseStarted);
+                    }
                 }
             }
         });
@@ -149,6 +181,9 @@ public final class JsonRpcServer {
     }
 
     private Object dispatch(String method, JsonObject params) throws Exception {
+        if (agent instanceof AbstractJdbcAgent observingAgent) {
+            observingAgent.beforeAgentMethod(method, stringOrNull(params, "sessionId"));
+        }
         if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
             return AgentProtocol.handshakeResult();
         }
@@ -162,7 +197,8 @@ public final class JsonRpcServer {
         if (AgentProtocol.METHOD_TEST_CONNECTION.equals(method)) {
             Map<String, Object> result = agent.testConnectionWithInfo(gson.fromJson(params, ConnectParams.class));
             if (!Boolean.TRUE.equals(result.get("ok"))) {
-                throw new RuntimeException("Connection failed");
+                Object error = result.get("error");
+                throw new RuntimeException(error == null ? "Connection failed" : String.valueOf(error));
             }
             return result;
         }
@@ -243,6 +279,14 @@ public final class JsonRpcServer {
             switchCatalog(params);
             return agent.listTriggers(params.get("schema").getAsString(), params.get("table").getAsString());
         }
+        if (AgentProtocol.METHOD_LIST_PARTITIONS.equals(method)) {
+            switchCatalog(params);
+            return agent.listPartitions(params.get("schema").getAsString(), params.get("table").getAsString());
+        }
+        if (AgentProtocol.METHOD_LIST_SUBPARTITIONS.equals(method)) {
+            switchCatalog(params);
+            return agent.listSubpartitions(params.get("schema").getAsString(), params.get("table").getAsString());
+        }
         if (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)) {
             return agent.executeQuery(
                 params.get("sql").getAsString(),
@@ -313,6 +357,15 @@ public final class JsonRpcServer {
             Type statementsType = new TypeToken<List<String>>() {}.getType();
             List<String> statements = gson.fromJson(params.get("statements"), statementsType);
             return agent.executeTransaction(statements, stringOrNull(params, "schema"));
+        }
+        if (AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION.equals(method)) {
+            return agent.beginManualTransaction(stringOrNull(params, "schema"));
+        }
+        if (AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION.equals(method)) {
+            return agent.commitManualTransaction();
+        }
+        if (AgentProtocol.METHOD_ROLLBACK_MANUAL_TRANSACTION.equals(method)) {
+            return agent.rollbackManualTransaction();
         }
         if (AgentProtocol.METHOD_EXECUTE_BATCH.equals(method)) {
             Type statementsType = new TypeToken<List<String>>() {}.getType();
@@ -421,6 +474,9 @@ public final class JsonRpcServer {
     }
 
     private boolean requiresSessionAffinity(String method, JsonObject params) {
+        if (AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION.equals(method)) {
+            return true;
+        }
         try {
             if (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)
                 || AgentProtocol.METHOD_EXECUTE_QUERY_PAGE.equals(method)
@@ -444,6 +500,23 @@ public final class JsonRpcServer {
             return false;
         }
         return false;
+    }
+
+    private static boolean endsSessionAffinity(String method) {
+        return AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION.equals(method)
+            || AgentProtocol.METHOD_ROLLBACK_MANUAL_TRANSACTION.equals(method);
+    }
+
+    private boolean preservesSchemaContext() {
+        Connection connection = agent.getConnection();
+        if (connection == null) {
+            return false;
+        }
+        try {
+            return !connection.getAutoCommit();
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private static boolean evictAfterRequest(String method) {

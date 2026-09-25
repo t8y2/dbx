@@ -1,6 +1,7 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use dbx_core::storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState};
@@ -13,6 +14,30 @@ use crate::{
 };
 
 const DEVELOPMENT_OPEN_TABS_STATE_KEY: &str = "development_open_tabs";
+const DETACHED_TABS_STATE_KEY: &str = "detached_tabs";
+static DETACHED_TABS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static APPROVED_DETACHED_CLOSES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn detached_tabs_lock() -> &'static tokio::sync::Mutex<()> {
+    DETACHED_TABS_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn approved_detached_closes() -> &'static Mutex<HashSet<String>> {
+    APPROVED_DETACHED_CLOSES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+pub(crate) fn take_approved_detached_window_close(label: &str) -> bool {
+    approved_detached_closes().lock().map(|mut labels| labels.remove(label)).unwrap_or(false)
+}
+
+async fn load_detached_tabs_map(state: &AppState) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    Ok(state
+        .storage
+        .load_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY)
+        .await?
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default())
+}
 
 fn open_tabs_state_key(debug_build: bool) -> &'static str {
     if debug_build {
@@ -67,6 +92,16 @@ pub fn set_app_locale(app: AppHandle, locale_state: State<'_, AppLocaleState>, l
 #[tauri::command]
 pub async fn save_max_agent_turns(state: State<'_, Arc<AppState>>, max_agent_turns: u32) -> Result<(), String> {
     state.storage.save_max_agent_turns(max_agent_turns).await
+}
+
+#[tauri::command]
+pub async fn load_history_retention_limit(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
+    state.storage.load_history_retention_limit().await
+}
+
+#[tauri::command]
+pub async fn save_history_retention_limit(state: State<'_, Arc<AppState>>, limit: u32) -> Result<(), String> {
+    state.storage.save_history_retention_limit(limit).await
 }
 
 #[tauri::command]
@@ -151,6 +186,30 @@ pub async fn save_editor_settings(state: State<'_, Arc<AppState>>, settings: ser
     state.storage.save_editor_settings(&settings).await
 }
 
+const GLOBAL_SEARCH_SETTINGS_FILE: &str = "global-search-settings.json";
+
+#[tauri::command]
+pub async fn load_global_search_settings(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = crate::data_dir::resolve_data_dir_with_mode(default_data_dir).data_dir;
+    let path = data_dir.join(GLOBAL_SEARCH_SETTINGS_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes).map(Some).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
+}
+
+#[tauri::command]
+pub async fn save_global_search_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
+    let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = crate::data_dir::resolve_data_dir_with_mode(default_data_dir).data_dir;
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create {}: {e}", data_dir.display()))?;
+    let path = data_dir.join(GLOBAL_SEARCH_SETTINGS_FILE);
+    let bytes = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+}
+
 #[tauri::command]
 pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
     state.storage.load_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions))).await
@@ -159,6 +218,53 @@ pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Opt
 #[tauri::command]
 pub async fn save_open_tabs_state(state: State<'_, Arc<AppState>>, payload: serde_json::Value) -> Result<(), String> {
     state.storage.save_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions)), &payload).await
+}
+
+#[tauri::command]
+pub async fn save_detached_tab_handoff(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    handoff: serde_json::Value,
+) -> Result<(), String> {
+    let _guard = detached_tabs_lock().lock().await;
+    let mut tabs = load_detached_tabs_map(state.inner()).await?;
+    tabs.insert(tab_id, handoff);
+    state.storage.save_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY, &serde_json::Value::Object(tabs)).await
+}
+
+#[tauri::command]
+pub async fn load_detached_tab_handoff(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let _guard = detached_tabs_lock().lock().await;
+    Ok(load_detached_tabs_map(state.inner()).await?.remove(&tab_id))
+}
+
+#[tauri::command]
+pub async fn list_detached_tab_handoffs(state: State<'_, Arc<AppState>>) -> Result<Vec<serde_json::Value>, String> {
+    let _guard = detached_tabs_lock().lock().await;
+    Ok(load_detached_tabs_map(state.inner()).await?.into_values().collect())
+}
+
+#[tauri::command]
+pub async fn delete_detached_tab_handoff(state: State<'_, Arc<AppState>>, tab_id: String) -> Result<(), String> {
+    let _guard = detached_tabs_lock().lock().await;
+    let mut tabs = load_detached_tabs_map(state.inner()).await?;
+    tabs.remove(&tab_id);
+    state.storage.save_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY, &serde_json::Value::Object(tabs)).await
+}
+
+#[tauri::command]
+pub fn approve_detached_window_close(window: Window) -> Result<(), String> {
+    if !window.label().starts_with("detached-tab-") {
+        return Err("current window is not a detached tab window".to_string());
+    }
+    approved_detached_closes()
+        .lock()
+        .map_err(|_| "detached window close state is unavailable".to_string())?
+        .insert(window.label().to_string());
+    Ok(())
 }
 
 #[tauri::command]

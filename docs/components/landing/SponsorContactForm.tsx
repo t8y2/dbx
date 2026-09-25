@@ -2,6 +2,7 @@
 
 import type { FormEvent } from "react";
 import { Send } from "lucide-react";
+import type { DocsLang } from "@/lib/i18n";
 
 const CONTACT_EMAIL = "1156263951@qq.com";
 
@@ -62,7 +63,7 @@ const i18n = {
   },
 };
 
-export function SponsorContactForm({ lang }: { lang: "en" | "cn" }) {
+export function SponsorContactForm({ lang }: { lang: DocsLang }) {
   const t = i18n[lang];
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {

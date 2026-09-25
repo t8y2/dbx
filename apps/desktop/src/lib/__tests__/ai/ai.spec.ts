@@ -1,5 +1,6 @@
-import { beforeAll, describe, expect, it } from "vitest";
-import { buildAgentRequest, buildSystemPrompt, buildUserPrompt, type AiContext } from "@/lib/ai/ai";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { buildAgentRequest, buildSystemPrompt, buildUserPrompt, runAgentStream, type AiContext } from "@/lib/ai/ai";
+import * as api from "@/lib/backend/api";
 import { setLocale } from "@/i18n";
 
 function context(overrides: Partial<AiContext> = {}): AiContext {
@@ -18,6 +19,31 @@ function context(overrides: Partial<AiContext> = {}): AiContext {
 }
 
 describe("AI SQL dialect prompt", () => {
+  it("sends database selections to the backend as well as the model", async () => {
+    const stream = vi.spyOn(api, "aiAgentStream").mockResolvedValue("done");
+    try {
+      await runAgentStream(
+        {
+          config: { provider: "openai", apiKey: "test", apiUrl: "https://example.invalid", model: "model" },
+          action: "general",
+          mode: "agent",
+          instruction: "Join users and orders",
+          context: context({ databaseType: "mysql", database: "db_a", selectedDatabases: ["db_a", "db_b"] }),
+        },
+        [],
+        () => {},
+        "multi-db-run",
+      );
+      const args = stream.mock.calls[0];
+      expect(args[3]).toBe("db_a");
+      expect(args[14]).toEqual(["db_a", "db_b"]);
+      expect(args[1].systemPrompt).toContain('Selected databases: ["db_a","db_b"]');
+      expect(args[8]).toBe(false);
+    } finally {
+      stream.mockRestore();
+    }
+  });
+
   // buildSystemPrompt picks zh/en copy via currentLocale(); pin to en so the
   // English-string assertions are deterministic regardless of the host OS locale.
   beforeAll(async () => {
@@ -49,6 +75,26 @@ describe("AI SQL dialect prompt", () => {
     expect(prompt).toContain("明确询问用户是否确认执行");
     expect(prompt).toContain("禁止不经确认直接执行写入");
     await setLocale("en");
+  });
+
+  it("gives Redis agents database and key-scan safety guidance", () => {
+    const prompt = buildSystemPrompt("general", context({ connectionName: "Redis", databaseType: "redis", database: "8", selectedDatabases: ["8"] }), "agent");
+
+    expect(prompt).toContain("Use dbx_execute_redis_command");
+    expect(prompt).toContain("db argument");
+    expect(prompt).toContain("Never send the SELECT command");
+    expect(prompt).toContain("Use SCAN, not KEYS");
+    expect(prompt).not.toContain("execute_query tool");
+    expect(prompt).not.toContain("Put SQL in a fenced");
+  });
+
+  it("keeps Redis ask mode command-oriented", () => {
+    const prompt = buildSystemPrompt("general", context({ connectionName: "Redis", databaseType: "redis", database: "8" }), "ask");
+
+    expect(prompt).toContain("Redis Ask mode");
+    expect(prompt).toContain("do not generate SELECT commands");
+    expect(prompt).not.toContain("Generate SQL and explanations only");
+    expect(buildUserPrompt("query", context({ databaseType: "redis", database: "8" }), "scan task keys", false)).toBe("scan task keys");
   });
 
   it("keeps attached text data out of the system prompt", () => {
@@ -158,6 +204,44 @@ describe("AI SQL dialect prompt", () => {
     expect(prompt).toContain("Ask mode");
   });
 
+  it("uses the configured output budget for non-thinking requests", () => {
+    const request = buildAgentRequest({
+      config: {
+        provider: "deepseek",
+        apiKey: "test",
+        apiUrl: "https://example.invalid",
+        model: "deepseek-v4-flash",
+        enableThinking: false,
+        maxOutputTokens: 1024,
+      },
+      action: "general",
+      mode: "ask",
+      instruction: "generate a long migration",
+      context: context(),
+    });
+
+    expect(request.maxTokens).toBe(1024);
+  });
+
+  it("uses the configured output budget above the thinking minimum", () => {
+    const request = buildAgentRequest({
+      config: {
+        provider: "deepseek",
+        apiKey: "test",
+        apiUrl: "https://example.invalid",
+        model: "deepseek-v4-flash",
+        enableThinking: true,
+        maxOutputTokens: 32768,
+      },
+      action: "general",
+      mode: "ask",
+      instruction: "generate a long migration",
+      context: context(),
+    });
+
+    expect(request.maxTokens).toBe(32768);
+  });
+
   it("MongoDB agent mode uses shell commands instead of SQL", () => {
     const prompt = buildSystemPrompt("general", context({ databaseType: "mongodb", connectionName: "MongoDB", database: "benchmark" }), "agent");
 
@@ -165,5 +249,44 @@ describe("AI SQL dialect prompt", () => {
     expect(prompt).toContain("execute_query accepts MongoDB shell-style commands, not SQL");
     expect(prompt).toContain("db.collection.findOne({})");
     expect(prompt).not.toContain("get_sample_data");
+  });
+
+  it("injects the rich-content chart protocol into the normal database system prompt", () => {
+    const prompt = buildSystemPrompt("generate", context(), "ask");
+    expect(prompt).toContain("chart-json");
+    expect(prompt).toContain("at most one chart per reply");
+    expect(prompt).toContain('"version":1,"type":"line"');
+    expect(prompt).toContain('"version":1,"type":"pie"');
+    expect(prompt).toContain('"xAxis":{"values":["Jan","Feb","Mar"]}');
+    expect(prompt).toContain("grounded in actual available data");
+    expect(prompt).toContain("Do not emit ```html code blocks unless the user explicitly asks for them.");
+  });
+
+  it("injects the rich-content chart protocol into the vector database system prompt", () => {
+    const prompt = buildSystemPrompt("general", context({ databaseType: "qdrant", connectionName: "Qdrant", database: "vec" }), "ask");
+    expect(prompt).toContain("chart-json");
+    expect(prompt).toContain("at most one chart per reply");
+    expect(prompt).toContain('"version":1,"type":"pie"');
+    expect(prompt).toContain("Do not emit ```html code blocks unless the user explicitly asks for them.");
+  });
+
+  it("injects the zh rich-content protocol into both normal and vector prompts", async () => {
+    await setLocale("zh-CN");
+    try {
+      const normal = buildSystemPrompt("generate", context(), "ask");
+      expect(normal).toContain("chart-json");
+      expect(normal).toContain("一条回复最多一个");
+      expect(normal).toContain('"version":1,"type":"line"');
+      expect(normal).toContain("不得编造");
+      expect(normal).toContain("不要输出 ```html 代码块，除非用户明确要求");
+
+      const vector = buildSystemPrompt("general", context({ databaseType: "milvus", connectionName: "Milvus", database: "vec" }), "ask");
+      expect(vector).toContain("chart-json");
+      expect(vector).toContain("一条回复最多一个");
+      expect(vector).toContain('"version":1,"type":"pie"');
+      expect(vector).toContain("不要输出 ```html 代码块，除非用户明确要求");
+    } finally {
+      await setLocale("en");
+    }
   });
 });

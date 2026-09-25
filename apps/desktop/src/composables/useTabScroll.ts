@@ -1,4 +1,5 @@
 import { onBeforeUnmount, ref, watch, type Ref } from "vue";
+import { deferUntilPanelResizeEnd } from "@/lib/app/panelResizeState";
 
 export function useTabScroll(tabsContainerRef: Ref<HTMLElement | null>) {
   const hasTabOverflow = ref(false);
@@ -20,6 +21,10 @@ export function useTabScroll(tabsContainerRef: Ref<HTMLElement | null>) {
       scrollThumbWidthPercent.value = 100;
       return;
     }
+    // Skip DOM geometry reads while a divider drag is in flight; they force a
+    // synchronous relayout of the whole document on every frame. Re-measure
+    // once when the drag finishes.
+    if (deferUntilPanelResizeEnd(updateScrollButtons)) return;
     const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
     hasTabOverflow.value = maxScrollLeft > 1;
     const rawThumbWidth = el.scrollWidth > 0 ? (el.clientWidth / el.scrollWidth) * 100 : 100;
@@ -53,10 +58,11 @@ export function useTabScroll(tabsContainerRef: Ref<HTMLElement | null>) {
 
     const previousScrollLeft = el.scrollLeft;
     el.scrollLeft = Math.min(maxScrollLeft, Math.max(0, previousScrollLeft + delta));
-    if (el.scrollLeft !== previousScrollLeft) {
-      event.preventDefault();
-      updateScrollButtons();
-    }
+    // Consume the gesture even at either boundary. Letting the native wheel
+    // handler run there causes trackpad rubber-banding and a visible reversal.
+    event.preventDefault();
+    event.stopPropagation();
+    if (el.scrollLeft !== previousScrollLeft) updateScrollButtons();
   }
 
   function applyScrollbarDrag(clientX: number) {

@@ -23,7 +23,7 @@ where
     let text = match collation {
         // TEXT
         Some(collation) => {
-            let encoder = collation.encoding()?;
+            let codec = collation.codec()?;
             let text_len = src.read_u32_le().await? as usize;
             let mut buf = Vec::with_capacity(text_len);
 
@@ -31,10 +31,10 @@ where
                 buf.push(src.read_u8().await?);
             }
 
-            encoder
-                .decode_without_bom_handling_and_without_replacement(buf.as_ref())
-                .ok_or_else(|| Error::Encoding("invalid sequence".into()))?
-                .to_string()
+            // Lossy: a row holding bytes that are invalid in its declared
+            // collation must stay readable instead of failing the result set.
+            let (text, _) = codec.decode_lossy(buf.as_ref());
+            text
         }
         // NTEXT
         None => {

@@ -46,6 +46,7 @@ pub async fn start_table_export(
         "xlsx" => "xlsx",
         "json" => "json",
         "markdown" | "md" => "md",
+        "sql" if req.split_max_mb.is_some() => "zip",
         "sql" => "sql",
         _ => return Err(AppError::from(format!("Unsupported export format: {}", req.format))),
     };
@@ -59,7 +60,7 @@ pub async fn start_table_export(
         .export_files
         .write()
         .await
-        .insert(export_id.clone(), WebExportFile { file_path, download_filename, format: req.format.clone() });
+        .insert(export_id.clone(), WebExportFile { file_path, download_filename, format: ext.to_string() });
 
     let tx = {
         let mut channels = state.sse_channels.write().await;
@@ -71,7 +72,9 @@ pub async fn start_table_export(
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_progress = cancelled.clone();
 
-    tokio::spawn(async move {
+    // Exports interleave async fetches with synchronous row formatting and
+    // buffered disk writes; run them off the async workers (see spawn_export_task).
+    dbx_core::export_runtime::spawn_export_task(async move {
         let result = table_export::export_table_data_core(&app, &req, |progress| {
             if matches!(progress.status, ExportStatus::Cancelled) {
                 cancelled_progress.store(true, Ordering::SeqCst);
@@ -150,6 +153,7 @@ pub async fn table_export_download(
         "json" => "application/json; charset=utf-8",
         "markdown" | "md" => "text/markdown; charset=utf-8",
         "sql" => "application/sql; charset=utf-8",
+        "zip" => "application/zip",
         format => return Err(AppError::from(format!("Unknown format: {format}"))),
     };
 
@@ -166,7 +170,6 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use dbx_core::connection::AppState;
-    use dbx_core::storage::Storage;
 
     use crate::state::WebExportFile;
 
@@ -174,7 +177,7 @@ mod tests {
     async fn table_export_download_uses_the_requested_web_filename() {
         let dir = std::env::temp_dir().join(format!("dbx-web-table-export-download-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         let file_path = dir.join("table-export.xlsx");

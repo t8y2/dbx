@@ -12,6 +12,21 @@ interface DebugLogEntry {
   message: string;
 }
 
+export interface BrowserMemorySnapshot {
+  jsHeapUsedBytes?: number;
+  jsHeapTotalBytes?: number;
+  jsHeapLimitBytes?: number;
+  deviceMemoryGiB?: number;
+  hardwareConcurrency?: number;
+}
+
+export interface NativeProcessMemorySnapshot {
+  residentBytes: number;
+  virtualBytes: number;
+  totalMemoryBytes: number;
+  usedMemoryBytes: number;
+}
+
 let installed = false;
 let originalConsole: Partial<Record<DebugLogLevel, (...args: unknown[]) => void>> = {};
 
@@ -113,6 +128,35 @@ export function appendDebugLog(level: DebugLogLevel, ...args: unknown[]) {
     message: formatArgs(args),
   });
   safeLocalStorageSet(DEBUG_LOG_ENTRIES_KEY, JSON.stringify(entries.slice(-MAX_DEBUG_LOG_ENTRIES)));
+}
+
+export function getBrowserMemorySnapshot(): BrowserMemorySnapshot {
+  const snapshot: BrowserMemorySnapshot = {};
+  const memory = (typeof performance !== "undefined" ? performance : undefined) as
+    | (Performance & {
+        memory?: { usedJSHeapSize?: number; totalJSHeapSize?: number; jsHeapSizeLimit?: number };
+      })
+    | undefined;
+  if (memory?.memory?.usedJSHeapSize !== undefined) snapshot.jsHeapUsedBytes = memory.memory.usedJSHeapSize;
+  if (memory?.memory?.totalJSHeapSize !== undefined) snapshot.jsHeapTotalBytes = memory.memory.totalJSHeapSize;
+  if (memory?.memory?.jsHeapSizeLimit !== undefined) snapshot.jsHeapLimitBytes = memory.memory.jsHeapSizeLimit;
+  if (typeof navigator !== "undefined") {
+    const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+    if (deviceMemory !== undefined) snapshot.deviceMemoryGiB = deviceMemory;
+    if (navigator.hardwareConcurrency) snapshot.hardwareConcurrency = navigator.hardwareConcurrency;
+  }
+  return snapshot;
+}
+
+export async function appendNativeProcessMemoryLog(event: string, context: Record<string, unknown> = {}) {
+  if (!isDebugLoggingEnabled() || !isTauriRuntimeLike()) return;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const memory = await invoke<NativeProcessMemorySnapshot>("get_process_memory_info");
+    appendDebugLog("info", `[DBX][native-memory:${event}]`, { ...context, ...memory });
+  } catch (error) {
+    appendDebugLog("warn", `[DBX][native-memory:${event}:error]`, { ...context, error });
+  }
 }
 
 export function setDebugLoggingEnabled(enabled: boolean) {

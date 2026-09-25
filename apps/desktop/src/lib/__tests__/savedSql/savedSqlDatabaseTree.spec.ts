@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDatabaseSavedSqlRootNode, decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, savedSqlFilesForDatabase, stripDatabaseSavedSqlTreeNodes } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { buildDatabaseSavedSqlRootNode, decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, savedSqlFilesForDatabase, stripDatabaseSavedSqlTreeNodes, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
 import type { SavedSqlFile, TreeNode } from "@/types/database";
 
 function file(input: Partial<SavedSqlFile> & Pick<SavedSqlFile, "id" | "name" | "connectionId" | "database">): SavedSqlFile {
@@ -65,6 +65,11 @@ describe("database saved SQL tree", () => {
     expect(root).toMatchObject({ id: "conn-1:app:__queries", label: "tree.queries", type: "saved-sql-root", children: [] });
   });
 
+  it("collapses the Queries node by default when opening a connection", () => {
+    expect(buildDatabaseSavedSqlRootNode(database, files)?.isExpanded).toBe(false);
+    expect(buildDatabaseSavedSqlRootNode(database, [])?.isExpanded).toBe(false);
+  });
+
   it("adds Queries after database metadata and preserves its expansion state", () => {
     const existingRoot = { ...buildDatabaseSavedSqlRootNode(database, files)!, isExpanded: false };
     const decorated = decorateDatabaseSavedSqlTreeNodes(
@@ -80,6 +85,16 @@ describe("database saved SQL tree", () => {
 
     expect(decorated[0].children?.map((child) => child.type)).toEqual(["group-tables", "saved-sql-root"]);
     expect(decorated[0].children?.at(-1)).toMatchObject({ isExpanded: false, children: [{ savedSqlId: "orders-2" }, { savedSqlId: "orders-10" }] });
+  });
+
+  it("reuses unchanged database children when the saved SQL index changes elsewhere", () => {
+    const existingChildren = [{ id: "conn-1:app:tables", label: "tree.tables", type: "group-tables" as const }];
+    const existing = { ...database, children: [...existingChildren, buildDatabaseSavedSqlRootNode(database, files)!] };
+    const next = withDatabaseSavedSqlRoot({ ...database, children: existing.children }, existing.children, indexSavedSqlFilesByDatabase([...files, file({ id: "analytics-2", name: "analytics-2.sql", connectionId: "conn-1", database: "analytics" })]));
+
+    expect(next).toEqual(existing.children);
+    expect(next[0]).toBe(existingChildren[0]);
+    expect(next[1]).toBe(existing.children[1]);
   });
 
   it("removes runtime saved SQL nodes before metadata is cached", () => {

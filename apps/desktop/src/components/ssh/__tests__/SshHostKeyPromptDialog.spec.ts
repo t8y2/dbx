@@ -15,7 +15,7 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
 vi.mock("@/components/ui/dialog", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { defineComponent, h, Teleport } = await import("vue");
   const passthrough = defineComponent({
     setup(_props, { slots }) {
       return () => h("div", slots.default?.());
@@ -27,9 +27,20 @@ vi.mock("@/components/ui/dialog", async () => {
       return () => (props.open ? h("div", slots.default?.()) : null);
     },
   });
+  const dialogContent = defineComponent({
+    props: {
+      class: [String, Array, Object],
+      overlayClass: [String, Array, Object],
+      portalClass: [String, Array, Object],
+    },
+    inheritAttrs: false,
+    setup(props, { slots }) {
+      return () => h(Teleport, { to: "body" }, [h("div", { class: ["dialog-overlay", "z-50", props.overlayClass] }), h("div", { class: ["dialog-positioner", "z-50", props.portalClass] }, [h("div", { class: ["dialog-content", props.class] }, slots.default?.())])]);
+    },
+  });
   return {
     Dialog: dialog,
-    DialogContent: passthrough,
+    DialogContent: dialogContent,
     DialogDescription: passthrough,
     DialogFooter: passthrough,
     DialogHeader: passthrough,
@@ -124,13 +135,49 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     expect(dialogSource).not.toContain(':dismissible="false"');
   });
 
-  it("stacks above dialogs that mount later than it does", () => {
-    // Dialog portals teleport into <body> when their component mounts, so paint
-    // order at the shared z-50 follows mount order. This prompt mounts once at
-    // app start, so an on-demand dialog (e.g. the connection editor) would bury
-    // it and block the whole window. It must opt out of the default layer.
-    expect(dialogSource).toContain('overlay-class="z-[200]"');
-    expect(dialogSource).toContain('portal-class="z-[200]"');
+  it("keeps the prompt above a later body-mounted connection dialog and answerable", async () => {
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "prompt-layered",
+        kind: "HostKeyVerify",
+        host: "layered.example.test",
+        port: 22,
+        key_type: "ssh-ed25519",
+        fingerprint: "SHA256:layered",
+      },
+    });
+    await nextTick();
+
+    // Simulate ConnectionDialog opening after the global prompt: its portal is
+    // appended later and remains on the shared default z-50 layer.
+    const connectionPositioner = document.createElement("div");
+    connectionPositioner.className = "dialog-positioner z-50";
+    connectionPositioner.textContent = "New connection";
+    document.body.append(connectionPositioner);
+
+    const promptPositioner = document.body.querySelector<HTMLElement>(".dialog-positioner.z-\\[200\\]");
+    const promptOverlay = document.body.querySelector<HTMLElement>(".dialog-overlay.z-\\[200\\]");
+    expect(promptPositioner).not.toBeNull();
+    expect(promptOverlay).not.toBeNull();
+    expect(connectionPositioner.classList.contains("z-50")).toBe(true);
+    expect(promptPositioner?.classList.contains("z-[200]")).toBe(true);
+    expect(promptOverlay?.classList.contains("z-[200]")).toBe(true);
+    expect(document.body.textContent).toContain("layered.example.test:22");
+
+    const buttons = document.body.querySelectorAll<HTMLButtonElement>("button");
+    buttons.item(buttons.length - 1).click();
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "prompt-layered",
+        action: "accept",
+        remember: true,
+        secret: undefined,
+      });
+    });
   });
 
   it("shows an SSE host-key prompt and posts the user's acceptance", async () => {
@@ -163,6 +210,77 @@ describe("SshHostKeyPromptDialog web bridge", () => {
         id: "prompt-1",
         action: "accept",
         remember: true,
+        secret: undefined,
+      });
+    });
+  });
+
+  it("shows a changed host-key prompt and updates the saved fingerprint", async () => {
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "changed-1",
+        kind: "HostKeyChanged",
+        host: "192.168.1.111",
+        port: 22,
+        key_type: "ssh-ed25519",
+        fingerprint: "SHA256:new-fingerprint",
+        previous_fingerprint: "SHA256:old-fingerprint",
+      },
+    });
+    await nextTick();
+
+    expect(document.body.textContent).toContain("Host fingerprint has changed");
+    expect(document.body.textContent).toContain("new-fingerprint");
+    expect(document.body.textContent).toContain("old-fingerprint");
+    expect(document.body.textContent).toContain("Saved fingerprint");
+
+    const buttons = [...document.body.querySelectorAll("button")].map((button) => button.textContent?.trim());
+    expect(buttons).toContain("Close");
+    expect(buttons).toContain("Continue");
+    expect(buttons).toContain("Update and Continue");
+
+    const update = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Update and Continue");
+    update?.click();
+
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "changed-1",
+        action: "accept",
+        remember: true,
+        secret: undefined,
+      });
+    });
+  });
+
+  it("continues a changed host key for this session only", async () => {
+    await mountDialog();
+
+    MockEventSource.instances[0]?.emit({
+      type: "prompt",
+      request: {
+        id: "changed-2",
+        kind: "HostKeyChanged",
+        host: "board.example.test",
+        port: 22,
+        key_type: "ssh-ed25519",
+        fingerprint: "SHA256:new",
+        previous_fingerprint: "SHA256:old",
+      },
+    });
+    await nextTick();
+
+    const cont = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Continue");
+    cont?.click();
+
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "changed-2",
+        action: "accept",
+        remember: false,
         secret: undefined,
       });
     });
@@ -302,6 +420,124 @@ describe("SshHostKeyPromptDialog web bridge", () => {
         action: "secret",
         remember: undefined,
         secret: "123456",
+      });
+    });
+  });
+
+  it("relays a plugin question and submits the typed answer", async () => {
+    // Host API `host/requestUserInput`: a plugin backend (e.g. the SSH plugin
+    // answering a bastion's keyboard-interactive MFA) asks through the same
+    // dialog, and the host only carries the question and the typed value.
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "plugin-input-1",
+        kind: "UserInput",
+        host: "",
+        port: 0,
+        prompt: "Verification code (6 digits)",
+        title: "JumpServer login",
+        source: "SSH Terminal",
+        echo: false,
+        default_value: "12",
+      },
+    });
+    await nextTick();
+
+    expect(document.body.textContent).toContain("JumpServer login");
+    expect(document.body.textContent).toContain("SSH Terminal needs input before it can continue.");
+    expect(document.body.textContent).toContain("Verification code (6 digits)");
+
+    const input = document.body.querySelector<HTMLInputElement>("input");
+    expect(input?.type).toBe("password");
+    // A caller-provided default is offered but still has to be submitted.
+    expect(input?.value).toBe("12");
+    if (!input) throw new Error("plugin prompt input was not rendered");
+    input.value = "654321";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    const buttons = [...document.body.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons.map((button) => button.textContent?.trim())).toEqual(["Cancel", "Submit"]);
+    buttons[buttons.length - 1].click();
+
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "plugin-input-1",
+        action: "secret",
+        remember: undefined,
+        secret: "654321",
+      });
+    });
+  });
+
+  it("answers a fixed-choice plugin question by picking an option", async () => {
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "plugin-choice-1",
+        kind: "UserInput",
+        host: "",
+        port: 0,
+        title: "Select account",
+        prompt: "Which bastion account should be used?",
+        source: "LDAP Directory",
+        options: [
+          { value: "jinpy", label: "jinpy (admin)" },
+          { value: "deploy", label: "deploy (read-only)" },
+        ],
+      },
+    });
+    await nextTick();
+
+    expect(document.body.textContent).toContain("Which bastion account should be used?");
+    const buttons = [...document.body.querySelectorAll<HTMLButtonElement>("button")];
+    // Options replace the free-form input, so only the choices plus Cancel show.
+    expect(buttons.map((button) => button.textContent?.trim())).toEqual(["jinpy (admin)", "deploy (read-only)", "Cancel"]);
+    expect(document.body.querySelector("input")).toBeNull();
+
+    buttons.find((button) => button.textContent?.trim() === "deploy (read-only)")?.click();
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "plugin-choice-1",
+        action: "secret",
+        remember: undefined,
+        secret: "deploy",
+      });
+    });
+  });
+
+  it("cancels a plugin question without answering it", async () => {
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "plugin-input-cancel",
+        kind: "UserInput",
+        host: "",
+        port: 0,
+        prompt: "Verification code",
+        source: "SSH Terminal",
+      },
+    });
+    await nextTick();
+
+    const cancel = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Cancel");
+    cancel?.click();
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "plugin-input-cancel",
+        action: "reject",
+        remember: undefined,
+        secret: undefined,
       });
     });
   });

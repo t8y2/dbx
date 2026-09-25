@@ -87,39 +87,148 @@ Run `dsh web --dump-config` to verify the composed configuration, then restart D
 
 ## Tools
 
-DBX MCP currently provides 12 tools:
+DBX MCP provides the following tools (availability depends on build features and access settings):
 
 | Tool | Description |
 | --- | --- |
 | `dbx_list_connections` | List connections visible to the MCP session |
+| `dbx_list_databases` | List databases available through a connection, respecting its MCP database scope |
 | `dbx_add_connection` | Add a connection to DBX storage |
+| `dbx_duplicate_connection` | Duplicate a DBX connection with its complete settings |
 | `dbx_remove_connection` | Remove a connection from DBX storage |
 | `dbx_list_tables` | List tables, views, or collections |
 | `dbx_describe_table` | Return columns and table metadata |
+| `dbx_list_routines` | List stored procedures and functions in a schema, with an optional `routine_type` filter (PROCEDURE or FUNCTION) |
+| `dbx_get_routine_source` | Return the source of a stored procedure or function by name, with an optional `signature` for overloaded names |
 | `dbx_get_schema_context` | Return compact schema context for an AI model |
-| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
+| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning 100 rows by default (up to 1000 with the `max_rows` parameter) |
+| `dbx_execute_batch` | Execute a SQL script containing multiple statements in one call, returning a result per statement (or a single merged result with `use_transaction` on a multi-statement script) |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
+| `dbx_begin_transaction` | Begin a transaction on a transaction-enabled native MySQL session |
+| `dbx_commit_transaction` | Commit the active session transaction after MySQL acknowledges `COMMIT` |
+| `dbx_rollback_transaction` | Roll back the active session transaction |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
+| `dbx_salesforce_current_user` | Show the Salesforce user and org behind a connection, including whether the profile holds "Modify All Data" |
+| `dbx_salesforce_prepare_write` | Prepare one Salesforce record write and return a summary plus a single-use confirm token |
+| `dbx_salesforce_apply_write` | Apply a prepared Salesforce write using its confirm token |
+| `dbx_peek_messages` | Read Kafka messages without committing consumer offsets |
+| `dbx_send_message` | Send a message to a supported message queue topic or queue |
 | `dbx_open_table` | Open a table in the running DBX desktop app |
 | `dbx_execute_and_show` | Execute a query and display the result in DBX |
 
+`dbx_execute_query` row controls:
+
+- `max_rows`: 1–1000, defaults to 100. Out-of-range values are clamped, not rejected. It applies to SQL connections only — MongoDB shell commands always return at most 100 rows, and multi-statement scripts routed to the batch executor return at most 100 rows per statement.
+
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
+
+## Read Kafka Messages
+
+`dbx_peek_messages` is available in builds with `mq-admin`, in both local and Web modes. Select a saved Kafka connection by `connection_id` or `connection_name` and provide `topic`. It respects MCP connection scopes and tool allowlists and works with read-only and production connections without committing consumer offsets.
+
+```json
+{
+  "connection_name": "Kafka",
+  "topic": "events",
+  "count": 20,
+  "start_position": "offset",
+  "partition": 0,
+  "offset": 120
+}
+```
+
+- `count`: 1–100, defaults to 20.
+- `start_position`: `latest` (default), `earliest`, or `offset`. Supply a non-negative `offset` only with `offset` mode.
+- `partition`: optional non-negative partition number. If omitted, reads across topic partitions; in offset mode, the offset applies to every partition.
+- The JSON response contains `messages` with base64 payloads, lossless UTF-8 previews when available, message IDs and metadata. `incomplete` means the broker read reached a deadline or scan limit. `outputTruncated` means whole messages were omitted to fit the 256 KiB message output budget. A single oversized message may therefore yield no messages with `outputTruncated: true`; payloads are never silently clipped.
+
+This is a bounded snapshot, not a continuous consumer or a topic-wide text search. Other message queue types are rejected.
+
+## Batch SQL Execution
+
+`dbx_execute_batch` runs a SQL script containing multiple statements in a single call. In auto-commit mode (the default) it returns one result per statement, so callers see exactly which statement failed, how many rows each affected, and what each returned. With `use_transaction` and a script containing multiple statements it returns a single merged transaction outcome instead.
+
+- The script text is split with a database-dialect-aware parser, so semicolons inside string literals, comments, and stored procedures do not break the batch.
+- By default the batch stops at the first failing statement. Pass `continue_on_error` to keep going after a per-statement error (connection-level failures always stop the batch).
+- Pass `use_transaction` to run all statements inside one `BEGIN … COMMIT` so the whole batch either succeeds or rolls back; this requires a script with more than one statement (a single-statement script ignores the option and runs as normal auto-commit). In transaction mode the call returns a single merged result (not one result per statement), and `use_transaction` cannot be combined with `session_id` (a transactional batch runs on a pooled connection and would discard the session's state) or with `continue_on_error` (a transactional batch stops and rolls back at the first failure). DBX rejects the option when the active backend cannot provide a rollbackable transaction. MySQL-family connections reject `use_transaction` for DDL scripts because MySQL DDL implicitly commits and cannot be rolled back.
+- SQL policy (read-only, dangerous-SQL, production protection, database switching) is rechecked against the whole script as a unit before anything runs, exactly as `dbx_execute_query` does. A single write or DDL statement in the batch fails the whole call under a read-only policy.
+- Each batch gets a dedicated connection for its full lifetime, so temporary tables and `SET` state are preserved between its statements. To preserve that state across multiple MCP calls, open a session with `dbx_open_session` and pass its `session_id`.
+- `dbx_execute_batch` is not available for Redis or MongoDB connections.
 
 ## Stateful Query Sessions
 
-Regular `dbx_execute_query` calls are independent. When a workflow must preserve database session state, call `dbx_open_session` first and pass its returned `sessionId` to later `dbx_execute_query` calls. Typical uses include:
+Regular `dbx_execute_query` calls are independent. When a workflow must preserve database session state, call `dbx_open_session` first and pass its returned `sessionId` to later `dbx_execute_query` or `dbx_execute_batch` calls. Typical uses include:
 
 - `USE` or database-context changes
 - Temporary tables
 - Session variables and settings
 - Explicit transactions or multi-step diagnostics that require one connection
 
-Sessions support SQL connections only and are bound to one connection and database. Unknown, closed, or expired IDs fail instead of silently falling back to an ordinary query. Call `dbx_close_session` when finished. Idle sessions are reclaimed after 30 minutes, and the server allows at most 32 concurrent sessions.
+Sessions support SQL connections only and are bound to one connection and database. Unknown, closed, or expired IDs fail instead of silently falling back to an ordinary query. Call `dbx_close_session` when finished. Idle sessions are reclaimed after 30 minutes by default, and the server allows at most 32 concurrent sessions. Set `DBX_SESSION_IDLE_TTL_SECS=43200` in the process hosting MCP to allow 12 hours of inactivity, including transaction-owned connections. The value must be positive whole seconds; unset, invalid, zero, negative or unrepresentable values keep the 1800-second default. Restart the host after changing it. For embedded DBX Web MCP, set it on the Web server; for the standalone launcher, set it in the launcher environment.
 
 <Callout type="warn">A stateful session does not widen SQL policy. `USE` is meaningful only inside a session, while writes, DDL, production protection, connection read-only state, and database privileges are rechecked for every request.</Callout>
 
+### Explicit native MySQL transactions
+
+Set `enable_transactions: true` when calling `dbx_open_session` to reserve one physical native MySQL connection eagerly. Then use `dbx_begin_transaction`, one or more `dbx_execute_query` or `dbx_execute_batch` calls with the returned `session_id`, and finally `dbx_commit_transaction` or `dbx_rollback_transaction`. Queries before and after a transaction still use the same owned connection. `use_transaction` remains incompatible with `session_id`; it is the separate atomic-batch feature described above.
+
+This opt-in mode is available only for local native MySQL connections. DBX Web/`DBX_WEB_URL`, external driver profiles, compatibility engines, and other database types return `TRANSACTION_UNSUPPORTED` instead of falling back to auto-commit. Transaction-session SQL accepts one parsed `SELECT` (including locking reads), `INSERT`, `UPDATE`, `DELETE`, or `REPLACE` statement per operation. It rejects raw transaction control, DDL and temporary DDL, `CALL`, `LOAD`, table locks, `SET`, `USE`, XA, file/output clauses, executable comments, optimizer hints, and multi-statements. Complete batches hold one operation slot and report the resulting transaction state for every statement.
+
+Responses include `transaction_state` (`idle`, `active`, or `unknown`) and, when known, `transaction_outcome` (`committed`, `rolled_back`, or `unknown`). A normal MySQL statement error can leave the transaction active; DBX probes fresh state on the same connection before reporting it. A timeout, cancellation, transport failure, or lost `COMMIT` acknowledgement makes the outcome `unknown`, permanently blocks more SQL on that session, and disposes the connection without replaying the statement or `COMMIT`. A positive connection query timeout applies to transaction operations; when the connection is configured as unlimited (`0`), transaction owners still apply their default 300-second operation cap so busy work remains bounded. Closing, expiry, protocol-session deletion, and server shutdown attempt bounded rollback for a known active transaction and then dispose the connection.
+
+<Callout type="warn">Rollback guarantees require transactional storage such as InnoDB. Triggers, stored functions, nontransactional tables, and external side effects can have effects that MySQL cannot roll back. DBX rechecks the current connection/database scope, tool allowlist, read-only and production protections, and confirmed SQL after queue waiting. Rollback and close remain available for cleanup after write permission is revoked.</Callout>
+
+## Salesforce SOQL and DML
+
+Salesforce connections speak SOQL, not SQL, and DBX shapes the MCP surface around that:
+
+- `dbx_list_tables` lists the org's objects, `dbx_describe_table` lists an object's fields, and `dbx_execute_query` runs SOQL (`SELECT Id, Name FROM Account LIMIT 10`).
+- `dbx_list_databases` explains that one Salesforce org is one scope instead of inventing databases.
+- `dbx_execute_batch` and `dbx_open_session` are refused: SOQL is read-only so there is no multi-statement script to batch, and every call is a stateless REST request — there is no session to pin and no transaction to open.
+- A record write is never a query. `dbx_execute_query` rejects write attempts with `SALESFORCE_DML_REQUIRES_CONFIRMATION` so the confirmation below cannot be bypassed.
+
+### Confirming a write
+
+Writing goes through two calls, and the second one only works if a human saw the first one's summary:
+
+1. `dbx_salesforce_prepare_write` with `connection_id` (or `connection_name`), `op` (`insert`, `update`, or `delete`), `object` (an API name such as `Account` or `Invoice__c`), the record `id` for `update`/`delete`, and `fields` for `insert`/`update`. Nothing is sent to Salesforce.
+2. Show the returned summary to the user: the operation, object, record Id, every field value, the connection, and the identity the change will be attributed to.
+3. `dbx_salesforce_apply_write` with the `confirm_token` from step 1.
+
+The token is single-use, expires 5 minutes after it was issued, and is bound to that exact statement — a changed write needs a new prepare. A replayed, expired, or never-issued token fails with `CONFIRM_TOKEN_INVALID`. DBX re-checks the connection scope, tool allowlist, read-only and production protections, and the DML opt-in at apply time, so revoking permission between the two calls takes effect immediately.
+
+<Callout type="warn">Salesforce writes are not transactional. Once `dbx_salesforce_apply_write` returns, the record has changed in the org and DBX cannot roll it back. Each call touches exactly one record: `upsert`, bulk, and composite writes are rejected at prepare time with `SALESFORCE_DML_INVALID`. Preparing a write needs the per-connection **Allow DML** switch in **Settings → MCP**, which is off by default and returns `SALESFORCE_DML_DISABLED` until a person turns it on; a read-only execution mode ignores the switch entirely.</Callout>
+
+### Who the write is attributed to
+
+`dbx_salesforce_current_user` returns the connected user, their profile, the org display name, and whether that profile holds **Modify All Data** — the flag that decides whether field-level security and record sharing apply at all. Call it before preparing a write, and use it to tell a permission failure apart from a bad record Id. `dbx_salesforce_prepare_write` includes the same identity in its summary; if the lookup fails the summary says the identity is unknown and still prepares the write, leaving the decision with the user.
+
 ## Database Access
+
+### Native Streamable HTTP for DBX Desktop
+
+Desktop can optionally host its own Streamable HTTP MCP endpoint. It is **off by default** and, when enabled in **Settings → MCP → HTTP Service**, listens only on `127.0.0.1:5225/mcp` by default. The Desktop process manages the listener, creates a local bearer token, shows a copyable client configuration, and restarts the managed HTTP service if it exits unexpectedly.
+
+To connect a local MCP client:
+
+1. Open **Settings → MCP → HTTP Service**, turn on **Streamable HTTP Service**, and keep the default loopback address unless another device genuinely needs access.
+2. Click **Save and start service**. Saving a changed address, port, or path applies the configuration by restarting the service.
+3. Copy the displayed service address and bearer token into the MCP client.
+
+Use the generated values in an HTTP-capable MCP client. The transport-specific field names differ between clients, but the essential configuration is:
+
+```json
+{
+  "type": "http",
+  "url": "http://127.0.0.1:5225/mcp",
+  "headers": {
+    "Authorization": "Bearer <token shown by DBX Desktop>"
+  }
+}
+```
+
+Keep the default loopback binding for local clients. Binding to a LAN address requires turning on **Allow remote access** and setting the exact allowed `Host` authorities; browser clients also need their exact `Origin` values. Use `host:port` in an allowed Host when the client sends a non-default port. Rotating the token immediately invalidates the previous credential.
 
 ### Local connections
 
@@ -151,6 +260,22 @@ DBX Web requests honor the standard system proxy environment variables: `HTTPS_P
 
 DBX Web and Docker require the same standalone DuckDB driver. Install it from Driver Manager after the first launch. Docker stores installed drivers under `/app/data/agents`, so they persist when `/app/data` is mounted as a volume.
 
+### Native Streamable HTTP for DBX Web
+
+DBX Web can also host MCP itself. This mode is disabled unless `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) is configured. It uses the existing Web listener and the `/mcp` path, so Docker and reverse-proxy deployments do not need a second exposed port. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities that clients send in the `Host` header, including a mapped port when applicable. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
+
+For example, a container published as `4225:4224` uses `http://localhost:4225/mcp`:
+
+```yaml
+environment:
+  DBX_WEB_MCP_TOKEN: replace-with-a-long-random-secret
+  DBX_WEB_MCP_ALLOWED_HOSTS: localhost:4225
+ports:
+  - "4225:4224"
+```
+
+Clients must supply `Authorization: Bearer <DBX_WEB_MCP_TOKEN>`. Browser-based clients additionally require `DBX_WEB_MCP_ALLOWED_ORIGINS` with their exact origin, such as `https://mcp.example.com`; native clients normally do not send an `Origin` header. When a reverse proxy adds a public path prefix, set `DBX_PUBLIC_BASE_PATH=/dbx`; the native endpoint then becomes `/dbx/mcp`. Native HTTP and the existing `DBX_WEB_URL` stdio adapter can coexist: they share DBX connections and MCP policy, while the adapter remains useful for clients that support only stdio.
+
 ### Desktop UI tools
 
 `dbx_open_table` and `dbx_execute_and_show` require the DBX desktop app and are unavailable in Web mode or when scoped policy hides UI tools. Whether other tools need Desktop depends on whether the connection uses native execution or a bridge/Agent path.
@@ -167,11 +292,29 @@ DBX stores one authoritative MCP policy under **Settings → MCP** and reloads i
 
 An ineffective condition such as `WHERE TRUE`, `WHERE 1 = 1`, `_id: {$exists: true}`, or an opaque MongoDB filter remains high risk. Connection-level read-only protection, production protection, database credentials, and the MCP connection allowlist remain upper bounds in every mode.
 
+For connections exposed to MCP, **Settings → MCP** can set a default execution permission: inherit the global mode, read only, safe write, or high-risk write. When selected databases are used, individual databases can receive their own execution permission. Execution permissions fall back from the most specific scope: **database setting → connection default → global default**. For example, a database can use full access while both the global and connection defaults use data read/write. Connection-level read-only protection, production protection, database scope, and database credentials remain independent hard limits that no database setting can bypass.
+
+The same page can also expose only selected MCP tools. This is enforced at every call, rather than being only a client-side display preference; a client that retained an old tool list is denied once the server-side allowlist changes.
+
+### Configure access in order
+
+Use **Settings → MCP** to define the effective scope in this order:
+
+1. Choose whether MCP can see **all connections** (including future connections) or only **specified connections**.
+2. For every exposed connection, choose **all databases**, **specified databases**, or **no access**. Specified database names are exact matches; use `dbx_list_databases` to discover the names that are currently allowed, then optionally set execution permissions for those databases.
+3. Set each connection's default execution permission. It applies to every database when all databases are exposed, and to selected databases that do not have an override.
+4. Select only the MCP tools that the client needs, then choose the global default execution permission.
+
+The most specific execution setting wins, but an allowed tool still cannot bypass a hidden connection, database scope, connection read-only status, production protection, or the database account's own privileges. Requests for a database outside the selected scope are rejected with `DATABASE_OUT_OF_SCOPE`. When database-specific execution permissions exist, cross-database SQL and MongoDB aggregation writes are rejected to prevent bypassing those limits.
+
+During upgrade, saved connection rules without an execution policy version keep the previous ceiling semantics and cannot widen the global permission. Only a rule saved by the current Settings UI is marked for scoped override semantics; editing an existing legacy rule first carries its effective ceiling forward before enabling the new behavior.
+
 Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. For upgrade compatibility, `DBX_MCP_ALLOW_WRITES=0` (or `false`) still keeps MCP read-only until a central policy is saved for the first time. After that, the central policy is authoritative and the legacy permission variables are ignored. Legacy connection-scope variables can only narrow the DBX allowlist.
 
 | Variable | Purpose |
 | --- | --- |
 | `DBX_DATA_DIR` | Override the local DBX data directory |
+| `DBX_SESSION_IDLE_TTL_SECS` | Stateful session idle timeout in positive whole seconds (default: `1800`). Invalid, zero, negative or unrepresentable values use the default. Applies to transaction-owned connections too; restart the MCP host after changing it. |
 | `DBX_WEB_URL` | Use a DBX Web/Docker backend |
 | `DBX_WEB_PASSWORD` | Authenticate to DBX Web |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | Standard system proxy variables for DBX Web requests; empty value means no proxy. Auth via `http://user:pass@host:port` |
@@ -179,6 +322,10 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
 | `DBX_WEB_HEADERS` | JSON object of extra HTTP headers for DBX Web requests, e.g. `{"Authorization":"Bearer token"}` |
 | `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` disables TLS certificate verification for self-signed DBX Web backends (default: verify) |
 | `DBX_WEB_CA_CERT` | PEM/DER CA file to trust for DBX Web TLS verification |
+| `DBX_WEB_MCP_TOKEN` | Enable native Web Streamable HTTP MCP with this bearer token |
+| `DBX_WEB_MCP_TOKEN_FILE` | Read the native Web MCP token from a file; cannot be combined with `DBX_WEB_MCP_TOKEN` |
+| `DBX_WEB_MCP_ALLOWED_HOSTS` | Required comma-separated public Host authorities for native Web MCP |
+| `DBX_WEB_MCP_ALLOWED_ORIGINS` | Comma-separated browser Origins allowed for native Web MCP |
 | `DBX_MCP_ALLOW_WRITES` | Upgrade compatibility only: `0`/`false` keeps an unconfigured policy read-only |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | Compatibility scope for one connection ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
@@ -192,6 +339,11 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
   <Accordion title="The optional platform package was not installed">Reinstall without `--no-optional`, then verify the platform with `node -p 'process.platform + "-" + process.arch'`. The current platform must appear in the supported platform table.</Accordion>
   <Accordion title="dbx.db cannot be found">Set `DBX_DATA_DIR` to the folder containing `dbx.db`. For Windows portable builds, this is normally the `data` folder beside `DBX.exe`.</Accordion>
   <Accordion title="DBX is not running">Only `dbx_open_table` and `dbx_execute_and_show` require the desktop app. Local query tools can run without DBX open.</Accordion>
+  <Accordion title="A Desktop HTTP client gets ERR_CONNECTION_REFUSED">In **Settings → MCP → HTTP Service**, turn on the service and click **Save and start service**. Confirm that the client uses the displayed address, path, and current bearer token. The default `127.0.0.1` address accepts connections only from the same computer.</Accordion>
+  <Accordion title="Desktop says the HTTP address is already in use">Another process is listening on the selected address and port. Choose an unused port in **Settings → MCP → HTTP Service**, then save the configuration to restart the service. Do not run two DBX Desktop instances with the same HTTP endpoint.</Accordion>
+  <Accordion title="A request returns DATABASE_OUT_OF_SCOPE">The connection is exposed, but the requested database is not in its MCP database scope. Add the exact database name in **Settings → MCP**, or change that connection's scope to all databases if appropriate. For a specified scope, call `dbx_list_databases` first and then use one of the returned names.</Accordion>
+  <Accordion title="A previously visible tool is rejected">The tool is no longer selected in **Settings → MCP** or the current policy does not permit it. Refresh the MCP client's tool list after changing the allowlist; the server rejects stale tool calls as well.</Accordion>
+  <Accordion title="A Docker or reverse-proxy MCP request fails">Use the public endpoint, including the mapped port and any `DBX_PUBLIC_BASE_PATH` prefix. Set `DBX_WEB_MCP_ALLOWED_HOSTS` to the exact public `Host` authority. Browser clients also require an exact `DBX_WEB_MCP_ALLOWED_ORIGINS` entry.</Accordion>
   <Accordion title="An Agent/JDBC database cannot start">Install or update the matching DBX agent, JDBC driver, and JRE through DBX Driver Manager. Proprietary drivers are not included in the native MCP package.</Accordion>
   <Accordion title="A DuckDB connection cannot start">Install or update the DuckDB driver through DBX Driver Manager. Local MCP, DBX Web, and Docker use the standalone driver rather than embedding the DuckDB engine.</Accordion>
   <Accordion title="I see a better-sqlite3 or Node ABI error">MCP does not require `better-sqlite3`. Upgrade `@dbx-app/mcp-server`; if the error comes from `@dbx-app/cli`, follow the CLI installation requirements because it is a separate package.</Accordion>

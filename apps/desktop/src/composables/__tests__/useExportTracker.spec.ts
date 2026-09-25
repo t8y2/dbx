@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TransferProgress, TransferRequest } from "@/lib/backend/api";
+import type { SqlFileProgress, TransferProgress, TransferRequest } from "@/lib/backend/api";
 
 vi.mock("@/lib/backend/api", () => ({
   startTransfer: vi.fn(),
@@ -10,7 +10,17 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 
 import * as api from "@/lib/backend/api";
-import { formatDataTransferDuration, MAX_TRANSFER_FAILURE_DETAIL_BYTES, MAX_TRANSFER_FAILURE_DETAILS, MAX_TRANSFER_FAILURE_ERROR_BYTES, useExportTracker } from "@/composables/useExportTracker";
+import {
+  formatDataTransferDuration,
+  MAX_SQL_FILE_FAILURE_DETAIL_BYTES,
+  MAX_SQL_FILE_FAILURE_DETAILS,
+  MAX_SQL_FILE_FAILURE_ERROR_BYTES,
+  MAX_SQL_FILE_FAILURE_SUMMARY_BYTES,
+  MAX_TRANSFER_FAILURE_DETAIL_BYTES,
+  MAX_TRANSFER_FAILURE_DETAILS,
+  MAX_TRANSFER_FAILURE_ERROR_BYTES,
+  useExportTracker,
+} from "@/composables/useExportTracker";
 
 let now = 0;
 
@@ -27,6 +37,7 @@ function transferRequest(transferId: string, tables = ["users"]): TransferReques
     createTable: true,
     mode: "append",
     targetTableNameCase: "preserve",
+    quoteTargetColumnNames: true,
     batchSize: 1000,
   };
 }
@@ -42,6 +53,21 @@ function transferProgress(transferId: string, status: TransferProgress["status"]
     status,
     error: status === "error" ? "transfer failed" : null,
     terminal,
+  };
+}
+
+function sqlFileProgress(executionId: string, statementIndex: number, overrides: Partial<SqlFileProgress> = {}): SqlFileProgress {
+  return {
+    executionId,
+    status: "statementFailed",
+    statementIndex,
+    successCount: 0,
+    failureCount: statementIndex,
+    affectedRows: 0,
+    elapsedMs: statementIndex,
+    statementSummary: `SELECT missing_${statementIndex}`,
+    error: `failure ${statementIndex}`,
+    ...overrides,
   };
 }
 
@@ -326,6 +352,85 @@ describe("data transfer failure details", () => {
     });
 
     expect(task.transferFailuresOmitted).toBe(4_096);
+  });
+});
+
+describe("SQL-file failure details", () => {
+  it("preserves failures in event order through terminal completion and updates duplicate statements", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-failures", "migration.sql", "/tmp/migration.sql");
+
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 3));
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 7));
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 3, { error: "updated failure 3" }));
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 8, { status: "done", successCount: 5, failureCount: 2, error: null }));
+
+    expect(task.status).toBe("Done");
+    expect(task.sqlFileFailures).toEqual([
+      { statementIndex: 3, statementSummary: "SELECT missing_3", error: "updated failure 3" },
+      { statementIndex: 7, statementSummary: "SELECT missing_7", error: "failure 7" },
+    ]);
+    expect(task.failureCount).toBe(2);
+  });
+
+  it("retains reliable multi-file context for equal per-file statement indexes", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("multi-file-failures", "first.sql (+1)", "/tmp/first.sql; /tmp/second.sql");
+
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 1), { fileIndex: 0, fileName: "first.sql" });
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 1), { fileIndex: 1, fileName: "second.sql" });
+
+    expect(task.sqlFileFailures).toEqual([
+      { statementIndex: 1, statementSummary: "SELECT missing_1", error: "failure 1", fileIndex: 0, fileName: "first.sql" },
+      { statementIndex: 1, statementSummary: "SELECT missing_1", error: "failure 1", fileIndex: 1, fileName: "second.sql" },
+    ]);
+  });
+
+  it("bounds retained count and reports omitted failures without double-counting replays", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("many-sql-failures", "migration.sql", "/tmp/migration.sql");
+
+    for (let index = 1; index <= MAX_SQL_FILE_FAILURE_DETAILS + 2; index += 1) {
+      tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, index));
+    }
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, MAX_SQL_FILE_FAILURE_DETAILS + 1));
+
+    expect(task.sqlFileFailures).toHaveLength(MAX_SQL_FILE_FAILURE_DETAILS);
+    expect(task.sqlFileFailuresOmitted).toBe(2);
+  });
+
+  it("bounds UTF-8 summaries, errors, and total retained bytes", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("long-sql-failures", "migration.sql", "/tmp/migration.sql");
+    const longText = "错误🙂".repeat(4_000);
+
+    for (let index = 1; index <= 300; index += 1) {
+      tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, index, { statementSummary: longText, error: longText }));
+    }
+
+    const encoder = new TextEncoder();
+    const retainedBytes = task.sqlFileFailures!.reduce((total, failure) => {
+      expect(encoder.encode(failure.statementSummary).length).toBeLessThanOrEqual(MAX_SQL_FILE_FAILURE_SUMMARY_BYTES);
+      expect(encoder.encode(failure.error).length).toBeLessThanOrEqual(MAX_SQL_FILE_FAILURE_ERROR_BYTES);
+      expect(failure.statementSummary.endsWith("\ud83d")).toBe(false);
+      expect(failure.error.endsWith("\ud83d")).toBe(false);
+      expect(failure.truncated).toBe(true);
+      return total + encoder.encode(failure.statementSummary).length + encoder.encode(failure.error).length + encoder.encode(failure.fileName ?? "").length;
+    }, 0);
+
+    expect(retainedBytes).toBeLessThanOrEqual(MAX_SQL_FILE_FAILURE_DETAIL_BYTES);
+    expect(task.sqlFileFailuresOmitted).toBeGreaterThan(0);
+  });
+
+  it("starts a replacement execution with an empty failure list", () => {
+    const tracker = useExportTracker();
+    const first = tracker.addSqlFileTask("reused-id", "first.sql", "/tmp/first.sql");
+    tracker.updateSqlFileTask(first.exportId, sqlFileProgress(first.exportId, 1));
+
+    const replacement = tracker.addSqlFileTask("reused-id", "second.sql", "/tmp/second.sql");
+
+    expect(replacement.sqlFileFailures).toEqual([]);
+    expect(replacement.sqlFileFailuresOmitted).toBe(0);
   });
 });
 

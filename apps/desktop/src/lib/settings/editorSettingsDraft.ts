@@ -1,7 +1,10 @@
 import type { EditorSettings } from "@/stores/settingsStore";
+import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
+import { normalizeExternalSqlEditorMaxMb } from "@/lib/sql/sqlFileOpen";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { normalizeTableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 
 export const EDITOR_SETTINGS_DRAFT_KEYS = [
@@ -11,6 +14,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "uiFontFamily",
   "uiScale",
   "theme",
+  "backgroundImage",
   "customThemes",
   "activeCustomThemeId",
   "executeMode",
@@ -22,9 +26,12 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showInsertValueHints",
   "autoAliasTables",
   "insertSpaceAfterCompletion",
+  "sqlServerSpaceConfirmsCompletion",
   "sortCompletionColumnsAlphabetically",
   "selectFirstCompletionOnOpen",
   "wordWrap",
+  "showWhitespace",
+  "ddlOpenMode",
   "vimModeEnabled",
   "autoCloseBrackets",
   "sqlSemanticDiagnosticsMode",
@@ -34,8 +41,13 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "savedSqlOpenTargetMode",
   "appLayout",
   "tabLayout",
+  "tabPlacement",
+  "tabGroupMode",
+  "tabSortMode",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
+  "showColumnHeaderTooltips",
+  "showResultSourceDatabase",
   "dataGridShowTransposeFieldMetadata",
   "colorizeDataGridCellTypes",
   "dataGridTypeColorSchemes",
@@ -44,19 +56,27 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
   "dataGridFilterEditorView",
+  "dataGridToolbarLayout",
+  "dataGridKeepFilterEditorExpanded",
   "dataGridTextFilterPanelHeight",
+  "defaultAutoKeepResults",
   "multiStatementDefaultView",
   "dataGridAutoTransposeSingleRow",
   "dataGridCellDetailButtonVisible",
   "dataGridCrosshairHighlight",
   "pageSize",
   "tableOpenPageSize",
+  "tableOpenSortMode",
+  "tableDatabaseSortDirection",
+  "tableLocalSortDirection",
   "queryResultMaxRowsEnabled",
   "queryResultMaxRows",
+  "externalSqlEditorMaxMb",
   "infiniteScroll",
   "regexMaxMatchCount",
   "autoCalculateTotalRows",
   "flatteningMultiLineText",
+  "dataGridShowWhitespace",
   "tableColumnTemplateFields",
   "shortcuts",
   "sqlFormatter",
@@ -65,22 +85,38 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "routineSourceOpenMode",
   "sidebarTableSearchEnabled",
   "autoSelectActiveSidebarNode",
-  "sidebarOpenDatabaseOnSingleClick",
+  "sidebarBrowseObjectsOnDatabaseActivation",
   "openTabsRestoreMode",
   "disconnectTabHandlingMode",
+  "deleteConnectionTabHandlingMode",
+  "rememberConnectionDatabaseOnDelete",
   "dataTabReuseMode",
   "openDataTabsNextToActive",
   "prefillNewQueryWithSelect",
   "generateSqlIncludeDatabaseName",
+  "generateSqlQuoteIdentifiers",
   "formatSqlOnSqlFileSave",
+  "showTableDdlHoverPreview",
+  "tableHoverLookupMode",
   "updateNotificationsEnabled",
+  "autoDownloadUpdates",
+  "autoUpdateApp",
+  "autoUpdateDrivers",
+  "autoUpdateJdbc",
+  "autoUpdateMcp",
+  "autoUpdatePlugins",
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
+  "sidebarShowTooltips",
   "sidebarIndent",
   "sidebarFontSize",
   "sidebarHiddenTablePrefixes",
+  "sidebarCopyTableNameSeparator",
+  "sidebarCopyTableNameIncludeSchema",
   "redisKeyTemplates",
+  "redisDatabaseDisplayLimit",
   "exportBatchSize",
+  "csvQuoteMode",
   "exportRowLimitEnabled",
   "exportRowLimit",
   "queryExportKeysetOptimizationEnabled",
@@ -97,6 +133,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "clickTableNavigationTarget",
   "completionTriggerMode",
   "defaultTransactionMode",
+  "keepExplicitTransactionInAutoCommit",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];
@@ -119,8 +156,11 @@ export function normalizeQueryResultMaxRowsDraft(value: unknown): number {
 function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unknown {
   if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
+  if (key === "externalSqlEditorMaxMb") return normalizeExternalSqlEditorMaxMb(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
+  if (key === "tableHoverLookupMode") return normalizeTableHoverLookupMode(value);
   if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
+  if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   return value;
 }
 
@@ -134,6 +174,20 @@ export function editorSettingsDraftFromSettings(settings: EditorSettings): Edito
     draft[key] = cloneDraftValue(normalizedDraftValue(key, settings[key])) as never;
   }
   return draft;
+}
+
+/**
+ * Draft-shaped, per-key-normalized values for exactly the keys present in
+ * `settings`. Used for partial updates (e.g. settings import) where keys the
+ * input does not contain must leave the target state untouched.
+ */
+export function editorSettingsDraftPatchFromSettings(settings: Partial<EditorSettings>): Partial<EditorSettingsDraft> {
+  const patch: Partial<EditorSettingsDraft> = {};
+  for (const key of EDITOR_SETTINGS_DRAFT_KEYS) {
+    if (!(key in settings)) continue;
+    (patch as Record<string, unknown>)[key] = cloneDraftValue(normalizedDraftValue(key, settings[key])) as never;
+  }
+  return patch;
 }
 
 export function editorSettingsPatchFromDraft(draft: EditorSettingsDraft, base: EditorSettingsDraft): Partial<EditorSettings> {

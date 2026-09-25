@@ -42,6 +42,23 @@ make docs              # 本地预览文档站
 make cargo-check-fast  # 快速 Rust 检查
 ```
 
+### macOS 开发签名
+
+请使用 `make dev`、`make dev-fast` 或 `pnpm dev:tauri`。这些入口会在每次重新编译后、启动前，用固定的本地开发身份签名。首次启动仍可能需要对 DBX 原有钥匙串条目选择一次“始终允许”，之后重编译保持相同代码身份。直接执行 `pnpm tauri dev` 会绕过此流程。
+
+首次运行会在 `~/Library/Application Support/DBX/development-signing/` 创建独立签名钥匙串和自签开发证书，仅将该钥匙串加入当前用户的搜索列表，不更改默认钥匙串或系统信任设置。目录权限为 `0700`，文件权限为 `0600`；其中保存的随机密码只用于解锁这个开发签名钥匙串。不使用发布私钥，也不导出或更换已有连接的加密密钥。请保留这套本地身份，不要提交或分享；配置不完整、损坏或证书过期时会明确报错，不会自动换证书或降级为临时签名。
+
+签名 runner 仅接受 `debug/dbx`，保留 Cargo feature 和应用参数，不影响 Linux、Windows 或正式打包。使用这些 macOS 开发入口时，需要取消自定义的 `CARGO_TARGET_*_RUNNER` 环境变量。
+
+Core、桌面端和 Web 的 Storage 测试夹具使用 `dbx_core::persistence::test_storage`（仅由开发依赖启用 `test-support` feature），在迁移预检查前选择测试目录自己的密钥，不访问用户钥匙串，也不继承 `DBX_SECRET_KEY` / `DBX_SECRET_KEY_FILE`。测试数据库复制时，应将夹具目录及其密钥一起保留。
+
+```bash
+node --test scripts/dev-tauri.test.mjs
+DBX_TEST_MACOS_KEYCHAIN=1 node --test scripts/dev-tauri.test.mjs
+```
+
+第二条为 macOS 集成验证：创建并清理临时签名钥匙串，禁止系统交互，证明临时签名重编译会被拒绝，而采用同一稳定身份的两个不同构建仍能读取同一测试条目。
+
 ### JDBC Agent 驱动
 
 Agent 驱动工程在 `agents/` 目录。Java/JDBC 驱动构建和测试需要 JDK 21；环境允许时 Gradle 可以自动下载对应 toolchain。
@@ -57,18 +74,18 @@ cd agents
 
 ## 项目结构
 
-| 路径 | 说明 |
-| --- | --- |
-| `apps/desktop/src/` | Vue 前端 |
-| `src-tauri/` | Tauri 桌面端壳层与命令层 |
-| `crates/dbx-core/` | 共享 Rust 数据库逻辑 |
-| `crates/dbx-web/` | Docker / Web HTTP 后端 |
-| `packages/cli/` | `@dbx-app/cli` |
-| `packages/mcp-server/` | `@dbx-app/mcp-server` |
+| 路径                    | 说明                              |
+| ----------------------- | --------------------------------- |
+| `apps/desktop/src/`     | Vue 前端                          |
+| `src-tauri/`            | Tauri 桌面端壳层与命令层          |
+| `crates/dbx-core/`      | 共享 Rust 数据库逻辑              |
+| `crates/dbx-web/`       | Docker / Web HTTP 后端            |
+| `packages/cli/`         | `@dbx-app/cli`                    |
+| `packages/mcp-server/`  | `@dbx-app/mcp-server`             |
 | `packages/mongo-shell/` | 桌面端内部 MongoDB 编辑器解析工具 |
-| `docs/` | 官方文档站 |
-| `examples/` | 配置与自动化示例 |
-| `agents/` | JDBC Agent 驱动工程 |
+| `docs/`                 | 官方文档站                        |
+| `examples/`             | 配置与自动化示例                  |
+| `agents/`               | JDBC Agent 驱动工程               |
 
 ## 开发约定
 
@@ -83,6 +100,8 @@ cd agents
 ### 控制改动范围
 
 一个 PR 只做一类事。文档 PR 不要夹带无关代码；修 Bug 时也不要顺手大重构，除非重构是修复所必需的。
+
+提交前和推送后请按 [PR 提交与 CI 核查](docs/testing/pr-preflight.md) 检查多语言完整性、相关工作流及远端状态。
 
 ### 提交说明
 
@@ -103,6 +122,13 @@ pnpm test
 ```
 
 如果改的是前端或某个 package，再补跑对应目录下的测试。
+
+测试质量比测试数量更重要：
+
+- 调用生产函数或挂载真实组件，验证可观察的结果、状态变化、错误或事件。Mock 外部边界，不要 Mock 正在验证的行为。
+- 不要在测试中复制实现，也不要用源码字符串匹配锁定 class、局部变量名、模板片段或辅助函数调用写法。这类检查会阻碍无害重构，却不能证明运行行为；布局应在浏览器中验证，而不是从 CSS 字符串推断。
+- 回归用例优先补进已有行为测试，不再另加一份源码接线快照。只有输入和预期不同的场景优先使用参数化用例。
+- 发布产物、权限、兼容性规则和跨运行时契约可以使用文件内容检查。安全门禁在有等价行为覆盖前保留，不要仅因测试读文件、使用 Mock 或运行较慢就删除。
 
 ### 文档
 

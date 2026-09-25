@@ -9,7 +9,7 @@ const host = process.env.TAURI_DEV_HOST;
 const isTauri = !!host || !!process.env.TAURI_ENV_ARCH;
 const configuredBasePath = process.env.VITE_DBX_BASE_PATH || process.env.DBX_PUBLIC_BASE_PATH;
 const manualChunks: Record<string, string[]> = {
-  codemirror: ["codemirror", "@codemirror/lang-sql", "@codemirror/view", "@codemirror/state", "@codemirror/autocomplete", "@codemirror/commands", "@codemirror/theme-one-dark"],
+  codemirror: ["codemirror", "@codemirror/lang-sql", "@codemirror/view", "@codemirror/state", "@codemirror/autocomplete", "@codemirror/commands", "@codemirror/lint", "@codemirror/theme-one-dark"],
   "vue-echarts": ["vue-echarts"],
   ui: ["reka-ui"],
   marked: ["marked"],
@@ -71,6 +71,10 @@ export default defineConfig(async () => ({
       "@": path.resolve(import.meta.dirname, "./src"),
       // Prefer package source during app dev so shell parse changes need no rebuild.
       "@dbx-app/mongo-shell": path.resolve(import.meta.dirname, "../../packages/mongo-shell/src/index.ts"),
+      // sql-formatter's `exports` map only declares ".", so deep imports into its
+      // bundled parser/tokenizer are rejected by Vite's exports handling. The
+      // The default layout engine needs that AST; see src/lib/sql/layout/internals.ts.
+      "sql-formatter/dist/": `${path.resolve(import.meta.dirname, "../../node_modules/sql-formatter/dist")}/`,
     },
   },
   clearScreen: false,

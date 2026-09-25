@@ -1,8 +1,9 @@
-import { isMacShortcutPlatform, parseShortcutStrokes, shortcutDisplayParts } from "@/lib/editor/shortcutDisplay";
+import { isMacShortcutPlatform, parseShortcutParts, parseShortcutStrokes, shortcutDisplayParts } from "@/lib/editor/shortcutDisplay";
 
 export type ShortcutActionId =
   | "executeSql"
   | "executeSqlInNewResultTab"
+  | "explainSql"
   | "formatSql"
   | "expandSelectStar"
   | "toggleLineComment"
@@ -24,8 +25,11 @@ export type ShortcutActionId =
   | "redo"
   | "selectAll"
   | "extendSelection"
+  | "addNextSelectionOccurrence"
+  | "selectAllSelectionOccurrences"
   | "uppercaseSelection"
   | "lowercaseSelection"
+  | "convertNamingStyle"
   | "exPasteSqlInCondition"
   | "toggleFold"
   | "editTableStructure"
@@ -42,6 +46,8 @@ export type ShortcutActionId =
   | "closeOtherTabs"
   | "focusSearch"
   | "quickOpen"
+  | "globalSearch"
+  | "toggleAiPanel"
   | "navigateTabHistoryBack"
   | "navigateTabHistoryForward"
   | "tabSwitcher"
@@ -60,6 +66,7 @@ export type ShortcutActionId =
   | "zoomOutUi"
   | "resetUiZoom"
   | "find"
+  | "gotoLine"
   | "replace"
   | "refreshData"
   | "toggleResultsPane"
@@ -98,19 +105,49 @@ export function closeOtherTabsDefaultShortcut(platform = globalThis.navigator?.p
   return isMacShortcutPlatform(platform) ? "Alt+Mod+W" : "Shift+Alt+W";
 }
 
+// 同词项选择的平台相关默认键。Windows/Linux 上 Ctrl+Mod+G 经 CodeMirror 的
+// Mod→Ctrl 展开后成为不可达的 Ctrl-Ctrl-G，且 Ctrl+G 本身是编辑器内
+// find-next（Mod-G 的非 mac 展开），因此非 mac 平台改用 JetBrains 风格的
+// Alt+J / Ctrl+Alt+Shift+J；macOS 维持 Ctrl+G / Ctrl+Cmd+G。
+export function selectionOccurrenceDefaultShortcut(actionId: "addNextSelectionOccurrence" | "selectAllSelectionOccurrences", platform = globalThis.navigator?.platform || ""): string {
+  if (isMacShortcutPlatform(platform)) {
+    return actionId === "addNextSelectionOccurrence" ? "Ctrl+G" : "Ctrl+Mod+G";
+  }
+  return actionId === "addNextSelectionOccurrence" ? "Alt+J" : "Ctrl+Alt+Shift+J";
+}
+
 export function tabNavigationHistoryDefaultShortcut(direction: "back" | "forward", platform = globalThis.navigator?.platform || ""): string {
   const modifier = isMacShortcutPlatform(platform) ? "Ctrl" : "Mod";
   const key = direction === "back" ? "ArrowLeft" : "ArrowRight";
   return `${modifier}+Alt+${key}`;
 }
 
+// Match the shortcut used by VS Code to open its chat sidebar on macOS while
+// keeping a reachable, non-conflicting equivalent on Windows/Linux.
+export function toggleAiPanelDefaultShortcut(platform = globalThis.navigator?.platform || ""): string {
+  return isMacShortcutPlatform(platform) ? "Ctrl+Mod+I" : "Ctrl+Alt+I";
+}
+
+// 「跳转到行」的平台默认键。Windows/Linux 上用 Ctrl+G，与 VS Code / SSMS /
+// DataGrip 的惯例一致（编辑器内查找下一个仍有 F3 与搜索面板回车）；
+// macOS 的 Ctrl+G 已分配给「选中下一个相同词」（JetBrains 风格），因此沿用
+// CodeMirror 搜索键位里原本就指向 gotoLine 的 ⌘⌥G。
+export function gotoLineDefaultShortcut(platform = globalThis.navigator?.platform || ""): string {
+  return isMacShortcutPlatform(platform) ? "Mod+Alt+G" : "Mod+G";
+}
+
 const PLATFORM_DEFAULT_SHORTCUTS: Partial<Record<ShortcutActionId, ReadonlySet<string>>> = {
   closeOtherTabs: new Set(["Alt+Mod+W", "Shift+Alt+W"]),
   navigateTabHistoryBack: new Set(["Ctrl+Alt+ArrowLeft", "Mod+Alt+ArrowLeft"]),
   navigateTabHistoryForward: new Set(["Ctrl+Alt+ArrowRight", "Mod+Alt+ArrowRight"]),
+  addNextSelectionOccurrence: new Set(["Ctrl+G", "Alt+J"]),
+  selectAllSelectionOccurrences: new Set(["Ctrl+Mod+G", "Ctrl+Alt+Shift+J"]),
+  toggleAiPanel: new Set(["Ctrl+Mod+I", "Ctrl+Alt+I"]),
+  gotoLine: new Set(["Mod+G", "Mod+Alt+G"]),
 };
 const LEGACY_CLOSE_TAB_DEFAULT = "Meta+W";
 const LEGACY_COPY_CURRENT_ROW_DEFAULT = "Mod+D";
+const EDIT_TABLE_STRUCTURE_DEFAULT = "Mod+Shift+D";
 const TAB_NAVIGATION_HISTORY_ACTIONS: ShortcutActionId[] = ["navigateTabHistoryBack", "navigateTabHistoryForward"];
 
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
@@ -125,6 +162,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutExecuteSqlInNewResultTab",
     scope: "editor",
     defaultShortcut: "Mod+\\",
+  },
+  {
+    id: "explainSql",
+    labelKey: "toolbar.explainPlan",
+    scope: "editor",
+    defaultShortcut: "Mod+E",
   },
   {
     id: "formatSql",
@@ -253,6 +296,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Alt+W",
   },
   {
+    id: "addNextSelectionOccurrence",
+    labelKey: "settings.shortcutAddNextSelectionOccurrence",
+    scope: "editor",
+    defaultShortcut: "Ctrl+G",
+  },
+  {
+    id: "selectAllSelectionOccurrences",
+    labelKey: "settings.shortcutSelectAllSelectionOccurrences",
+    scope: "editor",
+    defaultShortcut: "Ctrl+Mod+G",
+  },
+  {
     id: "uppercaseSelection",
     labelKey: "settings.shortcutUppercaseSelection",
     scope: "editor",
@@ -263,6 +318,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutLowercaseSelection",
     scope: "editor",
     defaultShortcut: "Shift+Alt+L",
+  },
+  {
+    id: "convertNamingStyle",
+    labelKey: "settings.shortcutConvertNamingStyle",
+    scope: "editor",
+    defaultShortcut: "Shift+Alt+C",
   },
   {
     id: "exPasteSqlInCondition",
@@ -280,13 +341,13 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: "editTableStructure",
     labelKey: "settings.shortcutEditTableStructure",
     scope: "grid",
-    defaultShortcut: "Mod+D",
+    defaultShortcut: EDIT_TABLE_STRUCTURE_DEFAULT,
   },
   {
     id: "copyCurrentRow",
     labelKey: "settings.shortcutCopyCurrentRow",
     scope: "grid",
-    defaultShortcut: "",
+    defaultShortcut: LEGACY_COPY_CURRENT_ROW_DEFAULT,
   },
   {
     id: "deleteCurrentRow",
@@ -359,6 +420,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutQuickOpen",
     scope: "global",
     defaultShortcut: "Mod+P",
+  },
+  {
+    id: "globalSearch",
+    labelKey: "settings.shortcutGlobalSearch",
+    scope: "global",
+    defaultShortcut: "Mod+Alt+F",
+  },
+  {
+    id: "toggleAiPanel",
+    labelKey: "settings.shortcutToggleAiPanel",
+    scope: "global",
+    defaultShortcut: toggleAiPanelDefaultShortcut(),
   },
   {
     id: "navigateTabHistoryBack",
@@ -469,6 +542,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+F",
   },
   {
+    id: "gotoLine",
+    labelKey: "settings.shortcutGotoLine",
+    scope: "editor",
+    defaultShortcut: gotoLineDefaultShortcut(),
+  },
+  {
     id: "replace",
     labelKey: "settings.shortcutReplace",
     scope: "editor",
@@ -570,13 +649,29 @@ function hasExplicitShortcut(settings: Partial<ShortcutSettings> | undefined, ac
 }
 
 function shortcutsUseSameKeys(first: string, second: string, platform = globalThis.navigator?.platform || ""): boolean {
-  return !!first && !!second && formatShortcut(first, platform).toLowerCase() === formatShortcut(second, platform).toLowerCase();
+  const comparisonKey = (shortcut: string) =>
+    formatShortcut(shortcut, platform)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((stroke) => {
+        const parts = stroke.split("+").filter(Boolean);
+        if (parts.length <= 1) return stroke.toLowerCase();
+        const key = parts.pop()!;
+        return [...parts.sort(), key].join("+").toLowerCase();
+      })
+      .join(" ");
+  return !!first && !!second && comparisonKey(first) === comparisonKey(second);
 }
 
 function shortcutDefaultForPlatform(definition: ShortcutDefinition, platform: string): string {
+  if (definition.id === "addNextSelectionOccurrence") return selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", platform);
+  if (definition.id === "selectAllSelectionOccurrences") return selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", platform);
   if (definition.id === "closeOtherTabs") return closeOtherTabsDefaultShortcut(platform);
+  if (definition.id === "gotoLine") return gotoLineDefaultShortcut(platform);
   if (definition.id === "navigateTabHistoryBack") return tabNavigationHistoryDefaultShortcut("back", platform);
   if (definition.id === "navigateTabHistoryForward") return tabNavigationHistoryDefaultShortcut("forward", platform);
+  if (definition.id === "toggleAiPanel") return toggleAiPanelDefaultShortcut(platform);
   return definition.defaultShortcut;
 }
 
@@ -585,6 +680,7 @@ export function needsTabNavigationHistoryShortcutMigration(settings?: Partial<Sh
 }
 
 export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): ShortcutSettings {
+  const reservedKeyRepairedActionIds = new Set<ShortcutActionId>();
   const normalized = Object.fromEntries(
     SHORTCUT_DEFINITIONS.map((definition) => {
       const configuredValue = settings?.[definition.id];
@@ -602,16 +698,27 @@ export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>, 
         configured = definition.defaultShortcut;
       }
       const normalized = definition.inputKind === "modifier-only" ? normalizeModifierOnlyShortcut(configured, definition.defaultShortcut) : configured;
+      // 用户显式配置（或云同步带入）的 macOS 保留键会重新劫持 ⌘H（#9068 的
+      // 配置层复现：CodeMirror 对匹配的绑定 preventDefault，AppKit 菜单的 Hide
+      // key equivalent 永远收不到），因此解析后如果命中保留键，则回退到该动作
+      // 的平台默认值——而非清空——与上面云同步跨平台默认值的修复行为保持一致。
+      if (isReservedShortcut(normalized, platform)) {
+        reservedKeyRepairedActionIds.add(definition.id);
+        return [definition.id, platformDefault];
+      }
       return [definition.id, normalized];
     }),
   ) as ShortcutSettings;
 
-  if (!hasExplicitShortcut(settings, "editTableStructure") && settings?.copyCurrentRow === LEGACY_COPY_CURRENT_ROW_DEFAULT) {
-    normalized.editTableStructure = LEGACY_COPY_CURRENT_ROW_DEFAULT;
-    normalized.copyCurrentRow = "";
+  if (settings?.copyCurrentRow === "" && settings?.editTableStructure === LEGACY_COPY_CURRENT_ROW_DEFAULT) {
+    normalized.editTableStructure = EDIT_TABLE_STRUCTURE_DEFAULT;
+    normalized.copyCurrentRow = LEGACY_COPY_CURRENT_ROW_DEFAULT;
   }
 
-  for (const actionId of TAB_NAVIGATION_HISTORY_ACTIONS) {
+  // gotoLine 的平台默认键（Win/Linux 为 Ctrl+G）在该动作引入前是其他动作可合法
+  // 显式绑定的自由键位；无显式配置的默认值与同作用域显式绑定同键时同样让位，
+  // 否则运行时 keymap 先注册的 gotoLine 会遮蔽用户的显式配置。
+  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine"] as ShortcutActionId[]) {
     if (hasExplicitShortcut(settings, actionId)) continue;
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
     if (!definition) continue;
@@ -620,7 +727,55 @@ export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>, 
     if (occupiedByExistingAction) normalized[actionId] = "";
   }
 
+  // 修复后的平台默认值如果被同一作用域内另一动作的显式配置占用，则清空而非套用：
+  // 默认值不是用户的选择，强加回去会让用户刻意绑定的动作变得不可达——运行时的
+  // keymap 先匹配先执行（QueryEditor.vue 中 find 绑定注册在 formatSql 之前，
+  // 二者默认都是 Mod+F 时 formatSql 永远轮不到）。用户显式配置必须赢，
+  // 占用者只统计显式配置（hasExplicitShortcut），默认值之间的“占位”不算。
+  // 与上面 TAB_NAVIGATION_HISTORY_ACTIONS 的占用判定同构；清空后由上方
+  // copyCurrentRow/editTableStructure 迁移与 tab 导航占位判定依赖的值均不受影响。
+  for (const actionId of reservedKeyRepairedActionIds) {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
+    if (!definition) continue;
+    const repairedValue = normalized[actionId];
+    const occupiedByExistingAction = SHORTCUT_DEFINITIONS.some((item) => item.id !== actionId && item.scope === definition.scope && hasExplicitShortcut(settings, item.id) && shortcutsUseSameKeys(normalized[item.id], repairedValue, platform));
+    if (occupiedByExistingAction) normalized[actionId] = "";
+  }
+
   return normalized;
+}
+
+export interface CapturedShortcutEdit {
+  /** 归一化后的完整键位表：与 store 落盘口径一致，草稿直接采用它就不会与落盘值分叉。 */
+  shortcuts: ShortcutSettings;
+  /**
+   * 用户按下的组合命中了“另一平台的默认键”规则：落盘时该字面量会被换成本机平台
+   * 的默认键，所以这个组合在本平台不可能被保存（见上方 PLATFORM_DEFAULT_SHORTCUTS）。
+   */
+  rejectedByPlatformDefault: boolean;
+  /** 归一化是否改动了任意一行（跨平台默认键、旧默认键、遗留迁移都会改动）。 */
+  changed: boolean;
+}
+
+/**
+ * 捕获阶段的归一化：把用户在设置面板按下的组合先过一遍落盘时会走的
+ * `normalizeShortcutSettings`，让草稿始终是持久化值的**不动点**。
+ *
+ * 设置面板的“有无未保存改动”是拿草稿和 store 里的值做 JSON 比较
+ * （`editorSettingsDraftChanged`）得来的：草稿里只要存在一个会被落盘口径改写的
+ * 值，这个比较就永远为真——「应用」看起来毫无反应，「应用并关闭」每次都弹
+ * “未保存的更改”，改了多少次都存不进去（#9881：把「关闭其他标签页」改成 ⇧⌥W，
+ * 落盘时被跨平台默认键规则换回 ⌥⌘W）。调用方拿到结果后必须采用 `shortcuts`，
+ * 并在 `rejectedByPlatformDefault` 为真时提示用户换一个组合。
+ */
+export function resolveCapturedShortcutEdit(actionId: ShortcutActionId, shortcut: string, shortcuts: ShortcutSettings, platform = globalThis.navigator?.platform || ""): CapturedShortcutEdit {
+  const next = normalizeShortcutSettings({ ...shortcuts, [actionId]: shortcut }, platform);
+  const rejectedByPlatformDefault = next[actionId] !== shortcut && (PLATFORM_DEFAULT_SHORTCUTS[actionId]?.has(shortcut) === true || (actionId === "closeTab" && shortcut === LEGACY_CLOSE_TAB_DEFAULT));
+  return {
+    shortcuts: next,
+    rejectedByPlatformDefault,
+    changed: SHORTCUT_DEFINITIONS.some((definition) => next[definition.id] !== shortcuts[definition.id]),
+  };
 }
 
 export function shortcutToCodeMirrorKey(shortcut: string): string {
@@ -646,6 +801,47 @@ export function formatShortcut(shortcut: string, platform = globalThis.navigator
     .join("+");
 }
 
+// macOS 上由系统/应用菜单占用的快捷键（DBX 自己的应用子菜单，
+// src-tauri/src/lib.rs）：
+//   Mod+H      Hide，⌘H
+//   Alt+Mod+H  Hide Others，⌥⌘H
+// Web 视图中任何绑定只要 preventDefault 都会挡住 AppKit 的菜单 key
+// equivalent —— 这正是 #9068 里 ⌘H 打开替换面板、应用无法隐藏的机制，
+// 所以配置层必须把这些键从所有可绑定动作中排除出去。
+// 刻意不包含 ⌘M（Minimize）与 ⌘Q（Quit）：它们不在报告的问题范围内，
+// 加入会静默解绑已有用户配置；将来如需覆盖，扩展该集合即可。
+export const MACOS_RESERVED_SHORTCUTS: ReadonlySet<string> = new Set(["Mod+H", "Alt+Mod+H"]);
+
+// 本模块内的规范比较形式：在 macOS 分支上（isReservedShortcut 已短路掉非 mac
+// 平台），Mod 永远是 ⌘，因此把 Meta/Cmd 别名写成 Mod 后再解析为 Meta，与
+// Ctrl/Control 区分开——不能复用 canonicalShortcutKey，它按 "Win32" 把 Mod
+// 展开为 Ctrl，会把 ⌃H 误判成 ⌘H。修饰键排序、键名小写，使
+// Alt+Mod+H 与 Mod+Alt+H 归一为同一个串。
+function macCanonicalShortcut(shortcut: string): string {
+  // 保留键判定必须先 trim：配置层消费时会对值做 trim（createQueryEditorReplaceShortcutHandler
+  // 等），手工编辑设置 JSON 时误留的前后空白不能成为绕过保留键判定的途径。
+  const parts = parseShortcutParts(shortcut.replace(/\b(?:Meta|Cmd)\b/g, "Mod").trim());
+  if (parts.length === 0) return "";
+  const key = parts[parts.length - 1] ?? "";
+  const modifiers = parts
+    .slice(0, -1)
+    .map((modifier) => (modifier === "Mod" ? "Meta" : modifier === "Control" ? "Ctrl" : modifier))
+    .sort()
+    .join("+");
+  return `${modifiers}${modifiers ? "+" : ""}${key}`.toLowerCase();
+}
+
+export function isReservedShortcut(shortcut: string, platform = globalThis.navigator?.platform || ""): boolean {
+  // 仅 macOS 保留：Mod+H 在 Windows/Linux 上展开为 Ctrl+H（正常的替换键），
+  // 必须原样保留。该短路条件必须先于下面的比较执行。
+  if (!shortcut || !isMacShortcutPlatform(platform)) return false;
+  const canonical = macCanonicalShortcut(shortcut);
+  for (const reserved of MACOS_RESERVED_SHORTCUTS) {
+    if (macCanonicalShortcut(reserved) === canonical) return true;
+  }
+  return false;
+}
+
 export function findShortcutConflict(actionId: ShortcutActionId, shortcut: string, shortcuts: ShortcutSettings, platform = globalThis.navigator?.platform || ""): ShortcutActionId | null {
   if (!shortcut) return null;
   const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
@@ -653,4 +849,50 @@ export function findShortcutConflict(actionId: ShortcutActionId, shortcut: strin
 
   const conflict = SHORTCUT_DEFINITIONS.find((item) => item.id !== actionId && item.scope === definition.scope && shortcutsUseSameKeys(shortcuts[item.id], shortcut, platform));
   return conflict?.id ?? null;
+}
+
+/**
+ * 跨作用域同键（**仅用于提示，不参与任何修复**）。
+ *
+ * 不同作用域共用同一个组合是**有意的设计**：`find`（editor）与
+ * `focusSearch`（global）默认都是 `Mod+F`，运行时由焦点/目标路由区分
+ * （`App.vue` 在 `defaultPrevented` 时让位，`ContentArea.focusSearch()`
+ * 按聚焦面路由）。因此本函数只**只读地报告**这类重叠，供设置界面以
+ * “提示”级别展示；绝不能拿它的结果去改写配置——`normalizeShortcutSettings`
+ * 的占用判定刻意只统计**同作用域**（见该函数内的两张占用轮），跨作用域
+ * 重叠不在其范围内。
+ *
+ * 同作用域重复**不**在此返回（那是必须阻断的冲突，见 `findShortcutConflict`）。
+ * 未绑定（空串）不参与比较。比较口径与 `findShortcutConflict` 一致：
+ * `formatShortcut` 展开 `Mod`、修饰键排序、大小写不敏感，因此
+ * `Mod+Shift+D` 与 `Shift+Mod+D` 视为同键。
+ */
+export function findCrossScopeShortcutConflicts(shortcuts: ShortcutSettings, platform = globalThis.navigator?.platform || ""): Partial<Record<ShortcutActionId, ShortcutActionId[]>> {
+  const conflicts: Partial<Record<ShortcutActionId, ShortcutActionId[]>> = {};
+  for (const definition of SHORTCUT_DEFINITIONS) {
+    const shortcut = shortcuts[definition.id];
+    if (!shortcut) continue;
+    const others = SHORTCUT_DEFINITIONS.filter((item) => item.id !== definition.id && item.scope !== definition.scope && shortcutsUseSameKeys(shortcuts[item.id], shortcut, platform)).map((item) => item.id);
+    if (others.length > 0) conflicts[definition.id] = others;
+  }
+  return conflicts;
+}
+
+/**
+ * 去重后的重复对数。行→对方 的映射会把同一对重复算两次（双向各一次），
+ * 而摘要文案要说的是“有多少组重复”，故统一按无序对折算。
+ *
+ * 同时接受 L1（每行单个对方）与 L2（每行多个对方）两种形状，
+ * 让同作用域与跨作用域的计数口径保持一致。
+ */
+export function countShortcutConflictPairs(conflicts: Partial<Record<ShortcutActionId, ShortcutActionId | ShortcutActionId[]>>): number {
+  const pairs = new Set<string>();
+  for (const [actionId, value] of Object.entries(conflicts)) {
+    if (!value) continue;
+    for (const other of Array.isArray(value) ? value : [value]) {
+      if (!other) continue;
+      pairs.add([actionId, other].sort().join("|"));
+    }
+  }
+  return pairs.size;
 }

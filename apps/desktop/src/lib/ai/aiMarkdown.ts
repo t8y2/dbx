@@ -56,6 +56,14 @@ export function formatAiInlineMarkdown(text: string): string {
   }
 }
 
+export function formatAiInlineMarkdownFragment(text: string): string {
+  try {
+    return markedInstance.parseInline(text) as string;
+  } catch {
+    return escapeHtml(text);
+  }
+}
+
 export function normalizeAiMarkdownLink(href: string): string | null {
   try {
     const url = new URL(href);
@@ -84,7 +92,7 @@ export function handleAiMarkdownLinkClick(event: AiMarkdownLinkClickEvent, openU
   return true;
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 

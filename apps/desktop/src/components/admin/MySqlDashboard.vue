@@ -11,6 +11,7 @@ import MetricLineChart from "@/components/chart/MetricLineChart.vue";
 import * as api from "@/lib/backend/api";
 import { computeQps, computeRate, formatBytes, formatBytesPerSec, formatNumber, formatRate, formatUptime, GLOBAL_STATUS_SQL, GLOBAL_VARIABLES_SQL, innodbBufferHitRatio, MAX_SAMPLES, parseStatusResult, statusEntries, statusNumber, type StatusSample } from "@/lib/database/mysqlServerStatus";
 import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connectionId: string;
@@ -19,15 +20,16 @@ const props = defineProps<{
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ autoRefreshInterval?: number; statusSearch?: string; showStatusTable?: boolean }>({}, "MySqlDashboard");
 
 const loading = ref(false);
 const fetching = ref(false);
 const error = ref("");
 const variables = ref<Record<string, string>>({});
 const samples = ref<StatusSample[]>([]);
-const autoRefreshInterval = ref(5);
-const statusSearch = ref("");
-const showStatusTable = ref(true);
+const autoRefreshInterval = ref([0, 1, 2, 5, 10].includes(restoredUiState.autoRefreshInterval ?? -1) ? restoredUiState.autoRefreshInterval! : 5);
+const statusSearch = ref(restoredUiState.statusSearch ?? "");
+const showStatusTable = ref(restoredUiState.showStatusTable ?? true);
 const scrollerRef = ref<HTMLElement | null>(null);
 const scrollerContentRef = ref<HTMLElement | null>(null);
 const scrollbarTrackRef = ref<HTMLElement | null>(null);
@@ -41,6 +43,8 @@ const {
   onThumbPointerDown: onScrollbarThumbPointerDown,
 } = useVerticalOverlayScrollbar(scrollerRef, scrollerContentRef, scrollbarTrackRef);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+trackUiState(() => ({ autoRefreshInterval: autoRefreshInterval.value, statusSearch: statusSearch.value, showStatusTable: showStatusTable.value }));
 
 const connectionName = computed(() => connectionStore.getConfig(props.connectionId)?.name ?? "");
 const latest = computed(() => samples.value[samples.value.length - 1]);

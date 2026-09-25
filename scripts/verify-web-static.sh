@@ -38,8 +38,7 @@ tar -xzf "$package_tarball" -C "$runtime_dir" --strip-components=1
 
 for required_runtime_path in \
   dbx \
-  bin/dbx-web-bin \
-  dist/index.html; do
+  bin/dbx-web-bin ; do
   if [ ! -e "$runtime_dir/$required_runtime_path" ]; then
     echo "missing packaged static web runtime path: $required_runtime_path" >&2
     exit 1

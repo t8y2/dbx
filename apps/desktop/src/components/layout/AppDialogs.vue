@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 const ConnectionDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionDialog.vue"));
 const DangerConfirmDialog = defineAsyncComponent(() => import("@/components/editor/DangerConfirmDialog.vue"));
+const MultiDbDangerConfirmDialog = defineAsyncComponent(() => import("@/components/layout/MultiDbDangerConfirmDialog.vue"));
 const SqlParameterDialog = defineAsyncComponent(() => import("@/components/editor/SqlParameterDialog.vue"));
 const DataTransferDialog = defineAsyncComponent(() => import("@/components/transfer/DataTransferDialog.vue"));
 const SchemaDiffDialog = defineAsyncComponent(() => import("@/components/diff/SchemaDiffDialog.vue"));
@@ -12,7 +13,10 @@ const DataCompareDialog = defineAsyncComponent(() => import("@/components/diff/D
 const SqlFileExecutionDialog = defineAsyncComponent(() => import("@/components/sql-file/SqlFileExecutionDialog.vue"));
 const SchemaDiagramDialog = defineAsyncComponent(() => import("@/components/diagram/SchemaDiagramDialog.vue"));
 const DatabaseDocsDialog = defineAsyncComponent(() => import("@/components/docs/DatabaseDocsDialog.vue"));
+const DataDictionaryDialog = defineAsyncComponent(() => import("@/components/docs/DataDictionaryDialog.vue"));
 const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
+const MongoImportDialog = defineAsyncComponent(() => import("@/components/document/MongoImportDialog.vue"));
+const MongoDatabaseDumpDialog = defineAsyncComponent(() => import("@/components/document/MongoDatabaseDumpDialog.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/components/config/ConfigConnectionSelectDialog.vue"));
@@ -26,15 +30,18 @@ import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useReadOnlyUnlockStore, WRITE_UNLOCK_FIVE_MINUTES_SECS, WRITE_UNLOCK_ONE_MINUTE_SECS, type WriteUnlockDurationSecs } from "@/stores/readOnlyUnlockStore";
 import { useDialogSources } from "@/composables/useDialogSources";
-import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import type { ConnectionDeepLinkDraft, ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import type { SqlParameterDescriptor, SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import type { DatabaseType } from "@/types/database";
+import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 
 const props = defineProps<{
   showConnectionDialog: boolean;
   connectionPrefill?: ConnectionDeepLinkDraft | null;
+  connectionUpdate?: ConnectionDeepLinkUpdate | null;
+  connectionPluginProvider?: PluginCenterFocus | null;
   connectionInitialTab?: ConfigTab;
   showDangerDialog: boolean;
   dangerSql: string;
@@ -59,6 +66,7 @@ const emit = defineEmits<{
   connectFailed: [message: string];
   openDriverStore: [focus?: DriverStoreFocus];
   openTunnelProfileSettings: [];
+  openConnectionSettings: [connectionId: string, initialTab: "advanced"];
   openLineageTarget: [
     target: {
       connectionId: string;
@@ -120,16 +128,6 @@ watch(
     if (pending) unlockDuration.value = WRITE_UNLOCK_ONE_MINUTE_SECS;
   },
 );
-const multiDbDangerDetails = computed(() => {
-  const request = sqlExecutionDangerStore.pending;
-  if (!request) return "";
-  return [request.targetLabel || request.connectionName, request.database].filter(Boolean).join("\n");
-});
-const multiDbDangerMessage = computed(() => {
-  const request = sqlExecutionDangerStore.pending;
-  return request?.kind === "redis" ? t("dangerDialog.redisCommandMessage") : t("dangerDialog.message");
-});
-
 const editConfig = computed(() => {
   const id = connectionStore.editingConnectionId;
   if (!id) return undefined;
@@ -138,7 +136,8 @@ const editConfig = computed(() => {
 const shouldShowConnectionDialog = computed(() => props.showConnectionDialog || !!editConfig.value);
 
 watch(editConfig, (v) => {
-  if (v) emit("update:showConnectionDialog", true);
+  if (!v) return;
+  emit("update:showConnectionDialog", true);
 });
 
 watch(
@@ -165,6 +164,8 @@ watch(
     :open="shouldShowConnectionDialog"
     :edit-config="editConfig"
     :prefill-config="connectionPrefill"
+    :update-prefill="connectionUpdate"
+    :plugin-provider="connectionPluginProvider"
     :initial-tab="connectionInitialTab"
     @update:open="emit('update:showConnectionDialog', $event)"
     @connect-started="emit('connectStarted', $event)"
@@ -221,19 +222,7 @@ watch(
       </fieldset>
     </template>
   </DangerConfirmDialog>
-  <DangerConfirmDialog
-    v-if="sqlExecutionDangerStore.pending"
-    :open="true"
-    :title="t('multiDbExecute.dangerTitle')"
-    :message="multiDbDangerMessage"
-    :details-text="multiDbDangerDetails"
-    :sql="sqlExecutionDangerStore.pending.sql"
-    :confirm-label="t('multiDbExecute.dangerConfirm')"
-    :show-suppress-toggle="false"
-    :close-on-confirm="false"
-    @update:open="(open) => !open && sqlExecutionDangerStore.cancel()"
-    @confirm="sqlExecutionDangerStore.confirm()"
-  />
+  <MultiDbDangerConfirmDialog v-if="sqlExecutionDangerStore.pending" :request="sqlExecutionDangerStore.pending" @confirm="sqlExecutionDangerStore.confirm()" @cancel="sqlExecutionDangerStore.cancel()" />
   <SqlParameterDialog
     v-if="showSqlParameterDialog"
     :open="showSqlParameterDialog"
@@ -255,7 +244,16 @@ watch(
     :prefill-target-database="dialogs.transferPrefillTargetDatabase.value"
     :prefill-target-schema="dialogs.transferPrefillTargetSchema.value"
   />
-  <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />
+  <SchemaDiffDialog
+    v-if="dialogs.showSchemaDiffDialog.value"
+    v-model:open="dialogs.showSchemaDiffDialog.value"
+    :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value"
+    :prefill-database="dialogs.schemaDiffPrefillDatabase.value"
+    :prefill-schema="dialogs.schemaDiffPrefillSchema.value"
+    :prefill-selected-routines="dialogs.schemaDiffPrefillSelectedRoutines.value"
+    :prefill-result-tab="dialogs.schemaDiffPrefillResultTab.value || undefined"
+    :session-id="dialogs.schemaDiffSessionId.value"
+  />
   <DataCompareDialog
     v-if="dialogs.showDataCompareDialog.value"
     v-model:open="dialogs.showDataCompareDialog.value"
@@ -263,8 +261,15 @@ watch(
     :prefill-database="dialogs.dataComparePrefillDatabase.value"
     :prefill-schema="dialogs.dataComparePrefillSchema.value"
     :prefill-table="dialogs.dataComparePrefillTable.value"
+    :session-id="dialogs.dataCompareSessionId.value"
   />
-  <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" :prefill-file-path="dialogs.sqlFilePrefillFilePath.value" />
+  <SqlFileExecutionDialog
+    v-model:open="dialogs.showSqlFileDialog.value"
+    :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value"
+    :prefill-database="dialogs.sqlFilePrefillDatabase.value"
+    :prefill-file-path="dialogs.sqlFilePrefillFilePath.value"
+    :prefill-preview="dialogs.sqlFilePrefillPreview.value"
+  />
   <SchemaDiagramDialog
     v-if="dialogs.showDiagramDialog.value"
     v-model:open="dialogs.showDiagramDialog.value"
@@ -272,9 +277,18 @@ watch(
     :prefill-database="dialogs.diagramPrefillDatabase.value"
     :prefill-schema="dialogs.diagramPrefillSchema.value"
     :focus-table-name="dialogs.diagramFocusTableName.value"
+    :focus-table-names="dialogs.diagramFocusTableNames.value"
     @open-target="emit('openDiagramTarget', $event)"
   />
   <DatabaseDocsDialog v-if="dialogs.showDocsDialog.value" v-model:open="dialogs.showDocsDialog.value" :prefill-connection-id="dialogs.docsPrefillConnectionId.value" :prefill-database="dialogs.docsPrefillDatabase.value" :prefill-schema="dialogs.docsPrefillSchema.value" />
+  <DataDictionaryDialog
+    v-if="dialogs.showDataDictionaryDialog.value"
+    v-model:open="dialogs.showDataDictionaryDialog.value"
+    :prefill-connection-id="dialogs.dataDictionaryPrefillConnectionId.value"
+    :prefill-database="dialogs.dataDictionaryPrefillDatabase.value"
+    :prefill-schema="dialogs.dataDictionaryPrefillSchema.value"
+    :prefill-table-names="dialogs.dataDictionaryPrefillTableNames.value"
+  />
   <TableImportDialog
     v-if="dialogs.showTableImportDialog.value"
     v-model:open="dialogs.showTableImportDialog.value"
@@ -282,6 +296,14 @@ watch(
     :prefill-database="dialogs.tableImportPrefillDatabase.value"
     :prefill-schema="dialogs.tableImportPrefillSchema.value"
     :prefill-table="dialogs.tableImportPrefillTable.value"
+  />
+  <MongoImportDialog v-model:open="dialogs.showMongoImportDialog.value" :connection-id="dialogs.mongoImportPrefillConnectionId.value" :database="dialogs.mongoImportPrefillDatabase.value" :collection="dialogs.mongoImportPrefillCollection.value" />
+  <MongoDatabaseDumpDialog
+    v-if="dialogs.showMongoDatabaseDumpDialog.value"
+    v-model:open="dialogs.showMongoDatabaseDumpDialog.value"
+    :connection-id="dialogs.mongoDatabaseDumpPrefillConnectionId.value"
+    :database="dialogs.mongoDatabaseDumpPrefillDatabase.value"
+    :mode="dialogs.mongoDatabaseDumpMode.value"
   />
   <DataGenerateDialog
     v-if="dialogs.showTableDataGenerateDialog.value"
@@ -318,6 +340,7 @@ watch(
     :prefill-table="dialogs.databaseExportPrefillTable.value"
     :prefill-tables="dialogs.databaseExportPrefillTables.value"
     :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
+    @open-connection-settings="emit('openConnectionSettings', $event, 'advanced')"
   />
   <ConfigConnectionSelectDialog
     v-if="dialogs.showConfigConnectionSelectDialog.value"

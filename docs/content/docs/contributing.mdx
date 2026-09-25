@@ -15,6 +15,10 @@ This tutorial is for first-time DBX contributors. By the end, you will have:
   Documentation, translations, small UI fixes, and issues for a database you can test are good first contributions. Keep each pull request focused on one verifiable problem.
 </Callout>
 
+<Callout type="warn">
+  Pull requests described on this page target `t8y2/dbx` and cover the DBX application, plugin platform, SDK, CLI, documentation, and Agents. Ordinary plugin source remains in the plugin's own repository, while Marketplace listing PRs target `t8y2/dbx-store`. See [Develop and Submit DBX Plugins](/en/docs/plugin-development) for the complete flow.
+</Callout>
+
 ## 1. Choose and Claim an Issue
 
 Open [DBX Issues](https://github.com/t8y2/dbx/issues) and choose an issue that has no assignee and no active contributor in its comments. Good first contributions have one of these properties:
@@ -220,7 +224,7 @@ The service ports listen on `127.0.0.1` by default. Set `DB_BIND_ADDRESS=0.0.0.0
 | `packages/app-tests/` | Tests for shared frontend logic |
 | `packages/cli/` | DBX CLI |
 | `packages/mcp-server/` | MCP Server |
-| `docs/content/docs/` | Bilingual website documentation |
+| `docs/content/docs/` | Multilingual website documentation |
 | `agents/drivers/` | Java/JDBC and selected native database agents |
 
 Search for a feature name, visible label, or error message when you do not know the file yet:
@@ -233,12 +237,14 @@ rg "text to find" apps/desktop/src crates src-tauri packages
 
 ### Path A: Update the Website Docs
 
-Documentation is the easiest first contribution. English and Chinese pages use the same base filename:
+Documentation is the easiest first contribution. Every language uses the same base filename:
 
 ```text
 docs/content/docs/example.mdx
 docs/content/docs/example.cn.mdx
 ```
+
+Docs site languages follow `docs/lib/i18n.ts` and `docs/scripts/languages.mjs` (currently `en` / `cn`).
 
 Start the docs site:
 
@@ -268,7 +274,7 @@ pnpm --dir docs content:check
 make docs-build
 ```
 
-`content:check` verifies bilingual page pairs, navigation coverage and ordering, frontmatter, duplicate titles, and internal links. `make docs-build` runs the check again and validates the Next.js production build.
+`content:check` verifies that every page exists in each language, navigation coverage and ordering, frontmatter, duplicate titles, and internal links. `make docs-build` runs the check again and validates the Next.js production build.
 
 ### Path B: Change the Desktop Frontend
 

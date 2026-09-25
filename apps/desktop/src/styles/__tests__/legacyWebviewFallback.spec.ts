@@ -16,12 +16,17 @@ const connectionDialogSource = readFileSync(new URL("../../components/connection
 const connectionTreeSource = readFileSync(new URL("../../components/sidebar/ConnectionTree.vue", import.meta.url), "utf8");
 const activeConnectionFilterSource = readFileSync(new URL("../../components/sidebar/ActiveConnectionFilterButton.vue", import.meta.url), "utf8");
 const scheduledDatabaseBackupSource = readFileSync(new URL("../../components/backup/ScheduledDatabaseBackupSettings.vue", import.meta.url), "utf8");
+const databaseBackupConfigFieldsSource = readFileSync(new URL("../../components/backup/DatabaseBackupConfigFields.vue", import.meta.url), "utf8");
 const driverStoreDialogSource = readFileSync(new URL("../../components/config/DriverStoreDialog.vue", import.meta.url), "utf8");
+const driverStoreAgentRowSource = readFileSync(new URL("../../components/config/DriverStoreAgentRow.vue", import.meta.url), "utf8");
 const tunnelProfileManagerSource = readFileSync(new URL("../../components/connection/TunnelProfileManager.vue", import.meta.url), "utf8");
 const changelogPanelSource = readFileSync(new URL("../../components/settings/ChangelogPanel.vue", import.meta.url), "utf8");
 const editorSettingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const switchSource = readFileSync(new URL("../../components/ui/switch/Switch.vue", import.meta.url), "utf8");
 const aiAssistantSource = readFileSync(new URL("../../components/editor/AiAssistant.vue", import.meta.url), "utf8");
+const dataGridSource = readFileSync(new URL("../../components/grid/DataGrid.vue", import.meta.url), "utf8");
+const dataGridTableInfoPanelsSource = readFileSync(new URL("../../components/grid/DataGridTableInfoPanels.vue", import.meta.url), "utf8");
+const tableStructureEditorSource = readFileSync(new URL("../../components/structure/TableStructureEditor.vue", import.meta.url), "utf8");
 const desktopIndexSource = readFileSync(new URL("../../../index.html", import.meta.url), "utf8");
 const connectionDialogLegacyCss = readFileSync(new URL("../../../public/connection-dialog-legacy.css", import.meta.url), "utf8");
 const legacyWebViewSource = readFileSync(new URL("../../lib/ui/legacyWebView.ts", import.meta.url), "utf8");
@@ -88,6 +93,18 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(fallback).toContain(".space-y-2\\.5 > * + *");
     expect(scheduledDatabaseBackupSource).toContain("dbx-form-dialog dbx-form-dialog--lg");
     expect(scheduledDatabaseBackupSource).toContain("max-w-[min(720px,calc(100vw-32px))]");
+    expect(scheduledDatabaseBackupSource).toContain("overflow-x-hidden overflow-y-auto pr-8 [scrollbar-gutter:stable]");
+    expect(scheduledDatabaseBackupSource).toContain("dbx-backup-dialog");
+    expect(scheduledDatabaseBackupSource).toContain('class="backup-schedule-form grid gap-5 py-1"');
+    expect(databaseBackupConfigFieldsSource).toContain('class="backup-config-fields grid gap-5 py-1"');
+    expect(databaseBackupConfigFieldsSource).toContain('class="backup-destination-field"');
+    expect(databaseBackupConfigFieldsSource).toContain('class="backup-destination-picker"');
+    expect(databaseBackupConfigFieldsSource).toContain("padding-right: 2.5rem;");
+    expect(databaseBackupConfigFieldsSource).toContain("position: absolute;");
+    expect(databaseBackupConfigFieldsSource).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(databaseBackupConfigFieldsSource).toContain("overflow-wrap: anywhere;");
+    expect(databaseBackupConfigFieldsSource).toContain("word-break: break-all;");
+    expect(fallback).toContain('[data-slot="dialog-content"].dbx-backup-dialog > *');
     expect(fallback).toContain('[data-slot="dialog-content"].dbx-form-dialog');
     expect(fallback).toContain('[data-slot="dialog-content"].dbx-form-dialog--lg');
     expect(fallback).toContain("max-width: 45rem !important;");
@@ -133,13 +150,14 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps the DDL dialog layout on the global legacy dialog fallbacks", () => {
-    expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog sm:max-w-190"');
+    expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog flex min-h-0 flex-col overflow-hidden sm:max-w-190"');
     // The dialog content element is rendered through reka-ui's portal Teleport and
     // never carries this component's scoped data-v attribute, so per-dialog rules
     // (scoped or unscoped) are avoided; the global width table covers the dialog.
     expect(ddlViewDialogSource).not.toContain("dbx-legacy-webview");
     expect(ddlViewDialogSource).not.toContain("@media");
     expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-190"]');
+    expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog');
   });
 
   it("keeps the global dialog fallback block outside media queries", () => {
@@ -187,6 +205,12 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(rule).toContain("max-width: none !important;");
     expect(rule).toContain("width: calc(100vw - 2rem) !important;");
     expect(rule).toContain("var(--dbx-viewport-height)");
+  });
+
+  it("allows the DDL viewer to resize beyond the default legacy dialog width", () => {
+    const ruleStart = globalsCss.indexOf('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog');
+    expect(ruleStart).toBeGreaterThan(-1);
+    expect(globalsCss.slice(ruleStart, globalsCss.indexOf("}", ruleStart))).toContain("max-width: calc(100vw - 32px) !important;");
   });
 
   it("uses an explicit tooltip copy-button hover color in legacy WebViews", () => {
@@ -279,6 +303,52 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(aiAssistantSource).toContain("background: rgba(212, 212, 216, 0.45);");
   });
 
+  it("keeps structure and table-info scrollbars visible without OKLab color mixing", () => {
+    const sources = [dataGridSource, dataGridTableInfoPanelsSource, tableStructureEditorSource];
+    const thumbRules = sources.flatMap((source) => [...source.matchAll(/[^{}]+::-webkit-scrollbar-thumb(?:\)|)\s*\{[^{}]+\}/g)].map((match) => match[0])).filter((rule) => rule.includes("color-mix(in oklab, var(--foreground) 30%, transparent)"));
+    const hoverRules = sources.flatMap((source) => [...source.matchAll(/[^{}]+::-webkit-scrollbar-thumb:hover(?:\)|)\s*\{[^{}]+\}/g)].map((match) => match[0])).filter((rule) => rule.includes("color-mix(in oklab, var(--foreground) 48%, transparent)"));
+
+    expect(thumbRules).toHaveLength(6);
+    expect(hoverRules).toHaveLength(6);
+    for (const rule of thumbRules) {
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeGreaterThan(-1);
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeLessThan(rule.indexOf("background: color-mix(in oklab, var(--foreground) 30%, transparent);"));
+    }
+    for (const rule of hoverRules) {
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeGreaterThan(-1);
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeLessThan(rule.indexOf("background: color-mix(in oklab, var(--foreground) 48%, transparent);"));
+    }
+
+    const horizontalThumbStart = tableStructureEditorSource.indexOf(".structure-horizontal-scrollbar__thumb {");
+    const horizontalHoverStart = tableStructureEditorSource.indexOf(".structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,", horizontalThumbStart);
+    const horizontalThumb = tableStructureEditorSource.slice(horizontalThumbStart, horizontalHoverStart);
+    const horizontalHover = tableStructureEditorSource.slice(horizontalHoverStart, tableStructureEditorSource.indexOf("/* Editable values", horizontalHoverStart));
+    expect(horizontalThumb.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeGreaterThan(-1);
+    expect(horizontalThumb.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeLessThan(horizontalThumb.indexOf("background: color-mix(in oklab, var(--foreground) 30%, transparent);"));
+    expect(horizontalHover.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeGreaterThan(-1);
+    expect(horizontalHover.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeLessThan(horizontalHover.indexOf("background: color-mix(in oklab, var(--foreground) 48%, transparent);"));
+
+    expect(dataGridSource).toMatch(/html\.dbx-legacy-webview\.dark \.ddl-code::-webkit-scrollbar-thumb\s*\{\s*background: rgba\(212, 212, 216, 0\.3\);/);
+    expect(dataGridSource).toMatch(/html\.dbx-legacy-webview\.dark \.ddl-code::-webkit-scrollbar-thumb:hover\s*\{\s*background: rgba\(212, 212, 216, 0\.48\);/);
+    expect(dataGridTableInfoPanelsSource).toMatch(/html\.dbx-legacy-webview\.dark \.table-info-scroller::-webkit-scrollbar-thumb\s*\{\s*background: rgba\(212, 212, 216, 0\.3\);/);
+    expect(dataGridTableInfoPanelsSource).toMatch(/html\.dbx-legacy-webview\.dark \.table-info-scroller::-webkit-scrollbar-thumb:hover\s*\{\s*background: rgba\(212, 212, 216, 0\.48\);/);
+    const structureLegacyThumbStart = tableStructureEditorSource.indexOf("html.dbx-legacy-webview.dark .structure-ddl-editor .cm-scroller::-webkit-scrollbar-thumb,");
+    const structureLegacyHoverStart = tableStructureEditorSource.indexOf("html.dbx-legacy-webview.dark .structure-ddl-editor .cm-scroller::-webkit-scrollbar-thumb:hover,", structureLegacyThumbStart);
+    const structureLegacyThumb = tableStructureEditorSource.slice(structureLegacyThumbStart, structureLegacyHoverStart);
+    const structureLegacyHover = tableStructureEditorSource.slice(structureLegacyHoverStart);
+    expect(structureLegacyThumbStart).toBeGreaterThan(-1);
+    expect(structureLegacyHoverStart).toBeGreaterThan(structureLegacyThumbStart);
+    expect(structureLegacyThumb).toContain("html.dbx-legacy-webview.dark .structure-card-scroller::-webkit-scrollbar-thumb,");
+    expect(structureLegacyThumb).toContain("html.dbx-legacy-webview.dark .structure-table-scroller::-webkit-scrollbar-thumb,");
+    expect(structureLegacyThumb).toContain("html.dbx-legacy-webview.dark .structure-horizontal-scrollbar__thumb");
+    expect(structureLegacyThumb).toContain("background: rgba(212, 212, 216, 0.3);");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-card-scroller::-webkit-scrollbar-thumb:hover,");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-table-scroller::-webkit-scrollbar-thumb:hover,");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-horizontal-scrollbar--dragging .structure-horizontal-scrollbar__thumb");
+    expect(structureLegacyHover).toContain("background: rgba(212, 212, 216, 0.48);");
+  });
+
   it("keeps selected tiles readable in WebViews without color-mix support", () => {
     const fallbackStart = globalsCss.indexOf("@supports not (background-color: color-mix(in srgb, black 10%, transparent))");
     const choiceFallback = globalsCss.indexOf(".dbx-choice-selected", fallbackStart);
@@ -330,8 +400,9 @@ describe("legacy WebView CSS fallbacks", () => {
     const fallbackEnd = driverStoreDialogSource.indexOf("@media (max-width: 900px)", fallbackStart);
     const fallback = driverStoreDialogSource.slice(fallbackStart, fallbackEnd);
 
-    expect(driverStoreDialogSource.match(/driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground/g)?.length).toBe(3);
-    expect(driverStoreDialogSource.match(/variant="ghost"\n\s+class="driver-store-local-import-button/g)?.length).toBe(3);
+    expect(driverStoreAgentRowSource.match(/driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground/g)?.length).toBe(1);
+    expect(driverStoreAgentRowSource.match(/variant="ghost"\n\s+class="driver-store-local-import-button/g)?.length).toBe(1);
+    expect(driverStoreDialogSource).toContain("<DriverStoreAgentRow");
     expect(fallback).toContain(".driver-store-local-import-button");
     expect(fallback).toContain("width: 2rem !important;");
     expect(fallback).toContain("height: 2rem !important;");

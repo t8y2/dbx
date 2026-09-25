@@ -16,7 +16,21 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
+      # main 的 ruleset 要求改动走 PR，默认 GITHUB_TOKEN 直推会被 GH013 拒掉；
+      # 用 owner PAT 后 push 以 admin 身份命中 ruleset 的 bypass（同 mcp-release.yml）。
       - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.MCP_RELEASE_TOKEN || secrets.PROJECT_AUTOMATION_TOKEN }}
+      - name: Verify push token
+        # 快照抓取要打好几页 GitHub API，先用一步廉价检查把缺 token 的情况挡在前面，
+        # 否则要等到最后 push 才以 GH013 报错，很难看出是令牌问题。
+        env:
+          PUSH_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN || secrets.PROJECT_AUTOMATION_TOKEN }}
+        run: |
+          if [ -z "$PUSH_TOKEN" ]; then
+            echo "::error::No owner PAT configured; the default GITHUB_TOKEN cannot push to the protected main branch."
+            exit 1
+          fi
       - uses: actions/setup-node@v6
         with:
           node-version: 22

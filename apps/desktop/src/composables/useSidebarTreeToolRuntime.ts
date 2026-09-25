@@ -3,7 +3,8 @@ import type { useConnectionStore } from "@/stores/connectionStore";
 import type { useQueryStore } from "@/stores/queryStore";
 import type { useSettingsStore } from "@/stores/settingsStore";
 import type { TreeNode } from "@/types/database";
-import { allDatabasesExportSourceForNode, databaseExportSourceForNode } from "@/lib/sidebar/sidebarExportRuntime";
+import { allDatabasesExportSourceForNode, databaseExportSourceForNode, sidebarSameSchemaStructureTargets } from "@/lib/sidebar/sidebarExportRuntime";
+import { schemaDiffRoutineKey } from "@/lib/schema/schemaDiffRoutine";
 
 interface SidebarTreeToolRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -11,6 +12,7 @@ interface SidebarTreeToolRuntimeOptions {
   queryStore: ReturnType<typeof useQueryStore>;
   settingsStore: ReturnType<typeof useSettingsStore>;
   tableChildObjectName: (node: TreeNode) => string;
+  acceptedSelectionIds?: () => readonly string[] | null;
 }
 
 export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions) {
@@ -25,13 +27,24 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     };
   }
 
-  function openSchemaDiff() {
+  function openSchemaDiff(options?: { selectedRoutines?: string[]; preferredResultTab?: "tables" | "routines" }) {
     if (!activeNode.value.connectionId) return;
     connectionStore.schemaDiffSource = {
       connectionId: activeNode.value.connectionId,
       database: activeNode.value.database ?? "",
       schema: activeNode.value.schema,
+      selectedRoutines: options?.selectedRoutines,
+      preferredResultTab: options?.preferredResultTab,
     };
+  }
+
+  function openSchemaDiffForRoutine() {
+    const node = activeNode.value;
+    if (!node.connectionId || (node.type !== "procedure" && node.type !== "function")) return;
+    openSchemaDiff({
+      selectedRoutines: [schemaDiffRoutineKey(node.objectName || node.label, node.signature ?? "")],
+      preferredResultTab: "routines",
+    });
   }
 
   function openDataCompare() {
@@ -52,14 +65,21 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     };
   }
 
+  function selectedSameSchemaStructureTargets() {
+    return sidebarSameSchemaStructureTargets(activeNode.value, connectionStore.treeNodes, options.acceptedSelectionIds?.() ?? connectionStore.selectedTreeNodeIds);
+  }
+
   function openDiagram() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
+    const tables = selectedSameSchemaStructureTargets().filter((target) => target.type === "table");
+    const tableNames = tables.length > 1 ? tables.map((target) => target.label) : undefined;
     connectionStore.diagramSource = {
       connectionId: node.connectionId,
       database: node.database,
       schema: node.schema,
-      tableName: node.type === "table" ? node.label : undefined,
+      tableName: tableNames?.length ? tableNames[0] : node.type === "table" ? node.label : undefined,
+      tableNames,
     };
   }
 
@@ -75,6 +95,28 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     };
   }
 
+  function openDataDictionary() {
+    const node = activeNode.value;
+    if (!node.connectionId || !node.database) return;
+    if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
+      const targets = selectedSameSchemaStructureTargets().filter((target) => target.type === "table" || target.type === "view" || target.type === "materialized_view");
+      const tableNames = targets.length > 1 ? targets.map((target) => target.label) : [node.label];
+      connectionStore.dataDictionarySource = {
+        connectionId: node.connectionId,
+        database: node.database,
+        schema: node.schema,
+        tableNames,
+      };
+      return;
+    }
+    connectionStore.dataDictionarySource = {
+      connectionId: node.connectionId,
+      database: node.database,
+      // A database node has no schema, so the collector documents every schema.
+      schema: node.type === "schema" ? node.schema : undefined,
+    };
+  }
+
   function openDatabaseSearch() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
@@ -86,7 +128,18 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
   }
 
   function openDatabaseExport() {
-    connectionStore.databaseExportSource = databaseExportSourceForNode(activeNode.value);
+    const node = activeNode.value;
+    const tables = selectedSameSchemaStructureTargets().filter((target) => target.type === "table");
+    if (tables.length > 1 && node.connectionId && node.database) {
+      connectionStore.databaseExportSource = {
+        connectionId: node.connectionId,
+        database: node.database,
+        schema: node.schema,
+        tableNames: tables.map((target) => target.label),
+      };
+      return;
+    }
+    connectionStore.databaseExportSource = databaseExportSourceForNode(node);
   }
 
   function openAllDatabasesExport() {
@@ -106,6 +159,22 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
       schema: node.schema,
       tableName: node.type === "table" ? node.label : undefined,
     };
+  }
+
+  function openMongoImport() {
+    const node = activeNode.value;
+    if (!node.connectionId || !node.database || node.type !== "mongo-collection") return;
+    connectionStore.mongoImportSource = {
+      connectionId: node.connectionId,
+      database: node.database,
+      collection: node.label,
+    };
+  }
+
+  function openMongoDatabaseDump(mode: "dump" | "restore") {
+    const node = activeNode.value;
+    if (node.type !== "mongo-db" || !node.connectionId || !node.database) return;
+    connectionStore.mongoDatabaseDumpSource = { connectionId: node.connectionId, database: node.database, mode };
   }
 
   function openStructureEditor() {
@@ -146,11 +215,15 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     openDataCompare,
     openDatabaseExport,
     openDatabaseSearch,
+    openDataDictionary,
     openDiagram,
     openDocs,
     openFieldLineage,
+    openMongoImport,
+    openMongoDatabaseDump,
     openScheduledBackups,
     openSchemaDiff,
+    openSchemaDiffForRoutine,
     openSqlFileExecution,
     openStructureEditor,
     openTableImport,

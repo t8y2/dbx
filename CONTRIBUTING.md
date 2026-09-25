@@ -11,6 +11,8 @@ Thanks for taking a look at DBX. Whether you fix a typo, improve docs, or tackle
 
 If you are not sure what to pick, choose an issue with clear reproduction steps, a small scope, or a database you can verify against a real instance. Follow the [complete website tutorial](https://dbxio.com/en/docs/contributing).
 
+`user-priority/*` reflects the reporter's urgency; `ai-priority/*` is an automated repair/implementation suggestion, not a verified diagnosis or release promise. Maintainer decisions take precedence. See the [priority rubric and automation safeguards](.github/scripts/README.md).
+
 ## Development Setup
 
 ### Prerequisites
@@ -42,6 +44,23 @@ make docs              # preview the documentation site
 make cargo-check-fast  # fast Rust checks
 ```
 
+### macOS Development Signing
+
+Use `make dev`, `make dev-fast`, or `pnpm dev:tauri`. These entry points sign each rebuilt debug executable with a stable, local-only development identity before launching it. The first launch may still ask you to select **Always Allow** for DBX's existing Keychain item; subsequent rebuilds keep the same code identity. Direct `pnpm tauri dev` bypasses this setup.
+
+The first run creates a dedicated signing keychain and a self-signed certificate under `~/Library/Application Support/DBX/development-signing/`. It adds only this keychain to your user search list, without changing the default keychain or system trust settings. The directory is owner-only (`0700`); its files, including the generated password used to unlock this development-only signing keychain, are owner-only (`0600`). No release private key or DBX connection-encryption key is exported or replaced. Keep this local identity across rebuilds; do not commit or share it. An incomplete, corrupt, or expired identity fails explicitly rather than silently rotating or falling back to ad-hoc signing.
+
+The runner is restricted to `debug/dbx`, preserves Cargo feature and application arguments, and does not run for Linux, Windows, or release packaging. Custom `CARGO_TARGET_*_RUNNER` variables must be unset for these macOS development entry points.
+
+Core, desktop and Web storage test fixtures use `dbx_core::persistence::test_storage` (the `test-support` dev-dependency feature). They resolve their own data-directory keys before migration preflight, without accessing the user's Keychain or inheriting `DBX_SECRET_KEY` / `DBX_SECRET_KEY_FILE`. Keep the fixture directory and its key together when testing database copies.
+
+```bash
+node --test scripts/dev-tauri.test.mjs
+DBX_TEST_MACOS_KEYCHAIN=1 node --test scripts/dev-tauri.test.mjs
+```
+
+The opt-in macOS integration test creates and removes a temporary signing keychain. It verifies that an ad-hoc rebuild is denied and that two different builds signed with the same identity can read the same test item with system interaction disabled.
+
 ### JDBC Agent Drivers
 
 Agent driver projects live under `agents/`. Java/JDBC driver builds and tests require JDK 21; Gradle can auto-download the toolchain when available.
@@ -65,6 +84,7 @@ For a real local Java agent test, build the target `shadowJar`, back up and repl
 | `crates/dbx-web/` | Docker / Web HTTP backend |
 | `packages/cli/` | `@dbx-app/cli` |
 | `packages/mcp-server/` | `@dbx-app/mcp-server` |
+| `packages/plugin-cli/` | Precompiled `@dbx-app/plugin-cli` launcher and bundled plugin SDKs |
 | `packages/mongo-shell/` | Private MongoDB editor parsing helpers |
 | `docs/` | Official documentation site |
 | `examples/` | Sample configs and automation scripts |
@@ -103,6 +123,13 @@ pnpm test
 ```
 
 For frontend or package changes, run the relevant package tests under `packages/` or `packages/app-tests/`.
+
+Test quality matters more than test count:
+
+- Exercise production functions or mounted components and assert observable results, state changes, errors, or emitted events. Mock external boundaries, not the behavior under test.
+- Do not copy the implementation into a test or use source-string matching to pin class names, local variable names, template fragments, or helper-call spelling. These checks break on harmless refactors without proving runtime behavior. Check layout in a browser rather than inferring it from CSS strings.
+- Extend the existing behavior suite for a regression instead of adding a second source-wiring snapshot. Use table-driven cases when only the inputs and expected outputs differ.
+- File-content checks are appropriate for shipped artifacts, permissions, compatibility rules, and cross-runtime contracts. Keep safety guards until equivalent behavior coverage exists; do not delete a test merely because it reads files, uses mocks, or runs slowly.
 
 ### Documentation
 

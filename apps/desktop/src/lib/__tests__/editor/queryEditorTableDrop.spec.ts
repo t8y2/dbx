@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createColumnReferencePayload, createTableReferencePayload, parseTableReferencePayload, tableReferenceInsertText } from "@/lib/editor/queryEditorTableDrop";
+import { createColumnReferencePayload, createMultiTableReferencePayload, createTableReferencePayload, parseTableReferencePayload, tableReferenceInsertText } from "@/lib/editor/queryEditorTableDrop";
+
+const commaNewline = { columnNameSeparator: "comma-newline" as const };
 
 describe("query editor table reference drop", () => {
   it("inserts a quoted database name for database references", () => {
@@ -102,7 +104,7 @@ describe("query editor table reference drop", () => {
       columnNames: ["id", "order no", "order", "created_at"],
       databaseType: "mysql",
     })!;
-    expect(tableReferenceInsertText(mysql)).toBe("id,\n`order no`,\n`order`,\ncreated_at");
+    expect(tableReferenceInsertText(mysql, undefined, commaNewline)).toBe("id,\n`order no`,\n`order`,\ncreated_at");
 
     const postgres = createColumnReferencePayload({
       connectionId: "conn-1",
@@ -110,7 +112,29 @@ describe("query editor table reference drop", () => {
       columnNames: ["id", "OrderNo", "select"],
       databaseType: "postgres",
     })!;
-    expect(tableReferenceInsertText(postgres)).toBe('id,\n"OrderNo",\n"select"');
+    expect(tableReferenceInsertText(postgres, undefined, commaNewline)).toBe('id,\n"OrderNo",\n"select"');
+  });
+
+  it("uses columnNameSeparator from the payload for multi-column sidebar drag", () => {
+    const comma = createColumnReferencePayload({
+      connectionId: "conn-1",
+      database: "app-db",
+      columnNames: ["id", "name"],
+      databaseType: "mysql",
+      columnNameSeparator: "comma",
+    })!;
+    expect(comma.columnNameSeparator).toBe("comma");
+    expect(parseTableReferencePayload(JSON.stringify(comma))).toEqual(comma);
+    expect(tableReferenceInsertText(comma)).toBe("id,name");
+
+    const newline = createColumnReferencePayload({
+      connectionId: "conn-1",
+      database: "app-db",
+      columnNames: ["id", "name"],
+      databaseType: "mysql",
+      columnNameSeparator: "newline",
+    })!;
+    expect(tableReferenceInsertText(newline)).toBe("id\nname");
   });
 
   it("keeps smart quoting for dialects without a dedicated keyword table", () => {
@@ -121,7 +145,7 @@ describe("query editor table reference drop", () => {
       columnNames: ["id", "order no"],
       databaseType: "oracle",
     })!;
-    expect(tableReferenceInsertText(oracle)).toBe('id,\n"order no"');
+    expect(tableReferenceInsertText(oracle, undefined, commaNewline)).toBe('id,\n"order no"');
   });
 
   it("bare-quotes sqlserver columns when safe and brackets reserved words", () => {
@@ -131,7 +155,7 @@ describe("query editor table reference drop", () => {
       columnNames: ["id", "order", "order no"],
       databaseType: "sqlserver",
     })!;
-    expect(tableReferenceInsertText(payload)).toBe("id,\n[order],\n[order no]");
+    expect(tableReferenceInsertText(payload, undefined, commaNewline)).toBe("id,\n[order],\n[order no]");
   });
 
   it("falls back to the editor database type when the payload omits one", () => {
@@ -140,6 +164,21 @@ describe("query editor table reference drop", () => {
       database: "app-db",
       columnNames: ["order no"],
     })!;
-    expect(tableReferenceInsertText(payload, "mysql")).toBe("`order no`");
+    expect(tableReferenceInsertText(payload, "mysql", commaNewline)).toBe("`order no`");
+  });
+
+  it("inserts multiple table references with the configured separator", () => {
+    const payload = createMultiTableReferencePayload({
+      connectionId: "conn-1",
+      database: "app-db",
+      tableReferences: [
+        { schema: "public", tableName: "users" },
+        { schema: "public", tableName: "orders" },
+      ],
+      databaseType: "postgres",
+    })!;
+    expect(parseTableReferencePayload(JSON.stringify(payload))).toEqual(payload);
+    expect(tableReferenceInsertText(payload, undefined, { tableNameSeparator: "comma" })).toBe("users,orders");
+    expect(tableReferenceInsertText(payload, undefined, { tableNameSeparator: "comma", includeTableSchema: true })).toBe('"public"."users","public"."orders"');
   });
 });

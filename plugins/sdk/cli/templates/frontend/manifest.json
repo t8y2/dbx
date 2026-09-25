@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "{{PLUGIN_ID}}",
+  "name": "{{PLUGIN_NAME_JSON}}",
+  "version": "{{VERSION}}",
+  "publisher": "{{PUBLISHER_JSON}}",
+  "description": "{{DESCRIPTION_JSON}}",
+  "icon": "assets/plugin.svg",
+  "engines": {
+    "dbx": ">=0.5.68",
+    "host_api": "1"
+  },
+  "entrypoints": {
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "workbench",
+      "id": "{{PLUGIN_ID}}.workbench",
+      "label": "{{PLUGIN_NAME_JSON}}",
+      "description": "Sandboxed frontend workbench contributed by {{PLUGIN_NAME_JSON}}.",
+      "icon": "assets/plugin.svg"
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "{{PLUGIN_NAME_JSON}}",
+      "description": "{{DESCRIPTION_JSON}}",
+      "contributions": {
+        "{{PLUGIN_ID}}.workbench": {
+          "label": "{{PLUGIN_NAME_JSON}}",
+          "description": "由插件提供的沙箱前端工作台。"
+        }
+      }
+    }
+  }
+}

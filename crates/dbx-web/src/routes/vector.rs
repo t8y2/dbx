@@ -57,10 +57,10 @@ pub async fn drop_database(
     headers: HeaderMap,
     Json(req): Json<VectorDatabaseRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Drop database")
-        .await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Drop database").await?;
     ensure_writable(&state, &req.connection_id, "Drop database").await?;
-    dbx_core::schema::drop_vector_database_core(&state.app, &req.connection_id, &req.database)
+    dbx_core::schema::drop_vector_database_core(&state.app, &req.connection_id, &database)
         .await
         .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -71,10 +71,11 @@ pub async fn drop_collection(
     headers: HeaderMap,
     Json(req): Json<VectorCollectionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Drop collection")
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Drop collection")
         .await?;
     ensure_writable(&state, &req.connection_id, "Drop collection").await?;
-    dbx_core::schema::drop_vector_collection_core(&state.app, &req.connection_id, &req.database, &req.collection)
+    dbx_core::schema::drop_vector_collection_core(&state.app, &req.connection_id, &database, &req.collection)
         .await
         .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -85,13 +86,14 @@ pub async fn rename_collection(
     headers: HeaderMap,
     Json(req): Json<VectorRenameCollectionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Rename collection")
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Rename collection")
         .await?;
     ensure_writable(&state, &req.connection_id, "Rename collection").await?;
     dbx_core::schema::rename_vector_collection_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         &req.new_name,
     )

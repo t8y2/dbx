@@ -13,6 +13,12 @@ describe("sqlSemanticTokens", () => {
     expect(tokens.some((token) => token.kind === "string" && token.text === "'it''s ok'")).toBe(true);
   });
 
+  it("tokenizes Unicode identifier prefixes as complete word tokens", () => {
+    const tokens = tokenizeSqlSemantic("SELECT 名称 客户名称 𠀀字段", "sqlserver");
+
+    expect(tokens.filter((token) => token.kind === "word").map((token) => token.text)).toEqual(["SELECT", "名称", "客户名称", "𠀀字段"]);
+  });
+
   it("marks comments and string literals as suppressed contexts", () => {
     const sql = "select * from users -- user.";
     const tokens = tokenizeSqlSemantic(sql);

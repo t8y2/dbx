@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test, vi } from "vitest";
-import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
+import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
 
 test("recognizes Oracle-compatible NUMBER column types as numeric", () => {
   assert.equal(findGeneratorKey("value", "NUMBER"), "number");
@@ -422,4 +422,41 @@ test("keeps ordinary TDengine table generation unchanged", () => {
   assert.deepEqual(result.columns, ["ts"]);
   assert.deepEqual(result.rows, [[1]]);
   assert.doesNotMatch(result.sql, /tbname/);
+});
+
+test("formats generated values for MySQL JSON columns as JSON literals", () => {
+  const result = generateTableData(
+    {
+      tableName: "events",
+      schema: "app",
+      database: "app",
+      rowCount: 1,
+      columns: [
+        {
+          columnName: "ext_json",
+          dataType: "json",
+          rowCount: 1,
+          generatorKey: "uuid",
+        },
+      ],
+    },
+    "mysql",
+  );
+
+  // The generated uuid must land as a JSON string scalar ("..."), not a bare
+  // SQL string — MySQL rejects the latter in a JSON column (#9011).
+  assert.match(result.sql, /VALUES\n\('"[0-9a-f-]{36}"'\);$/);
+});
+
+test("JSON-encodes generated strings for json columns but not for varchar", () => {
+  // Plain prose lands as a JSON string scalar (still a SQL string, so valid).
+  assert.equal(formatGeneratedValue("plain", "mysql", "json"), `'"plain"'`);
+  // Embedded double quotes are JSON-escaped; MySQL's lexer consumes '\' escapes
+  // inside '...' literals, so backslashes double to survive the roundtrip.
+  assert.equal(formatGeneratedValue('say "hi"', "mysql", "json"), `'"say \\\\"hi\\\\""'`);
+  // Already-valid JSON passes through with the same backslash doubling.
+  assert.equal(formatGeneratedValue('{"a":1}', "mysql", "json"), `'{"a":1}'`);
+  assert.equal(formatGeneratedValue('{"a":"b\\"c"}', "mysql", "json"), `'{"a":"b\\\\"c"}'`);
+  // Non-JSON columns keep plain string quoting.
+  assert.equal(formatGeneratedValue("plain", "mysql", "varchar(16)"), `'plain'`);
 });

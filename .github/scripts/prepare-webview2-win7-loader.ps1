@@ -4,103 +4,43 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Newer WebView2 static loaders import EventSetInformation, which does not exist on Windows 7.
-# The loader entry points are stable, so the Win7 bundle uses the last verified compatible SDK loader.
-$sdkVersion = "1.0.1054.31"
-$sdkPackageSha256 = "0afe683aa3d143a5f6330db1ce833c69278b38fe5e1eadec52f26910ad26e22f"
-$loaderSha256 = "76314119685bbf4c2b2423a44e81b57beadc914c943d0e772fd6bc78c8e6b0e8"
-$webView2ComSysVersion = "0.38.2"
-$upstreamLoaderSha256 = "0659b741bde6348d4c4a6ec4ceb9af50e3d0048ed9cd3c8659bccbb61fde55ee"
+# The Windows 7 / Server 2012 R2 bundle links the static loader from WebView2 SDK
+# 1.0.902.49. Loaders >= 1.0.1054.31 import EventSetInformation, which Win7 and
+# Server 2012 R2 do not provide, and fail with "Could not find the WebView2
+# Runtime". The loader lives in vendor/webview2-com-sys/win7/x64/ and Cargo links
+# it through the [patch.crates-io] entry. This script verifies the committed
+# loader and stages the loader DLL for the runtime probe. It does not modify the
+# Cargo registry, so compile caches stay correct.
+$sdkVersion = "1.0.902.49"
+$loaderSha256 = "aa5c26670f1b18d0fa2a56ac3f1ae30110c332a8bfbd555a7be3e548d1b0da3d"
+$loaderDllSha256 = "fdf978ba706578b05967d7f0181f462147864a5aa74f36016a62cb3d3dbe6909"
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
-$temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) "dbx-win7-webview2-loader-$([Guid]::NewGuid())"
-$packagePath = Join-Path $temporaryRoot "Microsoft.Web.WebView2.$sdkVersion.nupkg"
-$extractedPath = Join-Path $temporaryRoot "extracted"
+$loaderDirectory = Join-Path $repositoryRoot "vendor/webview2-com-sys/win7/x64"
+$loaderPath = Join-Path $loaderDirectory "WebView2LoaderStatic.lib"
+$loaderDllPath = Join-Path $loaderDirectory "WebView2Loader.dll"
 
-try {
-  New-Item -ItemType Directory -Path $extractedPath -Force | Out-Null
-
-  $packageUrl = "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/$sdkVersion"
-  Write-Host "Downloading WebView2 SDK $sdkVersion for the Windows 7 loader..."
-  Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -UseBasicParsing
-
-  $actualPackageSha256 = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actualPackageSha256 -ne $sdkPackageSha256) {
-    throw "Unexpected WebView2 SDK package SHA256: $actualPackageSha256"
+function Assert-FileHash {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Expected
+  )
+  if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
+    throw "Vendored Windows 7 WebView2 loader is missing: $Path"
   }
-
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  [System.IO.Compression.ZipFile]::ExtractToDirectory($packagePath, $extractedPath)
-
-  $legacyLoader = Join-Path $extractedPath "build/native/x64/WebView2LoaderStatic.lib"
-  if (!(Test-Path -LiteralPath $legacyLoader -PathType Leaf)) {
-    throw "WebView2 SDK $sdkVersion does not contain the x64 static loader."
-  }
-
-  $legacyLoaderDll = Join-Path $extractedPath "build/native/x64/WebView2Loader.dll"
-  if (!(Test-Path -LiteralPath $legacyLoaderDll -PathType Leaf)) {
-    throw "WebView2 SDK $sdkVersion does not contain the x64 loader DLL."
-  }
-
-  $actualLoaderSha256 = (Get-FileHash -LiteralPath $legacyLoader -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actualLoaderSha256 -ne $loaderSha256) {
-    throw "Unexpected Windows 7 WebView2 loader SHA256: $actualLoaderSha256"
-  }
-
-  Push-Location $repositoryRoot
-  try {
-    & cargo fetch --locked --target x86_64-win7-windows-msvc
-    if ($LASTEXITCODE -ne 0) {
-      throw "cargo fetch failed while preparing the Windows 7 WebView2 loader."
-    }
-
-    $metadataJson = & cargo metadata --locked --format-version 1
-    if ($LASTEXITCODE -ne 0) {
-      throw "cargo metadata failed while locating webview2-com-sys."
-    }
-  }
-  finally {
-    Pop-Location
-  }
-
-  $metadata = $metadataJson | ConvertFrom-Json
-  $webView2Packages = @($metadata.packages | Where-Object {
-      $_.name -eq "webview2-com-sys" -and $_.version -eq $webView2ComSysVersion
-    })
-  if ($webView2Packages.Count -ne 1) {
-    throw "Expected exactly one webview2-com-sys $webView2ComSysVersion package, found $($webView2Packages.Count)."
-  }
-
-  $crateRoot = Split-Path -Parent $webView2Packages[0].manifest_path
-  $loaderDestination = Join-Path $crateRoot "x64/WebView2LoaderStatic.lib"
-  if (!(Test-Path -LiteralPath $loaderDestination -PathType Leaf)) {
-    throw "webview2-com-sys static loader does not exist: $loaderDestination"
-  }
-
-  $existingLoaderSha256 = (Get-FileHash -LiteralPath $loaderDestination -Algorithm SHA256).Hash.ToLowerInvariant()
-  $knownLoaderHashes = @($upstreamLoaderSha256, $loaderSha256)
-  if ($existingLoaderSha256 -notin $knownLoaderHashes) {
-    throw "Refusing to replace an unknown webview2-com-sys loader SHA256: $existingLoaderSha256"
-  }
-
-  Set-ItemProperty -LiteralPath $loaderDestination -Name IsReadOnly -Value $false
-  Copy-Item -LiteralPath $legacyLoader -Destination $loaderDestination -Force
-
-  $installedLoaderSha256 = (Get-FileHash -LiteralPath $loaderDestination -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($installedLoaderSha256 -ne $loaderSha256) {
-    throw "Windows 7 WebView2 loader replacement failed: $installedLoaderSha256"
-  }
-
-  $probeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "dbx-win7-webview2-loader-probe"
-  New-Item -ItemType Directory -Path $probeDirectory -Force | Out-Null
-  $probeLoader = Join-Path $probeDirectory "WebView2Loader.dll"
-  Copy-Item -LiteralPath $legacyLoaderDll -Destination $probeLoader -Force
-
-  Write-Host "Prepared WebView2 SDK $sdkVersion static loader for Windows 7: $loaderDestination"
-  Write-Host "Prepared WebView2 SDK $sdkVersion loader probe DLL: $probeLoader"
-}
-finally {
-  if (Test-Path -LiteralPath $temporaryRoot) {
-    Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+  $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actual -ne $Expected) {
+    throw "Unexpected Windows 7 WebView2 loader SHA256 for ${Path}: $actual"
   }
 }
+
+Assert-FileHash -Path $loaderPath -Expected $loaderSha256
+Assert-FileHash -Path $loaderDllPath -Expected $loaderDllSha256
+
+$probeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "dbx-win7-webview2-loader-probe"
+New-Item -ItemType Directory -Path $probeDirectory -Force | Out-Null
+$probeLoader = Join-Path $probeDirectory "WebView2Loader.dll"
+Copy-Item -LiteralPath $loaderDllPath -Destination $probeLoader -Force
+
+Write-Host "Verified vendored WebView2 SDK $sdkVersion static loader: $loaderPath"
+Write-Host "Staged WebView2 SDK $sdkVersion loader probe DLL: $probeLoader"

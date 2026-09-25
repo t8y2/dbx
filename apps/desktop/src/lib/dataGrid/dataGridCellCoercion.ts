@@ -9,10 +9,18 @@ export interface CoerceDataGridCellValueOptions {
   oldValue: GridCellValue | undefined;
   databaseType: DatabaseType | undefined;
   columnInfo: Pick<ColumnInfo, "data_type"> | undefined;
+  numberFormat?: NumericInputNumberFormat;
   preserveEmptyString?: boolean;
   /** Treat an empty inline bulk edit as SQL NULL before type coercion. */
   emptyStringAsNull?: boolean;
 }
+
+export interface NumericInputNumberFormat {
+  groupSeparator?: string;
+  decimalSeparator?: string;
+}
+
+let cachedRuntimeNumberFormat: NumericInputNumberFormat | undefined;
 
 export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions): GridCellValue {
   const { value, oldValue } = options;
@@ -22,13 +30,13 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   if (blobValue !== undefined) return blobValue;
   const postgresArrayValue = coercePostgresArrayValue(options);
   if (postgresArrayValue !== undefined) return postgresArrayValue;
-  // Excel-pasted values often carry thousands separators (10,000.00) that make
-  // Number() return NaN and the literal fail to convert on the server. Strip
-  // only unambiguous groupings and keep the normalized text for the precision
-  // checks below, so exact values survive as text.
+  // Excel-pasted values often carry separators that make Number() return NaN
+  // and the literal fail to convert on the server. Use the runtime number
+  // format to resolve single-comma values, then keep the normalized text for
+  // the precision checks below so exact values survive as text.
   const useSampledValueType = normalizeDataType(options.columnInfo?.data_type) === "";
   const numericInput = isNumericColumnType(options.columnInfo?.data_type) || (useSampledValueType && typeof oldValue === "number");
-  const numericText = normalizeGroupedNumberText(value, options.columnInfo, oldValue);
+  const numericText = normalizeGroupedNumberText(value, options.columnInfo, oldValue, options.numberFormat ?? runtimeNumberFormat());
   if (isBooleanInputColumn(options) || (useSampledValueType && typeof oldValue === "boolean")) {
     // MySQL exposes TINYINT(1) as an integer in the grid. Keep its numeric
     // 0/1 edits numeric while still accepting explicit TRUE/FALSE aliases.
@@ -155,23 +163,38 @@ function shouldPreserveNumericText(options: CoerceDataGridCellValueOptions, pars
   return shouldPreserveNumericTextForType(options.columnInfo?.data_type, text, parsedNumber);
 }
 
-function normalizeGroupedNumberText(value: string, columnInfo: Pick<ColumnInfo, "data_type"> | undefined, oldValue: GridCellValue | undefined): string {
+function normalizeGroupedNumberText(value: string, columnInfo: Pick<ColumnInfo, "data_type"> | undefined, oldValue: GridCellValue | undefined, numberFormat: NumericInputNumberFormat): string {
   const useSampledNumberType = normalizeDataType(columnInfo?.data_type) === "" && typeof oldValue === "number";
   if (!isNumericColumnType(columnInfo?.data_type) && !useSampledNumberType) return value;
-  return stripUnambiguousThousandSeparators(value);
+  return normalizeCommaSeparatedNumberText(value, numberFormat);
 }
 
-function stripUnambiguousThousandSeparators(value: string): string {
+function normalizeCommaSeparatedNumberText(value: string, numberFormat: NumericInputNumberFormat): string {
   const trimmed = value.trim();
   const match = trimmed.match(/^([+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?)([eE][+-]?\d+)?$/);
   if (!match) return value;
   const mantissa = match[1];
   const exponent = match[2] ?? "";
-  // A lone "1,000" (one comma group, no decimal point) is ambiguous: in
-  // comma-decimal locales it reads as 1.000. Only strip when a decimal point
-  // is present (1,234.56) or there are multiple comma groups (1,234,567).
-  if (/^[+-]?\d{1,3},\d{3}$/.test(mantissa)) return value;
+  if (/^[+-]?\d{1,3},\d{3}$/.test(mantissa)) {
+    if (numberFormat.groupSeparator === "," && numberFormat.decimalSeparator !== ",") {
+      return `${mantissa.replace(",", "")}${exponent}`;
+    }
+    if (numberFormat.decimalSeparator === ",") {
+      return `${mantissa.replace(",", ".")}${exponent}`;
+    }
+    return value;
+  }
   return `${mantissa.replace(/,/g, "")}${exponent}`;
+}
+
+function runtimeNumberFormat(): NumericInputNumberFormat {
+  if (cachedRuntimeNumberFormat) return cachedRuntimeNumberFormat;
+  const parts = new Intl.NumberFormat().formatToParts(12345.6);
+  cachedRuntimeNumberFormat = {
+    groupSeparator: parts.find((part) => part.type === "group")?.value,
+    decimalSeparator: parts.find((part) => part.type === "decimal")?.value,
+  };
+  return cachedRuntimeNumberFormat;
 }
 
 function postgresArrayElementDataType(dataType: string | undefined): string {

@@ -1,13 +1,52 @@
+import type { CellValue } from "@/lib/dataGrid/cellValue";
+
 export type MongoInputValue = string | number | boolean | null;
 
 const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
 const MONGO_SHELL_NUMBER_LONG_PATTERN = /^NumberLong\(\s*(["'])(-?\d+)\1\s*\)$/;
 const MONGO_OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
 const MONGO_INTEGER_PATTERN = /^-?\d+$/;
+// These values are internal to the MongoDB collection grid. BSON strings may
+// contain any UTF-8 text, so strings in this reserved namespace are escaped
+// before entering the grid and restored before being saved.
+const MONGO_DOCUMENT_GRID_PREFIX = "\u0000dbx:mongo-document-grid:";
+const MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX = `${MONGO_DOCUMENT_GRID_PREFIX}string:`;
+export const MONGO_DOCUMENT_GRID_NULL = `${MONGO_DOCUMENT_GRID_PREFIX}null`;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_BSON_INT64 = -9223372036854775808n;
 const MAX_BSON_INT64 = 9223372036854775807n;
-const MONGO_EXTENDED_JSON_VALUE_KEYS = new Set(["$binary", "$code", "$date", "$dbPointer", "$maxKey", "$minKey", "$numberDecimal", "$numberDouble", "$numberInt", "$numberLong", "$oid", "$regularExpression", "$symbol", "$timestamp", "$undefined", "$uuid"]);
+/** Extended JSON wrapper key -> the BSON scalar it stands for. */
+const MONGO_EXTENDED_JSON_VALUE_TYPES = new Map([
+  ["$binary", "binary"],
+  ["$code", "javascript"],
+  ["$date", "date"],
+  ["$dbPointer", "dbPointer"],
+  ["$maxKey", "maxKey"],
+  ["$minKey", "minKey"],
+  ["$numberDecimal", "decimal128"],
+  ["$numberDouble", "double"],
+  ["$numberInt", "int32"],
+  ["$numberLong", "int64"],
+  ["$oid", "objectId"],
+  ["$regularExpression", "regex"],
+  ["$symbol", "symbol"],
+  ["$timestamp", "timestamp"],
+  ["$undefined", "undefined"],
+  ["$uuid", "uuid"],
+]);
+const MONGO_EXTENDED_JSON_VALUE_KEYS = new Set(MONGO_EXTENDED_JSON_VALUE_TYPES.keys());
+
+/**
+ * The BSON scalar an extended JSON wrapper stands for, or undefined when the value is
+ * a plain object. `{$oid: "..."}` is how the driver ships an ObjectId over JSON; it is
+ * one value, not a subdocument with a `$oid` field.
+ */
+export function mongoExtendedJsonValueType(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value as Record<string, unknown>);
+  if (keys.length === 2 && keys.includes("$code") && keys.includes("$scope")) return "javascript";
+  return keys.length === 1 ? MONGO_EXTENDED_JSON_VALUE_TYPES.get(keys[0] ?? "") : undefined;
+}
 const MONGO_EXTENDED_JSON_NUMERIC_TYPES = new Map([
   ["$numberInt", "int32"],
   ["$numberLong", "int64"],
@@ -52,7 +91,9 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
 
   const trimmed = raw.trim();
   if (trimmed === "NULL") return null;
-  if (/^(true|false|null)$/i.test(trimmed)) return JSON.parse(trimmed.toLowerCase());
+  if (/^true$/i.test(trimmed)) return true;
+  if (/^false$/i.test(trimmed)) return false;
+  if (/^null$/i.test(trimmed)) return null;
 
   const shellDate = mongoShellDateToExtendedJson(trimmed);
   if (shellDate !== trimmed) return shellDate;
@@ -68,13 +109,17 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   }
   if (/^-?\d+\.\d+$/.test(trimmed)) return Number(trimmed);
   if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"')) {
-    return mongoShellDateToExtendedJson(JSON.parse(trimmed));
+    try {
+      return mongoShellDateToExtendedJson(JSON.parse(trimmed));
+    } catch {
+      // JSON-shaped text is still valid user data when it is not valid JSON.
+      return raw;
+    }
   }
   return raw;
 }
 
 export function mongoDocumentDisplayValue(value: unknown): unknown {
-  if (value === null) return "NULL";
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const object = value as Record<string, unknown>;
     if (Object.keys(object).length === 1 && typeof object.$numberLong === "string") return `NumberLong(${JSON.stringify(object.$numberLong)})`;
@@ -82,9 +127,67 @@ export function mongoDocumentDisplayValue(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Maps BSON values into the flat collection-grid representation.  The grid
+ * needs an internal sentinel for an explicit BSON null because an empty cell
+ * represents a field that does not exist. The grid formatter renders that
+ * sentinel as NULL, while a literal "NULL" remains ordinary string data.
+ */
+export function mongoDocumentGridValue(value: unknown): unknown {
+  if (value === null) return MONGO_DOCUMENT_GRID_NULL;
+  if (typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_PREFIX)) return `${MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX}${value}`;
+  return mongoDocumentDisplayValue(value);
+}
+
+function mongoDocumentGridEscapedString(value: unknown): string | undefined {
+  return typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX) ? value.slice(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX.length) : undefined;
+}
+
+/** Returns the text presented in a collection-grid editor, when customized. */
+export function mongoDocumentGridEditorText(value: unknown): string | undefined {
+  // An existing BSON null is represented as NULL in the grid, but editing it
+  // starts with an empty input. The private marker must never be user-facing.
+  if (value === MONGO_DOCUMENT_GRID_NULL) return "";
+  return mongoDocumentGridEscapedString(value);
+}
+
+/** Returns the text used when copying a collection-grid cell. */
+export function mongoDocumentGridClipboardText(value: unknown): string | undefined {
+  if (value === MONGO_DOCUMENT_GRID_NULL) return "NULL";
+  return mongoDocumentGridEditorText(value);
+}
+
+/** Returns the custom display text required by collection-grid BSON values. */
+export function mongoDocumentGridDisplayText(value: unknown): string | undefined {
+  if (value === MONGO_DOCUMENT_GRID_NULL) return "NULL";
+  const escapedString = mongoDocumentGridEscapedString(value);
+  if (escapedString !== undefined) return JSON.stringify(escapedString);
+  return value === "NULL" ? JSON.stringify(value) : undefined;
+}
+
+/** Restores a collection-grid value before it leaves the grid externally. */
+export function mongoDocumentGridExternalValue(value: CellValue): CellValue {
+  if (value === MONGO_DOCUMENT_GRID_NULL) return null;
+  const escapedString = mongoDocumentGridEscapedString(value);
+  return escapedString === undefined ? value : escapedString;
+}
+
+/** Preserves encoded grid clipboard values and escapes other reserved input. */
+export function mongoDocumentGridInputValue(value: string): string {
+  // Internal copy/paste already carries encoded values; escaping again would
+  // save BSON null as a literal sentinel string.
+  if (value === MONGO_DOCUMENT_GRID_NULL || value.startsWith(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX)) return value;
+  return value.startsWith(MONGO_DOCUMENT_GRID_PREFIX) ? `${MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX}${value}` : value;
+}
+
 function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, originalValue: unknown): unknown {
   // Objects and arrays are serialized into grid text too, so the raw document
   // is the only reliable way to distinguish them from JSON-shaped BSON strings.
+  // The collection grid's private sentinel represents an explicit BSON null.
+  // A literal "NULL" remains a normal string, including in Mongo query results.
+  if (raw === MONGO_DOCUMENT_GRID_NULL) return null;
+  const escapedString = mongoDocumentGridEscapedString(raw);
+  if (escapedString !== undefined) return escapedString;
   if (typeof originalValue === "string") {
     return typeof raw === "string" ? raw : String(raw);
   }
@@ -195,7 +298,7 @@ export function buildMongoInsertDocument(row: MongoInputValue[], columns: string
     if (!col || col === "_id") continue;
     const val = row[ci];
     if (val === null) continue;
-    doc[col] = parseMongoDocumentInputValue(val);
+    doc[col] = val === MONGO_DOCUMENT_GRID_NULL ? null : (mongoDocumentGridEscapedString(val) ?? parseMongoDocumentInputValue(val));
   }
   return doc;
 }
@@ -211,7 +314,7 @@ export function buildMongoCopyInsertDocument(row: MongoInputValue[], columns: st
       doc[col] = { $oid: val };
       continue;
     }
-    doc[col] = parseMongoDocumentInputValue(val);
+    doc[col] = val === MONGO_DOCUMENT_GRID_NULL ? null : (mongoDocumentGridEscapedString(val) ?? parseMongoDocumentInputValue(val));
   }
   return doc;
 }
@@ -228,7 +331,9 @@ export function buildMongoCopyDocumentFromOriginal(original: unknown, row: Mongo
     // Display strings are ambiguous, so only explicitly edited cells may replace original BSON values.
     if (dirtyColumns[columnIndex]) {
       const value = row[columnIndex];
-      if (value !== null) document[column] = parseMongoDocumentInputValue(value);
+      if (value !== null) {
+        document[column] = value === MONGO_DOCUMENT_GRID_NULL ? null : (mongoDocumentGridEscapedString(value) ?? parseMongoDocumentInputValue(value));
+      }
       continue;
     }
     if (Object.prototype.hasOwnProperty.call(source, column)) document[column] = source[column];

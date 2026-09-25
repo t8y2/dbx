@@ -1,8 +1,10 @@
+use regex::Regex;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const MAX_SCAN_DEPTH: usize = 10;
+const DEFAULT_FILE_FILTER: &str = "*.sql";
 
 /// Directories that are never interesting for SQL file browsing but are huge
 /// (often tens of thousands of entries), which makes a recursive scan take
@@ -33,11 +35,16 @@ pub struct SqlFileEntry {
     pub children: Vec<SqlFileEntry>,
 }
 
-fn validate_sql_file_name(file_name: &str) -> Result<&str, String> {
+fn validate_file_name(file_name: &str) -> Result<&str, String> {
     let file_name = file_name.trim();
     if file_name.is_empty() || file_name == "." || file_name == ".." || file_name.contains(['/', '\\']) {
-        return Err("SQL file name must not contain a path".to_string());
+        return Err("File name must not contain a path".to_string());
     }
+    Ok(file_name)
+}
+
+fn validate_sql_file_name(file_name: &str) -> Result<&str, String> {
+    let file_name = validate_file_name(file_name)?;
     if !file_name.to_ascii_lowercase().ends_with(".sql") || file_name.len() <= 4 {
         return Err("Only .sql files can be managed here".to_string());
     }
@@ -70,19 +77,14 @@ fn managed_directory(root_path: &str, directory_path: &str) -> Result<PathBuf, S
     Ok(directory)
 }
 
-fn managed_sql_file(root_path: &str, file_path: &str) -> Result<PathBuf, String> {
+fn managed_file(root_path: &str, file_path: &str) -> Result<PathBuf, String> {
     let root = canonical_directory(Path::new(root_path), "SQL root folder")?;
-    let file = std::fs::canonicalize(file_path).map_err(|error| format!("Failed to resolve SQL file: {error}"))?;
+    let file = std::fs::canonicalize(file_path).map_err(|error| format!("Failed to resolve file: {error}"))?;
     if !file.starts_with(&root) {
-        return Err("SQL file is outside the opened root folder".to_string());
+        return Err("File is outside the opened root folder".to_string());
     }
-    if !file.is_file()
-        || !file
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
-    {
-        return Err("Only .sql files can be managed here".to_string());
+    if !file.is_file() {
+        return Err("Only files can be managed here".to_string());
     }
     Ok(file)
 }
@@ -91,7 +93,50 @@ fn is_pruned_dir(name: &str) -> bool {
     PRUNED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d))
 }
 
-fn scan_sql_files(dir: &Path, depth: usize, visited: &mut HashSet<String>) -> Vec<SqlFileEntry> {
+fn glob_to_regex(glob: &str) -> String {
+    let mut pattern = String::from("(?i)^");
+    for character in glob.chars() {
+        match character {
+            '*' => pattern.push_str(".*"),
+            '?' => pattern.push('.'),
+            _ => pattern.push_str(&regex::escape(&character.to_string())),
+        }
+    }
+    pattern.push('$');
+    pattern
+}
+
+fn is_glob_filter(file_filter: &str) -> bool {
+    let characters: Vec<char> = file_filter.chars().collect();
+    if !characters.contains(&'*') && !characters.contains(&'?') {
+        return false;
+    }
+    for (index, character) in characters.iter().enumerate() {
+        if matches!(character, '\\' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '+') {
+            return false;
+        }
+        // A wildcard directly after `.` is a regex quantifier (`.*`, `.?`),
+        // not a glob wildcard: `.*sql` must stay a regex while `*.sql` is a glob.
+        if matches!(character, '*' | '?') && index > 0 && characters[index - 1] == '.' {
+            return false;
+        }
+    }
+    true
+}
+
+fn compile_file_filter(file_filter: &str) -> Result<Regex, String> {
+    let file_filter = file_filter.trim();
+    let pattern = if file_filter.is_empty() {
+        glob_to_regex(DEFAULT_FILE_FILTER)
+    } else if is_glob_filter(file_filter) {
+        glob_to_regex(file_filter)
+    } else {
+        file_filter.to_string()
+    };
+    Regex::new(&pattern).map_err(|error| format!("Invalid file filter regular expression: {error}"))
+}
+
+fn scan_sql_files(dir: &Path, depth: usize, visited: &mut HashSet<String>, file_filter: &Regex) -> Vec<SqlFileEntry> {
     if depth > MAX_SCAN_DEPTH {
         return vec![];
     }
@@ -127,13 +172,11 @@ fn scan_sql_files(dir: &Path, depth: usize, visited: &mut HashSet<String>) -> Ve
             if is_pruned_dir(&name) {
                 continue;
             }
-            let children = scan_sql_files(&path, depth + 1, visited);
+            let children = scan_sql_files(&path, depth + 1, visited, file_filter);
             if !children.is_empty() {
                 entries.push(SqlFileEntry { name, path: path.to_string_lossy().to_string(), is_dir: true, children });
             }
-        } else if file_type.is_file()
-            && path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("sql")).unwrap_or(false)
-        {
+        } else if file_type.is_file() && file_filter.is_match(&name) {
             entries.push(SqlFileEntry {
                 name,
                 path: path.to_string_lossy().to_string(),
@@ -155,8 +198,12 @@ fn scan_sql_files(dir: &Path, depth: usize, visited: &mut HashSet<String>) -> Ve
 }
 
 #[tauri::command]
-pub async fn list_sql_files_in_folder(folder_path: String) -> Result<Vec<SqlFileEntry>, String> {
+pub async fn list_sql_files_in_folder(
+    folder_path: String,
+    file_filter: Option<String>,
+) -> Result<Vec<SqlFileEntry>, String> {
     let path = Path::new(&folder_path).to_path_buf();
+    let file_filter = compile_file_filter(file_filter.as_deref().unwrap_or(DEFAULT_FILE_FILTER))?;
     // Filesystem scanning is blocking work; run it on a thread pool so the
     // Tauri main thread (and thus the webview) does not freeze while large
     // folders are being walked.
@@ -165,7 +212,7 @@ pub async fn list_sql_files_in_folder(folder_path: String) -> Result<Vec<SqlFile
             return Err(format!("Path is not a directory: {}", folder_path));
         }
         let mut visited = HashSet::new();
-        Ok(scan_sql_files(&path, 0, &mut visited))
+        Ok(scan_sql_files(&path, 0, &mut visited, &file_filter))
     })
     .await
     .map_err(|e| format!("Failed to scan folder: {e}"))?
@@ -201,9 +248,9 @@ pub async fn rename_sql_file_in_folder(
     file_name: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let file_name = validate_sql_file_name(&file_name)?.to_owned();
+        let file_name = validate_file_name(&file_name)?.to_owned();
         let display_path = renamed_sql_file_display_path(&file_path, &file_name)?;
-        let file = managed_sql_file(&root_path, &file_path)?;
+        let file = managed_file(&root_path, &file_path)?;
         let target =
             file.parent().ok_or_else(|| "Failed to resolve SQL file parent folder".to_string())?.join(&file_name);
         if target.exists() {
@@ -223,7 +270,7 @@ pub async fn rename_sql_file_in_folder(
 #[tauri::command]
 pub async fn delete_sql_file_in_folder(root_path: String, file_path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let file = managed_sql_file(&root_path, &file_path)?;
+        let file = managed_file(&root_path, &file_path)?;
         std::fs::remove_file(file).map_err(|error| format!("Failed to delete SQL file: {error}"))
     })
     .await
@@ -257,7 +304,8 @@ mod tests {
         std::fs::write(idea.join("workspace.sql"), "SELECT 3;").unwrap();
 
         let mut visited = HashSet::new();
-        let entries = scan_sql_files(&root, 0, &mut visited);
+        let filter = compile_file_filter(DEFAULT_FILE_FILTER).unwrap();
+        let entries = scan_sql_files(&root, 0, &mut visited, &filter);
         let mut names = Vec::new();
         collect_file_names(&entries, &mut names);
         names.sort();
@@ -267,12 +315,81 @@ mod tests {
     }
 
     #[test]
+    fn scan_sql_files_accepts_user_regular_expressions() {
+        let root = std::env::temp_dir().join(format!("dbx-file-folder-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("query.sql"), "SELECT 1;").unwrap();
+        std::fs::write(root.join("script.sh"), "echo hello").unwrap();
+        std::fs::write(root.join("tool.py"), "print('hello')").unwrap();
+
+        let mut visited = HashSet::new();
+        let filter = compile_file_filter(r"\.(sql|sh|py)$").unwrap();
+        let entries = scan_sql_files(&root, 0, &mut visited, &filter);
+        let mut names = Vec::new();
+        collect_file_names(&entries, &mut names);
+        names.sort();
+
+        assert_eq!(names, vec!["query.sql", "script.sh", "tool.py"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compile_file_filter_accepts_glob_patterns() {
+        let filter = compile_file_filter("*.sh").unwrap();
+
+        assert!(filter.is_match("script.sh"));
+        assert!(filter.is_match("SCRIPT.SH"));
+        assert!(!filter.is_match("script.py"));
+    }
+
+    #[test]
+    fn compile_file_filter_keeps_dot_prefixed_wildcards_as_regex() {
+        // `.*sql` is a regex ("anything ending in sql"), not a glob that would
+        // match only literal dots before "sql".
+        let filter = compile_file_filter(".*sql").unwrap();
+
+        assert!(filter.is_match("notes.sql"));
+        assert!(filter.is_match("mysql-dump.txt"));
+        assert!(!filter.is_match("readme.txt"));
+    }
+
+    #[test]
+    fn compile_file_filter_accepts_question_mark_globs() {
+        let filter = compile_file_filter("file?.sql").unwrap();
+
+        assert!(filter.is_match("file1.sql"));
+        assert!(!filter.is_match("file12.sql"));
+    }
+
+    #[test]
     fn validates_single_sql_file_names() {
         assert_eq!(validate_sql_file_name("query.sql").unwrap(), "query.sql");
         assert!(validate_sql_file_name("query.txt").is_err());
         assert!(validate_sql_file_name("nested/query.sql").is_err());
         assert!(validate_sql_file_name("nested\\query.sql").is_err());
+        assert_eq!(validate_file_name("script.py").unwrap(), "script.py");
         assert_eq!(renamed_sql_file_display_path("draft.sql", "report.sql").unwrap(), "report.sql");
+    }
+
+    #[tokio::test]
+    async fn renames_and_deletes_filtered_text_files_within_the_opened_root() {
+        let root = std::env::temp_dir().join(format!("dbx-text-file-manage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("script.sh");
+        std::fs::write(&source, "echo hello").unwrap();
+
+        let renamed = rename_sql_file_in_folder(
+            root.to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
+            "script.py".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(Path::new(&renamed).is_file());
+
+        delete_sql_file_in_folder(root.to_string_lossy().into_owned(), renamed.clone()).await.unwrap();
+        assert!(!Path::new(&renamed).exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

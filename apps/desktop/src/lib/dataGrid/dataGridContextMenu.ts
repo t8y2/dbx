@@ -77,12 +77,37 @@ export function createDataGridColumnContextMenuItems(options: {
   canFilter: boolean;
   hasSort: boolean;
   sortMode: "database" | "local";
+  databaseSortEnabled?: boolean;
   frozenColumnCount?: number;
   contextVisibleColIdx?: number;
   hasColumnSelection?: boolean;
-  labels: Record<"copyName" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns", string>;
+  /** 显式多选的可见列数量；为 undefined 时按 0 处理。 */
+  selectedColumnCount?: number;
+  /** 当前可见列总数，用于判断「选中列覆盖全部可见列」而禁用批量隐藏。 */
+  visibleColumnCount?: number;
+  /** 当前被隐藏的列数量，用于决定是否显示「显示全部列」。 */
+  hiddenColumnCount?: number;
+  labels: Record<
+    "copyName" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
+    string
+  > &
+    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn", string>>;
   icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort">;
-  actions: { copyName: () => void; copyNames: () => void; details: () => void; copyAlterSql: () => void; sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void; freezeToColumn: () => void; freezeSelectedColumns: () => void; unfreezeColumns: () => void };
+  actions: {
+    copyName: () => void;
+    copyNames: () => void;
+    details: () => void;
+    copyAlterSql: () => void;
+    sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void;
+    freezeToColumn: () => void;
+    freezeSelectedColumns: () => void;
+    freezeCurrentColumn?: () => void;
+    unfreezeCurrentColumn?: () => void;
+    unfreezeColumns: () => void;
+    hideColumn: () => void;
+    hideSelectedColumns: () => void;
+    showAllColumnsMenu: () => void;
+  };
   filterSubmenu: DataGridContextMenuItem;
 }): DataGridContextMenuItem[] {
   const items: DataGridContextMenuItem[] = [];
@@ -94,24 +119,39 @@ export function createDataGridColumnContextMenuItems(options: {
   }
   if (!options.contextColumn && !options.headerColumn) return items;
   if (options.contextColumn) {
-    items.push(
-      { label: options.labels.databaseAscending, action: () => options.actions.sort("asc", "database"), icon: options.icons.database },
-      { label: options.labels.databaseDescending, action: () => options.actions.sort("desc", "database"), icon: options.icons.database },
-      { label: "", separator: true },
-      { label: options.labels.localAscending, action: () => options.actions.sort("asc", "local"), icon: options.icons.ascending },
-      { label: options.labels.localDescending, action: () => options.actions.sort("desc", "local"), icon: options.icons.descending },
-    );
+    if (options.databaseSortEnabled !== false) {
+      items.push(
+        { label: options.labels.databaseAscending, action: () => options.actions.sort("asc", "database"), icon: options.icons.database },
+        { label: options.labels.databaseDescending, action: () => options.actions.sort("desc", "database"), icon: options.icons.database },
+        { label: "", separator: true },
+      );
+    }
+    items.push({ label: options.labels.localAscending, action: () => options.actions.sort("asc", "local"), icon: options.icons.ascending }, { label: options.labels.localDescending, action: () => options.actions.sort("desc", "local"), icon: options.icons.descending });
     if (options.hasSort) items.push({ label: options.labels.clearSort, action: () => options.actions.sort(null, options.sortMode), icon: options.icons.clearSort });
     if (options.canFilter) items.push({ label: "", separator: true }, options.filterSubmenu);
   }
   if (options.contextVisibleColIdx !== undefined) {
     items.push({ label: "", separator: true });
+    const selectedColumnCount = options.selectedColumnCount ?? 0;
+    const visibleColumnCount = options.visibleColumnCount ?? 0;
+    // 只剩一列时隐藏会被 helper 拒绝；用 disabled 明确表达，而不是静默无效。
+    // 这里读 options.visibleColumnCount 而非本地默认值：字段可选，未传的调用方不应被误禁用。
+    items.push({ label: options.labels.hideColumn, action: options.actions.hideColumn, disabled: options.visibleColumnCount !== undefined && options.visibleColumnCount <= 1 });
+    // 仅在多选（>1）时提供批量隐藏；选中列覆盖全部可见列时禁用，而不是悄悄少隐藏一列。
+    if (options.hasColumnSelection && selectedColumnCount > 1) {
+      items.push({ label: options.labels.hideSelectedColumns, action: options.actions.hideSelectedColumns, disabled: visibleColumnCount > 0 && selectedColumnCount >= visibleColumnCount });
+    }
+    if ((options.hiddenColumnCount ?? 0) > 0) {
+      items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
+    }
     if ((options.frozenColumnCount ?? 0) > 0) {
+      if ((options.contextVisibleColIdx ?? -1) < (options.frozenColumnCount ?? 0) && options.labels.unfreezeCurrentColumn && options.actions.unfreezeCurrentColumn) items.push({ label: options.labels.unfreezeCurrentColumn, action: options.actions.unfreezeCurrentColumn });
       items.push({ label: options.labels.unfreezeColumns, action: options.actions.unfreezeColumns });
     }
     if (options.hasColumnSelection) {
       items.push({ label: options.labels.freezeSelectedColumns, action: options.actions.freezeSelectedColumns });
     }
+    if (options.labels.freezeCurrentColumn && options.actions.freezeCurrentColumn) items.push({ label: options.labels.freezeCurrentColumn, action: options.actions.freezeCurrentColumn });
     items.push({ label: options.labels.freezeToColumn, action: options.actions.freezeToColumn });
   }
   return items;
@@ -210,13 +250,17 @@ export function dataGridSelectedSortMenuValue(state: DataGridColumnSortState, co
   return dataGridColumnIsSorted(state, column, columnIndex) ? `${state.mode}-${state.direction}` : undefined;
 }
 
-export function createDataGridSortMenuItems(options: { column: string; columnIndex: number; state: DataGridColumnSortState; labels: SortMenuLabels; icons: SortMenuIcons }): DataGridColumnMenuItem[] {
-  const { column, columnIndex, state, labels, icons } = options;
+export function createDataGridSortMenuItems(options: { column: string; columnIndex: number; state: DataGridColumnSortState; labels: SortMenuLabels; icons: SortMenuIcons; databaseSortEnabled?: boolean }): DataGridColumnMenuItem[] {
+  const { column, columnIndex, state, labels, icons, databaseSortEnabled = true } = options;
   const sorted = dataGridColumnIsSorted(state, column, columnIndex);
   return [
-    { label: labels.databaseAscending, value: "database-asc", icon: icons.database, checked: sorted && state.direction === "asc" && state.mode === "database" },
-    { label: labels.databaseDescending, value: "database-desc", icon: icons.database, checked: sorted && state.direction === "desc" && state.mode === "database" },
-    { label: labels.currentPageAscending, value: "local-asc", icon: icons.ascending, checked: sorted && state.direction === "asc" && state.mode === "local", separatorBefore: true },
+    ...(databaseSortEnabled
+      ? [
+          { label: labels.databaseAscending, value: "database-asc", icon: icons.database, checked: sorted && state.direction === "asc" && state.mode === "database" },
+          { label: labels.databaseDescending, value: "database-desc", icon: icons.database, checked: sorted && state.direction === "desc" && state.mode === "database" },
+        ]
+      : []),
+    { label: labels.currentPageAscending, value: "local-asc", icon: icons.ascending, checked: sorted && state.direction === "asc" && state.mode === "local", separatorBefore: databaseSortEnabled },
     { label: labels.currentPageDescending, value: "local-desc", icon: icons.descending, checked: sorted && state.direction === "desc" && state.mode === "local" },
     { label: labels.clear, value: "clear", icon: icons.clear, disabled: !sorted, separatorBefore: true },
   ];

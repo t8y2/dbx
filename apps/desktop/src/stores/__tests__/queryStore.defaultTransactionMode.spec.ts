@@ -83,6 +83,22 @@ describe("queryStore default transaction mode", () => {
     expect(tab.autoCommit).toBe(false);
   });
 
+  it("creates a Dameng query tab in manual transaction mode when configured", async () => {
+    editorSettings.defaultTransactionMode = "manual";
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "dameng-1",
+      name: "Dameng",
+      db_type: "dameng",
+      database: "DM",
+    });
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("dameng-1", "DM", "Query", "query", "PUBLIC");
+
+    expect(store.tabs.find((item) => item.id === tabId)!.autoCommit).toBe(false);
+  });
+
   it("creates a query tab in auto-commit mode by default", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -101,5 +117,35 @@ describe("queryStore default transaction mode", () => {
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.autoCommit).toBe(true);
+  });
+
+  it("applies the manual default when an unbound file tab binds to a transactional connection", async () => {
+    editorSettings.defaultTransactionMode = "manual";
+    mocks.getConnectionConfig.mockImplementation((connectionId: string) => (connectionId === "mysql-1" ? { id: "mysql-1", name: "MySQL", db_type: "mysql", database: "app" } : undefined));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    // Externally opened SQL files and saved-SQL tabs start unbound
+    // (connectionId ""), so their initial mode falls back to auto-commit.
+    const tabId = store.createTab("", "", "Query", "query");
+    expect(store.tabs.find((item) => item.id === tabId)!.autoCommit).toBe(true);
+
+    store.updateConnection(tabId, "mysql-1", "app");
+
+    expect(store.tabs.find((item) => item.id === tabId)!.autoCommit).toBe(false);
+  });
+
+  it("keeps the manual default when switching between transactional connections", async () => {
+    editorSettings.defaultTransactionMode = "manual";
+    mocks.getConnectionConfig.mockImplementation((connectionId: string) => (connectionId === "mysql-1" ? { id: "mysql-1", name: "MySQL", db_type: "mysql", database: "app" } : { id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL" }));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    expect(store.tabs.find((item) => item.id === tabId)!.autoCommit).toBe(false);
+
+    store.updateConnection(tabId, "mysql-1", "app");
+
+    expect(store.tabs.find((item) => item.id === tabId)!.autoCommit).toBe(false);
   });
 });

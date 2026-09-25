@@ -1,0 +1,34 @@
+[package]
+name = "dbx-plugin-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+dbx-platform = { path = "../dbx-platform", features = ["host-prompts"] }
+dbx-types = { path = "../dbx-types", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+semver = "1"
+ed25519-dalek = "2"
+fs2 = "0.4"
+log = "0.4"
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
+futures = "0.3"
+base64 = "0.22"
+sha2 = "0.10"
+bytes = "1"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+tempfile = "3"
+
+[dev-dependencies]
+dbx-platform = { path = "../dbx-platform", features = ["test-support"] }
+tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }

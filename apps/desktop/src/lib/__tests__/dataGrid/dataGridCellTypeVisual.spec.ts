@@ -1,10 +1,6 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolveDataGridCellTextRole } from "@/lib/dataGrid/dataGridCellTextVisual";
 import { resolveDataGridTypeVisualKind, resolveHeaderColumnType, type DataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
-
-const dataGridSource = readFileSync(new URL("../../../components/grid/DataGrid.vue", import.meta.url), "utf8");
-const globalStylesSource = readFileSync(new URL("../../../styles/globals.css", import.meta.url), "utf8");
 
 describe("data grid type visual kind", () => {
   it.each<[string, DataGridTypeVisualKind]>([
@@ -25,6 +21,11 @@ describe("data grid type visual kind", () => {
     ["UUID", "identifier"],
     ["BYTEA", "binary"],
     ["SDO_GEOMETRY", "spatial"],
+    ["keyword", "string"],
+    ["unsigned_long", "integer"],
+    ["scaled_float", "numeric"],
+    ["date_nanos", "temporal"],
+    ["nested", "structured"],
     ["inet", "unknown"],
   ])("maps %s to %s", (dataType, expected) => {
     expect(resolveDataGridTypeVisualKind(dataType)).toBe(expected);
@@ -40,6 +41,10 @@ describe("data grid type visual kind", () => {
     ["rowversion", "sqlserver", "binary"],
     ["bit(8)", "postgres", "binary"],
     ["bit varying(8)", "postgres", "binary"],
+    ["long", "elasticsearch", "integer"],
+    ["long", "easysearch", "integer"],
+    ["byte", "elasticsearch", "integer"],
+    ["short", "elasticsearch", "integer"],
   ] as const)("maps %s for %s to %s", (dataType, databaseType, expected) => {
     expect(resolveDataGridTypeVisualKind(dataType, databaseType)).toBe(expected);
   });
@@ -49,6 +54,10 @@ describe("data grid type visual kind", () => {
     expect(resolveDataGridTypeVisualKind("timestamp", "postgres")).toBe("temporal");
     expect(resolveDataGridTypeVisualKind("bit")).toBe("boolean");
     expect(resolveDataGridTypeVisualKind("bit", "sqlserver")).toBe("boolean");
+    expect(resolveDataGridTypeVisualKind("long")).toBe("string");
+    expect(resolveDataGridTypeVisualKind("long", "oracle")).toBe("string");
+    expect(resolveDataGridTypeVisualKind("byte")).toBe("unknown");
+    expect(resolveDataGridTypeVisualKind("short")).toBe("unknown");
   });
 });
 
@@ -62,8 +71,6 @@ describe("data grid header type color", () => {
 
     expect(displayedType).toBe("decimal(10,2)");
     expect(resolveDataGridTypeVisualKind(displayedType)).toBe("numeric");
-    expect(dataGridSource).toContain(':type-class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"');
-    expect(dataGridSource).not.toContain("typeColorClass(allColumnTypes[col.actualColIdx]");
   });
 });
 
@@ -85,21 +92,7 @@ describe("data grid cell text visual priority", () => {
     expect(resolveDataGridCellTextRole({ ...ordinaryInteger, ...override })).toBe("muted");
   });
 
-  it("uses a neutral foreground on editable DOM hover surfaces", () => {
-    expect(dataGridSource).toContain("'hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800':");
-    expect(dataGridSource).toContain("'cursor-text hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800':");
-  });
-
-  it("returns before reading cell state when type colors are disabled", () => {
-    expect(dataGridSource).toContain('function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {\n  if (!colorizeDataGridCellTypes.value) return "text-foreground";\n  const value = item.data[actualColIdx];');
-    expect(dataGridSource).toContain('function transposeCellTextColorClass(recordIndex: number, actualColIdx: number): string {\n  if (!colorizeDataGridCellTypes.value) return "text-foreground";\n  const item = displayItems.value[recordIndex];');
-  });
-
-  it("places data-grid type selectors in the components layer", () => {
-    const componentsLayerStart = globalStylesSource.indexOf("@layer components {");
-    const integerTypeSelector = globalStylesSource.indexOf(".data-grid-type-integer");
-
-    expect(componentsLayerStart).toBeGreaterThan(-1);
-    expect(integerTypeSelector).toBeGreaterThan(componentsLayerStart);
+  it("keeps NULL muted when type colors are disabled", () => {
+    expect(resolveDataGridCellTextRole({ ...ordinaryInteger, colorizeTypes: false, isNull: true })).toBe("muted");
   });
 });

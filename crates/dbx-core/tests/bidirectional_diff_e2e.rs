@@ -6,6 +6,7 @@ fn table(name: &str) -> TableInfo {
     TableInfo {
         name: name.to_string(),
         table_type: "BASE TABLE".to_string(),
+        valid: None,
         comment: None,
         parent_schema: None,
         parent_name: None,
@@ -26,6 +27,7 @@ fn col(name: &str, data_type: &str) -> ColumnInfo {
         numeric_precision: None,
         numeric_scale: None,
         character_maximum_length: None,
+        metadata_capabilities: None,
         enum_values: None,
         character_set: None,
         collation: None,
@@ -254,6 +256,7 @@ fn rollback_graph_direct_consistency_check() {
         diff_type: "added".to_string(),
         object_type: None,
         name: "users".to_string(),
+        target_name: None,
         columns: Some(vec![]),
         indexes: None,
         foreign_keys: None,

@@ -32,9 +32,9 @@ vi.mock("@/lib/backend/api", () => ({
 
 const mountedApps: App[] = [];
 
-function messageAt(index: number): MqttMessage {
+function messageAt(index: number, topic = "device/status"): MqttMessage {
   return {
-    topic: "device/status",
+    topic,
     payloadBase64: btoa(`payload-${index}`),
     payloadText: `payload-${index}`,
     qos: 0,
@@ -124,5 +124,61 @@ describe("MQTT 控制台消息暂停自动滚动 (issue #5615)", () => {
     await nextTick();
     await vi.advanceTimersByTimeAsync(3000);
     expect(mqttGetMessagesMock).toHaveBeenCalled();
+  });
+});
+
+describe("MQTT 消息列表刷新后自动回到最新消息 (issue #9373)", () => {
+  it("刷新消息列表后，消息容器的 scrollTop 被重置为 0", async () => {
+    const container = await mountConsole();
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+
+    const messageList = container.querySelector('[data-testid="mqtt-message-list"]') as HTMLElement | null;
+    expect(messageList).toBeTruthy();
+    messageList!.scrollTop = 120;
+    expect(messageList!.scrollTop).toBe(120);
+
+    mqttGetMessagesMock.mockResolvedValueOnce([messageAt(1)]);
+    const refreshButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("刷新"));
+    expect(refreshButton).toBeTruthy();
+    refreshButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(messageList!.scrollTop).toBe(0);
+  });
+});
+
+describe("MQTT 控制台暂停后选择消息 (issue #8353)", () => {
+  it("点击暂停后的消息内容时不会重新获取并替换消息", async () => {
+    mqttGetMessagesMock.mockResolvedValue([messageAt(0, "device/other")]);
+    const container = await mountConsole();
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+    expect(container.textContent).toContain("payload-0");
+    expect(container.textContent).toContain("消息：device/status");
+
+    const pauseButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("暂停"));
+    expect(pauseButton).toBeTruthy();
+    pauseButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+
+    mqttGetMessagesMock.mockClear();
+    mqttGetMessagesMock.mockResolvedValue([messageAt(1, "device/other")]);
+    const messageRow = Array.from(container.querySelectorAll(".cursor-pointer")).find((element) => element.textContent?.includes("payload-0"));
+    expect(messageRow).toBeTruthy();
+    messageRow?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(mqttGetMessagesMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("payload-0");
+    expect(container.textContent).not.toContain("payload-1");
+    expect(container.textContent).toContain("消息：device/status");
+    expect(container.textContent).not.toContain("消息：device/other");
   });
 });

@@ -30,6 +30,18 @@ pub async fn start_transfer(
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
     dbx_core::transfer::validate_transfer_request(&request)?;
 
+    // `drop_target_before_create` rebuilds target tables; gate the dialect and require an
+    // explicit confirmation for production databases.
+    dbx_core::transfer_rebuild::ensure_drop_target_allowed(
+        &state,
+        &request.target_connection_id,
+        &request.target_database,
+        target_db_type,
+        request.drop_target_before_create,
+        request.drop_target_confirmed,
+    )
+    .await?;
+
     // Cross-family object transfers are validated inside transfer_schema_objects:
     // only mechanically rewriteable kinds (views, sequences) are allowed.
     // Structure-only data transfer is unsupported for MongoDB.
@@ -101,6 +113,87 @@ pub async fn start_transfer(
         let mut pending_fk_alters: Vec<(String, String)> = Vec::new();
         let mut last_rows_transferred = 0_u64;
         let mut last_total_rows = None;
+
+        // When drop_target_before_create is true, perform a rename pre-pass in
+        // parents_first=false order (children first) so that foreign keys on the
+        // backup tables remain intact. The main create/insert pass then runs in
+        // parents_first=true order (parents first).
+        // Children-first order used by the rename pre-pass, kept for the post-loop backup
+        // cleanup: a backup can still be referenced by another backup, so the drops must
+        // follow the same order.
+        let mut backup_drop_order: Vec<String> = Vec::new();
+        let backup_names = if request.drop_target_before_create {
+            // Re-sort tables in children-first order for the rename pre-pass
+            let (tables_for_rename, _) = dbx_core::transfer::sort_tables_by_fk_dependency_with_foreign_keys(
+                &state,
+                &request.target_connection_id,
+                &request.target_database,
+                &request.target_schema,
+                &sorted_tables,
+                false, // parents_first=false: children first
+            )
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("[transfer] failed to sort tables for rename pre-pass, using original order: {e}");
+                (sorted_tables.clone(), std::collections::HashMap::new())
+            });
+            backup_drop_order = tables_for_rename.clone();
+
+            match dbx_core::transfer::rename_tables_to_backup(
+                &state,
+                &request,
+                &tables_for_rename,
+                target_db_type,
+                &target_pool_key,
+                |progress| {
+                    last_rows_transferred = progress.rows_transferred;
+                    last_total_rows = progress.total_rows;
+                    emit_progress(&app, progress);
+                },
+            )
+            .await
+            {
+                Ok(names) => Some(names),
+                Err(e) if e == "Cancelled" => {
+                    emit_progress(
+                        &app,
+                        TransferProgress {
+                            transfer_id: transfer_id.clone(),
+                            table: "rename pre-pass".to_string(),
+                            table_index: 0,
+                            total_tables,
+                            rows_transferred: last_rows_transferred,
+                            total_rows: last_total_rows,
+                            status: TransferStatus::Cancelled,
+                            error: None,
+                            terminal: true,
+                        },
+                    );
+                    dbx_core::transfer::clear_cancelled(&transfer_id).await;
+                    return;
+                }
+                Err(e) => {
+                    emit_progress(
+                        &app,
+                        TransferProgress {
+                            transfer_id: transfer_id.clone(),
+                            table: "rename pre-pass".to_string(),
+                            table_index: 0,
+                            total_tables,
+                            rows_transferred: last_rows_transferred,
+                            total_rows: last_total_rows,
+                            status: TransferStatus::Error,
+                            error: Some(e),
+                            terminal: true,
+                        },
+                    );
+                    dbx_core::transfer::clear_cancelled(&transfer_id).await;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
         if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
             && matches!(target_db_type, dbx_core::models::connection::DatabaseType::Postgres)
@@ -190,6 +283,7 @@ pub async fn start_transfer(
                 &target_pool_key,
                 &known_foreign_keys,
                 &mut pending_fk_alters,
+                backup_names.as_ref(),
                 |progress| {
                     last_rows_transferred = progress.rows_transferred;
                     last_total_rows = progress.total_rows;
@@ -255,7 +349,9 @@ pub async fn start_transfer(
         // Add any foreign keys deferred during MySQL-family table creation now that
         // every selected table exists — see transfer_table's use of
         // strip_inline_foreign_key_constraint_lines for why these can't be created
-        // inline (a foreign key cycle has no valid CREATE TABLE order at all).
+        // inline (a foreign key cycle has no valid CREATE TABLE order at all). The
+        // rename pre-pass already freed the backup constraint names, so these re-create
+        // the original names without colliding.
         let mut failed_fk_tables: Vec<String> = Vec::new();
         let mut failed_fk_count = 0usize;
         for (table, alter_sql) in &pending_fk_alters {
@@ -327,6 +423,33 @@ pub async fn start_transfer(
         }
         if !object_outcome.failed.is_empty() {
             failed_tables.push(format!("schema objects ({})", object_outcome.failed.len()));
+        }
+
+        // The rename pre-pass left one backup per rebuilt table. Drop them only now that
+        // every table, every deferred foreign key and every selected schema object has
+        // succeeded — a failure anywhere above keeps the originals recoverable under
+        // their backup names.
+        if let Some(backup_names) = backup_names.as_ref() {
+            if failed_tables.is_empty() {
+                if let Err(e) = dbx_core::transfer::drop_backup_tables(
+                    &state,
+                    &request,
+                    target_db_type,
+                    &target_pool_key,
+                    backup_names,
+                    &backup_drop_order,
+                )
+                .await
+                {
+                    failed_tables.push(e);
+                }
+            } else {
+                log::warn!(
+                    "[transfer] keeping {} backup table(s) because {} step(s) failed",
+                    backup_names.len(),
+                    failed_tables.len()
+                );
+            }
         }
         let skip_suffix = if !object_outcome.skipped.is_empty() && failed_tables.is_empty() {
             format!("，跳过 {} 个已存在对象", object_outcome.skipped.len())

@@ -45,6 +45,8 @@ vi.mock("@/stores/settingsStore", () => ({
       sidebarAllowHorizontalScroll: false,
       sidebarHiddenTablePrefixes: [],
       sidebarObjectInfoMode: "none",
+      sidebarCopyTableNameSeparator: "comma",
+      sidebarCopyTableNameIncludeSchema: false,
     },
   }),
 }));
@@ -146,5 +148,57 @@ describe("TreeItem table reference dragging", () => {
     dragToEditor(row);
 
     expect(onDrop).not.toHaveBeenCalled();
+  });
+
+  it("drags multiple selected columns from the same table", async () => {
+    mockEditorDropTarget();
+    const onDrop = listenForTableReferenceDrop();
+    const columnA: TreeNode = {
+      id: "column-id",
+      label: "id (INTEGER)",
+      type: "column",
+      connectionId: "connection-1",
+      database: "main",
+      schema: "main",
+      tableName: "orders",
+      meta: { name: "id" },
+    };
+    const columnB: TreeNode = {
+      id: "column-name",
+      label: "name (TEXT)",
+      type: "column",
+      connectionId: "connection-1",
+      database: "main",
+      schema: "main",
+      tableName: "orders",
+      meta: { name: "name" },
+    };
+    connectionStore.selectedTreeNodeIds = [columnA.id, columnB.id];
+    connectionStore.selectedTreeNodeIdsSet = new Set([columnA.id, columnB.id]);
+    connectionStore.selectedTreeNodeId = columnA.id;
+    connectionStore.treeNodes = [columnA, columnB];
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(TreeItem, { node: columnA, depth: 3 }),
+      }),
+    );
+    mountedApps.push(app);
+    app.use(i18n);
+    app.provide(sidebarTreeRuntimeKey, createSidebarTreeRuntime());
+    app.mount(container);
+    await nextTick();
+
+    const row = container.querySelector<HTMLElement>("[tabindex]");
+    if (!row) throw new Error("Tree item row was not rendered");
+    dragToEditor(row);
+
+    expect(onDrop).toHaveBeenCalledOnce();
+    const detail = (onDrop.mock.calls[0][0] as CustomEvent<QueryEditorTableReferenceDropDetail>).detail;
+    expect(detail.payload.referenceType).toBe("column");
+    expect(detail.payload.columnNames).toEqual(["id", "name"]);
+    expect(detail.payload.columnNameSeparator).toBe("comma");
   });
 });

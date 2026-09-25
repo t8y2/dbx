@@ -231,37 +231,79 @@ func (s *server) listTables(schema string, constraints metadataListConstraints) 
 	if err != nil {
 		return nil, err
 	}
-	names := sortedMapKeys(metadata.Tables)
-	result := make([]tableInfo, 0, len(names))
-	for _, name := range names {
+	return tableInfosFromKeyspaceMetadata(metadata, constraints), nil
+}
+
+// Materialized views live in their own section of the keyspace metadata, so
+// listing tables only would hide them from the browser. Report them with their
+// own table type so tables and views stay distinguishable.
+func tableInfosFromKeyspaceMetadata(metadata *gocql.KeyspaceMetadata, constraints metadataListConstraints) []tableInfo {
+	result := make([]tableInfo, 0, len(metadata.Tables)+len(metadata.MaterializedViews))
+	for _, name := range sortedMapKeys(metadata.Tables) {
 		if !metadataNameMatches(name, constraints.Filter) {
 			continue
 		}
 		result = append(result, tableInfo{Name: name, TableType: "TABLE"})
 	}
-	return applyMetadataWindow(result, constraints.Offset, constraints.Limit), nil
+	for _, name := range sortedMapKeys(metadata.MaterializedViews) {
+		if !metadataNameMatches(name, constraints.Filter) {
+			continue
+		}
+		result = append(result, tableInfo{Name: name, TableType: "MATERIALIZED_VIEW"})
+	}
+	return applyMetadataWindow(result, constraints.Offset, constraints.Limit)
 }
 
 func (s *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
-	tables, err := s.listTables(schema, metadataListConstraints{Filter: constraints.Filter})
+	metadata, err := s.keyspaceMetadata(schema)
 	if err != nil {
 		return nil, err
 	}
+	return objectInfosFromKeyspaceMetadata(metadata, schema, constraints), nil
+}
+
+func objectInfosFromKeyspaceMetadata(metadata *gocql.KeyspaceMetadata, schema string, constraints metadataListConstraints) []objectInfo {
 	allowed := stringSet(constraints.ObjectTypes)
-	result := make([]objectInfo, 0, len(tables))
-	for _, table := range tables {
-		if len(allowed) > 0 && !allowed["table"] && !allowed["base_table"] {
-			continue
+	tablesAllowed := len(allowed) == 0 || allowed["table"] || allowed["base_table"]
+	viewsAllowed := len(allowed) == 0 || allowed["view"] || allowed["materialized_view"]
+	result := make([]objectInfo, 0, len(metadata.Tables)+len(metadata.MaterializedViews))
+	if tablesAllowed {
+		for _, name := range sortedMapKeys(metadata.Tables) {
+			if !metadataNameMatches(name, constraints.Filter) {
+				continue
+			}
+			result = append(result, objectInfo{Name: name, ObjectType: "TABLE", Schema: schema})
 		}
-		result = append(result, objectInfo{Name: table.Name, ObjectType: "TABLE", Schema: schema})
 	}
-	return applyMetadataWindow(result, constraints.Offset, constraints.Limit), nil
+	if viewsAllowed {
+		for _, name := range sortedMapKeys(metadata.MaterializedViews) {
+			if !metadataNameMatches(name, constraints.Filter) {
+				continue
+			}
+			result = append(result, objectInfo{Name: name, ObjectType: "MATERIALIZED_VIEW", Schema: schema})
+		}
+	}
+	return applyMetadataWindow(result, constraints.Offset, constraints.Limit)
 }
 
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
-	metadata, err := s.tableMetadata(schema, table)
+	keyspace, err := s.keyspaceMetadata(schema)
 	if err != nil {
 		return nil, err
+	}
+	return columnsForSchemaObject(keyspace, schema, table)
+}
+
+func columnsForSchemaObject(keyspace *gocql.KeyspaceMetadata, schema, table string) ([]columnInfo, error) {
+	if view := keyspace.MaterializedViews[table]; view != nil {
+		if view.BaseTable == nil {
+			return nil, fmt.Errorf("Cassandra materialized view base table metadata unavailable: %s.%s", schema, table)
+		}
+		return columnsFromMetadata(view.BaseTable), nil
+	}
+	metadata := keyspace.Tables[table]
+	if metadata == nil {
+		return nil, fmt.Errorf("Cassandra table not found: %s.%s", schema, table)
 	}
 	return columnsFromMetadata(metadata), nil
 }

@@ -139,4 +139,31 @@ describe("query result SQL export progress", () => {
     expect(cancelHandler.value).toBeNull();
     expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportTableName: "users", exportColumnTypes: ["int4", "text"] }), expect.any(Function));
   });
+
+  it("forwards result column EXTRA metadata so identity INSERT exports can be replayed", async () => {
+    const state = useDataGridExport(
+      createOptions({
+        tableMeta: computed(() => ({
+          tableName: "users",
+          primaryKeys: ["id"],
+          columns: [
+            { name: "id", data_type: "int", is_nullable: false, is_primary_key: true, extra: "identity(1,1)" },
+            { name: "name", data_type: "text", is_nullable: true },
+          ],
+        })),
+      }),
+    );
+
+    await state.exportSql();
+
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportColumnTypes: ["int4", "text"], exportColumnExtras: ["identity(1,1)", null] }), expect.any(Function));
+  });
+
+  it("routes incomplete query-result JSON exports through the streaming backend", async () => {
+    const state = useDataGridExport(createOptions());
+
+    await state.exportJson();
+
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "json", sql: "SELECT id, name FROM users" }), expect.any(Function));
+  });
 });

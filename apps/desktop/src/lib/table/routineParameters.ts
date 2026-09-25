@@ -128,11 +128,11 @@ ORDER BY p.parameter_id;`.trim();
   if (options.databaseType === "oracle" || options.databaseType === "dameng" || options.databaseType === "oceanbase-oracle") {
     return `
 SELECT
-  ARGUMENT_NAME AS name,
-  DATA_TYPE AS data_type,
-  IN_OUT AS mode,
-  POSITION AS ordinal,
-  DEFAULTED AS has_default
+  ARGUMENT_NAME AS "name",
+  DATA_TYPE AS "data_type",
+  IN_OUT AS "mode",
+  POSITION AS "ordinal",
+  DEFAULTED AS "has_default"
 FROM ALL_ARGUMENTS
 WHERE OWNER = UPPER(${schema})
   AND OBJECT_NAME = UPPER(${name})

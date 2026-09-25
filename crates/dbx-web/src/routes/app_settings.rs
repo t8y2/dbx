@@ -65,6 +65,43 @@ pub async fn save_mcp_global_policy(
     Ok(Json(()))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebMcpHttpStatus {
+    pub enabled: bool,
+    pub endpoint_path: String,
+    pub token_source: Option<&'static str>,
+    pub allowed_hosts: Vec<String>,
+    pub allowed_origins: Vec<String>,
+}
+
+pub async fn load_web_mcp_http_status(State(state): State<Arc<WebState>>) -> Json<WebMcpHttpStatus> {
+    let token_source = match (std::env::var_os("DBX_WEB_MCP_TOKEN"), std::env::var_os("DBX_WEB_MCP_TOKEN_FILE")) {
+        (Some(_), None) => Some("environment"),
+        (None, Some(_)) => Some("file"),
+        _ => None,
+    };
+    let endpoint_path =
+        if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
+    Json(WebMcpHttpStatus {
+        enabled: token_source.is_some(),
+        endpoint_path,
+        token_source,
+        allowed_hosts: comma_separated_env("DBX_WEB_MCP_ALLOWED_HOSTS"),
+        allowed_origins: comma_separated_env("DBX_WEB_MCP_ALLOWED_ORIGINS"),
+    })
+}
+
+fn comma_separated_env(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveMaxAgentTurnsRequest {
@@ -84,6 +121,24 @@ pub async fn save_max_agent_turns(
 }
 
 #[derive(Deserialize)]
+pub struct SaveHistoryRetentionLimitRequest {
+    pub limit: u32,
+}
+
+pub async fn load_history_retention_limit(State(state): State<Arc<WebState>>) -> Result<Json<u32>, AppError> {
+    state.app.storage.load_history_retention_limit().await.map(Json).map_err(AppError::from)
+}
+
+pub async fn save_history_retention_limit(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveHistoryRetentionLimitRequest>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::history::validate_history_retention_limit(body.limit).map_err(AppError::bad_request)?;
+    state.app.storage.save_history_retention_limit(body.limit).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveMaxRetriesRequest {
     pub max_retries: u32,
@@ -91,6 +146,29 @@ pub struct SaveMaxRetriesRequest {
 
 pub async fn load_max_retries(State(state): State<Arc<WebState>>) -> Result<Json<u32>, AppError> {
     state.app.storage.load_max_retries().await.map(Json).map_err(AppError::from)
+}
+
+fn sql_file_upload_max_bytes_from_mb(max_mb: u32) -> u64 {
+    u64::from(max_mb).saturating_mul(1024 * 1024)
+}
+
+pub async fn load_sql_file_upload_max_bytes(State(state): State<Arc<WebState>>) -> Result<Json<u64>, AppError> {
+    let max_mb = state.app.storage.load_sql_file_upload_max_mb().await.map_err(AppError::from)?;
+    Ok(Json(sql_file_upload_max_bytes_from_mb(max_mb)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSqlFileUploadMaxMbRequest {
+    pub sql_file_upload_max_mb: u32,
+}
+
+pub async fn save_sql_file_upload_max_mb(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveSqlFileUploadMaxMbRequest>,
+) -> Result<Json<()>, AppError> {
+    state.app.storage.save_sql_file_upload_max_mb(body.sql_file_upload_max_mb).await.map_err(AppError::from)?;
+    Ok(Json(()))
 }
 
 pub async fn save_max_retries(
@@ -126,7 +204,12 @@ fn decrypt_config_payload(payload: &EncryptedConfigPayload, passphrase: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{decrypt_config_payload, EncryptedConfigPayload};
+    use super::{decrypt_config_payload, sql_file_upload_max_bytes_from_mb, EncryptedConfigPayload};
+
+    #[test]
+    fn preserves_four_gib_sql_file_upload_limit() {
+        assert_eq!(sql_file_upload_max_bytes_from_mb(4096), 4096_u64 * 1024 * 1024);
+    }
 
     fn exported_browser_payload() -> EncryptedConfigPayload {
         EncryptedConfigPayload {

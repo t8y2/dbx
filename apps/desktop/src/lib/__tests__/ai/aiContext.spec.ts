@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { buildAiContext, resolveAiDatabaseTarget, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
+import { aiSchemaSelectionSupported, buildAiContext, resolveAiDatabaseTarget, resolveAiMentionDatabase, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
 import type { AiConfig } from "@/types/ai";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
@@ -49,6 +49,19 @@ function damengConnection(database = "APPDB"): ConnectionConfig {
     host: "127.0.0.1",
     port: 5236,
     username: "APP_USER",
+    password: "",
+    database,
+  };
+}
+
+function postgresConnection(database = "app"): ConnectionConfig {
+  return {
+    id: "postgres-1",
+    name: "PostgreSQL",
+    db_type: "postgres",
+    host: "127.0.0.1",
+    port: 5432,
+    username: "app_user",
     password: "",
     database,
   };
@@ -132,7 +145,94 @@ describe("Dameng AI context routing", () => {
     expect(resolveDefaultAiSchema(connection, ["REPORTING", "ARCHIVE"])).toBe("REPORTING");
   });
 
+  it("lists @ mention tables from the database picked in the composer", () => {
+    const connection = postgresConnection();
+    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, ["db_second"])).toBe("db_second");
+    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, ["db_second", "db_first"])).toBe("db_second");
+    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, [])).toBe("db_first");
+    expect(resolveAiMentionDatabase(queryTab("db_first"), damengConnection(), ["ignored"])).toBe("db_first");
+  });
+
   it("does not change non-Dameng namespace behavior", () => {
     expect(resolveAiDatabaseTarget(queryTab("analytics"), sqliteConnection())).toEqual({ database: "analytics" });
+  });
+});
+
+describe("PostgreSQL AI schema routing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.listTables.mockResolvedValue([]);
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.aiAgentStream.mockResolvedValue("done");
+  });
+
+  it("scopes metadata and agent tools to the selected schema", async () => {
+    const tab = { ...queryTab("app", "main_chatdr"), connectionId: "postgres-1" };
+    const connection = postgresConnection();
+    const context = await buildAiContext(tab, connection);
+
+    expect(resolveAiDatabaseTarget(tab, connection)).toEqual({ database: "app", schema: "main_chatdr" });
+    expect(context.schema).toBe("main_chatdr");
+    expect(apiMock.listTables).toHaveBeenCalledWith("postgres-1", "app", "main_chatdr");
+
+    await runAgentStream(
+      {
+        config: aiConfig(),
+        action: "general",
+        mode: "agent",
+        instruction: "inspect chat_dial_in",
+        context,
+      },
+      [],
+      vi.fn(),
+      "session-postgres",
+    );
+    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-postgres", expect.any(Object), "postgres-1", "app", "main_chatdr", "postgres", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined);
+  });
+});
+
+describe("AI schema selector visibility", () => {
+  it("matches the effective type consumed by resolveAiDatabaseTarget", () => {
+    const gbaseLikeMysql: ConnectionConfig = {
+      id: "gbase-1",
+      name: "GBase",
+      db_type: "gbase",
+      host: "localhost",
+      port: 5258,
+      username: "dbx",
+      password: "",
+      database: "app",
+    };
+    // gbase is schema-aware at the raw metadata level but maps to a
+    // MySQL-like effective type, so the AI target ignores schema selections
+    // and the selector must stay hidden to avoid a silently dropped choice.
+    expect(aiSchemaSelectionSupported(gbaseLikeMysql)).toBe(false);
+    const tab: QueryTab = queryTab("app", "sysmaster");
+    expect(resolveAiDatabaseTarget(tab, gbaseLikeMysql)).toEqual({ database: "app" });
+
+    const postgres: ConnectionConfig = { ...gbaseLikeMysql, id: "pg-1", db_type: "postgres" };
+    expect(aiSchemaSelectionSupported(postgres)).toBe(true);
+    expect(resolveAiDatabaseTarget(queryTab("app", "public"), postgres)).toEqual({ database: "app", schema: "public" });
+  });
+});
+
+describe("Plugin AI context", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each([false, true])("skips database metadata even with stale table context: %s", async (withTable) => {
+    const connection: ConnectionConfig = { ...postgresConnection(), db_type: "plugin", plugin_id: "sample.plugin" };
+    const tab = { ...queryTab("stale-db", "public"), connectionId: connection.id, tableMeta: withTable ? { schema: "public", tableName: "stale_table", columns: [] } : undefined };
+    const context = await buildAiContext(tab, connection, { mentionedTables: [{ schema: "public", table: "stale_mention" }], sqlFiles: [{ name: "notes.sql", content: "SELECT 1" }] });
+    expect(context.databaseType).toBe("plugin");
+    expect(context.connectionName).toBe(connection.name);
+    expect(context.tables).toEqual([]);
+    expect(context.truncated).toBe(false);
+    expect(context.sqlFiles).toEqual([{ name: "notes.sql", content: "SELECT 1" }]);
+    expect(apiMock.listTables).not.toHaveBeenCalled();
+    expect(apiMock.getColumns).not.toHaveBeenCalled();
+    expect(apiMock.listIndexes).not.toHaveBeenCalled();
+    expect(apiMock.listForeignKeys).not.toHaveBeenCalled();
   });
 });

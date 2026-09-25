@@ -60,6 +60,7 @@ import {
   isDamengAnyPrivilege,
   parseDamengEnableDdlAnyPriv,
 } from "@/lib/database/damengPrincipalAdmin";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -70,19 +71,25 @@ type DetailTab = "roles" | "privileges";
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{
+  selectedUsername?: string;
+  search?: string;
+  detailTab?: DetailTab;
+  collapsedGroups?: Record<string, boolean>;
+}>({}, "DamengUserAdmin");
 
 const users = ref<DamengUser[]>([]);
 const allRoles = ref<DamengRole[]>([]);
 const tablespaces = ref<string[]>([]);
-const selectedUsername = ref("");
-const search = ref("");
+const selectedUsername = ref(restoredUiState.selectedUsername ?? "");
+const search = ref(restoredUiState.search ?? "");
 const loadingUsers = ref(false);
 const loadingRoles = ref(false);
 const loadingDetails = ref(false);
 const applying = ref(false);
 const loadError = ref("");
 const detailError = ref("");
-const detailTab = ref<DetailTab>("roles");
+const detailTab = ref<DetailTab>(restoredUiState.detailTab === "privileges" ? "privileges" : "roles");
 const grantedRoles = ref<DamengGrant[]>([]);
 const grantedPrivileges = ref<DamengSysPrivilege[]>([]);
 const systemPrivilegeMap = ref<Set<string> | null>(null);
@@ -96,7 +103,9 @@ const createLocked = ref(false);
 const createUserType = ref<Exclude<DamengUserGroup, "other">>("admin");
 const createdUsername = ref("");
 const userRoleGrants = ref<Map<string, Set<string>>>(new Map());
-const collapsedGroups = ref<Record<string, boolean>>({});
+const collapsedGroups = ref<Record<string, boolean>>(restoredUiState.collapsedGroups ?? {});
+
+trackUiState(() => ({ selectedUsername: selectedUsername.value, search: search.value, detailTab: detailTab.value, collapsedGroups: collapsedGroups.value }));
 
 function groupLabel(group: DamengUserGroup): string {
   if (group === "other") return t("damengUserAdmin.groupOther");

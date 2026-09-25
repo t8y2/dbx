@@ -148,6 +148,89 @@ export function buildColumnFormatterKey(parts: ColumnFormatterKeyParts): string 
   return [parts.connectionId, parts.database ?? "", parts.schema ?? "", parts.tableName, parts.column].join("::");
 }
 
+export interface ColumnFormatterKeyContext {
+  connectionId: string;
+  database?: string;
+  schema?: string;
+  databaseType?: string;
+  /** Result-column label (may be an alias). */
+  resultColumn: string;
+  /** Physical source column label when the grid already knows it. */
+  sourceColumn?: string;
+  /** Resolved physical source identity of a query result column, when known. */
+  displaySource?: {
+    database?: string;
+    schema?: string;
+    tableName?: string;
+    sourceColumn?: string;
+  };
+  tableMeta?: {
+    database?: string;
+    schema?: string;
+    tableName: string;
+  };
+}
+
+// Ordered formatter-key candidates for one grid column. keys[0] is the write
+// key: always the physical source identity, never the current tab namespace,
+// so a same-named table in another database or schema must not inherit this
+// column's formatter. Remaining keys are read/clear fallbacks for configs
+// saved by other surfaces or older versions.
+//
+// MySQL-family query metadata mirrors the database into the schema slot while
+// table-view keys have always used an empty schema. Keep the shared
+// empty-schema key first so a formatter saved from a query result is written
+// to (and read by) the table view too, and retain the mirrored spelling only
+// as a read fallback for configs saved by older versions.
+export function columnFormatterKeys(context: ColumnFormatterKeyContext): string[] {
+  const { connectionId, database, schema, databaseType, resultColumn } = context;
+  const displaySource = context.displaySource;
+  // A joined-result source key is only meaningful within one query. Do not
+  // guess a formatter key for cached legacy mappings that lack a physical table.
+  if (displaySource && !displaySource.tableName) return [];
+
+  const tableMeta = displaySource?.tableName
+    ? {
+        database: displaySource.database,
+        schema: displaySource.schema,
+        tableName: displaySource.tableName,
+      }
+    : context.tableMeta;
+  if (!tableMeta?.tableName) return [];
+
+  const sourceColumn = displaySource?.sourceColumn || context.sourceColumn || resultColumn;
+  const keys = new Set<string>();
+  const primaryDatabase = tableMeta.database?.trim() || database;
+  const primarySchema = tableMeta.schema ?? schema;
+  const isMysql = databaseType === "mysql";
+  const mirroredSchema = isMysql ? primaryDatabase : undefined;
+  const addKey = (keyDatabase: string | undefined, keySchema: string | undefined, column: string) => {
+    keys.add(
+      buildColumnFormatterKey({
+        connectionId,
+        database: keyDatabase,
+        schema: keySchema,
+        tableName: tableMeta.tableName,
+        column,
+      }),
+    );
+  };
+
+  if (isMysql) addKey(primaryDatabase, "", sourceColumn);
+  addKey(primaryDatabase, primarySchema, sourceColumn);
+  if (displaySource?.tableName) return [...keys];
+
+  const databases = [...new Set([primaryDatabase, database, context.tableMeta?.database])];
+  const schemas = [...new Set([primarySchema, schema, context.tableMeta?.schema, "", mirroredSchema])];
+  const columns = [...new Set([sourceColumn, resultColumn])];
+  for (const keyDatabase of databases) {
+    for (const keySchema of schemas) {
+      for (const column of columns) addKey(keyDatabase, keySchema, column);
+    }
+  }
+  return [...keys];
+}
+
 export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig | undefined {
   if (!value || typeof value !== "object") return undefined;
   const config = value as Record<string, any>;
@@ -346,12 +429,15 @@ export function iotdbTimestampFractionDigits(precision: IoTDBTimestampPrecision)
 
 function iotdbTimestampTimeZone(urlParams: string | undefined): string {
   const params = new URLSearchParams(urlParams ?? "");
-  const candidate = params.get("time_zone") || params.get("timezone") || params.get("zone_id") || "UTC";
+  // Keep display aligned with the IoTDB Go client's default session zone.
+  // Otherwise an unconfigured connection interprets SQL literals in
+  // Asia/Shanghai but the grid renders the returned epoch in UTC.
+  const candidate = params.get("time_zone") || params.get("timezone") || params.get("zone_id") || "Asia/Shanghai";
   try {
     dayjs(0).tz(candidate);
     return candidate;
   } catch {
-    return "UTC";
+    return "Asia/Shanghai";
   }
 }
 
@@ -362,6 +448,24 @@ export function formatTemporalRowsForExport<T extends CellValue>(rows: readonly 
     row.map((value, index) => {
       if (!isTemporalColumnType(columnTypes[index])) return value;
       return formatTemporalValueForExport(value, normalizedPattern) as T;
+    }),
+  );
+}
+
+// CSV is untyped text: spreadsheet apps (WPS/Excel/OnlyOffice) re-guess a
+// quoted date-looking cell's type on open regardless of RFC4180 quoting,
+// which silently truncates/reformats it and can drop the milliseconds or
+// the date part entirely. Wrapping the value as an `="..."` formula is the
+// standard cross-app way to force text interpretation; the surrounding CSV
+// quoting/escaping (which already doubles embedded `"`) makes it round-trip
+// correctly. Only applied to already-string temporal cells so numeric/plain
+// columns keep exporting as-is.
+export function forceCsvTextForTemporalColumns<T extends CellValue>(rows: readonly (readonly T[])[], columnTypes: readonly (string | null | undefined)[]): T[][] {
+  if (!columnTypes.some((type) => isTemporalColumnType(type))) return rows.map((row) => [...row]);
+  return rows.map((row) =>
+    row.map((value, index) => {
+      if (typeof value !== "string" || !isTemporalColumnType(columnTypes[index])) return value;
+      return `="${value}"` as T;
     }),
   );
 }

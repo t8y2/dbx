@@ -78,6 +78,28 @@ export function getCachedObjectBrowserRows(scope: ObjectBrowserRowsCacheScope): 
   return hit ? cloneRows(hit.value) : undefined;
 }
 
+export interface ObjectBrowserRowsCacheHit {
+  rows: ObjectBrowserRow[];
+  stale: boolean;
+  ageMs: number;
+  cachedAt: number;
+}
+
+/**
+ * Reads the cached rows for a scope as a **scaffold**, allowing stale entries
+ * (beyond the TTL) to be surfaced and refreshed in the background. This never
+ * adds a new cache entry or expands capacity — a stale hit is the same Map entry
+ * the TTL would otherwise refuse to return, only now with its freshness metadata.
+ *
+ * Carries `stale`/`ageMs`/`cachedAt` so the caller can decide: keep an entry
+ * under TTL as-is, or present it immediately then revalidate in the background.
+ */
+export function getCachedObjectBrowserRowsForScaffold(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRowsCacheHit | undefined {
+  const hit = objectBrowserRowsCache.get(objectBrowserRowsScope(scope), { allowStale: true });
+  if (!hit) return undefined;
+  return { rows: cloneRows(hit.value), stale: hit.stale, ageMs: hit.ageMs, cachedAt: hit.cachedAt };
+}
+
 export function createObjectBrowserRowsCacheWriteToken(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRowsCacheWriteToken {
   const frozenScope = Object.freeze({ ...scope });
   return Object.freeze({ generation: objectBrowserRowsCacheGeneration(frozenScope).generation, scope: frozenScope });

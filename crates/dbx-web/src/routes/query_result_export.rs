@@ -44,6 +44,8 @@ pub async fn start_query_result_export(
     let ext = match req.format.as_str() {
         "csv" => "csv",
         "xlsx" => "xlsx",
+        "json" => "json",
+        "txt" => "txt",
         _ => return Err(AppError::from(format!("Unsupported query result export format: {}", req.format))),
     };
     let tmp_dir = state.data_dir.join("tmp");
@@ -69,7 +71,9 @@ pub async fn start_query_result_export(
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_progress = cancelled.clone();
 
-    tokio::spawn(async move {
+    // Exports interleave async fetches with synchronous row formatting and
+    // buffered disk writes; run them off the async workers (see spawn_export_task).
+    dbx_core::export_runtime::spawn_export_task(async move {
         let execution_id = req.execution_id.clone().filter(|id| !id.trim().is_empty());
         let registered_query = execution_id.as_ref().map(|id| {
             app.running_queries.register_task(
@@ -160,6 +164,8 @@ pub async fn query_result_export_download(
     let content_type = match export_file.format.as_str() {
         "csv" => "text/csv; charset=utf-8",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "json" => "application/json; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
         format => return Err(AppError::from(format!("Unknown format: {format}"))),
     };
 
@@ -176,7 +182,6 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use dbx_core::connection::AppState;
-    use dbx_core::storage::Storage;
 
     use crate::state::WebExportFile;
 
@@ -184,7 +189,7 @@ mod tests {
     async fn query_result_export_download_uses_the_requested_web_filename() {
         let dir = std::env::temp_dir().join(format!("dbx-web-query-export-download-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         let file_path = dir.join("query-export.csv");

@@ -2,7 +2,7 @@
  * Issue #6189 — SQL Server "focus jumps to the message result".
  *
  * Background:
- *  - `crates/dbx-core/src/db/sqlserver.rs:523-542` synthesizes a pseudo result with a
+ *  - `crates/dbx-drivers/src/db/sqlserver.rs:523-542` synthesizes a pseudo result with a
  *    single "Message" column and `server_message: true` for any batch segment that
  *    produced only server messages (PRINT / "DBCC execution completed" / ...).
  *  - `stores/queryStore.ts:4727` then picks the first result that HAS COLUMNS as the
@@ -15,6 +15,7 @@
 import { computed, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MULTI_SOURCE_MAX_ROWS_PER_SOURCE } from "@/lib/query/multiSourceResult";
 import { useSqlExecution } from "../useSqlExecution";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -98,6 +99,31 @@ describe("SQL Server result focus: doExecute vs executeTargetSql", () => {
   beforeEach(() => {
     installLocalStorage();
     setActivePinia(createPinia());
+  });
+
+  it("opens message-only executeTargetSql output in the messages view", async () => {
+    const tab = { ...queryTab(), sql: "PRINT N'x'" };
+    const connection = sqlServerConnection();
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart" | "messages">("result");
+    const queryStore = useQueryStore();
+    const { messageResult } = sqlServerMessageFirstResults();
+    vi.spyOn(queryStore, "executeTabSql").mockImplementation(async () => {
+      tab.result = messageResult;
+      return true;
+    });
+    vi.spyOn(queryStore, "getExecutionTab").mockReturnValue(tab);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execution = useSqlExecution({
+      activeTab: computed(() => tab as QueryTab | undefined),
+      activeConnection: computed(() => connection),
+      executableSql: computed(() => tab.sql),
+      activeOutputView,
+    });
+
+    await execution.executeTargetSql({ tab, connection, sql: tab.sql });
+
+    expect(activeOutputView.value).toBe("messages");
+    expect(tab.result?.rows).toEqual([["x"]]);
   });
 
   // ---- control: the single-connection editor path (fixed by be3336c1e) ----
@@ -287,5 +313,68 @@ describe("preservedResultIndex staleness theory", () => {
     const options = executeTabSql.mock.calls[0]?.[2] ?? {};
     expect(options).not.toHaveProperty("preserveActiveResultIndex");
     expect(tab.activeResultIndex).toBe(0);
+  });
+
+  it("reads one multi-database target up to the per-source row cap, not just the editor page", async () => {
+    const sql = "SELECT 1 AS value";
+    const tab = { ...queryTab(), sql };
+    const connection = sqlServerConnection();
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeTabSql = vi.spyOn(queryStore, "executeTabSql").mockImplementation(async () => true);
+    vi.spyOn(queryStore, "getExecutionTab").mockReturnValue(tab);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => tab as QueryTab | undefined),
+      activeConnection: computed(() => connection),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.executeTargetSql({ tab, connection, sql });
+
+    expect(MULTI_SOURCE_MAX_ROWS_PER_SOURCE).toBe(10_000);
+    expect(executeTabSql.mock.calls[0]?.[2]).toMatchObject({ pagination: { limit: MULTI_SOURCE_MAX_ROWS_PER_SOURCE, offset: 0 } });
+  });
+
+  it("does not count the time an operator spends on the danger confirmation", async () => {
+    vi.useFakeTimers();
+    try {
+      const sql = "UPDATE t_order SET shard_no = 999";
+      const tab = { ...queryTab(), sql };
+      const connection = sqlServerConnection();
+      const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+      const queryStore = useQueryStore();
+      vi.spyOn(queryStore, "executeTabSql").mockImplementation(async () => {
+        tab.result = { columns: [], rows: [], affected_rows: 2, execution_time_ms: 1 };
+        return true;
+      });
+      vi.spyOn(queryStore, "getExecutionTab").mockReturnValue(tab);
+      const history = vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+      let answer: ((confirmed: boolean) => void) | undefined;
+      const execution = useSqlExecution({
+        activeTab: computed(() => tab as QueryTab | undefined),
+        activeConnection: computed(() => connection),
+        executableSql: computed(() => sql),
+        activeOutputView,
+        requestDangerConfirmation: () => new Promise<boolean>((resolve) => (answer = resolve)),
+      });
+
+      const running = execution.executeTargetSql({ tab, connection, sql });
+      await vi.advanceTimersByTimeAsync(9_000);
+      answer?.(true);
+      const result = await running;
+
+      // The batch is parked on the prompt, so neither the target nor the history
+      // row may report those nine seconds as execution time.
+      expect(result.status).toBe("success");
+      expect(result.durationMs).toBeLessThan(1_000);
+      expect(history.mock.calls[0]?.[0]).toMatchObject({ execution_time_ms: expect.any(Number) });
+      expect((history.mock.calls[0]?.[0] as { execution_time_ms: number }).execution_time_ms).toBeLessThan(1_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

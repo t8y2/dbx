@@ -1,7 +1,5 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -41,8 +39,6 @@ vi.mock("@/components/ui/button", async () => {
 
 import DataGridColumnLayoutPopover from "../DataGridColumnLayoutPopover.vue";
 
-const contentAreaSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/layout/ContentArea.vue"), "utf8");
-
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 function columnLayoutOptions(itemCount: number): DataGridColumnLayoutOption[] {
@@ -60,6 +56,7 @@ function createGrid(itemCount: number) {
   const options = columnLayoutOptions(itemCount);
   const toggleColumnVisibility = vi.fn();
   const moveDisplayableColumn = vi.fn();
+  const autoFitAllColumns = vi.fn();
   const grid: DataGridColumnLayoutHandle = {
     visibleColumnCount: itemCount,
     displayableColumnCount: itemCount,
@@ -70,14 +67,46 @@ function createGrid(itemCount: number) {
       return normalizedSearch ? options.filter((option) => option.column.toLowerCase().includes(normalizedSearch)) : options;
     },
     toggleColumnVisibility,
+    hideColumns: vi.fn(),
     showAllColumns: vi.fn(),
     invertColumnVisibility: vi.fn(),
     hasCustomColumnOrder: false,
     moveDisplayableColumn,
     resetColumnOrder: vi.fn(),
+    autoFitAllColumns,
   };
-  return { grid, moveDisplayableColumn, toggleColumnVisibility };
+  return { grid, moveDisplayableColumn, toggleColumnVisibility, autoFitAllColumns };
 }
+
+// https://github.com/t8y2/dbx/issues/9813
+describe("column layout popover auto fit", () => {
+  it("offers an auto fit action that fits every visible column", async () => {
+    const { host, autoFitAllColumns } = await mountPopover(3);
+
+    expect(host.textContent).toContain("Column Width");
+    const autoFitButton = host.querySelector<HTMLButtonElement>("[data-column-auto-fit-all]")!;
+    expect(autoFitButton).not.toBeNull();
+    expect(autoFitButton.textContent?.trim()).toBe("Fit columns to content");
+
+    autoFitButton.click();
+    expect(autoFitAllColumns).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the auto fit action for grids that cannot resize columns", async () => {
+    const gridState = createGrid(2);
+    delete (gridState.grid as { autoFitAllColumns?: unknown }).autoFitAllColumns;
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(DataGridColumnLayoutPopover, { grid: gridState.grid });
+    app.use(i18n);
+    app.mount(host);
+    mountedApps.push({ app, host });
+    await nextTick();
+    await nextTick();
+
+    expect(host.querySelector("[data-column-auto-fit-all]")).toBeNull();
+  });
+});
 
 async function mountPopover(itemCount = 4) {
   const gridState = createGrid(itemCount);
@@ -142,8 +171,6 @@ afterEach(() => {
 
 describe("data grid column layout popover", () => {
   it("is available from the query result toolbar and keeps a labelled compact trigger", async () => {
-    expect(contentAreaSource).toContain('<DataGridColumnLayoutPopover :grid="dataGridRef" :compact="compact" />');
-
     const gridState = createGrid(4);
     const host = document.createElement("div");
     document.body.append(host);

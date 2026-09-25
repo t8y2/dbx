@@ -37,7 +37,7 @@ DBX uses unique short-lived logical sessions for independent Agent metadata task
 
 Runtime reuse keys include the Agent driver key, executable or JAR path, launch arguments, working directory, JRE selection, JVM options, classpath-affecting options, and native executable version boundary. Host, account, schema, and credentials belong to sessions and are not part of the runtime key.
 
-Etcd and ZooKeeper retain the legacy path because they use the key-value Agent protocol rather than the SQL session contract. Older Agent binaries and JARs also remain on the legacy path.
+ZooKeeper retains the legacy single-session path because its Agent does not advertise the `multi_session` capability; etcd Agents (v3 and v2) run on the shared multi-session path like the SQL Agents. Older Agent binaries and JARs also remain on the legacy path.
 
 ## Resource limits and recovery
 

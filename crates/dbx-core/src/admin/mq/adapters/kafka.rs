@@ -1,0 +1,1385 @@
+//! Apache Kafka admin adapter. Communicates with a Java agent process
+//! (`KafkaAgent.java`) via JSON-RPC over stdin/stdout. The Java agent uses
+//! `kafka-clients` AdminClient for admin operations and KafkaProducer for
+//! message production.
+//!
+//! This adapter follows the same pattern as the ZooKeeper/Etcd agents:
+//! 1. Spawn a Java agent process via `AgentDriverClient`
+//! 2. Perform JSON-RPC handshake + connect
+//! 3. Delegate all `MessageQueueAdmin` trait methods to JSON-RPC calls
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde::de::DeserializeOwned;
+use tokio::sync::Mutex;
+
+use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
+use crate::mq::auth::MqAuth;
+use crate::mq::config::MqAdminConfig;
+use crate::mq::port::MessageQueueAdmin;
+use crate::mq::types::*;
+
+/// Kafka capabilities - no tenants/namespaces, supports topics, consumer groups,
+/// ACLs, retention, and message production.
+const KAFKA_CAPABILITIES: MqCapabilities = MqCapabilities {
+    supports_tenants: false,
+    supports_namespaces: false,
+    supports_partitioned_topics: true,
+    supports_subscriptions: true,
+    supports_create_subscription: false,
+    supports_reset_cursor: true,
+    supports_skip_messages: false,
+    supports_clear_backlog: true,
+    supports_peek_messages: true,
+    supports_expire_messages: false,
+    supports_rate_limits: false,
+    supports_backlog_quota: false,
+    supports_retention: true,
+    supports_permissions: true,
+    supports_geo_replication: false,
+    supports_token_management: false,
+    supports_raw_admin_api: false,
+    supports_send_message: true,
+    supports_message_query: false,
+    supports_dlq: false,
+    supports_message_trace: false,
+    supports_exchanges: false,
+    supports_client_connections: false,
+    supports_user_permissions: false,
+    supports_policies: false,
+    supports_cluster_monitoring: false,
+};
+
+pub struct KafkaAdmin {
+    client: Arc<Mutex<AgentDriverClient>>,
+    config: MqAdminConfig,
+}
+
+impl KafkaAdmin {
+    /// Spawn the Kafka Java agent, perform handshake, and connect.
+    pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
+        let mut client = AgentDriverClient::spawn(launch).await?;
+
+        // Handshake
+        let _: serde_json::Value =
+            client.call_with_timeout("handshake", serde_json::json!({}), cfg.rpc_timeout()).await?;
+
+        // Build the connection params from MqAdminConfig
+        let conn_params = build_connection_params(&cfg);
+        let connect_params = serde_json::json!({ "connection": conn_params });
+        let _: serde_json::Value = client.call_with_timeout("connect", connect_params, cfg.rpc_timeout()).await?;
+
+        log::info!("Kafka admin connected via agent (bootstrap servers: {})", bootstrap_servers(&cfg));
+
+        Ok(Self { client: Arc::new(Mutex::new(client)), config: cfg })
+    }
+
+    /// Send a JSON-RPC call to the Kafka agent and deserialize the result.
+    async fn call<T: DeserializeOwned + Send + 'static>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String> {
+        let mut client = self.client.lock().await;
+        client.call_with_timeout(method, params, self.config.rpc_timeout()).await
+    }
+
+    /// The Kafka agent bounds these operations with its configured request timeout.
+    /// Do not preempt that with the driver's generic RPC timeout.
+    async fn call_with_agent_timeout<T: DeserializeOwned + Send + 'static>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String> {
+        let mut client = self.client.lock().await;
+        client.call_with_timeout(method, params, None).await
+    }
+
+    /// Send a JSON-RPC call that returns `{ok: true}` on success.
+    async fn call_ok(&self, method: &str, params: serde_json::Value) -> Result<(), String> {
+        let _: serde_json::Value = self.call(method, params).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl MessageQueueAdmin for KafkaAdmin {
+    fn capabilities(&self) -> MqCapabilities {
+        KAFKA_CAPABILITIES
+    }
+
+    fn system_kind(&self) -> MqSystemKind {
+        MqSystemKind::Kafka
+    }
+
+    async fn test_connection(&self) -> Result<MqClusterInfo, String> {
+        let conn_params = build_connection_params(&self.config);
+        let result: serde_json::Value =
+            self.call("test_connection", serde_json::json!({ "connection": conn_params })).await?;
+
+        let cluster_id = result.get("clusterId").and_then(|v| v.as_str()).map(String::from);
+        let brokers = result.get("brokers").cloned().unwrap_or(serde_json::json!([]));
+
+        // When the broker has no authorizer configured, disable permissions in the UI
+        // so the frontend hides the tab instead of showing raw errors.
+        let acl_enabled = result.get("aclEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let mut caps = KAFKA_CAPABILITIES;
+        if !acl_enabled {
+            caps.supports_permissions = false;
+        }
+
+        Ok(MqClusterInfo {
+            system_kind: MqSystemKind::Kafka,
+            server_version: None,
+            resolved_profile: "kafka-agent".to_string(),
+            version_detection: "agent".to_string(),
+            capabilities: caps,
+            extra: serde_json::json!({
+                "clusterId": cluster_id,
+                "brokers": brokers,
+            }),
+        })
+    }
+
+    // ---- Tenants (not supported by Kafka) ----
+
+    async fn list_tenants(&self) -> Result<Vec<TenantInfo>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn get_tenant(&self, _name: &str) -> Result<TenantInfo, String> {
+        Err("Kafka does not support tenants".to_string())
+    }
+
+    async fn create_tenant(&self, _name: &str, _cfg: TenantConfig) -> Result<(), String> {
+        Err("Kafka does not support tenants".to_string())
+    }
+
+    async fn update_tenant(&self, _name: &str, _cfg: TenantConfig) -> Result<(), String> {
+        Err("Kafka does not support tenants".to_string())
+    }
+
+    async fn delete_tenant(&self, _name: &str, _force: bool) -> Result<(), String> {
+        Err("Kafka does not support tenants".to_string())
+    }
+
+    // ---- Namespaces (not supported by Kafka) ----
+
+    async fn list_namespaces(&self, _tenant: &str) -> Result<Vec<NamespaceInfo>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn create_namespace(&self, _ns: &NamespaceRef, _cfg: NamespaceConfig) -> Result<(), String> {
+        Err("Kafka does not support namespaces".to_string())
+    }
+
+    async fn delete_namespace(&self, _ns: &NamespaceRef, _force: bool) -> Result<(), String> {
+        Err("Kafka does not support namespaces".to_string())
+    }
+
+    async fn get_namespace_policies(&self, _ns: &NamespaceRef) -> Result<serde_json::Value, String> {
+        Err("Kafka does not support namespaces".to_string())
+    }
+
+    // ---- Topics ----
+
+    async fn list_topics(&self, _ns: &NamespaceRef, _opts: ListTopicsOpts) -> Result<Vec<TopicInfo>, String> {
+        let result: serde_json::Value = self.call_with_agent_timeout("mq_list_topics", serde_json::json!({})).await?;
+        let topics = result.get("topics").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+        Ok(topics
+            .into_iter()
+            .map(|t| {
+                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let partitions = t.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+                TopicInfo {
+                    name: name.clone(),
+                    short_name: name,
+                    // Kafka topics always have partitions; mark as partitioned so the
+                    // "Adjust Partitions" UI button is available even for single-partition
+                    // topics (fixes t8y2/dbx#6208).
+                    partitioned: partitions.map(|p| p > 0).unwrap_or(false),
+                    partitions,
+                    persistent: true,
+                    internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
+                    message_type: None,
+                    namespace: None,
+                    message_count: None,
+                    messages_ready: None,
+                    messages_unacked: None,
+                    ..Default::default()
+                }
+            })
+            .collect())
+    }
+
+    async fn create_topic(&self, topic: &TopicRef, partitions: Option<u32>) -> Result<(), String> {
+        let params = serde_json::json!({
+            "name": topic.topic,
+            "partitions": partitions.unwrap_or(1),
+            "replicationFactor": 1,
+        });
+        self.call_ok("mq_create_topic", params).await
+    }
+
+    async fn delete_topic(&self, topic: &TopicRef, _force: bool) -> Result<(), String> {
+        self.call_ok("mq_delete_topic", serde_json::json!({ "name": topic.topic })).await
+    }
+
+    async fn update_partitions(&self, topic: &TopicRef, partitions: u32) -> Result<(), String> {
+        self.call_ok(
+            "mq_update_partitions",
+            serde_json::json!({
+                "name": topic.topic,
+                "totalPartitions": partitions,
+            }),
+        )
+        .await
+    }
+
+    async fn get_topic_stats(&self, topic: &TopicRef) -> Result<TopicStats, String> {
+        let result: serde_json::Value =
+            self.call("mq_get_topic_stats", serde_json::json!({ "name": topic.topic })).await?;
+
+        let total_messages = result.get("totalMessages").and_then(|v| v.as_i64()).unwrap_or(0);
+        let _partitions = result.get("partitions").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+        Ok(TopicStats {
+            msg_rate_in: 0.0,
+            msg_rate_out: 0.0,
+            msg_throughput_in: 0.0,
+            msg_throughput_out: 0.0,
+            storage_size: 0,
+            backlog_size: 0,
+            msg_in_counter: total_messages,
+            msg_out_counter: 0,
+            subscription_count: 0,
+            producer_count: 0,
+            rates_unavailable: false,
+            raw: result,
+        })
+    }
+
+    async fn get_topic_internal_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, String> {
+        self.call("mq_get_topic_config", serde_json::json!({ "name": topic.topic })).await
+    }
+
+    // ---- Subscriptions (mapped to consumer groups) ----
+
+    async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String> {
+        // One batched agent RPC: the agent lists every consumer group, batch-describes
+        // them, and resolves committed + end offsets for the requested topic with a
+        // handful of Kafka Admin calls. Subscriptions are filtered in memory below.
+        // (The previous 1 + 2N serial RPC pattern — describe + lag per group — took
+        // tens of seconds on remote clusters with many groups, see #7163.)
+        let result: serde_json::Value =
+            self.call("mq_list_consumer_groups", serde_json::json!({ "topic": topic.topic })).await?;
+        let groups = result.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+        // For each group, check both active assignments and committed offsets.
+        let mut subs = Vec::new();
+        for group in groups {
+            let group_id = group.get("groupId").and_then(|v| v.as_str()).unwrap_or_default();
+            if let Some(sub) = kafka_subscription_from_group_row(group_id, &topic.topic, &group) {
+                subs.push(sub);
+            }
+        }
+        Ok(subs)
+    }
+
+    async fn get_kafka_consumer_group_snapshot(&self) -> Result<KafkaConsumerGroupSnapshot, String> {
+        self.call("mq_get_consumer_group_snapshot", consumer_group_snapshot_params(&self.config)).await
+    }
+
+    async fn create_subscription(&self, _topic: &TopicRef, _sub: &str, _pos: ResetPosition) -> Result<(), String> {
+        Err("Kafka consumer groups are created automatically when consumers join".to_string())
+    }
+
+    async fn delete_subscription(&self, _topic: &TopicRef, sub: &str, _force: bool) -> Result<(), String> {
+        self.call_ok("mq_delete_consumer_group", serde_json::json!({ "groupId": sub })).await
+    }
+
+    async fn skip_messages(&self, _topic: &TopicRef, _sub: &str, _count: SkipCount) -> Result<(), String> {
+        Err("Kafka does not support skipping messages directly".to_string())
+    }
+
+    async fn reset_cursor(&self, topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<(), String> {
+        let params = reset_cursor_params(topic, sub, pos)?;
+        self.call_ok("mq_reset_consumer_group_offsets", params).await
+    }
+
+    async fn clear_backlog(&self, topic: &TopicRef, sub: &str) -> Result<(), String> {
+        // Clearing backlog = resetting offsets to latest
+        self.call_ok(
+            "mq_reset_consumer_group_offsets",
+            serde_json::json!({
+                "groupId": sub,
+                "topic": topic.topic,
+                "position": "latest",
+            }),
+        )
+        .await
+    }
+
+    async fn peek_messages(
+        &self,
+        topic: &TopicRef,
+        _sub: &str,
+        count: u32,
+        options: PeekMessagesOptions,
+    ) -> Result<PeekMessagesResult, String> {
+        let params = peek_messages_params(&self.config, topic, count, options);
+        let result: serde_json::Value = self.call_with_agent_timeout("mq_peek_messages", params).await?;
+
+        Ok(peek_messages_result_from_agent(&result))
+    }
+
+    async fn expire_messages(&self, _topic: &TopicRef, _sub: &str, _expire_seconds: i64) -> Result<(), String> {
+        Err("Kafka does not support expiring messages on a subscription".to_string())
+    }
+
+    // ---- Producers / consumers ----
+
+    async fn list_producers(&self, topic: &TopicRef) -> Result<Vec<ProducerInfo>, String> {
+        let result: serde_json::Value =
+            match self.call("mq_list_producers", serde_json::json!({ "topic": topic.topic })).await {
+                Ok(result) => result,
+                Err(err) if is_describe_producers_unsupported(&err) => {
+                    log::info!("Kafka broker does not support DESCRIBE_PRODUCERS; active producers are unavailable");
+                    return Ok(Vec::new());
+                }
+                Err(err) => return Err(err),
+            };
+        let producers = result.get("producers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        Ok(producers
+            .into_iter()
+            .map(|p| ProducerInfo {
+                producer_id: p.get("producerId").and_then(|v| v.as_i64()).unwrap_or(0),
+                producer_name: p.get("producerName").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                msg_rate_in: p.get("msgRateIn").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                msg_throughput_in: p.get("msgThroughputIn").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                address: p.get("address").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                client_version: p.get("clientVersion").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            })
+            .collect())
+    }
+
+    async fn list_consumers(&self, _topic: &TopicRef, sub: &str) -> Result<Vec<ConsumerInfo>, String> {
+        let result: serde_json::Value =
+            self.call("mq_describe_consumer_group", serde_json::json!({ "groupId": sub })).await?;
+
+        let members = result.get("members").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        Ok(members.iter().map(kafka_consumer_from_member).collect())
+    }
+
+    async fn unload_topic(&self, _topic: &TopicRef) -> Result<(), String> {
+        Err("Kafka does not support unloading topics".to_string())
+    }
+
+    // ---- Rate limits / quotas / retention ----
+
+    async fn set_publish_rate(&self, _scope: &PolicyScope, _rate: PublishRate) -> Result<(), String> {
+        Err("Kafka does not support publish rate limits via AdminClient".to_string())
+    }
+
+    async fn set_dispatch_rate(&self, _scope: &PolicyScope, _rate: DispatchRate) -> Result<(), String> {
+        Err("Kafka does not support dispatch rate limits via AdminClient".to_string())
+    }
+
+    async fn set_subscribe_rate(&self, _scope: &PolicyScope, _rate: SubscribeRate) -> Result<(), String> {
+        Err("Kafka does not support subscribe rate limits via AdminClient".to_string())
+    }
+
+    async fn set_backlog_quota(&self, _scope: &PolicyScope, _quota: BacklogQuota) -> Result<(), String> {
+        Err("Kafka does not support backlog quotas via AdminClient".to_string())
+    }
+
+    async fn set_retention(&self, scope: &PolicyScope, retention: RetentionPolicy) -> Result<(), String> {
+        let topic_name = match scope {
+            PolicyScope::Topic { topic, .. } => topic.clone(),
+            PolicyScope::Namespace { .. } => return Err("Kafka retention can only be set on topics".to_string()),
+        };
+
+        let retention_ms = if retention.retention_time_in_minutes < 0 {
+            "-1".to_string()
+        } else {
+            (retention.retention_time_in_minutes as i64 * 60 * 1000).to_string()
+        };
+
+        let mut configs = vec![serde_json::json!({ "key": "retention.ms", "value": retention_ms })];
+        if retention.retention_size_in_mb >= 0 {
+            let retention_bytes = (retention.retention_size_in_mb as i64 * 1024 * 1024).to_string();
+            configs.push(serde_json::json!({ "key": "retention.bytes", "value": retention_bytes }));
+        }
+
+        self.call_ok(
+            "mq_alter_topic_config",
+            serde_json::json!({
+                "name": topic_name,
+                "configs": configs,
+            }),
+        )
+        .await
+    }
+
+    async fn get_effective_policies(&self, scope: &PolicyScope) -> Result<serde_json::Value, String> {
+        let topic_name = match scope {
+            PolicyScope::Topic { topic, .. } => topic.clone(),
+            PolicyScope::Namespace { .. } => return Err("Kafka does not support namespace policies".to_string()),
+        };
+        self.call("mq_get_topic_config", serde_json::json!({ "name": topic_name })).await
+    }
+
+    // ---- Permissions (mapped to Kafka ACLs) ----
+
+    async fn grant_permission(&self, scope: &PolicyScope, role: &str, actions: Vec<AuthAction>) -> Result<(), String> {
+        let (resource_type, resource_name) = match scope {
+            PolicyScope::Topic { topic, .. } => ("TOPIC", topic.clone()),
+            PolicyScope::Namespace { .. } => ("TOPIC", "*".to_string()),
+        };
+
+        let acls: Vec<serde_json::Value> = actions
+            .into_iter()
+            .map(|action| {
+                let operation = match action {
+                    AuthAction::Produce => "WRITE",
+                    AuthAction::Consume => "READ",
+                    _ => "ALL",
+                };
+                serde_json::json!({
+                    "resourceType": resource_type,
+                    "resourceName": resource_name,
+                    "patternType": "LITERAL",
+                    "principal": format!("User:{}", role),
+                    "host": "*",
+                    "operation": operation,
+                    "permissionType": "ALLOW",
+                })
+            })
+            .collect();
+
+        self.call_ok("mq_create_acls", serde_json::json!({ "acls": acls })).await
+    }
+
+    async fn revoke_permission(&self, scope: &PolicyScope, role: &str) -> Result<(), String> {
+        let (resource_type, resource_name) = match scope {
+            PolicyScope::Topic { topic, .. } => ("TOPIC", topic.clone()),
+            PolicyScope::Namespace { .. } => ("TOPIC", "*".to_string()),
+        };
+
+        self.call_ok(
+            "mq_delete_acls",
+            serde_json::json!({
+                "filters": [{
+                    "resourceType": resource_type,
+                    "resourceName": resource_name,
+                    "principal": format!("User:{}", role),
+                }]
+            }),
+        )
+        .await
+    }
+
+    async fn list_permissions(&self, scope: &PolicyScope) -> Result<PermissionMap, String> {
+        let (resource_type, resource_name) = match scope {
+            PolicyScope::Topic { topic, .. } => ("TOPIC", topic.clone()),
+            PolicyScope::Namespace { .. } => ("TOPIC", "*".to_string()),
+        };
+
+        let result: serde_json::Value = self
+            .call(
+                "mq_list_acls",
+                serde_json::json!({
+                    "resourceType": resource_type,
+                    "resourceName": resource_name,
+                }),
+            )
+            .await?;
+
+        let acls = result.get("acls").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mut permissions: PermissionMap = HashMap::new();
+
+        for acl in acls {
+            let principal = acl.get("principal").and_then(|v| v.as_str()).unwrap_or_default();
+            let role = principal.strip_prefix("User:").unwrap_or(principal).to_string();
+            let operation = acl.get("operation").and_then(|v| v.as_str()).unwrap_or_default();
+            let action = match operation {
+                "WRITE" => AuthAction::Produce,
+                "READ" => AuthAction::Consume,
+                _ => continue,
+            };
+            permissions.entry(role).or_default().push(action);
+        }
+        Ok(permissions)
+    }
+
+    // ---- Monitoring ----
+
+    async fn get_backlog(&self, topic: &TopicRef, sub: Option<&str>) -> Result<BacklogStats, String> {
+        let group_id = sub.ok_or("Consumer group name (subscription) is required for Kafka backlog")?;
+        let result: serde_json::Value = self
+            .call(
+                "mq_get_consumer_lag",
+                serde_json::json!({
+                    "groupId": group_id,
+                    "topic": topic.topic,
+                }),
+            )
+            .await?;
+
+        Ok(backlog_stats_from_consumer_lag(&result))
+    }
+
+    async fn get_cluster_info(&self) -> Result<ClusterInfo, String> {
+        let result: serde_json::Value = self.call("mq_describe_cluster", serde_json::json!({})).await?;
+
+        let cluster_id = result.get("clusterId").and_then(|v| v.as_str()).map(String::from);
+        let broker_count = result.get("nodeCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+        let controller = result.get("controller").filter(|v| !v.is_null());
+        let controller_id = controller.and_then(|v| v.get("id")).and_then(|v| v.as_i64()).map(|v| v as i32);
+        let controller_host = controller.and_then(|v| v.get("host")).and_then(|v| v.as_str()).map(|host| {
+            let port = controller.and_then(|v| v.get("port")).and_then(|v| v.as_i64()).unwrap_or(0);
+            format!("{}:{}", host, port)
+        });
+
+        let brokers = result
+            .get("brokers")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|node| {
+                        Some(BrokerNode {
+                            id: node.get("id")?.as_i64()? as i32,
+                            host: node.get("host")?.as_str()?.to_string(),
+                            port: node.get("port")?.as_i64()? as i32,
+                            rack: node.get("rack").and_then(|v| v.as_str()).map(String::from),
+                            ..Default::default()
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(ClusterInfo { cluster_id, broker_count, controller_id, controller_host, brokers, raw: result })
+    }
+
+    // ---- Raw request (not supported for Kafka) ----
+
+    async fn raw_request(&self, _req: MqRawRequest) -> Result<MqRawResponse, String> {
+        Err("Kafka does not have a REST admin API; raw requests are not supported".to_string())
+    }
+
+    // ---- Message production ----
+
+    async fn send_message(&self, req: SendMessageRequest) -> Result<SendMessageResponse, String> {
+        let params = serde_json::json!({
+            "topic": req.topic,
+            "key": req.key,
+            "payloadBase64": req.payload_base64,
+            "headers": req.headers,
+            "partition": req.partition,
+        });
+        let result: serde_json::Value = self.call("mq_send_message", params).await?;
+
+        Ok(SendMessageResponse {
+            topic: result.get("topic").and_then(|v| v.as_str()).unwrap_or(&req.topic).to_string(),
+            partition: result.get("partition").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            offset: result.get("offset").and_then(|v| v.as_i64()).unwrap_or(0),
+            timestamp: result.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Extract Kafka bootstrap servers from MqAdminConfig.extra.
+fn bootstrap_servers(cfg: &MqAdminConfig) -> String {
+    cfg.extra.get("bootstrapServers").and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+fn extra_str<'a>(extra: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    extra.get(key).and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty())
+}
+
+fn is_describe_producers_unsupported(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    (normalized.contains("unsupportedversionexception") && normalized.contains("describe_producers"))
+        || normalized.contains("the node does not support describe_producers")
+}
+
+/// Build the connection params JSON from MqAdminConfig for the Java agent.
+fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
+    let extra = &cfg.extra;
+    let basic_auth = match &cfg.auth {
+        MqAuth::Basic { username, password } => Some((username.as_str(), password.as_str())),
+        _ => None,
+    };
+    let sasl_username =
+        extra_str(extra, "saslUsername").or_else(|| basic_auth.map(|(username, _)| username)).unwrap_or("");
+    let sasl_password =
+        extra_str(extra, "saslPassword").or_else(|| basic_auth.map(|(_, password)| password)).unwrap_or("");
+    let sasl_mechanism = extra_str(extra, "saslMechanism").unwrap_or(if basic_auth.is_some() { "PLAIN" } else { "" });
+    let security_protocol = extra_str(extra, "securityProtocol").unwrap_or(if !sasl_mechanism.is_empty() {
+        "SASL_PLAINTEXT"
+    } else {
+        "PLAINTEXT"
+    });
+    let zookeeper_connect_string = extra_str(extra, "zookeeperServers").unwrap_or("");
+    let properties =
+        extra.get("properties").filter(|value| value.is_object()).cloned().unwrap_or_else(|| serde_json::json!({}));
+
+    serde_json::json!({
+        "bootstrap_servers": bootstrap_servers(cfg),
+        "zookeeper_connect_string": zookeeper_connect_string,
+        "security_protocol": security_protocol,
+        "sasl_mechanism": sasl_mechanism,
+        "sasl_username": sasl_username,
+        "sasl_password": sasl_password,
+        "tls_skip_verify": cfg.tls_skip_verify,
+        "tls": {
+            "skip_verify": cfg.tls_skip_verify,
+        },
+        "properties": properties,
+        "request_timeout_ms": cfg.request_timeout_ms(),
+    })
+}
+
+fn consumer_group_snapshot_params(cfg: &MqAdminConfig) -> serde_json::Value {
+    serde_json::json!({
+        "timeout_ms": cfg.request_timeout_ms(),
+    })
+}
+
+fn peek_messages_params(
+    cfg: &MqAdminConfig,
+    topic: &TopicRef,
+    count: u32,
+    options: PeekMessagesOptions,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "topic": topic.topic,
+        "count": count,
+        "connection": build_connection_params(cfg),
+    });
+    // Keep absent fields absent so older earliest and offset requests retain
+    // their established agent semantics, including offset 0.
+    if let Some(start_position) = options.start_position {
+        params["startPosition"] = serde_json::json!(start_position);
+    }
+    if let Some(partition) = options.partition {
+        params["partition"] = serde_json::json!(partition);
+    }
+    if let Some(offset) = options.offset {
+        params["offset"] = serde_json::json!(offset);
+    }
+    params
+}
+
+fn peek_messages_result_from_agent(result: &serde_json::Value) -> PeekMessagesResult {
+    let (messages, incomplete) = if let Some(messages) = result.as_array() {
+        (messages.clone(), false)
+    } else {
+        (
+            result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+            result.get("incomplete").and_then(|v| v.as_bool()).unwrap_or(false),
+        )
+    };
+    let messages = messages
+        .into_iter()
+        .enumerate()
+        .map(|(idx, m)| {
+            let mut properties = HashMap::new();
+            if let Some(partition) = m.get("partition").and_then(|v| v.as_i64()) {
+                properties.insert("partition".to_string(), partition.to_string());
+            }
+            PeekedMessage {
+                position: (idx + 1) as u32,
+                message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                key: m.get("key").and_then(|v| v.as_str()).map(String::from),
+                publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                event_time: None,
+                properties,
+                headers: m
+                    .get("headers")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
+                    })
+                    .unwrap_or_default(),
+                payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
+            }
+        })
+        .collect();
+    PeekMessagesResult { messages, incomplete }
+}
+
+fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<serde_json::Value, String> {
+    match pos {
+        ResetPosition::Earliest => Ok(serde_json::json!({
+            "groupId": sub,
+            "topic": topic.topic,
+            "position": "earliest",
+        })),
+        ResetPosition::Latest => Ok(serde_json::json!({
+            "groupId": sub,
+            "topic": topic.topic,
+            "position": "latest",
+        })),
+        ResetPosition::Timestamp { timestamp_ms } => Ok(serde_json::json!({
+            "groupId": sub,
+            "topic": topic.topic,
+            "position": "timestamp",
+            "timestampMs": timestamp_ms,
+        })),
+        ResetPosition::PartitionOffset { partition, offset } => {
+            if partition < 0 || offset < 0 {
+                return Err("Kafka partition and offset must be non-negative integers".to_string());
+            }
+            Ok(serde_json::json!({
+                "groupId": sub,
+                "topic": topic.topic,
+                "offsets": [{ "partition": partition, "offset": offset }],
+            }))
+        }
+        ResetPosition::MessageId { .. } => Err("Kafka does not support cursor reset by Pulsar message id".to_string()),
+    }
+}
+
+/// Build a `SubscriptionInfo` for `topic` from one row of the batched
+/// `mq_list_consumer_groups` response. The agent already resolved committed
+/// offsets (and end offsets for the requested topic) for every group, so no
+/// per-group RPC happens here.
+fn kafka_subscription_from_group_row(group_id: &str, topic: &str, row: &serde_json::Value) -> Option<SubscriptionInfo> {
+    let consumers = row
+        .get("members")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|member| kafka_member_is_assigned_to_topic(member, topic))
+        .map(kafka_consumer_from_member)
+        .collect::<Vec<_>>();
+    let has_active_assignment = !consumers.is_empty();
+
+    let committed = row
+        .get("committedOffsets")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|partition| partition.get("topic").and_then(|v| v.as_str()) == Some(topic))
+        .collect::<Vec<_>>();
+    let has_committed_offsets = !committed.is_empty();
+
+    if !has_active_assignment && !has_committed_offsets {
+        return None;
+    }
+
+    let end_offsets = row
+        .get("endOffsets")
+        .and_then(|v| v.as_array())
+        .map(|partitions| {
+            partitions
+                .iter()
+                .filter_map(|partition| {
+                    // Defensive: the agent already filters end offsets to the
+                    // requested topic, but keying by partition id alone would
+                    // let a same-numbered partition of another topic collide.
+                    if partition.get("topic").and_then(|v| v.as_str()) != Some(topic) {
+                        return None;
+                    }
+                    let partition_id = partition.get("partition").and_then(|v| v.as_i64())?;
+                    let offset = partition.get("offset").and_then(|v| v.as_i64())?;
+                    Some((partition_id, offset))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    // Sum lag over the topic's committed partitions. A partition without a
+    // resolved end offset contributes nothing (matches the agent's lag probe:
+    // unknown end offsets are not reported as zero lag).
+    let msg_backlog = committed
+        .iter()
+        .filter_map(|partition| {
+            let partition_id = partition.get("partition").and_then(|v| v.as_i64())?;
+            let committed_offset = partition.get("offset").and_then(|v| v.as_i64())?;
+            let end_offset = end_offsets.get(&partition_id).copied()?;
+            Some((end_offset - committed_offset).max(0))
+        })
+        .sum();
+
+    Some(SubscriptionInfo {
+        name: group_id.to_string(),
+        sub_type: "consumer-group".to_string(),
+        msg_backlog,
+        msg_rate_out: 0.0,
+        msg_throughput_out: 0.0,
+        consumers,
+        ..Default::default()
+    })
+}
+
+fn kafka_member_is_assigned_to_topic(member: &serde_json::Value, topic: &str) -> bool {
+    member
+        .get("assignments")
+        .and_then(|v| v.as_array())
+        .map(|assignments| assignments.iter().any(|a| a.get("topic").and_then(|v| v.as_str()) == Some(topic)))
+        .unwrap_or(false)
+}
+
+fn kafka_consumer_from_member(member: &serde_json::Value) -> ConsumerInfo {
+    ConsumerInfo {
+        consumer_name: member.get("memberId").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        msg_rate_out: 0.0,
+        msg_throughput_out: 0.0,
+        available_permits: 0,
+        address: member.get("host").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        client_version: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mq::auth::MqAuth;
+    use crate::mq::types::MqSystemKind;
+
+    fn kafka_config(extra: serde_json::Value, auth: MqAuth, tls_skip_verify: bool) -> MqAdminConfig {
+        MqAdminConfig {
+            system_kind: MqSystemKind::Kafka,
+            admin_url: String::new(),
+            auth,
+            tls_skip_verify,
+            pinned_version: None,
+            token_signing: None,
+            connect_override: None,
+            management_connect_override: None,
+            socks_proxy: None,
+            query_timeout_secs: crate::mq::config::DEFAULT_MQ_QUERY_TIMEOUT_SECS,
+            connect_timeout_secs: crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS,
+            extra,
+        }
+    }
+
+    fn topic_ref() -> TopicRef {
+        TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
+        }
+    }
+
+    #[test]
+    fn peek_message_params_forward_explicit_start_position_and_offset_filters() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(
+            &cfg,
+            &topic_ref(),
+            20,
+            PeekMessagesOptions {
+                start_position: Some(PeekStartPosition::Offset),
+                partition: Some(2),
+                offset: Some(17),
+            },
+        );
+
+        assert_eq!(params.get("topic").and_then(|value| value.as_str()), Some("events"));
+        assert_eq!(params.get("count").and_then(|value| value.as_u64()), Some(20));
+        assert_eq!(params.get("startPosition").and_then(|value| value.as_str()), Some("offset"));
+        assert_eq!(params.get("partition").and_then(|value| value.as_i64()), Some(2));
+        assert_eq!(params.get("offset").and_then(|value| value.as_i64()), Some(17));
+    }
+
+    #[test]
+    fn consumer_group_snapshot_params_forward_the_configured_query_timeout() {
+        let mut cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        cfg.query_timeout_secs = 17;
+
+        let params = consumer_group_snapshot_params(&cfg);
+
+        assert_eq!(params.get("timeout_ms").and_then(serde_json::Value::as_u64), Some(17_000));
+        assert_eq!(cfg.rpc_timeout(), Some(std::time::Duration::from_secs(17)));
+    }
+
+    #[test]
+    fn consumer_group_snapshot_params_keep_a_finite_agent_budget_for_unlimited_rpc_timeout() {
+        let mut cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        cfg.query_timeout_secs = 0;
+
+        let params = consumer_group_snapshot_params(&cfg);
+
+        assert_eq!(params.get("timeout_ms").and_then(serde_json::Value::as_u64), Some(3_600_000));
+        assert_eq!(cfg.rpc_timeout(), None);
+    }
+
+    #[test]
+    fn peek_message_params_omit_legacy_optional_fields() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(&cfg, &topic_ref(), 20, PeekMessagesOptions::default());
+
+        assert!(params.get("startPosition").is_none());
+        assert!(params.get("partition").is_none());
+        assert!(params.get("offset").is_none());
+    }
+
+    #[test]
+    fn peek_result_preserves_the_agent_incomplete_status() {
+        let result = peek_messages_result_from_agent(&serde_json::json!({
+            "messages": [{
+                "partition": 2,
+                "offset": 17,
+                "payloadBase64": "aGVsbG8=",
+            }],
+            "incomplete": true,
+        }));
+
+        assert!(result.incomplete);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("2"));
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("17"));
+    }
+
+    #[test]
+    fn peek_result_accepts_legacy_agent_array_responses() {
+        let result = peek_messages_result_from_agent(&serde_json::json!([{
+            "partition": 1,
+            "offset": 9,
+            "payloadBase64": "bGVnYWN5",
+        }]));
+
+        assert!(!result.incomplete);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("1"));
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("9"));
+        assert_eq!(result.messages[0].payload_base64, "bGVnYWN5");
+    }
+
+    #[test]
+    fn peek_message_params_preserve_legacy_offset_requests() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(
+            &cfg,
+            &topic_ref(),
+            20,
+            PeekMessagesOptions { start_position: None, partition: None, offset: Some(17) },
+        );
+
+        assert!(params.get("startPosition").is_none());
+        assert_eq!(params.get("offset").and_then(|value| value.as_i64()), Some(17));
+    }
+
+    #[test]
+    fn connection_params_map_basic_auth_to_kafka_sasl_without_plaintext_password_extra() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "bootstrapServers": "localhost:9092"
+            }),
+            MqAuth::Basic { username: "alice".to_string(), password: "secret".to_string() },
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("bootstrap_servers").and_then(|v| v.as_str()), Some("localhost:9092"));
+        assert_eq!(params.get("security_protocol").and_then(|v| v.as_str()), Some("SASL_PLAINTEXT"));
+        assert_eq!(params.get("sasl_mechanism").and_then(|v| v.as_str()), Some("PLAIN"));
+        assert_eq!(params.get("sasl_username").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(params.get("sasl_password").and_then(|v| v.as_str()), Some("secret"));
+    }
+
+    #[test]
+    fn connection_params_preserve_kafka_security_extra_and_nested_tls() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "bootstrapServers": "broker:9093",
+                "securityProtocol": "SASL_SSL",
+                "saslMechanism": "SCRAM-SHA-512",
+                "properties": {
+                    "client.id": "dbx"
+                }
+            }),
+            MqAuth::Basic { username: "bob".to_string(), password: "pw".to_string() },
+            true,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("security_protocol").and_then(|v| v.as_str()), Some("SASL_SSL"));
+        assert_eq!(params.get("sasl_mechanism").and_then(|v| v.as_str()), Some("SCRAM-SHA-512"));
+        assert_eq!(params.pointer("/tls/skip_verify").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(params.pointer("/properties/client.id").and_then(|v| v.as_str()), Some("dbx"));
+    }
+
+    #[test]
+    fn connection_params_preserve_kafka_gssapi_properties() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "bootstrapServers": "broker:9093",
+                "securityProtocol": "SASL_SSL",
+                "saslMechanism": "GSSAPI",
+                "properties": {
+                    "sasl.jaas.config": "com.sun.security.auth.module.Krb5LoginModule required useKeyTab=true keyTab=\"/tmp/user.keytab\" principal=\"user@EXAMPLE.COM\";",
+                    "sasl.kerberos.service.name": "kafka",
+                    "java.security.krb5.conf": "/tmp/krb5.conf"
+                }
+            }),
+            MqAuth::None,
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("security_protocol").and_then(|v| v.as_str()), Some("SASL_SSL"));
+        assert_eq!(params.get("sasl_mechanism").and_then(|v| v.as_str()), Some("GSSAPI"));
+        assert_eq!(params.pointer("/properties/sasl.kerberos.service.name").and_then(|v| v.as_str()), Some("kafka"));
+        assert_eq!(
+            params.pointer("/properties/java.security.krb5.conf").and_then(|v| v.as_str()),
+            Some("/tmp/krb5.conf")
+        );
+    }
+
+    #[test]
+    fn connection_params_pass_zookeeper_discovery_without_fake_bootstrap_servers() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "connectionSource": "zookeeper",
+                "zookeeperServers": "zk-1:2181,zk-2:2181/kafka",
+                "securityProtocol": "PLAINTEXT"
+            }),
+            MqAuth::None,
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("bootstrap_servers").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(params.get("zookeeper_connect_string").and_then(|v| v.as_str()), Some("zk-1:2181,zk-2:2181/kafka"));
+        assert_eq!(params.get("security_protocol").and_then(|v| v.as_str()), Some("PLAINTEXT"));
+    }
+
+    #[test]
+    fn connection_params_preserve_zookeeper_sasl_and_tls_properties() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "connectionSource": "zookeeper",
+                "zookeeperServers": "zk-secure:2281/kafka",
+                "securityProtocol": "SASL_SSL",
+                "properties": {
+                    "zookeeper.sasl.client": "true",
+                    "zookeeper.sasl.clientconfig": "DbxZooKeeperClient",
+                    "zookeeper.client.secure": "true",
+                    "zookeeper.clientCnxnSocket": "org.apache.zookeeper.ClientCnxnSocketNetty",
+                    "zookeeper.ssl.trustStore.location": "/etc/dbx/zookeeper-truststore.p12"
+                }
+            }),
+            MqAuth::None,
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("zookeeper_connect_string").and_then(|v| v.as_str()), Some("zk-secure:2281/kafka"));
+        assert_eq!(params.pointer("/properties/zookeeper.sasl.client").and_then(|v| v.as_str()), Some("true"));
+        assert_eq!(
+            params.pointer("/properties/zookeeper.sasl.clientconfig").and_then(|v| v.as_str()),
+            Some("DbxZooKeeperClient")
+        );
+        assert_eq!(params.pointer("/properties/zookeeper.client.secure").and_then(|v| v.as_str()), Some("true"));
+        assert_eq!(
+            params.pointer("/properties/zookeeper.clientCnxnSocket").and_then(|v| v.as_str()),
+            Some("org.apache.zookeeper.ClientCnxnSocketNetty")
+        );
+        assert_eq!(
+            params.pointer("/properties/zookeeper.ssl.trustStore.location").and_then(|v| v.as_str()),
+            Some("/etc/dbx/zookeeper-truststore.p12")
+        );
+    }
+
+    #[test]
+    fn reset_cursor_params_preserve_timestamp_position() {
+        let topic = TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        let params = reset_cursor_params(&topic, "group-a", ResetPosition::Timestamp { timestamp_ms: 1710000000000 })
+            .expect("timestamp reset should be supported");
+
+        assert_eq!(params.get("groupId").and_then(|v| v.as_str()), Some("group-a"));
+        assert_eq!(params.get("topic").and_then(|v| v.as_str()), Some("events"));
+        assert_eq!(params.get("position").and_then(|v| v.as_str()), Some("timestamp"));
+        assert_eq!(params.get("timestampMs").and_then(|v| v.as_i64()), Some(1710000000000));
+    }
+
+    #[test]
+    fn reset_cursor_params_reject_message_id_position() {
+        let topic = TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        let err = reset_cursor_params(&topic, "group-a", ResetPosition::MessageId { ledger_id: 1, entry_id: 2 })
+            .expect_err("Kafka should not accept Pulsar message ids");
+
+        assert!(err.contains("message id"));
+    }
+
+    #[test]
+    fn reset_cursor_params_maps_one_absolute_partition_offset() {
+        let topic = TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: Some(true),
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        let params =
+            reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: 2, offset: 41 })
+                .expect("Kafka should support an absolute offset for one partition");
+
+        assert_eq!(
+            params,
+            serde_json::json!({
+                "groupId": "group-a",
+                "topic": "events",
+                "offsets": [{ "partition": 2, "offset": 41 }]
+            })
+        );
+    }
+
+    #[test]
+    fn reset_cursor_params_rejects_negative_absolute_positions() {
+        let topic = TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: Some(true),
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        assert!(reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: -1, offset: 41 },)
+            .is_err());
+        assert!(reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: 1, offset: -1 },)
+            .is_err());
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_includes_offline_group_with_committed_offsets() {
+        let row = serde_json::json!({
+            "groupId": "orders-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [],
+            "committedOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 3 },
+                { "topic": "orders", "partition": 1, "offset": 8 }
+            ],
+            "endOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 10 },
+                { "topic": "orders", "partition": 1, "offset": 12 }
+            ]
+        });
+
+        let sub = kafka_subscription_from_group_row("orders-service", "orders", &row)
+            .expect("committed offsets should make an inactive group visible");
+
+        assert_eq!(sub.name, "orders-service");
+        assert_eq!(sub.sub_type, "consumer-group");
+        assert_eq!(sub.msg_backlog, 11); // (10-3) + (12-8)
+        assert!(sub.consumers.is_empty());
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_includes_active_assignment_without_committed_offsets() {
+        let row = serde_json::json!({
+            "groupId": "live-service",
+            "state": "STABLE",
+            "simpleGroup": false,
+            "members": [
+                {
+                    "memberId": "consumer-events",
+                    "host": "/10.0.0.10",
+                    "assignments": [
+                        { "topic": "events", "partition": 0 }
+                    ]
+                },
+                {
+                    "memberId": "consumer-audit",
+                    "host": "/10.0.0.11",
+                    "assignments": [
+                        { "topic": "audit", "partition": 0 }
+                    ]
+                }
+            ],
+            "committedOffsets": [],
+            "endOffsets": []
+        });
+
+        let sub = kafka_subscription_from_group_row("live-service", "events", &row)
+            .expect("active assignments should make the group visible");
+
+        assert_eq!(sub.name, "live-service");
+        assert_eq!(sub.msg_backlog, 0);
+        assert_eq!(sub.consumers.len(), 1);
+        assert_eq!(sub.consumers[0].consumer_name, "consumer-events");
+        assert_eq!(sub.consumers[0].address, "/10.0.0.10");
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_ignores_unrelated_group() {
+        let row = serde_json::json!({
+            "groupId": "billing-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [{
+                "assignments": [
+                    { "topic": "billing", "partition": 0 }
+                ]
+            }],
+            "committedOffsets": [
+                { "topic": "billing", "partition": 0, "offset": 2 }
+            ],
+            "endOffsets": [
+                { "topic": "billing", "partition": 0, "offset": 5 }
+            ]
+        });
+
+        assert!(kafka_subscription_from_group_row("billing-service", "orders", &row).is_none());
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_skips_partitions_without_end_offsets() {
+        let row = serde_json::json!({
+            "groupId": "orders-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [],
+            "committedOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 3 },
+                { "topic": "orders", "partition": 1, "offset": 8 }
+            ],
+            "endOffsets": [
+                // partition 1's end offset is unavailable (agent-side failure)
+                { "topic": "orders", "partition": 0, "offset": 10 }
+            ]
+        });
+
+        let sub = kafka_subscription_from_group_row("orders-service", "orders", &row)
+            .expect("the group still has visible committed offsets");
+
+        assert_eq!(sub.msg_backlog, 7); // only partition 0 contributes
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_filters_committed_offsets_to_the_requested_topic() {
+        let row = serde_json::json!({
+            "groupId": "multi-topic-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [],
+            "committedOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 3 },
+                { "topic": "payments", "partition": 0, "offset": 7 }
+            ],
+            "endOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 8 },
+                { "topic": "payments", "partition": 0, "offset": 9 }
+            ]
+        });
+
+        let sub = kafka_subscription_from_group_row("multi-topic-service", "orders", &row)
+            .expect("committed offsets on the requested topic make the group visible");
+
+        // Lag totals only the requested topic's partitions.
+        assert_eq!(sub.msg_backlog, 5);
+    }
+
+    #[test]
+    fn kafka_topic_partitioned_flag_true_for_any_partition_count() {
+        // Single-partition topics must still be marked as partitioned so the
+        // frontend "Adjust Partitions" button is available (t8y2/dbx#6208).
+        let single = serde_json::json!({ "name": "orders", "partitions": 1 });
+        let partitions = single.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+        assert!(partitions.map(|p| p > 0).unwrap_or(false));
+
+        let multi = serde_json::json!({ "name": "events", "partitions": 3 });
+        let partitions = multi.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+        assert!(partitions.map(|p| p > 0).unwrap_or(false));
+
+        let missing = serde_json::json!({ "name": "unknown" });
+        let partitions = missing.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+        assert!(!partitions.map(|p| p > 0).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn topic_listing_does_not_preempt_agent_timeout_fallback() {
+        let script_path = std::env::temp_dir().join(format!("dbx-kafka-topic-timeout-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json
+import sys
+import time
+
+print(json.dumps({"ready": True}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["method"] == "mq_list_topics":
+        time.sleep(1.2)
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {"topics": [{"name": "delayed", "internal": False}]},
+        }), flush=True)
+"#,
+        )
+        .expect("write test agent script");
+
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new(python).with_args([script_path.to_string_lossy().to_string()]),
+        )
+        .await
+        .expect("spawn test agent");
+        // The delayed response models the Kafka agent returning its fallback after metadata timeout.
+        let mut config = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        config.query_timeout_secs = 1;
+        let admin = KafkaAdmin { client: Arc::new(Mutex::new(client)), config };
+
+        let result = admin
+            .list_topics(
+                &NamespaceRef { tenant: "_kafka".to_string(), namespace: "_kafka".to_string() },
+                ListTopicsOpts::default(),
+            )
+            .await;
+        drop(admin);
+        let _ = std::fs::remove_file(&script_path);
+
+        let topics = result.expect("topic listing should wait for the agent response");
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].name, "delayed");
+    }
+}

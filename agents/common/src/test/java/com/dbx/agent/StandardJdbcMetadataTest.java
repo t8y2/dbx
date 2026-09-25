@@ -1,6 +1,8 @@
 package com.dbx.agent;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -41,6 +43,37 @@ class StandardJdbcMetadataTest {
         );
 
         assertEquals(Arrays.asList("APP", "PUBLIC"), StandardJdbcMetadata.INSTANCE.listSchemas(conn, profile));
+    }
+
+    @Test
+    void scopesSchemasToTheConnectionCatalog() {
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getSchemas".equals(method.getName())) {
+                    capturedArgs.set(args);
+                    return rows(row("TABLE_SCHEM", "APP"));
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                if ("getCatalog".equals(method.getName())) {
+                    return "regular_catalog";
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+
+        assertEquals(List.of("APP"), StandardJdbcMetadata.INSTANCE.listSchemas(conn, profile, "initial_catalog"));
+        assertEquals("regular_catalog", capturedArgs.get()[0]);
+        assertEquals(null, capturedArgs.get()[1]);
     }
 
     @Test
@@ -277,6 +310,38 @@ class StandardJdbcMetadataTest {
 
         assertEquals(1, tables.size());
         assertEquals("SALES", capturedArgs.get()[1]);
+    }
+
+    @Test
+    void listTablesSkipsEscapeWhenProfileDisablesWildcards() {
+        // databend 等驱动的 getSearchStringEscape() 返回 "\\"，但 getTables 把 _ 当字面量且忽略转义，
+        // 转义含 _ 的库名（如 my_db）会返回 0 行（#8114）。profile.escapeSchemaWildcards=false 时应原样传入。
+        JdbcAgentProfile noEscapeProfile = new JdbcAgentProfile(
+            "example.Driver",
+            "jdbc:example://{host}:{port}/{database}",
+            0,
+            false,
+            Collections.emptySet(),
+            Arrays.asList("TABLE", "VIEW", "BASE TABLE"),
+            "\"",
+            "USE",
+            true,
+            false,
+            false,
+            false,
+            false
+        );
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection("\\", rows(
+            row("TABLE_NAME", "A", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, noEscapeProfile, "", "my_db");
+
+        assertEquals(1, tables.size());
+        assertEquals("A", tables.get(0).getName());
+        // 关闭转义：schemaPattern 应为原始 "my_db"，而非 "my\\_db"
+        assertEquals("my_db", capturedArgs.get()[1]);
     }
 
     private static Connection schemaEscapeConnection(String searchEscape, ResultSet tables, AtomicReference<Object[]> capturedArgs) {
@@ -529,6 +594,46 @@ class StandardJdbcMetadataTest {
         assertEquals("VARCHAR", columns.getCandidates().get(0).getData_type());
         assertEquals("ACCOUNTS", capturedColumnArgs.get()[2]);
         assertEquals("DISPLAY%", capturedColumnArgs.get()[3]);
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {
+        "/|DBX_I7539_1001|DBX/_I7539/_1001%",
+        "/|A/B_%|A//B/_/%%",
+        "\\|A\\B_%|A\\\\B\\_\\%%",
+        "''|A_%|A_%%",
+        "|A_%|A_%%",
+        "/|''|%"
+    }, delimiter = '|')
+    void completionUsesDriverEscapeForTableAndColumnMasks(String escape, String mask, String prefixPattern) {
+        for (CompletionAssistantMatchMode mode : Arrays.asList(CompletionAssistantMatchMode.PREFIX, CompletionAssistantMatchMode.CONTAINS)) {
+            for (CompletionAssistantObjectKind kind : Arrays.asList(CompletionAssistantObjectKind.TABLE, CompletionAssistantObjectKind.COLUMN)) {
+                AtomicReference<String> capturedPattern = new AtomicReference<>();
+                DatabaseMetaData meta = proxy(DatabaseMetaData.class, (method, args) -> {
+                    switch (method.getName()) {
+                        case "getSearchStringEscape": return escape;
+                        case "getTableTypes": return rows(row("TABLE_TYPE", "TABLE"));
+                        case "getTables":
+                            capturedPattern.set((String) args[2]);
+                            return rows(row("TABLE_NAME", mask + "MATCH", "TABLE_TYPE", "TABLE"));
+                        case "getColumns":
+                            capturedPattern.set((String) args[3]);
+                            return rows(row("COLUMN_NAME", mask + "MATCH", "TYPE_NAME", "VARCHAR"));
+                        default: return defaultValue(method.getReturnType());
+                    }
+                });
+                Connection conn = proxy(Connection.class, (method, args) ->
+                    "getMetaData".equals(method.getName()) ? meta : defaultValue(method.getReturnType()));
+                CompletionAssistantRequest request = request("sales", "APP", mask, Collections.singletonList(kind), "ACCOUNTS");
+                setField(request, "match_mode", mode);
+
+                CompletionAssistantResponse result = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(conn, profile, "sales", request);
+
+                String expected = mode == CompletionAssistantMatchMode.CONTAINS && !mask.isEmpty() ? "%" + prefixPattern : prefixPattern;
+                assertEquals(expected, capturedPattern.get(), kind + " " + mode);
+                assertEquals(mask + "MATCH", result.getCandidates().get(0).getName());
+            }
+        }
     }
 
     private static Connection connection(

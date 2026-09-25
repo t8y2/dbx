@@ -40,6 +40,9 @@
 @theme inline {
   --font-sans: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --font-heading: var(--font-sans);
+  /* Baseline mono token; App.vue overrides it inline with the editor font
+     setting, and plugin sandboxes receive the resolved value via the bridge. */
+  --font-mono: 'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -91,6 +94,10 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
+  /* Opaque background for inverted text (`bg-foreground text-background-solid`).
+     useBackgroundImage publishes `--background-solid` while a wallpaper is active,
+     so tooltips/toasts keep readable glyphs when the surfaces turn translucent. */
+  --color-background-solid: var(--background-solid, var(--background));
   --radius-sm: var(--dbx-radius-sm);
   --radius-md: var(--dbx-radius-md);
   --radius-lg: var(--dbx-radius-lg);

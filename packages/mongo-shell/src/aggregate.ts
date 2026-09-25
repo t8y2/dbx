@@ -3,15 +3,7 @@
  * JSON preprocessing lives in ./json.ts — do not re-copy helpers here.
  */
 
-import {
-  findMatchingParen,
-  hasUnclosedMongoDelimiters,
-  normalizeJsonArgument,
-  parseCollectionMethodTarget,
-  parseMongoObjectArgument,
-  splitTopLevel,
-  trimMongoOuterComments,
-} from "./json.js";
+import { findMatchingParen, hasUnclosedMongoDelimiters, normalizeJsonArgument, parseCollectionMethodTarget, parseMongoObjectArgument, splitTopLevel, trimMongoOuterComments } from "./json.js";
 
 export interface MongoAggregateCommand {
   collection: string;
@@ -28,21 +20,19 @@ export const MONGO_SHELL_COMMAND_HINT =
   "db.collection.getIndexes(), db.collection.createIndex({...}), db.createUser({...}), db.runCommand({...}), " +
   "or db.collection.insertOne({...}).";
 
-const PIPELINE_MUST_BE_ARRAY =
-  "MongoDB aggregate pipeline must be a JSON array (for example [{ $match: {} }]).";
-const OPTIONS_MUST_BE_OBJECT =
-  "MongoDB aggregate options must be a JSON object (for example { explain: true }).";
-const UNCLOSED_DELIMITERS =
-  "MongoDB command has unclosed parentheses, brackets, braces, or strings.";
-const UNSUPPORTED_CHAINING =
-  "Unsupported MongoDB aggregate form. Use db.collection.aggregate(pipeline) or " +
-  "db.collection.aggregate(pipeline, options). Chaining (for example .limit()) is not supported.";
-const EXPECTS_PIPELINE_OR_OPTIONS =
-  "MongoDB aggregate expects aggregate(pipeline) or aggregate(pipeline, options).";
+const PIPELINE_MUST_BE_ARRAY = "MongoDB aggregate pipeline must be a JSON array (for example [{ $match: {} }]).";
+const OPTIONS_MUST_BE_OBJECT = "MongoDB aggregate options must be a JSON object (for example { explain: true }).";
+const UNCLOSED_DELIMITERS = "MongoDB command has unclosed parentheses, brackets, braces, or strings.";
+const UNSUPPORTED_CHAINING = "Unsupported MongoDB aggregate form. Use db.collection.aggregate(pipeline) or " + "db.collection.aggregate(pipeline, options). Chaining (for example .limit()) is not supported.";
 
-type AggregateParseResult =
-  | { ok: true; command: MongoAggregateCommand }
-  | { ok: false; reason: string };
+/**
+ * Cursor methods that change nothing here: DBX always materialises results, so
+ * the `.toArray()` that mongosh and Compass append can simply be dropped.
+ */
+const NOOP_CURSOR_CHAIN = /^(?:\s*\.\s*(?:toArray|pretty)\s*\(\s*\))*\s*$/;
+const EXPECTS_PIPELINE_OR_OPTIONS = "MongoDB aggregate expects aggregate(pipeline) or aggregate(pipeline, options).";
+
+type AggregateParseResult = { ok: true; command: MongoAggregateCommand } | { ok: false; reason: string };
 
 export function parseMongoAggregateCommand(input: string): MongoAggregateCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
@@ -70,7 +60,7 @@ function tryParseMongoAggregateCommand(source: string): AggregateParseResult | n
   const openIndex = source.indexOf("(", target.methodCallIndex);
   const closeIndex = findMatchingParen(source, openIndex);
   if (closeIndex < 0) return { ok: false, reason: UNCLOSED_DELIMITERS };
-  if (source.slice(closeIndex + 1).trim()) return { ok: false, reason: UNSUPPORTED_CHAINING };
+  if (!NOOP_CURSOR_CHAIN.test(source.slice(closeIndex + 1))) return { ok: false, reason: UNSUPPORTED_CHAINING };
 
   const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
   if (args.length < 1 || args.length > 2) return { ok: false, reason: EXPECTS_PIPELINE_OR_OPTIONS };

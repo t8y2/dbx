@@ -32,9 +32,11 @@ import {
   type MongoCreateIndexRequest,
   type MongoIndexSpecSnapshot,
 } from "@/lib/sidebar/mongoCollectionMutation";
-import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
+import { elasticsearchClearIndexPreview, isElasticsearchProtocolIndex, isPartialElasticsearchClear, notifyElasticsearchIndexCleared } from "@/lib/sidebar/elasticsearchIndexActions";
+import { supportsMongoAllDriverMutations, supportsMongoIndexMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { uuid } from "@/lib/common/utils";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import type { NacosAdminConfig } from "@/types/nacos";
@@ -60,6 +62,8 @@ import {
   dropAllMongoIndexesLoading,
   showDropDatabaseConfirm,
   dropDatabaseLoading,
+  showClearElasticsearchIndexConfirm,
+  clearElasticsearchIndexLoading,
   showFlushRedisDbConfirm,
   showRedisDatabaseAliasDialog,
   redisDatabaseAliasInput,
@@ -74,6 +78,11 @@ import {
   cloneMongoCollectionError,
   cloneMongoCollectionLoading,
   showCreateMongoIndexDialog,
+  showCreateMeilisearchIndexDialog,
+  meilisearchCreateIndexUid,
+  meilisearchCreateIndexPrimaryKey,
+  meilisearchCreateIndexError,
+  meilisearchCreateIndexLoading,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
   mongoCreateIndexError,
@@ -112,10 +121,6 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     return !!node.connectionId && supportsMongoAllDriverMutations(connectionStore.getConfig(node.connectionId));
   }
 
-  function usesNativeMongoDriver(node: Pick<TreeNode, "connectionId">): boolean {
-    return !!node.connectionId && supportsNativeMongoDriverMutations(connectionStore.getConfig(node.connectionId));
-  }
-
   function canMutateMongoIndexes(node: TreeNode): boolean {
     return !!node.connectionId && supportsMongoIndexMutations(connectionStore.getConfig(node.connectionId), mongoCollectionKindFromNode(node));
   }
@@ -141,12 +146,19 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   }
 
   function canRenameMongoCollectionNode(node: TreeNode): boolean {
-    return canMutateMilvusCollectionNode(node) || (canMutateMongoCollectionNode(node) && usesNativeMongoDriver(node) && isRenamableMongoCollection(node.label, mongoCollectionKindFromNode(node)));
+    return canMutateMilvusCollectionNode(node) || (canMutateMongoCollectionNode(node) && isRenamableMongoCollection(node.label, mongoCollectionKindFromNode(node)));
   }
 
   function canCloneMongoCollectionNode(node: TreeNode): boolean {
     return canMutateMongoCollectionNode(node) && isCloneableMongoCollection(node.label, mongoCollectionKindFromNode(node));
   }
+
+  function canMutateElasticsearchIndexNode(node: TreeNode): boolean {
+    if (!node.connectionId) return false;
+    return isElasticsearchProtocolIndex(node.type, connectionStore.getConfig(node.connectionId)?.db_type);
+  }
+
+  const canManageElasticsearchIndex = computed(() => canMutateElasticsearchIndexNode(activeNode.value));
 
   const canDropMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value));
   const canDropMilvusCollection = computed(() => activeNode.value.type === "vector-collection" && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.getConfig(activeNode.value.connectionId)?.db_type === "milvus");
@@ -356,6 +368,48 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       .catch(() => {
         // MongoDB is schemaless; users can still enter a field that was not sampled.
       });
+  }
+
+  const canCreateMeilisearchIndex = computed(() => {
+    const node = activeNode.value;
+    const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+    return node.type === "connection" && config?.db_type === "meilisearch" && !connectionIsEffectivelyReadOnly(config);
+  });
+
+  function prepareCreateMeilisearchIndexDialog() {
+    if (!canCreateMeilisearchIndex.value) return;
+    meilisearchCreateIndexUid.value = "";
+    meilisearchCreateIndexPrimaryKey.value = "";
+    meilisearchCreateIndexError.value = "";
+    meilisearchCreateIndexLoading.value = false;
+    showCreateMeilisearchIndexDialog.value = true;
+  }
+
+  async function confirmCreateMeilisearchIndex() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const uid = meilisearchCreateIndexUid.value.trim();
+    if (!canCreateMeilisearchIndex.value || node.type !== "connection" || !connectionId) return;
+    if (!uid) {
+      meilisearchCreateIndexError.value = t("meilisearch.createIndexUidRequired");
+      return;
+    }
+    meilisearchCreateIndexLoading.value = true;
+    meilisearchCreateIndexError.value = "";
+    try {
+      await connectionStore.ensureConnected(connectionId);
+      await api.meilisearchCreateIndex(connectionId, {
+        uid,
+        primaryKey: meilisearchCreateIndexPrimaryKey.value.trim() || undefined,
+      });
+      showCreateMeilisearchIndexDialog.value = false;
+      toast(t("meilisearch.indexCreated"), 3000);
+      await connectionStore.loadElasticsearchIndices(connectionId);
+    } catch (error) {
+      meilisearchCreateIndexError.value = translateBackendError(t, errorMessage(error));
+    } finally {
+      meilisearchCreateIndexLoading.value = false;
+    }
   }
 
   async function loadMongoIndexManagerRows() {
@@ -898,6 +952,49 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     showFlushRedisDbConfirm.value = true;
   }
 
+  function clearElasticsearchIndex() {
+    clearElasticsearchIndexLoading.value = false;
+    showClearElasticsearchIndexConfirm.value = true;
+  }
+
+  async function confirmClearElasticsearchIndex() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    if (!canMutateElasticsearchIndexNode(node) || !connectionId || clearElasticsearchIndexLoading.value) return;
+    const index = node.label;
+    // Only the mutation is guarded. Reporting the outcome sits outside the try
+    // so a failure in a post-success side effect can never make a completed
+    // deletion look like it failed.
+    let executed: { result: Awaited<ReturnType<typeof api.elasticsearchDeleteAllDocuments>> } | undefined;
+    try {
+      executed = await executeWithProductionContextGuard({
+        connection: connectionStore.getConfig(connectionId),
+        database: node.database,
+        reviewText: elasticsearchClearIndexPreview(index),
+        source: t("production.sourceSidebar"),
+        execute: async () => {
+          clearElasticsearchIndexLoading.value = true;
+          await connectionStore.ensureConnected(connectionId);
+          return { result: await api.elasticsearchDeleteAllDocuments(connectionId, index) };
+        },
+      });
+    } catch (error: unknown) {
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
+      return;
+    } finally {
+      clearElasticsearchIndexLoading.value = false;
+    }
+    // The guard returns undefined only when the user declines confirmation.
+    if (executed === undefined) return;
+    const result = executed.result;
+    if (isPartialElasticsearchClear(result)) {
+      toast(t("contextMenu.elasticsearchClearIndexPartial", { index, deleted: result.deleted, total: result.total }), 6000);
+    } else {
+      toast(t("contextMenu.elasticsearchClearIndexDone", { index, deleted: result.deleted }), 3000);
+    }
+    notifyElasticsearchIndexCleared(connectionId, index);
+  }
+
   function prepareRedisDatabaseAliasDialog() {
     const node = activeNode.value;
     redisDatabaseAliasInput.value = node.connectionId && node.database != null ? connectionStore.getRedisDatabaseAlias(node.connectionId, node.database) || "" : "";
@@ -1166,6 +1263,9 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     mongoCreateIndexCanSubmit,
     mongoCreateIndexCanAddField,
     prepareCreateMongoIndexDialog,
+    canCreateMeilisearchIndex,
+    prepareCreateMeilisearchIndexDialog,
+    confirmCreateMeilisearchIndex,
     addMongoCreateIndexField,
     removeMongoCreateIndexField,
     confirmCreateMongoIndex,
@@ -1190,6 +1290,9 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     dropMongoCollection,
     dropMongoIndex,
     dropAllMongoIndexes,
+    canManageElasticsearchIndex,
+    clearElasticsearchIndex,
+    confirmClearElasticsearchIndex,
     flushRedisDb,
     prepareRedisDatabaseAliasDialog,
     confirmRedisDatabaseAlias,

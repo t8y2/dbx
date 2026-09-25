@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { qualifiedTableName, qualifyTableReferencesInSql, quoteTableDataIdentifier, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { encodeSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
+import { qualifiedTableName, qualifyTableReferencesInSql, quoteTableDataIdentifier, quoteTableIdentifier, quoteTableIdentifierIfNeeded, requiresEagerTableMetadataForDataOpen, tableMetaWithoutOptionalDatabaseQualifier } from "@/lib/table/tableSelectSql";
 
 describe("qualifiedTableName — Doris/StarRocks multi-catalog", () => {
   it("prefixes external catalog for Doris (no schema)", () => {
@@ -40,6 +41,24 @@ describe("qualifiedTableName — optional database qualification", () => {
 
   it("uses MySQL-compatible quoting for GoldenDB", () => {
     expect(qualifiedTableName({ databaseType: "goldendb", database: "a`b", tableName: "c`d", includeDatabaseName: true })).toBe("`a``b`.`c``d`");
+  });
+});
+
+describe("qualifiedTableName — SQL Server three-part names", () => {
+  it("prefixes the database ahead of the schema once enabled", () => {
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", schema: "dbo", tableName: "gen_table" })).toBe("[dbo].[gen_table]");
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", schema: "dbo", tableName: "gen_table", includeDatabaseName: true })).toBe("[dbx].[dbo].[gen_table]");
+  });
+
+  it("keeps the schema-only form when the database is unknown", () => {
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", schema: "dbo", tableName: "gen_table", includeDatabaseName: true, quoteIdentifiers: false })).toBe("dbx.dbo.gen_table");
+    expect(qualifiedTableName({ databaseType: "sqlserver", schema: "dbo", tableName: "gen_table", includeDatabaseName: true })).toBe("[dbo].[gen_table]");
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", tableName: "gen_table", includeDatabaseName: true })).toBe("[gen_table]");
+  });
+
+  it("never stacks the local database on a linked-server schema", () => {
+    const schema = encodeSqlServerLinkedSchema({ server: "ERP", catalog: "Finance", schema: "dbo" });
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", schema, tableName: "orders", includeDatabaseName: true })).toBe("[ERP].[Finance].[dbo].[orders]");
   });
 });
 
@@ -113,9 +132,47 @@ describe("qualifyTableReferencesInSql", () => {
   });
 });
 
+describe("qualifyTableReferencesInSql — SQL Server three-part names (#9262)", () => {
+  const options = { databaseType: "sqlserver" as const, database: "dbx", includeDatabaseName: true };
+
+  it("prefixes the database ahead of the schema already named", () => {
+    expect(qualifyTableReferencesInSql("SELECT TOP (100) * FROM [dbo].[gen_table]", options)).toBe("SELECT TOP (100) * FROM [dbx].[dbo].[gen_table]");
+  });
+
+  it("qualifies every FROM/JOIN source while keeping aliases", () => {
+    expect(qualifyTableReferencesInSql("SELECT * FROM [dbo].[orders] AS o JOIN [sales].[items] AS i ON i.order_id = o.id", options)).toBe("SELECT * FROM [dbx].[dbo].[orders] AS o JOIN [dbx].[sales].[items] AS i ON i.order_id = o.id");
+  });
+
+  it("handles unquoted and spaced qualifiers", () => {
+    expect(qualifyTableReferencesInSql("SELECT * FROM dbo.gen_table", options)).toBe("SELECT * FROM [dbx].dbo.gen_table");
+  });
+
+  it("leaves already database-qualified and three-part names alone", () => {
+    expect(qualifyTableReferencesInSql("SELECT * FROM [other].[dbo].[gen_table]", options)).toBe("SELECT * FROM [other].[dbo].[gen_table]");
+    expect(qualifyTableReferencesInSql("SELECT * FROM [dbx_test].[dbo].[gen_table]", options)).toBe("SELECT * FROM [dbx_test].[dbo].[gen_table]");
+  });
+
+  it("leaves schema-less names alone because `db.table` is not a SQL Server reference", () => {
+    expect(qualifyTableReferencesInSql("SELECT * FROM [gen_table]", options)).toBe("SELECT * FROM [gen_table]");
+    expect(qualifyTableReferencesInSql("SELECT * FROM [dbx]..[gen_table]", options)).toBe("SELECT * FROM [dbx]..[gen_table]");
+  });
+
+  it("skips CTEs and stays inert when the setting is off", () => {
+    expect(qualifyTableReferencesInSql("WITH cte AS (SELECT * FROM [dbo].[gen_table]) SELECT * FROM cte", options)).toBe("WITH cte AS (SELECT * FROM [dbx].[dbo].[gen_table]) SELECT * FROM cte");
+    expect(qualifyTableReferencesInSql("SELECT * FROM [dbo].[gen_table]", { ...options, includeDatabaseName: false })).toBe("SELECT * FROM [dbo].[gen_table]");
+  });
+});
+
 describe("qualifiedTableName — SQLite attached databases", () => {
   it("qualifies tables with the attached database alias", () => {
     expect(qualifiedTableName({ databaseType: "sqlite", schema: "analytics", tableName: "events" })).toBe('"analytics"."events"');
+  });
+});
+
+describe("qualifiedTableName — SQL Server linked servers", () => {
+  it("retains required brackets when optional quoting is disabled", () => {
+    const schema = encodeSqlServerLinkedSchema({ server: "REMOTE SERVER", catalog: "sales", schema: "dbo" });
+    expect(qualifiedTableName({ databaseType: "sqlserver", schema, tableName: "order", quoteIdentifiers: false })).toBe("[REMOTE SERVER].sales.dbo.[order]");
   });
 });
 
@@ -133,6 +190,72 @@ describe("qualifiedTableName — schema-aware JDBC profiles", () => {
   });
 });
 
+describe("qualifiedTableName — includeDatabaseName on quoted-identifier paths (#9110)", () => {
+  it("drops the schema qualifier for JDBC-reported Postgres-family connections", () => {
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "public", tableName: "Users", includeDatabaseName: false })).toBe('"Users"');
+  });
+
+  it("keeps the schema qualifier by default for quoted-identifier connections", () => {
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "public", tableName: "Users" })).toBe('public."Users"');
+  });
+
+  it("drops the schema qualifier for kingbase JDBC connections", () => {
+    expect(qualifiedTableName({ databaseType: "kingbase", identifierQuote: '"', schema: "app", tableName: "orders", includeDatabaseName: false })).toBe('"orders"');
+  });
+
+  it("drops the schema qualifier for generic JDBC profiles that qualify schemas", () => {
+    expect(qualifiedTableName({ databaseType: "jdbc", driverProfile: "phoenix", identifierQuote: '"', schema: "MY_SCHEMA", tableName: "ORDER", includeDatabaseName: false })).toBe('"ORDER"');
+  });
+
+  it("drops the schema qualifier for native Informix connections", () => {
+    expect(qualifiedTableName({ databaseType: "informix", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke", includeDatabaseName: false })).toBe("connection_smoke");
+  });
+
+  it("keeps the qualifier for databases that require fully qualified names", () => {
+    expect(qualifiedTableName({ databaseType: "sqlserver", schema: "dbo", tableName: "users", includeDatabaseName: false })).toBe("[dbo].[users]");
+  });
+});
+
+describe("tableMetaWithoutOptionalDatabaseQualifier — copy extractors (#9326)", () => {
+  const mysqlMeta = { schema: "analytics", database: "analytics", tableName: "events" };
+
+  it("strips MySQL schema/database when includeDatabaseName is false", () => {
+    expect(tableMetaWithoutOptionalDatabaseQualifier(mysqlMeta, "mysql", false)).toEqual({ schema: undefined, database: undefined, tableName: "events" });
+  });
+
+  it("keeps MySQL schema when includeDatabaseName is true or unset", () => {
+    expect(tableMetaWithoutOptionalDatabaseQualifier(mysqlMeta, "mysql", true)).toBe(mysqlMeta);
+    expect(tableMetaWithoutOptionalDatabaseQualifier(mysqlMeta, "mysql")).toBe(mysqlMeta);
+  });
+
+  it("keeps schema for dialects that require fully qualified names", () => {
+    expect(tableMetaWithoutOptionalDatabaseQualifier({ schema: "dbo", tableName: "users" }, "sqlserver", false)).toEqual({ schema: "dbo", tableName: "users" });
+  });
+
+  it("matches SELECT-template dropsSchemaQualifier for Oracle/Postgres", () => {
+    // Same rule as #9110: when the setting is off, optional schema prefixes are
+    // dropped so the active connection schema applies.
+    expect(tableMetaWithoutOptionalDatabaseQualifier({ schema: "SCOTT", tableName: "EMP" }, "oracle", false)).toEqual({ schema: undefined, tableName: "EMP" });
+    expect(tableMetaWithoutOptionalDatabaseQualifier({ schema: "public", tableName: "users" }, "postgres", false)).toEqual({ schema: undefined, tableName: "users" });
+  });
+
+  it("returns undefined tableMeta unchanged", () => {
+    expect(tableMetaWithoutOptionalDatabaseQualifier(undefined, "mysql", false)).toBeUndefined();
+  });
+
+  it("keeps qualifiers for Doris/StarRocks external catalogs", () => {
+    // External-catalog tables are only addressable as catalog.database.table,
+    // mirroring the SELECT-template rule in qualifiedTableName.
+    const externalCatalogMeta = { catalog: "ext", database: "db", tableName: "t" };
+    expect(tableMetaWithoutOptionalDatabaseQualifier(externalCatalogMeta, "doris", false)).toBe(externalCatalogMeta);
+    expect(tableMetaWithoutOptionalDatabaseQualifier(externalCatalogMeta, "starrocks", false)).toBe(externalCatalogMeta);
+  });
+
+  it("still strips the internal-catalog database qualifier", () => {
+    expect(tableMetaWithoutOptionalDatabaseQualifier({ catalog: "internal", database: "db", tableName: "t" }, "doris", false)).toEqual({ catalog: "internal", schema: undefined, database: undefined, tableName: "t" });
+  });
+});
+
 describe("qualifiedTableName — GBase 8s", () => {
   it("omits the metadata owner for GBase 8s table data", () => {
     expect(qualifiedTableName({ databaseType: "informix", driverProfile: "gbase8s", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke" })).toBe("connection_smoke");
@@ -145,6 +268,24 @@ describe("qualifiedTableName — GBase 8s", () => {
 });
 
 describe("quoteTableIdentifier", () => {
+  it("keeps only required quotes when identifier quoting is disabled", () => {
+    expect(quoteTableIdentifierIfNeeded("oracle", "DBX_TEST")).toBe("DBX_TEST");
+    expect(quoteTableIdentifierIfNeeded("oracle", "Order")).toBe('"Order"');
+    expect(quoteTableIdentifierIfNeeded("oracle", "ORDER")).toBe('"ORDER"');
+    expect(quoteTableIdentifierIfNeeded("dameng", "DBX_TEST")).toBe("DBX_TEST");
+    expect(quoteTableIdentifierIfNeeded("dameng", "order detail")).toBe('"order detail"');
+    expect(quoteTableIdentifierIfNeeded("postgres", "dbx_test")).toBe("dbx_test");
+    expect(quoteTableIdentifierIfNeeded("postgres", "Order")).toBe('"Order"');
+    expect(quoteTableIdentifierIfNeeded("mysql", "dbx_test")).toBe("dbx_test");
+    expect(quoteTableIdentifierIfNeeded("mysql", "order")).toBe("`order`");
+  });
+
+  it("uses a JDBC driver's reported quote for required identifiers", () => {
+    expect(quoteTableIdentifierIfNeeded("jdbc", "student", '"')).toBe("student");
+    expect(quoteTableIdentifierIfNeeded("jdbc", "Order", '"')).toBe('"Order"');
+    expect(quoteTableIdentifierIfNeeded("jdbc", "order detail", "`")).toBe("`order detail`");
+  });
+
   it("backtick-quotes mysql identifiers", () => {
     expect(quoteTableIdentifier("mysql", "orders")).toBe("`orders`");
   });
@@ -162,6 +303,28 @@ describe("quoteTableIdentifier", () => {
   it("uses BigQuery quoted identifiers and escape sequences", () => {
     expect(quoteTableIdentifier("bigquery", "order")).toBe("`order`");
     expect(quoteTableIdentifier("bigquery", "a`b")).toBe("`a\\`b`");
+  });
+
+  it("never quotes Salesforce SOQL identifiers", () => {
+    // SOQL has no delimited identifiers and reads `"` as a string literal, so the
+    // grid's ORDER BY / filter must send object and field API names bare — the
+    // quoted form the backend used to produce failed with MALFORMED_QUERY.
+    expect(quoteTableIdentifier("salesforce", "Account")).toBe("Account");
+    expect(quoteTableIdentifier("salesforce", "First_Name__c")).toBe("First_Name__c");
+    expect(quoteTableDataIdentifier("salesforce", "Account")).toBe("Account");
+    // An org is a single scope: no schema or database qualifier.
+    expect(qualifiedTableName({ databaseType: "salesforce", schema: "sales", database: "org", tableName: "Account" })).toBe("Account");
+  });
+
+  it("awaits table metadata before building Salesforce data-preview SQL", () => {
+    // Without a column list the backend falls back to `FIELDS(ALL)`, which the org
+    // only accepts with LIMIT 200 or less, so the describe has to land first.
+    expect(requiresEagerTableMetadataForDataOpen("salesforce")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("mysql")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("postgres")).toBe(true);
+    // Drivers whose preview works from `SELECT *` keep loading metadata lazily.
+    expect(requiresEagerTableMetadataForDataOpen("sqlite")).toBe(false);
+    expect(requiresEagerTableMetadataForDataOpen(undefined)).toBe(false);
   });
 
   it("backtick-quotes Cloud Spanner GoogleSQL identifiers by default", () => {

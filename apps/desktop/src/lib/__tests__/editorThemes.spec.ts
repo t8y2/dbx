@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, editorDiagnosticColors, editorThemeAppearanceFor, resolveCustomThemeBackgrounds, resolveEditorTheme } from "@/lib/editor/editorThemes";
+import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, editorDiagnosticColors, editorThemeAppearanceFor, resolveCustomThemeBackgrounds, resolveEditorTheme, SQL_BUILTIN_HIGHLIGHT_TAG } from "@/lib/editor/editorThemes";
 import { DEFAULT_APP_CUSTOM_UI_COLORS, wcagContrastRatio, type AppThemePalette } from "@/lib/app/appTheme";
 import type { EditorTheme } from "@/stores/settingsStore";
+import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
+import * as langSql from "@codemirror/lang-sql";
 
 describe("resolveEditorTheme", () => {
   it("maps only the follow-app editor theme to application IDE palettes", () => {
@@ -162,10 +164,65 @@ describe("SQL completion theme", () => {
     expect(rules[".cm-completionLabel"]).toMatchObject({ flex: "0 1 auto" });
     expect(rules[".cm-completionDetail"]).toMatchObject({ flex: "1 1 0", minWidth: "0", textOverflow: "ellipsis" });
   });
+
+  it("keeps the batch column insertion action fixed at the bottom of its menu", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-batch-column-selection-action"]).toMatchObject({
+      bottom: "0",
+      position: "sticky",
+      zIndex: "1",
+    });
+  });
+
+  it("pins the completion icon glyph to its box so engines cannot clip it", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    // With `left`/`top` auto, the absolutely positioned pseudo element relies on
+    // engine-specific static positions inside the flex icon, and WebKit places it
+    // far enough left for `overflow: hidden` to cut off the left half of the glyph.
+    expect(rules[".cm-completionIcon:before"]).toMatchObject({
+      left: "0",
+      top: "0",
+      width: "15px",
+      height: "15px",
+      maskSize: "14px 14px",
+      maskPosition: "center",
+    });
+    expect(rules[".cm-completionIcon"]).toMatchObject({ width: "15px", height: "15px", overflow: "hidden" });
+  });
+});
+
+describe("SQL builtin highlight tag", () => {
+  // #7950: count/date_format/etc. were added to the dialect builtin word lists (#7222) but
+  // never actually rendered in a distinct color, because the theme's highlight rule matched
+  // standard(variableName) while @codemirror/lang-sql tags builtin words as standard(name) —
+  // variableName is a *child* tag of name, so a rule keyed on the child never matches the
+  // token's actual (parent) tag.
+  it("gives builtin SQL functions their own highlight class, distinct from plain identifiers and keywords", async () => {
+    const { highlightTree } = await import("@lezer/highlight");
+    const { HighlightStyle } = await import("@codemirror/language");
+    const { tags } = await import("@lezer/highlight");
+    const style = HighlightStyle.define([
+      { tag: tags.keyword, color: "keyword" },
+      { tag: [tags.name, tags.variableName], color: "variable" },
+      { tag: SQL_BUILTIN_HIGHLIGHT_TAG, color: "builtin" },
+    ]);
+
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres", "postgres");
+    const doc = "select count(*) from t";
+    const tree = dialect.language.parser.parse(doc);
+    const classesByToken = new Map<string, string>();
+    highlightTree(tree, style, (from, to, cls) => classesByToken.set(doc.slice(from, to), cls));
+
+    expect(classesByToken.get("count")).toBeDefined();
+    expect(classesByToken.get("count")).not.toBe(classesByToken.get("t"));
+    expect(classesByToken.get("count")).not.toBe(classesByToken.get("select"));
+  });
 });
 
 describe("editor gutters", () => {
-  it("anchors line numbers to the first visual row of wrapped lines", () => {
+  it("keeps single line numbers vertically centered in the base rule", () => {
     const rules = buildEditorFontThemeRules();
 
     expect(rules[".cm-lineNumbers .cm-gutterElement"]).toMatchObject({
@@ -173,6 +230,19 @@ describe("editor gutters", () => {
       display: "flex",
       justifyContent: "flex-end",
     });
-    expect(rules[".cm-lineNumbers .cm-gutterElement.cm-db-wrapped-line-number"]).toMatchObject({ alignItems: "flex-start" });
+  });
+});
+
+describe("editor font theme", () => {
+  it("disables ligatures on the editor content so repainted character runs stay stable", () => {
+    const rules = buildEditorFontThemeRules();
+
+    // Ligature fonts merge runs like `--`/`==` into one glyph and can race
+    // CodeMirror's per-keystroke span patching (dbx#7900); dropping either
+    // declaration would reintroduce unpainted characters in the query editor.
+    expect(rules[".cm-content"]).toMatchObject({
+      fontVariantLigatures: "none",
+      fontFeatureSettings: '"liga" 0, "calt" 0',
+    });
   });
 });

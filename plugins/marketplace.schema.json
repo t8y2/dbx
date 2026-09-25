@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dbx.example/schemas/plugin-marketplace-v1.json",
+  "title": "DBX Plugin Marketplace Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["catalogVersion", "repository", "plugins"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "catalogVersion": { "const": 1 },
+    "repository": { "$ref": "#/$defs/repository" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "plugins": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/plugin" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "homepage": { "type": "string", "format": "uri" }
+      }
+    },
+    "localization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "url", "sha256", "signingKeyId"],
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9-]+$",
+          "description": "DBX runtime target such as darwin-arm64, windows-x64, or linux-x64. Use universal only when the same package is valid on every supported target; exact target artifacts take precedence."
+        },
+        "url": { "type": "string", "format": "uri-reference" },
+        "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+        "signingKeyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "size": { "type": "integer", "minimum": 0, "maximum": 536870912 }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "artifacts"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+        },
+        "releasedAt": { "type": "string", "format": "date-time" },
+        "releaseNotes": { "type": "string" },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifact" }
+        }
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "publisher", "latestVersion", "versions"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "publisher": { "type": "string", "minLength": 1 },
+        "verified": { "type": "boolean", "default": false },
+        "icon": { "type": "string", "format": "uri-reference" },
+        "tags": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "permissions": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "source": { "type": "string", "format": "uri" },
+        "homepage": { "type": "string", "format": "uri" },
+        "license": { "type": "string", "minLength": 1 },
+        "latestVersion": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+        },
+        "versions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/version" }
+        },
+        "localizations": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/localization" }
+        }
+      }
+    }
+  }
+}

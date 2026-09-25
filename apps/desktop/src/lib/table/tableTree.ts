@@ -7,7 +7,7 @@ export function normalizeDatabaseObjectName(name: string): string {
   return name.trim();
 }
 
-export function buildTableTreeNodes({ nodeId, connectionId, database, schema, tables, catalog }: { nodeId: string; connectionId: string; database: string; schema?: string; tables: TableInfo[]; catalog?: string }): TreeNode[] {
+export function buildTableTreeNodes({ nodeId, connectionId, database, schema, tables, catalog, includeSchemaInId = false }: { nodeId: string; connectionId: string; database: string; schema?: string; tables: TableInfo[]; catalog?: string; includeSchemaInId?: boolean }): TreeNode[] {
   const entries = tables.flatMap((table) => {
     const name = normalizeDatabaseObjectName(table.name);
     if (!name) return [];
@@ -19,11 +19,12 @@ export function buildTableTreeNodes({ nodeId, connectionId, database, schema, ta
         connectionId,
         database,
         schema: childSchema,
-        includeSchemaInId: false,
+        includeSchemaInId,
         name,
         objectType,
         tableType: table.table_type,
         comment: table.comment,
+        valid: table.valid,
         parentSchema: table.parent_schema,
         parentName: table.parent_name,
         catalog,
@@ -53,6 +54,7 @@ function makeTableTreeEntry({
   objectType,
   tableType,
   comment,
+  valid,
   parentSchema,
   parentName,
   catalog,
@@ -66,6 +68,7 @@ function makeTableTreeEntry({
   objectType: DatabaseObjectTreeKind;
   tableType?: string;
   comment?: string | null;
+  valid?: boolean | null;
   parentSchema?: string | null;
   parentName?: string | null;
   catalog?: string;
@@ -79,10 +82,12 @@ function makeTableTreeEntry({
     type: objectType === "VIEW" ? ("view" as const) : objectType === "MATERIALIZED_VIEW" ? ("materialized_view" as const) : ("table" as const),
     tableType,
     comment,
+    valid,
     connectionId,
     database,
     schema,
     catalog,
+    ...(objectType === "TABLE" ? { tableName: name } : {}),
     isExpanded: false,
     children: [],
   };
@@ -248,6 +253,9 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
       if (matchingObject && table.comment && !matchingObject.comment) {
         matchingObject.comment = table.comment;
       }
+      if (matchingObject && matchingObject.valid == null && table.valid != null) {
+        matchingObject.valid = table.valid;
+      }
       continue;
     }
     seen.add(key);
@@ -257,6 +265,7 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
       // downstream template strategies can distinguish special table kinds.
       object_type: table.table_type,
       schema: tableSchema,
+      valid: table.valid,
       comment: table.comment,
       created_at: undefined,
       updated_at: undefined,
@@ -541,6 +550,7 @@ function buildObjectTreeEntries({ nodeId, connectionId, database, schema, object
         objectType,
         tableType: obj.object_type,
         comment: obj.comment,
+        valid: obj.valid,
         parentSchema: obj.parent_schema,
         parentName: obj.parent_name,
       }),
@@ -658,6 +668,7 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
       objectType,
       tableType: obj.object_type,
       comment: obj.comment,
+      valid: obj.valid,
       parentSchema: obj.parent_schema,
       parentName: obj.parent_name,
     });
@@ -775,6 +786,13 @@ const groupDefs: Array<{
     childType: "synonym",
   },
   {
+    key: "__jobs",
+    label: "tree.schedulerJobs",
+    objectTypes: ["JOB"],
+    nodeType: "group-jobs",
+    childType: "job",
+  },
+  {
     key: "__packages",
     label: "tree.packages",
     objectTypes: ["PACKAGE", "PACKAGE_BODY"],
@@ -790,7 +808,7 @@ const groupDefs: Array<{
   },
 ];
 
-const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-jobs", "group-packages", "group-types"]);
 
 export function buildObjectGroupPlaceholderNodes({
   nodeId,

@@ -31,6 +31,8 @@ export interface SidebarDangerDialogRequest {
   details?: string;
   detailsText?: string;
   loading?: boolean;
+  /** Keeps the confirm button held back until the request's own precondition is met (e.g. a typed target name). */
+  confirmDisabled?: boolean;
   closeOnConfirm?: boolean;
   progress?: SidebarDangerDialogProgress;
   option?: SidebarDangerDialogOption;

@@ -17,6 +17,7 @@ const SQLSERVER_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FU
 
 const FAMILY_BY_DB = new Map<DatabaseType, TransferObjectFamily>([
   ["mysql", TransferObjectFamily.Mysql],
+  ["gbase", TransferObjectFamily.Mysql],
   ["postgres", TransferObjectFamily.Postgres],
   ["kingbase", TransferObjectFamily.Postgres],
   ["gaussdb", TransferObjectFamily.Postgres],

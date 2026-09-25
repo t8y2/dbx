@@ -1,6 +1,6 @@
 import { EditorSelection, findClusterBreak, type EditorState, type SelectionRange } from "@codemirror/state";
 import type { EditorView, MouseSelectionStyle, ViewUpdate } from "@codemirror/view";
-import { analyzeSqlSemanticSelectionRanges, sqlStringContentRangeAt, type SqlSemanticSelectionAnalysis, type SqlSemanticSelectionOptions } from "@/lib/editor/sqlSemanticSelectionRanges";
+import { analyzeSqlSemanticSelectionRanges, sqlStringContentRangeAt, trimSqlStringWildcardBoundaries, type SqlSemanticSelectionAnalysis, type SqlSemanticSelectionOptions } from "@/lib/editor/sqlSemanticSelectionRanges";
 
 export interface QueryEditorStringMouseSelectionOptions extends SqlSemanticSelectionOptions {
   language?: "sql" | "text";
@@ -41,7 +41,9 @@ function groupAt(state: EditorState, position: PointerPosition): SelectionRange 
 
 function semanticOrDefaultRange(state: EditorState, position: PointerPosition, options: SqlSemanticSelectionOptions, analysis: SqlSemanticSelectionAnalysis): SelectionRange {
   const semantic = sqlStringContentRangeAt(state.doc.toString(), position.pos, position.assoc, options, analysis);
-  return semantic ? EditorSelection.range(semantic.from, semantic.to) : groupAt(state, position);
+  if (!semantic) return groupAt(state, position);
+  const trimmed = trimSqlStringWildcardBoundaries(state.doc.toString(), semantic);
+  return EditorSelection.range(trimmed.from, trimmed.to);
 }
 
 export function createQueryEditorStringMouseSelection(view: EditorView, event: MouseEvent, options: QueryEditorStringMouseSelectionOptions = {}): MouseSelectionStyle | null {
@@ -51,7 +53,8 @@ export function createQueryEditorStringMouseSelection(view: EditorView, event: M
   const semantic = sqlStringContentRangeAt(view.state.doc.toString(), start.pos, start.assoc, options, analysis);
   if (!semantic) return null;
 
-  let startRange = EditorSelection.range(semantic.from, semantic.to);
+  const trimmed = trimSqlStringWildcardBoundaries(view.state.doc.toString(), semantic);
+  let startRange = EditorSelection.range(trimmed.from, trimmed.to);
   let startSelection = view.state.selection;
   return {
     update(update: ViewUpdate) {

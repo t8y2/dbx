@@ -559,6 +559,64 @@ func TestKingbaseCustomTypeDetailsIntegration(t *testing.T) {
 	}
 }
 
+// A "timestamp"/"date" column has no timezone meaning; it must be returned as
+// a wall-clock string with no "Z"/offset suffix, or clients that convert it to
+// a display timezone will double-apply the shift (see #7681). A "timestamptz"
+// column is a real absolute instant and must keep its offset.
+func TestKingbaseTimezoneLessDateTimeIsReturnedWithoutOffset(t *testing.T) {
+	host := os.Getenv("KINGBASE_TEST_HOST")
+	portText := os.Getenv("KINGBASE_TEST_PORT")
+	username := os.Getenv("KINGBASE_TEST_USERNAME")
+	password := os.Getenv("KINGBASE_TEST_PASSWORD")
+	if host == "" || portText == "" || username == "" || password == "" {
+		t.Skip("Kingbase integration environment is not configured")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := os.Getenv("KINGBASE_TEST_DATABASE")
+	if database == "" {
+		database = "test"
+	}
+	table := "dbx_go_tzless_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+
+	server := newServer()
+	cp := connectParams{
+		Host: host, Port: port, Database: database, Username: username, Password: password,
+		ConnectionString: fmt.Sprintf("jdbc:kingbase8://%s:%d/%s", host, port, database),
+	}
+	if err := server.connect(cp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.disconnect() })
+	t.Cleanup(func() {
+		_, _ = server.executeQuery(queryOptions{SQL: "DROP TABLE IF EXISTS " + quoteIdentifier(table)})
+	})
+
+	mustExecute(t, server, "CREATE TABLE "+quoteIdentifier(table)+" (id integer PRIMARY KEY, ts timestamp, tstz timestamptz)")
+	mustExecute(t, server, "INSERT INTO "+quoteIdentifier(table)+" VALUES (1, '2026-01-30 10:00:03', '2026-01-30 10:00:03+00')")
+
+	result, err := server.executeQuery(queryOptions{SQL: "SELECT ts, tstz FROM " + quoteIdentifier(table) + " WHERE id = 1"})
+	if err != nil {
+		t.Fatalf("select failed: %v", err)
+	}
+	if len(result.Rows) != 1 || len(result.Rows[0]) != 2 {
+		t.Fatalf("unexpected result shape: %#v", result)
+	}
+
+	ts, ok := result.Rows[0][0].(string)
+	if !ok || ts != "2026-01-30T10:00:03" {
+		t.Fatalf("timezone-less timestamp: got %#v, want the wall-clock value with no Z/offset suffix", result.Rows[0][0])
+	}
+	tstz, ok := result.Rows[0][1].(string)
+	_, timeOfDay, foundDateTimeSeparator := strings.Cut(tstz, "T")
+	hasOffsetSuffix := strings.HasSuffix(tstz, "Z") || strings.Contains(timeOfDay, "+") || strings.Contains(timeOfDay, "-")
+	if !ok || !foundDateTimeSeparator || !hasOffsetSuffix {
+		t.Fatalf("timezone-aware timestamptz must keep its Z/offset suffix, got %#v", result.Rows[0][1])
+	}
+}
+
 func rawJSON(value any) json.RawMessage {
 	data, err := json.Marshal(value)
 	if err != nil {

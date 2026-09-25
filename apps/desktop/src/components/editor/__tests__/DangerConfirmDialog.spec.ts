@@ -9,6 +9,17 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 const DANGER_PREVIEW_MAX_CHARACTERS = 8192;
 const DANGER_PREVIEW_MAX_LINES = 200;
 const highlight = vi.fn((sql: string) => `<span>${sql}</span>`);
+const focusMocks = vi.hoisted(() => {
+  const focus = vi.fn();
+  return {
+    focus,
+    findFromDOM: vi.fn(() => ({ focus })),
+  };
+});
+
+vi.mock("@codemirror/view", () => ({
+  EditorView: { findFromDOM: focusMocks.findFromDOM },
+}));
 
 vi.mock("@/composables/useSqlHighlighter", () => ({
   useSqlHighlighter: () => ({ highlight }),
@@ -50,6 +61,8 @@ afterEach(() => {
   document.body.innerHTML = "";
   highlight.mockClear();
   vi.mocked(copyToClipboard).mockClear();
+  focusMocks.findFromDOM.mockClear();
+  focusMocks.focus.mockClear();
 });
 
 describe("DangerConfirmDialog SQL preview", () => {
@@ -106,6 +119,26 @@ describe("DangerConfirmDialog SQL preview", () => {
     await nextTick();
 
     expect(copyToClipboard).toHaveBeenCalledWith(sql);
+  });
+
+  it("restores a previously focused CodeMirror editor through EditorView on close", async () => {
+    const editorRoot = document.createElement("div");
+    editorRoot.className = "cm-editor";
+    const editorContent = document.createElement("div");
+    editorContent.className = "cm-content";
+    editorContent.tabIndex = 0;
+    editorRoot.append(editorContent);
+    document.body.append(editorRoot);
+    editorContent.focus();
+
+    await mountDialog("DROP TABLE users;");
+    const cancelButton = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Cancel");
+    cancelButton?.click();
+
+    await vi.waitFor(() => {
+      expect(focusMocks.findFromDOM).toHaveBeenCalledWith(editorRoot);
+    });
+    expect(focusMocks.focus).toHaveBeenCalledOnce();
   });
 });
 

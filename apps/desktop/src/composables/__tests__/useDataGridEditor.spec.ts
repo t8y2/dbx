@@ -1,6 +1,9 @@
-import { computed, ref, type Ref } from "vue";
+// @vitest-environment happy-dom
+import { computed, nextTick, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
+import { clearDataGridClipboardCopy, parseDataGridClipboard, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
+import { buildMongoUpdateDocument, MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridInputValue, mongoDocumentGridValue } from "@/lib/mongo/mongoDocumentValues";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 
 const mocks = vi.hoisted(() => ({
@@ -10,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   executeConditionalUpdate: vi.fn(),
   cancelConditionalUpdate: vi.fn(),
   executeInTransaction: vi.fn(),
+  executeInManualTransaction: vi.fn(),
+  executeQuery: vi.fn(),
   addHistory: vi.fn(),
 }));
 
@@ -19,6 +24,8 @@ vi.mock("@/lib/backend/api", () => ({
   executeConditionalUpdate: mocks.executeConditionalUpdate,
   cancelConditionalUpdate: mocks.cancelConditionalUpdate,
   executeInTransaction: mocks.executeInTransaction,
+  executeInManualTransaction: mocks.executeInManualTransaction,
+  executeQuery: mocks.executeQuery,
   unlockConnectionWrites: vi.fn(),
   lockConnectionWrites: vi.fn(),
   connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
@@ -33,7 +40,18 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
 }));
 
-function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true, cacheKey?: string, readonlyColumnIndexes?: number[], existingRows: CellValue[][] = [], onCellValueChanged?: (rowId: number, columnIndex: number) => void) {
+function createEditorWithResult(
+  sourceColumns?: Array<string | undefined>,
+  confirmDangerousRowDeletion = true,
+  cacheKey?: string,
+  readonlyColumnIndexes?: number[],
+  existingRows: CellValue[][] = [],
+  onCellValueChanged?: (rowId: number, columnIndex: number) => void,
+  tableColumns?: Array<{ name: string; data_type: string; extra?: string; column_default?: string }>,
+  mongoCollectionGrid = false,
+  quickEntry = false,
+  editable = ref(true),
+) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
     columns: ["first", "hidden", "last"],
@@ -42,13 +60,14 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
 
   editor = useDataGridEditor({
     result: computed(() => result.value),
-    editable: computed(() => true),
-    databaseType: computed(() => "postgres"),
+    editable: computed(() => editable.value),
+    databaseType: computed(() => (mongoCollectionGrid ? "mongodb" : "postgres")),
+    normalizeEditorInput: mongoCollectionGrid ? mongoDocumentGridInputValue : undefined,
     connectionId: computed(() => "connection-1"),
     database: computed(() => "app"),
     tableMeta: computed(() => ({
       tableName: "people",
-      columns: [
+      columns: tableColumns ?? [
         { name: "first", data_type: "varchar" },
         { name: "hidden", data_type: "varchar" },
         { name: "last", data_type: "varchar" },
@@ -60,6 +79,7 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
     onExecuteSql: computed(() => undefined),
     sql: computed(() => undefined),
     searchText: ref(""),
+    dataGridQuickEntryEnabled: computed(() => quickEntry),
     whereFilterInput: ref(""),
     currentWhereInput: computed(() => undefined),
     orderByInput: ref(""),
@@ -112,7 +132,207 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
   });
 
   editor.newRows.value = [[null, null, null]];
-  return editor;
+  return { editor, result };
+}
+
+function createEditor(...args: Parameters<typeof createEditorWithResult>) {
+  return createEditorWithResult(...args).editor;
+}
+
+describe("useDataGridEditor searched replacements", () => {
+  beforeEach(() => {
+    mocks.prepareDataGridSave.mockReset();
+    mocks.executeBatch.mockReset();
+    mocks.getConfig.mockReturnValue(undefined);
+  });
+
+  it.each([true, false])("blocks queued saves while row identity is pending (autoSave=%s)", async (autoSave) => {
+    const editable = ref(true);
+    const editor = createEditor(undefined, true, undefined, undefined, [["old", "keep", "last"]], undefined, undefined, false, false, editable);
+    editor.newRows.value = [];
+    editor.applyCellValue(0, 0, "new");
+    editable.value = false;
+
+    await editor.saveChanges({ autoSave });
+
+    expect(mocks.prepareDataGridSave).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.hasPendingChanges.value).toBe(true);
+    editable.value = true;
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE people SET first='new'"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue([]);
+    await editor.saveChanges();
+    expect(mocks.executeBatch).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks row identity readiness after asynchronous save preparation", async () => {
+    const editable = ref(true);
+    const editor = createEditor(undefined, true, undefined, undefined, [["old", "keep", "last"]], undefined, undefined, false, false, editable);
+    editor.newRows.value = [];
+    editor.applyCellValue(0, 0, "new");
+    let finishPreparation!: (value: { statements: string[]; rollbackStatements: string[] }) => void;
+    mocks.prepareDataGridSave.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishPreparation = resolve;
+      }),
+    );
+    const save = editor.saveChanges();
+    expect(mocks.prepareDataGridSave).toHaveBeenCalledOnce();
+    editable.value = false;
+    finishPreparation({ statements: ["UPDATE people SET first='new'"], rollbackStatements: [] });
+    await save;
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.hasPendingChanges.value).toBe(true);
+    expect(editor.isSaving.value).toBe(false);
+  });
+
+  it("stages one undoable batch, keeps empty strings and preserves prior pending edits", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["hit", "keep", "hit"]]);
+    editor.newRows.value = [];
+    editor.applyCellValue(0, 1, "draft");
+    expect(
+      editor.stageCellReplacements([
+        { rowId: 0, col: 0, previousValue: "hit", value: "" },
+        { rowId: 0, col: 2, previousValue: "hit", value: "new" },
+      ]),
+    ).toBe(2);
+    expect(editor.dirtyRows.value.get(0)).toEqual(
+      new Map([
+        [1, "draft"],
+        [0, ""],
+        [2, "new"],
+      ]),
+    );
+    expect(editor.manualSaveRequired.value).toBe(true);
+    editor.undoPendingChange();
+    expect(editor.dirtyRows.value.get(0)).toEqual(new Map([[1, "draft"]]));
+    expect(editor.manualSaveRequired.value).toBe(false);
+    editor.redoPendingChange();
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBe("");
+    expect(editor.manualSaveRequired.value).toBe(true);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("stages a resolved large-value replacement while the source row still contains its preview", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["prefix hit…"]]);
+    editor.newRows.value = [];
+
+    expect(
+      editor.stageCellReplacements([
+        {
+          rowId: 0,
+          col: 0,
+          sourceValue: "prefix hit…",
+          previousValue: "prefix hit suffix",
+          value: "prefix done suffix",
+        },
+      ]),
+    ).toBe(1);
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBe("prefix done suffix");
+  });
+
+  it("rejects readonly, stale, deleted, non-string and out-of-range targets", () => {
+    const editor = createEditor(
+      ["first", undefined, "last"],
+      true,
+      undefined,
+      [2],
+      [
+        ["hit", "hit", "hit"],
+        [123, null, false],
+      ],
+    );
+    editor.newRows.value = [];
+    editor.deletedRows.value.add(0);
+    const changes = [
+      { rowId: 0, col: 0, previousValue: "hit", value: "x" },
+      { rowId: 1, col: 0, previousValue: "123", value: "x" },
+      { rowId: 9, col: 0, previousValue: "hit", value: "x" },
+    ];
+    expect(editor.stageCellReplacements(changes)).toBe(0);
+    editor.deletedRows.value.clear();
+    expect(
+      editor.stageCellReplacements([
+        { rowId: 0, col: 0, previousValue: "stale", value: "x" },
+        { rowId: 0, col: 1, previousValue: "hit", value: "x" },
+        { rowId: 0, col: 2, previousValue: "hit", value: "x" },
+        { rowId: -1, col: 0, previousValue: "hit", value: "x" },
+      ]),
+    ).toBe(0);
+    expect(editor.dirtyRows.value.size).toBe(0);
+    expect(editor.manualSaveRequired.value).toBe(false);
+  });
+
+  it("blocks later quick-entry autosaves until explicit save or discard", async () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["hit", "keep", "hit"]], undefined, undefined, false, true);
+    editor.newRows.value = [];
+    editor.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "hit", value: "new" }]);
+    editor.applyCellValue(0, 1, "later edit");
+    await editor.saveChanges({ autoSave: true });
+    expect(mocks.prepareDataGridSave).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.hasPendingChanges.value).toBe(true);
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE people SET first='new',hidden='later edit' WHERE last='hit'"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue([]);
+    await editor.saveChanges();
+    expect(mocks.executeBatch).toHaveBeenCalledOnce();
+    expect(editor.manualSaveRequired.value).toBe(false);
+    editor.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "new", value: "other" }]);
+    editor.discardChanges();
+    expect(editor.manualSaveRequired.value).toBe(false);
+  });
+
+  it("persists the manual-save interlock across a tab remount", async () => {
+    const key = "replace-remount";
+    const rows: CellValue[][] = [["hit", "keep", "hit"]];
+    const first = createEditor(undefined, true, key, undefined, rows);
+    first.newRows.value = [];
+    first.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "hit", value: "new" }]);
+    first.savePendingSnapshot();
+    const second = createEditor(undefined, true, key, undefined, rows);
+    second.newRows.value = [];
+    expect(second.manualSaveRequired.value).toBe(true);
+    await second.saveChanges({ autoSave: true });
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    second.discardChanges();
+    clearDataGridPendingSnapshot(key);
+  });
+
+  it("clears the manual-save interlock when replacement restores all original values", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["hit", "keep", "hit"]]);
+    editor.newRows.value = [];
+    editor.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "hit", value: "new" }]);
+    editor.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "new", value: "hit" }]);
+    expect(editor.hasPendingChanges.value).toBe(false);
+    expect(editor.manualSaveRequired.value).toBe(false);
+    editor.undoPendingChange();
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBe("new");
+    expect(editor.manualSaveRequired.value).toBe(true);
+    editor.redoPendingChange();
+    expect(editor.manualSaveRequired.value).toBe(false);
+  });
+});
+
+function beforeTabSwitchEvent(fromTabId: string, tabId = "next-tab") {
+  return new CustomEvent("dbx:before-tab-switch", { detail: { tabId, fromTabId } });
+}
+
+function setupTabSwitchScrollFixture() {
+  class TestScroller {
+    scrollTop = 0;
+    scrollLeft = 0;
+    scrollTo({ top, left }: ScrollToOptions) {
+      if (typeof top === "number") this.scrollTop = top;
+      if (typeof left === "number") this.scrollLeft = left;
+    }
+  }
+  vi.stubGlobal("HTMLElement", TestScroller);
+  const rows: CellValue[][] = [
+    ["a", null, 1],
+    ["b", null, 2],
+    ["c", null, 3],
+  ];
+  return { TestScroller, rows };
 }
 
 describe("useDataGridEditor result snapshots", () => {
@@ -185,6 +405,112 @@ describe("useDataGridEditor result snapshots", () => {
     remounted.restorePendingSnapshotFocus();
     expect(remountedScroller.scrollTop).toBe(0);
     expect(remountedScroller.scrollLeft).toBe(0);
+  });
+
+  it("adopts a scroll-only snapshot when the previous instance was torn down by a tab switch (#8524)", () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-8524";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.onBeforeTabSwitch(beforeTabSwitchEvent(key));
+    // Unmount path runs right after the switch and must not clobber the provenance.
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(6_400);
+    expect(remountedScroller.scrollLeft).toBe(24);
+  });
+
+  it("ignores a tab switch that names a different tab", () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-other-group";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    // Split groups keep several grids mounted; this one did not change tabs.
+    previous.onBeforeTabSwitch(beforeTabSwitchEvent("some-other-tab"));
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(0);
+    expect(remountedScroller.scrollLeft).toBe(0);
+  });
+
+  it("ignores a tab switch event without a fromTabId", () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-no-origin";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.onBeforeTabSwitch(new CustomEvent("dbx:before-tab-switch", { detail: { tabId: "next-tab" } }));
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(0);
+  });
+
+  it("drops the tab-switch scroll once the result identity changes", async () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-reloaded";
+    const { editor: previous, result } = createEditorWithResult(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.onBeforeTabSwitch(beforeTabSwitchEvent(key));
+    previous.savePendingSnapshot(true, true);
+
+    // A reload lands a new row array: the grid must start at the first row (#7341).
+    result.value = { columns: ["first", "hidden", "last"], rows: rows.map((row) => [...row]) };
+    await nextTick();
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(0);
+  });
+
+  it("clears the tab-switch provenance when the grid is explicitly scrolled to the top", () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-reset-scroll";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.onBeforeTabSwitch(beforeTabSwitchEvent(key));
+    // Sort/filter/paginate/refresh all route through here and mean "new viewport".
+    previous.resetGridVerticalScroll(true);
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(0);
   });
 
   it("still adopts the cached scroll when the snapshot carries pending edits", () => {
@@ -385,6 +711,29 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     expect(editor.hasPendingChanges.value).toBe(true);
   });
 
+  it("clears generated key columns instead of pasting the copied value", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [], undefined, [
+      { name: "first", data_type: "integer", extra: "autoincrement" },
+      { name: "hidden", data_type: "varchar" },
+      { name: "last", data_type: "varchar" },
+    ]);
+
+    const result = editor.appendPastedRowsToNewRow(
+      -1,
+      [
+        ["1", "Lovelace"],
+        ["2", "Hopper"],
+      ],
+      [0, 2],
+    );
+
+    expect(result).toEqual({ ok: true, rowCount: 2 });
+    expect(editor.newRows.value).toEqual([
+      [null, null, "Lovelace"],
+      [null, null, "Hopper"],
+    ]);
+  });
+
   it("keeps explicitly read-only mapped columns out of editing and paste", () => {
     const editor = createEditor(["first", "hidden", "last"], true, undefined, [0]);
 
@@ -514,6 +863,69 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
 
     expect(editor.newRows.value[1]).toEqual(["Ada", "full payload", "Lovelace"]);
   });
+
+  it("places a cloned source row below its source row", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [
+      ["Ada", null, "Lovelace"],
+      ["Grace", null, "Hopper"],
+    ]);
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+
+    editor.cloneRow(1);
+
+    expect(editor.newRowMeta.value[0]?.placement).toEqual({ anchorId: 1, position: "below" });
+  });
+
+  it("keeps the scroll position when the cloned row anchors below its source row", async () => {
+    class ScrollerStub {
+      scrollTop = 0;
+      scrollHeight = 4_000;
+    }
+    vi.stubGlobal("HTMLElement", ScrollerStub);
+    const editor = createEditor(undefined, true, undefined, undefined, [
+      ["Ada", null, "Lovelace"],
+      ["Grace", null, "Hopper"],
+    ]);
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+    const scroller = new ScrollerStub();
+    editor.scrollerRef.value = scroller as unknown as NonNullable<typeof editor.scrollerRef.value>;
+
+    editor.cloneRow(1);
+    await nextTick();
+    vi.unstubAllGlobals();
+
+    expect(editor.newRowMeta.value[0]?.placement).toEqual({ anchorId: 1, position: "below" });
+    expect(scroller.scrollTop).toBe(0);
+  });
+
+  it("places a cloned pending row below the pending source row", () => {
+    const editor = createEditor();
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+    editor.addRows(1);
+
+    editor.cloneRow(-1);
+
+    expect(editor.newRowMeta.value[1]?.placement).toEqual({ anchorId: -1, position: "below" });
+  });
+
+  it("places each multi-row clone below its corresponding source row", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [
+      ["Ada", null, "Lovelace"],
+      ["Grace", null, "Hopper"],
+    ]);
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+
+    editor.cloneRows([1, 0]);
+
+    expect(editor.newRowMeta.value.map((meta) => meta.placement)).toEqual([
+      { anchorId: 1, position: "below" },
+      { anchorId: 0, position: "below" },
+    ]);
+  });
 });
 
 describe("useDataGridEditor saveChanges reload", () => {
@@ -523,13 +935,33 @@ describe("useDataGridEditor saveChanges reload", () => {
     mocks.executeConditionalUpdate.mockReset();
     mocks.cancelConditionalUpdate.mockReset();
     mocks.executeInTransaction.mockReset();
+    mocks.executeInManualTransaction.mockReset();
+    mocks.executeQuery.mockReset();
     mocks.addHistory.mockReset();
     mocks.getConfig.mockReset();
   });
 
-  function createSaveTestEditor(options: { currentPage?: Ref<number>; prepareFullReload?: () => void; customSaveHandler?: { save: ReturnType<typeof vi.fn> } } = {}) {
+  function createSaveTestEditor(
+    options: {
+      joinedWriteTargets?: import("@/types/database").QueryTab["queryWriteTargets"];
+      queryResult?: { columns: string[]; rows: CellValue[][] };
+      currentPage?: Ref<number>;
+      prepareFullReload?: () => void;
+      customSaveHandler?: { save: ReturnType<typeof vi.fn> };
+      confirmSaveRequest?: (request: import("@/composables/useDataGridEditor").DataGridSaveConfirmationRequest) => Promise<boolean>;
+      manualTransactionSessionId?: string;
+      ensureManualTransactionSession?: () => Promise<string>;
+      refreshSavedRows?: ReturnType<typeof vi.fn>;
+      onManualTransactionMutation?: ReturnType<typeof vi.fn>;
+      connectionId?: string;
+      databaseType?: import("@/types/database").DatabaseType;
+      primaryKeys?: string[];
+      onExecuteSql?: (sql: string) => Promise<void>;
+    } = {},
+  ) {
     const emit = vi.fn();
     const currentPage = options.currentPage ?? ref(1);
+    const ensureManualTransactionSession = ref(options.ensureManualTransactionSession);
     const result = ref<{ columns: string[]; rows: CellValue[][] }>({
       columns: ["id", "status"],
       rows: [
@@ -537,11 +969,12 @@ describe("useDataGridEditor saveChanges reload", () => {
         [2, "pending"],
       ],
     });
+    if (options.queryResult) result.value = options.queryResult;
     const editor = useDataGridEditor({
       result: computed(() => result.value),
       editable: computed(() => true),
-      databaseType: computed(() => "mysql"),
-      connectionId: computed(() => "connection-1"),
+      databaseType: computed(() => options.databaseType ?? "mysql"),
+      connectionId: computed(() => ("connectionId" in options ? options.connectionId : "connection-1")),
       database: computed(() => "app"),
       tableMeta: computed(() => ({
         tableName: "orders_test",
@@ -549,11 +982,16 @@ describe("useDataGridEditor saveChanges reload", () => {
           { name: "id", data_type: "int" },
           { name: "status", data_type: "varchar" },
         ],
-        primaryKeys: ["id"],
+        primaryKeys: options.primaryKeys ?? ["id"],
       })),
       sourceColumns: computed(() => undefined),
-      onExecuteSql: computed(() => undefined),
+      joinedWriteTargets: computed(() => options.joinedWriteTargets),
+      onExecuteSql: computed(() => options.onExecuteSql),
       customSaveHandler: computed(() => options.customSaveHandler),
+      confirmSaveRequest: computed(() => options.confirmSaveRequest),
+      manualTransactionSessionId: computed(() => options.manualTransactionSessionId),
+      ensureManualTransactionSession: computed(() => ensureManualTransactionSession.value),
+      onManualTransactionMutation: options.onManualTransactionMutation,
       sql: computed(() => undefined),
       searchText: ref(""),
       whereFilterInput: ref(""),
@@ -566,10 +1004,74 @@ describe("useDataGridEditor saveChanges reload", () => {
       cacheKey: computed(() => undefined),
       getRowItem: () => undefined,
       prepareFullReload: options.prepareFullReload,
+      refreshSavedRows: options.refreshSavedRows,
       emit,
     });
-    return { editor, emit, currentPage };
+    return { editor, emit, currentPage, ensureManualTransactionSession };
   }
+
+  // https://github.com/t8y2/dbx/issues/8321: without a primary key the row is
+  // addressed by matching every column value, and the loaded page cannot show
+  // whether another physical row matches the same condition.
+  const keylessGuard = {
+    sql: "SELECT COUNT(*) AS dbx_keyless_row_matches FROM orders_test WHERE (status = 'pending')",
+    maxMatchedRows: 1,
+    message: "Cannot safely update or delete this row: more than one row matches.",
+  };
+
+  it("refuses a keyless save when the server counts more than one row matching the predicate the save sends", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE orders_test SET status='shipped' WHERE status = 'pending'"],
+      rollbackStatements: [],
+      keylessGuards: [keylessGuard],
+    });
+    mocks.executeQuery.mockResolvedValue({ columns: ["dbx_keyless_row_matches"], rows: [[2]] });
+
+    const { editor } = createSaveTestEditor({ primaryKeys: [] });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(mocks.executeQuery).toHaveBeenCalledWith("connection-1", "app", keylessGuard.sql, undefined);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.saveError.value).toBe(keylessGuard.message);
+  });
+
+  it("runs a keyless save once the server confirms the predicate matches a single row", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE orders_test SET status='shipped' WHERE status = 'pending'"],
+      rollbackStatements: [],
+      keylessGuards: [keylessGuard],
+    });
+    mocks.executeQuery.mockResolvedValue({ columns: ["dbx_keyless_row_matches"], rows: [[1]] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 1 });
+
+    const { editor } = createSaveTestEditor({ primaryKeys: [] });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).toBeFalsy();
+  });
+
+  it("refuses a keyless save when the guard cannot be counted on the server at all", async () => {
+    const onExecuteSql = vi.fn().mockResolvedValue(undefined);
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE orders_test SET status='shipped' WHERE status = 'pending'"],
+      rollbackStatements: [],
+      keylessGuards: [keylessGuard],
+    });
+
+    const { editor } = createSaveTestEditor({ primaryKeys: [], connectionId: undefined, onExecuteSql });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(onExecuteSql).not.toHaveBeenCalled();
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(editor.saveError.value).toContain("could not check on the server");
+  });
 
   it("reloads after a pure row update, so database-computed columns (e.g. ON UPDATE CURRENT_TIMESTAMP) refresh without a manual page reload", async () => {
     mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=1"], rollbackStatements: [] });
@@ -582,6 +1084,135 @@ describe("useDataGridEditor saveChanges reload", () => {
 
     expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("previews and saves edits to both joined tables in a single transaction", async () => {
+    const refreshSavedRows = vi.fn();
+    const targets = [
+      { tableMeta: { tableName: "users", primaryKeys: ["id"], columns: [] }, sourceColumns: ["id", "name", undefined, undefined] },
+      { tableMeta: { tableName: "papers", primaryKeys: ["id"], columns: [] }, sourceColumns: [undefined, undefined, "id", "title"] },
+    ];
+    mocks.prepareDataGridSave.mockImplementation(async (options) => ({ statements: ["update " + options.tableMeta.tableName], rollbackStatements: ["undo " + options.tableMeta.tableName] }));
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 2 });
+    const { editor, emit } = createSaveTestEditor({ joinedWriteTargets: targets, queryResult: { columns: ["id", "name", "paper_id", "title"], rows: [[1, "old", 20, "old"]] }, refreshSavedRows });
+    editor.dirtyRows.value.set(
+      0,
+      new Map([
+        [1, "new name"],
+        [3, "new title"],
+      ]),
+    );
+    expect(await editor.previewChanges()).toEqual(["update users", "update papers"]);
+    expect(mocks.executeInTransaction).not.toHaveBeenCalled();
+    await editor.saveChanges();
+    expect(mocks.executeInTransaction).toHaveBeenCalledWith("connection-1", "app", ["update users", "update papers"], undefined);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(refreshSavedRows).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+    expect(mocks.prepareDataGridSave.mock.calls[0]![0].dirtyRows).toEqual([[0, [[1, "new name"]]]]);
+    expect(mocks.prepareDataGridSave.mock.calls[1]![0].dirtyRows).toEqual([[0, [[3, "new title"]]]]);
+  });
+
+  it("keeps both joined edits pending if the transaction fails", async () => {
+    const targets = [
+      { tableMeta: { tableName: "users", primaryKeys: ["id"], columns: [] }, sourceColumns: ["id", "name", undefined, undefined] },
+      { tableMeta: { tableName: "papers", primaryKeys: ["id"], columns: [] }, sourceColumns: [undefined, undefined, "id", "title"] },
+    ];
+    mocks.prepareDataGridSave.mockImplementation(async (options) => ({ statements: ["update " + options.tableMeta.tableName], rollbackStatements: [] }));
+    mocks.executeInTransaction.mockRejectedValue(new Error("second update failed"));
+    const { editor, emit } = createSaveTestEditor({ joinedWriteTargets: targets, queryResult: { columns: ["id", "name", "paper_id", "title"], rows: [[1, "old", 20, "old"]] } });
+    editor.dirtyRows.value.set(
+      0,
+      new Map([
+        [1, "new name"],
+        [3, "new title"],
+      ]),
+    );
+    await editor.saveChanges();
+    expect(editor.dirtyRows.value.get(0)?.size).toBe(2);
+    expect(editor.saveError.value).toContain("second update failed");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(emit.mock.calls.some(([event]) => event === "reload")).toBe(false);
+  });
+
+  it("saves query-result edits through the active manual transaction session", async () => {
+    const statement = "UPDATE orders_test SET status='shipped' WHERE id=1";
+    const refreshSavedRows = vi.fn().mockResolvedValue(true);
+    const onManualTransactionMutation = vi.fn();
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [statement], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockResolvedValue([{ affected_rows: 1 }]);
+
+    const { editor, emit } = createSaveTestEditor({ manualTransactionSessionId: "txn-session-1", refreshSavedRows, onManualTransactionMutation });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledWith("txn-session-1", statement, "app", undefined);
+    expect(onManualTransactionMutation).toHaveBeenCalledTimes(1);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(refreshSavedRows).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("starts a manual transaction before saving an existing result grid", async () => {
+    const statement = "UPDATE orders_test SET status='shipped' WHERE id=1";
+    const ensureManualTransactionSession = vi.fn().mockResolvedValue("txn-grid-1");
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [statement], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockResolvedValue([{ affected_rows: 1 }]);
+
+    const { editor, ensureManualTransactionSession: transactionMode } = createSaveTestEditor();
+    transactionMode.value = ensureManualTransactionSession;
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+
+    expect(ensureManualTransactionSession).toHaveBeenCalledOnce();
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledWith("txn-grid-1", statement, "app", undefined);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("checks a keyless edit on the newly opened manual transaction session", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE orders_test SET status='shipped' WHERE status = 'pending'"],
+      rollbackStatements: [],
+      keylessGuards: [keylessGuard],
+    });
+    mocks.executeInManualTransaction.mockResolvedValueOnce([{ columns: ["matches"], rows: [[1]] }]).mockResolvedValueOnce([{ affected_rows: 1 }]);
+    const { editor } = createSaveTestEditor({ primaryKeys: [], ensureManualTransactionSession: vi.fn().mockResolvedValue("txn-grid-2") });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+
+    expect(mocks.executeInManualTransaction.mock.calls[0]?.[0]).toBe("txn-grid-2");
+    expect(mocks.executeInManualTransaction.mock.calls[0]?.[1]).toBe(keylessGuard.sql);
+    expect(mocks.executeInManualTransaction.mock.calls[1]?.[0]).toBe("txn-grid-2");
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps edits pending if a manual transaction cannot start", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=1"], rollbackStatements: [] });
+    const ensureManualTransactionSession = vi.fn().mockRejectedValue(new Error("BEGIN failed"));
+    const { editor } = createSaveTestEditor({ ensureManualTransactionSession });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    await editor.saveChanges();
+
+    expect(editor.saveError.value).toContain("BEGIN failed");
+    expect(editor.dirtyRows.value.get(0)?.get(1)).toBe("shipped");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
+  });
+
+  it("marks the manual transaction dirty before a result-grid mutation can fail", async () => {
+    const onManualTransactionMutation = vi.fn();
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=1"], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockRejectedValue(new Error("Query timed out"));
+
+    const { editor } = createSaveTestEditor({ manualTransactionSessionId: "txn-session-1", onManualTransactionMutation });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(onManualTransactionMutation).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).toContain("Query timed out");
   });
 
   it("executes a conditional update immediately, records affected rows, and reloads", async () => {
@@ -761,5 +1392,107 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(customSave).toHaveBeenCalledTimes(1);
     expect(prepareFullReload).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalledWith("reload", expect.anything());
+  });
+
+  // Engines that cannot roll a partial batch back (Salesforce: one REST call per
+  // record) hand the operation list to the host for review before it is written.
+  it("summarizes inserts, updates and deletes for the host save confirmation and writes once accepted", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["stmt-1", "stmt-2", "stmt-3"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 1 });
+    const confirmSaveRequest = vi.fn().mockResolvedValue(true);
+
+    const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+    editor.addRows(1);
+    editor.deletedRows.value.add(1);
+
+    await editor.saveChanges();
+
+    expect(confirmSaveRequest).toHaveBeenCalledTimes(1);
+    expect(confirmSaveRequest.mock.calls[0]?.[0]).toMatchObject({
+      updates: 1,
+      inserts: 1,
+      deletes: 1,
+      targetLabel: "orders_test",
+      statements: ["stmt-1", "stmt-2", "stmt-3"],
+    });
+    expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).toBeFalsy();
+  });
+
+  it("keeps every edit staged and reports no error when the host declines the save", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["stmt-1"], rollbackStatements: [] });
+    const confirmSaveRequest = vi.fn().mockResolvedValue(false);
+
+    const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(confirmSaveRequest).toHaveBeenCalledTimes(1);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.dirtyRows.value.get(0)?.get(1)).toBe("shipped");
+    expect(editor.isSaving.value).toBe(false);
+    expect(editor.saveError.value).toBeFalsy();
+  });
+
+  it("never writes an auto-save past a required confirmation", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["stmt-1"], rollbackStatements: [] });
+    const confirmSaveRequest = vi.fn().mockResolvedValue(true);
+
+    const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges({ autoSave: true });
+
+    expect(confirmSaveRequest).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.dirtyRows.value.get(0)?.get(1)).toBe("shipped");
+  });
+});
+
+describe("useDataGridEditor cell edit focus", () => {
+  it("selects the editor value only on the first frame so fast typing is not clobbered (#7336)", async () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["long json value", "hidden", "last"]]);
+    const select = vi.fn();
+    const setSelectionRange = vi.fn();
+    const focus = vi.fn();
+    const input = { focus, select, setSelectionRange, dataset: {}, value: "long json value" };
+    const rafCallbacks: Array<(time: number) => void> = [];
+    vi.stubGlobal("document", { querySelector: () => input });
+    vi.stubGlobal("requestAnimationFrame", (callback: (time: number) => void) => {
+      rafCallbacks.push(callback);
+      return rafCallbacks.length;
+    });
+
+    editor.startEdit(0, 0);
+    await nextTick();
+    for (let frame = 0; frame < 3; frame += 1) {
+      const callbacks = rafCallbacks.splice(0);
+      callbacks.forEach((callback) => callback(0));
+      await nextTick();
+    }
+
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(setSelectionRange).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("Mongo collection-grid clipboard round-trip", () => {
+  it.each([null, MONGO_DOCUMENT_GRID_NULL, "\u0000dbx:mongo-document-grid:string:literal", "NULL"])("preserves BSON value %j through paste and save", (bsonValue) => {
+    const encoded = mongoDocumentGridValue(bsonValue) as string;
+    const editor = createEditor(undefined, true, undefined, undefined, [["before", "", ""]], undefined, undefined, true);
+    try {
+      // The OS clipboard is display text; the internal matrix retains encoding.
+      rememberDataGridClipboardCopy("copied text", [[encoded]]);
+      const pasted = parseDataGridClipboard("copied text")[0]![0]!;
+      editor.applyCellValue(0, 0, pasted);
+      const changes = editor.dirtyRows.value.get(0)!;
+      expect(changes.get(0)).toBe(encoded);
+      expect(buildMongoUpdateDocument(changes, ["value"], { value: "before" })).toEqual({ $set: { value: bsonValue } });
+    } finally {
+      clearDataGridClipboardCopy();
+    }
   });
 });

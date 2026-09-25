@@ -9,6 +9,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "procedure",
   "function",
   "synonym",
+  "oracle-db-link",
   "package",
   "package-body",
   "type-body",
@@ -39,6 +40,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "table-search-control",
   "load-more",
   "extension",
+  "datafile",
 ]);
 
 const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index"]);

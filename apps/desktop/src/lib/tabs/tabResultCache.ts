@@ -32,8 +32,15 @@ export interface TabResultSnapshot {
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   resultRuns?: QueryTab["resultRuns"];
   activeResultRunId?: string;
+  /**
+   * Logical-result identity for the tab-switch view snapshot cache. Required at
+   * the tab level because a data tab has no result run to carry it; query tabs
+   * additionally carry it per run through `resultRuns`.
+   */
+  resultViewGeneration?: string;
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
+  queryWriteTargets?: QueryTab["queryWriteTargets"];
   resultColumnComments?: QueryTab["resultColumnComments"];
   queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
@@ -55,15 +62,24 @@ interface ColumnarQueryResult {
   execution_error?: true;
   statement_index?: number;
   column_types?: string[];
+  local_column_filters?: QueryResult["local_column_filters"];
   columnValues: CellValue[][];
   rowCount: number;
   mongo_documents?: unknown[];
   mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
+  server_execute_time_us?: number;
+  client_request_wait_ms?: number;
+  query_timings_ms?: QueryResult["query_timings_ms"];
+  client_prepare_ms?: number;
+  client_result_ms?: number;
+  timing_page_count?: number;
   truncated?: boolean;
   has_more?: boolean;
   sourceLabel?: string;
+  sourceQualifier?: string;
+  sourceName?: string;
   sourceStatement?: string;
   sourceFrom?: number;
   sourceTo?: number;
@@ -327,6 +343,10 @@ function clonePlain<T>(value: T): T {
   }
 }
 
+function cloneLocalColumnFilters(filters: QueryResult["local_column_filters"]): QueryResult["local_column_filters"] {
+  return filters ? Object.fromEntries(Object.entries(filters).map(([columnIndex, values]) => [columnIndex, [...values]])) : undefined;
+}
+
 function stripSessionIds(result: QueryResult | undefined): QueryResult | undefined {
   if (!result) return undefined;
   return {
@@ -334,6 +354,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
+    local_column_filters: cloneLocalColumnFilters(result.local_column_filters),
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
@@ -342,10 +363,18 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
+    server_execute_time_us: result.server_execute_time_us,
+    client_request_wait_ms: result.client_request_wait_ms,
+    query_timings_ms: result.query_timings_ms ? { ...result.query_timings_ms } : undefined,
+    client_prepare_ms: result.client_prepare_ms,
+    client_result_ms: result.client_result_ms,
+    timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
+    sourceQualifier: result.sourceQualifier,
+    sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,
@@ -371,28 +400,48 @@ function stripResultRunSessionIds(resultRuns: QueryTab["resultRuns"]): QueryTab[
 
 function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult | undefined {
   if (!result) return undefined;
-  const columnValues = result.columns.map((_, colIndex) => result.rows.map((row) => row[colIndex] ?? null));
-  return removeUndefinedFields({
+  const rowCount = result.rows.length;
+  const columnValues = result.columns.map(() => {
+    const values: CellValue[] = [];
+    values.length = rowCount;
+    return values;
+  });
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+    const row = result.rows[rowIndex];
+    for (let columnIndex = 0; columnIndex < columnValues.length; columnIndex++) {
+      columnValues[columnIndex][rowIndex] = row?.[columnIndex] ?? null;
+    }
+  }
+  const metadata = removeUndefinedFields({
     columns: [...result.columns],
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
+    local_column_filters: cloneLocalColumnFilters(result.local_column_filters),
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
-    columnValues,
-    rowCount: result.rows.length,
+    rowCount,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
+    server_execute_time_us: result.server_execute_time_us,
+    client_request_wait_ms: result.client_request_wait_ms,
+    query_timings_ms: result.query_timings_ms ? { ...result.query_timings_ms } : undefined,
+    client_prepare_ms: result.client_prepare_ms,
+    client_result_ms: result.client_result_ms,
+    timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
+    sourceQualifier: result.sourceQualifier,
+    sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,
   });
+  return { ...metadata, columnValues };
 }
 
 function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResult | undefined {
@@ -403,6 +452,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
+    local_column_filters: cloneLocalColumnFilters(result.local_column_filters),
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
@@ -411,10 +461,18 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
+    server_execute_time_us: result.server_execute_time_us,
+    client_request_wait_ms: result.client_request_wait_ms,
+    query_timings_ms: result.query_timings_ms ? { ...result.query_timings_ms } : undefined,
+    client_prepare_ms: result.client_prepare_ms,
+    client_result_ms: result.client_result_ms,
+    timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
+    sourceQualifier: result.sourceQualifier,
+    sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,
@@ -422,18 +480,17 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
 }
 
 function snapshotToPayload(snapshot: TabResultSnapshot): TabResultSnapshotPayload {
-  return removeUndefinedFields({
-    ...snapshot,
-    result: toColumnarResult(snapshot.result),
-    results: snapshot.results?.map((result) => toColumnarResult(result)!),
-    resultRuns: snapshot.resultRuns?.map((run) =>
-      removeUndefinedFields({
-        ...run,
-        result: toColumnarResult(run.result),
-        results: run.results?.map((result) => toColumnarResult(result)!),
-      }),
-    ),
-  });
+  const { result, results, resultRuns, ...metadata } = snapshot;
+  return {
+    ...removeUndefinedFields(metadata),
+    result: toColumnarResult(result),
+    results: results?.map((result) => toColumnarResult(result)!),
+    resultRuns: resultRuns?.map(({ result, results, ...run }) => ({
+      ...removeUndefinedFields(run),
+      result: toColumnarResult(result),
+      results: results?.map((result) => toColumnarResult(result)!),
+    })),
+  };
 }
 
 function payloadToSnapshot(payload: TabResultSnapshotPayload): TabResultSnapshot {
@@ -549,12 +606,16 @@ async function pruneRemoteRuntimeCache(options: ResultCachePruneOptions): Promis
 }
 
 async function deleteRemoteRuntimeCacheOwner(ownerId: string): Promise<void> {
-  if (isTauriRuntime()) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("delete_tab_runtime_cache_owner", { ownerId });
-    return;
+  try {
+    if (isTauriRuntime()) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("delete_tab_runtime_cache_owner", { ownerId });
+      return;
+    }
+    await fetch(apiUrl(`/api/tab-runtime-cache/owner?owner_id=${encodeURIComponent(ownerId)}`), { method: "DELETE" });
+  } catch {
+    // Cache deletion is best-effort; the entry expires server-side anyway.
   }
-  await fetch(apiUrl(`/api/tab-runtime-cache/owner?owner_id=${encodeURIComponent(ownerId)}`), { method: "DELETE" });
 }
 
 async function readRemoteRuntimeCache(key: string): Promise<Uint8Array | undefined> {
@@ -584,8 +645,10 @@ async function deleteRemoteRuntimeCache(key: string): Promise<void> {
       return;
     }
     await fetch(apiUrl(`/api/tab-runtime-cache?key=${encodeURIComponent(key)}`), { method: "DELETE" });
-  } catch (error) {
-    console.warn("[DBX][tab-result-cache:remote-delete:error]", { key, error });
+  } catch {
+    // Best-effort delete (the entry expires server-side). Deliberately silent: logging
+    // here after a vitest run finishes races worker teardown and has failed CI runs
+    // ("Closing rpc while onUserConsoleLog was pending").
   }
 }
 
@@ -696,7 +759,7 @@ export function encodeTabResultSnapshot(snapshot: TabResultSnapshot): Uint8Array
     columnCount: stats.columnCount,
     payload: snapshotToPayload(snapshot),
   };
-  return encode(removeUndefinedFields(envelope));
+  return encode(envelope, { ignoreUndefined: true });
 }
 
 export function decodeTabResultSnapshot(bytes: Uint8Array | ArrayBuffer): TabResultSnapshot | undefined {
@@ -712,6 +775,7 @@ export function decodeTabResultSnapshot(bytes: Uint8Array | ArrayBuffer): TabRes
     return undefined;
   }
   if (!isRecord(decoded.payload)) return undefined;
+  // SAFETY: The validated envelope is produced by encodeTabResultSnapshot, so its record payload has the snapshot shape expected here.
   return payloadToSnapshot(decoded.payload as unknown as TabResultSnapshotPayload);
 }
 
@@ -731,8 +795,10 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(tab.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultRuns: stripResultRunSessionIds(tab.resultRuns),
     activeResultRunId: tab.activeResultRunId,
+    resultViewGeneration: tab.resultViewGeneration,
     queryAnalysis: tab.queryAnalysis ? clonePlain(tab.queryAnalysis) : undefined,
     querySourceColumns: tab.querySourceColumns ? [...tab.querySourceColumns] : undefined,
+    queryWriteTargets: tab.queryWriteTargets?.map((target) => ({ ...target, sourceColumns: [...target.sourceColumns] })),
     resultColumnComments: tab.resultColumnComments ? clonePlain(tab.resultColumnComments) : undefined,
     queryDisplaySourceColumns: tab.queryDisplaySourceColumns ? [...tab.queryDisplaySourceColumns] : undefined,
     queryEditabilityReason: tab.queryEditabilityReason,

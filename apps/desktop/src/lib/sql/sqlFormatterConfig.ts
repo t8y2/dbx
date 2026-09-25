@@ -74,8 +74,8 @@ export const DEFAULT_SQL_FORMATTER_SETTINGS: SqlFormatterSettings = {
   useTabs: false,
   tabWidth: 2,
   logicalOperatorNewline: "before",
-  fromClauseLayout: "newLine",
-  expressionWidth: 50,
+  fromClauseLayout: "sameLine",
+  expressionWidth: 120,
   linesBetweenQueries: 1,
   preserveEmptyLines: false,
   denseOperators: false,
@@ -206,6 +206,21 @@ export function normalizeSqlFormatterSettings(value: unknown): SqlFormatterSetti
   const input = isObject(value) ? value : {};
   const optionSource = isObject(input.options) ? input.options : input;
   return sqlFormatterOptionSettings(optionSource);
+}
+
+/**
+ * Complete nested-schema check for an already-shaped settings object: every
+ * formatter option must be present with a valid value, and no unknown option
+ * may appear. Unlike the normalizer this never fills defaults, so callers can
+ * reject partially malformed payloads instead of silently substituting them.
+ */
+export function isCompleteSqlFormatterSettings(value: unknown): value is SqlFormatterSettings {
+  if (!isObject(value)) return false;
+  for (const key of SQL_FORMATTER_OPTION_KEYS) {
+    if (!(key in value)) return false;
+    if (!SQL_FORMATTER_OPTION_VALIDATORS[key]((value as Record<string, unknown>)[key])) return false;
+  }
+  return Object.keys(value).every((key) => SQL_FORMATTER_OPTION_KEYS.has(key as keyof SqlFormatterOptionSettings));
 }
 
 export function sqlFormatterConfigFile(settings: unknown): SqlFormatterConfigFile {

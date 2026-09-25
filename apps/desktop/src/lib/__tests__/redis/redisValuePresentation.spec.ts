@@ -180,6 +180,23 @@ describe("redisValuePresentation", () => {
     expect(redisValueSize(value)).toBe(1);
   });
 
+  it("uses the original byte count for a truncated Redis String preview", () => {
+    const value = {
+      key_display: "bf:ali_health_monitor",
+      key_raw: "YmY6YWxpX2hlYWx0aF9tb25pdG9y",
+      ttl: -1,
+      redis_type: "string",
+      data: {
+        kind: "string" as const,
+        content: { raw_base64: "cHJldmlldw==", encoding: "utf8" as const },
+        total_bytes: 45 * 1024 * 1024,
+        truncated: true,
+      },
+    };
+
+    expect(redisValueSize(value)).toBe(45 * 1024 * 1024);
+  });
+
   it("labels raw text views by encoding instead of generic raw text", () => {
     expect(formatRedisMemberDetail("plain-text").rawLabel).toBe("ASCII");
     expect(

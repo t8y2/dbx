@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
+import { ArrowDownWideNarrow, ChevronsDownUp, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -16,14 +16,16 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
+import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
-import { exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
+import { uniqueSavedSqlExportFileName, exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent } from "@/lib/selection/orderedListSelection";
 import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
@@ -95,6 +97,10 @@ function uniqueImportedName(name: string, takenNames: Set<string>) {
   }
 }
 
+function savedSqlImportNameScopeKey(target: Pick<SavedSqlFile, "connectionId" | "catalog" | "database">, folderId?: string) {
+  return JSON.stringify([savedSqlDatabaseScopeKey(target), folderId || null]);
+}
+
 async function exportSingleFile(file: SavedSqlFile) {
   try {
     const loadedFile = await savedSqlStore.ensureFileContent(file.id);
@@ -135,10 +141,11 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
         await mkdir(childDir, { recursive: true });
         await writeFolder(child, childDir);
       }
+      const exportedNames = new Set<string>();
       for (const file of savedSqlStore.filesInFolder(libraryFolder.id)) {
         const loadedFile = await savedSqlStore.ensureFileContent(file.id);
         if (!loadedFile) continue;
-        const filePath = await join(dir, sanitizeFileSystemSegment(ensureSqlExtension(file.name)));
+        const filePath = await join(dir, uniqueSavedSqlExportFileName(file.name, exportedNames));
         await writeTextFile(filePath, loadedFile.sql);
       }
     };
@@ -156,10 +163,11 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
       if (unfiled.length > 0) {
         const unfiledDir = await join(rootDir, sanitizeFileSystemSegment(t("sqlLibrary.unfiled")));
         await mkdir(unfiledDir, { recursive: true });
+        const exportedNames = new Set<string>();
         for (const file of unfiled) {
           const loadedFile = await savedSqlStore.ensureFileContent(file.id);
           if (!loadedFile) continue;
-          const filePath = await join(unfiledDir, sanitizeFileSystemSegment(ensureSqlExtension(file.name)));
+          const filePath = await join(unfiledDir, uniqueSavedSqlExportFileName(file.name, exportedNames));
           await writeTextFile(filePath, loadedFile.sql);
         }
       }
@@ -217,21 +225,22 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
     }
 
     const folderCache = new Map<string, SavedSqlFolder>();
-    const takenNamesByFolder = new Map<string, Set<string>>();
+    const takenNamesByScope = new Map<string, Set<string>>();
     const folderConnectionId = targetFolder?.connectionId ?? "";
 
     for (const file of importFiles) {
       const sourceTarget = resolveExternalSqlFileTarget(file.path, (connectionId) => !!connectionStore.getConfig(connectionId), unassociatedExternalSqlFileTarget());
       const importTarget = savedSqlImportTarget(sourceTarget, targetFolder);
       const folderId = await resolveImportedFolder(folderConnectionId, targetFolder?.id, file.folderNames, folderCache);
-      const folderKey = folderId || "";
-      let takenNames = takenNamesByFolder.get(folderKey);
+      const nameScopeKey = savedSqlImportNameScopeKey(importTarget, folderId);
+      let takenNames = takenNamesByScope.get(nameScopeKey);
       if (!takenNames) {
-        takenNames = new Set((folderId ? savedSqlStore.filesInFolder(folderId) : savedSqlStore.filesWithoutFolder()).map((savedFile) => savedFile.name));
-        takenNamesByFolder.set(folderKey, takenNames);
+        const filesInTargetFolder = folderId ? savedSqlStore.filesInFolder(folderId) : savedSqlStore.filesWithoutFolder();
+        takenNames = new Set(filesInTargetFolder.filter((savedFile) => savedSqlDatabaseScopeKey(savedFile) === savedSqlDatabaseScopeKey(importTarget)).map((savedFile) => savedFile.name));
+        takenNamesByScope.set(nameScopeKey, takenNames);
       }
       const path = file.path;
-      const content = await api.readExternalSqlFile(path);
+      const content = await api.readExternalSqlFile(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
       const displayName = uniqueImportedName(file.name, takenNames);
       await savedSqlStore.saveFile({
         connectionId: importTarget.connectionId,
@@ -346,7 +355,7 @@ const visibleFolderRows = computed<SqlLibraryRow[]>(() => {
   const appendFolder = (folder: SavedSqlFolder, depth: number) => {
     if (!folderBranchMatchesQuery(folder)) return;
     rows.push({ type: "folder", folder, depth, folderIndex: folderIndex++ });
-    if (!isFolderExpanded(folder.id)) return;
+    if (!isFolderExpanded(folder)) return;
     for (const child of childFolders(folder.id)) {
       appendFolder(child, depth + 1);
     }
@@ -375,16 +384,52 @@ const hasAnyVisibleItem = computed(() => visibleFolderRows.value.length > 0 || v
 
 const collapsedFolders = ref<Set<string>>(new Set());
 
+// Seed a default-collapsed state when the library first becomes non-empty so
+// opening the panel shows every directory collapsed instead of fully expanded.
+// Guarded so a later in-session folder add/delete does not re-collapse folders
+// the user has already expanded.
+const collapseDefaultsSeeded = ref(false);
+watch(
+  () => savedSqlStore.allFolders.map((folder) => folder.id),
+  (folderIds) => {
+    if (collapseDefaultsSeeded.value || folderIds.length === 0) return;
+    collapseDefaultsSeeded.value = true;
+    collapsedFolders.value = new Set(folderIds);
+  },
+  { immediate: true },
+);
+
+function collapseAllFolders() {
+  // Collapse the whole tree: every folder currently known, including nested
+  // children, is marked collapsed in one shot.
+  const folderIds = savedSqlStore.allFoldersTreeOrder.map((folder) => folder.id);
+  if (folderIds.length === 0) return;
+  collapsedFolders.value = new Set(folderIds);
+}
+
+function hasAnyFolder(): boolean {
+  return savedSqlStore.allFolders.length > 0;
+}
+
 function toggleFolder(folderId: string) {
   if (suppressNextRowClick.value) return;
+  // While a search is active, matched branches are force-expanded for
+  // visibility; toggling them would only mutate hidden state that surprises
+  // after the search is cleared, so treat the click as a no-op.
+  if (searchQuery.value) {
+    const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === folderId);
+    if (folder && folderBranchMatchesQuery(folder)) return;
+  }
   const next = new Set(collapsedFolders.value);
   if (next.has(folderId)) next.delete(folderId);
   else next.add(folderId);
   collapsedFolders.value = next;
 }
 
-function isFolderExpanded(folderId: string) {
-  return !collapsedFolders.value.has(folderId);
+function isFolderExpanded(folder: SavedSqlFolder) {
+  // 搜索激活时,命中的分支自动展开以便直接看到匹配文件;否则遵循折叠状态。
+  if (searchQuery.value && folderBranchMatchesQuery(folder)) return true;
+  return !collapsedFolders.value.has(folder.id);
 }
 
 async function openNewFolderInput(parentFolderId?: string) {
@@ -408,7 +453,9 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
   const connectionId = folder?.connectionId || connectionStore.activeConnectionId || connectionStore.connections[0]?.id;
   if (!connectionId) return;
 
-  const takenNames = folder ? new Set(savedSqlStore.filesInFolder(folder.id).map((f) => f.name)) : new Set(savedSqlStore.filesWithoutFolder().map((f) => f.name));
+  const target = { connectionId, database: "" };
+  const filesInTargetFolder = folder ? savedSqlStore.filesInFolder(folder.id) : savedSqlStore.filesWithoutFolder();
+  const takenNames = new Set(filesInTargetFolder.filter((file) => savedSqlDatabaseScopeKey(file) === savedSqlDatabaseScopeKey(target)).map((file) => file.name));
   const name = uniqueImportedName("new_query.sql", takenNames);
   try {
     const file = await savedSqlStore.saveFile({
@@ -1127,6 +1174,11 @@ function showDropInside(targetId: string) {
       </HelpTooltip>
       <span v-if="hasSelection" class="text-[12px] text-muted-foreground ml-1">({{ selectedCount }})</span>
       <span class="flex-1" />
+      <LightTooltip :text="t('sqlLibrary.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap :disabled="!hasAnyFolder()">
+        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!hasAnyFolder() || sortMode === 'date'" @click="collapseAllFolders">
+          <ChevronsDownUp class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
       <LightTooltip :text="sortMode === 'folder' ? t('sqlLibrary.sortByDate') : t('sqlLibrary.sortByFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="sortMode = sortMode === 'folder' ? 'date' : 'folder'">
           <ArrowDownWideNarrow :class="['h-3 w-3', sortMode === 'date' ? 'text-primary' : '']" />
@@ -1157,7 +1209,7 @@ function showDropInside(targetId: string) {
     <div class="border-b shrink-0 px-2 py-1">
       <div class="relative">
         <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
-        <input v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="w-full h-6 pl-7 pr-6 text-[13px] rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" :placeholder="t('grid.search')" />
+        <input data-sql-library-search v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="w-full h-6 pl-7 pr-6 text-[13px] rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" :placeholder="t('grid.search')" />
         <button v-if="searchText" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchText = ''">
           <X class="h-3 w-3" />
         </button>
@@ -1276,7 +1328,7 @@ function showDropInside(targetId: string) {
                 >
                   <div v-if="showDropBefore(row.folder.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                   <div v-if="showDropAfter(row.folder.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                  <component :is="isFolderExpanded(row.folder.id) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" />
+                  <component :is="isFolderExpanded(row.folder) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" />
                   <template v-if="isRenamingFolder(row.folder.id)">
                     <input
                       :ref="setRenameInputRef"

@@ -79,7 +79,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
     /**
      * Wrap {@link AbstractJdbcAgent#resultValue} so PostGIS-style {@code geometry}
      * and {@code geography} columns are decoded into WKT (matching the native
-     * tokio_postgres path in {@code crates/dbx-core/src/db/postgres.rs}).
+     * tokio_postgres path in {@code crates/dbx-drivers/src/db/postgres.rs}).
      */
     private JdbcExecutor.ColumnAwareResultValueReader geometryAwareResolver() {
         return (rs, index, sqlType, columnTypeName) -> {
@@ -206,7 +206,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
             for (TableInfo table : listTables(schema)) {
-                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
             }
             try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(
                 "SELECT p.proname AS routine_name, " +
@@ -542,11 +542,16 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             // dropped; their text comes from pg_get_indexdef instead of a.attname, and
             // is_expression records which case applied so Rust never has to guess from
             // characters in the text (#6312 review).
+            // `a.attname::text` keeps the cast: a bare COALESCE(name, text) resolves to
+            // `name`, which truncates an expression key part to 63 bytes (NAMEDATALEN - 1)
+            // and makes the rebuilt CREATE INDEX invalid (#9988).
             Map<String, IndexBuilder> byName = new LinkedHashMap<>();
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
                 "(ix.indisunique AND ix.indisvalid) AS is_unique, ix.indisprimary AS is_primary, " +
-                "COALESCE(a.attname, " + profile.catalogPrefixedFunction("get_indexdef") + "(ix.indexrelid, k.n, true)) AS column_text, " +
-                "(a.attname IS NULL) AS is_expression " +
+                "COALESCE(a.attname::text, " + profile.catalogPrefixedFunction("get_indexdef") + "(ix.indexrelid, k.n, true)) AS column_text, " +
+                "(a.attname IS NULL) AS is_expression, " +
+                "array_length(ix.indoption, 1) AS nkeyatts, k.n AS key_position, " +
+                "ix.indoption[(k.n - 1)::int] AS key_option " +
                 "FROM " + profile.catalogRelation("index") + " ix " +
                 "JOIN " + profile.catalogRelation("class") + " t ON t.oid = ix.indrelid " +
                 "JOIN " + profile.catalogRelation("class") + " i ON i.oid = ix.indexrelid " +
@@ -569,24 +574,36 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
                             indexName,
                             name -> new IndexBuilder(name, indexType, isUnique, isPrimary)
                         );
-                        builder.columns.add(rs.getString("column_text"));
+                        String columnText = rs.getString("column_text");
+                        if (rs.getObject("nkeyatts") != null && rs.getObject("key_position") != null
+                            && rs.getInt("key_position") > rs.getInt("nkeyatts")) {
+                            builder.includedColumns.add(columnText);
+                            continue;
+                        }
+                        builder.columns.add(columnText);
                         builder.keyIsExpression.add(rs.getBoolean("is_expression"));
+                        Object keyOption = rs.getObject("key_option");
+                        if (keyOption != null) {
+                            builder.keyOptions.add(rs.getInt("key_option"));
+                        }
                     }
                 }
             }
             List<IndexInfo> result = new ArrayList<>();
             for (IndexBuilder builder : byName.values()) {
-                result.add(new IndexInfo(
+                IndexInfo index = new IndexInfo(
                     builder.name,
                     builder.columns,
                     builder.isUnique,
                     builder.isPrimary,
                     null,
                     builder.indexType,
-                    null,
+                    builder.includedColumns.isEmpty() ? null : builder.includedColumns,
                     null,
                     builder.keyIsExpression
-                ));
+                );
+                index.setKey_options(builder.keyOptions);
+                result.add(index);
             }
             return result;
         });
@@ -598,8 +615,9 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
         private final boolean isUnique;
         private final boolean isPrimary;
         private final List<String> columns = new ArrayList<>();
+        private final List<String> includedColumns = new ArrayList<>();
         private final List<Boolean> keyIsExpression = new ArrayList<>();
-
+        private final List<Integer> keyOptions = new ArrayList<>();
         private IndexBuilder(String name, String indexType, boolean isUnique, boolean isPrimary) {
             this.name = name;
             this.indexType = indexType;

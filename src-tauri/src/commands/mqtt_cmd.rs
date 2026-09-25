@@ -12,10 +12,9 @@ async fn get_mqtt_client(
     state: &AppState,
     connection_id: &str,
 ) -> Result<Arc<dbx_core::mqtt::client::MqttClient>, String> {
-    let connections = state.connections.read().await;
-    let pool = connections.get(connection_id).ok_or_else(|| format!("连接 {} 未建立", connection_id))?;
+    let pool = state.pool_handle(connection_id).await.ok_or_else(|| format!("连接 {} 未建立", connection_id))?;
     match pool {
-        PoolKind::Mqtt(client) => Ok(Arc::clone(client)),
+        PoolKind::Mqtt(client) => Ok(client),
         _ => Err(format!("连接 {} 不是 MQTT 类型", connection_id)),
     }
 }

@@ -25,6 +25,20 @@ describe("buildObjectBrowserRows", () => {
 
     expect(rows[0]?.schema).toBeUndefined();
   });
+
+  it("preserves nullable view validity in browser rows", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: "valid_view", object_type: "VIEW", valid: true },
+        { name: "invalid_view", object_type: "VIEW", valid: false },
+        { name: "unknown_view", object_type: "VIEW", valid: null },
+      ],
+      database: "app",
+      fallbackSchema: "app",
+    });
+
+    expect(rows.map((row) => row.valid)).toEqual([true, false, null]);
+  });
 });
 
 describe("Object Browser pinned ordering", () => {
@@ -136,6 +150,22 @@ describe("buildMongoObjectBrowserRows", () => {
       { name: "active_users", type: "VIEW", collectionKind: "view" },
       { name: "metrics", type: "TABLE", collectionKind: "timeseries" },
     ]);
+  });
+
+  it("sorts collections by document count and on-disk bytes once stats are merged", () => {
+    const stats = [
+      { name: "stores", estimatedRows: 50, totalBytes: 40_960 },
+      { name: "customer_events", estimatedRows: 30_000, totalBytes: 1_912_832 },
+      { name: "orders_10k", estimatedRows: 10_000, totalBytes: 901_120 },
+    ];
+    const rows = buildMongoObjectBrowserRows({ collections: stats.map(({ name }) => ({ name, kind: "collection" })), database: "app" }).map((row, index) => ({
+      ...row,
+      estimatedRows: stats[index]!.estimatedRows,
+      totalBytes: stats[index]!.totalBytes,
+    }));
+
+    expect(sortObjectBrowserRows(rows, "totalBytes", "desc").map((row) => row.name)).toEqual(["customer_events", "orders_10k", "stores"]);
+    expect(sortObjectBrowserRows(rows, "estimatedRows", "desc").map((row) => row.name)).toEqual(["customer_events", "orders_10k", "stores"]);
   });
 
   it("preserves distinct MongoDB collection identifiers verbatim", () => {

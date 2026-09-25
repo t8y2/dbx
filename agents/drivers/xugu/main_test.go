@@ -452,6 +452,34 @@ func TestBuildDSNUsesConnectionFields(t *testing.T) {
 	}
 }
 
+func TestOpenDBRejectsMissingDatabaseBeforeOpeningDriver(t *testing.T) {
+	tests := []struct {
+		name   string
+		params connectParams
+	}{
+		{name: "empty structured database", params: connectParams{Host: "db.example.com", Username: "app"}},
+		{name: "whitespace structured database", params: connectParams{Host: "db.example.com", Database: " \t ", Username: "app"}},
+		{name: "empty native DSN database", params: connectParams{ConnectionString: "IP=db.example.com;DB=;User=app"}},
+		{name: "quoted whitespace native DSN database", params: connectParams{ConnectionString: "IP=db.example.com;DB='  ';User=app"}},
+		{name: "URL without database", params: connectParams{ConnectionString: "xugu://app:secret@db.example.com:5138/"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := openDB(test.params)
+			if err == nil {
+				if db != nil {
+					_ = db.Close()
+				}
+				t.Fatal("expected missing database to be rejected before opening the driver")
+			}
+			if !strings.Contains(err.Error(), "XuguDB requires an existing database name") {
+				t.Fatalf("unexpected missing-database error: %v", err)
+			}
+		})
+	}
+}
+
 func TestBuildDSNUsesDefaultPort(t *testing.T) {
 	dsn := buildDSN(connectParams{
 		Host:     "db.example.com",
@@ -707,6 +735,9 @@ func TestConfiguredDatabaseName(t *testing.T) {
 		{params: connectParams{ConnectionString: "xugu://user:secret@db.example.com:5138/demo"}, want: "demo"},
 		{params: connectParams{ConnectionString: "jdbc:xugu://db.example.com:5138/reporting"}, want: "reporting"},
 		{params: connectParams{ConnectionString: "IP=db.example.com;DB=SYSTEM;User=SYSDBA;PWD=secret"}, want: "SYSTEM"},
+		{params: connectParams{ConnectionString: "IP=db.example.com;DB='shop;east';User=APP"}, want: "shop;east"},
+		{params: connectParams{ConnectionString: "IP=db.example.com;DB='sales''east';User=APP"}, want: "sales'east"},
+		{params: connectParams{ConnectionString: "IP=db.example.com;DB='  ';User=APP"}, want: ""},
 	}
 
 	for _, tc := range cases {
@@ -744,10 +775,10 @@ func TestXuguListSchemasExposesPublicScopeWithoutGUESTCollision(t *testing.T) {
 		public       bool
 		want         []string
 	}{
-		{name: "private only", want: []string{"APP_TEST", "SYSDBA"}},
-		{name: "public without real guest", public: true, want: []string{"APP_TEST", "SYSDBA", xuguPublicSynonymScope}},
-		{name: "public with real guest", realGuest: true, public: true, want: []string{"APP_TEST", "GUEST", "SYSDBA", xuguPublicSynonymScope}},
-		{name: "public with former reserved schema", realReserved: true, public: true, want: []string{"APP_TEST", "__DBX_XUGU_PUBLIC_SYNONYMS__", "SYSDBA", xuguPublicSynonymScope}},
+		{name: "private only", want: []string{"APP_TEST", "SYSDBA", xuguSchedulerJobScope}},
+		{name: "public synonyms", public: true, want: []string{"APP_TEST", "SYSDBA", xuguPublicSynonymScope, xuguSchedulerJobScope}},
+		{name: "public with real guest", realGuest: true, public: true, want: []string{"APP_TEST", "GUEST", "SYSDBA", xuguPublicSynonymScope, xuguSchedulerJobScope}},
+		{name: "public with former reserved schema", realReserved: true, public: true, want: []string{"APP_TEST", "__DBX_XUGU_PUBLIC_SYNONYMS__", "SYSDBA", xuguPublicSynonymScope, xuguSchedulerJobScope}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -799,7 +830,7 @@ func TestXuguListSchemasFallsBackWhenCombinedQueryIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listSchemas() error: %v", err)
 	}
-	if want := []string{"APP_TEST", "GUEST", "SYSDBA"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"APP_TEST", "GUEST", "SYSDBA", xuguSchedulerJobScope}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("listSchemas() = %v, want %v", got, want)
 	}
 	xuguSchemaListingState.Lock()
@@ -946,6 +977,59 @@ func TestGetColumnsFallsBackWhenOnNullMetadataIsUnavailable(t *testing.T) {
 	column := columns[0]
 	if column.Name != "PRODUCT_ID" || column.DataType != "INTEGER" || !column.IsPrimaryKey || column.IsNullable {
 		t.Fatalf("unexpected legacy column metadata: %#v", column)
+	}
+}
+
+func TestXuguPrimaryKeyMatchesColumnCaseWhenCatalogsDisagree(t *testing.T) {
+	primaryKeys := map[string]bool{"ID": true}
+	if !xuguPrimaryKeyMatches("id", primaryKeys) {
+		t.Fatal("expected an unquoted primary key to match the column despite case differences")
+	}
+	if !xuguPrimaryKeyMatches("ID", primaryKeys) {
+		t.Fatal("expected an exact primary-key match")
+	}
+}
+
+func TestXuguPrimaryKeyMatchingDoesNotGuessAmbiguousCase(t *testing.T) {
+	primaryKeys := map[string]bool{"ID": true, "id": true}
+	if xuguPrimaryKeyMatches("Id", primaryKeys) {
+		t.Fatal("must not choose between primary-key names that differ only by case")
+	}
+}
+
+func TestGetColumnsMarksXuguIdentityColumnsAsAutoIncrement(t *testing.T) {
+	db, err := sql.Open("xugu-test-table-ddl", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	columns, err := s.getColumns("APP", "CHILD")
+	if err != nil {
+		t.Fatalf("get columns: %v", err)
+	}
+	if len(columns) != 2 {
+		t.Fatalf("expected two columns, got %#v", columns)
+	}
+	if columns[0].Name != "ID" || columns[0].Extra == nil || *columns[0].Extra != "auto_increment" {
+		t.Fatalf("identity column should be marked auto_increment: %#v", columns[0])
+	}
+	if columns[1].Name != "PARENT_ID" || columns[1].Extra != nil {
+		t.Fatalf("ordinary column must not be marked auto_increment: %#v", columns[1])
+	}
+}
+
+func TestXuguIdentityColumnMatchingIsCaseInsensitiveOnlyWhenUnambiguous(t *testing.T) {
+	if !xuguIdentityMatchesColumn("id", map[string]xuguIdentityInfo{"ID": {Column: "ID"}}) {
+		t.Fatal("expected an unambiguous case-insensitive identity match")
+	}
+	if xuguIdentityMatchesColumn("id", map[string]xuguIdentityInfo{
+		"ID": {Column: "ID"},
+		"Id": {Column: "Id"},
+	}) {
+		t.Fatal("ambiguous case-insensitive identity names must not match")
 	}
 }
 
@@ -1479,6 +1563,100 @@ func TestGetSequenceSourceReconstructsExecutableDDL(t *testing.T) {
 	}
 	if !strings.HasSuffix(strings.TrimSpace(ddl), ";") {
 		t.Fatalf("sequence DDL must end with a statement terminator:\n%s", ddl)
+	}
+}
+
+func TestRenderXuguSchedulerJobDDLReconstructsEscapedReplayableCall(t *testing.T) {
+	ddl := renderXuguSchedulerJobDDL(xuguSchedulerJobMetadata{
+		Name:           `DBX_JOB_'A`,
+		JobType:        "plsql_block",
+		ParameterCount: 2,
+		Action:         `BEGIN do_work('x'); END;`,
+		BeginTime:      "2026-08-29 10:15:00",
+		RepeatInterval: "FREQ=DAILY;INTERVAL=2",
+		EndTime:        nil,
+		Enabled:        true,
+		AutoDrop:       false,
+		Comments:       `owner's scheduled task`,
+	})
+
+	for _, want := range []string{
+		"EXEC DBMS_SCHEDULER.CREATE_JOB(",
+		"'DBX_JOB_''A'",
+		"'plsql_block'",
+		"'BEGIN do_work(''x''); END;'",
+		"2",
+		"'2026-08-29 10:15:00'",
+		"'FREQ=DAILY;INTERVAL=2'",
+		"NULL",
+		"'default_class'",
+		"true",
+		"false",
+		"'owner''s scheduled task'",
+		");",
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Fatalf("scheduler DDL is missing %q:\n%s", want, ddl)
+		}
+	}
+}
+
+func TestXuguSchedulerJobQueriesRemainInCurrentDatabase(t *testing.T) {
+	listQuery := xuguSchedulerJobsQuery(metadataListConstraints{ObjectTypes: []string{"JOB"}})
+	if !strings.Contains(listQuery.SQL, "DB_ID = CURRENT_DB_ID") || !strings.Contains(listQuery.SQL, "'JOB'") {
+		t.Fatalf("job list must remain current-database scoped: %s", listQuery.SQL)
+	}
+
+	metadataQuery := xuguSchedulerJobMetadataQuery("DbxJob")
+	if !strings.Contains(metadataQuery, "DB_ID = CURRENT_DB_ID") || !strings.Contains(metadataQuery, "JOB_NAME = 'DbxJob'") {
+		t.Fatalf("job metadata must remain exact-name and current-database scoped: %s", metadataQuery)
+	}
+	if !strings.Contains(metadataQuery, "TO_CHAR(BEGIN_T)") || !strings.Contains(metadataQuery, "TO_CHAR(END_T)") {
+		t.Fatalf("scheduler timestamps must be read as text to preserve SQL NULL values: %s", metadataQuery)
+	}
+
+	exact := xuguCatalogSchedulerJobNameQuery("DbxJob", false)
+	folded := xuguCatalogSchedulerJobNameQuery("DbxJob", true)
+	if strings.Contains(exact, "UPPER(JOB_NAME)") || !strings.Contains(folded, "UPPER(JOB_NAME)") {
+		t.Fatalf("job source lookup must prefer exact case before folded fallback: exact=%s folded=%s", exact, folded)
+	}
+}
+
+func TestXuguNullableSchedulerLiteralTreatsEmptyCatalogValueAsNull(t *testing.T) {
+	if got := xuguNullableSchedulerLiteral(""); got != "NULL" {
+		t.Fatalf("empty optional scheduler metadata should render as NULL, got %q", got)
+	}
+	if got := xuguNullableSchedulerLiteral(" "); got != "NULL" {
+		t.Fatalf("whitespace-only optional scheduler metadata should render as NULL, got %q", got)
+	}
+	if got := xuguNullableSchedulerLiteral("FREQ=DAILY"); got != "'FREQ=DAILY'" {
+		t.Fatalf("non-empty scheduler metadata should remain quoted, got %q", got)
+	}
+}
+
+func TestXuguNullableSchedulerEndTimeTreatsCatalogSentinelsAsNull(t *testing.T) {
+	for _, value := range []any{
+		"1816-03-30T05:56:08.065277376Z",
+		"9999-12-31 23:59:59",
+		"9999-12-31T23:59:59Z",
+	} {
+		if got := xuguNullableSchedulerEndTimeLiteral(value); got != "NULL" {
+			t.Fatalf("Xugu no-end sentinel %v should render as NULL, got %q", value, got)
+		}
+	}
+	if got := xuguNullableSchedulerEndTimeLiteral("2029-01-01 01:00:00"); got != "'2029-01-01 01:00:00'" {
+		t.Fatalf("real scheduler end time should remain quoted, got %q", got)
+	}
+}
+
+func TestXuguSchedulerJobCatalogErrorsDegradeWithoutBreakingSchemaDiscovery(t *testing.T) {
+	for _, message := range []string{
+		"[E5021] 表或视图 ALL_JOBS 不存在",
+		"permission denied for ALL_JOBS",
+	} {
+		if !isXuguMetadataUnavailableError(errors.New(message)) {
+			t.Fatalf("scheduler catalog error should be treated as optional metadata: %q", message)
+		}
 	}
 }
 
@@ -3843,4 +4021,36 @@ func waitForXuguActiveOperation(t *testing.T, s *server) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("operation did not become active")
+}
+
+func TestNormalizeValueWithTypeFormatsXuguWritableTemporals(t *testing.T) {
+	// XuguDB rejects the ISO "T"/"Z" literal that RFC3339Nano produces
+	// (E19138 时间值常数错误), so temporal values must round-trip as a
+	// space-separated wall-clock string. See issue #8110.
+	loc := time.FixedZone("CST", 8*3600)
+	instant := time.Date(2026, 6, 1, 19, 42, 21, 17_000_000, loc)
+
+	cases := []struct {
+		name       string
+		columnType string
+		expected   string
+	}{
+		{name: "datetime", columnType: "DATETIME", expected: "2026-06-01 19:42:21.017"},
+		{name: "timestamp", columnType: "TIMESTAMP", expected: "2026-06-01 19:42:21.017"},
+		{name: "date", columnType: "DATE", expected: "2026-06-01 19:42:21.017"},
+		{name: "unknown type falls back to timezone-less", columnType: "", expected: "2026-06-01 19:42:21.017"},
+		{name: "datetime with time zone keeps offset", columnType: "DATETIME WITH TIME ZONE", expected: "2026-06-01 19:42:21.017 +08:00"},
+		{name: "timestamp with time zone keeps offset", columnType: "TIMESTAMP(6) WITH TIME ZONE", expected: "2026-06-01 19:42:21.017 +08:00"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeValueWithType(instant, tc.columnType)
+			if got != tc.expected {
+				t.Fatalf("normalizeValueWithType(%q) = %q, want %q", tc.columnType, got, tc.expected)
+			}
+			if str, ok := got.(string); ok && strings.ContainsAny(str, "TZ") {
+				t.Fatalf("formatted temporal %q still contains an ISO T/Z literal Xugu rejects", str)
+			}
+		})
+	}
 }

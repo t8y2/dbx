@@ -8,14 +8,24 @@ export function shouldResolveSqlColumnCompletion(options: { suggestColumns: bool
   return options.suggestColumns && options.hasReferencedTables && (options.prefix.length > 0 || options.typedActivation || options.selectListColumnContext);
 }
 
+export function shouldSwallowSelectStar(from: number, to: number, nextCharacter: string, replaceSelectWildcard = false): boolean {
+  return replaceSelectWildcard && from === to && nextCharacter === "*";
+}
+
+export function completionReplacementTo(options: { from: number; to: number; nextCharacter: string; replaceClosingQuote?: string; replaceSelectWildcard?: boolean }): number {
+  const { from, to, nextCharacter, replaceClosingQuote, replaceSelectWildcard } = options;
+  return replaceClosingQuote === nextCharacter || shouldSwallowSelectStar(from, to, nextCharacter, replaceSelectWildcard) ? to + 1 : to;
+}
+
 /**
  * The INSERT batch action writes its own closing parenthesis before VALUES.
  * Consume an existing one (normally inserted by CodeMirror's auto-close
  * brackets extension) so the resulting statement has exactly one `)`.
  */
-export function batchColumnSelectionReplaceTo(options: { to: number; mode: BatchColumnSelectionMode; nextCharacter: string; replaceClosingQuote?: string }): number {
-  const { to, mode, nextCharacter, replaceClosingQuote } = options;
-  return replaceClosingQuote === nextCharacter || (mode === "insert" && nextCharacter === ")") ? to + 1 : to;
+export function batchColumnSelectionReplaceTo(options: { from: number; to: number; mode: BatchColumnSelectionMode; nextCharacter: string; replaceClosingQuote?: string; replaceSelectWildcard?: boolean }): number {
+  const { from, to, mode, nextCharacter, replaceClosingQuote, replaceSelectWildcard } = options;
+  if (mode === "insert" && nextCharacter === ")") return to + 1;
+  return completionReplacementTo({ from, to, nextCharacter, replaceClosingQuote, replaceSelectWildcard });
 }
 
 export function batchColumnSelectionInsertReplacement(options: { document: string; to: number; columns: string; valuesKeyword: "values" | "VALUES"; valueCount: number }): { replaceTo: number; insert: string } {

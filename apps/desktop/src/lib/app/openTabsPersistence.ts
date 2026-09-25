@@ -1,4 +1,5 @@
-import type { QueryTab } from "@/types/database";
+import type { QueryTab, TabOutputView } from "@/types/database";
+import { sanitizeTabUiState } from "@/lib/tabs/tabUiState";
 
 export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
 export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
@@ -10,20 +11,30 @@ export interface SavedQueryResultRun {
   sql: string;
   createdAt: number;
   pinned?: boolean;
+  /** 标题是否为用户/多库执行显式指定；为假时结果标签改用来源名显示 */
+  customTitle?: boolean;
   activeResultIndex?: number;
   resultCacheKey?: string;
   resultEvicted?: boolean;
+  /** 结果来源（库名.表名 / 表名），用于结果标签命名；与结果 payload 分离，回收 payload 后仍可显示 */
+  sourceLabel?: string;
+  sourceName?: string;
 }
 
 export interface SavedOpenTab {
   id: string;
+  createdAt?: number;
   title: string;
   customTitle?: boolean;
   connectionId: string;
   database: string;
+  /** 原连接已被删除但页签被保留时记录的原连接名，用于新建同名连接后重新绑定。 */
+  detachedConnectionName?: string;
   catalog?: string;
   schema?: string;
   sql: string;
+  editorViewport?: QueryTab["editorViewport"];
+  editorSelection?: QueryTab["editorSelection"];
   originalSql?: string;
   savedSqlId?: string;
   externalSqlPath?: string;
@@ -43,14 +54,20 @@ export interface SavedOpenTab {
   whereInput?: string;
   pinned?: boolean;
   mode?: QueryTab["mode"];
+  pluginWorkbench?: QueryTab["pluginWorkbench"];
+  pluginFilesystem?: QueryTab["pluginFilesystem"];
   autoCommit?: boolean;
   mqTenant?: string;
   mqInitialTab?: QueryTab["mqInitialTab"];
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   structureTableName?: string;
+  structureDraft?: QueryTab["structureDraft"];
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
+  sourceView?: boolean;
+  ddlViewer?: QueryTab["ddlViewer"];
+  tableComment?: QueryTab["tableComment"];
   tableMeta?: QueryTab["tableMeta"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
   resultEvicted?: boolean;
@@ -58,11 +75,29 @@ export interface SavedOpenTab {
   resultRuns?: SavedQueryResultRun[];
   activeResultRunId?: string;
   resultAutoSave?: boolean;
+  uiState?: QueryTab["uiState"];
 }
 
 export interface RestoredOpenTabs {
   tabs: QueryTab[];
   activeTabId: string | null;
+}
+
+/** Group membership persisted with the open-tabs payload. */
+export interface PersistedEditorGroup {
+  id: string;
+  tabIds: string[];
+  activeTabId: string | null;
+}
+
+/** Shared open-tabs transport payload — the single definition both backend adapters persist. */
+export interface OpenTabsStatePayload {
+  tabs: unknown[];
+  activeTabId: string | null;
+  groups?: PersistedEditorGroup[];
+  focusedGroupId?: string;
+  orientation?: "vertical" | "horizontal";
+  sizes?: number[];
 }
 
 export type OpenTabsRestoreFilter = "all" | "pinned";
@@ -77,10 +112,17 @@ function shouldPersistTabSql(tab: QueryTab) {
   return tab.originalSql !== undefined && tab.sql !== tab.originalSql;
 }
 
+// Pending object-source tabs are transient work surfaces. Persisting one while
+// its request is in flight would restore an empty source tab after restart,
+// because the request itself is intentionally not durable.
+function shouldPersistOpenTab(tab: QueryTab): boolean {
+  return !tab.sourceLoad;
+}
+
 function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: string) {
   if (mode !== "query") return undefined;
   if (tab.externalSqlPath) return tab.originalSql ?? sql;
-  if (tab.savedSqlId) return sql ? "" : undefined;
+  if (tab.savedSqlId) return tab.originalSql ?? (sql ? "" : undefined);
   // Prefer the persisted originalSql so a clean prefilled query tab (sql === originalSql)
   // restores clean instead of being marked dirty. Older saved state without this field
   // falls through to "" (preserving prior behavior for user-edited scratch tabs).
@@ -88,19 +130,56 @@ function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: str
   return "";
 }
 
+function restoredEditorSelection(tab: SavedOpenTab, docLength: number): QueryTab["editorSelection"] {
+  const selection = tab.editorSelection;
+  if (!selection || !Number.isFinite(selection.anchor) || !Number.isFinite(selection.head)) return undefined;
+  return {
+    anchor: Math.min(Math.max(0, Math.trunc(selection.anchor)), docLength),
+    head: Math.min(Math.max(0, Math.trunc(selection.head)), docLength),
+  };
+}
+
+function restoredEditorViewport(tab: SavedOpenTab): QueryTab["editorViewport"] {
+  const viewport = tab.editorViewport;
+  if (!viewport || !Number.isFinite(viewport.scrollTop) || !Number.isFinite(viewport.scrollLeft)) return undefined;
+  return {
+    scrollTop: Math.max(0, viewport.scrollTop),
+    scrollLeft: Math.max(0, viewport.scrollLeft),
+  };
+}
+
+const TAB_OUTPUT_VIEWS = new Set<TabOutputView>(["result", "summary", "explain", "chart", "messages", "profile"]);
+
+function restoredTabUiState(tab: SavedOpenTab): QueryTab["uiState"] {
+  const activeOutputView = tab.uiState?.activeOutputView;
+  const resultPaneOpen = tab.uiState?.resultPaneOpen;
+  const restored: NonNullable<QueryTab["uiState"]> = {};
+  if (activeOutputView && TAB_OUTPUT_VIEWS.has(activeOutputView)) restored.activeOutputView = activeOutputView;
+  if (typeof resultPaneOpen === "boolean") restored.resultPaneOpen = resultPaneOpen;
+  if (tab.uiState?.page) {
+    const sanitized = sanitizeTabUiState({ page: tab.uiState.page });
+    if (sanitized?.page) restored.page = sanitized.page;
+  }
+  return Object.keys(restored).length > 0 ? restored : undefined;
+}
+
 export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
-  return tabs.map((tab) => ({
+  return tabs.filter(shouldPersistOpenTab).map((tab) => ({
     id: tab.id,
+    ...(typeof tab.createdAt === "number" ? { createdAt: tab.createdAt } : {}),
     title: tab.title,
     ...(tab.customTitle ? { customTitle: true } : {}),
     connectionId: tab.connectionId,
     database: tab.database,
+    ...(tab.detachedConnectionName ? { detachedConnectionName: tab.detachedConnectionName } : {}),
     ...(tab.catalog !== undefined ? { catalog: tab.catalog } : {}),
     schema: tab.schema,
     sql: shouldPersistTabSql(tab) ? tab.sql : "",
-    // Plain query tabs always round-trip originalSql. External-file tabs only persist it
-    // while dirty so their disk baseline survives restart without duplicating clean SQL.
-    ...(tab.originalSql !== undefined && !tab.savedSqlId && (!tab.externalSqlPath || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
+    ...(tab.editorViewport ? { editorViewport: tab.editorViewport } : {}),
+    ...(tab.editorSelection ? { editorSelection: tab.editorSelection } : {}),
+    // File-backed drafts retain their baseline, including when the edited SQL is empty.
+    // Clean file-backed tabs omit it so startup can hydrate the current file content.
+    ...(tab.originalSql !== undefined && ((!tab.savedSqlId && !tab.externalSqlPath) || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
     savedSqlId: tab.savedSqlId,
     externalSqlPath: tab.externalSqlPath,
     ...(tab.externalSqlFileVersion ? { externalSqlFileVersion: tab.externalSqlFileVersion } : {}),
@@ -119,14 +198,20 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.whereInput !== undefined ? { whereInput: tab.whereInput } : {}),
     pinned: tab.pinned,
     mode: tab.mode,
+    ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
+    ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
     ...(tab.mode === "query" && tab.autoCommit !== undefined ? { autoCommit: tab.autoCommit } : {}),
     ...(tab.mqTenant !== undefined ? { mqTenant: tab.mqTenant } : {}),
     ...(tab.mqInitialTab !== undefined ? { mqInitialTab: tab.mqInitialTab } : {}),
     ...(tab.nacosNamespace !== undefined ? { nacosNamespace: tab.nacosNamespace } : {}),
     ...(tab.nacosNamespaceName !== undefined ? { nacosNamespaceName: tab.nacosNamespaceName } : {}),
     ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
+    ...(tab.structureDraft ? { structureDraft: JSON.parse(JSON.stringify(tab.structureDraft)) } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
+    ...(tab.sourceView ? { sourceView: true } : {}),
+    ...(tab.ddlViewer ? { ddlViewer: { ...tab.ddlViewer } } : {}),
+    ...(tab.tableComment !== undefined ? { tableComment: tab.tableComment } : {}),
     tableMeta: tab.tableMeta,
     ...(tab.mongoEditTarget !== undefined ? { mongoEditTarget: tab.mongoEditTarget } : {}),
     ...(tab.mode !== "data" && tab.resultEvicted ? { resultEvicted: true } : {}),
@@ -139,6 +224,9 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
             sequence: run.sequence,
             sql: run.sql,
             createdAt: run.createdAt,
+            ...(run.sourceLabel ? { sourceLabel: run.sourceLabel } : {}),
+            ...(run.sourceName ? { sourceName: run.sourceName } : {}),
+            ...(run.customTitle ? { customTitle: true } : {}),
             ...(run.pinned ? { pinned: true } : {}),
             activeResultIndex: run.activeResultIndex,
             ...(run.resultCacheKey !== undefined ? { resultCacheKey: run.resultCacheKey } : {}),
@@ -147,6 +235,10 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
         }
       : {}),
     ...(tab.mode === "query" && tab.activeResultRunId !== undefined ? { activeResultRunId: tab.activeResultRunId } : {}),
+    ...(tab.mode === "query" && typeof tab.resultAutoSave === "boolean" ? { resultAutoSave: tab.resultAutoSave } : {}),
+    ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
+    ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
+    ...(tab.uiState ? { uiState: sanitizeTabUiState(tab.uiState) } : {}),
     ...(tab.mode === "query" && tab.resultAutoSave ? { resultAutoSave: true } : {}),
   }));
 }
@@ -186,10 +278,15 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         mode,
         sql: typeof tab.sql === "string" ? tab.sql : "",
         isExecuting: false,
+        redisMonitorActive: false,
         isCancelling: false,
         queryExecutionStartedAt: undefined,
-        editorViewport: undefined,
-        editorSelection: undefined,
+        // sourceLoad 是纯运行期态（serializeOpenTabs 不落盘）。这里显式清空，
+        // 让「恢复后的 tab 不会停在加载中」成为不变量，而不是依赖白名单的副作用。
+        sourceLoad: undefined,
+        executingResultRunId: undefined,
+        editorViewport: restoredEditorViewport(tab),
+        editorSelection: restoredEditorSelection(tab, typeof tab.sql === "string" ? tab.sql.length : 0),
         isExplaining: false,
         originalSql: restoredOriginalSql(tab, mode, typeof tab.sql === "string" ? tab.sql : ""),
         resultEvicted: mode === "data" ? undefined : tab.resultEvicted,
@@ -197,7 +294,8 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         resultCacheState: mode !== "data" && tab.resultCacheKey ? "disk" : undefined,
         resultRuns,
         activeResultRunId: resultRuns?.some((run) => run.id === tab.activeResultRunId) ? tab.activeResultRunId : resultRuns?.[0]?.id,
-        resultAutoSave: mode === "query" && tab.resultAutoSave ? true : undefined,
+        resultAutoSave: mode === "query" && typeof tab.resultAutoSave === "boolean" ? tab.resultAutoSave : undefined,
+        uiState: restoredTabUiState(tab),
       };
     });
     const activeTabId = rawActiveTabId || null;

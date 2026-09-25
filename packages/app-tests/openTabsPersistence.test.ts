@@ -50,6 +50,19 @@ test("round-trips query transaction mode", () => {
   assert.equal(restored.tabs[0]?.autoCommit, false);
 });
 
+test("round-trips editor selection and viewport", () => {
+  const saved = serializeOpenTabs([
+    queryTab({
+      editorSelection: { anchor: 8, head: 8 },
+      editorViewport: { scrollTop: 120, scrollLeft: 16 },
+    }),
+  ]);
+  const restored = restoreOpenTabsState(JSON.stringify(saved), "tab-1");
+
+  assert.deepEqual(restored.tabs[0]?.editorSelection, { anchor: 8, head: 8 });
+  assert.deepEqual(restored.tabs[0]?.editorViewport, { scrollTop: 120, scrollLeft: 16 });
+});
+
 test("serializes object source query tabs with save context", () => {
   const saved = serializeOpenTabs([
     queryTab({
@@ -311,6 +324,7 @@ test("restores data and structure tabs with table state", () => {
       resultPageOffset: 50,
       whereInput: "id > 10",
       orderByInput: "id DESC",
+      tableComment: "Application users",
       tableMeta: {
         schema: "public",
         tableName: "users",
@@ -351,6 +365,7 @@ test("restores data and structure tabs with table state", () => {
   assert.equal(restored.tabs[0]?.resultPageOffset, 50);
   assert.equal(restored.tabs[0]?.whereInput, "id > 10");
   assert.equal(restored.tabs[0]?.orderByInput, "id DESC");
+  assert.equal(restored.tabs[0]?.tableComment, "Application users");
   assert.equal(restored.tabs[1]?.structureTableName, "users");
 });
 

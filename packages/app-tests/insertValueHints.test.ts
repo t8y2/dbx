@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildInsertValueHints, expandToSqlStatementWindow, parseInsertValueHints, parseInsertValueHintsInRanges, parseInsertValuesClauses } from "../../apps/desktop/src/lib/sql/insertValueHints.ts";
+import { buildInsertValueHints, expandToSqlStatementWindow, findEnclosingDollarQuoteStart, parseInsertValueHints, parseInsertValueHintsInRanges, parseInsertValuesClauses } from "../../apps/desktop/src/lib/sql/insertValueHints.ts";
 import { insertValueHintColumnNames } from "../../apps/desktop/src/lib/sql/insertValueHintColumns.ts";
 
 /**
@@ -16,6 +16,83 @@ function assertSublinearScaling(measureAt: (scale: number) => number, options: {
   const bigMs = measureAt(bigScale);
   assert.ok(bigMs < Math.max(maxMs, smallMs * maxRatio), `${label}: ${smallScale}x took ${smallMs.toFixed(1)}ms, ${bigScale}x took ${bigMs.toFixed(1)}ms -- expected roughly bounded, not scaling with document size`);
 }
+
+test("findEnclosingDollarQuoteStart locates the opening tag inside a PostgreSQL procedure body", () => {
+  const prefix = "CREATE OR REPLACE PROCEDURE p()\nLANGUAGE plpgsql\nAS $$\nBEGIN\n";
+  const sql = `${prefix}INSERT INTO users (id, name) SELECT src_id, src_name FROM staging;\nEND;\n$$;`;
+  const dollarOpen = sql.indexOf("$$");
+  assert.equal(findEnclosingDollarQuoteStart(sql, prefix.length + 10), dollarOpen);
+  assert.equal(findEnclosingDollarQuoteStart(sql, sql.indexOf("SELECT src_id")), dollarOpen);
+  assert.equal(findEnclosingDollarQuoteStart(sql, 0), null);
+  assert.equal(findEnclosingDollarQuoteStart(sql, dollarOpen), null);
+});
+
+test("insert hints isolate INSERT ... SELECT inside a dollar-quoted procedure when the slice would include the opening tag", () => {
+  const prefix = "CREATE OR REPLACE PROCEDURE p()\nLANGUAGE plpgsql\nAS $$\nBEGIN\n";
+  const insert = "INSERT INTO users (id, name) SELECT src_id, src_name FROM staging;";
+  const sql = `${prefix}${insert}\nEND;\n$$;`;
+  const cursor = sql.indexOf("INSERT");
+  let sliceFrom = 0;
+  const dollarStart = findEnclosingDollarQuoteStart(sql, cursor);
+  assert.equal(dollarStart, sql.indexOf("$$"));
+  const openingTag = "$$";
+  sliceFrom = Math.max(sliceFrom, dollarStart! + openingTag.length);
+  const slice = sql.slice(sliceFrom);
+  const relativeCursor = cursor - sliceFrom;
+  const window = expandToSqlStatementWindow(slice, relativeCursor, relativeCursor, "postgres");
+  const hints = buildInsertValueHints(parseInsertValuesClauses(slice.slice(window.from, window.to), "postgres"));
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["id", "name"],
+  );
+});
+
+test("slice adjustment probes viewport end when start is still before the opening dollar tag", () => {
+  const header = "CREATE OR REPLACE PROCEDURE p()\nLANGUAGE plpgsql\nAS ";
+  const prefix = `${header}$$\nBEGIN\n`;
+  const insert = "INSERT INTO users (id, name) SELECT src_id, src_name FROM staging;";
+  const sql = `${prefix}${insert}\nEND;\n$$;`;
+  const viewportFrom = 0;
+  const viewportTo = sql.indexOf("SELECT src_id") + 4;
+  const probePos = Math.min(sql.length, Math.max(viewportFrom, viewportTo));
+  assert.equal(findEnclosingDollarQuoteStart(sql, viewportFrom), null);
+  const dollarStart = findEnclosingDollarQuoteStart(sql, probePos) ?? findEnclosingDollarQuoteStart(sql, viewportFrom);
+  assert.equal(dollarStart, sql.indexOf("$$"));
+  let sliceFrom = 0;
+  sliceFrom = Math.max(sliceFrom, dollarStart! + "$$".length);
+  const slice = sql.slice(sliceFrom);
+  const relativeInsert = sql.indexOf("INSERT") - sliceFrom;
+  const window = expandToSqlStatementWindow(slice, relativeInsert, relativeInsert, "postgres");
+  const hints = buildInsertValueHints(parseInsertValuesClauses(slice.slice(window.from, window.to), "postgres"));
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["id", "name"],
+  );
+});
+
+test("findEnclosingDollarQuoteStart supports custom procedure tags", () => {
+  const prefix = "CREATE PROCEDURE p() AS $procedure$\nBEGIN\n";
+  const sql = `${prefix}INSERT INTO t (a) SELECT x FROM s;\nEND;\n$procedure$;`;
+  const tagOpen = sql.indexOf("$procedure$");
+  assert.equal(findEnclosingDollarQuoteStart(sql, sql.indexOf("INSERT")), tagOpen);
+  assert.equal(findEnclosingDollarQuoteStart(sql, sql.indexOf("SELECT x")), tagOpen);
+});
+
+test("findEnclosingDollarQuoteStart detects bodies when the opening tag spans a scan chunk boundary", () => {
+  const pad = "x".repeat(64 * 1024 - 1);
+  const opening = "$$";
+  const body = "BEGIN\nINSERT INTO t (a) SELECT x FROM s;\nEND;\n";
+  const sql = `${pad}${opening}${body}`;
+  const cursor = sql.indexOf("INSERT") + 5;
+  assert.equal(findEnclosingDollarQuoteStart(sql, cursor), pad.length);
+});
+
+test("findEnclosingDollarQuoteStart does not reopen a tag after chunk-extension overlap", () => {
+  const pad = "x".repeat(64 * 1024 - 1);
+  const sql = `${pad}$$ short $$`;
+  assert.equal(findEnclosingDollarQuoteStart(sql, pad.length + 4), pad.length);
+  assert.equal(findEnclosingDollarQuoteStart(sql, sql.length), null);
+});
 
 test("maps explicit column list to single-row VALUES", () => {
   const sql = "INSERT INTO auth_user (id, password, last_login) VALUES (5, 'hash', NULL)";
@@ -156,6 +233,88 @@ test("returns no positional hints for wildcard INSERT ... SELECT projections", (
   }
 });
 
+test("skips the hint when the SELECT projection already aliases its target column", () => {
+  // Reported as duplicated aliases that cannot be selected or deleted: the inlay pill repeated
+  // the `AS <target column>` name the statement already spells out.
+  const sql = ["INSERT INTO t_demo (operation_apply_id, pacu_enter_time, pacu_status)", "SELECT", "    noprid.ruid            as operation_apply_id,", "    noprid.enter_date      as pacu_enter_time,", "    noprid.flag            as unrelated_alias", "FROM noprid"].join("\n");
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => ({ column: hint.column, text: sql.slice(hint.from).split(/[ ,]/u, 1)[0] })),
+    [{ column: "pacu_status", text: "noprid.flag" }],
+  );
+});
+
+test("keeps positional mapping when only some projections repeat their target column", () => {
+  const sql = "INSERT INTO t (a, b, c) SELECT x AS a, y, z AS c FROM s";
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => ({ column: hint.column, text: sql.slice(hint.from).split(/[ ,]/u, 1)[0] })),
+    [{ column: "b", text: "y" }],
+  );
+});
+
+test("matches projection aliases to target columns regardless of case or quoting", () => {
+  assert.deepEqual(parseInsertValueHints("INSERT INTO t (operation_apply_id) SELECT noprid.ruid AS Operation_Apply_ID FROM noprid"), []);
+  assert.deepEqual(parseInsertValueHints("INSERT INTO t (`pacu_status`) SELECT noprid.flag AS `pacu_status` FROM noprid"), []);
+  assert.deepEqual(parseInsertValueHints('INSERT INTO t (total) SELECT npl.additive AS "TOTAL" FROM npl'), []);
+});
+
+test("recognises implicit projection aliases without the AS keyword", () => {
+  assert.deepEqual(parseInsertValueHints("INSERT INTO t (cnt, name) SELECT COUNT(*) cnt, src.name name FROM s"), []);
+  assert.deepEqual(
+    parseInsertValueHints("INSERT INTO t (name) SELECT src.name FROM s").map((hint) => hint.column),
+    ["name"],
+  );
+  assert.deepEqual(
+    parseInsertValueHints("INSERT INTO t (cnt) SELECT COUNT(*) FROM s").map((hint) => hint.column),
+    ["cnt"],
+  );
+});
+
+test("keeps the hint for a projection whose alias names a different column", () => {
+  const sql = "INSERT INTO dbo.users (id, name) SELECT source_id AS old_id, source_name AS display_name FROM staging";
+  assert.deepEqual(
+    parseInsertValueHints(sql).map((hint) => hint.column),
+    ["id", "name"],
+  );
+});
+
+test("does not split nested to_date arguments into extra SELECT projections", () => {
+  // ASCII parentheses: commas inside to_date(to_char(...), 'fmt') stay nested.
+  const ascii = [
+    "INSERT INTO t_demo (occur_date, company_no, company_name, dep_id, market_code)",
+    "SELECT",
+    "  to_date(to_char(a.l_date), 'YYYYMMDD') as occur_date,",
+    "  '01694' as company_no,",
+    "  'Acme Corp' as company_name,",
+    "  d.dept_code as dep_id,",
+    "  a.market_code",
+    "FROM dual a, dual d",
+  ].join("\n");
+  assert.deepEqual(
+    parseInsertValueHints(ascii).map((hint) => ({ column: hint.column, text: ascii.slice(hint.from).split(/[\s,]/u, 1)[0] })),
+    [{ column: "market_code", text: "a.market_code" }],
+  );
+
+  // Fullwidth outer parentheses (common IME typo) must not treat the format-string comma as a
+  // top-level projection separator — that shifted every later hint by one.
+  const fullwidth = [
+    "INSERT INTO t_demo (occur_date, company_no, company_name, dep_id, market_code)",
+    "SELECT",
+    "  to_date\uFF08to_char(a.l_date), 'YYYYMMDD'\uFF09 as occur_date,",
+    "  '01694' as company_no,",
+    "  'Acme Corp' as company_name,",
+    "  d.dept_code as dep_id,",
+    "  a.market_code",
+    "FROM dual a, dual d",
+  ].join("\n");
+  assert.equal(parseInsertValuesClauses(fullwidth)[0]?.rows[0]?.length, 5);
+  assert.deepEqual(
+    parseInsertValueHints(fullwidth).map((hint) => ({ column: hint.column, text: fullwidth.slice(hint.from).split(/[\s,]/u, 1)[0] })),
+    [{ column: "market_code", text: "a.market_code" }],
+  );
+});
+
 test("caps INSERT ... SELECT hints to the smaller target or projection count", () => {
   assert.deepEqual(
     parseInsertValueHints("INSERT INTO t (a, b) SELECT x, y, z FROM source").map((hint) => hint.column),
@@ -164,6 +323,54 @@ test("caps INSERT ... SELECT hints to the smaller target or projection count", (
   assert.deepEqual(
     parseInsertValueHints("INSERT INTO t (a, b, c) SELECT x, y FROM source").map((hint) => hint.column),
     ["a", "b"],
+  );
+});
+
+test("maps INSERT ... SELECT DISTINCT ON projections after skipping the ON clause", () => {
+  const sql = "INSERT INTO t (a, b) SELECT DISTINCT ON (x) y, z FROM s";
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => ({ column: hint.column, text: sql.slice(hint.from).split(/[ ,]/u, 1)[0] })),
+    [
+      { column: "a", text: "y" },
+      { column: "b", text: "z" },
+    ],
+  );
+});
+
+test("maps INSERT ... SELECT inside parenthesized source query", () => {
+  const sql = "INSERT INTO t (a, b) (SELECT x, y FROM z)";
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => ({ column: hint.column, text: sql.slice(hint.from).split(/[ ,]/u, 1)[0] })),
+    [
+      { column: "a", text: "x" },
+      { column: "b", text: "y" },
+    ],
+  );
+});
+
+test("maps INSERT ... SELECT with a CTE source query", () => {
+  const sql = "INSERT INTO t (a, b) WITH tmp AS (SELECT 1) SELECT x, y FROM tmp";
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => ({ column: hint.column, text: sql.slice(hint.from).split(/[ ,]/u, 1)[0] })),
+    [
+      { column: "a", text: "x" },
+      { column: "b", text: "y" },
+    ],
+  );
+});
+
+test("maps INSERT ... SELECT UNION only to the first SELECT branch", () => {
+  const sql = "INSERT INTO t (a, b) SELECT x, y FROM s1 UNION SELECT u, v FROM s2";
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => ({ column: hint.column, text: sql.slice(hint.from).split(/[ ,]/u, 1)[0] })),
+    [
+      { column: "a", text: "x" },
+      { column: "b", text: "y" },
+    ],
   );
 });
 
@@ -410,6 +617,81 @@ test("documents a known limitation of the pure-string fallback (no live EditorSt
   const cursor = sql.indexOf(body) + 500_000;
   const window = expandToSqlStatementWindow(sql, cursor, cursor);
   assert.notEqual(window.from, 0, "known-imperfect (pure-string fallback only): a correct implementation would return 0 here (the whole CREATE FUNCTION is one statement)");
+});
+
+test("parses every INSERT inside a semicolon-less statement group", () => {
+  // T-SQL scripts routinely omit statement terminators; the reported case is one query window
+  // holding BEGIN TRANSACTION + two INSERT ... SELECT statements (#9966).
+  const sql = ["BEGIN TRANSACTION", "INSERT INTO u_msfx_a (id, billno) SELECT src_id, src_billno FROM staging_a", "INSERT INTO u_msfx_b (id, billno) SELECT src_id, src_billno FROM staging_b", "COMMIT TRANSACTION"].join("\n");
+  const clauses = parseInsertValuesClauses(sql, "sqlserver");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["u_msfx_a", "u_msfx_b"],
+  );
+  const hints = buildInsertValueHints(clauses);
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["id", "billno", "id", "billno"],
+  );
+  assert.deepEqual(
+    hints.map((hint) => hint.from),
+    [sql.indexOf("src_id"), sql.indexOf("src_billno"), sql.lastIndexOf("src_id"), sql.lastIndexOf("src_billno")],
+  );
+});
+
+test("parses every INSERT ... VALUES inside a semicolon-less statement group", () => {
+  const sql = "INSERT INTO t1 (id, name) VALUES (1, 'a')\nINSERT INTO t2 (id, name) VALUES (2, 'b')";
+  const clauses = parseInsertValuesClauses(sql, "sqlserver");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["t1", "t2"],
+  );
+  assert.deepEqual(
+    buildInsertValueHints(clauses).map((hint) => hint.column),
+    ["id", "name", "id", "name"],
+  );
+});
+
+test("does not split a statement at the INSERT() string function", () => {
+  // MySQL/MariaDB expose INSERT(str, pos, len, newstr); an `insert` word without a following
+  // INTO is a function call, not a statement start.
+  const sql = "INSERT INTO t1 (id, name) SELECT id, INSERT('ab', 1, 2, 'xy') FROM src\nINSERT INTO t2 (id, name) VALUES (1, INSERT('ab', 1, 2, 'xy'))";
+  const clauses = parseInsertValuesClauses(sql, "mysql");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["t1", "t2"],
+  );
+});
+
+test("parses each batch of a GO-separated SQL Server script", () => {
+  const sql = ["INSERT INTO t1 (id, name) SELECT src_id, src_name FROM staging1", "GO", "INSERT INTO t2 (id, name) SELECT src_id, src_name FROM staging2", "GO"].join("\n");
+  const clauses = parseInsertValuesClauses(sql, "sqlserver");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["t1", "t2"],
+  );
+  assert.deepEqual(
+    buildInsertValueHints(clauses).map((hint) => hint.column),
+    ["id", "name", "id", "name"],
+  );
+});
+
+test("still parses INSERT statements separated by semicolons", () => {
+  const sql = "INSERT INTO t1 (id, name) SELECT src_id, src_name FROM staging1; INSERT INTO t2 (id, name) SELECT src_id, src_name FROM staging2;";
+  const clauses = parseInsertValuesClauses(sql, "sqlserver");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["t1", "t2"],
+  );
+  assert.deepEqual(
+    buildInsertValueHints(clauses).map((hint) => hint.column),
+    ["id", "name", "id", "name"],
+  );
+});
+
+test("does not read a MERGE INSERT branch as an INSERT statement", () => {
+  const sql = "MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)";
+  assert.deepEqual(parseInsertValuesClauses(sql, "sqlserver"), []);
 });
 
 test("ignores statements that are not INSERT VALUES", () => {

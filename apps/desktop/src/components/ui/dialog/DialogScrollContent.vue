@@ -26,12 +26,16 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
     <div data-slot="dialog-positioner" class="fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none">
       <DialogContent
         data-slot="dialog-content"
-        :class="cn('relative z-50 grid max-h-[calc(var(--dbx-viewport-height)-6rem)] w-full max-w-lg my-8 gap-4 rounded-lg border border-border bg-background p-4 shadow-lg duration-200 md:w-full pointer-events-auto', props.class)"
+        :class="cn('relative z-50 grid max-h-[calc(var(--dbx-viewport-height)-6rem)] w-full max-w-lg my-8 gap-4 rounded-lg border border-border bg-popover text-popover-foreground p-4 shadow-lg duration-200 md:w-full pointer-events-auto', props.class)"
         v-bind="{ ...$attrs, ...forwarded }"
         @pointer-down-outside="
           (event) => {
             const originalEvent = event.detail.originalEvent;
             const target = originalEvent.target as HTMLElement;
+            if (target.closest('[role=menu], [role=listbox], [data-slot=select-content]')) {
+              event.preventDefault();
+              return;
+            }
             if (originalEvent.offsetX > target.clientWidth || originalEvent.offsetY > target.clientHeight) {
               event.preventDefault();
             }

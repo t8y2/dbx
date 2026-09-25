@@ -1,6 +1,6 @@
 [package]
 name = "dbx-web"
-version = "0.5.98"
+version = "0.6.22"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -10,14 +10,19 @@ path = "src/main.rs"
 
 [features]
 default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
-duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
+duckdb-sidecar = ["dbx-core/duckdb-sidecar", "dbx-mcp/duckdb-sidecar"]
 dynamodb = ["dbx-core/dynamodb"]
-mq-admin = ["dbx-core/mq-admin"]
+mq-admin = ["dbx-core/mq-admin", "dbx-mcp/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
 system-fonts = ["dbx-core/system-fonts"]
+# Embed the frontend build output (../../dist) into the binary. When enabled
+# and DBX_STATIC_DIR is not set, the embedded files are served by default.
+# Requires the frontend to have been built before invoking cargo.
+embed-static = ["dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
 dbx-core = { path = "../dbx-core", default-features = false, features = ["openapi"] }
+dbx-mcp = { path = "../dbx-mcp", default-features = false }
 redis = { version = "0.32", features = ["tokio-comp"] }
 axum = { version = "0.8", features = ["multipart", "ws"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "compression-gzip", "trace"] }
@@ -33,10 +38,18 @@ tracing = "0.1"
 async-stream = "0.3"
 futures = "0.3"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 chrono = "0.4"
 aes-gcm = "0.10"
 base64 = "0.22"
 pbkdf2 = "0.12"
 sha2 = "0.10"
+tempfile = "3"
+rust-embed = { version = "8", features = ["debug-embed"], optional = true }
+mime_guess = { version = "2", optional = true }
+
+
+[dev-dependencies]
+dbx-core = { path = "../dbx-core", default-features = false, features = ["test-support"] }
+reqwest = { version = "0.12", default-features = false, features = ["multipart"] }

@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { LandingNav } from "@/components/landing/LandingNav";
 import { downloadLinksFor, formatSize, type AgentDownloadCatalog, type DownloadSource, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
 import { Archive, Cpu, Database, Download, Plug, Search, Terminal, X } from "lucide-react";
+import { resolveLang, type DocsLang } from "@/lib/i18n";
 
 const i18n = {
   en: {
@@ -102,6 +103,11 @@ type NativeAgentGroup = {
   options: NativeAgentDisplayEntry[];
 };
 
+const OFFLINE_HEADING: Record<DocsLang, string> = {
+  en: "Offline Usage",
+  cn: "离线使用说明",
+};
+
 type DriverTranslations = (typeof i18n)["en"];
 
 function DownloadLinks({ url, t }: { url: string; t: DriverTranslations }) {
@@ -131,7 +137,7 @@ function matchesSearch(values: Array<string | number | undefined>, query: string
 export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloadCatalog }) {
   const params = useParams();
   const rawLang = params?.lang as string | undefined;
-  const lang: "en" | "cn" = rawLang === "cn" ? "cn" : "en";
+  const lang = resolveLang(rawLang ?? "en");
   const t = i18n[lang];
 
   const catalog = initialCatalog;
@@ -417,7 +423,7 @@ export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloa
                                 className="h-8 min-w-[190px] rounded-[6px] border border-landing-line bg-black/10 px-2.5 text-xs text-landing-ink outline-none transition-colors focus:border-landing-blue max-[760px]:w-full"
                               >
                                 {group.options.map((option) => (
-                                  <option key={nativeKey(option)} value={option.platformKey} className="bg-[#121317] text-landing-ink">
+                                  <option key={nativeKey(option)} value={option.platformKey} className="bg-[#202123] text-landing-ink">
                                     {option.platformLabel}
                                   </option>
                                 ))}
@@ -480,7 +486,7 @@ export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloa
             </div>
 
             <div className="landing-glass-card rounded-[10px] p-5 text-sm text-landing-muted leading-[1.65]">
-              <strong className="text-landing-ink">{lang === "cn" ? "离线使用说明" : "Offline Usage"}</strong>
+              <strong className="text-landing-ink">{OFFLINE_HEADING[lang]}</strong>
               <p className="mt-1">{t.downloadHint}</p>
             </div>
           </>

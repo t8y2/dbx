@@ -16,7 +16,10 @@ pub mod history;
 pub mod jdbc;
 pub mod layout;
 pub mod mcp_policy;
+pub mod migration;
 pub mod mongo;
+pub mod mongodb_dump;
+pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 pub mod nacos;
@@ -27,6 +30,7 @@ pub mod query_result_export;
 pub mod redis;
 pub mod redis_pubsub_ws;
 pub mod saved_sql;
+pub mod scheduled_backup;
 pub mod schema;
 pub mod schema_cache;
 pub mod schema_diff;
@@ -42,3 +46,6 @@ pub mod tunnel_profiles;
 pub mod update;
 pub mod vector;
 pub mod zookeeper;
+
+#[cfg(test)]
+mod object_cache_tests;

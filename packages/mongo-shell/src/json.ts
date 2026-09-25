@@ -7,11 +7,14 @@
 export function normalizeJsonArgument(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return "{}";
-  const withoutComments = stripMongoJsonComments(trimmed).trim();
+  const withRegexLiterals = replaceMongoRegexLiterals(trimmed);
+  if (!withRegexLiterals) return null;
+  const withoutComments = stripMongoJsonComments(withRegexLiterals).trim();
   if (!withoutComments) return "{}";
   const withoutEjsonDeserialize = replaceMongoEjsonDeserialize(withoutComments);
   // Rewrite mongo shell constructors that are not valid JSON into extended JSON
-  // (mongo_driver::json_value_to_bson): ObjectId / NumberLong / ISODate / new Date.
+  // (mongo_driver::json_value_to_bson): ObjectId / ISODate / new Date / NumberLong /
+  // NumberInt / NumberDecimal / UUID / BinData / Timestamp / MinKey / MaxKey.
   const withExtendedJson = replaceMongoShellConstructors(withoutEjsonDeserialize);
   const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson));
   try {
@@ -20,6 +23,160 @@ export function normalizeJsonArgument(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+const MONGO_REGEX_LITERAL_OPTIONS = new Set(["i", "m", "s", "u"]);
+// JS-only regex flags with no server-side meaning for a stored regex literal
+// (MongoDB's $regex has no global modifier) are dropped instead of failing
+// the whole command.
+const MONGO_REGEX_LITERAL_IGNORED_OPTIONS = new Set(["d", "g", "v", "y"]);
+
+interface MongoRegexLiteral {
+  end: number;
+  pattern: string;
+  options: string;
+}
+
+function mongoRegexLiteralAt(source: string, index: number): MongoRegexLiteral | null {
+  if (source[index] !== "/" || !isMongoRegexValuePosition(source, index)) return null;
+
+  return readMongoRegexLiteral(source, index);
+}
+
+function readMongoRegexLiteral(source: string, index: number): MongoRegexLiteral | null {
+  let cursor = index + 1;
+  let pattern = "";
+  let escaped = false;
+  let inCharacterClass = false;
+  let closed = false;
+  while (cursor < source.length) {
+    const current = source[cursor] ?? "";
+    if (current === "\n" || current === "\r" || current === "\u2028" || current === "\u2029") return null;
+    if (escaped) {
+      pattern += current;
+      escaped = false;
+      cursor += 1;
+      continue;
+    }
+    if (current === "\\") {
+      pattern += current;
+      escaped = true;
+      cursor += 1;
+      continue;
+    }
+    if (current === "[") inCharacterClass = true;
+    else if (current === "]" && inCharacterClass) inCharacterClass = false;
+    else if (current === "/" && !inCharacterClass) {
+      closed = true;
+      cursor += 1;
+      break;
+    }
+    pattern += current;
+    cursor += 1;
+  }
+  if (!closed) return null;
+
+  const options: string[] = [];
+  while (/[A-Za-z]/.test(source[cursor] ?? "")) {
+    const option = source[cursor] ?? "";
+    cursor += 1;
+    if (MONGO_REGEX_LITERAL_IGNORED_OPTIONS.has(option)) continue;
+    if (!MONGO_REGEX_LITERAL_OPTIONS.has(option) || options.includes(option)) return null;
+    options.push(option);
+  }
+  options.sort();
+  return { end: cursor, pattern, options: options.join("") };
+}
+
+function replaceMongoRegexLiterals(source: string): string | null {
+  let result = "";
+  let index = 0;
+
+  while (index < source.length) {
+    const char = source[index] ?? "";
+    if (char === '"' || char === "'") {
+      const start = index;
+      const quote = char;
+      index += 1;
+      let escaped = false;
+      while (index < source.length) {
+        const current = source[index] ?? "";
+        index += 1;
+        if (escaped) escaped = false;
+        else if (current === "\\") escaped = true;
+        else if (current === quote) break;
+      }
+      result += source.slice(start, index);
+      continue;
+    }
+
+    const commentEnd = mongoCommentEndAt(source, index);
+    if (commentEnd !== null) {
+      result += source.slice(index, commentEnd);
+      index = commentEnd;
+      continue;
+    }
+
+    if (char !== "/" || !isMongoRegexValuePosition(source, index)) {
+      result += char;
+      index += 1;
+      continue;
+    }
+
+    const literal = mongoRegexLiteralAt(source, index);
+    if (!literal) return null;
+    result += JSON.stringify({ $regularExpression: { pattern: literal.pattern, options: literal.options } });
+    index = literal.end;
+  }
+
+  return result;
+}
+
+function isMongoRegexValuePosition(source: string, index: number): boolean {
+  let previousSignificant: string | null = null;
+  let cursor = 0;
+
+  while (cursor < index) {
+    const char = source[cursor] ?? "";
+    if (char === '"' || char === "'") {
+      const quote = char;
+      cursor += 1;
+      let escaped = false;
+      while (cursor < index) {
+        const current = source[cursor] ?? "";
+        cursor += 1;
+        if (escaped) escaped = false;
+        else if (current === "\\") escaped = true;
+        else if (current === quote) break;
+      }
+      previousSignificant = "value";
+      continue;
+    }
+
+    const commentEnd = mongoCommentEndAt(source, cursor);
+    if (commentEnd !== null) {
+      cursor = Math.min(commentEnd, index);
+      continue;
+    }
+
+    if (char === "/" && isMongoRegexValuePrefix(previousSignificant)) {
+      const literal = readMongoRegexLiteral(source, cursor);
+      if (literal && literal.end <= index) {
+        previousSignificant = "value";
+        cursor = literal.end;
+        continue;
+      }
+    }
+
+    if (!/\s/.test(char)) previousSignificant = char;
+    cursor += 1;
+  }
+
+  return isMongoRegexValuePrefix(previousSignificant);
+}
+
+function isMongoRegexValuePrefix(previousSignificant: string | null): boolean {
+  return previousSignificant === null || previousSignificant === ":" || previousSignificant === "[" || previousSignificant === "," || previousSignificant === "(";
 }
 
 /** Object-shaped shell arg (options documents, etc.). */
@@ -44,6 +201,11 @@ export function parseCollectionMethodTarget(source: string, method: string): { c
   const getCollection = new RegExp(`^db\\s*\\.\\s*getCollection\\s*\\(\\s*(["'])(.*?)\\1\\s*\\)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
   if (getCollection) {
     return { collection: getCollection[2]!, methodCallIndex: findChainedMethodCallIndex(source, method) };
+  }
+  // db["orders-2024"] reaches names that are not valid identifiers, the same way the shell does.
+  const bracket = new RegExp(`^db\\s*\\[\\s*(["'])(.*?)\\1\\s*\\]\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
+  if (bracket) {
+    return { collection: bracket[2]!, methodCallIndex: findChainedMethodCallIndex(source, method) };
   }
   return null;
 }
@@ -82,6 +244,12 @@ export function splitTopLevel(source: string): string[] {
       continue;
     }
 
+    const regexLiteral = mongoRegexLiteralAt(source, i);
+    if (regexLiteral) {
+      i = regexLiteral.end - 1;
+      continue;
+    }
+
     if (char === '"' || char === "'") quote = char;
     else if (char === "{" || char === "[" || char === "(") depth += 1;
     else if (char === "}" || char === "]" || char === ")") depth -= 1;
@@ -116,6 +284,12 @@ export function findMatchingParen(source: string, openIndex: number): number {
       continue;
     }
 
+    const regexLiteral = mongoRegexLiteralAt(source, i);
+    if (regexLiteral) {
+      i = regexLiteral.end - 1;
+      continue;
+    }
+
     if (char === '"' || char === "'") quote = char;
     else if (char === "(") depth += 1;
     else if (char === ")") {
@@ -143,6 +317,11 @@ export function hasUnclosedMongoDelimiters(source: string): boolean {
     const commentEnd = mongoCommentEndAt(source, i);
     if (commentEnd !== null) {
       i = commentEnd - 1;
+      continue;
+    }
+    const regexLiteral = mongoRegexLiteralAt(source, i);
+    if (regexLiteral) {
+      i = regexLiteral.end - 1;
       continue;
     }
     if (char === '"' || char === "'") {
@@ -362,8 +541,35 @@ function replaceMongoEjsonDeserialize(source: string): string {
   return result;
 }
 
+/**
+ * Shell value constructors rewritten to extended JSON.
+ * `Date` is only recognised after `new`, matching the shell where a bare `Date()`
+ * returns a string rather than a date.
+ */
+const SHELL_CONSTRUCTORS = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"]);
+/** `MinKey` / `MaxKey` are also valid without parentheses, as in `{ $lt: MaxKey }`. */
+const BARE_KEY_CONSTANT = /^(MinKey|MaxKey)(?![\w$])/;
+const CONSTRUCTOR_CALL = /^(new\s+)?([A-Za-z_$][\w$]*)\s*\(/;
+const QUOTED_ARGUMENT = /^(["'])([^\\]*)\1$/;
+const INTEGER_ARGUMENT = /^-?\d+$/;
+const DECIMAL_ARGUMENT = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+/** Canonical 8-4-4-4-12 hex form, as mongosh requires for `UUID("...")`. */
+const UUID_ARGUMENT = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+const INT64_BOUNDS = [-9223372036854775808n, 9223372036854775807n] as const;
+const INT32_BOUNDS = [-2147483648n, 2147483647n] as const;
+
+/** Bounds parity with the Rust parser, which range-checks before emitting $numberLong / $numberInt. */
+function fitsIntegerBounds(value: string, bounds: readonly [bigint, bigint]): boolean {
+  try {
+    const parsed = BigInt(value);
+    return parsed >= bounds[0] && parsed <= bounds[1];
+  } catch {
+    return false;
+  }
+}
+
 function replaceMongoShellConstructors(source: string): string {
-  const constructor = /^(ObjectId|NumberLong|ISODate)\s*\(\s*["']([^"']+)["']\s*\)|^(ObjectId|NumberLong)\s*\(\s*(-?\d+)\s*\)|^(?:new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/;
   let result = "";
   let index = 0;
   while (index < source.length) {
@@ -380,21 +586,139 @@ function replaceMongoShellConstructors(source: string): string {
       result += source.slice(start, index);
       continue;
     }
-    const match = source.slice(index).match(constructor);
-    if (!match) {
+    const call = matchShellConstructorCall(source, index) ?? matchShellBareConstant(source, index);
+    if (!call) {
       result += source[index++]!;
       continue;
     }
-    if (match[1]) {
-      result += match[1] === "ObjectId" ? `{"$oid":"${match[2]}"}` : match[1] === "NumberLong" ? `{"$numberLong":"${match[2]}"}` : `{"$date":"${match[2]}"}`;
-    } else if (match[3]) {
-      result += match[3] === "NumberLong" ? `{"$numberLong":"${match[4]}"}` : `{"$oid":"${match[4]}"}`;
-    } else {
-      result += `{"$date":"${match[5]}"}`;
-    }
-    index += match[0].length;
+    result += call.json;
+    index = call.end;
   }
   return result;
+}
+
+/** Rewrite a bare `MinKey` / `MaxKey` at {@link index}; a following `:` means it is an object key, not a value. */
+function matchShellBareConstant(source: string, index: number): { json: string; end: number } | null {
+  if (index > 0 && /[\w$.]/.test(source[index - 1]!)) return null;
+  const match = BARE_KEY_CONSTANT.exec(source.slice(index));
+  if (!match) return null;
+  const end = index + match[0].length;
+  const following = source.slice(end).trimStart();
+  if (following.startsWith(":") || following.startsWith("(")) return null;
+  return { json: keyConstantJson(match[1]!), end };
+}
+
+function keyConstantJson(name: string): string {
+  return name === "MinKey" ? '{"$minKey":1}' : '{"$maxKey":1}';
+}
+
+/** Rewrite one `Name(...)` / `new Name(...)` call at {@link index}, or null when it is not a known constructor. */
+function matchShellConstructorCall(source: string, index: number): { json: string; end: number } | null {
+  const match = CONSTRUCTOR_CALL.exec(source.slice(index));
+  if (!match) return null;
+  const name = match[2]!;
+  if (!SHELL_CONSTRUCTORS.has(name)) return null;
+  if (name === "Date" && !match[1]) return null;
+
+  const openIndex = index + match[0].length - 1;
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0) return null;
+
+  const inner = source.slice(openIndex + 1, closeIndex).trim();
+  const args = inner ? splitTopLevel(inner) : [];
+  const json = shellConstructorToExtendedJson(name, args);
+  return json === null ? null : { json, end: closeIndex + 1 };
+}
+
+function shellConstructorToExtendedJson(name: string, args: string[]): string | null {
+  // Two-argument constructors first; everything else takes at most one.
+  if (name === "BinData" || name === "Timestamp") return twoArgumentConstructorToExtendedJson(name, args);
+  if (args.length > 1) return null;
+  const arg = args[0]?.trim();
+  const literal = arg ? (QUOTED_ARGUMENT.exec(arg)?.[2] ?? null) : null;
+
+  switch (name) {
+    case "MinKey":
+    case "MaxKey":
+      return arg ? null : keyConstantJson(name);
+    case "UUID":
+      if (!arg) return wrap("$uuid", generateUuid());
+      return literal !== null && UUID_ARGUMENT.test(literal) ? wrap("$uuid", literal) : null;
+    case "ObjectId":
+      if (!arg) return wrap("$oid", generateObjectIdHex());
+      return literal !== null || INTEGER_ARGUMENT.test(arg) ? wrap("$oid", literal ?? arg) : null;
+    case "ISODate":
+    case "Date":
+      if (!arg) return wrap("$date", new Date().toISOString());
+      if (literal !== null) return wrap("$date", literal);
+      // `new Date(1735689600000)` takes epoch milliseconds, which extended JSON
+      // carries as a nested $numberLong rather than a bare number.
+      return INTEGER_ARGUMENT.test(arg) && fitsIntegerBounds(arg, INT64_BOUNDS) ? `{"$date":{"$numberLong":${JSON.stringify(arg)}}}` : null;
+    case "NumberLong":
+    case "NumberInt": {
+      const value = literal ?? arg;
+      if (value === undefined || !INTEGER_ARGUMENT.test(value)) return null;
+      if (!fitsIntegerBounds(value, name === "NumberLong" ? INT64_BOUNDS : INT32_BOUNDS)) return null;
+      return wrap(name === "NumberLong" ? "$numberLong" : "$numberInt", value);
+    }
+    case "NumberDecimal": {
+      const value = literal ?? arg;
+      if (value === undefined || !DECIMAL_ARGUMENT.test(value)) return null;
+      return wrap("$numberDecimal", value);
+    }
+    default:
+      return null;
+  }
+}
+
+const UINT32_BOUNDS = [0n, 4294967295n] as const;
+const BINARY_SUBTYPE_BOUNDS = [0n, 255n] as const;
+
+function twoArgumentConstructorToExtendedJson(name: "BinData" | "Timestamp", args: string[]): string | null {
+  if (args.length !== 2) return null;
+  const [first, second] = args.map((value) => value.trim()) as [string, string];
+  if (name === "Timestamp") {
+    // Timestamp(t, i): two unsigned 32-bit integers, seconds and ordinal.
+    if (!INTEGER_ARGUMENT.test(first) || !INTEGER_ARGUMENT.test(second)) return null;
+    if (!fitsIntegerBounds(first, UINT32_BOUNDS) || !fitsIntegerBounds(second, UINT32_BOUNDS)) return null;
+    return `{"$timestamp":{"t":${first},"i":${second}}}`;
+  }
+  // BinData(subType, base64): extended JSON carries the subtype as two hex digits.
+  const base64 = QUOTED_ARGUMENT.exec(second)?.[2];
+  if (base64 === undefined || !INTEGER_ARGUMENT.test(first) || !fitsIntegerBounds(first, BINARY_SUBTYPE_BOUNDS)) return null;
+  const subType = Number(first).toString(16).padStart(2, "0");
+  return `{"$binary":{"base64":${JSON.stringify(base64)},"subType":${JSON.stringify(subType)}}}`;
+}
+
+/** Client-side UUID for a bare `UUID()`, mirroring how the shell fills one in. */
+function generateUuid(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  const hex = randomHex(16).split("");
+  hex[12] = "4";
+  hex[16] = "89ab"[Number.parseInt(hex[16]!, 16) & 3]!;
+  const raw = hex.join("");
+  return `${raw.slice(0, 8)}-${raw.slice(8, 12)}-${raw.slice(12, 16)}-${raw.slice(16, 20)}-${raw.slice(20)}`;
+}
+
+function wrap(key: string, value: string): string {
+  return `{${JSON.stringify(key)}:${JSON.stringify(value)}}`;
+}
+
+const OBJECT_ID_RANDOM = randomHex(5);
+let objectIdCounter = Math.floor(Math.random() * 0xffffff);
+
+/** Client-side ObjectId for a bare `ObjectId()`, mirroring how the shell fills one in. */
+function generateObjectIdHex(): string {
+  objectIdCounter = (objectIdCounter + 1) % 0x1000000;
+  const seconds = Math.floor(Date.now() / 1000) % 0x100000000;
+  return seconds.toString(16).padStart(8, "0") + OBJECT_ID_RANDOM + objectIdCounter.toString(16).padStart(6, "0");
+}
+
+function randomHex(bytes: number): string {
+  const values = new Uint8Array(bytes);
+  if (typeof globalThis.crypto?.getRandomValues === "function") globalThis.crypto.getRandomValues(values);
+  else for (let i = 0; i < bytes; i += 1) values[i] = Math.floor(Math.random() * 256);
+  return Array.from(values, (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
 function convertSingleQuotedStrings(source: string): string {

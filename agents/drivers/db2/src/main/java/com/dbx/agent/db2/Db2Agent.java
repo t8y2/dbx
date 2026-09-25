@@ -19,9 +19,11 @@ import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Properties;
 import java.util.Set;
 
 public final class Db2Agent extends AbstractJdbcAgent {
@@ -44,6 +46,13 @@ public final class Db2Agent extends AbstractJdbcAgent {
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return buildUrl(params);
+    }
+
+    @Override
+    protected Properties buildConnectionProperties(ConnectParams params) {
+        Properties properties = super.buildConnectionProperties(params);
+        properties.setProperty("db2.jcc.charsetDecoderEncoder", "3");
+        return properties;
     }
 
     @Override
@@ -142,7 +151,7 @@ public final class Db2Agent extends AbstractJdbcAgent {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
             for (TableInfo table : listTables(schema)) {
-                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
             }
 
             String sql = "SELECT PROCNAME, 'PROCEDURE' FROM SYSCAT.PROCEDURES WHERE PROCSCHEMA = ? ORDER BY PROCNAME";
@@ -218,7 +227,11 @@ public final class Db2Agent extends AbstractJdbcAgent {
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         return unchecked(() -> {
-            String sql = "SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = ? AND ROUTINENAME = ?";
+            String normalizedType = objectType == null ? "" : objectType.trim().toUpperCase(Locale.ROOT);
+            // View definitions live in SYSCAT.VIEWS; SYSCAT.ROUTINES only covers procedures and functions.
+            String sql = "VIEW".equals(normalizedType)
+                ? "SELECT TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA = ? AND VIEWNAME = ?"
+                : "SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = ? AND ROUTINENAME = ?";
             String source;
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
                 stmt.setString(1, schema);
@@ -385,6 +398,14 @@ public final class Db2Agent extends AbstractJdbcAgent {
     @Override
     protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
+            if (sqlType == Types.CLOB || sqlType == Types.NCLOB) {
+                String value = rs.getString(index);
+                return rs.wasNull() ? null : value;
+            }
+            if (sqlType == Types.BLOB || sqlType == Types.BINARY || sqlType == Types.VARBINARY || sqlType == Types.LONGVARBINARY) {
+                byte[] value = rs.getBytes(index);
+                return rs.wasNull() ? null : JdbcExecutor.bytesToHex(value);
+            }
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();
         });

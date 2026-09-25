@@ -2844,6 +2844,10 @@ export default withEnglishFallback({
     legacy: "后端返回了错误。",
     unknown: "发生了未预期的后端错误。",
   },
+  startup: {
+    loading: "正在启动 DBX…",
+    loadFailed: "无法加载 DBX，请重试。",
+  },
   common: {
     fileNotFound: "文件不存在：{path}",
     language: "语言",

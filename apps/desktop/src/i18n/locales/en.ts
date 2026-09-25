@@ -2932,6 +2932,10 @@ export default {
     legacy: "Backend returned an error.",
     unknown: "An unexpected backend error occurred.",
   },
+  startup: {
+    loading: "Starting DBX…",
+    loadFailed: "Unable to load DBX. Please try again.",
+  },
   common: {
     fileNotFound: "File does not exist: {path}",
     language: "Language",

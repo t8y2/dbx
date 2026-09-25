@@ -675,7 +675,11 @@ function routeTreeItemDialogController() {
     },
   });
   routedController.pasteTableDataCopySupported = pasteTableDataCopySupported.value;
-  routedController.canSetCreateDatabaseCharset = canSetCreateDatabaseCharset.value;
+  // Mirror databaseDialogCapabilities(): for GBase 8s / Informix the create-database picker is a
+  // locale selector driven by canSetCreateDatabaseLocale, so the routed controller must expose it
+  // here too — otherwise the dropdown stays hidden even though openCreateDatabaseDialog already
+  // seeds the DB_LOCALE directive.
+  routedController.canSetCreateDatabaseCharset = canSetCreateDatabaseCharset.value || canSetCreateDatabaseLocale.value;
   routedController.canEditDatabaseCharsetCollation = canEditDatabaseCharsetCollation.value;
   routedController.canEditDatabaseComment = canEditDatabaseComment.value;
   emit("open-dialog-controller", routedController);

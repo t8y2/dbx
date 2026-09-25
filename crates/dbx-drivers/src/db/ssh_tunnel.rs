@@ -9,9 +9,8 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use russh::client::{self, AuthResult, Config, GexParams, Handle, KeyboardInteractiveAuthResponse};
-#[cfg(windows)]
-use russh::keys::agent::client::AgentStream;
-use russh::keys::agent::{client::AgentClient, AgentIdentity};
+use russh::keys::agent::client::{AgentClient, AgentStream};
+use russh::keys::agent::AgentIdentity;
 use russh::keys::ssh_key::HashAlg;
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
 use russh::MethodKind;
@@ -747,38 +746,35 @@ async fn try_authenticate_with_agent(
         let mut failures = Vec::new();
         for endpoint in windows_ssh_agent_endpoints(ssh_agent_sock_path) {
             let label = endpoint.label();
-            let agent: AgentClient<Box<dyn AgentStream + Send + Unpin + 'static>> = match endpoint {
+            // Every transport keeps its own concrete stream type. Erasing both into one
+            // `dyn AgentStream` (russh's `AgentClient::dynamic`) makes rustc unable to
+            // prove the spawned tunnel task is `Send`: the whole chain is rejected with
+            // "implementation of `std::marker::Send` is not general enough" for the
+            // `&str` user argument, which broke the Windows build.
+            let outcome = match endpoint {
                 WindowsSshAgentEndpoint::NamedPipe(path) => {
                     match tokio::time::timeout(*connect_timeout, AgentClient::connect_named_pipe(&path)).await {
-                        Ok(Ok(agent)) => agent.dynamic(),
-                        Ok(Err(error)) => {
-                            failures.push(format!("{label} is unavailable: {error}"));
-                            continue;
-                        }
-                        Err(_) => {
-                            failures.push(format!("{label} connection timed out"));
-                            continue;
-                        }
+                        Ok(Ok(agent)) => authenticate_with_agent_client(session, ssh_user, agent, connect_timeout)
+                            .await
+                            .map_err(|error| format!("{label}: {error}")),
+                        Ok(Err(error)) => Err(format!("{label} is unavailable: {error}")),
+                        Err(_) => Err(format!("{label} connection timed out")),
                     }
                 }
                 WindowsSshAgentEndpoint::Pageant => {
                     match tokio::time::timeout(*connect_timeout, AgentClient::connect_pageant()).await {
-                        Ok(Ok(agent)) => agent.dynamic(),
-                        Ok(Err(error)) => {
-                            failures.push(format!("{label} is unavailable: {error}"));
-                            continue;
-                        }
-                        Err(_) => {
-                            failures.push(format!("{label} connection timed out"));
-                            continue;
-                        }
+                        Ok(Ok(agent)) => authenticate_with_agent_client(session, ssh_user, agent, connect_timeout)
+                            .await
+                            .map_err(|error| format!("{label}: {error}")),
+                        Ok(Err(error)) => Err(format!("{label} is unavailable: {error}")),
+                        Err(_) => Err(format!("{label} connection timed out")),
                     }
                 }
             };
 
-            match authenticate_with_agent_client(session, ssh_user, agent, connect_timeout).await {
+            match outcome {
                 Ok(outcome) => return Ok(outcome),
-                Err(error) => failures.push(format!("{label}: {error}")),
+                Err(error) => failures.push(error),
             }
         }
 
@@ -796,7 +792,7 @@ async fn authenticate_with_agent_client<S>(
     connect_timeout: &Duration,
 ) -> Result<AgentAuthenticationOutcome, String>
 where
-    S: russh::keys::agent::client::AgentStream + Send + Unpin + 'static,
+    S: AgentStream + Send + Unpin + 'static,
 {
     let identities = match agent.request_identities().await {
         Ok(ids) if ids.is_empty() => {

@@ -88,6 +88,16 @@ struct ControlledSqlFileImportStatement {
 
 pub(crate) const SQL_FILE_READ_CHUNK_BYTES: usize = 256 * 1024;
 const SQL_FILE_STATEMENT_BATCH_SIZE: usize = 256;
+/// Upper bound on how much SQL text may be buffered before a batch is executed.
+///
+/// Dumps that use extended inserts (mysqldump default, ~1 MB per statement) put
+/// hundreds of megabytes into a 256-statement batch, so the statement-count bound
+/// alone both spikes memory and delays the first execution: parsing/planning the
+/// buffered text emits no progress at all, which the UI shows as a frozen import
+/// (dbx#10246).  Flushing on either bound keeps the buffered batch small and keeps
+/// progress events flowing for large files, while tiny statements still batch up to
+/// the statement-count bound so round trips do not increase.
+const SQL_FILE_STATEMENT_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
 const SQL_FILE_PREVIEW_ENCODING_SAMPLE_BYTES: usize = 1024 * 1024;
 const SQL_FILE_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -948,7 +958,11 @@ async fn execute_sql_file_paths_inner(
                     }
                 }
                 pending_statements.extend(next_statements);
-                if pending_statements.len() < SQL_FILE_STATEMENT_BATCH_SIZE {
+                // Recomputed from the batch itself (which is emptied by
+                // `execute_sql_file_statement_batch`) so no separate counter can
+                // drift out of sync across files or batches.
+                let buffered_bytes = buffered_statement_bytes(&pending_statements);
+                if !sql_file_statement_batch_is_full(pending_statements.len(), buffered_bytes) {
                     continue;
                 }
                 execute_sql_file_statement_batch(
@@ -1883,6 +1897,17 @@ fn split_sql_file_import_statements_with_control(
     statements
 }
 
+/// A batch is ready for execution as soon as either the statement-count bound or
+/// the buffered-bytes bound is reached.  `statement_bytes` only needs to be a
+/// proxy for the memory the batch pins, so the SQL text length is enough.
+fn sql_file_statement_batch_is_full(statement_count: usize, statement_bytes: usize) -> bool {
+    statement_count >= SQL_FILE_STATEMENT_BATCH_SIZE || statement_bytes >= SQL_FILE_STATEMENT_BATCH_MAX_BYTES
+}
+
+fn buffered_statement_bytes(statements: &[SqlStatementWithControl]) -> usize {
+    statements.iter().map(|statement| statement.sql.len()).sum()
+}
+
 fn plan_sql_file_statements(
     statements: &[SqlStatementWithControl],
     db_type: Option<DatabaseType>,
@@ -2743,6 +2768,69 @@ mod tests {
             tokio::fs::remove_file(&path).await.unwrap();
             assert_eq!(tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["a", "late_table"]);
         }
+    }
+
+    /// A batch must also be bounded by how many bytes are buffered, not only by how
+    /// many statements it holds: extended-insert dumps (mysqldump default, ~1 MB per
+    /// INSERT) otherwise buffer hundreds of megabytes before the first statement runs,
+    /// and planning that buffer emits no progress at all (dbx#10246).
+    #[test]
+    fn extended_insert_dumps_flush_batches_by_buffered_bytes() {
+        const ROWS_PER_STATEMENT: usize = 1_000;
+        const STATEMENTS: usize = 24;
+        let payload = "x".repeat(900);
+        let mut dump = String::new();
+        for statement_index in 0..STATEMENTS {
+            dump.push_str("INSERT INTO t (id, payload) VALUES ");
+            for row_index in 0..ROWS_PER_STATEMENT {
+                if row_index > 0 {
+                    dump.push(',');
+                }
+                dump.push_str(&format!("({},'{payload}')", statement_index * ROWS_PER_STATEMENT + row_index));
+            }
+            dump.push_str(";\n");
+        }
+        assert!(dump.len() > SQL_FILE_STATEMENT_BATCH_MAX_BYTES * 2, "the dump must exceed the byte bound");
+
+        let mut splitter =
+            StreamingSqlFileSplitter::new(Some(DatabaseType::Mysql), SqlParsingOptions::mysql_compatible());
+        let mut pending: Vec<SqlStatementWithControl> = Vec::new();
+        let mut batches: Vec<(usize, usize)> = Vec::new();
+        let mut largest_statement = 0usize;
+        for chunk in dump.as_bytes().chunks(SQL_FILE_READ_CHUNK_BYTES) {
+            let next = splitter.push_chunk(std::str::from_utf8(chunk).unwrap());
+            largest_statement = largest_statement.max(buffered_statement_bytes(&next));
+            pending.extend(next);
+            let bytes = buffered_statement_bytes(&pending);
+            if sql_file_statement_batch_is_full(pending.len(), bytes) {
+                batches.push((pending.len(), bytes));
+                pending.clear();
+            }
+        }
+        pending.extend(splitter.finish());
+        largest_statement = largest_statement.max(buffered_statement_bytes(&pending));
+        batches.push((pending.len(), buffered_statement_bytes(&pending)));
+
+        assert_eq!(
+            batches.iter().map(|(count, _)| count).sum::<usize>(),
+            STATEMENTS,
+            "every statement must still be executed exactly once"
+        );
+        assert!(batches.len() > 1, "an extended-insert dump must not be buffered as a single batch");
+        assert!(batches[0].0 < STATEMENTS, "the first batch must not be the whole file");
+        assert!(largest_statement > 0);
+        assert!(
+            batches.iter().all(|(_, bytes)| *bytes <= SQL_FILE_STATEMENT_BATCH_MAX_BYTES + largest_statement),
+            "a batch may only overshoot the bound by the one statement that crossed it: {batches:?}"
+        );
+    }
+
+    #[test]
+    fn small_statement_dumps_keep_batching_up_to_the_statement_count_bound() {
+        assert!(!sql_file_statement_batch_is_full(SQL_FILE_STATEMENT_BATCH_SIZE - 1, 4 * 1024));
+        assert!(sql_file_statement_batch_is_full(SQL_FILE_STATEMENT_BATCH_SIZE, 4 * 1024));
+        assert!(!sql_file_statement_batch_is_full(1, SQL_FILE_STATEMENT_BATCH_MAX_BYTES - 1));
+        assert!(sql_file_statement_batch_is_full(1, SQL_FILE_STATEMENT_BATCH_MAX_BYTES));
     }
 
     #[test]

@@ -7140,6 +7140,56 @@ mod tests {
     }
 
     #[test]
+    fn postgres_create_table_serial_pk_omits_source_sequence_default() {
+        // #10086: on a Postgres-family target (Kingbase in the report), the source
+        // column's raw `column_default` is a live `nextval('<old>_id_seq'::regclass)`
+        // cast pointing at the *source* database's sequence. Inlining that into
+        // `CREATE TABLE ... DEFAULT nextval(...)` fails at parse time on the target
+        // because that sequence doesn't exist there yet ("relation ... does not
+        // exist") — before the table is even created. The correct default is the
+        // `ALTER TABLE ... SET DEFAULT nextval('<name>_<col>_seq')` this function
+        // already emits further down, against the *new* sequence it just created.
+        let columns = vec![ColumnDiff {
+            diff_type: "added".into(),
+            name: "id".into(),
+            source: Some(ColumnInfo {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: Some("nextval('collection_abnormal_record_id_seq'::regclass)".into()),
+                ..Default::default()
+            }),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        }];
+        let (sql, missing) = generate_create_table_sql(
+            "collection_abnormal_record",
+            &columns,
+            &[],
+            &[],
+            None,
+            DatabaseType::Postgres,
+            None,
+            Some(DialectKind::Postgres),
+            &[],
+            &[],
+        );
+        assert!(missing.is_empty(), "{missing:?}");
+        let create_table = sql.split("CREATE SEQUENCE").next().unwrap();
+        assert!(
+            !create_table.contains("nextval"),
+            "CREATE TABLE must not reference the source's sequence before the new one exists: {sql}"
+        );
+        assert!(sql.contains("CREATE SEQUENCE IF NOT EXISTS"), "new sequence: {sql}");
+        assert!(
+            sql.contains("ALTER TABLE \"collection_abnormal_record\" ALTER COLUMN \"id\" SET DEFAULT nextval("),
+            "default wired up after the sequence exists: {sql}"
+        );
+    }
+
+    #[test]
     fn sync_to_sqlite_keeps_plain_integer_pk_without_autoincrement() {
         let columns = vec![ColumnDiff {
             diff_type: "added".into(),

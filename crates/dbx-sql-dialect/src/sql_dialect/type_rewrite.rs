@@ -435,7 +435,14 @@ pub fn apply_auto_inc_to_column_def(
             AutoIncColumnBuild::AppendSuffix { suffix, skip_default: false, postgres_sequence: false }
         }
         crate::sql_dialect::ddl_profile::AutoIncSyntax::PostgresSequence if col.is_primary_key && is_integer_like => {
-            AutoIncColumnBuild::AppendSuffix { suffix: "", skip_default: false, postgres_sequence: true }
+            // The caller emits `ALTER TABLE ... SET DEFAULT nextval('<new>_<col>_seq')`
+            // right after creating that sequence (see `generate_create_table_sql`), so
+            // the inline default here must be skipped. `col.column_default` is the raw
+            // value read from the *source* column — typically `nextval('<old>_id_seq'
+            // ::regclass)` pointing at the source database's own sequence — and inlining
+            // it fails the CREATE TABLE outright on any target that doesn't already have
+            // that exact sequence name (#10086: "relation ... does not exist").
+            AutoIncColumnBuild::AppendSuffix { suffix: "", skip_default: true, postgres_sequence: true }
         }
         _ => AutoIncColumnBuild::Normal { skip_default: false },
     }

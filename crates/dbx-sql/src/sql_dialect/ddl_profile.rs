@@ -142,6 +142,17 @@ pub struct DdlDialectProfile {
     pub column_ddl: ColumnDdlSyntax,
     /// MySQL `MODIFY COLUMN` vs ANSI `ALTER COLUMN … TYPE/SET`.
     pub alter_uses_modify_column: bool,
+    /// Spell `ADD COLUMN` (MySQL/Postgres/...) instead of the Oracle-family bare `ADD (...)`.
+    pub add_column_uses_column_keyword: bool,
+    /// Spell `MODIFY COLUMN` (MySQL) instead of the bare `MODIFY (...)` Oracle-family and
+    /// Dameng both use.
+    pub modify_column_uses_column_keyword: bool,
+    /// Wrap the definition in parentheses: Oracle's `ADD (...)` / `MODIFY (...)` clauses.
+    pub parenthesized_alter_column_clause: bool,
+    /// Write `DEFAULT` before `NOT NULL`. Oracle's grammar is
+    /// `datatype [DEFAULT expr] [NOT NULL]` and it rejects the MySQL order outright
+    /// (ORA-00907), so the tail of a column definition is dialect data, not cosmetics.
+    pub column_default_precedes_not_null: bool,
     /// Batch multiple alter clauses in one `ALTER TABLE` statement.
     pub alter_batches_clauses: bool,
     /// Prefer emitting source SHOW CREATE / native DDL when dialects match (MySQL-family).
@@ -210,10 +221,33 @@ impl DdlDialectProfile {
     }
 
     pub fn alter_modify_keyword(&self) -> &'static str {
-        if self.database_type == DatabaseType::Dameng {
-            "MODIFY"
-        } else {
+        if self.modify_column_uses_column_keyword {
             "MODIFY COLUMN"
+        } else {
+            "MODIFY"
+        }
+    }
+
+    /// Clause that changes one column's type without restating the whole definition.
+    ///
+    /// `ALTER COLUMN x TYPE …` everywhere except the Oracle grammar, where `TYPE` does not
+    /// exist and the change has to be spelled `MODIFY (x TYPE)`.
+    pub fn alter_column_type_clause(&self, name: &str, data_type: &str) -> String {
+        if self.parenthesized_alter_column_clause {
+            format!("  {} ({name} {data_type})", self.alter_modify_keyword())
+        } else {
+            format!("  ALTER COLUMN {name} TYPE {data_type}")
+        }
+    }
+
+    /// Clause that flips one column's nullability, in the dialect's spelling.
+    pub fn alter_column_nullability_clause(&self, name: &str, nullable: bool) -> String {
+        if self.parenthesized_alter_column_clause {
+            format!("  {} ({name} {})", self.alter_modify_keyword(), if nullable { "NULL" } else { "NOT NULL" })
+        } else if nullable {
+            format!("  ALTER COLUMN {name} DROP NOT NULL")
+        } else {
+            format!("  ALTER COLUMN {name} SET NOT NULL")
         }
     }
 
@@ -361,6 +395,10 @@ fn mysql_family(db: DatabaseType) -> DdlDialectProfile {
         grant_uses_mysql_user_syntax: true,
         warn_fk_needs_table_rebuild: false,
         alter_uses_modify_column: true,
+        add_column_uses_column_keyword: true,
+        modify_column_uses_column_keyword: true,
+        parenthesized_alter_column_clause: false,
+        column_default_precedes_not_null: false,
         alter_batches_clauses: true,
         create_table_if_not_exists: true,
         create_index_if_not_exists: false,
@@ -410,6 +448,10 @@ fn postgres_family(db: DatabaseType) -> DdlDialectProfile {
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
         alter_uses_modify_column: false,
+        add_column_uses_column_keyword: true,
+        modify_column_uses_column_keyword: true,
+        parenthesized_alter_column_clause: false,
+        column_default_precedes_not_null: false,
         alter_batches_clauses: false,
         create_table_if_not_exists: false,
         create_index_if_not_exists: true,
@@ -463,6 +505,16 @@ fn oracle_family(db: DatabaseType) -> DdlDialectProfile {
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
         alter_uses_modify_column: false,
+        // Family defaults keep the spellings the rest of the family had before
+        // (`ADD COLUMN`, bare `MODIFY`); `profile_for` turns on the Oracle-specific
+        // clause shapes for the engines whose grammar was verified on a real instance.
+        add_column_uses_column_keyword: true,
+        modify_column_uses_column_keyword: false,
+        // `profile_for` turns both of these on for the engines whose Oracle grammar is
+        // exercised by tests and real instances (`Oracle`, `OceanbaseOracle`); the rest
+        // of the family keeps the spellings they had before.
+        parenthesized_alter_column_clause: false,
+        column_default_precedes_not_null: false,
         alter_batches_clauses: false,
         create_table_if_not_exists: false,
         create_index_if_not_exists: false,
@@ -514,6 +566,10 @@ fn sqlserver_family(db: DatabaseType) -> DdlDialectProfile {
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
         alter_uses_modify_column: false,
+        add_column_uses_column_keyword: true,
+        modify_column_uses_column_keyword: true,
+        parenthesized_alter_column_clause: false,
+        column_default_precedes_not_null: false,
         alter_batches_clauses: false,
         create_table_if_not_exists: false,
         create_index_if_not_exists: false,
@@ -563,6 +619,10 @@ fn sqlite_family(db: DatabaseType) -> DdlDialectProfile {
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: true,
         alter_uses_modify_column: false,
+        add_column_uses_column_keyword: true,
+        modify_column_uses_column_keyword: true,
+        parenthesized_alter_column_clause: false,
+        column_default_precedes_not_null: false,
         alter_batches_clauses: false,
         create_table_if_not_exists: true,
         create_index_if_not_exists: true,
@@ -613,6 +673,10 @@ fn access_profile() -> DdlDialectProfile {
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
         alter_uses_modify_column: false,
+        add_column_uses_column_keyword: true,
+        modify_column_uses_column_keyword: true,
+        parenthesized_alter_column_clause: false,
+        column_default_precedes_not_null: false,
         alter_batches_clauses: false,
         create_table_if_not_exists: false,
         create_index_if_not_exists: false,
@@ -664,6 +728,10 @@ fn h2_profile() -> DdlDialectProfile {
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
         alter_uses_modify_column: false,
+        add_column_uses_column_keyword: true,
+        modify_column_uses_column_keyword: true,
+        parenthesized_alter_column_clause: false,
+        column_default_precedes_not_null: false,
         alter_batches_clauses: false,
         create_table_if_not_exists: false,
         create_index_if_not_exists: false,
@@ -720,6 +788,10 @@ fn conservative_ansi(db: DatabaseType) -> DdlDialectProfile {
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
         alter_uses_modify_column: false,
+        add_column_uses_column_keyword: true,
+        modify_column_uses_column_keyword: true,
+        parenthesized_alter_column_clause: false,
+        column_default_precedes_not_null: false,
         alter_batches_clauses: false,
         create_table_if_not_exists: false,
         create_index_if_not_exists: false,
@@ -788,8 +860,19 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
             profile
         }
 
-        // Oracle family
-        Oracle | OceanbaseOracle | Yashandb | Xugu | Iris => oracle_family(db_type),
+        // Oracle family. Oracle itself (and OceanBase's Oracle-compatibility mode) needs
+        // the Oracle clause spelling everywhere: `ADD (…)` / `MODIFY (….)`, and `DEFAULT`
+        // ahead of `NOT NULL`. The remaining family members keep the previous spellings
+        // until their own grammar is verified against a real instance.
+        Oracle | OceanbaseOracle => {
+            let mut profile = oracle_family(db_type);
+            profile.add_column_uses_column_keyword = false;
+            profile.parenthesized_alter_column_clause = true;
+            profile.column_default_precedes_not_null = true;
+            profile
+        }
+
+        Yashandb | Xugu | Iris => oracle_family(db_type),
 
         // SQL Server (not Access)
         SqlServer => sqlserver_family(db_type),

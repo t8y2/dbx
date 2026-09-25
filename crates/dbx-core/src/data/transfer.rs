@@ -2269,17 +2269,17 @@ fn postgres_index_column_sql(
     }
 }
 
-/// `CREATE INDEX IF NOT EXISTS` was added in PostgreSQL 9.5: 9.2/9.3/9.4 reject it
-/// with `syntax error at or near "NOT"` (issue #8853). A server that does not report
-/// its version keeps the idempotent form, matching the long-standing behavior.
-fn postgres_create_index_if_not_exists(server_version_num: Option<i32>) -> bool {
+/// `CREATE INDEX/SEQUENCE IF NOT EXISTS` was added in PostgreSQL 9.5: 9.2/9.3/9.4
+/// reject both with `syntax error at or near "NOT"` (issue #8853). A server that does
+/// not report its version keeps the idempotent form, matching the long-standing behavior.
+fn postgres_if_not_exists_supported(server_version_num: Option<i32>) -> bool {
     server_version_num.is_none_or(|version| version >= 90_500)
 }
 
-/// Decides whether the target index DDL may use `IF NOT EXISTS`. openGauss/GaussDB
+/// Decides whether the target index/sequence DDL may use `IF NOT EXISTS`. openGauss/GaussDB
 /// report a 9.x `server_version_num` but do implement the syntax, so only a plain
 /// PostgreSQL target is version-gated.
-async fn target_supports_create_index_if_not_exists(state: &AppState, pool_key: &str) -> bool {
+async fn target_supports_if_not_exists_ddl(state: &AppState, pool_key: &str) -> bool {
     let (_, _, db_type, _) = transfer_pool_context(state, pool_key).await;
     if db_type != Some(DatabaseType::Postgres) {
         return true;
@@ -2288,7 +2288,7 @@ async fn target_supports_create_index_if_not_exists(state: &AppState, pool_key: 
         .await
         .ok()
         .and_then(|result| result.rows.first().and_then(|row| row.first()).and_then(server_version_num_of));
-    postgres_create_index_if_not_exists(version)
+    postgres_if_not_exists_supported(version)
 }
 
 fn server_version_num_of(value: &serde_json::Value) -> Option<i32> {
@@ -2440,7 +2440,7 @@ async fn restore_postgres_table_schema_objects(
     source_indexes: &[db::IndexInfo],
     source_foreign_keys: &[db::ForeignKeyInfo],
 ) -> Result<(), String> {
-    let index_if_not_exists = target_supports_create_index_if_not_exists(state, target_pool_key).await;
+    let index_if_not_exists = target_supports_if_not_exists_ddl(state, target_pool_key).await;
     for statement in generate_postgres_index_ddl(source_indexes, target_table, target_schema, index_if_not_exists) {
         execute_on_pool(state, target_pool_key, &statement)
             .await
@@ -2588,11 +2588,16 @@ fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String
     }
 }
 
-fn generate_postgres_transfer_sequence_create_ddl(sequence: &PostgresTransferSequence, schema: &str) -> String {
+fn generate_postgres_transfer_sequence_create_ddl(
+    sequence: &PostgresTransferSequence,
+    schema: &str,
+    if_not_exists: bool,
+) -> String {
     let qualified_name = postgres_sequence_qualified_name(schema, &sequence.name);
     let cycle = if sequence.cycle { "CYCLE" } else { "NO CYCLE" };
+    let idempotent = if if_not_exists { "IF NOT EXISTS " } else { "" };
     format!(
-        "CREATE SEQUENCE IF NOT EXISTS {qualified_name}\n  AS {data_type}\n  START WITH {start_value}\n  INCREMENT BY {increment}\n  MINVALUE {min_value}\n  MAXVALUE {max_value}\n  CACHE {cache_value}\n  {cycle}",
+        "CREATE SEQUENCE {idempotent}{qualified_name}\n  AS {data_type}\n  START WITH {start_value}\n  INCREMENT BY {increment}\n  MINVALUE {min_value}\n  MAXVALUE {max_value}\n  CACHE {cache_value}\n  {cycle}",
         data_type = sequence.data_type,
         start_value = sequence.start_value,
         increment = sequence.increment,
@@ -6627,6 +6632,7 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             .map(|sequence| (sequence.name.clone(), sequence))
             .collect::<HashMap<_, _>>();
 
+    let sequence_if_not_exists = target_supports_if_not_exists_ddl(state, target_pool_key).await;
     for sequence in &owned_sequences {
         let should_create = validate_existing_postgres_sequence(
             sequence,
@@ -6637,7 +6643,11 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             let definition = definitions
                 .get(&sequence.name)
                 .ok_or_else(|| format!("PostgreSQL sequence definition not found: {}", sequence.name))?;
-            let create_sql = generate_postgres_transfer_sequence_create_ddl(definition, &request.target_schema);
+            let create_sql = generate_postgres_transfer_sequence_create_ddl(
+                definition,
+                &request.target_schema,
+                sequence_if_not_exists,
+            );
             execute_on_pool(state, target_pool_key, &create_sql)
                 .await
                 .map_err(|e| format!("Failed to create PostgreSQL sequence for {target_table}: {e}"))?;
@@ -10167,6 +10177,11 @@ where
             .map_err(|e| format!("Failed to create PostgreSQL domain {}: {e}", domain.domain_name))?;
     }
 
+    let sequence_if_not_exists = if selected_sequences.is_empty() {
+        true
+    } else {
+        target_supports_if_not_exists_ddl(state, target_pool_key).await
+    };
     for sequence in selected_sequences {
         if is_cancelled(&request.transfer_id).await {
             return Err("Cancelled".to_string());
@@ -10186,7 +10201,7 @@ where
         execute_on_pool(
             state,
             target_pool_key,
-            &generate_postgres_transfer_sequence_create_ddl(&sequence, &request.target_schema),
+            &generate_postgres_transfer_sequence_create_ddl(&sequence, &request.target_schema, sequence_if_not_exists),
         )
         .await
         .map_err(|e| format!("Failed to create PostgreSQL sequence {}: {e}", sequence.name))?;
@@ -12269,8 +12284,14 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             };
 
             assert_eq!(
-                generate_postgres_transfer_sequence_create_ddl(&sequence, "archive"),
+                generate_postgres_transfer_sequence_create_ddl(&sequence, "archive", true),
                 "CREATE SEQUENCE IF NOT EXISTS \"archive\".\"biz_banner_id_seq\"\n  AS bigint\n  START WITH 5\n  INCREMENT BY 2\n  MINVALUE -10\n  MAXVALUE 999\n  CACHE 7\n  CYCLE"
+            );
+            // PostgreSQL 9.2-9.4 reject `CREATE SEQUENCE IF NOT EXISTS` just like the
+            // index form, so legacy targets get the plain statement.
+            assert_eq!(
+                generate_postgres_transfer_sequence_create_ddl(&sequence, "archive", false),
+                "CREATE SEQUENCE \"archive\".\"biz_banner_id_seq\"\n  AS bigint\n  START WITH 5\n  INCREMENT BY 2\n  MINVALUE -10\n  MAXVALUE 999\n  CACHE 7\n  CYCLE"
             );
             assert_eq!(
                 generate_postgres_transfer_sequence_setval_sql(&sequence, "archive"),
@@ -14868,13 +14889,13 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
     }
 
     #[test]
-    fn postgres_create_index_if_not_exists_is_version_gated() {
-        assert!(postgres_create_index_if_not_exists(Some(150_001)));
-        assert!(postgres_create_index_if_not_exists(Some(90_500)));
-        assert!(!postgres_create_index_if_not_exists(Some(90_499)));
-        assert!(!postgres_create_index_if_not_exists(Some(90_223)));
+    fn postgres_if_not_exists_is_version_gated() {
+        assert!(postgres_if_not_exists_supported(Some(150_001)));
+        assert!(postgres_if_not_exists_supported(Some(90_500)));
+        assert!(!postgres_if_not_exists_supported(Some(90_499)));
+        assert!(!postgres_if_not_exists_supported(Some(90_223)));
         // Unknown version keeps the idempotent form used by every modern target.
-        assert!(postgres_create_index_if_not_exists(None));
+        assert!(postgres_if_not_exists_supported(None));
     }
 
     #[test]

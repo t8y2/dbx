@@ -1,6 +1,8 @@
 #![allow(clippy::items_after_test_module)]
 
-use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Offset, Utc};
+use chrono_tz::Tz;
+use duckdb::core::LogicalTypeId;
 use duckdb::types::{TimeUnit, Value, ValueRef};
 
 use crate::wire as db;
@@ -160,6 +162,81 @@ mod tests {
     }
 
     #[test]
+    fn duckdb_execute_renders_timestamptz_in_session_timezone() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        con.execute_batch("SET TimeZone = 'Asia/Shanghai'").expect("set session timezone");
+        let result = duckdb_execute(
+            &con,
+            "SELECT current_setting('TimeZone') AS session_tz, \
+             typeof(TIMESTAMPTZ '2025-02-10 20:37:56+00') AS value_type, \
+             TIMESTAMPTZ '2025-02-10 20:37:56+00' AS raw_value, \
+             (TIMESTAMPTZ '2025-02-10 20:37:56+00')::VARCHAR AS formatted_value",
+        )
+        .expect("execute timestamptz query");
+
+        assert_eq!(result.columns, vec!["session_tz", "value_type", "raw_value", "formatted_value"]);
+        let row = &result.rows[0];
+        assert_eq!(row[0], serde_json::json!("Asia/Shanghai"));
+        assert_eq!(row[1], serde_json::json!("TIMESTAMP WITH TIME ZONE"));
+        // A zone-aware value must be rendered the same way DuckDB casts it to VARCHAR instead of
+        // exposing the raw UTC instant as if it were a local wall-clock time.
+        assert_eq!(row[2], serde_json::json!("2025-02-11 04:37:56+08"));
+        assert_eq!(row[3], serde_json::json!("2025-02-11 04:37:56+08"));
+    }
+
+    #[test]
+    fn duckdb_execute_marks_utc_timestamptz_with_explicit_offset() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        con.execute_batch("SET TimeZone = 'UTC'").expect("set session timezone");
+        let result = duckdb_execute(&con, "SELECT TIMESTAMPTZ '2025-02-10 20:37:56+00' AS ts")
+            .expect("execute timestamptz query");
+
+        assert_eq!(result.rows[0][0], serde_json::json!("2025-02-10 20:37:56+00"));
+    }
+
+    #[test]
+    fn duckdb_execute_applies_dst_offset_of_the_value_instant() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        con.execute_batch("SET TimeZone = 'America/New_York'").expect("set session timezone");
+        let result = duckdb_execute(
+            &con,
+            "SELECT TIMESTAMPTZ '2025-01-15 12:00:00+00' AS winter, TIMESTAMPTZ '2025-07-15 12:00:00+00' AS summer",
+        )
+        .expect("execute timestamptz query");
+
+        assert_eq!(result.rows[0][0], serde_json::json!("2025-01-15 07:00:00-05"));
+        assert_eq!(result.rows[0][1], serde_json::json!("2025-07-15 08:00:00-04"));
+    }
+
+    #[test]
+    fn duckdb_execute_keeps_zone_less_timestamps_unchanged() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        con.execute_batch("SET TimeZone = 'Asia/Shanghai'").expect("set session timezone");
+        let result = duckdb_execute(
+            &con,
+            "SELECT TIMESTAMP '2025-02-10 20:37:56' AS ts, DATE '2026-05-14' AS d, TIME '16:58:15' AS t",
+        )
+        .expect("execute temporal query");
+
+        assert_eq!(result.rows[0][0], serde_json::json!("2025-02-10 20:37:56"));
+        assert_eq!(result.rows[0][1], serde_json::json!("2026-05-14"));
+        assert_eq!(result.rows[0][2], serde_json::json!("16:58:15"));
+    }
+
+    #[test]
+    fn duckdb_session_timezone_parses_zone_names_and_fixed_offsets() {
+        assert!(matches!(DuckDbSessionTimezone::parse("Asia/Shanghai"), Some(DuckDbSessionTimezone::Zone(_))));
+        assert!(matches!(DuckDbSessionTimezone::parse("Etc/UTC"), Some(DuckDbSessionTimezone::Zone(_))));
+        assert!(DuckDbSessionTimezone::parse("+08").is_some());
+        assert!(DuckDbSessionTimezone::parse("-05:30").is_some());
+        assert!(DuckDbSessionTimezone::parse("+24").is_none());
+        assert!(DuckDbSessionTimezone::parse("Mars/Olympus").is_none());
+        assert_eq!(format_utc_offset(0), "+00");
+        assert_eq!(format_utc_offset(8 * 3600), "+08");
+        assert_eq!(format_utc_offset(-(5 * 3600 + 30 * 60)), "-05:30");
+    }
+
+    #[test]
     fn duckdb_execute_formats_temporal_values_by_column_type() {
         let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
         let result = duckdb_execute(
@@ -186,7 +263,12 @@ pub fn duckdb_execute(con: &duckdb::Connection, sql: &str) -> Result<db::QueryRe
     duckdb_execute_with_max_rows(con, sql, None)
 }
 
-fn duckdb_value_to_json(row: &duckdb::Row<'_>, idx: usize) -> serde_json::Value {
+fn duckdb_value_to_json(
+    row: &duckdb::Row<'_>,
+    idx: usize,
+    timestamptz: bool,
+    session_timezone: Option<DuckDbSessionTimezone>,
+) -> serde_json::Value {
     let Ok(value_ref) = row.get_ref(idx) else {
         return serde_json::Value::Null;
     };
@@ -216,7 +298,12 @@ fn duckdb_value_to_json(row: &duckdb::Row<'_>, idx: usize) -> serde_json::Value 
             duckdb_time64_to_string(unit, value).map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
         }
         ValueRef::Timestamp(unit, value) => {
-            duckdb_timestamp_to_string(unit, value).map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+            let formatted = if timestamptz {
+                duckdb_timestamptz_to_string(unit, value, session_timezone)
+            } else {
+                duckdb_timestamp_to_string(unit, value)
+            };
+            formatted.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
         }
         ValueRef::Text(bytes) => std::str::from_utf8(bytes)
             .map(|s| serde_json::Value::String(s.to_string()))
@@ -353,6 +440,95 @@ fn duckdb_time64_to_string(unit: TimeUnit, value: i64) -> Option<String> {
     Some(format_temporal_without_empty_fraction(time.to_string()))
 }
 
+/// DuckDB stores `TIMESTAMP WITH TIME ZONE` values as UTC instants and only uses the session
+/// `TimeZone` when it renders them (for example in a `VARCHAR` cast). The driver therefore has to
+/// apply the same session time zone itself, otherwise the UTC instant is displayed as if it were a
+/// wall-clock time without any zone marker.
+#[derive(Clone, Copy)]
+enum DuckDbSessionTimezone {
+    Zone(Tz),
+    Fixed(FixedOffset),
+}
+
+impl DuckDbSessionTimezone {
+    fn parse(name: &str) -> Option<Self> {
+        let name = name.trim();
+        if let Ok(zone) = name.parse::<Tz>() {
+            return Some(Self::Zone(zone));
+        }
+        parse_fixed_utc_offset(name).map(Self::Fixed)
+    }
+
+    fn to_local(self, instant: DateTime<Utc>) -> (NaiveDateTime, i32) {
+        match self {
+            Self::Zone(zone) => {
+                let local = instant.with_timezone(&zone);
+                (local.naive_local(), local.offset().fix().local_minus_utc())
+            }
+            Self::Fixed(offset) => {
+                let local = instant.with_timezone(&offset);
+                (local.naive_local(), local.offset().fix().local_minus_utc())
+            }
+        }
+    }
+}
+
+fn parse_fixed_utc_offset(value: &str) -> Option<FixedOffset> {
+    let (sign, rest) = match value.as_bytes().first()? {
+        b'+' => (1, &value[1..]),
+        b'-' => (-1, &value[1..]),
+        _ => return None,
+    };
+    let (hours, minutes) = match rest.split_once(':') {
+        Some((hours, minutes)) => (hours.parse::<i32>().ok()?, minutes.parse::<i32>().ok()?),
+        None if rest.len() == 4 => (rest[..2].parse::<i32>().ok()?, rest[2..].parse::<i32>().ok()?),
+        None if rest.len() <= 2 => (rest.parse::<i32>().ok()?, 0),
+        None => return None,
+    };
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
+    FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
+}
+
+/// Reads the session `TimeZone` DuckDB would use for rendering zone-aware timestamps. A failure only
+/// means the value cannot be shown with an offset, never that the query itself failed.
+fn duckdb_session_timezone(con: &duckdb::Connection) -> Option<DuckDbSessionTimezone> {
+    let name: String = con.query_row("SELECT current_setting('TimeZone')", [], |row| row.get(0)).ok()?;
+    DuckDbSessionTimezone::parse(&name)
+}
+
+fn duckdb_timestamptz_to_string(
+    unit: TimeUnit,
+    value: i64,
+    session_timezone: Option<DuckDbSessionTimezone>,
+) -> Option<String> {
+    let nanos = duckdb_time_unit_to_nanos(unit, value)?;
+    let seconds = nanos.div_euclid(1_000_000_000);
+    let nanos_remainder = nanos.rem_euclid(1_000_000_000) as u32;
+    let instant: DateTime<Utc> = DateTime::from_timestamp(seconds, nanos_remainder)?;
+    Some(match session_timezone {
+        Some(session_timezone) => {
+            let (local, offset_seconds) = session_timezone.to_local(instant);
+            format!("{}{}", format_naive_datetime(local), format_utc_offset(offset_seconds))
+        }
+        // Never drop the zone marker: an unparsable session time zone still has to show that the
+        // value is a UTC instant instead of a local wall-clock time.
+        None => format!("{}+00", format_naive_datetime(instant.naive_utc())),
+    })
+}
+
+fn format_utc_offset(offset_seconds: i32) -> String {
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let total_minutes = offset_seconds.unsigned_abs() / 60;
+    let (hours, minutes) = (total_minutes / 60, total_minutes % 60);
+    if minutes == 0 {
+        format!("{sign}{hours:02}")
+    } else {
+        format!("{sign}{hours:02}:{minutes:02}")
+    }
+}
+
 fn duckdb_timestamp_to_string(unit: TimeUnit, value: i64) -> Option<String> {
     let nanos = duckdb_time_unit_to_nanos(unit, value)?;
     let seconds = nanos.div_euclid(1_000_000_000);
@@ -397,6 +573,9 @@ pub fn duckdb_execute_with_max_rows(
     let sql = sql.as_ref();
 
     if crate::sql::starts_with_duckdb_result_sql_keyword(sql) {
+        // The session time zone decides how zone-aware timestamps are displayed, and DuckDB cannot
+        // answer another query while a result set is being streamed, so it is read up front.
+        let session_timezone = duckdb_session_timezone(con);
         let mut stmt = con.prepare(sql).map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         let stmt_ref = rows.as_ref().ok_or("DuckDB statement unavailable")?;
@@ -404,10 +583,14 @@ pub fn duckdb_execute_with_max_rows(
         let columns: Vec<String> = (0..col_count)
             .map(|i| stmt_ref.column_name(i).map(|s| s.to_string()).unwrap_or_else(|_| "?".to_string()))
             .collect();
+        let timestamptz_columns: Vec<bool> =
+            (0..col_count).map(|i| stmt_ref.column_logical_type(i).id() == LogicalTypeId::TimestampTZ).collect();
 
         let mut result_rows = Vec::new();
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let vals: Vec<serde_json::Value> = (0..col_count).map(|i| duckdb_value_to_json(row, i)).collect();
+            let vals: Vec<serde_json::Value> = (0..col_count)
+                .map(|i| duckdb_value_to_json(row, i, timestamptz_columns[i], session_timezone))
+                .collect();
             result_rows.push(vals);
             if result_rows.len() > row_limit {
                 break;

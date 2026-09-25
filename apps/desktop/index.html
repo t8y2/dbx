@@ -13,6 +13,10 @@
         background-color: rgb(255 255 255);
       }
 
+      body {
+        margin: 0;
+      }
+
       html.dark,
       html.dark body,
       html.dark #root {
@@ -22,30 +26,47 @@
       #startup-loading {
         display: flex;
         flex-direction: column;
+        gap: 16px;
         min-height: 100vh;
         align-items: center;
         justify-content: center;
         color: #6b7280;
-        font: 13px system-ui, sans-serif;
+        font:
+          14px system-ui,
+          sans-serif;
       }
 
-      #startup-loading::before {
+      #startup-loading .startup-brand {
+        color: #111827;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.5px;
+      }
+
+      html.dark #startup-loading .startup-brand {
+        color: #f3f4f6;
+      }
+
+      #startup-loading .startup-spinner {
         width: 22px;
         height: 22px;
-        margin-bottom: 12px;
+        box-sizing: border-box;
         border: 2px solid rgba(107, 114, 128, 0.22);
         border-top-color: currentColor;
         border-radius: 999px;
-        content: "";
         animation: dbx-startup-spin 0.8s linear infinite;
       }
 
       @media (prefers-reduced-motion: reduce) {
-        #startup-loading::before { animation: none; }
+        #startup-loading .startup-spinner {
+          animation: none;
+        }
       }
 
       @keyframes dbx-startup-spin {
-        to { transform: rotate(360deg); }
+        to {
+          transform: rotate(360deg);
+        }
       }
     </style>
     <script data-dbx-startup-theme>
@@ -98,7 +119,11 @@
   </head>
   <body>
     <div id="root">
-      <div id="startup-loading" role="status" aria-live="polite">Loading…</div>
+      <div id="startup-loading" role="status" aria-live="polite" aria-busy="true">
+        <span class="startup-brand" aria-hidden="true">DBX</span>
+        <span class="startup-spinner" aria-hidden="true"></span>
+        <span>Loading…</span>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -1532,7 +1532,7 @@ mod tests {
     use axum::Json;
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::ConnectionConfig;
-    use dbx_core::storage::{McpGlobalPolicy, Storage};
+    use dbx_core::storage::McpGlobalPolicy;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock};

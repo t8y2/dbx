@@ -174,7 +174,6 @@ async fn official_tools_round_trip_through_dbx_core() {
         export_mongodb_query_core, import_mongodb_file_core, MongoExportFormat, MongoExportRequest, MongoExportStatus,
         MongoImportRequest, MongoImportStatus,
     };
-    use dbx_core::storage::Storage;
     use mongodb::bson::{oid::ObjectId, spec::BinarySubtype, Binary, DateTime, Decimal128, Regex, Timestamp};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -379,7 +378,6 @@ async fn official_database_tools_round_trip_through_dbx() {
         connection::{AppState, PoolKind},
         models::connection::ConnectionConfig,
         mongodb_dump::*,
-        storage::Storage,
     };
     let uri = std::env::var("DBX_MONGO_DUMP_TEST_URI").expect("DBX_MONGO_DUMP_TEST_URI");
     let tools = std::path::PathBuf::from(std::env::var("DBX_MONGO_TOOLS_DIR").expect("DBX_MONGO_TOOLS_DIR"));
@@ -730,7 +728,6 @@ async fn legacy_agent_database_round_trip_through_dbx() {
         models::connection::ConnectionConfig,
         mongo_ops::mongo_run_command_core,
         mongodb_dump::*,
-        storage::Storage,
     };
     // Everything, including seeding and verification, goes through the legacy agent: the native
     // Rust driver refuses servers older than 4.2, which is the very case the agent exists for.
@@ -948,7 +945,7 @@ async fn database_source_rejects_invalid_metadata_and_view_cycles() {
 
 #[tokio::test]
 async fn directory_preview_does_not_read_bson_and_source_identity_is_checked_before_restore() {
-    use dbx_core::{connection::AppState, mongodb_dump::*, storage::Storage};
+    use dbx_core::{connection::AppState, mongodb_dump::*};
     let files = tempfile::tempdir().unwrap();
     let source = files.path().join("source");
     std::fs::create_dir(&source).unwrap();

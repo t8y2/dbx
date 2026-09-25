@@ -18,11 +18,13 @@ export function clearPluginIconCache() {
 
 // This cache is global, but the plugin set can change from entry points other than the plugin
 // center (e.g. the update center dispatches COMPONENT_PLUGINS_UPDATED_EVENT from App.vue while the
-// center is closed). Invalidate on that event here, at the cache owner, so freshly installed or
-// updated plugins don't keep a stale (missing) icon in the sidebar, tabs and connection tree until
-// the plugin center happens to mount.
+// center is closed; batch uninstall dispatches only dbx:plugins-changed). Invalidate on both
+// events here, at the cache owner, so freshly installed or updated plugins don't keep a stale
+// (missing) icon in the sidebar, tabs and connection tree until the plugin center happens to
+// mount.
 if (typeof window !== "undefined") {
   window.addEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, clearPluginIconCache);
+  window.addEventListener("dbx:plugins-changed", clearPluginIconCache);
 }
 
 export async function resolvePluginIcon(pluginId: string, contributionId?: string): Promise<string | undefined> {

@@ -42,4 +42,18 @@ describe("pluginIconResolver cache", () => {
     expect(await resolvePluginIcon("new")).toBe("assets/new.svg");
     expect(api.listPlugins).toHaveBeenCalledTimes(2);
   });
+
+  it("drops the stale cache on dbx:plugins-changed (batch uninstall path)", async () => {
+    vi.mocked(api.listPlugins).mockResolvedValueOnce([plugin("old", "assets/old.svg")]);
+    expect(await resolvePluginIcon("old")).toBe("assets/old.svg");
+    expect(api.listPlugins).toHaveBeenCalledTimes(1);
+
+    // Batch uninstall refreshes via dbx:plugins-changed only; the removed plugin must not
+    // resolve from the cached list anymore.
+    vi.mocked(api.listPlugins).mockResolvedValueOnce([]);
+    window.dispatchEvent(new Event("dbx:plugins-changed"));
+
+    expect(await resolvePluginIcon("old")).toBeUndefined();
+    expect(api.listPlugins).toHaveBeenCalledTimes(2);
+  });
 });

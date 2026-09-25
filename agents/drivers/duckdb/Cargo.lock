@@ -1543,6 +1543,7 @@ name = "dbx-duckdb-driver"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "dbx-core",
  "duckdb",
  "log",

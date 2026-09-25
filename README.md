@@ -1,8 +1,8 @@
 <div align="center">
-  <p style="font-size: 18px; white-space: nowrap;"><strong>90+ databases in 25 MB. Desktop, Docker, CLI, built-in AI assistant, and MCP Server.</strong></p>
+  <p style="font-size: 18px; white-space: nowrap;"><strong>100+ databases in 25 MB. Desktop, Docker, CLI, built-in AI assistant, and MCP Server.</strong></p>
 
   <p>
-    <img src="https://dl.dbxio.com/assets/readme-hero-20260820.png" alt="DBX screenshot" width="820" />
+    <img src="https://dl.dbxio.com/assets/readme-hero-20260925.png" alt="DBX screenshot" width="820" />
   </p>
 
   <p>
@@ -208,13 +208,23 @@
       <p>Native app on macOS, Windows, and Linux. Self-host via Docker for team access. Web version for browser-only environments. Same feature set. Same connections.</p>
     </td>
   </tr>
+  <tr>
+    <td>
+      <h3>📨 Not just databases</h3>
+      <p>Message queues and middleware get first-class consoles: Kafka, RocketMQ, RabbitMQ, Pulsar, and MQTT, plus Nacos, Consul, ZooKeeper, and etcd. Inspect topics and messages next to your databases — no extra tool.</p>
+    </td>
+    <td>
+      <h3>🧩 Plugin ecosystem</h3>
+      <p>Extend DBX with signed, sandboxed plugins from the built-in store — S3, Kubernetes, LDAP, and more. Build your own with the Go / TypeScript SDK.</p>
+    </td>
+  </tr>
 </table>
 
 ## Features
 
-### 90+ Databases, One Tool
+### 100+ Databases, One Tool
 
-MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingbaseES, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, Dolt, and more. Agent-based profiles extend DBX to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Cloud Spanner, Kylin, SunDB, JDBCX, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and more. Message queue admin is also available for Pulsar, Kafka, and RocketMQ. All in a single ~25 MB app. No bundled Chromium.
+MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingbaseES, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, Dolt, and more. Agent-based profiles extend DBX to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Cloud Spanner, Kylin, SunDB, JDBCX, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and more. All in a single ~25 MB app. No bundled Chromium.
 
 ### Query Editor
 
@@ -253,6 +263,18 @@ Virtual-scrolled table that handles large result sets. Inline editing, SQL previ
 
 - **Redis** — key pattern search, batch key operations, command runner, TTL editing, and all data types (String, Hash, List, Set, ZSet, Stream)
 - **MongoDB** — document CRUD with pagination, Atlas & replica set URL connection
+
+### Message Queue & Middleware Consoles
+
+- **Kafka / RocketMQ / RabbitMQ / Pulsar** — topics, consumer groups, message browsing, query and trace, broker monitoring, permissions and policies
+- **MQTT** — topic tree navigation, subscribe, and publish
+- **Nacos / Consul / ZooKeeper / etcd** — service discovery, KV / config browsing, health, and ACL
+
+### Plugin System
+
+- **Extensible by design** — new connection types and tools arrive as plugins: S3 browsing, Kubernetes, LDAP, and more from the built-in store
+- **Signed & sandboxed** — every plugin package is signature-verified before install; plugin UI runs sandboxed with its own sidecar process
+- **Build your own** — Go / TypeScript SDKs with `npx @dbx-app/plugin-cli` scaffolding; publish to the Marketplace via [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store)
 
 ### Safety & Connectivity
 

@@ -5204,9 +5204,11 @@ fn postgres_check_constraints_sql() -> &'static str {
 pub async fn list_constraints(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, postgres_constraints_sql(), &[&schema, &table])
-        .await
-        .map_err(|e| e.to_string())?;
+    let tiers = postgres_constraint_query_tiers();
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
+    let rows =
+        query_with_compat_fallback("list_constraints", &tiers, |sql| postgres_query_cached(&client, sql, &params))
+            .await?;
 
     Ok(rows
         .iter()
@@ -5423,6 +5425,48 @@ fn postgres_constraints_sql() -> &'static str {
          FROM unnest(con.confkey) WITH ORDINALITY AS ord(attnum, ord) \
          JOIN pg_catalog.pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = ord.attnum AND NOT a.attisdropped \
      ) confkey ON true \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
+     ORDER BY con.conname"
+}
+
+fn postgres_constraint_query_tiers() -> [&'static str; 2] {
+    [postgres_constraints_sql(), postgres_constraints_compat_sql()]
+}
+
+/// PostgreSQL 9.2/9.3 sibling of [`postgres_constraints_sql`]: those servers
+/// have neither `LATERAL` (9.3+) nor `unnest(...) WITH ORDINALITY` (9.4+), so
+/// the whole-table DDL/metadata path used to fail with a bare `db error`
+/// (#10079). `generate_subscripts` plus a correlated scalar subquery produce
+/// the same column arrays on every supported server.
+fn postgres_constraints_compat_sql() -> &'static str {
+    "SELECT con.conname, \
+            con.contype::text, \
+            pg_catalog.pg_get_constraintdef(con.oid, true) AS definition, \
+            COALESCE(( \
+                SELECT array_agg(a.attname::text ORDER BY key_order.ord) \
+                FROM generate_subscripts(con.conkey, 1) AS key_order(ord) \
+                JOIN pg_catalog.pg_attribute a \
+                  ON a.attrelid = con.conrelid AND a.attnum = con.conkey[key_order.ord] AND NOT a.attisdropped \
+            ), ARRAY[]::text[]) AS columns, \
+            refn.nspname AS ref_schema, \
+            refc.relname AS ref_table, \
+            COALESCE(( \
+                SELECT array_agg(a.attname::text ORDER BY key_order.ord) \
+                FROM generate_subscripts(con.confkey, 1) AS key_order(ord) \
+                JOIN pg_catalog.pg_attribute a \
+                  ON a.attrelid = con.confrelid AND a.attnum = con.confkey[key_order.ord] AND NOT a.attisdropped \
+            ), ARRAY[]::text[]) AS ref_columns, \
+            CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END AS match_type, \
+            CASE WHEN con.contype = 'f' THEN con.confupdtype::text END AS on_update, \
+            CASE WHEN con.contype = 'f' THEN con.confdeltype::text END AS on_delete, \
+            con.condeferrable, \
+            con.condeferred, \
+            con.convalidated \
+     FROM pg_catalog.pg_constraint con \
+     JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_class refc ON refc.oid = con.confrelid \
+     LEFT JOIN pg_catalog.pg_namespace refn ON refn.oid = refc.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
      ORDER BY con.conname"
 }
@@ -13217,6 +13261,50 @@ mod tests {
         // attname (pg_attribute type `name`) is explicitly cast to text so the
         // array decodes as text[] (matching the COALESCE fallback and Vec<String>).
         assert!(sql.contains("array_agg(a.attname::text ORDER BY ord.ord)"));
+        assert_eq!(sql.matches("attname::text").count(), 2);
+        assert!(sql.contains("a.attisdropped"));
+        assert!(sql.contains("n.nspname = $1 AND c.relname = $2"));
+        assert!(sql.contains("c.relkind IN ('r','p','f')"));
+        assert!(sql.contains("ORDER BY con.conname"));
+    }
+
+    #[test]
+    fn postgres_constraint_tiers_keep_the_compat_sibling_first_usable() {
+        let tiers = postgres_constraint_query_tiers();
+        assert_eq!(tiers[0], postgres_constraints_sql());
+        assert_eq!(tiers[1], postgres_constraints_compat_sql());
+    }
+
+    #[test]
+    fn postgres_constraints_compat_sql_avoids_lateral_and_ordinality() {
+        let sql = postgres_constraints_compat_sql();
+        // PostgreSQL 9.2/9.3 fail on the primary query's `LEFT JOIN LATERAL`
+        // (9.3+) and `unnest(...) WITH ORDINALITY` (9.4+); the compat tier must
+        // not reference either, or table DDL export keeps reporting `db error`.
+        assert!(!sql.contains("LATERAL"));
+        assert!(!sql.contains("WITH ORDINALITY"));
+        assert!(!sql.contains("unnest("));
+        assert!(sql.contains("generate_subscripts(con.conkey, 1)"));
+        assert!(sql.contains("generate_subscripts(con.confkey, 1)"));
+        // Same projection, in the same order, as the primary query so
+        // `list_constraints`' positional row mapping stays valid.
+        for column in [
+            "con.conname",
+            "con.contype::text",
+            "pg_catalog.pg_get_constraintdef(con.oid, true) AS definition",
+            "AS columns",
+            "refn.nspname AS ref_schema",
+            "refc.relname AS ref_table",
+            "AS ref_columns",
+            "AS match_type",
+            "AS on_update",
+            "AS on_delete",
+            "con.condeferrable",
+            "con.condeferred",
+            "con.convalidated",
+        ] {
+            assert!(sql.contains(column), "compat constraints SQL is missing {column}");
+        }
         assert_eq!(sql.matches("attname::text").count(), 2);
         assert!(sql.contains("a.attisdropped"));
         assert!(sql.contains("n.nspname = $1 AND c.relname = $2"));

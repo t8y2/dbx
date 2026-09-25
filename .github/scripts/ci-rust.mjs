@@ -18,7 +18,7 @@ export function rustCommand(action, group, mode) {
     ...["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-bundled", "sqlite-sqlcipher", "test-support"].map((feature) => `dbx-drivers/${feature}`),
     "dbx-driver-agent/test-support", "dbx-driver-mysql/test-support", "dbx-driver-redis/test-support",
     "dbx-driver-support/test-support",
-    "dbx-sqlite-worker/runtime", "dbx-types/openapi", "dbx-sql/openapi",
+    "dbx-sqlite-worker/runtime", "dbx-types/openapi", "dbx-sql-data/openapi",
   ] : appFeatures;
   const packages = group === "workspace" ? ["--workspace"] : rustGroups[group].flatMap((name) => ["--package", name]);
   const command = action === "test" ? ["nextest", "run", "--no-fail-fast"] : action === "doctest" ? ["test", "--doc"] : [action];

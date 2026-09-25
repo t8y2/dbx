@@ -3588,19 +3588,30 @@ fn show_tables_query_attempts(
     exact_names: &[String],
 ) -> Vec<ShowTablesQueryAttempt> {
     // DBeaver-style server filtering is preferred for large schemas, but some
-    // MySQL proxies only implement bare SHOW TABLES forms.
+    // MySQL proxies only implement unfiltered or current-database SHOW forms.
     let filtered_full = show_tables_filtered_sql(database, true, filter, exact_names);
     let filtered_plain = show_tables_filtered_sql(database, false, filter, exact_names);
     let unfiltered_full = show_tables_filtered_sql(database, true, None, &[]);
     let unfiltered_plain = show_tables_filtered_sql(database, false, None, &[]);
     let has_server_filter = filtered_full != unfiltered_full;
-    let mut attempts = Vec::with_capacity(if has_server_filter { 4 } else { 2 });
+    let has_qualified_database = !database.trim().is_empty();
+    let mut attempts = Vec::with_capacity(if has_server_filter {
+        6
+    } else if has_qualified_database {
+        4
+    } else {
+        2
+    });
     if has_server_filter {
         attempts.push(ShowTablesQueryAttempt { sql: filtered_full, server_filtered: true });
         attempts.push(ShowTablesQueryAttempt { sql: filtered_plain, server_filtered: true });
     }
     attempts.push(ShowTablesQueryAttempt { sql: unfiltered_full, server_filtered: false });
     attempts.push(ShowTablesQueryAttempt { sql: unfiltered_plain, server_filtered: false });
+    if has_qualified_database {
+        attempts.push(ShowTablesQueryAttempt { sql: "SHOW FULL TABLES".to_string(), server_filtered: false });
+        attempts.push(ShowTablesQueryAttempt { sql: "SHOW TABLES".to_string(), server_filtered: false });
+    }
     attempts
 }
 
@@ -7582,10 +7593,10 @@ mod tests {
     }
 
     #[test]
-    fn mysql_filtered_show_fallback_attempts_bare_show_after_syntax_errors() {
+    fn mysql_filtered_show_fallback_attempts_current_database_show_last() {
         let attempts = show_tables_query_attempts("app", Some("orders"), &[]);
 
-        assert_eq!(attempts.len(), 4);
+        assert_eq!(attempts.len(), 6);
         assert!(attempts[0].server_filtered);
         assert!(attempts[0].sql.starts_with("SHOW FULL TABLES FROM `app` WHERE "));
         assert!(attempts[1].server_filtered);
@@ -7594,16 +7605,29 @@ mod tests {
         assert_eq!(attempts[2].sql, "SHOW FULL TABLES FROM `app`");
         assert!(!attempts[3].server_filtered);
         assert_eq!(attempts[3].sql, "SHOW TABLES FROM `app`");
+        assert_eq!(attempts[4].sql, "SHOW FULL TABLES");
+        assert_eq!(attempts[5].sql, "SHOW TABLES");
     }
 
     #[test]
-    fn mysql_unfiltered_show_avoids_duplicate_attempts() {
+    fn mysql_unfiltered_show_retries_against_current_database() {
         let attempts = show_tables_query_attempts("app", None, &[]);
 
-        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts.len(), 4);
         assert_eq!(attempts[0].sql, "SHOW FULL TABLES FROM `app`");
         assert_eq!(attempts[1].sql, "SHOW TABLES FROM `app`");
+        assert_eq!(attempts[2].sql, "SHOW FULL TABLES");
+        assert_eq!(attempts[3].sql, "SHOW TABLES");
         assert!(attempts.iter().all(|attempt| !attempt.server_filtered));
+    }
+
+    #[test]
+    fn mysql_catalogless_show_avoids_duplicate_attempts() {
+        let attempts = show_tables_query_attempts("", None, &[]);
+
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].sql, "SHOW FULL TABLES");
+        assert_eq!(attempts[1].sql, "SHOW TABLES");
     }
 
     #[test]

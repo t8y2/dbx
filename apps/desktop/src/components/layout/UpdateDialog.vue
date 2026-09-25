@@ -298,8 +298,8 @@ watch(
       </DialogHeader>
 
       <div class="flex min-h-0 flex-1 flex-col">
-        <div v-if="tabs.length" class="border-b px-4 py-2">
-          <div role="tablist" :aria-label="t('updates.centerTitle')" class="inline-flex h-9 w-full items-center justify-center rounded-md bg-muted p-[3px] text-muted-foreground">
+        <div v-if="tabs.length" class="px-5 pb-2.5 pt-1.5">
+          <div role="tablist" :aria-label="t('updates.centerTitle')" class="inline-flex h-9 w-full items-center gap-1">
             <button
               v-for="tab in tabs"
               :key="tab.id"
@@ -308,8 +308,8 @@ watch(
               :aria-selected="selectedTab === tab.id"
               :data-state="selectedTab === tab.id ? 'active' : 'inactive'"
               :data-update-tab="tab.id"
-              class="relative inline-flex h-full flex-1 select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-transparent px-2 text-sm font-medium transition-colors hover:text-foreground focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
-              :class="selectedTab === tab.id ? 'bg-background text-foreground shadow-sm' : 'text-foreground/60'"
+              class="relative inline-flex h-full select-none items-center gap-1.5 whitespace-nowrap px-2.5 text-sm font-medium transition-colors after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:rounded-full after:bg-foreground after:opacity-0 after:transition-opacity hover:text-foreground focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
+              :class="selectedTab === tab.id ? 'text-foreground after:opacity-100' : 'text-foreground/60'"
               @click="selectTab(tab.id)"
             >
               <span>{{ tab.label }}</span>
@@ -376,12 +376,14 @@ watch(
                   {{ t("updates.historyLoadFailed") }}
                 </div>
                 <template v-else>
-                  <div v-for="release in visibleOlderReleases" :key="release.tag" class="flex items-center justify-between gap-4 rounded-md border p-3">
-                    <div class="min-w-0">
-                      <div class="font-medium">{{ release.tag }}</div>
-                      <div class="mt-0.5 text-xs text-muted-foreground">{{ t("updates.historyPublishedOn", { date: formatOlderReleaseDate(release.date) }) }}</div>
+                  <div class="divide-y overflow-hidden rounded-md border">
+                    <div v-for="release in visibleOlderReleases" :key="release.tag" class="flex items-center justify-between gap-4 px-3 py-2">
+                      <span class="min-w-0 truncate font-medium">{{ release.tag }}</span>
+                      <span class="flex shrink-0 items-center gap-3">
+                        <span class="text-xs text-muted-foreground">{{ t("updates.historyPublishedOn", { date: formatOlderReleaseDate(release.date) }) }}</span>
+                        <Button variant="outline" class="shrink-0" @click="openOlderReleasePage(release.tag)">{{ t("updates.openRelease") }}</Button>
+                      </span>
                     </div>
-                    <Button variant="outline" class="shrink-0" @click="openOlderReleasePage(release.tag)">{{ t("updates.openRelease") }}</Button>
                   </div>
                   <Button v-if="hasMoreOlderReleases" variant="ghost" class="w-full" @click="showMoreOlderReleases">{{ t("updates.historyLoadMore") }}</Button>
                 </template>
@@ -400,45 +402,55 @@ watch(
                 <span>{{ componentUpdatesError }}</span>
               </div>
               <template v-if="selectedTab === 'drivers'">
-                <div v-for="driver in driverUpdates" :key="driver.db_type" class="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <div class="min-w-0">
-                    <div class="font-medium">{{ driver.label }}</div>
-                    <div class="mt-0.5 text-xs text-muted-foreground">{{ driver.installed_version || driver.version }} → {{ driver.version }}</div>
+                <div v-if="driverUpdates.length" class="divide-y overflow-hidden rounded-md border">
+                  <div v-for="driver in driverUpdates" :key="driver.db_type" data-update-entry class="flex items-center justify-between gap-4 px-3 py-2">
+                    <span class="min-w-0 truncate font-medium">{{ driver.label }}</span>
+                    <span class="flex shrink-0 items-center gap-3">
+                      <span class="text-xs tabular-nums text-muted-foreground">{{ driver.installed_version || driver.version }} → {{ driver.version }}</span>
+                      <span class="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
+                    </span>
                   </div>
-                  <span class="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
                 </div>
               </template>
 
               <template v-else-if="selectedTab === 'jdbc' && jdbcUpdate?.update_available">
-                <div class="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <div class="min-w-0">
-                    <div class="font-medium">{{ t("settings.updateJdbc") }}</div>
-                    <div class="mt-0.5 text-xs text-muted-foreground">{{ jdbcUpdate.version || t("updates.notInstalled") }} → {{ jdbcUpdate.latest_version || t("settings.updateAvailable") }}</div>
+                <div class="divide-y overflow-hidden rounded-md border">
+                  <div data-update-entry class="flex items-center justify-between gap-4 px-3 py-2">
+                    <span class="min-w-0 truncate font-medium">{{ t("settings.updateJdbc") }}</span>
+                    <span class="flex shrink-0 items-center gap-3">
+                      <span class="text-xs tabular-nums text-muted-foreground">{{ jdbcUpdate.version || t("updates.notInstalled") }} → {{ jdbcUpdate.latest_version || t("settings.updateAvailable") }}</span>
+                      <span class="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
+                    </span>
                   </div>
-                  <span class="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
                 </div>
               </template>
 
               <template v-else-if="selectedTab === 'mcp' && mcpAvailable && mcpUpdate">
-                <div class="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <div class="min-w-0">
-                    <div class="font-medium">{{ t("settings.updateMcp") }}</div>
-                    <div class="mt-0.5 text-xs text-muted-foreground">{{ mcpUpdate.current_version || t("updates.notInstalled") }} → {{ mcpUpdate.latest_version || t("settings.updateAvailable") }}</div>
+                <div class="divide-y overflow-hidden rounded-md border">
+                  <div data-update-entry class="flex items-center justify-between gap-4 px-3 py-2">
+                    <span class="min-w-0 truncate font-medium">{{ t("settings.updateMcp") }}</span>
+                    <span class="flex shrink-0 items-center gap-3">
+                      <span class="text-xs tabular-nums text-muted-foreground">{{ mcpUpdate.current_version || t("updates.notInstalled") }} → {{ mcpUpdate.latest_version || t("settings.updateAvailable") }}</span>
+                      <span class="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
+                    </span>
                   </div>
-                  <span class="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
                 </div>
               </template>
 
               <template v-else-if="selectedTab === 'plugins'">
-                <div v-for="plugin in pluginUpdates" :key="plugin.key" class="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <div class="min-w-0">
-                    <div class="truncate font-medium">{{ plugin.name }}</div>
-                    <div class="mt-0.5 text-xs text-muted-foreground">{{ plugin.installed?.manifest.version || t("updates.notInstalled") }} → {{ plugin.plugin.latestVersion }}</div>
+                <div class="divide-y overflow-hidden rounded-md border">
+                  <div v-for="plugin in pluginUpdates" :key="plugin.key" data-update-entry class="px-3 py-2">
+                    <div class="flex items-center justify-between gap-4">
+                      <span class="min-w-0 truncate font-medium">{{ plugin.name }}</span>
+                      <span class="flex shrink-0 items-center gap-3">
+                        <span class="text-xs tabular-nums text-muted-foreground">{{ plugin.installed?.manifest.version || t("updates.notInstalled") }} → {{ plugin.plugin.latestVersion }}</span>
+                        <span class="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
+                      </span>
+                    </div>
                     <!-- "Update all" deliberately skips a changed source: the user has to confirm it in
                          the Plugin Center, so say so instead of leaving an item that never updates. -->
                     <div v-if="pluginSourceChange(plugin)" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ t("pluginPlatform.updateSourceChangeRequired") }}</div>
                   </div>
-                  <span class="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
                 </div>
               </template>
 

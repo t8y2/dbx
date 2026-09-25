@@ -304,7 +304,9 @@ DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 D
 
 ### DBX Web 原生 Streamable HTTP
 
-DBX Web 也可以直接托管 MCP。只有配置 `DBX_WEB_MCP_TOKEN` 或 `DBX_WEB_MCP_TOKEN_FILE` 后才会启用。它复用现有 Web 监听器和 `/mcp` 路径，因此 Docker 和反向代理部署不需要额外暴露第二个端口。将 `DBX_WEB_MCP_ALLOWED_HOSTS` 配置为客户端在 `Host` 请求头中发送的公网访问地址；如有端口映射，必须包含映射后的端口。生产环境请使用 `DBX_WEB_MCP_TOKEN_FILE` 或部署平台的 Secret 管理能力，不要把真实 Token 提交到 Compose 文件中。
+DBX Web 可以直接托管 MCP，复用现有 Web 监听器和 `/mcp` 路径，因此 Docker 和反向代理部署不需要额外暴露第二个端口。单实例、已启用 Web 登录密码的部署可在 **设置 → MCP → HTTP 服务**填写允许的 Host 并启用服务；DBX 自动生成 Bearer Token，使用现有加密 Secret 存储，可在页面复制、轮换或禁用，修改立即对新请求生效。未启用时页面不会把 `/mcp` 显示为可连接地址。无 Web 登录密码时，页面管理的 MCP 不会生效；演示部署禁用 MCP。
+
+部署环境变量仍然优先：配置 `DBX_WEB_MCP_TOKEN` 或 `DBX_WEB_MCP_TOKEN_FILE` 后，页面只读显示状态，不会覆盖部署 Secret。此前启用的页面 Token 仍会保留；移除部署 Token 并重启 Web 后，它会重新生效。将 `DBX_WEB_MCP_ALLOWED_HOSTS` 配置为客户端在 `Host` 请求头中发送的公网访问地址；如有端口映射，必须包含映射后的端口。多实例部署应使用一致的部署 Secret 与白名单，而不是页面管理模式。生产环境请使用 `DBX_WEB_MCP_TOKEN_FILE` 或部署平台的 Secret 管理能力，不要把真实 Token 提交到 Compose 文件中。
 
 例如容器映射为 `4225:4224` 时，MCP 地址为 `http://localhost:4225/mcp`：
 

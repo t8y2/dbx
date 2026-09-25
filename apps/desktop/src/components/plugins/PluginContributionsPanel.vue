@@ -867,6 +867,10 @@ async function uninstallSelectedPlugin() {
     selectFirstProvider();
   } catch (cause) {
     toast(cause instanceof Error ? cause.message : String(cause), 5000);
+    // A failed uninstall can still have changed the store (the container is renamed out of the
+    // plugin store before its physical delete, for instance), so re-read the installed list
+    // instead of leaving the panel on state it may no longer describe.
+    await refreshAfterBatch();
   } finally {
     operating.value = false;
   }

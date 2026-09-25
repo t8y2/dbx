@@ -971,8 +971,14 @@ impl ConnectionConfig {
             || self.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("starrocks"))
     }
 
+    pub fn is_doris(&self) -> bool {
+        self.db_type == DatabaseType::Doris
+            || (self.db_type == DatabaseType::Mysql
+                && self.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("doris")))
+    }
+
     pub fn bare_mysql_supports_tls(&self) -> bool {
-        self.is_starrocks()
+        self.is_doris() || self.is_starrocks()
     }
 
     pub fn bare_mysql_uses_tls(&self) -> bool {
@@ -3456,6 +3462,72 @@ mod tests {
             config.connection_url(),
             "mysql://root:secret@10.1.2.3:2883/analytics?connect_timeout=10&sessionVariables=query_timeout=60&enable_cleartext_plugin=true"
         );
+    }
+
+    #[test]
+    fn doris_database_type_preserves_mysql_tls_params_when_enabled() {
+        let mut config = mysql_config("root", "secret", Some("analytics"));
+        config.db_type = DatabaseType::Doris;
+        config.ssl = true;
+        config.ca_cert_path = "/tmp/doris-ca.pem".to_string();
+        config.url_params = Some("verify_ca=true&verify_identity=true".to_string());
+
+        assert!(config.bare_mysql_uses_tls());
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/analytics?require_ssl=true&verify_ca=true&verify_identity=true&charset=utf8mb4&enable_cleartext_plugin=true"
+        );
+    }
+
+    #[test]
+    fn legacy_doris_profile_preserves_mysql_tls_params_when_enabled() {
+        let mut config = mysql_config("root", "secret", Some("analytics"));
+        config.driver_profile = Some("doris".to_string());
+        config.ssl = true;
+        config.ca_cert_path = "/tmp/doris-ca.pem".to_string();
+        config.url_params = Some("verify_ca=true&verify_identity=false".to_string());
+
+        assert!(config.bare_mysql_uses_tls());
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/analytics?require_ssl=true&verify_ca=true&verify_identity=false&charset=utf8mb4&enable_cleartext_plugin=true"
+        );
+    }
+
+    #[test]
+    fn doris_explicit_disabled_mode_remains_plaintext() {
+        let mut config = mysql_config("root", "secret", Some("analytics"));
+        config.db_type = DatabaseType::Doris;
+        config.ssl = true;
+        config.url_params = Some("ssl-mode=disabled&verify_ca=true&verify_identity=true".to_string());
+
+        assert!(!config.bare_mysql_uses_tls());
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/analytics?enable_cleartext_plugin=true");
+    }
+
+    #[test]
+    fn selectdb_profile_does_not_gain_bare_mysql_tls_support() {
+        let mut config = mysql_config("root", "secret", Some("analytics"));
+        config.driver_profile = Some("selectdb".to_string());
+        config.ssl = true;
+        config.url_params = Some("require_ssl=true&verify_ca=true&verify_identity=true".to_string());
+
+        assert!(!config.bare_mysql_supports_tls());
+        assert!(!config.bare_mysql_uses_tls());
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/analytics?enable_cleartext_plugin=true");
+    }
+
+    #[test]
+    fn doris_profile_on_unrelated_database_type_does_not_gain_bare_mysql_tls_support() {
+        let mut config = mysql_config("root", "secret", Some("analytics"));
+        config.db_type = DatabaseType::Postgres;
+        config.driver_profile = Some("doris".to_string());
+        config.ssl = true;
+        config.url_params = Some("require_ssl=true&verify_ca=true&verify_identity=true".to_string());
+
+        assert!(!config.is_doris());
+        assert!(!config.bare_mysql_supports_tls());
+        assert!(!config.bare_mysql_uses_tls());
     }
 
     #[test]

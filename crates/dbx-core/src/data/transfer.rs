@@ -2249,7 +2249,7 @@ fn postgres_index_column_sql(
 ) -> String {
     // The base key text: a real column is quoted as an identifier; an expression/functional
     // key part arrives as raw expression text (the per-column `pg_get_indexdef` omits the
-    // opclass — see `crates/dbx-drivers/src/db/postgres.rs`), so quoting the whole thing as
+    // opclass — see `crates/dbx-driver-postgres/src/postgres.rs`), so quoting the whole thing as
     // an identifier would turn it into a nonexistent column reference (#6295).
     let base = if is_expression { column.to_string() } else { quote_identifier(column, &DatabaseType::Postgres) };
     // The opclass is read separately from `pg_index.indclass` for every key position

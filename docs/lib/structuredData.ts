@@ -3,19 +3,19 @@ import type { DocsLang } from "./i18n";
 
 const localizedDescription = {
   en: DEFAULT_DESCRIPTION,
-  cn: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 90+ 种数据系统，提供 SQL 编辑、AI 助手与 Docker 自托管。",
+  cn: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 100+ 种数据系统，提供 SQL 编辑、AI 助手与 Docker 自托管。",
 } as const;
 
 const localizedFeatureList = {
   en: [
-    "Manage 90+ SQL, NoSQL, vector, time-series, embedded databases, and message queues",
+    "Manage 100+ SQL, NoSQL, vector, time-series, embedded databases, and message queues",
     "Desktop apps for Windows, macOS, and Linux",
     "Docker self-hosting for browser access",
     "AI-assisted SQL generation, explanation, optimization, and repair",
     "MCP Server integration for AI coding agents",
     "Schema browsing, schema diff, data editing, import, and export",
   ],
-  cn: ["统一管理 90+ 种 SQL、NoSQL、向量、时序、嵌入式数据库与消息队列", "提供 Windows、macOS 与 Linux 桌面端", "支持 Docker 自托管与浏览器访问", "支持 AI 生成、解释、优化与修复 SQL", "通过 MCP Server 连接 AI 编程智能体", "提供结构浏览、结构对比、数据编辑、导入与导出"],
+  cn: ["统一管理 100+ 种 SQL、NoSQL、向量、时序、嵌入式数据库与消息队列", "提供 Windows、macOS 与 Linux 桌面端", "支持 Docker 自托管与浏览器访问", "支持 AI 生成、解释、优化与修复 SQL", "通过 MCP Server 连接 AI 编程智能体", "提供结构浏览、结构对比、数据编辑、导入与导出"],
 } as const;
 
 export function buildSiteStructuredData() {

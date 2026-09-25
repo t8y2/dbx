@@ -10,9 +10,9 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use super::{
     InstalledPlugin, PluginBinaryMessage, PluginConnectionActionContribution, PluginConnectionCapability,
     PluginConnectionProviderContribution, PluginEvent, PluginFormFieldBinding, PluginFormFieldDefinition,
-    PluginFormFieldType, PluginRegistry, PluginRuntimeEnv, PluginSessionState, PluginSidecarSession,
-    PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
-    PLUGIN_CONNECTION_TEST_METHOD,
+    PluginFormFieldType, PluginPackageInstaller, PluginRegistry, PluginRuntimeEnv, PluginSessionState,
+    PluginSidecarSession, PluginTrustStore, PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD,
+    PLUGIN_CONNECTION_DISCONNECT_METHOD, PLUGIN_CONNECTION_TEST_METHOD,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -350,6 +350,25 @@ impl PluginHost {
         for (_, session) in sessions {
             session.shutdown().await;
         }
+    }
+
+    /// Runtime-aware uninstall. The lifecycle update lease is taken *before* the sidecar is stopped
+    /// and held until the store-level uninstall committed, so nothing can re-activate the plugin
+    /// and re-lock its container between the runtime stop and the filesystem rename. It also keeps
+    /// `PluginHost::sessions` and the plugin store consistent: the session is removed and the
+    /// container gone before the lease is released.
+    ///
+    /// Callers drain the plugin's connection pools and external driver pools first: the lease is
+    /// refused while the plugin still has an active connection or operation.
+    pub async fn uninstall_plugin(&self, plugin_id: &str) -> Result<(), String> {
+        let _update = self.inner.registry.lifecycle.begin_update(plugin_id)?;
+        self.stop(plugin_id).await;
+        let root_dir = self.inner.registry.root_dir().to_path_buf();
+        let app_version = self.inner.registry.app_version().to_string();
+        // Uninstall never validates a package signature, so it must not load the user trust store.
+        let installer = PluginPackageInstaller::with_trust_store(root_dir, app_version, PluginTrustStore::default());
+        let plugin_id = plugin_id.to_string();
+        tokio::task::spawn_blocking(move || installer.uninstall(&plugin_id)).await.map_err(|error| error.to_string())?
     }
 
     async fn running_session(&self, plugin_id: &str) -> Option<Arc<PluginSidecarSession>> {
@@ -835,6 +854,43 @@ mod tests {
     };
     use crate::models::connection::ConnectionConfig;
     use crate::plugins::PluginConnectionProviderContribution;
+
+    #[tokio::test]
+    async fn uninstall_plugin_holds_one_update_lease_across_the_runtime_and_the_store() {
+        use crate::plugins::installer::PLUGIN_TRASH_DIR;
+        use crate::plugins::{PluginHost, PluginRegistry};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugins");
+        let plugin_dir = root.join("sample.hello");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({ "id": "sample.hello", "name": "Sample", "version": "1.0.0", "protocol_version": 1 })
+                .to_string(),
+        )
+        .unwrap();
+        let registry = PluginRegistry::new_with_app_version(root.clone(), "0.5.67");
+        let lifecycle = registry.lifecycle();
+        let host = PluginHost::new(registry);
+
+        // An active operation refuses the uninstall before anything is stopped or deleted, so the
+        // caller still sees a complete, discoverable plugin.
+        let operation = lifecycle.begin_operation("sample.hello").unwrap();
+        let refused = host.uninstall_plugin("sample.hello").await.unwrap_err();
+        assert!(refused.contains("active operations"), "{refused}");
+        assert!(plugin_dir.join("manifest.json").is_file(), "a refused uninstall must not touch the container");
+        drop(operation);
+
+        host.uninstall_plugin("sample.hello").await.unwrap();
+        assert!(!plugin_dir.exists());
+        let tombstones = std::fs::read_dir(root.join(PLUGIN_TRASH_DIR)).map(|entries| entries.count()).unwrap_or(0);
+        assert_eq!(tombstones, 0, "a successful uninstall sweeps its tombstone");
+
+        // The lease is released again, and it was scoped to just this plugin.
+        assert!(lifecycle.begin_update("sample.hello").is_ok());
+        assert!(lifecycle.begin_update("sample.other").is_ok());
+    }
 
     #[tokio::test]
     async fn ui_only_connections_hold_update_guards_but_saved_configs_do_not() {

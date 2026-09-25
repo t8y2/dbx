@@ -1,0 +1,24 @@
+[package]
+name = "dbx-driver-sqlserver"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+dbx-driver-support = { path = "../dbx-driver-support" }
+dbx-sql-core = { path = "../dbx-sql-core" }
+dbx-sql-data = { path = "../dbx-sql-data" }
+dbx-types = { path = "../dbx-types", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+sqlparser = { version = "0.62.0", features = ["visitor"] }
+tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "sql-browser-tokio"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }

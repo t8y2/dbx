@@ -22,7 +22,7 @@ class EwkbWktDecoderTest {
 
     // ──────────────────────────────────────────────────────────────────────
     // Cross-checked against the Rust ewkb_to_wkt tests in
-    // crates/dbx-drivers/src/db/postgres.rs (same hex inputs, same expected WKT).
+    // crates/dbx-driver-support/src/wkb.rs (same hex inputs, same expected WKT).
     // ──────────────────────────────────────────────────────────────────────
 
     @Test

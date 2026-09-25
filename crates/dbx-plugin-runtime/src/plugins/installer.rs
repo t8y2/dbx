@@ -25,6 +25,10 @@ const MAX_UNCOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const INSTALL_LOCK_FILE: &str = ".install.lock";
+/// Where a logically uninstalled plugin container waits for its physical delete. The directory is
+/// no plugin container of its own (no manifest, no activations), so installed plugin discovery
+/// skips it, and `validate_plugin_id` rejects a leading dot, so no plugin id can collide with it.
+pub(super) const PLUGIN_TRASH_DIR: &str = ".trash";
 const VERSIONS_DIR: &str = "versions";
 const ACTIVATIONS_DIR: &str = "activations";
 const TRUST_DIR: &str = ".trust";
@@ -409,6 +413,10 @@ impl PluginPackageInstaller {
         let lock = open_install_lock(&self.root_dir)?;
         lock.lock_exclusive().map_err(|error| format!("Failed to lock plugin store: {error}"))?;
         let result = self.install_bytes_locked(package, policy, expectation, source, allow_source_change);
+        if result.is_ok() {
+            // Opportunistic cleanup of tombstones an earlier uninstall could not delete yet.
+            self.sweep_plugin_trash(&TRANSIENT_LOCK_RETRY_DELAYS, |path: &Path| std::fs::remove_dir_all(path));
+        }
         let _ = FileExt::unlock(&lock);
         result
     }
@@ -423,18 +431,79 @@ impl PluginPackageInstaller {
         result
     }
 
+    /// Store-level logical uninstall: the official `plugins/<plugin_id>` container is renamed into
+    /// `.trash` (that rename *is* the commit) and only then physically deleted. `remove_dir_all` is
+    /// not atomic, so deleting the container in place could leave a partially deleted tree behind;
+    /// a failed rename instead leaves the container exactly as it was and reports a clean failure.
     pub fn uninstall(&self, plugin_id: &str) -> Result<(), String> {
+        self.uninstall_with_ops(
+            plugin_id,
+            &TRANSIENT_LOCK_RETRY_DELAYS,
+            |src: &Path, dst: &Path| std::fs::rename(src, dst),
+            |path: &Path| std::fs::remove_dir_all(path),
+        )
+    }
+
+    /// The uninstall body, parameterised for tests: `delays` is the transient Windows lock retry
+    /// window, and the two filesystem primitives are injected so error 5 / 32 failures can be
+    /// reproduced deterministically on every platform instead of depending on a real scanner.
+    fn uninstall_with_ops(
+        &self,
+        plugin_id: &str,
+        delays: &[Duration],
+        mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+        mut remove_dir_all: impl FnMut(&Path) -> std::io::Result<()>,
+    ) -> Result<(), String> {
         validate_plugin_id(plugin_id)?;
         let lock = open_install_lock(&self.root_dir)?;
         lock.lock_exclusive().map_err(|error| format!("Failed to lock plugin store: {error}"))?;
-        let plugin_dir = self.root_dir.join(plugin_id);
-        let result = match std::fs::remove_dir_all(&plugin_dir) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("Failed to uninstall plugin '{plugin_id}': {error}")),
-        };
+        let result = (|| {
+            let plugin_dir = self.root_dir.join(plugin_id);
+            if plugin_dir.exists() {
+                let trash_dir = self.root_dir.join(PLUGIN_TRASH_DIR);
+                std::fs::create_dir_all(&trash_dir)
+                    .map_err(|error| format!("Failed to prepare plugin trash '{}': {error}", trash_dir.display()))?;
+                let tombstone = unique_plugin_tombstone(&trash_dir, plugin_id);
+                // From here on the plugin is uninstalled: the container is out of the store root
+                // and discovery does not see it any more. An antivirus scanner holding a freshly
+                // extracted binary may fail this rename with error 5 / 32, hence the retry, and a
+                // rename that keeps failing leaves the container untouched for a clean failure.
+                retry_transient_lock(delays, || rename(&plugin_dir, &tombstone))
+                    .map_err(|error| format!("Failed to uninstall plugin '{plugin_id}': {error}"))?;
+            }
+            self.sweep_plugin_trash(delays, &mut remove_dir_all);
+            Ok(())
+        })();
         let _ = FileExt::unlock(&lock);
         result
+    }
+
+    /// Best-effort physical delete of every `.trash` tombstone: the one the caller just committed
+    /// plus leftovers from an earlier uninstall whose delete failed. Callers hold `.install.lock`,
+    /// every entry in there is already logically uninstalled, and a tombstone that still cannot be
+    /// removed only logs a warning — the plugin is uninstalled either way, and a later install or
+    /// uninstall sweeps it again.
+    fn sweep_plugin_trash(&self, delays: &[Duration], mut remove_dir_all: impl FnMut(&Path) -> std::io::Result<()>) {
+        let trash_dir = self.root_dir.join(PLUGIN_TRASH_DIR);
+        let entries = match std::fs::read_dir(&trash_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                log::warn!("Failed to scan plugin trash '{}': {error}", trash_dir.display());
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let tombstone = entry.path();
+            let removed = retry_transient_lock(delays, || match remove_dir_all(&tombstone) {
+                // Already gone (or not a directory): nothing left to clean up.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            });
+            if let Err(error) = removed {
+                log::warn!("Failed to remove plugin tombstone '{}': {error}", tombstone.display());
+            }
+        }
     }
 
     /// Recorded provenance of one container's active installation, if any.
@@ -1088,6 +1157,19 @@ fn is_windows_lock_error(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(5 | 32))
 }
 
+/// Tombstone path for one logical uninstall: `.trash/<plugin id>`, or `.trash/<plugin id>-<n>`, the
+/// same suffix convention `install_bytes_locked` uses for replaced versions, when an earlier
+/// tombstone of that plugin is still waiting for its physical delete.
+fn unique_plugin_tombstone(trash_dir: &Path, plugin_id: &str) -> PathBuf {
+    let mut candidate = trash_dir.join(plugin_id);
+    let mut suffix = 0u32;
+    while candidate.exists() {
+        suffix = suffix.saturating_add(1);
+        candidate = trash_dir.join(format!("{plugin_id}-{suffix}"));
+    }
+    candidate
+}
+
 fn make_backend_executable(path: &Option<PathBuf>) -> Result<(), String> {
     #[cfg(unix)]
     if let Some(path) = path {
@@ -1198,7 +1280,7 @@ fn sync_directory(_path: &Path) -> Result<(), String> {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{Cursor, Write};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use base64::Engine;
@@ -1208,8 +1290,8 @@ mod tests {
     use super::{
         is_activation_record_file, read_install_identity, retry_transient_lock, sha256_hex,
         validate_package_expectation, PluginInstallPolicy, PluginPackageExpectation, PluginPackageInstaller,
-        PluginSignatureStatus, PluginTrustStore, ACTIVATIONS_DIR, PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE,
-        VERSIONS_DIR,
+        PluginSignatureStatus, PluginTrustStore, ACTIVATIONS_DIR, INSTALL_LOCK_FILE, PLUGIN_CHECKSUMS_FILE,
+        PLUGIN_SIGNATURE_FILE, PLUGIN_TRASH_DIR, VERSIONS_DIR,
     };
     use crate::plugins::{PluginManifest, PluginRegistry};
 
@@ -2092,5 +2174,169 @@ mod tests {
         });
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(result.unwrap_err().raw_os_error(), Some(5));
+    }
+
+    /// Sorted `.trash` entries, so tombstone assertions are deterministic.
+    fn trash_entries(root: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(root.join(PLUGIN_TRASH_DIR))
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Installs `sample.hello` into a store rooted at `<temp>/plugins`, so `<temp>/plugin-data`
+    /// sits next to it exactly like the real registry layout does.
+    fn uninstall_fixture(temp: &tempfile::TempDir, version: &str) -> (PluginPackageInstaller, PathBuf) {
+        let root = temp.path().join("plugins");
+        let installer = PluginPackageInstaller::with_trust_store(root.clone(), "0.5.67", PluginTrustStore::default());
+        installer.install_bytes(&package(version, None, false), PluginInstallPolicy::LocalDevelopment).unwrap();
+        (installer, root)
+    }
+
+    #[test]
+    fn uninstall_commits_logically_and_sweeps_its_own_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let (installer, root) = uninstall_fixture(&temp, "1.0.0");
+        let plugin_data = temp.path().join("plugin-data").join("sample.hello");
+        std::fs::create_dir_all(&plugin_data).unwrap();
+        std::fs::write(plugin_data.join("preferences.json"), "{}").unwrap();
+        let container = root.join("sample.hello");
+        assert!(container.join(VERSIONS_DIR).join("1.0.0").join("manifest.json").is_file());
+
+        installer.uninstall("sample.hello").unwrap();
+
+        assert!(!container.exists(), "the official container must be gone");
+        assert!(trash_entries(&root).is_empty(), "a successful uninstall sweeps its own tombstone");
+        assert!(root.join(INSTALL_LOCK_FILE).is_file(), "the store lock file stays in place");
+        assert!(plugin_data.join("preferences.json").is_file(), "plugin data survives an uninstall");
+        let registry = PluginRegistry::new_with_app_version(root, "0.5.67");
+        assert!(registry.list_installed().unwrap().is_empty());
+        assert!(registry.find_plugin("sample.hello").unwrap().is_none());
+
+        // Uninstalling a plugin that is already gone stays idempotent.
+        installer.uninstall("sample.hello").unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn uninstall_retries_transient_windows_locks_on_the_commit_rename() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp = tempfile::tempdir().unwrap();
+        let (installer, root) = uninstall_fixture(&temp, "1.0.0");
+        let attempts = AtomicUsize::new(0);
+        installer
+            .uninstall_with_ops(
+                "sample.hello",
+                &[Duration::ZERO, Duration::ZERO, Duration::ZERO],
+                |src: &Path, dst: &Path| match attempts.fetch_add(1, Ordering::SeqCst) {
+                    0 => Err(std::io::Error::from_raw_os_error(5)),
+                    1 => Err(std::io::Error::from_raw_os_error(32)),
+                    _ => std::fs::rename(src, dst),
+                },
+                |path: &Path| std::fs::remove_dir_all(path),
+            )
+            .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "two lock errors then one successful rename");
+        assert!(!root.join("sample.hello").exists());
+        assert!(trash_entries(&root).is_empty());
+    }
+
+    #[test]
+    fn uninstall_reports_a_clean_failure_and_keeps_the_container_when_the_rename_keeps_failing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp = tempfile::tempdir().unwrap();
+        let (installer, root) = uninstall_fixture(&temp, "1.0.0");
+        let container = root.join("sample.hello");
+        let attempts = AtomicUsize::new(0);
+        let error = installer
+            .uninstall_with_ops(
+                "sample.hello",
+                &[Duration::ZERO, Duration::ZERO, Duration::ZERO],
+                |_: &Path, _: &Path| {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err(std::io::Error::from_raw_os_error(32))
+                },
+                |path: &Path| std::fs::remove_dir_all(path),
+            )
+            .unwrap_err();
+
+        assert!(error.contains("Failed to uninstall plugin 'sample.hello'"), "{error}");
+        assert_eq!(attempts.load(Ordering::SeqCst), if cfg!(windows) { 4 } else { 1 });
+        // A failed logical commit must leave the container exactly as it was: the plugin has to
+        // stay installed, discoverable, and loadable after a restart.
+        assert!(container.join(VERSIONS_DIR).join("1.0.0").join("manifest.json").is_file());
+        assert_eq!(activation_record_count(&container), 1);
+        assert!(trash_entries(&root).is_empty(), "a failed commit must not leave a tombstone behind");
+        let registry = PluginRegistry::new_with_app_version(root, "0.5.67");
+        assert_eq!(registry.list_installed().unwrap().len(), 1);
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn uninstall_stays_a_logical_success_when_the_tombstone_cannot_be_deleted() {
+        let temp = tempfile::tempdir().unwrap();
+        let (installer, root) = uninstall_fixture(&temp, "1.0.0");
+
+        installer
+            .uninstall_with_ops(
+                "sample.hello",
+                &[Duration::ZERO, Duration::ZERO, Duration::ZERO],
+                |src: &Path, dst: &Path| std::fs::rename(src, dst),
+                |_: &Path| Err(std::io::Error::from_raw_os_error(32)),
+            )
+            .unwrap();
+
+        assert!(!root.join("sample.hello").exists());
+        assert_eq!(trash_entries(&root), vec!["sample.hello".to_string()]);
+        let registry = PluginRegistry::new_with_app_version(root, "0.5.67");
+        assert!(registry.list_installed().unwrap().is_empty());
+        assert!(registry.find_plugin("sample.hello").unwrap().is_none());
+    }
+
+    #[test]
+    fn install_and_uninstall_sweep_tombstones_left_by_an_earlier_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let (installer, root) = uninstall_fixture(&temp, "1.0.0");
+        let stale = root.join(PLUGIN_TRASH_DIR).join("sample.hello");
+        std::fs::create_dir_all(stale.join(VERSIONS_DIR).join("1.0.0")).unwrap();
+        std::fs::write(stale.join(VERSIONS_DIR).join("1.0.0").join("manifest.json"), "{}").unwrap();
+
+        installer.install_bytes(&package("1.1.0", None, false), PluginInstallPolicy::LocalDevelopment).unwrap();
+        assert!(!stale.exists(), "an install sweeps leftovers of an earlier uninstall");
+
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("leftover.bin"), b"still locked").unwrap();
+        installer.uninstall("sample.hello").unwrap();
+        assert!(!root.join("sample.hello").exists());
+        assert!(!stale.exists(), "an uninstall sweeps old tombstones as well");
+    }
+
+    #[test]
+    fn tombstone_containers_are_never_discovered_as_installed_plugins() {
+        let temp = tempfile::tempdir().unwrap();
+        let (installer, root) = uninstall_fixture(&temp, "1.0.0");
+        let tombstone = root.join(PLUGIN_TRASH_DIR).join("sample.hello");
+        std::fs::create_dir_all(root.join(PLUGIN_TRASH_DIR)).unwrap();
+        std::fs::rename(root.join("sample.hello"), &tombstone).unwrap();
+        // The tombstone still holds a complete container: versions/, activations/, manifest.json.
+        assert!(tombstone.join(VERSIONS_DIR).join("1.0.0").join("manifest.json").is_file());
+        assert_eq!(activation_record_count(&tombstone), 1);
+
+        let registry = PluginRegistry::new_with_app_version(root.clone(), "0.5.67");
+        assert!(registry.list_installed().unwrap().is_empty());
+        assert!(registry.find_plugin("sample.hello").unwrap().is_none());
+
+        // The store stays usable: a reinstall does not collide with the pending tombstone.
+        installer.install_bytes(&package("1.0.0", None, false), PluginInstallPolicy::LocalDevelopment).unwrap();
+        assert_eq!(registry.list_installed().unwrap().len(), 1);
     }
 }

@@ -876,3 +876,37 @@ describe("PluginContributionsPanel marketplace card layout", () => {
     expect(versionBadge!.classList.contains("shrink-0"), "version badge should be shrink-0").toBe(true);
   });
 });
+
+describe("PluginContributionsPanel single uninstall outcomes", () => {
+  it("re-reads the installed list and notifies listeners when a single uninstall fails", async () => {
+    const changed = vi.fn();
+    window.addEventListener("dbx:plugins-changed", changed);
+    const failure = "The process cannot access the file because it is being used by another process. (os error 32)";
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error(failure));
+    // The backend kept the plugin installed (the uninstall never committed), and the panel has to
+    // show exactly that instead of the state it guessed before the call.
+    mocks.listPlugins.mockResolvedValueOnce([installed("a"), installed("b", "9.9.9")]);
+
+    try {
+      await state.uninstallSelectedPlugin();
+    } finally {
+      window.removeEventListener("dbx:plugins-changed", changed);
+    }
+
+    expect(mocks.toast).toHaveBeenLastCalledWith(failure, 5000);
+    expect(mocks.listPlugins).toHaveBeenCalledOnce();
+    expect(state.installedPlugins.map((plugin) => `${plugin.manifest.id}@${plugin.manifest.version}`)).toEqual(["a@1.0.0", "b@9.9.9"]);
+    expect(changed).toHaveBeenCalledOnce();
+    expect(state.error).toBe("");
+  });
+
+  it("keeps the uninstall failure visible when the follow-up refresh also fails", async () => {
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error("denied"));
+    mocks.listPlugins.mockRejectedValueOnce(new Error("refresh offline"));
+
+    await state.uninstallSelectedPlugin();
+
+    expect(mocks.toast).toHaveBeenLastCalledWith("denied", 5000);
+    expect(state.error).toBe('pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}');
+  });
+});

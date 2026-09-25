@@ -61,14 +61,15 @@ test("web startup uses the guarded initializer behind the existing authenticatio
   assert.ok(initAppStart >= 0 && initAppEnd > initAppStart);
 
   const initAppSource = appSource.slice(initAppStart, initAppEnd);
+  const savedSqlInitialization = initAppSource.indexOf("savedSqlStore.initFromStorage()");
   const webInitialization = initAppSource.indexOf("await initializeOpenTabs({");
   const optionalInitialization = initAppSource.indexOf("initializeOptionalState: () => settingsStore.initAiConfigs()", webInitialization);
   const requiredRestoration = initAppSource.indexOf("restoreOpenTabs,", optionalInitialization);
-  const savedSqlInitialization = initAppSource.indexOf("savedSqlStore.initFromStorage()", requiredRestoration);
+  assert.ok(savedSqlInitialization >= 0);
   assert.ok(webInitialization >= 0);
+  assert.ok(savedSqlInitialization < webInitialization);
   assert.ok(optionalInitialization > webInitialization);
   assert.ok(requiredRestoration > optionalInitialization);
-  assert.ok(savedSqlInitialization > requiredRestoration);
   assert.equal(initAppSource.includes("if (!desktopOpenTabsRestorationBarrier) await settingsStore.initAiConfigs()"), false);
 
   const mountedStart = appSource.indexOf("onMounted(async () =>");

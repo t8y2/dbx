@@ -3,6 +3,9 @@ use std::sync::Arc;
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use axum::extract::State;
+use axum::http::header;
+use axum::http::HeaderMap;
+use axum::response::IntoResponse;
 use axum::Json;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dbx_core::storage::{McpGlobalPolicy, McpGlobalPolicyState};
@@ -12,6 +15,7 @@ use sha2::Sha256;
 
 use crate::error::AppError;
 use crate::state::WebState;
+use crate::web_mcp::{UpdateWebMcpRequest, WebMcpHttpStatus};
 
 const CONFIG_PBKDF2_ITERATIONS: u32 = 100_000;
 
@@ -65,41 +69,53 @@ pub async fn save_mcp_global_policy(
     Ok(Json(()))
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WebMcpHttpStatus {
-    pub enabled: bool,
-    pub endpoint_path: String,
-    pub token_source: Option<&'static str>,
-    pub allowed_hosts: Vec<String>,
-    pub allowed_origins: Vec<String>,
-}
-
-pub async fn load_web_mcp_http_status(State(state): State<Arc<WebState>>) -> Json<WebMcpHttpStatus> {
-    let token_source = match (std::env::var_os("DBX_WEB_MCP_TOKEN"), std::env::var_os("DBX_WEB_MCP_TOKEN_FILE")) {
-        (Some(_), None) => Some("environment"),
-        (None, Some(_)) => Some("file"),
-        _ => None,
-    };
+pub async fn load_web_mcp_http_status(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let endpoint_path =
         if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
-    Json(WebMcpHttpStatus {
-        enabled: token_source.is_some(),
-        endpoint_path,
-        token_source,
-        allowed_hosts: comma_separated_env("DBX_WEB_MCP_ALLOWED_HOSTS"),
-        allowed_origins: comma_separated_env("DBX_WEB_MCP_ALLOWED_ORIGINS"),
-    })
+    let management_available =
+        !state.password_disabled && state.password_hash.read().await.is_some() && !state.demo_mode;
+    let mut status = state.web_mcp.status(endpoint_path, management_available);
+    if state.demo_mode {
+        status.enabled = false;
+    }
+    web_mcp_status_response(status)
 }
 
-fn comma_separated_env(name: &str) -> Vec<String> {
-    std::env::var(name)
-        .ok()
-        .into_iter()
-        .flat_map(|value| {
-            value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>()
-        })
-        .collect()
+pub async fn save_web_mcp_http_settings(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateWebMcpRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    ensure_web_mcp_management_allowed(&state, &headers).await?;
+    state.web_mcp.update(&state.app.storage, request).await.map_err(AppError::bad_request)?;
+    let endpoint_path =
+        if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
+    Ok(web_mcp_status_response(state.web_mcp.status(endpoint_path, true)))
+}
+
+pub async fn rotate_web_mcp_token(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    ensure_web_mcp_management_allowed(&state, &headers).await?;
+    state.web_mcp.rotate(&state.app.storage).await.map_err(AppError::bad_request)?;
+    let endpoint_path =
+        if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
+    Ok(web_mcp_status_response(state.web_mcp.status(endpoint_path, true)))
+}
+
+fn web_mcp_status_response(status: WebMcpHttpStatus) -> impl IntoResponse {
+    ([(header::CACHE_CONTROL, "no-store")], Json(status))
+}
+
+async fn ensure_web_mcp_management_allowed(state: &WebState, headers: &HeaderMap) -> Result<(), AppError> {
+    if state.demo_mode || state.password_disabled || state.password_hash.read().await.is_none() {
+        return Err(AppError::forbidden("Web MCP management requires password-protected DBX Web"));
+    }
+    if headers.get("x-dbx-mcp-settings").and_then(|value| value.to_str().ok()) != Some("1") {
+        return Err(AppError::forbidden("Web MCP management requires a same-origin settings request"));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]

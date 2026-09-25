@@ -48,6 +48,7 @@ pub struct WebState {
     pub export_files: RwLock<HashMap<String, WebExportFile>>,
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
     pub migration_ready: Arc<AtomicBool>,
+    pub web_mcp: Arc<crate::web_mcp::WebMcpRuntime>,
 }
 
 impl WebState {
@@ -76,6 +77,7 @@ impl WebState {
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(AtomicBool::new(true)),
+            web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
         }
     }
 }

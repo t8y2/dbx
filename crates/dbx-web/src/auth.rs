@@ -137,6 +137,11 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 
     // Update in-memory state
     *state.password_hash.write().await = Some(hash);
+    if state.migration_ready.load(std::sync::atomic::Ordering::Acquire) {
+        if let Err(error) = state.web_mcp.reload(&state.app.storage, true).await {
+            log::error!("Web MCP remained disabled after password setup: {error}");
+        }
+    }
 
     // Auto-login: create session
     let token = uuid::Uuid::new_v4().to_string();

@@ -791,7 +791,10 @@ impl LocalBackend {
                 Ok(tools) => tools,
                 // A plugin that predates the optional `mcp/tools` bridge answers -32601; skip it
                 // instead of failing discovery for every other installed plugin.
-                Err(err) if plugin_lacks_mcp_surface(&err) => continue,
+                Err(err) if plugin_lacks_mcp_surface(&err) => {
+                    log::debug!("[mcp] plugin {} exposes no MCP tool surface: {}", plugin.manifest.id, err);
+                    continue;
+                }
                 Err(err) => return Err(err),
             };
             let tool_list = tools

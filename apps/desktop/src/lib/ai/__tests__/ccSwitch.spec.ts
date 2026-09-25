@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCcSwitchPluginAvailable } from "@/lib/ai/ccSwitch";
+import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable } from "@/lib/ai/ccSwitch";
 import type { InstalledPlugin } from "@/types/database";
 
 function plugin(overrides: Partial<InstalledPlugin> = {}): InstalledPlugin {
@@ -22,5 +22,12 @@ describe("isCcSwitchPluginAvailable", () => {
     expect(isCcSwitchPluginAvailable([plugin({ manifest: { id: "other-plugin" } })])).toBe(false);
     expect(isCcSwitchPluginAvailable([plugin({ compatibility: { compatible: false } })])).toBe(false);
     expect(isCcSwitchPluginAvailable([plugin({ manifest: { capabilities: [] } })])).toBe(false);
+  });
+
+  it("distinguishes missing, incompatible, and available plugins", () => {
+    expect(getCcSwitchPluginStatus([])).toBe("not-installed");
+    expect(getCcSwitchPluginStatus([plugin({ compatibility: { compatible: false } })])).toBe("incompatible");
+    expect(getCcSwitchPluginStatus([plugin({ manifest: { id: "cc-switch", capabilities: [] } })])).toBe("incompatible");
+    expect(getCcSwitchPluginStatus([plugin()])).toBe("available");
   });
 });

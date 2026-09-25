@@ -286,7 +286,7 @@ import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
 import type { InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
-import { isCcSwitchPluginAvailable } from "@/lib/ai/ccSwitch";
+import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable } from "@/lib/ai/ccSwitch";
 import { uuid } from "@/lib/common/utils";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
@@ -5752,7 +5752,12 @@ const aiDeleteConfigId = ref<string | null>(null);
 const aiCcSwitchImporting = ref(false);
 const aiCcSwitchPlugins = ref<InstalledPlugin[]>([]);
 const aiCcSwitchPluginLoading = ref(false);
+const aiCcSwitchPluginStatus = computed(() => getCcSwitchPluginStatus(aiCcSwitchPlugins.value));
 const aiCcSwitchPluginAvailable = computed(() => isCcSwitchPluginAvailable(aiCcSwitchPlugins.value));
+const aiCcSwitchPluginStatusText = computed(() => {
+  if (aiCcSwitchPluginLoading.value) return "ai.ccSwitchPluginChecking";
+  return aiCcSwitchPluginStatus.value === "incompatible" ? "ai.ccSwitchPluginIncompatible" : "ai.ccSwitchPluginNotInstalledStatus";
+});
 
 const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
@@ -10625,7 +10630,7 @@ LIMIT 100;</pre
                   <PackageSearch class="mt-0.5 h-4 w-4 shrink-0 text-primary" />
                   <div class="min-w-0 space-y-1">
                     <p class="text-sm font-medium">{{ t("ai.ccSwitchProvider") }}</p>
-                    <p class="text-xs leading-relaxed text-muted-foreground">{{ t("ai.ccSwitchPluginNotInstalledStatus") }}</p>
+                    <p class="text-xs leading-relaxed text-muted-foreground">{{ t(aiCcSwitchPluginStatusText) }}</p>
                   </div>
                 </div>
                 <Button type="button" size="sm" variant="outline" class="shrink-0" @click="emit('open-cc-switch-plugin-center')">

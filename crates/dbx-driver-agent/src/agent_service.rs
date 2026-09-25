@@ -757,13 +757,16 @@ pub async fn install_agent_driver(
 /// Ensure both Linux worker binaries are available for remote SQLite over SSH.
 ///
 /// Unlike a regular native Agent, this driver is selected by the remote SSH
-/// host's architecture rather than by the desktop application's platform.
+/// host's architecture rather than by the desktop application's platform. The
+/// online installer always fetches every platform, so this readiness check asks
+/// for all of them; an offline import may legitimately provide just one (the
+/// remote host's), which [`AgentManager::driver_native_installed`] accepts.
 pub async fn ensure_sqlite_worker_driver_ready(am: &AgentManager) -> Result<(), String> {
-    if am.driver_native_installed(SQLITE_WORKER_DRIVER_KEY) {
+    if am.sqlite_worker_all_platforms_installed() {
         return Ok(());
     }
     install_agent_driver(am, SQLITE_WORKER_DRIVER_KEY, |_| {}).await?;
-    if am.driver_native_installed(SQLITE_WORKER_DRIVER_KEY) {
+    if am.sqlite_worker_all_platforms_installed() {
         Ok(())
     } else {
         Err("SQLite SSH worker installation completed without both Linux binaries".to_string())
@@ -2791,7 +2794,7 @@ pub struct OfflineImportPlan {
 }
 
 type OfflineJreEntry = (String, String, Option<ArtifactFormat>);
-type OfflineDriverEntry = (String, String, bool);
+type OfflineDriverEntry = (String, String, bool, Option<String>);
 type OfflineArchiveEntries = (Vec<OfflineJreEntry>, Vec<OfflineDriverEntry>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3003,7 +3006,12 @@ pub fn inspect_offline_zip(zip_path: &Path) -> Result<OfflineImportPlan, String>
     let (jre_entries, driver_entries) = collect_offline_entries(&mut archive, &registry)?;
     validate_offline_zip_preflight(&mut archive, &registry, &jre_entries, &driver_entries)?;
     Ok(OfflineImportPlan {
-        driver_keys: driver_entries.into_iter().map(|(db_type, _, _)| db_type).collect(),
+        driver_keys: driver_entries
+            .into_iter()
+            .map(|(db_type, _, _, _)| db_type)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         includes_jre: !jre_entries.is_empty(),
     })
 }
@@ -3118,19 +3126,33 @@ pub async fn import_offline_zip(
         }
     }
 
-    for (db_type, entry_name, is_native) in &driver_entries {
+    // Decide up front which drivers are already up to date. A single driver can
+    // contribute several entries (the SQLite worker ships one binary per remote
+    // platform), and the check must not skip the second artifact just because
+    // installing the first one updated the recorded version.
+    let mut up_to_date_drivers = std::collections::BTreeSet::new();
+    for (db_type, _, _, _) in &driver_entries {
+        if up_to_date_drivers.contains(db_type) {
+            continue;
+        }
+        let Some(remote_driver) = registry.drivers.get(db_type) else { continue };
+        let Some(installed) = local_state.installed_drivers.get(db_type) else { continue };
+        if installed.version != "0.1.0-local"
+            && installed.version != "local"
+            && !dbx_platform::version::is_newer_version(&remote_driver.version, &installed.version)
+        {
+            up_to_date_drivers.insert(db_type.clone());
+        }
+    }
+
+    for (db_type, entry_name, is_native, worker_platform) in &driver_entries {
         current += 1;
 
-        if let Some(remote_driver) = registry.drivers.get(db_type) {
-            if let Some(installed) = local_state.installed_drivers.get(db_type) {
-                if installed.version != "0.1.0-local"
-                    && installed.version != "local"
-                    && !dbx_platform::version::is_newer_version(&remote_driver.version, &installed.version)
-                {
-                    result.drivers_skipped.push(db_type.clone());
-                    continue;
-                }
+        if up_to_date_drivers.contains(db_type) {
+            if !result.drivers_skipped.contains(db_type) {
+                result.drivers_skipped.push(db_type.clone());
             }
+            continue;
         }
 
         progress(OfflineImportProgress {
@@ -3141,7 +3163,7 @@ pub async fn import_offline_zip(
             db_type: Some(db_type.clone()),
         });
 
-        let driver_path = if *is_native { am.driver_native_path(db_type) } else { am.driver_jar_path(db_type) };
+        let driver_path = offline_driver_target_path(am, db_type, *is_native, worker_platform.as_deref());
         // Same per-item isolation as the JRE loop: one unreadable or blocked
         // driver must not stop the remaining drivers from installing.
         let staged = (|| -> Result<PathBuf, String> {
@@ -3166,7 +3188,13 @@ pub async fn import_offline_zip(
             }
             drop(out);
             if *is_native {
-                if let Err(error) = validate_native_agent_binary(&staging_path) {
+                // The SQLite SSH worker carries the remote host's architecture, so
+                // validate against the packaged platform rather than this desktop.
+                let native_platform = match worker_platform {
+                    Some(packaged) => packaged.as_str(),
+                    None => AgentManager::current_platform(),
+                };
+                if let Err(error) = validate_native_agent_binary_for_platform(&staging_path, native_platform) {
                     std::fs::remove_file(&staging_path).ok();
                     return Err(error);
                 }
@@ -3249,7 +3277,10 @@ fn collect_offline_entries(
 ) -> Result<OfflineArchiveEntries, String> {
     let platform = AgentManager::current_platform();
     let mut jres = std::collections::BTreeMap::<String, (String, Option<ArtifactFormat>)>::new();
-    let mut drivers = std::collections::BTreeMap::<String, (String, bool)>::new();
+    // One driver can contribute more than one entry: the SQLite SSH worker ships
+    // a binary per remote Linux platform, and a bundle may carry both a native
+    // artifact and a Java fallback for the same key.
+    let mut drivers = std::collections::BTreeMap::<String, Vec<(String, bool, Option<String>)>>::new();
 
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|e| format!("Failed to inspect ZIP entry: {e}"))?;
@@ -3280,21 +3311,77 @@ fn collect_offline_entries(
                 .or_else(|| extract_db_type_from_filename(&name))
                 .ok_or_else(|| format!("Unable to identify offline driver: {name}"))?;
             validate_offline_driver_key(&db_type)?;
-            drivers.entry(db_type).or_insert((name, false));
+            drivers.entry(db_type).or_default().push((name, false, None));
         } else if name.starts_with("drivers/") {
-            if let Some(db_type) = db_type_for_native_offline_entry(registry, platform, &name) {
+            if let Some((db_type, worker_platform)) = native_offline_entry_target(registry, platform, &name) {
                 validate_offline_driver_key(&db_type)?;
-                // Prefer the native artifact when a package contains both the
-                // platform executable and a Java fallback for the same driver.
-                drivers.insert(db_type, (name, true));
+                drivers.entry(db_type).or_default().push((name, true, worker_platform));
             }
         }
     }
 
-    Ok((
-        jres.into_iter().map(|(jre_key, (name, format))| (jre_key, name, format)).collect(),
-        drivers.into_iter().map(|(db_type, (name, is_native))| (db_type, name, is_native)).collect(),
-    ))
+    let driver_entries = drivers
+        .into_iter()
+        .flat_map(|(db_type, mut entries)| {
+            // Prefer native artifacts when a package contains both the platform
+            // executable and a Java fallback for the same driver.
+            if entries.iter().any(|(_, is_native, _)| *is_native) {
+                entries.retain(|(_, is_native, _)| *is_native);
+            } else {
+                entries.truncate(1);
+            }
+            entries
+                .into_iter()
+                .map(move |(name, is_native, worker_platform)| (db_type.clone(), name, is_native, worker_platform))
+        })
+        .collect();
+
+    Ok((jres.into_iter().map(|(jre_key, (name, format))| (jre_key, name, format)).collect(), driver_entries))
+}
+
+/// Where an offline native artifact must be installed.
+///
+/// Everything except the SQLite SSH worker installs under the desktop platform
+/// path; the worker is chosen by the remote SSH host's architecture, so its
+/// Linux packages are addressed by the platform baked into their filename.
+fn offline_driver_target_path(
+    am: &AgentManager,
+    db_type: &str,
+    is_native: bool,
+    worker_platform: Option<&str>,
+) -> PathBuf {
+    match (is_native, worker_platform) {
+        (true, Some(platform)) => am.driver_native_platform_path(db_type, platform),
+        (true, None) => am.driver_native_path(db_type),
+        (false, _) => am.driver_jar_path(db_type),
+    }
+}
+
+/// Resolve a `drivers/` native entry to its driver key and, for the SQLite SSH
+/// worker, to the remote Linux platform the binary belongs to.
+fn native_offline_entry_target(
+    registry: &AgentRegistry,
+    platform: &str,
+    name: &str,
+) -> Option<(String, Option<String>)> {
+    let filename = name.rsplit('/').next()?;
+    // The SQLite SSH worker follows the remote SSH host, so resolve it against
+    // its own platform list first: the generic lookup below would match the
+    // desktop platform on a Linux machine and wrongly point at the flat native
+    // path instead of the per-platform one the SSH launcher reads.
+    for (db_type, driver) in &registry.drivers {
+        if !AgentManager::is_sqlite_worker_driver(db_type) {
+            continue;
+        }
+        for worker_platform in SQLITE_WORKER_NATIVE_PLATFORMS {
+            let artifact_filename =
+                driver.native.get(*worker_platform).and_then(|artifact| artifact.url.rsplit('/').next());
+            if artifact_filename == Some(filename) {
+                return Some((db_type.clone(), Some((*worker_platform).to_string())));
+            }
+        }
+    }
+    db_type_for_native_offline_entry(registry, platform, name).map(|db_type| (db_type, None))
 }
 
 fn validate_offline_zip_preflight(
@@ -3317,7 +3404,7 @@ fn validate_offline_zip_preflight(
         }
     }
 
-    for (db_type, entry_name, is_native) in driver_entries {
+    for (db_type, entry_name, is_native, worker_platform) in driver_entries {
         let Some(driver) = registry.drivers.get(db_type) else {
             // Older locally assembled ZIPs can identify a JAR solely from its
             // canonical filename. Preserve that import path when no registry
@@ -3325,7 +3412,7 @@ fn validate_offline_zip_preflight(
             continue;
         };
         let artifact = if *is_native {
-            driver.native.get(platform)
+            driver.native.get(worker_platform.as_deref().unwrap_or(platform))
         } else {
             let jre_key = driver.jre.trim();
             if !jre_key.is_empty() {
@@ -6490,6 +6577,129 @@ mod agent_registry_install_tests {
             tokio::time::timeout(std::time::Duration::from_secs(1), manager.installation_operation_lock.write())
                 .await
                 .expect("offline import did not resume after driver operations completed");
+    }
+
+    /// A minimal ELF header that passes the native-agent platform check.
+    fn linux_native_binary(machine: u16) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 20];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+
+    /// A registry entry for the SSH worker carrying both Linux binaries, the way
+    /// a release bundle does.
+    fn registry_with_sqlite_worker(version: &str) -> AgentRegistry {
+        let native = SQLITE_WORKER_NATIVE_PLATFORMS
+            .iter()
+            .map(|platform| {
+                (
+                    (*platform).to_string(),
+                    ArtifactInfo {
+                        url: format!("https://example.com/dbx-agent-sqlite-worker-{version}-{platform}"),
+                        sha256: None,
+                        size: 0,
+                        format: None,
+                    },
+                )
+            })
+            .collect();
+        AgentRegistry {
+            jre: None,
+            jres: std::collections::HashMap::new(),
+            drivers: [(
+                SQLITE_WORKER_DRIVER_KEY.to_string(),
+                DriverInfo {
+                    version: version.to_string(),
+                    label: "SQLite SSH Worker".to_string(),
+                    min_app_version: "0.1.0".to_string(),
+                    jar: None,
+                    native,
+                    jre: DEFAULT_JRE_KEY.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    fn sqlite_worker_entry(manager: &AgentManager, registry: &AgentRegistry) -> AgentDriverInfo {
+        build_agent_list(manager, Some(registry))
+            .into_iter()
+            .find(|driver| driver.db_type == SQLITE_WORKER_DRIVER_KEY)
+            .expect("sqlite-worker is part of the driver catalog")
+    }
+
+    #[tokio::test]
+    async fn offline_zip_installs_the_single_sqlite_worker_platform_it_ships() {
+        let version = "0.1.3";
+        let x64_name = format!("dbx-agent-sqlite-worker-{version}-linux-x64");
+        let registry = registry_with_sqlite_worker(version);
+        let (_dir, package) = write_offline_zip(&registry, &[(format!("drivers/{x64_name}"), linux_native_binary(62))]);
+
+        let plan = inspect_offline_zip(&package).unwrap();
+        assert_eq!(plan.driver_keys, vec![SQLITE_WORKER_DRIVER_KEY.to_string()]);
+
+        let manager = test_manager("offline-sqlite-worker-single-platform");
+        assert!(!manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
+        assert!(!sqlite_worker_entry(&manager, &registry).installed);
+
+        let result = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        assert!(result.failures.is_empty(), "unexpected failures: {:?}", result.failures);
+        assert_eq!(result.drivers_installed, vec![SQLITE_WORKER_DRIVER_KEY.to_string()]);
+
+        // Only the packaged platform lands on disk, and that alone must count as
+        // installed so the SSH connection stops trying to download it (#8987).
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").is_file());
+        assert!(!manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-aarch64").exists());
+        assert!(manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
+        assert!(sqlite_worker_entry(&manager, &registry).installed, "Driver Manager must report the worker installed");
+
+        // Re-importing the same package is a no-op instead of a bogus reinstall.
+        let again = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        assert_eq!(again.drivers_skipped, vec![SQLITE_WORKER_DRIVER_KEY.to_string()]);
+        assert!(again.drivers_installed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn offline_zip_installs_both_sqlite_worker_platforms_when_packaged() {
+        let version = "0.1.4";
+        let x64_name = format!("dbx-agent-sqlite-worker-{version}-linux-x64");
+        let arm_name = format!("dbx-agent-sqlite-worker-{version}-linux-aarch64");
+        let registry = registry_with_sqlite_worker(version);
+        let (_dir, package) = write_offline_zip(
+            &registry,
+            &[
+                (format!("drivers/{x64_name}"), linux_native_binary(62)),
+                (format!("drivers/{arm_name}"), linux_native_binary(183)),
+            ],
+        );
+
+        let manager = test_manager("offline-sqlite-worker-both-platforms");
+        let result = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        assert!(result.failures.is_empty(), "unexpected failures: {:?}", result.failures);
+        // Installing the first artifact updates the recorded version; the second
+        // must still be written instead of being treated as already up to date.
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").is_file());
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-aarch64").is_file());
+        assert!(manager.sqlite_worker_all_platforms_installed());
+    }
+
+    #[tokio::test]
+    async fn offline_zip_rejects_a_sqlite_worker_binary_for_the_wrong_architecture() {
+        let version = "0.1.5";
+        let name = format!("dbx-agent-sqlite-worker-{version}-linux-x64");
+        let registry = registry_with_sqlite_worker(version);
+        // An aarch64 ELF packaged as the x64 artifact must not be installed.
+        let (_dir, package) = write_offline_zip(&registry, &[(format!("drivers/{name}"), linux_native_binary(183))]);
+
+        let manager = test_manager("offline-sqlite-worker-wrong-arch");
+        let result = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        assert!(!result.failures.is_empty(), "a mismatched binary must be reported as a failure");
+        assert!(!manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").exists());
+        assert!(!manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
     }
 }
 

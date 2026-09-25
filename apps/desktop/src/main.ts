@@ -1,10 +1,9 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
-import VueVirtualScroller from "vue-virtual-scroller";
-import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import "./styles/globals.css";
 import { installDebugLogCapture } from "@/lib/backend/debugLog";
-import { clearStartupPreloadRetry, retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRecovery";
+import { retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRecovery";
+import { markStartupPhase } from "@/lib/startup/startupTiming";
 import { applyLegacyWebViewClass } from "@/lib/ui/legacyWebView";
 
 function startupErrorMessage(error: unknown): string {
@@ -76,19 +75,17 @@ function installGlobalInputAttrs() {
 }
 
 async function bootstrap() {
+  markStartupPhase("bootstrap");
   console.log("[STARTUP] frontend bootstrap begin");
   const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), import("./StartupGate.vue")]);
   console.log("[STARTUP] frontend modules loaded");
-  await loadSavedLocale();
-  console.log("[STARTUP] locale ready");
-
-  const app = createApp(App);
+  const localeReady = loadSavedLocale();
+  const app = createApp(App, { localeReady });
   app.use(createPinia());
   app.use(i18n);
-  app.use(VueVirtualScroller);
   app.mount("#root");
-  clearStartupPreloadRetry();
-  window.dispatchEvent(new Event("dbx:startup-ready"));
+  markStartupPhase("gate-mounted");
+  void localeReady.then(() => window.dispatchEvent(new Event("dbx:startup-ready"))).catch(() => {});
   console.log("[STARTUP] vue mounted");
 
   installGlobalInputAttrs();

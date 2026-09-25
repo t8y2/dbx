@@ -1,7 +1,6 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
-import { useSettingsStore } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 
 // ---------------------------------------------------------------------------
@@ -135,6 +134,7 @@ export const uninstallJdbcPlugin = forward("uninstallJdbcPlugin");
 export const listInstalledAgentsLocal = forward("listInstalledAgentsLocal");
 export async function listInstalledAgents() {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.listInstalledAgents(useSettingsStore().editorSettings.updateDownloadSource);
 }
 export const isAgentInstalled = forward("isAgentInstalled");
@@ -145,10 +145,12 @@ export const stopDriverRuntime = forward("stopDriverRuntime");
 export const restartDriverRuntime = forward("restartDriverRuntime");
 export async function installAgent(dbType: string, operationId?: string) {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.installAgent(dbType, useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export async function upgradeAllAgents(operationId?: string) {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.upgradeAllAgents(useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export const cancelAgentInstall = forward("cancelAgentInstall");
@@ -168,6 +170,7 @@ export const importAgentDriver = forward("importAgentDriver");
 export const importAgentJar = importAgentDriver;
 export async function reinstallJre(jreKey?: string, operationId?: string) {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.reinstallJre(jreKey, useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export const uninstallJre = forward("uninstallJre");

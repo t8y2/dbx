@@ -7,6 +7,10 @@ const appSource = readFileSync("apps/desktop/src/App.vue", "utf8");
 
 test("web startup reports optional initialization failure and continues restoring persisted state", async () => {
   const events: string[] = [];
+  let reportError!: () => void;
+  const errorReported = new Promise<void>((resolve) => {
+    reportError = resolve;
+  });
 
   await initializeOpenTabs({
     initializeOptionalState: async () => {
@@ -18,10 +22,18 @@ test("web startup reports optional initialization failure and continues restorin
       events.push("initialize-connections");
       events.push("restore-tabs");
     },
-    onOptionalStateError: () => events.push("report-ai-config-error"),
+    onOptionalStateError: () => {
+      events.push("report-ai-config-error");
+      reportError();
+    },
   });
 
-  assert.deepEqual(events, ["initialize-ai-configs", "report-ai-config-error", "initialize-editor-settings", "initialize-connections", "restore-tabs"]);
+  await errorReported;
+  assert.deepEqual(
+    events.filter((event) => !event.includes("ai-config")),
+    ["initialize-editor-settings", "initialize-connections", "restore-tabs"],
+  );
+  assert.ok(events.includes("report-ai-config-error"));
 });
 
 test("shared startup initializes optional state once and propagates required restoration failure", async () => {
@@ -64,10 +76,11 @@ test("web startup uses the guarded initializer behind the existing authenticatio
   assert.ok(mountedStart >= 0 && mountedEnd > mountedStart);
 
   const mountedSource = appSource.slice(mountedStart, mountedEnd);
-  const authCheck = mountedSource.indexOf('fetch(apiUrl("/api/auth/check"))');
+  const cachedAuth = mountedSource.indexOf("if (!startupProps.startupAuthentication)");
+  const authCheck = mountedSource.indexOf("await checkStartupAuthentication()", cachedAuth);
   const loginRedirect = mountedSource.indexOf('history.replaceState(null, "", webPath("/login"))', authCheck);
   const authenticatedInitialization = mountedSource.indexOf("if (!setupRequired.value && (!needsAuth.value || authenticated.value)) void initApp()", loginRedirect);
-  assert.ok(authCheck >= 0);
+  assert.ok(cachedAuth >= 0 && authCheck > cachedAuth);
   assert.ok(loginRedirect > authCheck);
   assert.ok(authenticatedInitialization > loginRedirect);
 });
@@ -96,7 +109,55 @@ test("desktop SQL file opening survives unrelated initialization failure and fol
   });
   await fileOpen;
 
-  assert.deepEqual(events, ["initialize-ai-configs", "ignore-ai-config-error", "initialize-editor-settings", "initialize-connections", "restore-tabs", "read-file", "open-tab"]);
+  await Promise.resolve();
+  assert.deepEqual(
+    events.filter((event) => !event.includes("ai-config")),
+    ["initialize-editor-settings", "initialize-connections", "restore-tabs", "read-file", "open-tab"],
+  );
+  assert.ok(events.includes("ignore-ai-config-error"));
+});
+
+test("pending optional AI initialization does not hold tab restoration or external file opening", async () => {
+  let rejectOptional!: (error: Error) => void;
+  const optional = new Promise<void>((_resolve, reject) => {
+    rejectOptional = reject;
+  });
+  const errors: unknown[] = [];
+  const barrier = createOpenTabsRestorationBarrier();
+  const events: string[] = [];
+  const fileOpen = barrier.settled.then(() => events.push("open-file"));
+  await initializeDesktopOpenTabs({
+    barrier,
+    initializeOptionalState: () => optional,
+    restoreOpenTabs: async () => {
+      events.push("restore-tabs");
+    },
+    onOptionalStateError: (error) => errors.push(error),
+  });
+  await fileOpen;
+  assert.deepEqual(events, ["restore-tabs", "open-file"]);
+  const error = new Error("AI config unavailable");
+  rejectOptional(error);
+  await optional.catch(() => {});
+  await Promise.resolve();
+  assert.deepEqual(errors, [error]);
+});
+
+test("a synchronous optional initialization failure does not block required restoration", async () => {
+  const events: string[] = [];
+  await initializeOpenTabs({
+    initializeOptionalState: () => {
+      throw new Error("optional failure");
+    },
+    restoreOpenTabs: async () => {
+      events.push("restored");
+    },
+    onOptionalStateError: () => {
+      events.push("reported");
+    },
+  });
+  await Promise.resolve();
+  assert.deepEqual(events, ["restored", "reported"]);
 });
 
 test("desktop SQL file opening is released when persisted tab restoration rejects", async () => {

@@ -478,10 +478,10 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     await queryStore.executeCurrentTab();
   }
 
-  async function onPaginate(tabId: string | undefined, offset: number, limit: number, whereInput?: string, orderBy?: string) {
+  async function onPaginate(tabId: string | undefined, offset: number, limit: number, whereInput?: string, orderBy?: string, appendRequested = false) {
     const tab = resolveActionTab(tabId);
     if (!tab) return;
-    const appendResult = settingsStore.editorSettings.infiniteScroll && offset > 0 && offset === tab.result?.rows.length;
+    const appendResult = (appendRequested || settingsStore.editorSettings.infiniteScroll) && offset > 0 && offset === tab.result?.rows.length;
     const appendOptions = appendResult
       ? {
           appendResult: {

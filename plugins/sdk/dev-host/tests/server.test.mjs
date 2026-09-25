@@ -372,7 +372,7 @@ test("save, reload, iframe isolation, generic RPC and close lifecycle", async (t
   assert.equal(host.sidecar.state, "stopped");
 });
 test("host.storage persists per-plugin entries behind the declared permission", async (t) => {
-  const { root, request } = await fixture(t);
+  const { request } = await fixture(t);
   const saved = await request("connections/save", { providerId: "example.connection", values });
   const frame = (await request("connections/connect", { id: saved.value.id })).value.frame;
   const document = (await request("frame-document", { frameId: frame.id })).value;

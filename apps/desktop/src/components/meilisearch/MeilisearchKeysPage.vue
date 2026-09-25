@@ -79,6 +79,7 @@ const deleteConfirmation = ref("");
 const secretOpen = ref(false);
 const createdSecret = ref("");
 const createdUid = ref("");
+let loadRequestId = 0;
 
 const hasPrevious = computed(() => offset.value > 0);
 const hasNext = computed(() => offset.value + rows.value.length < total.value);
@@ -114,16 +115,20 @@ function toggleColumn(key: MeilisearchKeyColumnKey) {
 }
 
 async function load() {
+  const requestId = ++loadRequestId;
+  const requestedOffset = offset.value;
   loading.value = true;
   error.value = "";
   try {
-    const page = await api.meilisearchListKeys(props.connectionId, offset.value, limit);
+    const page = await api.meilisearchListKeys(props.connectionId, requestedOffset, limit);
+    if (requestId !== loadRequestId) return;
     rows.value = page.results;
     total.value = page.total;
   } catch (cause: any) {
+    if (requestId !== loadRequestId) return;
     error.value = cause?.message || String(cause);
   } finally {
-    loading.value = false;
+    if (requestId === loadRequestId) loading.value = false;
   }
 }
 
@@ -142,6 +147,7 @@ async function loadIndexes() {
 }
 
 function refresh() {
+  if (loading.value) return;
   void load();
   void loadIndexes();
 }
@@ -265,7 +271,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="flex h-full flex-col overflow-hidden p-4">
+  <div class="flex h-full select-none flex-col overflow-hidden p-4">
     <div class="mb-3 flex items-center justify-between gap-3">
       <div>
         <h2 class="text-base font-semibold">{{ t("meilisearch.apiKeys") }}</h2>

@@ -2307,6 +2307,10 @@ html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-190"] {
   max-width: 47.5rem !important;
 }
 
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog {
+  max-width: calc(100vw - 32px) !important;
+}
+
 html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[360px]"] {
   max-width: 360px !important;
 }

@@ -150,13 +150,14 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps the DDL dialog layout on the global legacy dialog fallbacks", () => {
-    expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog sm:max-w-190"');
+    expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog flex min-h-0 flex-col overflow-hidden sm:max-w-190"');
     // The dialog content element is rendered through reka-ui's portal Teleport and
     // never carries this component's scoped data-v attribute, so per-dialog rules
     // (scoped or unscoped) are avoided; the global width table covers the dialog.
     expect(ddlViewDialogSource).not.toContain("dbx-legacy-webview");
     expect(ddlViewDialogSource).not.toContain("@media");
     expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-190"]');
+    expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog');
   });
 
   it("keeps the global dialog fallback block outside media queries", () => {
@@ -204,6 +205,12 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(rule).toContain("max-width: none !important;");
     expect(rule).toContain("width: calc(100vw - 2rem) !important;");
     expect(rule).toContain("var(--dbx-viewport-height)");
+  });
+
+  it("allows the DDL viewer to resize beyond the default legacy dialog width", () => {
+    const ruleStart = globalsCss.indexOf('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog');
+    expect(ruleStart).toBeGreaterThan(-1);
+    expect(globalsCss.slice(ruleStart, globalsCss.indexOf("}", ruleStart))).toContain("max-width: calc(100vw - 32px) !important;");
   });
 
   it("uses an explicit tooltip copy-button hover color in legacy WebViews", () => {

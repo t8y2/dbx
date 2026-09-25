@@ -1,4 +1,4 @@
-import { ref, computed, watch, type ComputedRef, type Ref } from "vue";
+import { ref, shallowRef, computed, watch, type ComputedRef, type Ref } from "vue";
 import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, COLUMN_WIDTH_DENSITY_PRESETS, sampleDataGridColumnValues } from "@/lib/dataGrid/dataGridColumnWidth";
 import { createDataGridColumnMeasurementSignature, loadDataGridColumnWidthState, removeDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
 import type { ColumnWidthDensity } from "@/stores/settingsStore";
@@ -42,6 +42,7 @@ export interface UseDataGridColumnResizeOptions {
   measureHeaderText?: (text: string) => number | undefined;
   headerMeasurementKey?: Ref<unknown>;
   rowNumberWidth?: Ref<number> | ComputedRef<number>;
+  viewportWidth?: Ref<number> | ComputedRef<number>;
   displayValue?: (value: CellValue, columnIndex: number) => CellValue;
 }
 
@@ -51,7 +52,9 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   const columnWidths = ref<number[]>([]);
   let isResizing = false;
   let previousColumnIndexes: number[] = [];
-  let userSizedColumnIndexes = new Set<number>();
+  // Replaced wholesale instead of mutated so reactive consumers (renderedColumnWidths)
+  // re-run when a column becomes user-sized and stops receiving spare width.
+  const userSizedColumnIndexes = shallowRef<Set<number>>(new Set());
 
   function columnWidthStateIdentity() {
     return {
@@ -62,7 +65,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   }
 
   function persistColumnWidths() {
-    saveDataGridColumnWidthState(columnWidthStateIdentity(), previousColumnIndexes, columnWidths.value, userSizedColumnIndexes);
+    saveDataGridColumnWidthState(columnWidthStateIdentity(), previousColumnIndexes, columnWidths.value, userSizedColumnIndexes.value);
   }
 
   function sampleColumnValues(visibleColIdx: number): CellValue[] {
@@ -96,7 +99,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     const next = columnWidths.value.slice();
     for (let colIdx = 0; colIdx < columns.value.length; colIdx++) {
       const actualColIdx = columnIndexes.value[colIdx];
-      if (actualColIdx === undefined || userSizedColumnIndexes.has(actualColIdx)) continue;
+      if (actualColIdx === undefined || userSizedColumnIndexes.value.has(actualColIdx)) continue;
       const needed = neededWidths[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
       if (needed > (next[colIdx] ?? 0)) {
         next[colIdx] = needed;
@@ -110,11 +113,14 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
 
   function markColumnUserSized(visibleColIdx: number) {
     const actualColIdx = columnIndexes.value[visibleColIdx];
-    if (actualColIdx !== undefined) userSizedColumnIndexes.add(actualColIdx);
+    if (actualColIdx === undefined || userSizedColumnIndexes.value.has(actualColIdx)) return;
+    const next = new Set(userSizedColumnIndexes.value);
+    next.add(actualColIdx);
+    userSizedColumnIndexes.value = next;
   }
 
   function initColumnWidths(force = false) {
-    if (force) userSizedColumnIndexes.clear();
+    if (force) userSizedColumnIndexes.value = new Set();
     const previousWidthsByColumnIndex = new Map<number, number>();
     previousColumnIndexes.forEach((columnIndex, visibleIndex) => {
       const width = columnWidths.value[visibleIndex];
@@ -122,7 +128,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     });
     const nextColumnIndexes = [...columnIndexes.value];
     const cachedState = !force && previousColumnIndexes.length === 0 ? loadDataGridColumnWidthState(columnWidthStateIdentity(), nextColumnIndexes) : undefined;
-    if (cachedState) userSizedColumnIndexes = new Set(cachedState.userSizedColumnIndexes);
+    if (cachedState) userSizedColumnIndexes.value = new Set(cachedState.userSizedColumnIndexes);
     const currentNeededWidths = neededColumnWidths.value ?? [];
     const columnCount = columns.value?.length ?? 0;
     if (force || columnWidths.value.length !== columnCount || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
@@ -144,7 +150,15 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     event.preventDefault();
     isResizing = true;
     const startX = event.clientX;
-    const startWidth = columnWidths.value[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
+    // The drag base is the width the user grabbed, which may include spare width
+    // distributed at render time. Freezing that snapshot as the stored width and
+    // marking the column user-sized right away keeps the column out of the
+    // flexible set for the whole drag, so every frame renders startWidth + delta
+    // as-is instead of re-stretching it with the remaining surplus, and the
+    // stored (persisted) width matches what the cursor moved.
+    const startWidth = renderedColumnWidths.value[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
+    markColumnUserSized(colIdx);
+    columnWidths.value[colIdx] = startWidth;
     let pendingClientX = startX;
     let resizeFrame = 0;
 
@@ -232,9 +246,25 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     persistColumnWidths();
   }
 
-  const renderedColumnWidths = computed(() => columnWidths.value.slice());
-
   const resolvedRowNumberWidth = computed(() => options.rowNumberWidth?.value ?? DATA_GRID_ROW_NUM_WIDTH);
+
+  const renderedColumnWidths = computed(() => {
+    const widths = columnWidths.value.slice();
+    const viewportWidth = options.viewportWidth?.value ?? 0;
+    const surplus = viewportWidth - resolvedRowNumberWidth.value - widths.reduce((sum, width) => sum + width, 0);
+    if (surplus <= 0) return widths;
+    const flexibleIndexes = widths.flatMap((_, visibleIndex) => {
+      const actualIndex = columnIndexes.value[visibleIndex];
+      return actualIndex !== undefined && !userSizedColumnIndexes.value.has(actualIndex) ? [visibleIndex] : [];
+    });
+    if (flexibleIndexes.length === 0) return widths;
+    const base = Math.floor(surplus / flexibleIndexes.length);
+    let remainder = surplus - base * flexibleIndexes.length;
+    flexibleIndexes.forEach((index) => {
+      widths[index] += base + (remainder-- > 0 ? 1 : 0);
+    });
+    return widths;
+  });
 
   const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + resolvedRowNumberWidth.value);
 
@@ -259,7 +289,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   watch([() => options.cacheKey?.value, options.columnStructureSignature], () => {
     columnWidths.value = [];
     previousColumnIndexes = [];
-    userSizedColumnIndexes.clear();
+    userSizedColumnIndexes.value = new Set();
     initColumnWidths();
   });
   watch([density, compactColumnHeaderActions, () => options.headerMeasurementKey?.value], () => {

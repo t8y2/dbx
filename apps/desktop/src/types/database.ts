@@ -1,5 +1,6 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
+import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 
@@ -1977,6 +1978,25 @@ export interface QueryTab {
   };
   /** Opened to view object source, including objects without editable source metadata. */
   sourceView?: boolean;
+  ddlViewer?: {
+    schema?: string;
+    tableName: string;
+    objectType?: ObjectSourceKind;
+    formatDialect?: SqlFormatDialect;
+  };
+  /**
+   * 「先出 tab 再加载」的中间态：DDL 新标签已经可见，但 DDL 还在路上
+   * （issue #9387）。让 tab 栏与编辑区在等待期间就有反馈，失败时就地显示
+   * 错误 + Retry，而不是加载完成后才建 tab、失败只弹 toast。
+   *
+   * 纯运行期字段，刻意不进 openTabsPersistence 的落盘白名单：重启后恢复出的
+   * tab 直接使用落盘的 SQL 文本，不会永久停在「加载中」。
+   */
+  ddlLoad?: {
+    startedAt: number;
+    /** 加载失败时写入；保留状态以便就地重试 */
+    error?: string;
+  };
   objectSource?: {
     schema?: string;
     name: string;

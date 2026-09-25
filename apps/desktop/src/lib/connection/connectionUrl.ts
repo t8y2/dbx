@@ -2,6 +2,7 @@ import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { h2JdbcUrlHasPasswordParam, h2JdbcUrlHasUserParam, parseH2JdbcUrl } from "@/lib/database/h2Connection";
 import { damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { normalizeRedisDatabaseValue } from "@/lib/redis/redisDatabaseIndex";
+import { parseJdbcProperties } from "@/lib/connection/jdbcProperties";
 
 export interface ParsedConnectionUrl {
   name?: string;
@@ -462,16 +463,14 @@ function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
   const profile = SCHEME_PROFILES.sqlserver;
   const props = new Map<string, string>();
   const urlParams: string[] = [];
-  for (const part of (match[3] || "").split(";")) {
-    if (!part) continue;
-    const [rawKey, ...rest] = part.split("=");
-    const key = rawKey.trim();
-    const value = rest.join("=");
+  const properties = parseJdbcProperties(match[3] || "", "sqlserver");
+  if (!properties) throw new Error("Invalid SQL Server JDBC properties");
+  for (const { key, value, raw: part, quoted } of properties) {
     const normalizedKey = key.toLowerCase();
-    if (normalizedKey === "databasename" || normalizedKey === "database" || normalizedKey === "user") {
-      props.set(normalizedKey, value);
-    } else if (normalizedKey === "password") {
-      props.set(normalizedKey, value);
+    // Braces are literal JDBC values; unquoted %xx values retain DBX's old import behavior.
+    const importedValue = quoted ? value : decodeUrlPart(value);
+    if (normalizedKey === "databasename" || normalizedKey === "database" || normalizedKey === "user" || normalizedKey === "password") {
+      props.set(normalizedKey, importedValue);
     } else {
       urlParams.push(part);
     }
@@ -484,9 +483,9 @@ function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
     host: match[1],
     port: match[2] ? Number(match[2]) : profile.defaultPort,
     ...(match[2] ? { portExplicit: true } : {}),
-    username: decodeUrlPart(props.get("user") || ""),
-    password: decodeUrlPart(props.get("password") || ""),
-    database: decodeUrlPart(props.get("databasename") || props.get("database") || "") || undefined,
+    username: props.get("user") || "",
+    password: props.get("password") || "",
+    database: props.get("databasename") || props.get("database") || undefined,
     urlParams: urlParams.join(";"),
     ssl: false,
   };

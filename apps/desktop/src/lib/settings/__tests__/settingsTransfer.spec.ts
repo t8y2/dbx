@@ -195,6 +195,7 @@ describe("settingsTransfer", () => {
     for (const key of EDITOR_SETTINGS_DRAFT_KEYS) {
       expect(transferCategoryForKey(key), key).toBeDefined();
     }
+    expect(transferCategoryForKey("ddlOpenMode")).toBe("editor");
     expect(transferCategoryForKey("notARealSetting")).toBeUndefined();
   });
 

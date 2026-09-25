@@ -33,6 +33,7 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
     continueOnErrorOnBatch: false,
     confirmUnsavedSqlClose: true,
     savedSqlOpenTargetMode: "saved",
+    ddlOpenMode: "dialog",
     objectBrowserViewMode: "list",
     sqlVariableSubstitutionEnabled: true,
     sqlVariableSyntaxOverrides: {},
@@ -49,6 +50,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes showLineNumbers", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("showLineNumbers");
+  });
+
+  it("includes the DDL open mode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("ddlOpenMode");
   });
 
   it("includes continueOnErrorOnBatch", () => {
@@ -413,6 +418,19 @@ describe("editorSettingsDraftFromSettings - tabLayout", () => {
   it("maps tabLayout from settings", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ tabLayout: "wrap" })).tabLayout).toBe("wrap");
     expect(editorSettingsDraftFromSettings(makeSettings({ tabLayout: "scroll" })).tabLayout).toBe("scroll");
+  });
+});
+
+describe("editorSettingsDraftFromSettings - ddlOpenMode", () => {
+  it("maps and tracks the selected DDL open mode", () => {
+    const settings = makeSettings({ ddlOpenMode: "dialog" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+
+    expect(draft.ddlOpenMode).toBe("dialog");
+    draft.ddlOpenMode = "tab";
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ ddlOpenMode: "tab" });
   });
 });
 

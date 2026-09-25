@@ -76,7 +76,7 @@ onMounted(() => {
 <template>
   <div class="h-full flex overflow-hidden">
     <!-- Left column: index meta + navigation -->
-    <nav class="w-44 shrink-0 border-r flex flex-col gap-1 overflow-y-auto p-2">
+    <nav class="w-44 shrink-0 select-none border-r flex flex-col gap-1 overflow-y-auto p-2">
       <div class="px-1 pb-2">
         <div class="flex items-center gap-1">
           <div class="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" :title="index">{{ index }}</div>

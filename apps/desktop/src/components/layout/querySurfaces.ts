@@ -91,7 +91,7 @@ export interface ContentAreaSurfaceEmits {
   editorStateFlushed: [tabId: string];
   formatError: [tabId: string];
   reload: [tabId: string, sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
-  paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string];
+  paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean];
   sort: [tabId: string, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
   executeSql: [tabId: string, sql: string];
   clickTable: [tabId: string, target: SqlObjectNavigationTarget];
@@ -105,7 +105,7 @@ export interface ContentAreaSurfaceEmits {
   objectBrowserSearchChange: [tabId: string, query: string];
   objectBrowserFilterChange: [tabId: string, filter: ObjectBrowserFilter];
   addObjectTableToAi: [tabId: string, tables: Array<{ name: string; schema?: string }>];
-  structureEditorSaved: [tabId: string, commentChanged: boolean];
+  structureEditorSaved: [tabId: string, commentChanged: boolean, createdTableName?: string];
   structureEditorClose: [tabId: string];
   previewStatement: [tabId: string, range: StatementRange | null];
   focusStatement: [tabId: string, range: StatementRange | null];

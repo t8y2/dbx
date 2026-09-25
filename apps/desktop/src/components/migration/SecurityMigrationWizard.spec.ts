@@ -18,6 +18,8 @@ describe("migration failure actions", () => {
     const app = createApp(Wizard, { store });
     app.mount(root);
     try {
+      expect(root.querySelector("main")?.classList.contains("overflow-y-auto")).toBe(true);
+      expect(root.querySelector("section")?.classList.contains("my-auto")).toBe(true);
       const button = (label: string) => Array.from(root.querySelectorAll("button")).find((b) => b.textContent === label)!;
       expect(root.querySelector("textarea")?.value).toContain("statusFailed");
       button("migration.exportDiagnostic").click();

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Check, ChevronDown, Copy, Eye, Loader2, Map, Plus, RefreshCcw, RotateCcw, Rows3, Save, TableProperties, Timer, Trash2, Upload } from "@lucide/vue";
+import { Check, ChevronDown, Copy, Eye, Loader2, Map, Plus, RefreshCcw, RotateCcw, Rows3, Save, TableProperties, Trash2, Upload } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import DataGridAutoRefreshClock from "@/components/grid/DataGridAutoRefreshClock.vue";
 import {
   DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER,
   dataGridToolbarIntervalOptions,
@@ -104,7 +105,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
           :aria-label="autoRefresh?.label"
           :aria-pressed="autoRefresh?.enabled"
         >
-          <Timer class="data-grid-topbar-action-icon h-3 w-3" />
+          <DataGridAutoRefreshClock :enabled="autoRefresh?.enabled === true" :interval-seconds="autoRefresh?.intervalSeconds" :sweep-key="autoRefresh?.sweepKey" />
           <span class="data-grid-topbar-action-label" :class="actionLabelClass('autoRefresh')">{{ autoRefresh?.enabled ? `${autoRefresh.intervalSeconds}s` : autoRefresh?.shortLabel }}</span>
         </Button>
       </DropdownMenuTrigger>

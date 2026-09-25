@@ -22,7 +22,7 @@ export function useMigrationStore(backend: MigrationApi = api) {
   // A managed data-directory key is intentionally created when migration
   // starts. Its absence during the read-only preflight is actionable, not a
   // migration failure, as long as the backend explicitly allows creation.
-  const hasBlockingError = () => Boolean(state.errorCode && !(state.errorCode === "MISSING_MANAGED_KEY" && state.status?.keyCreationAllowed === true));
+  const hasBlockingError = () => Boolean(state.errorCode && state.status?.keyStatus !== "will_create" && !(state.errorCode === "MISSING_MANAGED_KEY" && state.status?.keyCreationAllowed === true));
   // A retained backup is a recovery asset and must not make the success page
   // reappear on later launches. An attempt in this session keeps the wizard
   // visible even when its response is lost, until the user enters the app.
@@ -106,6 +106,7 @@ export function useMigrationStore(backend: MigrationApi = api) {
       state: s?.state,
       counts: s ? { connections: s.connectionCount, databasePlaintext: s.databasePlaintextCount, plugin: s.pluginSecretCount, ai: s.aiSecretCount, tunnel: s.tunnelSecretCount, sync: s.syncCredentialCount } : {},
       keyProviderAvailable: s?.keyProviderAvailable,
+      keyStatus: s?.keyStatus,
       backupPath: s?.backupPath,
       errorCode: state.errorCode,
     };

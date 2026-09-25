@@ -7,6 +7,7 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { bracketMatching, foldGutter, foldKeymap } from "@codemirror/language";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
@@ -217,6 +218,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         highlightSpecialChars(),
         history(),
         drawSelection(),
+        editorClipboardLineEndingsExtension(EditorView),
         trimmedSelectionLayer(),
         dropCursor(),
         highlightActiveLine(),

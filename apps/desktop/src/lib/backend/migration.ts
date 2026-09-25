@@ -1,9 +1,11 @@
 export type MigrationState = "pending" | "running" | "succeeded" | "failed" | "not_required";
+export type MigrationKeyStatus = "ready" | "will_create" | "unavailable" | "invalid" | "mismatch" | "missing_for_ciphertext";
 export interface MigrationPreflight {
   migrationId: string;
   state: MigrationState;
   needsMigration: boolean;
   keyProviderAvailable: boolean;
+  keyStatus?: MigrationKeyStatus;
   keyCreationAllowed?: boolean;
   databasePlaintextCount: number;
   connectionCount: number;

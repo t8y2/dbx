@@ -198,6 +198,17 @@ pub enum MigrationState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationKeyStatus {
+    Ready,
+    WillCreate,
+    Unavailable,
+    Invalid,
+    Mismatch,
+    MissingForCiphertext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LegacyJsonFileStatus {
     pub name: String,
@@ -212,6 +223,7 @@ pub struct MigrationPreflight {
     pub state: MigrationState,
     pub needs_migration: bool,
     pub key_provider_available: bool,
+    pub key_status: MigrationKeyStatus,
     /// Desktop may provision a new local key only for plaintext-only data.
     /// Headless callers always set this false.
     pub key_creation_allowed: bool,
@@ -1427,6 +1439,17 @@ impl Storage {
                     | "ENCRYPTED_DATA_KEY_MISSING"
             )
         });
+        let key_status = match key_error_code.as_deref() {
+            Some("SECRET_KEY_INVALID") => MigrationKeyStatus::Invalid,
+            Some("SECRET_KEY_MISMATCH") => MigrationKeyStatus::Mismatch,
+            Some("ENCRYPTED_DATA_KEY_MISSING") => MigrationKeyStatus::MissingForCiphertext,
+            Some("KEY_PROVIDER_UNAVAILABLE") | Some("MISSING_MANAGED_KEY") if key_creation_allowed => {
+                MigrationKeyStatus::WillCreate
+            }
+            Some(_) => MigrationKeyStatus::Unavailable,
+            None if key_provider_available => MigrationKeyStatus::Ready,
+            None => MigrationKeyStatus::Unavailable,
+        };
         let source_changed = stored.source_fingerprint.as_deref().is_some_and(|value| value != current_fingerprint);
         let state = if fatal_key_error
             || missing_required_key
@@ -1478,6 +1501,7 @@ impl Storage {
             state,
             needs_migration,
             key_provider_available,
+            key_status,
             key_creation_allowed,
             database_plaintext_count,
             connection_count: connections.max(0) as usize,

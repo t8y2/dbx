@@ -14,6 +14,10 @@ const BRIDGE_LIMIT = 2 * 1024 * 1024,
   UI_BINARY_LIMIT = 8 * 1024 * 1024,
   STORAGE_VALUE_LIMIT = 256 * 1024,
   STORAGE_TOTAL_LIMIT = 1024 * 1024;
+function hasControlChars(value) {
+  for (let i = 0; i < value.length; i++) if (value.charCodeAt(i) < 0x20) return true;
+  return false;
+}
 function jsonSize(value) {
   return Buffer.byteLength(JSON.stringify(value) ?? "null");
 }
@@ -271,7 +275,7 @@ export async function createMockHost(options) {
       case "host.storageSet":
       case "host.storageDelete": {
         requirePermission(manifest, "host.storage");
-        if (typeof p.key !== "string" || !p.key || p.key.length > 256 || /[\u0000-\u001f]/.test(p.key)) throw new Error("storage key is invalid");
+        if (typeof p.key !== "string" || !p.key || p.key.length > 256 || hasControlChars(p.key)) throw new Error("storage key is invalid");
         return serialize(async () => {
           const entries = await readUiStorage();
           if (input.method === "host.storageGet") return entries[p.key] === undefined ? null : structuredClone(entries[p.key]);

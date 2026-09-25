@@ -424,9 +424,11 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}.2.31"
+            cargo zigbuild --release -p dbx-cli --no-default-features --features dbx-mcp/os-keyring --target "${{ matrix.target }}.2.31"
           else
-            cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+            # Same keychain rationale as the MCP native legs; the feature is
+            # forwarded through the dbx-mcp dependency.
+            cargo build --release -p dbx-cli --no-default-features --features dbx-mcp/os-keyring --target "${{ matrix.target }}"
           fi
 
       - name: Stage platform package
@@ -660,9 +662,14 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}.2.31"
+            # Pure-Rust (zbus) Secret Service backend: no C libdbus, so the
+            # zigbuild legs can read desktop-provisioned keys too.
+            cargo zigbuild --release -p dbx-mcp --features os-keyring --target "${{ matrix.target }}.2.31"
           else
-            cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
+            # Native macOS/Windows builds read the OS keychain key that DBX
+            # Desktop provisions during the data security upgrade, so the MCP
+            # works against desktop-migrated profiles without env overrides.
+            cargo build --release -p dbx-mcp --features os-keyring --target "${{ matrix.target }}"
           fi
 
       - name: Stage platform package

@@ -118,6 +118,28 @@ describe("migration store", () => {
     expect(store.state.errorCode).toBe("MISSING_MANAGED_KEY");
   });
 
+  it("treats an absent platform key as actionable setup before migration", async () => {
+    const store = useMigrationStore({
+      migrationStatus: vi.fn().mockResolvedValue({
+        ...pending(),
+        keyProviderAvailable: false,
+        keyCreationAllowed: true,
+        keyStatus: "will_create",
+        errorCode: "KEY_PROVIDER_UNAVAILABLE",
+        errorMessage: "The local secret provider is unavailable",
+      }),
+      migrationStart: vi.fn(),
+      migrationRetry: vi.fn(),
+      migrationCleanupBackups: vi.fn(),
+    });
+
+    await store.initialize();
+
+    expect(store.state.error).toBeNull();
+    expect(store.state.errorCode).toBe("KEY_PROVIDER_UNAVAILABLE");
+    expect(store.diagnostic().keyStatus).toBe("will_create");
+  });
+
   it("keeps completion through a failed cleanup and successful cleanup retry", async () => {
     let finishCleanup!: () => void;
     const cleanup = vi

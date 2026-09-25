@@ -104,6 +104,7 @@ import { buildSqlShortcutExecutionSql, enabledSqlShortcutActions, resolveSqlShor
 import { resolveSqlShortcutTableToken } from "@/lib/sql/sqlShortcutTableTarget";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
+import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
 
@@ -1841,6 +1842,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         }),
         sqlBlockFoldService,
         drawSelection(),
+        editorClipboardLineEndingsExtension(EditorView),
         trimmedSelectionLayer(),
         selectionMatchOccurrences(),
         dropCursor(),

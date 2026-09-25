@@ -7,6 +7,7 @@ import type { CellSelectionRange } from "@/lib/dataGrid/gridSelection";
 import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, dataGridTypeForeground, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
 import type { CrosshairTarget } from "@/lib/dataGrid/crosshairHighlight";
+import { resolveDataGridRowNumberLabel } from "@/lib/dataGrid/dataGridRowNumber";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 export const MAX_CANVAS_DATA_GRID_PIXEL_RATIO = 4;
@@ -102,6 +103,8 @@ export interface DrawCanvasDataGridOptions {
   booleanDisplayMode?: "checkbox" | "dropdown";
   flatteningMultiLineEnabled: boolean;
   showWhitespace?: boolean;
+  /** 行号栏取值：`view` = 当前视图序号（默认，与筛选前一致），`source` = 筛选前的原始行号 */
+  rowNumberMode?: "view" | "source";
 }
 
 type NumericCanvasContext = CanvasRenderingContext2D & {
@@ -365,6 +368,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     booleanDisplayMode = "dropdown",
     flatteningMultiLineEnabled,
     showWhitespace = false,
+    rowNumberMode = "view",
   } = options;
   // 框选热路径：整次绘制只判断一次。常见情况（单矩形 / 多列且每段都是多格）可跳过逐格 kind 查询
   const paintSelectionOuterFrame = dataGridSelectionUsesOuterFrame(selectionFrames);
@@ -485,13 +489,17 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     ctx.beginPath();
     ctx.rect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.clip();
-    if (item.isDraft) {
-      ctx.fillText("*", rowNumberTextX, textY);
-    } else if (infiniteScrollEnabled) {
-      ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
-    } else {
-      ctx.fillText(String(item.displayIndex + 1 + pageOffset), rowNumberTextX, textY);
-    }
+    ctx.fillText(
+      resolveDataGridRowNumberLabel({
+        displayIndex: item.displayIndex,
+        sourceIndex: item.sourceIndex,
+        isDraft: item.isDraft,
+        sourceRowNumbers: rowNumberMode === "source",
+        pageOffset: infiniteScrollEnabled ? 0 : pageOffset,
+      }),
+      rowNumberTextX,
+      textY,
+    );
     ctx.restore();
     ctx.font = normalFont;
 

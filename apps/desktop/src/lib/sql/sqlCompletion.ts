@@ -1839,6 +1839,7 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
 function shouldAutoOpenColumnCompletion(context: SqlCompletionContext, sql: string, cursor: number, databaseType: DatabaseType | undefined): boolean {
   if (!context.suggestColumns || context.referencedTables.length === 0) return false;
   if (context.prefix.length > 0) return true;
+  if (context.selectListColumnContext) return true;
   return isColumnCompletionExpressionStart(sql.slice(0, cursor), databaseType);
 }
 

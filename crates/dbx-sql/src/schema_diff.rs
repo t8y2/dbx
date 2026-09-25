@@ -294,6 +294,54 @@ fn with_known_length(source_type: &str, character_maximum_length: Option<i32>) -
     }
 }
 
+/// Numeric base types whose `(precision[, scale])` is part of the *declared* type on every
+/// dialect that spells the name that way. Oracle's `ALL_TAB_COLUMNS` — and therefore every
+/// Oracle introspection path, native agent and JDBC alike — reports a bare `NUMBER` with
+/// `DATA_PRECISION`/`DATA_SCALE` beside it, so comparing the type strings alone cannot tell
+/// `NUMBER(10,2)` from `NUMBER(12,2)` and the difference is silently dropped from the
+/// result (#9261). Integer families are deliberately excluded: MySQL's `information_schema`
+/// fills `numeric_precision` in for `int` (10) and rendering that back as `int(10)` would
+/// invent a display width that a Postgres target rejects.
+const NUMERIC_TYPES_WITH_DECLARED_PRECISION: [&str; 5] = ["NUMBER", "NUMERIC", "DECIMAL", "DEC", "FIXED"];
+
+/// Counterpart of [`with_known_length`] for the numeric family: splices a driver-reported
+/// precision/scale back into a type name that omits them. A negative scale (`NUMBER(10,-2)`
+/// on Oracle) is preserved because it changes the value range, while a scale of zero is
+/// left out — `NUMBER(10)` and `NUMBER(10,0)` are the same column.
+fn with_known_numeric_precision(
+    source_type: &str,
+    numeric_precision: Option<i32>,
+    numeric_scale: Option<i32>,
+) -> String {
+    let trimmed = source_type.trim();
+    if trimmed.contains('(') {
+        return trimmed.to_string();
+    }
+    let base = trimmed.split([' ', '(']).next().unwrap_or_default().to_ascii_uppercase();
+    if !NUMERIC_TYPES_WITH_DECLARED_PRECISION.contains(&base.as_str()) {
+        return trimmed.to_string();
+    }
+    let Some(precision) = numeric_precision.filter(|value| *value > 0) else {
+        return trimmed.to_string();
+    };
+    match numeric_scale {
+        Some(scale) if scale != 0 => format!("{trimmed}({precision},{scale})"),
+        _ => format!("{trimmed}({precision})"),
+    }
+}
+
+/// The declared shape of a column: the driver's type string with every length/precision it
+/// reports *beside* the string spliced back in. Comparison needs it so that a changed
+/// precision or length is a difference at all, and scripts need it so that an emitted
+/// `ADD COLUMN`/`MODIFY` keeps the parameters the user declared.
+fn declared_column_type(column: &ColumnInfo) -> String {
+    with_known_numeric_precision(
+        &with_known_length(&column.data_type, column.character_maximum_length),
+        column.numeric_precision,
+        column.numeric_scale,
+    )
+}
+
 impl FieldMapping {
     pub fn apply<'a>(mappings: &'a [FieldMapping], source_type: &str) -> Option<&'a str> {
         let base_type = source_type.split('(').next().unwrap_or(source_type).trim();
@@ -2491,7 +2539,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         let Some(target_ddl) = target_details.get(target_name.as_str()).and_then(|detail| detail.ddl.as_ref()) else {
             continue;
         };
-        if !mysql_view_definitions_differ(source_ddl, target_ddl, options.source_dialect, options.target_dialect) {
+        if !view_definitions_differ(source_ddl, target_ddl, options.source_dialect, options.target_dialect) {
             continue;
         }
 
@@ -2595,17 +2643,36 @@ fn diff_names(source: &[String], target: &[String]) -> (Vec<String>, Vec<String>
     )
 }
 
-fn mysql_view_definitions_differ(
+/// Whether two captured view definitions differ.
+///
+/// Only dialects whose captured text `dbx` can normalize are compared: a view body is
+/// dialect-specific SQL, so a cross-dialect pair (or an engine whose text nobody taught
+/// this function to read) is left alone rather than reported as a difference.
+fn view_definitions_differ(
     source_ddl: &str,
     target_ddl: &str,
     source_dialect: Option<DialectKind>,
     target_dialect: Option<DialectKind>,
 ) -> bool {
-    if source_dialect != Some(DialectKind::Mysql) || target_dialect != Some(DialectKind::Mysql) {
+    if source_dialect != target_dialect {
         return false;
     }
 
-    normalize_mysql_view_ddl(source_ddl) != normalize_mysql_view_ddl(target_ddl)
+    match source_dialect {
+        Some(DialectKind::Mysql) => normalize_mysql_view_ddl(source_ddl) != normalize_mysql_view_ddl(target_ddl),
+        Some(DialectKind::Oracle) => {
+            // Each side's view lives in its own schema, and Oracle hands the body back exactly
+            // as it was written. dbx's own generated script rewrites only the header, so after
+            // applying it the target body can still qualify the *source* schema — normalising
+            // references to either compared schema keeps the comparison idempotent instead of
+            // reporting the view as permanently modified.
+            let schemas = oracle_view_schemas(source_ddl, target_ddl);
+            let schemas: Vec<&str> = schemas.iter().map(String::as_str).collect();
+            normalize_oracle_view_ddl_with_schemas(source_ddl, &schemas)
+                != normalize_oracle_view_ddl_with_schemas(target_ddl, &schemas)
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2656,13 +2723,13 @@ fn normalize_mysql_view_ddl(ddl: &str) -> String {
                 let end = ddl[index + 2..].find("*/").map_or(bytes.len(), |offset| index + 2 + offset + 2);
                 (end, MysqlViewTokenKind::Atom, None)
             }
-            byte if mysql_view_symbol(byte) => (index + 1, MysqlViewTokenKind::Symbol, None),
+            byte if view_ddl_symbol(byte) => (index + 1, MysqlViewTokenKind::Symbol, None),
             _ => {
                 let mut end = index + 1;
                 while end < bytes.len()
                     && !bytes[end].is_ascii_whitespace()
                     && !matches!(bytes[end], b'\'' | b'"' | b'`' | b'#')
-                    && !mysql_view_symbol(bytes[end])
+                    && !view_ddl_symbol(bytes[end])
                 {
                     end += 1;
                 }
@@ -2682,7 +2749,10 @@ fn normalize_mysql_view_ddl(ddl: &str) -> String {
     normalized
 }
 
-fn mysql_view_symbol(byte: u8) -> bool {
+/// Punctuation shared by the view-text tokenizers: MySQL and Oracle agree on every
+/// operator and delimiter the server can put between two atoms, so one predicate keeps
+/// the two normalizers from drifting apart.
+fn view_ddl_symbol(byte: u8) -> bool {
     matches!(
         byte,
         b'(' | b')'
@@ -2786,7 +2856,7 @@ fn parse_mysql_identifier(ddl: &str, index: usize) -> Option<(String, usize)> {
 
     let mut end = index;
     while let Some(byte) = ddl.as_bytes().get(end) {
-        if byte.is_ascii_whitespace() || mysql_view_symbol(*byte) {
+        if byte.is_ascii_whitespace() || view_ddl_symbol(*byte) {
             break;
         }
         end += 1;
@@ -2841,6 +2911,181 @@ fn mysql_quoted_token_end(ddl: &str, start: usize) -> usize {
         index += 1;
     }
     bytes.len()
+}
+
+/// How `normalize_oracle_view_ddl` groups a token: anything the server reads as a
+/// single value is an atom, everything else is punctuation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OracleViewTokenKind {
+    Atom,
+    Symbol,
+}
+
+struct OracleViewToken {
+    kind: OracleViewTokenKind,
+    text: String,
+    /// Bare words and `"quoted"` identifiers are the ones that can name the owner;
+    /// `'literals'` never are, so a literal that happens to spell the schema stays a
+    /// literal.
+    identifier: bool,
+    /// Quoted identifiers keep their case and never spell a keyword.
+    quoted: bool,
+    /// Whether whitespace separated this token from the previous one.
+    spaced: bool,
+}
+
+/// Normalizes Oracle view text so that two schemas holding the *same* view compare equal
+/// and two holding different views do not (#9261).
+///
+/// Oracle reports it through `DBMS_METADATA`, which repeats the owner in the header
+/// (`CREATE OR REPLACE FORCE VIEW "DBX_TEST"."V_SAME"`) and qualifies every reference in
+/// the body with it (`FROM DBX_TEST.CMP_SAME`), so the owner is replaced by a placeholder
+/// exactly like `normalize_mysql_view_ddl` does for its backtick schema qualifier. The
+/// header (including the column list) stays part of the comparison because a view that
+/// exposes different columns is a different view, and comments are dropped because they
+/// carry no query semantics.
+/// Test-facing shorthand for the single-sided normalisation: collapse only this statement's
+/// own owner (production comparisons use `oracle_view_schemas` and normalise both sides
+/// against every compared schema).
+#[cfg(test)]
+fn normalize_oracle_view_ddl(ddl: &str) -> String {
+    let owner = oracle_view_owner(&oracle_view_tokens(ddl));
+    let schemas: Vec<&str> = owner.as_deref().into_iter().collect();
+    normalize_oracle_view_ddl_with_schemas(ddl, &schemas)
+}
+
+/// Every schema a pair of captured view definitions is allowed to qualify: each side's own
+/// owner, so the header qualifier and a body that names either schema collapse to the same
+/// placeholder.
+fn oracle_view_schemas(source_ddl: &str, target_ddl: &str) -> Vec<String> {
+    let mut schemas = Vec::new();
+    for ddl in [source_ddl, target_ddl] {
+        let Some(owner) = oracle_view_owner(&oracle_view_tokens(ddl)) else { continue };
+        if !schemas.iter().any(|known: &String| known.eq_ignore_ascii_case(&owner)) {
+            schemas.push(owner);
+        }
+    }
+    schemas
+}
+
+fn normalize_oracle_view_ddl_with_schemas(ddl: &str, schemas: &[&str]) -> String {
+    // `DBMS_METADATA` may or may not hand the statement over with its trailing `;` — the
+    // terminator carries no meaning for the comparison. (A literal's own semicolon is
+    // inside quotes, so the statement never ends with one there.)
+    let ddl = ddl.trim_end();
+    let ddl = ddl.strip_suffix(';').map_or(ddl, str::trim_end);
+    let tokens = oracle_view_tokens(ddl);
+    let mut normalized = String::with_capacity(ddl.len());
+    let mut previous = None;
+
+    for (position, token) in tokens.iter().enumerate() {
+        let replacement = if token.identifier
+            && schemas.iter().any(|schema| token.text.eq_ignore_ascii_case(schema))
+            && oracle_view_tokens_continue_with_dot(&tokens, position)
+        {
+            "__dbx_schema__".to_string()
+        } else {
+            token.text.clone()
+        };
+        if token.spaced && previous == Some(token.kind) {
+            normalized.push(' ');
+        }
+        normalized.push_str(&replacement);
+        previous = Some(token.kind);
+    }
+
+    normalized
+}
+
+fn oracle_view_tokens_continue_with_dot(tokens: &[OracleViewToken], position: usize) -> bool {
+    tokens.get(position + 1).is_some_and(|next| next.kind == OracleViewTokenKind::Symbol && next.text == ".")
+}
+
+/// The schema in `CREATE OR REPLACE FORCE VIEW "OWNER"."NAME"`, when the captured text
+/// qualifies the view at all.
+fn oracle_view_owner(tokens: &[OracleViewToken]) -> Option<String> {
+    let view = tokens.iter().position(|token| !token.quoted && token.text.eq_ignore_ascii_case("VIEW"))?;
+    let name = tokens.get(view + 1)?;
+    oracle_view_tokens_continue_with_dot(tokens, view + 1).then(|| name.text.clone())
+}
+
+fn oracle_view_tokens(ddl: &str) -> Vec<OracleViewToken> {
+    let bytes = ddl.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    let mut spaced = false;
+
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            spaced = true;
+            index += 1;
+            continue;
+        }
+
+        let (end, kind, text, identifier, quoted, keep) = match bytes[index] {
+            b'\'' => {
+                let end = oracle_quoted_token_end(ddl, index);
+                (end, OracleViewTokenKind::Atom, ddl[index..end].to_string(), false, false, true)
+            }
+            b'"' => {
+                let end = oracle_quoted_token_end(ddl, index);
+                (end, OracleViewTokenKind::Atom, decode_oracle_quoted_identifier(&ddl[index..end]), true, true, true)
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                let end = ddl[index..].find('\n').map_or(bytes.len(), |offset| index + offset);
+                (end, OracleViewTokenKind::Atom, String::new(), false, false, false)
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let end = ddl[index + 2..].find("*/").map_or(bytes.len(), |offset| index + 2 + offset + 2);
+                (end, OracleViewTokenKind::Atom, String::new(), false, false, false)
+            }
+            byte if view_ddl_symbol(byte) => {
+                (index + 1, OracleViewTokenKind::Symbol, ddl[index..index + 1].to_string(), false, false, true)
+            }
+            _ => {
+                let mut end = index + 1;
+                while end < bytes.len()
+                    && !bytes[end].is_ascii_whitespace()
+                    && !matches!(bytes[end], b'\'' | b'"')
+                    && !view_ddl_symbol(bytes[end])
+                {
+                    end += 1;
+                }
+                (end, OracleViewTokenKind::Atom, ddl[index..end].to_string(), true, false, true)
+            }
+        };
+
+        if keep {
+            tokens.push(OracleViewToken { kind, text, identifier, quoted, spaced });
+        }
+        spaced = false;
+        index = end;
+    }
+
+    tokens
+}
+
+/// Oracle ends a quoted token at the matching quote; a doubled quote is an escape
+/// (there is no backslash escape).
+fn oracle_quoted_token_end(ddl: &str, start: usize) -> usize {
+    let bytes = ddl.as_bytes();
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == quote {
+            if bytes.get(index + 1) == Some(&quote) {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn decode_oracle_quoted_identifier(identifier: &str) -> String {
+    identifier.strip_prefix('"').and_then(|value| value.strip_suffix('"')).unwrap_or(identifier).replace("\"\"", "\"")
 }
 
 fn skip_ascii_whitespace(input: &str, mut index: usize) -> usize {
@@ -3053,13 +3298,13 @@ fn diff_columns_with_identifier_options(
         if let Some(target_index) = column_matches[source_index] {
             let target_column = &target[target_index];
             let mut changes = Vec::new();
-            if !column_types_equal_for_dialects(
-                &source_column.data_type,
-                &target_column.data_type,
-                source_dialect,
-                target_dialect,
-            ) {
-                changes.push(format!("type: {} → {}", target_column.data_type, source_column.data_type));
+            // Compare the *declared* type, not the raw driver string: Oracle reports
+            // `NUMBER` with the precision/scale in separate fields, so `NUMBER(10,2)` and
+            // `NUMBER(12,2)` would otherwise look identical (#9261).
+            let source_type = declared_column_type(source_column);
+            let target_type = declared_column_type(target_column);
+            if !column_types_equal_for_dialects(&source_type, &target_type, source_dialect, target_dialect) {
+                changes.push(format!("type: {target_type} → {source_type}"));
             }
             if source_column.is_nullable != target_column.is_nullable {
                 changes.push(format!(
@@ -3229,6 +3474,78 @@ fn identifier_lists_equal(left: &[String], right: &[String], ignore_column_name_
         && left.iter().zip(right).all(|(left, right)| identifiers_equal(left, right, ignore_column_name_case))
 }
 
+/// Names a server hands out on its own. Oracle names the index behind an *unnamed*
+/// PRIMARY KEY / UNIQUE constraint `SYS_C<number>`, and that number is per-object, so two
+/// structurally identical tables never agree on it — while Dameng and SQLite do the same
+/// with `SYS_C…`/`sqlite_autoindex_…` shapes. Those names carry no user intent and must not
+/// be compared as if they did.
+fn index_name_is_server_generated(name: &str) -> bool {
+    let upper = name.trim().to_ascii_uppercase();
+    if let Some(digits) = upper.strip_prefix("SYS_C") {
+        return !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit());
+    }
+    upper.starts_with("SQLITE_AUTOINDEX_")
+}
+
+/// Everything that identifies an index apart from its name. Used to pair up two indexes
+/// whose names differ only because the server generated them.
+fn index_signatures_equal(source: &IndexInfo, target: &IndexInfo, ignore_column_name_case: bool) -> bool {
+    source.is_unique == target.is_unique
+        && source.index_type == target.index_type
+        && source.filter == target.filter
+        && source.column_opclasses == target.column_opclasses
+        && source.key_options == target.key_options
+        && index_columns_equal(source, target, ignore_column_name_case)
+        && identifier_lists_equal(
+            &source.included_columns.clone().unwrap_or_default(),
+            &target.included_columns.clone().unwrap_or_default(),
+            ignore_column_name_case,
+        )
+}
+
+/// Pairs source indexes with the target index that is *the same index under a
+/// server-generated name*, so comparing two structurally identical tables does not report
+/// a phantom "index added + index removed" pair (#9261). Returns the target position for
+/// every source position that was paired this way.
+fn match_server_generated_indexes(
+    source: &[IndexInfo],
+    target: &[IndexInfo],
+    ignore_column_name_case: bool,
+) -> Vec<Option<usize>> {
+    let source_names: HashSet<&str> = source.iter().map(|index| index.name.as_str()).collect();
+    let target_names: HashSet<&str> = target.iter().map(|index| index.name.as_str()).collect();
+    let mut matched_targets: HashSet<usize> = HashSet::new();
+    let mut pairs: Vec<Option<usize>> = vec![None; source.len()];
+
+    for (source_position, source_index) in source.iter().enumerate() {
+        if source_index.is_primary || target_names.contains(source_index.name.as_str()) {
+            continue;
+        }
+        let Some(target_position) = target.iter().enumerate().find_map(|(position, target_index)| {
+            if matched_targets.contains(&position)
+                || target_index.is_primary
+                || source_names.contains(target_index.name.as_str())
+            {
+                return None;
+            }
+            // Only a server-generated name may stand in for a user-chosen one; two
+            // deliberately different names stay a real difference.
+            if !index_name_is_server_generated(&source_index.name)
+                && !index_name_is_server_generated(&target_index.name)
+            {
+                return None;
+            }
+            index_signatures_equal(source_index, target_index, ignore_column_name_case).then_some(position)
+        }) else {
+            continue;
+        };
+        matched_targets.insert(target_position);
+        pairs[source_position] = Some(target_position);
+    }
+
+    pairs
+}
+
 fn diff_indexes_with_options(
     source: &[IndexInfo],
     target: &[IndexInfo],
@@ -3237,12 +3554,17 @@ fn diff_indexes_with_options(
     let mut diffs = Vec::new();
     let target_map: HashMap<&str, &IndexInfo> = target.iter().map(|index| (index.name.as_str(), index)).collect();
     let source_map: HashMap<&str, &IndexInfo> = source.iter().map(|index| (index.name.as_str(), index)).collect();
+    let server_generated_pairs = match_server_generated_indexes(source, target, ignore_column_name_case);
+    let paired_targets: HashSet<usize> = server_generated_pairs.iter().flatten().copied().collect();
 
-    for source_index in source {
+    for (source_position, source_index) in source.iter().enumerate() {
         if source_index.is_primary {
             continue;
         }
         let Some(target_index) = target_map.get(source_index.name.as_str()) else {
+            if server_generated_pairs[source_position].is_some() {
+                continue;
+            }
             diffs.push(IndexDiff {
                 diff_type: "added".to_string(),
                 name: source_index.name.clone(),
@@ -3308,8 +3630,8 @@ fn diff_indexes_with_options(
         }
     }
 
-    for target_index in target {
-        if target_index.is_primary {
+    for (target_position, target_index) in target.iter().enumerate() {
+        if target_index.is_primary || paired_targets.contains(&target_position) {
             continue;
         }
         if !source_map.contains_key(target_index.name.as_str()) {
@@ -3733,26 +4055,48 @@ fn quote_id(name: &str, db_type: DatabaseType) -> String {
     profile_for(db_type).quote_ident(name)
 }
 
+/// The `NOT NULL` / `DEFAULT ...` tail of a column definition, in the order the target
+/// dialect accepts. Oracle's grammar is `datatype [DEFAULT expr] [NOT NULL]` and rejects
+/// the reverse order with `ORA-00907`, while MySQL/Postgres/SQLite write the constraint
+/// first, so the order is dialect data (see `column_default_precedes_not_null`).
+fn column_modifier_tail(
+    profile: &DdlDialectProfile,
+    col: &ColumnInfo,
+    declared_type: &str,
+    db_type: DatabaseType,
+    source_dialect: Option<DialectKind>,
+    skip_default: bool,
+) -> String {
+    let not_null = if col.is_nullable { String::new() } else { " NOT NULL".to_string() };
+    let default = if skip_default {
+        String::new()
+    } else {
+        col.column_default.as_ref().map_or_else(String::new, |value| {
+            format!(
+                " DEFAULT {}",
+                default_literal(
+                    value,
+                    declared_type,
+                    effective_source_dialect(source_dialect, db_type),
+                    col.extra.as_deref()
+                )
+            )
+        })
+    };
+    if profile.column_default_precedes_not_null {
+        format!("{default}{not_null}")
+    } else {
+        format!("{not_null}{default}")
+    }
+}
+
 fn column_def(col: &ColumnInfo, db_type: DatabaseType, source_dialect: Option<DialectKind>) -> String {
     if db_type == DatabaseType::SqlServer {
         return sqlserver_column_definition(col, &col.data_type, source_dialect, None);
     }
     let profile = profile_for(db_type);
     let mut definition = format!("{} {}", quote_id(&col.name, db_type), col.data_type);
-    if !col.is_nullable {
-        definition.push_str(" NOT NULL");
-    }
-    if let Some(default) = &col.column_default {
-        definition.push_str(&format!(
-            " DEFAULT {}",
-            default_literal(
-                default,
-                &col.data_type,
-                effective_source_dialect(source_dialect, db_type),
-                col.extra.as_deref()
-            )
-        ));
-    }
+    definition.push_str(&column_modifier_tail(&profile, col, &col.data_type, db_type, source_dialect, false));
     // Suffix-style auto-increment is only valid in MySQL-family ALTER clauses
     // (ADD/MODIFY/CHANGE). Other dialects' identity clauses are order-sensitive
     // inside ADD COLUMN, so keep omitting them outside the MySQL family.
@@ -3787,7 +4131,21 @@ const TABLE_DDL_HEADER_KEYWORDS: &[&str] =
 
 /// `CREATE VIEW`-family header keywords, covering the `OR REPLACE` and
 /// `MATERIALIZED` variants emitted by the Postgres/MySQL view DDL builders.
-const VIEW_DDL_HEADER_KEYWORDS: &[&str] = &["CREATE MATERIALIZED VIEW", "CREATE OR REPLACE VIEW", "CREATE VIEW"];
+const VIEW_DDL_HEADER_KEYWORDS: &[&str] = &[
+    "CREATE MATERIALIZED VIEW",
+    "CREATE OR REPLACE VIEW",
+    // Oracle's `DBMS_METADATA` writes the `FORCE`/`EDITIONABLE` variants; without them an
+    // Oracle view that exists only in the source kept the source schema in its header and
+    // the sync script created it on the wrong schema (or failed on rights).
+    "CREATE OR REPLACE FORCE EDITIONABLE VIEW",
+    "CREATE OR REPLACE FORCE NONEDITIONABLE VIEW",
+    "CREATE OR REPLACE EDITIONABLE VIEW",
+    "CREATE OR REPLACE NONEDITIONABLE VIEW",
+    "CREATE OR REPLACE FORCE VIEW",
+    "CREATE OR REPLACE NOFORCE VIEW",
+    "CREATE FORCE VIEW",
+    "CREATE VIEW",
+];
 
 /// Case-insensitive ASCII prefix check that avoids allocating an uppercased
 /// copy of `haystack` (which can be a whole multi-KB `CREATE TABLE` body) just
@@ -4226,6 +4584,12 @@ fn drop_object_sql(diff: &TableDiff, db_type: DatabaseType, schema: Option<&str>
             "IF OBJECT_ID(N'{}', N'{object_id_type}') IS NOT NULL DROP {object_type} {name};",
             name.replace('\'', "''")
         );
+    }
+    // Oracle only gained `IF EXISTS` in 23c, and Access/Firebird/Db2/Informix/HANA/Teradata
+    // never had it; the comparison already knows the object exists on the target, so the
+    // direct form is valid and sufficient — the same reasoning `drop_index_sql` uses.
+    if !profile_for(db_type).drop_table_supports_if_exists {
+        return format!("DROP {object_type} {name}{cascade};");
     }
     format!("DROP {object_type} IF EXISTS {name}{cascade};")
 }
@@ -5110,7 +5474,7 @@ fn generate_create_table_sql(
     // Type rewrite: user mappings → profile type_map → DialectKind matrix → normalize.
     // Call sites must not branch on individual DatabaseType values.
     let map_type = |col: &ColumnInfo| -> String {
-        let source_type = with_known_length(&col.data_type, col.character_maximum_length);
+        let source_type = declared_column_type(col);
         if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, &source_type, target_dialect) {
             return user_target;
         }
@@ -5157,22 +5521,7 @@ fn generate_create_table_sql(
                     mapped_type.as_str()
                 };
                 let mut def = format!("{} {}", col_name, effective_type);
-                if !col.is_nullable {
-                    def.push_str(" NOT NULL");
-                }
-                if !skip_default {
-                    if let Some(default) = &col.column_default {
-                        def.push_str(&format!(
-                            " DEFAULT {}",
-                            default_literal(
-                                default,
-                                &mapped_type,
-                                effective_source_dialect(source_dialect, db_type),
-                                col.extra.as_deref()
-                            )
-                        ));
-                    }
-                }
+                def.push_str(&column_modifier_tail(&profile, col, &mapped_type, db_type, source_dialect, skip_default));
                 if profile.inline_column_comment {
                     if let Some(comment) = col.comment.as_deref().filter(|c| !c.is_empty()) {
                         def.push_str(&format!(" COMMENT {}", comment_literal(comment)));
@@ -5198,22 +5547,7 @@ fn generate_create_table_sql(
             }
             AutoIncColumnBuild::Normal { skip_default } => {
                 let mut def = format!("{} {}", col_name, mapped_type);
-                if !col.is_nullable {
-                    def.push_str(" NOT NULL");
-                }
-                if !skip_default {
-                    if let Some(default) = &col.column_default {
-                        def.push_str(&format!(
-                            " DEFAULT {}",
-                            default_literal(
-                                default,
-                                &mapped_type,
-                                effective_source_dialect(source_dialect, db_type),
-                                col.extra.as_deref()
-                            )
-                        ));
-                    }
-                }
+                def.push_str(&column_modifier_tail(&profile, col, &mapped_type, db_type, source_dialect, skip_default));
                 if profile.inline_column_comment {
                     if let Some(comment) = col.comment.as_deref().filter(|c| !c.is_empty()) {
                         def.push_str(&format!(" COMMENT {}", comment_literal(comment)));
@@ -5721,13 +6055,15 @@ fn generate_schema_sync_sql_inner(
     let mut lines = Vec::new();
     let mut missing_objects: Vec<MissingRollbackObject> = Vec::new();
     let profile = profile_for(db_type);
-    // SQL Server has no DROP ... CASCADE syntax. Related constraints are handled
-    // explicitly by the comparison plan instead of appending an invalid clause.
-    let cascade = if cascade_delete && db_type != DatabaseType::SqlServer { " CASCADE" } else { "" };
+    // SQL Server has no DROP ... CASCADE syntax (related constraints are handled explicitly
+    // by the comparison plan), and Oracle spells the clause `CASCADE CONSTRAINTS` — which
+    // `drop_table_supports_cascade` deliberately excludes — so an unknown dialect gets the
+    // plain form instead of a clause its server would reject.
+    let cascade = if cascade_delete && profile.drop_table_supports_cascade { " CASCADE" } else { "" };
 
     let map_type = |col: &ColumnInfo| -> String {
         let tgt = DialectKind::from_database_type(db_type);
-        let source_type = with_known_length(&col.data_type, col.character_maximum_length);
+        let source_type = declared_column_type(col);
         if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, &source_type, tgt) {
             return user_target;
         }
@@ -5927,11 +6263,14 @@ fn generate_schema_sync_sql_inner(
                             } else {
                                 String::new()
                             };
-                            parts.push(format!(
-                                "  ADD COLUMN {}{}",
-                                column_def(&convert_col(source), db_type, source_dialect),
-                                position
-                            ));
+                            let definition = column_def(&convert_col(source), db_type, source_dialect);
+                            // Oracle has no `COLUMN` keyword here: it parenthesizes the whole
+                            // definition (`ADD (AMT NUMBER(12,2))`) instead.
+                            parts.push(if profile.add_column_uses_column_keyword {
+                                format!("  ADD COLUMN {definition}{position}")
+                            } else {
+                                format!("  ADD ({definition}){position}")
+                            });
                         }
                     }
                     "removed" => {
@@ -5965,6 +6304,25 @@ fn generate_schema_sync_sql_inner(
                                         source_dialect,
                                         schema,
                                     ));
+                                }
+                            } else if profile.parenthesized_alter_column_clause {
+                                // Oracle spells the whole column change as one
+                                // `MODIFY (col definition)` clause, which also carries the
+                                // `DEFAULT`/`NOT NULL` order the server accepts.
+                                if column.changes.iter().any(|change| !change.starts_with("order:")) {
+                                    let modify_keyword = profile.alter_modify_keyword();
+                                    let mut definition = column_def(&mapped, db_type, source_dialect);
+                                    // Re-stating a definition does *not* drop an existing
+                                    // `NOT NULL` on Oracle (verified on 11g: the constraint
+                                    // survives `MODIFY (c NUMBER(12,2))`), so relaxing a
+                                    // column has to spell `NULL` out or the statement reports
+                                    // success while the target keeps the old constraint.
+                                    if source.is_nullable
+                                        && column.changes.iter().any(|change| change.starts_with("nullable:"))
+                                    {
+                                        definition.push_str(" NULL");
+                                    }
+                                    parts.push(format!("  {modify_keyword} ({definition})"));
                                 }
                             } else if profile.alter_uses_modify_column {
                                 if column.changes.iter().any(|change| !change.starts_with("order:")) {
@@ -6021,12 +6379,16 @@ fn generate_schema_sync_sql_inner(
                                     let old_name = quote_id(&target_col.name, db_type);
                                     let new_name = quote_id(&column.name, db_type);
                                     parts.push(format!("  RENAME COLUMN {old_name} TO {new_name}"));
+                                    // Follow-up clauses keep the renamed column's shape in
+                                    // sync; their spelling is dialect data because `TYPE` is
+                                    // Postgres/ANSI grammar that Oracle rejects.
                                     if source.data_type.to_lowercase() != target_col.data_type.to_lowercase() {
-                                        parts.push(format!("  ALTER COLUMN {new_name} TYPE {}", mapped.data_type));
+                                        parts.push(profile.alter_column_type_clause(&new_name, &mapped.data_type));
                                     }
                                     if source.is_nullable != target_col.is_nullable {
-                                        let action = if source.is_nullable { "DROP NOT NULL" } else { "SET NOT NULL" };
-                                        parts.push(format!("  ALTER COLUMN {new_name} {action}"));
+                                        parts.push(
+                                            profile.alter_column_nullability_clause(&new_name, source.is_nullable),
+                                        );
                                     }
                                 }
                                 RenameColumnSyntax::AlterColumnRenameTo => {
@@ -8021,7 +8383,9 @@ mod tests {
     fn oracle_same_dialect_operations() {
         let diffs = make_col_diffs(&[("id", "NUMBER"), ("name", "VARCHAR2(100)")], &[("id", "NUMBER")], false);
         let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Oracle, None);
-        assert!(sql.contains("ADD COLUMN"), "Oracle add: {sql}");
+        // Oracle's ADD clause is parenthesized and has no `COLUMN` keyword.
+        assert!(sql.contains("ADD (NAME VARCHAR2(100) NOT NULL)"), "Oracle add: {sql}");
+        assert!(!sql.contains("ADD COLUMN"), "Oracle add must omit COLUMN: {sql}");
         assert!(!sql.contains('`'), "Oracle no backticks: {sql}");
     }
 
@@ -8139,7 +8503,12 @@ mod tests {
         let diffs = make_col_diffs(&[("new1", "int"), ("new2", "varchar(10)")], &[], false);
         for db in [DatabaseType::Mysql, DatabaseType::Postgres, DatabaseType::Oracle] {
             let sql = gen_sql(wrap_table_diff("t", diffs.clone()), db, None);
-            assert_eq!(sql.matches("ADD COLUMN").count(), 2, "{db:?} two adds: {sql}");
+            if db == DatabaseType::Oracle {
+                assert_eq!(sql.matches("ADD (").count(), 2, "Oracle two adds: {sql}");
+                assert!(!sql.contains("ADD COLUMN"), "Oracle add must omit COLUMN: {sql}");
+            } else {
+                assert_eq!(sql.matches("ADD COLUMN").count(), 2, "{db:?} two adds: {sql}");
+            }
         }
     }
 
@@ -13851,13 +14220,13 @@ mod tests {
         let changed_literal_whitespace =
             "CREATE VIEW `target_db`.`active_orders` AS SELECT 'source_db.orders', 'a  b' FROM `target_db`.`orders`";
 
-        assert!(mysql_view_definitions_differ(
+        assert!(view_definitions_differ(
             common,
             changed_schema_literal,
             Some(DialectKind::Mysql),
             Some(DialectKind::Mysql)
         ));
-        assert!(mysql_view_definitions_differ(
+        assert!(view_definitions_differ(
             common,
             changed_literal_whitespace,
             Some(DialectKind::Mysql),
@@ -13870,7 +14239,7 @@ mod tests {
         let compact = "CREATE VIEW `app`.`active_orders` AS SELECT 1 <=> 1, 1 <= 2, 1 != 2";
         let split = "CREATE VIEW `app`.`active_orders` AS SELECT 1 < = > 1, 1 < = 2, 1 ! = 2";
 
-        assert!(mysql_view_definitions_differ(compact, split, Some(DialectKind::Mysql), Some(DialectKind::Mysql)));
+        assert!(view_definitions_differ(compact, split, Some(DialectKind::Mysql), Some(DialectKind::Mysql)));
     }
 
     #[test]
@@ -13883,7 +14252,7 @@ mod tests {
             ddl.replace("`OrderId`", "`orderid`"),
             ddl.replace("CASCADED", "LOCAL"),
         ] {
-            assert!(mysql_view_definitions_differ(ddl, &changed, Some(DialectKind::Mysql), Some(DialectKind::Mysql)));
+            assert!(view_definitions_differ(ddl, &changed, Some(DialectKind::Mysql), Some(DialectKind::Mysql)));
         }
     }
 
@@ -14384,5 +14753,429 @@ mod tests {
 
         assert!(sql.contains("-- Create table: loop_a9761"), "{sql}");
         assert!(sql.contains("-- Create table: loop_b9761"), "{sql}");
+    }
+
+    fn typed_column(
+        name: &str,
+        data_type: &str,
+        numeric_precision: Option<i32>,
+        numeric_scale: Option<i32>,
+        character_maximum_length: Option<i32>,
+    ) -> ColumnInfo {
+        ColumnInfo {
+            is_nullable: true,
+            numeric_precision,
+            numeric_scale,
+            character_maximum_length,
+            ..column(name, data_type, None)
+        }
+    }
+
+    fn named_index(name: &str, columns: &[&str], is_unique: bool) -> IndexInfo {
+        index(IndexInfo {
+            name: name.to_string(),
+            columns: columns.iter().map(|column| (*column).to_string()).collect(),
+            is_unique,
+            is_primary: false,
+            filter: None,
+            index_type: Some("NORMAL".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: Vec::new(),
+            key_options: Vec::new(),
+            constraint_backed: false,
+        })
+    }
+
+    fn oracle_table_pair(
+        columns: Vec<ColumnInfo>,
+        source_indexes: Vec<IndexInfo>,
+        target_indexes: Vec<IndexInfo>,
+    ) -> SchemaDiffPreparationOptions {
+        SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("cmp_autoname", "TABLE")],
+            target_tables: vec![table_info("cmp_autoname", "TABLE")],
+            source_details: vec![TableSchemaDetail {
+                name: "cmp_autoname".to_string(),
+                columns: columns.clone(),
+                indexes: source_indexes,
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            target_details: vec![TableSchemaDetail {
+                name: "cmp_autoname".to_string(),
+                columns,
+                indexes: target_indexes,
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            database_type: DatabaseType::Oracle,
+            ..Default::default()
+        }
+    }
+
+    fn single_column_table_pair(source_column: ColumnInfo, target_column: ColumnInfo) -> SchemaDiffPreparationOptions {
+        SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("cmp_autoname", "TABLE")],
+            target_tables: vec![table_info("cmp_autoname", "TABLE")],
+            source_details: vec![TableSchemaDetail {
+                name: "cmp_autoname".to_string(),
+                columns: vec![source_column],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            target_details: vec![TableSchemaDetail {
+                name: "cmp_autoname".to_string(),
+                columns: vec![target_column],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            database_type: DatabaseType::Oracle,
+            ..Default::default()
+        }
+    }
+
+    /// #9261：Oracle 给未命名的 PRIMARY KEY/UNIQUE 约束自动取的索引名（`SYS_C<编号>`）
+    /// 是对象级的，两张结构完全相同的表也必然不同。按签名配对后不能再报出这对凭空
+    /// 多出/消失的索引。
+    #[test]
+    fn server_generated_index_names_do_not_report_index_churn() {
+        let result = prepare_schema_diff(oracle_table_pair(
+            vec![
+                typed_column("id", "NUMBER", Some(10), Some(0), Some(0)),
+                typed_column("code", "VARCHAR2", None, None, Some(20)),
+            ],
+            vec![named_index("SYS_C008146", &["code"], true)],
+            vec![named_index("SYS_C008149", &["code"], true)],
+        ));
+
+        assert!(result.diffs.is_empty(), "{:?}", result.diffs);
+    }
+
+    /// 兜底只覆盖「服务器自己命名」的索引：用户命名的索引改名仍然要报出来。
+    #[test]
+    fn differently_named_user_indexes_still_report_index_churn() {
+        let result = prepare_schema_diff(oracle_table_pair(
+            vec![typed_column("code", "VARCHAR2", None, None, Some(20))],
+            vec![named_index("IDX_CODE", &["code"], false)],
+            vec![named_index("IDX_CODE_OLD", &["code"], false)],
+        ));
+
+        assert_eq!(result.diffs.len(), 1, "{:?}", result.diffs);
+        let indexes = result.diffs[0].indexes.as_ref().expect("index diff");
+        assert_eq!(indexes.len(), 2, "{indexes:?}");
+        assert!(indexes.iter().any(|diff| diff.diff_type == "added" && diff.name == "IDX_CODE"));
+        assert!(indexes.iter().any(|diff| diff.diff_type == "removed" && diff.name == "IDX_CODE_OLD"));
+    }
+
+    /// 名字是服务器生成的、但定义不同（列不一样），必须仍然报差异。
+    #[test]
+    fn server_generated_index_with_a_different_definition_is_still_a_difference() {
+        let result = prepare_schema_diff(oracle_table_pair(
+            vec![
+                typed_column("code", "VARCHAR2", None, None, Some(20)),
+                typed_column("other_code", "VARCHAR2", None, None, Some(20)),
+            ],
+            vec![named_index("SYS_C008146", &["code"], true)],
+            vec![named_index("SYS_C008149", &["other_code"], true)],
+        ));
+
+        assert_eq!(result.diffs.len(), 1, "{:?}", result.diffs);
+        assert!(result.diffs[0].indexes.as_ref().is_some_and(|indexes| indexes.len() == 2));
+    }
+
+    /// #9261：Oracle 报的 `NUMBER` 不带精度，`NUMBER(10,2)` 与 `NUMBER(12,2)` 的类型串
+    /// 一模一样，差别只在 data_precision/data_scale 里 —— 必须能比较出来。
+    #[test]
+    fn reported_numeric_precision_changes_are_detected() {
+        let result = prepare_schema_diff(single_column_table_pair(
+            typed_column("amt", "NUMBER", Some(10), Some(2), Some(0)),
+            typed_column("amt", "NUMBER", Some(12), Some(2), Some(0)),
+        ));
+
+        assert_eq!(result.diffs.len(), 1, "{:?}", result.diffs);
+        let columns = result.diffs[0].columns.as_ref().expect("column diff");
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].changes, vec!["type: NUMBER(12,2) → NUMBER(10,2)".to_string()]);
+    }
+
+    /// 字符长度同理：驱动把它放在 character_maximum_length 里。
+    #[test]
+    fn reported_character_length_changes_are_detected() {
+        let result = prepare_schema_diff(single_column_table_pair(
+            typed_column("name", "VARCHAR2", None, None, Some(40)),
+            typed_column("name", "VARCHAR2", None, None, Some(20)),
+        ));
+
+        assert_eq!(result.diffs.len(), 1, "{:?}", result.diffs);
+        let columns = result.diffs[0].columns.as_ref().expect("column diff");
+        assert_eq!(columns[0].changes, vec!["type: VARCHAR2(20) → VARCHAR2(40)".to_string()]);
+    }
+
+    /// 驱动根本没报精度/长度时不能臆造差异（两侧都为空 => 相等）。
+    #[test]
+    fn columns_without_reported_parameters_do_not_invent_a_difference() {
+        let result = prepare_schema_diff(single_column_table_pair(
+            typed_column("amt", "NUMBER", None, None, None),
+            typed_column("amt", "NUMBER", None, None, None),
+        ));
+
+        assert!(result.diffs.is_empty(), "{:?}", result.diffs);
+    }
+
+    /// MySQL 的 `int` 也会带 numeric_precision，但 `int(10)` 不是它的声明类型（跨方言会
+    /// 变成非法 DDL），所以整数族不在拼接白名单里。
+    #[test]
+    fn integer_precision_metadata_is_not_spliced_into_the_type() {
+        let result = prepare_schema_diff(SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("t", "TABLE")],
+            target_tables: vec![table_info("t", "TABLE")],
+            source_details: vec![TableSchemaDetail {
+                name: "t".to_string(),
+                columns: vec![typed_column("id", "int", Some(10), Some(0), None)],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            target_details: vec![TableSchemaDetail {
+                name: "t".to_string(),
+                columns: vec![typed_column("id", "int", Some(10), Some(0), None)],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            database_type: DatabaseType::Mysql,
+            ..Default::default()
+        });
+
+        assert!(result.diffs.is_empty(), "{:?}", result.diffs);
+        assert_eq!(declared_column_type(&typed_column("id", "int", Some(10), Some(0), None)), "int");
+    }
+
+    fn oracle_column(
+        name: &str,
+        data_type: &str,
+        numeric_precision: Option<i32>,
+        numeric_scale: Option<i32>,
+        character_maximum_length: Option<i32>,
+        is_nullable: bool,
+        column_default: Option<&str>,
+    ) -> ColumnInfo {
+        ColumnInfo {
+            is_nullable,
+            column_default: column_default.map(str::to_string),
+            ..typed_column(name, data_type, numeric_precision, numeric_scale, character_maximum_length)
+        }
+    }
+
+    fn oracle_column_pair(source: Vec<ColumnInfo>, target: Vec<ColumnInfo>) -> SchemaDiffPreparationOptions {
+        SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("cmp_grammar", "TABLE")],
+            target_tables: vec![table_info("cmp_grammar", "TABLE")],
+            source_details: vec![TableSchemaDetail {
+                name: "cmp_grammar".to_string(),
+                columns: source,
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            target_details: vec![TableSchemaDetail {
+                name: "cmp_grammar".to_string(),
+                columns: target,
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            database_type: DatabaseType::Oracle,
+            source_dialect: Some(DialectKind::Oracle),
+            target_dialect: Some(DialectKind::Oracle),
+            ..Default::default()
+        }
+    }
+
+    /// Oracle 没有 `ADD COLUMN`/`MODIFY COLUMN`，列变更子句要写成 `ADD (定义)` /
+    /// `MODIFY (定义)`；定义内部 `DEFAULT` 又必须排在 `NOT NULL` 前面，否则 11g 直接
+    /// 报 ORA-00907（都是真机实测过的语法）。
+    #[test]
+    fn oracle_column_clauses_follow_the_oracle_grammar() {
+        let result = prepare_schema_diff(oracle_column_pair(
+            vec![
+                oracle_column("amt", "NUMBER", Some(12), Some(2), Some(0), false, None),
+                oracle_column("label", "VARCHAR2", None, None, Some(20), false, Some("'x'")),
+            ],
+            vec![oracle_column("amt", "NUMBER", Some(10), Some(2), Some(0), false, None)],
+        ));
+
+        let sql = result.sync_sql;
+        assert!(sql.contains("ADD (LABEL VARCHAR2(20) DEFAULT 'x' NOT NULL)"), "{sql}");
+        assert!(sql.contains("MODIFY (AMT NUMBER(12,2) NOT NULL)"), "{sql}");
+        assert!(!sql.contains("ADD COLUMN"), "{sql}");
+        assert!(!sql.contains("MODIFY COLUMN"), "{sql}");
+        assert!(!sql.contains("ALTER COLUMN"), "{sql}");
+        let add = sql.lines().find(|line| line.contains("ADD (")).expect("ADD clause");
+        let default_at = add.find("DEFAULT").expect("default literal");
+        let not_null_at = add.find("NOT NULL").expect("not null");
+        assert!(default_at < not_null_at, "DEFAULT must precede NOT NULL: {sql}");
+    }
+
+    /// 把列改成可空时，Oracle 重述定义的 `MODIFY (列 定义)` **不会**去掉已有的
+    /// `NOT NULL`（11g 实测），所以生成的语句必须显式写 `NULL`，否则脚本报成功但约束还在。
+    #[test]
+    fn oracle_modify_spells_null_when_dropping_not_null() {
+        let with_type_change = prepare_schema_diff(oracle_column_pair(
+            vec![oracle_column("amt", "NUMBER", Some(12), Some(2), Some(0), true, None)],
+            vec![oracle_column("amt", "NUMBER", Some(10), Some(2), Some(0), false, None)],
+        ));
+        let sql = with_type_change.sync_sql;
+        assert!(sql.contains("MODIFY (AMT NUMBER(12,2) NULL)"), "{sql}");
+        assert!(!sql.contains("NOT NULL"), "{sql}");
+
+        let nullability_only = prepare_schema_diff(oracle_column_pair(
+            vec![oracle_column("amt", "NUMBER", Some(10), Some(2), Some(0), true, None)],
+            vec![oracle_column("amt", "NUMBER", Some(10), Some(2), Some(0), false, None)],
+        ));
+        let sql = nullability_only.sync_sql;
+        assert!(sql.contains("MODIFY (AMT NUMBER(10,2) NULL)"), "{sql}");
+    }
+
+    fn oracle_view_options(source_ddl: Option<&str>, target_ddl: Option<&str>) -> SchemaDiffPreparationOptions {
+        SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("v_change", "VIEW")],
+            target_tables: vec![table_info("v_change", "VIEW")],
+            source_details: vec![schema_detail("v_change", source_ddl)],
+            target_details: vec![schema_detail("v_change", target_ddl)],
+            database_type: DatabaseType::Oracle,
+            source_dialect: Some(DialectKind::Oracle),
+            target_dialect: Some(DialectKind::Oracle),
+            ..Default::default()
+        }
+    }
+
+    /// #9261：`DBMS_METADATA` 抓到的 Oracle 视图文本里 owner 出现在头部
+    /// （`CREATE OR REPLACE FORCE VIEW "DBX_TEST"."V_SAME"`）和每一处限定名上，两张不同
+    /// schema 的**同一张**视图必然处处不同 —— 归一化 owner 之后不能再报差异。
+    #[test]
+    fn oracle_views_with_different_owners_compare_equal() {
+        let result = prepare_schema_diff(oracle_view_options(
+            Some(
+                "CREATE OR REPLACE FORCE VIEW \"DBX_TEST\".\"V_SAME\" (\"ID\", \"NAME\", \"AMT\") AS\n  SELECT ID, NAME, AMT FROM DBX_TEST.CMP_SAME;",
+            ),
+            Some(
+                "CREATE OR REPLACE FORCE VIEW \"DBX_TGT\".\"V_SAME\" (\"ID\",\"NAME\",\"AMT\") AS\n  SELECT   ID,\n    NAME,\n    AMT\n  FROM DBX_TGT.CMP_SAME",
+            ),
+        ));
+
+        assert!(result.diffs.is_empty(), "{:?}", result.diffs);
+    }
+
+    /// 真正不同（列少了、条件不同）的视图仍然要报出来。
+    #[test]
+    fn oracle_views_with_a_different_definition_are_reported() {
+        let result = prepare_schema_diff(oracle_view_options(
+            Some(
+                "CREATE OR REPLACE FORCE VIEW \"DBX_TEST\".\"V_CHANGE\" (\"ID\", \"NAME\", \"AMT\") AS\n  SELECT ID, NAME, AMT FROM DBX_TEST.CMP_SAME;",
+            ),
+            Some(
+                "CREATE OR REPLACE FORCE VIEW \"DBX_TGT\".\"V_CHANGE\" (\"ID\", \"NAME\") AS\n  SELECT ID, NAME FROM DBX_TGT.CMP_SAME;",
+            ),
+        ));
+
+        assert_eq!(result.diffs.len(), 1, "{:?}", result.diffs);
+        assert_eq!(result.diffs[0].object_type.as_deref(), Some("view"));
+        assert_eq!(result.diffs[0].diff_type, "modified");
+    }
+
+    /// 字符串字面量里的 `'DBX_TEST.CMP_SAME'` 不是限定名：归一化只改 owner 的限定引用，
+    /// 字面量原样保留 —— 所以两侧字面量不同时，视图仍然算不同。
+    #[test]
+    fn oracle_view_owner_normalization_leaves_literals_alone() {
+        let source = "CREATE OR REPLACE FORCE VIEW \"DBX_TEST\".\"V_LIT\" AS SELECT 'DBX_TEST.CMP_SAME' AS TAG, ID FROM DBX_TEST.CMP_SAME";
+        let target = "CREATE OR REPLACE FORCE VIEW \"DBX_TGT\".\"V_LIT\" AS SELECT 'DBX_TEST.CMP_SAME' AS TAG, ID FROM DBX_TGT.CMP_SAME";
+
+        let normalized = normalize_oracle_view_ddl(source);
+        // 只有头部 owner 和 `FROM` 后面的限定名被替换，字面量原样保留。
+        assert!(normalized.contains("'DBX_TEST.CMP_SAME' AS TAG"), "{normalized}");
+        assert_eq!(normalized.matches("__dbx_schema__").count(), 2, "{normalized}");
+        assert_eq!(normalized, normalize_oracle_view_ddl(target), "{normalized}");
+
+        // 字面量真的不一样时仍然是差异（说明字面量没有被一起改写掉）。
+        let changed_literal = target.replace("'DBX_TEST.CMP_SAME' AS TAG", "'DBX_TGT.CMP_SAME' AS TAG");
+        assert_ne!(normalized, normalize_oracle_view_ddl(&changed_literal));
+    }
+
+    /// dbx 自己生成的脚本只改写视图头，落库后目标视图的正文可能仍限定源 schema；这时两侧
+    /// 必须判为相同，否则脚本执行完差异也不会消失。只有第三个 schema 的限定名才算差异。
+    #[test]
+    fn oracle_views_whose_body_keeps_the_other_schema_compare_equal() {
+        let source =
+            "CREATE OR REPLACE FORCE VIEW \"DBX_TEST\".\"V_NEW\" (\"ID\") AS \n  select id from DBX_TEST.CMP_OK;";
+        let target =
+            "CREATE OR REPLACE FORCE VIEW \"DBX_TGT\".\"V_NEW\" (\"ID\") AS \n  select id from DBX_TEST.CMP_OK;";
+        let oracle = (Some(DialectKind::Oracle), Some(DialectKind::Oracle));
+        assert!(!view_definitions_differ(source, target, oracle.0, oracle.1));
+
+        // 目标侧按自己的 schema 写正文，同样不能算差异。
+        let target_self = target.replace("from DBX_TEST.CMP_OK", "from DBX_TGT.CMP_OK");
+        assert!(!view_definitions_differ(source, &target_self, oracle.0, oracle.1));
+
+        // 第三个 schema 的限定名不在归一化范围内：正文确实不同时仍然报差异。
+        let other_schema = target.replace("from DBX_TEST.CMP_OK", "from DBX_OTHER.CMP_OK");
+        assert!(view_definitions_differ(source, &other_schema, oracle.0, oracle.1));
+        let changed_body = target.replace("select id from", "select id, name from");
+        assert!(view_definitions_differ(source, &changed_body, oracle.0, oracle.1));
+    }
+
+    /// 跨方言的视图文本本来就不是同一种 SQL，不参与比较。
+    #[test]
+    fn oracle_view_text_is_not_compared_across_dialects() {
+        assert!(!view_definitions_differ(
+            "CREATE OR REPLACE FORCE VIEW \"DBX_TEST\".\"V_SAME\" AS SELECT 1 FROM DUAL",
+            "CREATE ALGORITHM=UNDEFINED VIEW `v_same` AS select 1",
+            Some(DialectKind::Mysql),
+            Some(DialectKind::Oracle),
+        ));
+    }
+
+    /// Oracle 的视图头带 `FORCE`，生成的脚本要把它改写成目标 schema，否则会在源 schema
+    /// 上建视图（或因为权限直接失败）。
+    #[test]
+    fn added_oracle_view_native_ddl_rewrites_source_schema_to_target_schema() {
+        let diffs = vec![TableDiff {
+            diff_type: "added".to_string(),
+            object_type: Some("view".to_string()),
+            name: "V_NEW".to_string(),
+            ddl: Some(
+                "CREATE OR REPLACE FORCE VIEW \"DBX_TEST\".\"V_NEW\" (\"ID\") AS\n  SELECT ID FROM DBX_TEST.CMP_SAME"
+                    .to_string(),
+            ),
+            ..TableDiff::default()
+        }];
+
+        let sql = generate_schema_sync_sql(
+            &diffs,
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Oracle,
+            Some("DBX_TGT"),
+            false,
+            Some(DialectKind::Oracle),
+            &[],
+        );
+
+        assert!(sql.contains("CREATE OR REPLACE FORCE VIEW DBX_TGT.V_NEW"), "{sql}");
+        assert!(!sql.contains("DBX_TEST.V_NEW"), "{sql}");
     }
 }

@@ -53,6 +53,7 @@ const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positio
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
+const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
@@ -531,6 +532,20 @@ pub struct McpHttpServerSettings {
     pub path: String,
     #[serde(default)]
     pub allow_remote: bool,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
+/// Configuration for the optional DBX Web MCP endpoint. The bearer token is
+/// deliberately kept out of this JSON and stored through the encrypted secret
+/// store instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebMcpSettings {
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
@@ -4020,6 +4035,7 @@ impl Storage {
                 .map_err(|e| e.to_string())?;
             let dedicated_keys = [
                 MCP_GLOBAL_POLICY_KEY,
+                WEB_MCP_SETTINGS_KEY,
                 MAX_RETRIES_KEY,
                 SQL_FILE_UPLOAD_MAX_MB_KEY,
                 HISTORY_RETENTION_LIMIT_KEY,
@@ -4244,6 +4260,32 @@ impl Storage {
         let value = serde_json::to_value(settings).map_err(|error| error.to_string())?;
         app_settings.insert(MCP_HTTP_SERVER_SETTINGS_KEY.to_string(), value);
         self.save_app_settings_json(&app_settings).await
+    }
+
+    pub async fn load_web_mcp_settings(&self) -> Result<WebMcpSettings, String> {
+        let settings = self.load_app_settings_json().await?;
+        match settings.get(WEB_MCP_SETTINGS_KEY) {
+            Some(value) => {
+                serde_json::from_value(value.clone()).map_err(|error| format!("invalid Web MCP settings: {error}"))
+            }
+            None => Ok(WebMcpSettings::default()),
+        }
+    }
+
+    pub async fn save_web_mcp_credentials(&self, settings: &WebMcpSettings, token: Option<&str>) -> Result<(), String> {
+        let token = token.unwrap_or_default().to_string();
+        let codec = self.secret_codec_for_write(!token.is_empty()).await?;
+        let value = serde_json::to_value(settings).map_err(|error| error.to_string())?;
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let mut app_settings = app_settings_map_from_conn(&tx)?;
+            app_settings.insert(WEB_MCP_SETTINGS_KEY.to_string(), value);
+            persist_secret_in_tx(&tx, &codec, GLOBAL_SECRET_NAMESPACE, "web_mcp_token", &token)?;
+            write_app_settings_map(&tx, &app_settings)?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
     }
 
     pub async fn save_desktop_settings(&self, desktop_settings: &DesktopSettings) -> Result<(), String> {

@@ -14567,7 +14567,7 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
             .map(|(i, c)| {
                 // A real column is quoted via `pg_ident`; an expression/functional key part
                 // arrives as raw expression text (the per-column `pg_get_indexdef` omits the
-                // opclass — see `crates/dbx-drivers/src/db/postgres.rs`), so quoting the whole
+                // opclass — see `crates/dbx-driver-postgres/src/postgres.rs`), so quoting the whole
                 // thing as an identifier would turn it into a nonexistent column reference
                 // (#6295).
                 let is_expr = idx.key_is_expression.get(i).copied().unwrap_or(false);

@@ -39,13 +39,13 @@ function metrics(starLabel: string) {
   return {
     en: [
       { value: "~25 MB", label: "desktop installer" },
-      { value: "90+", label: "database engines" },
+      { value: "100+", label: "database engines" },
       { value: "3 modes", label: "desktop, Docker and CLI" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
       { value: "~25 MB", label: "桌面安装包" },
-      { value: "90+", label: "数据库引擎" },
+      { value: "100+", label: "数据库引擎" },
       { value: "3 种模式", label: "桌面、Docker 与 CLI" },
       { value: starLabel, label: "GitHub Star，完全开源" },
     ],
@@ -358,7 +358,7 @@ const localizedTestimonials = testimonials;
 
 const i18nText = {
   en: {
-    heroTitle: "25 MB to manage 90+ databases!",
+    heroTitle: "25 MB to manage 100+ databases!",
     heroSubtitle: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
     download: "Download DBX",
     downloadName: "Download DBX",
@@ -367,7 +367,7 @@ const i18nText = {
     docsStartDesc: "Install DBX, create your first connection, and learn the main workflow.",
     workflowsTitle: "Core workflows",
     workflowsDesc: "The docs are organized around what you actually do in a database client.",
-    supportTitle: "Supports 90+ databases",
+    supportTitle: "Supports 100+ databases",
     supportDesc: "Connect SQL, NoSQL, vector, time-series, and embedded databases, message queues, and compatible engines in one place.",
     supportLink: "View all",
     testimonialsTitle: "What DBX is good at",
@@ -403,7 +403,7 @@ const i18nText = {
     docker: "Docker setup",
   },
   cn: {
-    heroTitle: "25MB，管理90+种数据库！",
+    heroTitle: "25MB，管理100+种数据库！",
     heroSubtitle: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
     download: "下载 DBX",
     downloadName: "下载 DBX",
@@ -412,7 +412,7 @@ const i18nText = {
     docsStartDesc: "安装 DBX、创建第一个连接，并了解主要工作流。",
     workflowsTitle: "核心工作流",
     workflowsDesc: "文档围绕数据库客户端里的真实任务组织，而不是堆功能清单。",
-    supportTitle: "支持90+种数据库",
+    supportTitle: "支持100+种数据库",
     supportDesc: "统一连接和管理 SQL、NoSQL、向量、时序、嵌入式数据库、消息队列及兼容引擎。",
     supportLink: "查看全部",
     testimonialsTitle: "DBX 适合什么样的工作",
@@ -451,12 +451,12 @@ const i18nText = {
 
 const landingMeta = {
   en: {
-    title: "DBX - 25 MB to manage 90+ databases!",
-    description: "Manage MySQL, PostgreSQL, SQLite, Redis and 90+ data systems with DBX, a free open-source database client. Desktop, Docker self-hosting, optional AI and MCP.",
+    title: "DBX - 25 MB to manage 100+ databases!",
+    description: "Manage MySQL, PostgreSQL, SQLite, Redis and 100+ data systems with DBX, a free open-source database client. Desktop, Docker self-hosting, optional AI and MCP.",
   },
   cn: {
-    title: "DBX - 25MB，管理90+种数据库！",
-    description: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 90+ 种数据系统，提供 SQL 编辑、可选 AI 助手、MCP 和 Docker 自托管，覆盖 Windows、macOS 与 Linux。",
+    title: "DBX - 25MB，管理100+种数据库！",
+    description: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 100+ 种数据系统，提供 SQL 编辑、可选 AI 助手、MCP 和 Docker 自托管，覆盖 Windows、macOS 与 Linux。",
   },
 };
 

@@ -1,6 +1,6 @@
 import type { AstNode, ClauseNode, LimitClauseNode, ParenthesisNode, StatementNode } from "sql-formatter/dist/esm/parser/ast.js";
 import { createTableLayout, isCreateTable } from "./ddl";
-import { clauseChildContext, collapsedContext, emitText, isBodyNode, isCallParen, isJoinKeyword, isLogicalOperator, isParenthesis, keywordText, limitChildren, renderInline, splitByComma, splitLogicalOperands, Writer, type SqlLayoutContext } from "./primitives";
+import { clauseChildContext, collapsedContext, emitText, endsWithLineComment, isBodyNode, isCallParen, isJoinKeyword, isLineComment, isLogicalOperator, isParenthesis, keywordText, limitChildren, renderInline, splitByComma, splitLogicalOperands, Writer, type SqlLayoutContext } from "./primitives";
 
 export type { SqlLayoutContext, SqlLayoutOptions } from "./primitives";
 
@@ -74,7 +74,7 @@ function printLimitClause(writer: Writer, clause: LimitClauseNode, ctx: SqlLayou
   }
   writer.write(keyword);
   writer.newline(writer.column + ctx.options.indentWidth);
-  emitText(writer, ctx.renderers.block(children).trim(), writer.column);
+  emitText(writer, ctx.renderers.block(children).trim(), writer.column, endsWithLineComment(children));
 }
 
 /** Index just past the nodes that share a line with the group at `from`. */
@@ -200,7 +200,7 @@ function printElement(writer: Writer, nodes: AstNode[], baseColumn: number, ctx:
     } else {
       // A construct too wide to inline (a long CASE, a nested function call):
       // fall back to sql-formatter's own multi-line rendering of it.
-      emitText(writer, ctx.renderers.block(run).trim(), writer.column);
+      emitText(writer, ctx.renderers.block(run).trim(), writer.column, endsWithLineComment(run));
     }
     index = end;
   }
@@ -217,7 +217,7 @@ function printBlock(writer: Writer, nodes: AstNode[], baseColumn: number, ctx: S
   if (!nodes.some(isBodyNode)) {
     // A plain expression group (not a subquery) that did not fit: let
     // sql-formatter break it, then re-base the block on this column.
-    emitText(writer, ctx.renderers.block(nodes).trim(), baseColumn);
+    emitText(writer, ctx.renderers.block(nodes).trim(), baseColumn, endsWithLineComment(nodes));
     return;
   }
 
@@ -234,7 +234,7 @@ function writeBodyNode(writer: Writer, node: AstNode, baseColumn: number, ctx: S
   if (node.type === "clause") printClause(writer, node, baseColumn, ctx);
   else if (node.type === "set_operation") writer.write(keywordText(node.nameKw.text, ctx));
   else if (node.type === "limit_clause") printLimitClause(writer, node, ctx);
-  else emitText(writer, ctx.renderers.block([node]).trim(), writer.column);
+  else emitText(writer, ctx.renderers.block([node]).trim(), writer.column, isLineComment(node));
 }
 
 /** Emits a whole statement, one clause per line unless the statement collapses. */

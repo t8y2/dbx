@@ -53,6 +53,9 @@ const BLOCKED_EXACT: &[&str] = &[
     "tunnel-profiles/save",
     // 已存连接凭据解密出口
     "app-settings/config/decrypt",
+    // 演示实例不得开放可访问全部连接的 MCP bearer token
+    "app-settings/mcp-http",
+    "app-settings/mcp-http/rotate-token",
     // 读取服务器本地 ~/.ssh/config
     "ssh/config-hosts",
     // 插件数据访问授权写入（插件读取已存连接数据的许可）

@@ -1672,6 +1672,14 @@ export interface TreeNode {
     parentId: string;
     offset: number;
     pageSize: number;
+    /**
+     * Identity of the row that was expected to open this page: the peek row the
+     * previous page fetched but did not display. Offset paging is not snapshot
+     * consistent, so when objects are created or dropped above the window the
+     * same offset points at a different row; comparing against this anchor lets
+     * the page notice that and re-read the window instead of leaving a gap.
+     */
+    anchor?: string;
   };
 }
 

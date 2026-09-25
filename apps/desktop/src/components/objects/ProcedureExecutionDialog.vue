@@ -144,7 +144,7 @@ function displayParameterDefault(parameter: RoutineParameterValue): string {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[86vh] border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[780px]">
+    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[780px]">
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.confirmExecuteProcedureTitle") }}</DialogTitle>
       </DialogHeader>

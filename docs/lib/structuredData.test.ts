@@ -18,9 +18,9 @@ test("software structured data stays localized and versioned", () => {
   assert.equal(english.applicationCategory, "DeveloperApplication");
   assert.equal(english.softwareVersion, "0.5.71");
   assert.equal(english.inLanguage, "en");
-  assert.match(english.description, /90\+ data systems/);
+  assert.match(english.description, /100\+ data systems/);
   assert.equal(chinese.inLanguage, "zh-CN");
-  assert.match(chinese.description, /90\+ 种数据系统/);
+  assert.match(chinese.description, /100\+ 种数据系统/);
   assert.equal(chinese.license, "https://github.com/t8y2/dbx/blob/main/LICENSE");
 });
 

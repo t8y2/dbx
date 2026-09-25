@@ -3,6 +3,7 @@ package com.dbx.agent.sqlserverlegacy;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.IndexInfo;
+import com.dbx.agent.ObjectSource;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -124,6 +125,48 @@ class SqlServerLegacyAgentTest {
                 + "ORDER BY c.colid",
             SqlServerLegacyAgent.sqlServer2000ObjectSourceSql()
         );
+    }
+
+    /**
+     * The object browser asks for object source with the object's kind, so a
+     * view must map to sysobjects.xtype 'V' (and a trigger to 'TR') instead of
+     * being rejected as an unsupported object type (#10162).
+     */
+    @Test
+    void sqlServer2000ObjectSourceResolvesViewsAndTriggers() {
+        List<String> boundXtypes = new java.util.ArrayList<>();
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(boundXtypes));
+        setSqlServer2000Mode(agent, true);
+
+        ObjectSource view = agent.getObjectSource("dbo", "V_ORDERS", "VIEW");
+        ObjectSource trigger = agent.getObjectSource("dbo", "TR_ORDERS", "TRIGGER");
+        ObjectSource procedure = agent.getObjectSource("dbo", "P_ORDERS", "PROCEDURE");
+
+        Assertions.assertEquals(List.of("V", "TR", "P"), boundXtypes);
+        Assertions.assertEquals("CREATE VIEW dbo.V_ORDERS AS SELECT 1", view.getSource());
+        Assertions.assertEquals("VIEW", view.getObject_type());
+        Assertions.assertEquals("dbo", view.getSchema());
+        // Legacy catalogs stay read-only in the editor.
+        Assertions.assertFalse(view.isEditable());
+        Assertions.assertEquals("CREATE VIEW dbo.V_ORDERS AS SELECT 1", trigger.getSource());
+        Assertions.assertEquals("CREATE VIEW dbo.V_ORDERS AS SELECT 1", procedure.getSource());
+    }
+
+    @Test
+    void sqlServer2000ObjectSourceStillRejectsKindsWithoutAnXtype() {
+        List<String> boundXtypes = new java.util.ArrayList<>();
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(boundXtypes));
+        setSqlServer2000Mode(agent, true);
+
+        IllegalArgumentException error = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> agent.getObjectSource("dbo", "PKG_ORDERS", "PACKAGE")
+        );
+
+        Assertions.assertEquals("Unsupported object type: PACKAGE", error.getMessage());
+        Assertions.assertTrue(boundXtypes.isEmpty());
     }
 
     @Test
@@ -490,6 +533,42 @@ class SqlServerLegacyAgentTest {
             }
             if ("close".equals(name) || "isClosed".equals(name)) {
                 return "isClosed".equals(name) ? Boolean.FALSE : null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    /**
+     * Connection whose object-source query returns the ordered syscomments
+     * chunks and records the xtype the agent bound, so tests can assert the
+     * sysobjects.xtype mapping without a live legacy server.
+     */
+    private static Connection objectSourceConnection(List<String> boundXtypes) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    String name = statementMethod.getName();
+                    if ("setString".equals(name) && statementArgs != null && Integer.valueOf(3).equals(statementArgs[0])) {
+                        boundXtypes.add((String) statementArgs[1]);
+                        return null;
+                    }
+                    if ("executeQuery".equals(name)) {
+                        return metadataResultSet(
+                            Arrays.asList(
+                                Arrays.asList("CREATE VIEW dbo.V_ORDERS AS "),
+                                Arrays.asList("SELECT 1")
+                            ),
+                            Map.of("SOURCE_TEXT", 0)
+                        );
+                    }
+                    if ("close".equals(name)) {
+                        return null;
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("close".equals(method.getName()) || "isClosed".equals(method.getName())) {
+                return "isClosed".equals(method.getName()) ? Boolean.FALSE : null;
             }
             return defaultValue(method.getReturnType());
         });

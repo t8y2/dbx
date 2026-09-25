@@ -304,7 +304,9 @@ DBX Web and Docker require the same standalone DuckDB driver. Install it from Dr
 
 ### Native Streamable HTTP for DBX Web
 
-DBX Web can also host MCP itself. This mode is disabled unless `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) is configured. It uses the existing Web listener and the `/mcp` path, so Docker and reverse-proxy deployments do not need a second exposed port. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities that clients send in the `Host` header, including a mapped port when applicable. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
+DBX Web can also host MCP itself on its existing listener at `/mcp`, so Docker and reverse-proxy deployments do not need a second exposed port. A single-instance deployment with a Web login password can enable it in **Settings → MCP → HTTP Service** after entering the allowed Hosts. DBX generates a bearer token in its encrypted secret store; the page can copy, rotate, or disable it, with changes applying to new requests immediately. The page does not show `/mcp` as a usable endpoint while it is disabled. Page-managed MCP is inactive without a Web login password; demo deployments disable MCP entirely.
+
+Deployment configuration takes precedence: when `DBX_WEB_MCP_TOKEN` or `DBX_WEB_MCP_TOKEN_FILE` is set, the page shows read-only status and cannot replace the deployment secret. A previously enabled page-managed token remains stored and becomes active again if the deployment token is removed and Web is restarted. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities clients send in the `Host` header, including mapped ports. Multi-instance deployments should use a shared deployment secret and allowlist, not the page-managed mode. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
 
 For example, a container published as `4225:4224` uses `http://localhost:4225/mcp`:
 

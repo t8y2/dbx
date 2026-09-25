@@ -7,30 +7,12 @@ publish = false
 
 [features]
 default = []
-duckdb-sidecar = []
-openapi = ["dep:utoipa", "dbx-types/openapi"]
+duckdb-sidecar = ["dbx-sql-schema/duckdb-sidecar"]
+openapi = ["dbx-sql-data/openapi", "dbx-types/openapi"]
 
 [dependencies]
+dbx-sql-core = { path = "../dbx-sql-core" }
+dbx-sql-data = { path = "../dbx-sql-data" }
+dbx-sql-dialect = { path = "../dbx-sql-dialect" }
+dbx-sql-schema = { path = "../dbx-sql-schema" }
 dbx-types = { path = "../dbx-types", default-features = false }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
-utoipa = { version = "5.5", optional = true }
-regex = "1"
-sqlparser = { version = "0.62.0", features = ["visitor"] }
-winnow = "1.0"
-rayon = "1"
-log = "0.4"
-tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
-chrono = { version = "0.4", features = ["serde"] }
-percent-encoding = "2"
-encoding_rs = "0.8"
-unicode-ident = "1"
-unicode-width = "0.2"
-serde_yaml = "0.9"
-notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
-
-[dev-dependencies]
-insta = { version = "1", features = ["json", "glob"] }
-tempfile = "3"
-rusqlite = { version = "0.32", default-features = false }
-tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }

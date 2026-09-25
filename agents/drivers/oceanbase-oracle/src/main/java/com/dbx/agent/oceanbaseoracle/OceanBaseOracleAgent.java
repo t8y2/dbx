@@ -722,6 +722,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String owner = normalizeSchema(schema);
             String objectName = normalizeObjectName(name);
             String normalizedType = normalizeObjectSourceType(objectType);
+            if (prefersDictionarySource(normalizedType)) {
+                return getDictionaryFirstObjectSource(owner, objectName, normalizedType);
+            }
             String source;
             SQLException metadataError = null;
             try {
@@ -749,6 +752,30 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             }
             return new ObjectSource(objectName, normalizedType, owner, source == null ? "" : source);
         });
+    }
+
+    private ObjectSource getDictionaryFirstObjectSource(String owner, String name, String objectType) throws SQLException {
+        String source;
+        SQLException dictionaryError = null;
+        try {
+            source = queryDictionarySource(owner, name, objectType);
+        } catch (SQLException e) {
+            dictionaryError = e;
+            source = null;
+        }
+
+        if (source == null || source.trim().isEmpty()) {
+            try {
+                source = queryDbmsMetadataSource(owner, name, objectType);
+            } catch (SQLException metadataError) {
+                if (dictionaryError != null) {
+                    dictionaryError.addSuppressed(metadataError);
+                    throw dictionaryError;
+                }
+                throw metadataError;
+            }
+        }
+        return new ObjectSource(name, objectType, owner, source == null ? "" : source);
     }
 
     private String queryDbmsMetadataSource(String owner, String name, String objectType) throws SQLException {
@@ -794,6 +821,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             stmt.setString(1, owner);
             stmt.setString(2, name);
             stmt.setString(3, sourceType);
+            stmt.setFetchSize(256);
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     String line = rs.getString(1);
@@ -820,6 +848,13 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private static boolean supportsDictionarySource(String objectType) {
         return switch (objectType) {
             case "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY", "SEQUENCE" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean prefersDictionarySource(String objectType) {
+        return switch (objectType) {
+            case "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "TRIGGER", "TYPE", "TYPE_BODY" -> true;
             default -> false;
         };
     }

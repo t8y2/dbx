@@ -27,3 +27,16 @@ export function createRoutedSidebarDialogController(
   routedController.node = options.node;
   return routedController;
 }
+
+/**
+ * Whether the create-database dialog should expose its charset/locale picker.
+ *
+ * For MySQL-family dialects this is a charset+collation control gated by
+ * `canSetCreateDatabaseCharset`; for Informix-family dialects (GBase 8s) the same control is a
+ * locale selector gated by `canSetCreateDatabaseLocale`. Both the routed controller and
+ * `databaseDialogCapabilities()` must derive the flag from this single source, otherwise the two
+ * paths drift and the picker silently disappears for locale-only dialects.
+ */
+export function routedCanSetCreateDatabaseCharset(canSetCreateDatabaseCharset: boolean, canSetCreateDatabaseLocale: boolean): boolean {
+  return canSetCreateDatabaseCharset || canSetCreateDatabaseLocale;
+}

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, watch, onBeforeUnmount, inject, reactive, ref, shallowRef } from "vue";
-import { createRoutedSidebarDialogController } from "./sidebarDialogControllerRouting";
+import { createRoutedSidebarDialogController, routedCanSetCreateDatabaseCharset } from "./sidebarDialogControllerRouting";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
 import { useSidebarConnectionMutationRuntime } from "@/composables/useSidebarConnectionMutationRuntime";
@@ -675,11 +675,7 @@ function routeTreeItemDialogController() {
     },
   });
   routedController.pasteTableDataCopySupported = pasteTableDataCopySupported.value;
-  // Mirror databaseDialogCapabilities(): for GBase 8s / Informix the create-database picker is a
-  // locale selector driven by canSetCreateDatabaseLocale, so the routed controller must expose it
-  // here too — otherwise the dropdown stays hidden even though openCreateDatabaseDialog already
-  // seeds the DB_LOCALE directive.
-  routedController.canSetCreateDatabaseCharset = canSetCreateDatabaseCharset.value || canSetCreateDatabaseLocale.value;
+  routedController.canSetCreateDatabaseCharset = routedCanSetCreateDatabaseCharset(canSetCreateDatabaseCharset.value, canSetCreateDatabaseLocale.value);
   routedController.canEditDatabaseCharsetCollation = canEditDatabaseCharsetCollation.value;
   routedController.canEditDatabaseComment = canEditDatabaseComment.value;
   emit("open-dialog-controller", routedController);
@@ -5268,7 +5264,7 @@ function databaseDialogCapabilities() {
   return {
     showCreateDatabaseDialog,
     createDatabaseName,
-    canSetCreateDatabaseCharset: canSetCreateDatabaseCharset.value || canSetCreateDatabaseLocale.value,
+    canSetCreateDatabaseCharset: routedCanSetCreateDatabaseCharset(canSetCreateDatabaseCharset.value, canSetCreateDatabaseLocale.value),
     createDatabaseCharset,
     createDatabaseCharsetOptions,
     createDatabaseCharsetLoading,

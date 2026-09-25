@@ -2269,9 +2269,45 @@ fn postgres_index_column_sql(
     }
 }
 
-fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &str) -> Vec<String> {
+/// `CREATE INDEX IF NOT EXISTS` was added in PostgreSQL 9.5: 9.2/9.3/9.4 reject it
+/// with `syntax error at or near "NOT"` (issue #8853). A server that does not report
+/// its version keeps the idempotent form, matching the long-standing behavior.
+fn postgres_create_index_if_not_exists(server_version_num: Option<i32>) -> bool {
+    server_version_num.is_none_or(|version| version >= 90_500)
+}
+
+/// Decides whether the target index DDL may use `IF NOT EXISTS`. openGauss/GaussDB
+/// report a 9.x `server_version_num` but do implement the syntax, so only a plain
+/// PostgreSQL target is version-gated.
+async fn target_supports_create_index_if_not_exists(state: &AppState, pool_key: &str) -> bool {
+    let (_, _, db_type, _) = transfer_pool_context(state, pool_key).await;
+    if db_type != Some(DatabaseType::Postgres) {
+        return true;
+    }
+    let version = execute_read_on_pool(state, pool_key, "SHOW server_version_num")
+        .await
+        .ok()
+        .and_then(|result| result.rows.first().and_then(|row| row.first()).and_then(server_version_num_of));
+    postgres_create_index_if_not_exists(version)
+}
+
+fn server_version_num_of(value: &serde_json::Value) -> Option<i32> {
+    match value {
+        serde_json::Value::Number(number) => number.as_i64().and_then(|version| i32::try_from(version).ok()),
+        serde_json::Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn generate_postgres_index_ddl(
+    indexes: &[db::IndexInfo],
+    table: &str,
+    schema: &str,
+    if_not_exists: bool,
+) -> Vec<String> {
     let full_table = qualified_table(table, schema, &DatabaseType::Postgres, None);
     let mut statements = Vec::new();
+    let idempotent = if if_not_exists { "IF NOT EXISTS " } else { "" };
     for index in indexes.iter().filter(|index| !index.is_primary) {
         if index.name.trim().is_empty() || index.columns.is_empty() {
             continue;
@@ -2323,7 +2359,7 @@ fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &
             .map(|value| format!(" WHERE {value}"))
             .unwrap_or_default();
         statements.push(format!(
-            "CREATE {unique}INDEX IF NOT EXISTS {} ON {full_table}{using_clause} ({columns}){include_clause}{filter_clause}",
+            "CREATE {unique}INDEX {idempotent}{} ON {full_table}{using_clause} ({columns}){include_clause}{filter_clause}",
             quote_identifier(&index.name, &DatabaseType::Postgres)
         ));
         if let Some(comment) = index.comment.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
@@ -2404,7 +2440,8 @@ async fn restore_postgres_table_schema_objects(
     source_indexes: &[db::IndexInfo],
     source_foreign_keys: &[db::ForeignKeyInfo],
 ) -> Result<(), String> {
-    for statement in generate_postgres_index_ddl(source_indexes, target_table, target_schema) {
+    let index_if_not_exists = target_supports_create_index_if_not_exists(state, target_pool_key).await;
+    for statement in generate_postgres_index_ddl(source_indexes, target_table, target_schema, index_if_not_exists) {
         execute_on_pool(state, target_pool_key, &statement)
             .await
             .map_err(|e| format!("Failed to create PostgreSQL index for {target_table}: {e}"))?;
@@ -14759,7 +14796,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             },
         ];
 
-        let index_sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let index_sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
         let foreign_key_sql = generate_postgres_foreign_key_ddl(&foreign_keys, "orders", "public", "archive");
 
         assert_eq!(
@@ -14794,12 +14831,50 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,
             vec!["CREATE INDEX IF NOT EXISTS \"users_name_trgm_idx\" ON \"public\".\"users\" USING gin (\"name\" gin_trgm_ops)".to_string()]
         );
+    }
+
+    #[test]
+    fn postgres_index_ddl_drops_if_not_exists_for_legacy_servers() {
+        // PostgreSQL 9.2/9.3/9.4 reject `CREATE INDEX IF NOT EXISTS` outright
+        // (`syntax error at or near "NOT"`), so the transfer must fall back to the
+        // plain form there (issue #8853).
+        let indexes = vec![db::IndexInfo {
+            name: "users_name_idx".to_string(),
+            columns: vec!["name".to_string(), "status".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false, false],
+            column_opclasses: vec![None, None],
+            key_options: Vec::new(),
+            constraint_backed: false,
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", false);
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX \"users_name_idx\" ON \"public\".\"users\" (\"name\", \"status\")".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_create_index_if_not_exists_is_version_gated() {
+        assert!(postgres_create_index_if_not_exists(Some(150_001)));
+        assert!(postgres_create_index_if_not_exists(Some(90_500)));
+        assert!(!postgres_create_index_if_not_exists(Some(90_499)));
+        assert!(!postgres_create_index_if_not_exists(Some(90_223)));
+        // Unknown version keeps the idempotent form used by every modern target.
+        assert!(postgres_create_index_if_not_exists(None));
     }
 
     #[test]
@@ -14819,7 +14894,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,
@@ -14850,7 +14925,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,
@@ -14876,7 +14951,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,
@@ -14906,7 +14981,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "event_log", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "event_log", "public", true);
 
         assert_eq!(
             sql,
@@ -14931,7 +15006,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "events", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "events", "public", true);
 
         assert_eq!(
             sql,
@@ -14957,7 +15032,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,

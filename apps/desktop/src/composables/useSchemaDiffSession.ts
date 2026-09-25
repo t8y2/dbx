@@ -31,6 +31,13 @@ export interface SchemaDiffSessionConfig {
   targetSchema: string;
   sourceDbType: string;
   targetDbType: DatabaseType;
+  /**
+   * Product type behind a JDBC `sourceDbType`/`targetDbType` (see
+   * `schemaDiffEngineDatabaseType`). Only the diff engine's dialect/profile decisions use
+   * it: metadata loading, progress phases and option defaults keep the raw db types.
+   */
+  sourceEngineDbType?: DatabaseType;
+  targetEngineDbType?: DatabaseType;
   options: SchemaDiffCompareOptions;
   ignoreComments: boolean;
   label: string;
@@ -55,6 +62,11 @@ export interface SchemaDiffSessionDependencies {
 }
 
 const sessions = reactive(new Map<string, SchemaDiffSession>());
+
+function schemaDiffDialect(dbType: DatabaseType | string | undefined, explicit: string | undefined): string | undefined {
+  if (explicit) return normalizeDialectKind(explicit);
+  return dbType ? databaseTypeToDialectKind(dbType as DatabaseType) : undefined;
+}
 
 function cloneOptions(options: SchemaDiffCompareOptions): SchemaDiffCompareOptions {
   return {
@@ -209,7 +221,7 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
       sourceOwners,
       targetOwners,
       tableMappings: sessionOptions.selectedTables === undefined ? undefined : sessionOptions.tableMappings,
-      databaseType: input.targetDbType,
+      databaseType: input.targetEngineDbType ?? input.targetDbType,
       targetSchema: schemaDiffDeployTargetSchema(input.targetDbType, input.targetDatabase, input.targetSchema),
       ignoreComments: input.ignoreComments,
       cascadeDelete: sessionOptions.cascadeDelete ?? false,
@@ -226,8 +238,8 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
             .map((value) => value.trim())
             .filter(Boolean)
         : undefined,
-      sourceDialect: sessionOptions.sourceDialect ? normalizeDialectKind(sessionOptions.sourceDialect) : input.sourceDbType ? databaseTypeToDialectKind(input.sourceDbType as DatabaseType) : undefined,
-      targetDialect: sessionOptions.targetDialect ? normalizeDialectKind(sessionOptions.targetDialect) : input.targetDbType ? databaseTypeToDialectKind(input.targetDbType) : undefined,
+      sourceDialect: schemaDiffDialect(input.sourceEngineDbType ?? input.sourceDbType, sessionOptions.sourceDialect),
+      targetDialect: schemaDiffDialect(input.targetEngineDbType ?? input.targetDbType, sessionOptions.targetDialect),
       compatibilityThreshold: sessionOptions.compatibilityThreshold ?? 0.5,
       fieldMappings:
         sessionOptions.fieldMappings?.map((mapping) => ({

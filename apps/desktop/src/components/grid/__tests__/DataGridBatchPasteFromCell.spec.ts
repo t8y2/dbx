@@ -9,6 +9,30 @@ import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { buildMongoUpdateDocument } from "@/lib/mongo/mongoDocumentValues";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
+// DataGrid.vue imports RecycleScroller directly (no global registration),
+// so the module itself must be stubbed for deterministic row rendering.
+vi.mock("vue-virtual-scroller", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    RecycleScroller: defineComponent({
+      props: {
+        items: {
+          type: Array as PropType<unknown[]>,
+          default: () => [],
+        },
+      },
+      setup(props, { attrs, slots }) {
+        return () =>
+          h(
+            "div",
+            attrs,
+            props.items.map((item) => slots.default?.({ item })),
+          );
+      },
+    }),
+  };
+});
+
 vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/composables/useDataGridColumnResize")>();
   const { ref } = await import("vue");

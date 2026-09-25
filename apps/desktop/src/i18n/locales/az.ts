@@ -5436,6 +5436,8 @@ export default withEnglishFallback({
     deleteKey: "Açarı sil",
     deleteGroupDetails: "{target}\n{count} açar",
     deleteLoadedSearchKeysDetails: "{target}\n{count} yüklənmiş uyğun açar",
+    deleteGroupSubtreeDetails: "{target}\nBu qrupun altındakı bütün açarlar silinəcək ({count} yükləndi)",
+    deleteGroupSubtreeSuccess: "{count} açar silindi",
     batchExpiry: "Müddəti təyin et",
     batchExpiryTitle: "Toplu müddət təyini",
     batchExpirySelected: "{count} açar seçildi",

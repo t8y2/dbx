@@ -25,6 +25,9 @@ jobs:
     name: Publish to Homebrew & Scoop
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
       - name: Extract version from tag
         id: version
         run: |
@@ -91,10 +94,16 @@ jobs:
       - name: Publish Homebrew Cask
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           SHA_ARM64="${{ steps.hashes.outputs.sha_dmg_arm64 }}"
           SHA_X64="${{ steps.hashes.outputs.sha_dmg_x64 }}"
+
+          MCP_VERSION="$(curl -fsSL https://registry.npmjs.org/@dbx-app/mcp-server/latest | jq -er '.version')"
+          [[ "$MCP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          gh release download "packages-v${MCP_VERSION}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern SHA256SUMS --dir artifacts --clobber
 
           git clone --depth 1 \
             "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/${REPO_OWNER}/homebrew-tap.git" \
@@ -137,9 +146,13 @@ jobs:
           sed -i "s/__SHA_ARM64__/${SHA_ARM64}/g" Casks/dbx.rb
           sed -i "s/__SHA_X64__/${SHA_X64}/g" Casks/dbx.rb
 
+          mkdir -p Formula
+          node "$GITHUB_WORKSPACE/.github/scripts/render-mcp-formula.mjs" \
+            "${MCP_VERSION}" "$GITHUB_WORKSPACE/artifacts/SHA256SUMS" Formula/dbx-mcp.rb
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Casks/dbx.rb
+          git add Casks/dbx.rb Formula/dbx-mcp.rb
 
           if git diff --cached --quiet; then
             echo "Homebrew Cask is already up to date."

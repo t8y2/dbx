@@ -603,6 +603,7 @@ export const redisSetExpireAt = forward("redisSetExpireAt");
 export const redisSetKeysTtl = forward("redisSetKeysTtl");
 export const redisSetKeysExpireAt = forward("redisSetKeysExpireAt");
 export const redisDeleteKeys = forward("redisDeleteKeys");
+export const redisDeleteKeysByPattern = forward("redisDeleteKeysByPattern");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
 export const redisLoadMore = forward("redisLoadMore");
@@ -920,7 +921,9 @@ export const deleteHistoryEntry = forward("deleteHistoryEntry");
 // Updates
 export const checkMcpServerStatus = forward("checkMcpServerStatus");
 export const installMcpServer = forward("installMcpServer");
+export const installNativeMcpServer = forward("installNativeMcpServer");
 export const uninstallMcpServer = forward("uninstallMcpServer");
+export const uninstallNpmMcpServer = forward("uninstallNpmMcpServer");
 export const loadMcpHttpServerSettings = forward("loadMcpHttpServerSettings");
 export const saveMcpHttpServerSettings = forward("saveMcpHttpServerSettings");
 export const mcpHttpServerStatus = forward("mcpHttpServerStatus");

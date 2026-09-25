@@ -9179,11 +9179,37 @@ async fn get_table_ddl_core_with_options(
         .await?;
         return Ok(source.source);
     }
+    if let Some(kind) = object_type.clone().filter(ddl_kind_uses_object_source) {
+        // Routines, packages, triggers, types and the other schema objects have no
+        // table DDL: `SHOW CREATE TABLE` or the columns/indexes renderer can only
+        // fabricate `CREATE TABLE <name> ()` for them. Ask for the definition
+        // instead, and keep the previous behaviour when the driver cannot produce
+        // one (engine without a source query, empty definition, …).
+        match get_object_source_core(state, connection_id, database, schema, table, kind, None, None).await {
+            Ok(source) if !source.source.trim().is_empty() => return Ok(source.source),
+            Ok(_) => {}
+            Err(error) => {
+                log::debug!(
+                    "[schema][get_table_ddl:object-source-kind-fallback-failed] connection_id={connection_id} database={database} schema={schema} table={table} error={error}"
+                );
+            }
+        }
+    }
 
     retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
         get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
     })
     .await
+}
+
+/// Whether the DDL of this object kind is its own definition, rather than the
+/// table DDL built from columns and indexes.
+///
+/// Views and materialized views are excluded because they have dedicated
+/// branches in [`get_table_ddl_core_with_options`]: a view is re-wrapped into a
+/// `CREATE ... VIEW` statement, and a materialized view returns the raw source.
+fn ddl_kind_uses_object_source(kind: &db::ObjectSourceKind) -> bool {
+    !matches!(kind, db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView)
 }
 
 /// `pg_ddl_with_partitions` when the caller wants the whole partition tree,
@@ -11828,6 +11854,31 @@ mod object_source_tests {
 mod ddl_tests {
     use super::*;
 
+    /// Ctrl/Cmd+click on a routine, trigger or package sends its object kind to
+    /// the DDL endpoint. Those requests must be answered from the object source:
+    /// the table renderer can only fabricate `CREATE TABLE <name> ()` for them.
+    #[test]
+    fn ddl_object_kinds_that_need_the_object_source() {
+        for kind in [
+            db::ObjectSourceKind::Procedure,
+            db::ObjectSourceKind::Function,
+            db::ObjectSourceKind::Trigger,
+            db::ObjectSourceKind::Event,
+            db::ObjectSourceKind::Sequence,
+            db::ObjectSourceKind::Synonym,
+            db::ObjectSourceKind::Job,
+            db::ObjectSourceKind::Package,
+            db::ObjectSourceKind::PackageBody,
+            db::ObjectSourceKind::Type,
+            db::ObjectSourceKind::TypeBody,
+        ] {
+            assert!(ddl_kind_uses_object_source(&kind), "{kind:?} must use the object source");
+        }
+        // Views and materialized views keep their dedicated branches.
+        assert!(!ddl_kind_uses_object_source(&db::ObjectSourceKind::View));
+        assert!(!ddl_kind_uses_object_source(&db::ObjectSourceKind::MaterializedView));
+    }
+
     fn column(name: &str, data_type: &str) -> db::ColumnInfo {
         db::ColumnInfo {
             name: name.to_string(),
@@ -12924,6 +12975,91 @@ mod ddl_tests {
         );
     }
 
+    /// Doris answers `SHOW CREATE TABLE <mv>` with a pointer to
+    /// `SHOW CREATE MATERIALIZED VIEW`; the DDL request must follow that hint.
+    #[tokio::test]
+    async fn mysql_ddl_falls_back_to_materialized_view_after_a_doris_refusal() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(mysql_server_error(
+                    1105,
+                    "errCode = 2, detailMessage = not support async materialized view, please use `show create materialized view`",
+                )),
+                Ok("CREATE MATERIALIZED VIEW `mv_daily` (id)".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "dbx_test", "mv_daily").await.unwrap();
+
+        assert_eq!(ddl, "CREATE MATERIALIZED VIEW `mv_daily` (id);");
+        assert_eq!(
+            executor.executed,
+            ["SHOW CREATE TABLE `dbx_test`.`mv_daily`", "SHOW CREATE MATERIALIZED VIEW `dbx_test`.`mv_daily`"]
+        );
+    }
+
+    /// Without a database the materialized view statement stays unqualified,
+    /// matching the qualifier used for the table probe.
+    #[tokio::test]
+    async fn mysql_ddl_falls_back_to_materialized_view_without_a_database() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(mysql_server_error(
+                    1105,
+                    "not support async materialized view, please use `show create materialized view`",
+                )),
+                Ok("CREATE MATERIALIZED VIEW `mv_daily` (id)".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "", "mv_daily").await.unwrap();
+
+        assert_eq!(ddl, "CREATE MATERIALIZED VIEW `mv_daily` (id);");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `mv_daily`", "SHOW CREATE MATERIALIZED VIEW `mv_daily`"]);
+    }
+
+    /// Engines without `SHOW CREATE MATERIALIZED VIEW` answer the retry with a
+    /// syntax error; the original table error is what the user should still see.
+    #[tokio::test]
+    async fn mysql_ddl_preserves_the_table_error_when_the_materialized_view_probe_fails() {
+        let refusal = mysql_server_error(
+            1105,
+            "errCode = 2, detailMessage = not support async materialized view, please use `show create materialized view`",
+        );
+        let expected = refusal.to_string();
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(refusal), Err(mysql_server_error(1064, "You have an error in your SQL syntax"))].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "missing").await.unwrap_err();
+
+        assert_eq!(error, expected);
+        assert_eq!(
+            executor.executed,
+            ["SHOW CREATE TABLE `app`.`missing`", "SHOW CREATE MATERIALIZED VIEW `app`.`missing`"]
+        );
+    }
+
+    /// Unrelated failures must not trigger an extra probe, even when the server
+    /// reports them with the same generic error code Doris uses.
+    #[tokio::test]
+    async fn mysql_ddl_does_not_probe_materialized_views_for_unrelated_failures() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(mysql_server_error(1105, "errCode = 2, detailMessage = table is broken"))].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "missing").await.unwrap_err();
+
+        assert_eq!(error, "Server error: `ERROR 1105 (HY000): errCode = 2, detailMessage = table is broken'");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`missing`"]);
+    }
+
     #[tokio::test]
     async fn mysql_ddl_preserves_qualified_error_when_fallback_fails() {
         let first_error = mysql_server_error(1146, "qualified table doesn't exist");
@@ -12997,6 +13133,21 @@ impl MysqlDdlQueryError {
     fn is_no_such_table(&self) -> bool {
         matches!(self, Self::Query(mysql_async::Error::Server(error)) if error.code == 1146)
     }
+
+    /// Doris exposes asynchronous materialized views as base tables and then
+    /// refuses `SHOW CREATE TABLE` / `SHOW CREATE VIEW` on them with a pointer
+    /// to another statement:
+    /// `ERROR 1105 (HY000): errCode = 2, detailMessage = not support async
+    /// materialized view, please use `show create materialized view``.
+    /// Recognize that refusal so the DDL request can be retried with the
+    /// statement the server asked for instead of failing outright.
+    fn is_materialized_view_ddl_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::Query(mysql_async::Error::Server(error))
+                if error.message.to_ascii_lowercase().contains("materialized view")
+        )
+    }
 }
 
 impl std::fmt::Display for MysqlDdlQueryError {
@@ -13044,6 +13195,10 @@ async fn mysql_ddl_with_executor(
         Ok(ddl) => return Ok(normalize_mysql_display_ddl(ddl)),
         Err(error) => error,
     };
+    if qualified_error.is_materialized_view_ddl_refusal() {
+        let name = mysql_qualified_name(database, table);
+        return mysql_materialized_view_ddl(executor, &name, qualified_error).await;
+    }
     if database.trim().is_empty() || !qualified_error.is_no_such_table() {
         return Err(qualified_error.to_string());
     }
@@ -13054,6 +13209,25 @@ async fn mysql_ddl_with_executor(
     match executor.execute(&fallback_sql).await {
         Ok(ddl) => Ok(normalize_mysql_display_ddl(ddl)),
         Err(_) => Err(qualified_error.to_string()),
+    }
+}
+
+/// Reads the definition of a materialized view that the server refused to
+/// describe as a table.
+///
+/// The fallback only replaces the original error when the statement actually
+/// returns a definition: engines without `SHOW CREATE MATERIALIZED VIEW`
+/// (plain MySQL, MariaDB) answer with a syntax error, so the caller still sees
+/// the error it would have seen before this fallback existed.
+async fn mysql_materialized_view_ddl(
+    executor: &mut impl MysqlDdlQueryExecutor,
+    qualified_name: &str,
+    original_error: MysqlDdlQueryError,
+) -> Result<String, String> {
+    let sql = format!("SHOW CREATE MATERIALIZED VIEW {qualified_name}");
+    match executor.execute(&sql).await {
+        Ok(ddl) => Ok(normalize_mysql_display_ddl(ddl)),
+        Err(_) => Err(original_error.to_string()),
     }
 }
 

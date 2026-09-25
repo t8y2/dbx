@@ -2968,7 +2968,9 @@ export interface UpdateDownloadProgress {
 
 export interface McpServerStatus {
   installed: boolean;
+  installation_source: "native" | "homebrew" | "npm" | null;
   npm_available: boolean;
+  npm_installed: boolean;
   node_path: string | null;
   node_version: string | null;
   current_version: string | null;
@@ -2992,8 +2994,16 @@ export async function installMcpServer(): Promise<string> {
   return invoke("install_mcp_server");
 }
 
+export async function installNativeMcpServer(): Promise<string> {
+  return invoke("install_native_mcp_server");
+}
+
 export async function uninstallMcpServer(): Promise<string> {
   return invoke("uninstall_mcp_server");
+}
+
+export async function uninstallNpmMcpServer(): Promise<string> {
+  return invoke("uninstall_npm_mcp_server");
 }
 
 export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
@@ -3383,6 +3393,10 @@ export async function redisSetKeysExpireAt(connectionId: string, db: number, key
 
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
   return invoke("redis_delete_keys", { connectionId, db, keyRaws });
+}
+
+export async function redisDeleteKeysByPattern(connectionId: string, db: number, pattern: string): Promise<number> {
+  return invoke("redis_delete_keys_by_pattern", { connectionId, db, pattern });
 }
 
 export async function redisFlushDb(connectionId: string, db: number): Promise<void> {

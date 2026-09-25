@@ -868,6 +868,7 @@ async fn serve() {
         .route("/redis/set-keys-ttl", post(routes::redis::set_keys_ttl))
         .route("/redis/set-keys-expire-at", post(routes::redis::set_keys_expire_at))
         .route("/redis/delete-keys", post(routes::redis::delete_keys))
+        .route("/redis/delete-keys-by-pattern", post(routes::redis::delete_keys_by_pattern))
         .route("/redis/flush-db", post(routes::redis::flush_db))
         .route("/redis/execute-command", post(routes::redis::execute_command))
         .route("/redis/pubsub/publish", post(routes::redis::publish_message))

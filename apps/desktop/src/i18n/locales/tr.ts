@@ -5330,6 +5330,8 @@ export default withEnglishFallback({
     deleteKey: "Anahtarı sil",
     deleteGroupDetails: "{target}\n{count} anahtar",
     deleteLoadedSearchKeysDetails: "{target}\n{count} yüklenmiş eşleşen anahtar",
+    deleteGroupSubtreeDetails: "{target}\nBu grup altındaki tüm anahtarlar silinecek ({count} yüklendi)",
+    deleteGroupSubtreeSuccess: "{count} anahtar silindi",
     batchExpiry: "Süre belirle",
     batchExpiryTitle: "Toplu süre belirleme",
     batchExpirySelected: "{count} anahtar seçildi",

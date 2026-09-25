@@ -132,7 +132,9 @@ import {
   aiTestConnection,
   checkMcpServerStatus,
   installMcpServer,
+  installNativeMcpServer,
   uninstallMcpServer,
+  uninstallNpmMcpServer,
   loadMcpHttpServerSettings,
   saveMcpHttpServerSettings,
   mcpHttpServerStatus,
@@ -206,6 +208,7 @@ import {
   buildMcpWorkBuddyConfig,
   mcpWebBackendUrl,
   type McpLaunchConfig,
+  preferMcpNativeLaunch,
 } from "@/lib/mcp/mcpConfigTemplates";
 import { beginMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
@@ -3864,6 +3867,9 @@ const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
     };
   }
   const env = mcpStatus.value?.data_dir ? { DBX_DATA_DIR: mcpStatus.value.data_dir } : undefined;
+  if (mcpStatus.value?.native_bin_path) {
+    return preferMcpNativeLaunch({ command: "dbx-mcp-server", env }, mcpStatus.value.native_bin_path);
+  }
   if (mcpStatus.value?.node_path && mcpStatus.value.script_path) {
     return {
       command: mcpStatus.value.node_path,
@@ -3879,17 +3885,9 @@ const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
 
 const mcpJsonRecommendedConfig = computed(() => buildMcpJsonConfig(mcpLaunchConfig.value));
 
-const mcpTraeRecommendedConfig = computed(() => {
-  // TRAE currently splits Windows executable paths containing spaces, so bypass Node and launch the native MCP binary directly.
-  const nativeBinPath = !isWeb && isWindows() ? mcpStatus.value?.native_bin_path : undefined;
-  return buildMcpTraeConfig(mcpLaunchConfig.value, nativeBinPath ?? undefined);
-});
+const mcpTraeRecommendedConfig = computed(() => buildMcpTraeConfig(mcpLaunchConfig.value));
 
-const mcpQoderRecommendedConfig = computed(() => {
-  // Qoder follows TRAE's mcpServers JSON format and has the same Windows path parsing limitation.
-  const nativeBinPath = !isWeb && isWindows() ? mcpStatus.value?.native_bin_path : undefined;
-  return buildMcpQoderConfig(mcpLaunchConfig.value, nativeBinPath ?? undefined);
-});
+const mcpQoderRecommendedConfig = computed(() => buildMcpQoderConfig(mcpLaunchConfig.value));
 
 const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpLaunchConfig.value));
 
@@ -3918,11 +3916,19 @@ const mcpStatusLabel = computed(() => {
 });
 
 const mcpCommand = computed(() => {
-  if (!mcpStatus.value) return "npm install -g @dbx-app/mcp-server@latest";
+  if (!mcpStatus.value) return isWindows() ? 'powershell -NoProfile -Command "irm https://dbxio.com/install-mcp.ps1 | iex"' : "curl -fsSL https://dbxio.com/install-mcp | sh";
   return mcpStatus.value.installed ? mcpStatus.value.update_command : mcpStatus.value.install_command;
 });
 
 const mcpUninstallCommand = computed(() => mcpStatus.value?.uninstall_command || "npm uninstall -g @dbx-app/mcp-server");
+const mcpNativeMigrationAvailable = computed(() => mcpStatus.value?.installation_source === "npm");
+const mcpInstallDisabled = computed(() => mcpInstalling.value || mcpUninstalling.value || Boolean(mcpStatus.value?.installed && !mcpStatus.value.update_available && !mcpNativeMigrationAvailable.value));
+const mcpInstallButtonLabel = computed(() => {
+  if (mcpInstalling.value) return t("settings.mcpInstalling");
+  if (mcpNativeMigrationAvailable.value) return t("settings.mcpSwitchToNativeButton");
+  if (!mcpStatus.value?.installed) return t("settings.mcpInstallButton");
+  return mcpStatus.value.update_available ? t("settings.mcpUpdateButton") : t("settings.mcpUpToDate");
+});
 
 async function refreshMcpStatus() {
   if (mcpStatusLoading.value) return;
@@ -3963,7 +3969,7 @@ async function installMcp() {
   mcpInstallMessage.value = "";
   mcpInstallError.value = false;
   try {
-    const result = await installMcpServer();
+    const result = mcpNativeMigrationAvailable.value || !mcpStatus.value?.installed ? await installNativeMcpServer() : await installMcpServer();
     mcpInstallMessage.value = result;
     mcpInstallError.value = false;
     // 安装成功后刷新状态
@@ -3994,6 +4000,28 @@ async function uninstallMcp() {
     notifyComponentUpdatesChanged();
   } catch (e: any) {
     mcpInstallMessage.value = t("settings.mcpUninstallFailed", { error: e?.message || String(e) });
+    mcpInstallError.value = true;
+  } finally {
+    mcpUninstalling.value = false;
+    window.setTimeout(() => {
+      mcpInstallMessage.value = "";
+      mcpInstallError.value = false;
+    }, 3000);
+  }
+}
+
+async function uninstallNpmMcpFallback() {
+  if (mcpInstalling.value || mcpUninstalling.value || !mcpStatus.value?.npm_installed) return;
+  if (!window.confirm(t("settings.mcpRemoveNpmFallbackConfirm"))) return;
+  mcpUninstalling.value = true;
+  mcpInstallMessage.value = "";
+  mcpInstallError.value = false;
+  try {
+    mcpInstallMessage.value = await uninstallNpmMcpServer();
+    await refreshMcpStatus();
+    notifyComponentUpdatesChanged();
+  } catch (e: any) {
+    mcpInstallMessage.value = t("settings.mcpRemoveNpmFallbackFailed", { error: e?.message || String(e) });
     mcpInstallError.value = true;
   } finally {
     mcpUninstalling.value = false;
@@ -9923,7 +9951,10 @@ LIMIT 100;</pre
                         </div>
 
                         <div v-if="!isWeb" class="space-y-2">
-                          <Label>{{ mcpStatus?.installed ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand") }}</Label>
+                          <Label>{{ mcpStatus?.installed && !mcpNativeMigrationAvailable ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand") }}</Label>
+                          <p v-if="mcpNativeMigrationAvailable" class="rounded-md border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-xs text-blue-700 dark:text-blue-300">
+                            {{ t("settings.mcpNativeMigrationHint") }}
+                          </p>
                           <div class="flex min-w-0 items-center gap-2">
                             <div class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap">
                               {{ mcpCommand }}
@@ -9932,10 +9963,10 @@ LIMIT 100;</pre
                               <CheckCircle2 v-if="mcpCopied === 'install'" class="h-4 w-4 text-green-500" />
                               <Copy v-else class="h-4 w-4" />
                             </Button>
-                            <Button type="button" variant="default" :disabled="mcpInstalling || mcpUninstalling || !mcpStatus?.npm_available || (mcpStatus?.installed && !mcpStatus?.update_available)" @click="installMcp">
+                            <Button type="button" variant="default" :disabled="mcpInstallDisabled" @click="installMcp">
                               <Loader2 v-if="mcpInstalling" class="mr-2 h-4 w-4 animate-spin" />
-                              <CheckCircle2 v-if="!mcpInstalling && mcpStatus?.installed && !mcpStatus?.update_available" class="mr-2 h-4 w-4" />
-                              {{ mcpInstalling ? t("settings.mcpInstalling") : !mcpStatus?.installed ? t("settings.mcpInstallButton") : mcpStatus?.update_available ? t("settings.mcpUpdateButton") : t("settings.mcpUpToDate") }}
+                              <CheckCircle2 v-if="!mcpInstalling && mcpStatus?.installed && !mcpStatus?.update_available && !mcpNativeMigrationAvailable" class="mr-2 h-4 w-4" />
+                              {{ mcpInstallButtonLabel }}
                             </Button>
                           </div>
                           <div
@@ -9959,10 +9990,23 @@ LIMIT 100;</pre
                               <CheckCircle2 v-if="mcpCopied === 'uninstall'" class="h-4 w-4 text-green-500" />
                               <Copy v-else class="h-4 w-4" />
                             </Button>
-                            <Button type="button" variant="outline" class="text-destructive hover:text-destructive" :disabled="mcpInstalling || mcpUninstalling || !mcpStatus.npm_available" @click="uninstallMcp">
+                            <Button type="button" variant="outline" class="text-destructive hover:text-destructive" :disabled="mcpInstalling || mcpUninstalling" @click="uninstallMcp">
                               <Loader2 v-if="mcpUninstalling" class="mr-2 h-4 w-4 animate-spin" />
                               <Trash2 v-else class="mr-2 h-4 w-4" />
                               {{ mcpUninstalling ? t("settings.mcpUninstalling") : t("settings.mcpUninstallButton") }}
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div v-if="!isWeb && mcpStatus?.installation_source !== 'npm' && mcpStatus?.npm_installed" class="rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+                          <div class="flex flex-wrap items-center justify-between gap-3">
+                            <p class="min-w-0 flex-1 text-xs text-amber-800 dark:text-amber-200">
+                              {{ t("settings.mcpNpmFallbackHint") }}
+                            </p>
+                            <Button type="button" variant="outline" size="sm" :disabled="mcpInstalling || mcpUninstalling" @click="uninstallNpmMcpFallback">
+                              <Loader2 v-if="mcpUninstalling" class="mr-2 h-4 w-4 animate-spin" />
+                              <Trash2 v-else class="mr-2 h-4 w-4" />
+                              {{ t("settings.mcpRemoveNpmFallbackButton") }}
                             </Button>
                           </div>
                         </div>
@@ -10378,7 +10422,7 @@ LIMIT 100;</pre
 
                   <div v-if="mcpTransportTab === 'stdio'" class="flex items-center gap-2 text-xs text-muted-foreground">
                     <Terminal class="h-3.5 w-3.5" />
-                    <span>{{ t("settings.mcpDetectionTiming") }} {{ t("settings.mcpNpmBoundary") }}</span>
+                    <span>{{ t("settings.mcpDetectionTiming") }} {{ t("settings.mcpNativeManagementBoundary") }}</span>
                   </div>
                 </div>
               </Tabs>

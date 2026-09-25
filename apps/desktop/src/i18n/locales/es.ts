@@ -5550,6 +5550,8 @@ export default withEnglishFallback({
     deleteKey: "Eliminar clave",
     deleteGroupDetails: "{target}\n{count} claves",
     deleteLoadedSearchKeysDetails: "{target}\n{count} claves coincidentes cargadas",
+    deleteGroupSubtreeDetails: "{target}\nSe eliminarán todas las claves de este grupo ({count} cargadas)",
+    deleteGroupSubtreeSuccess: "Se eliminaron {count} claves",
     batchExpiry: "Establecer caducidad",
     batchExpiryTitle: "Caducidad por lotes",
     batchExpirySelected: "{count} claves seleccionadas",

@@ -25,7 +25,7 @@ import { REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT, REDIS_DATABASE_DISPLAY_LIMIT_MIN,
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeSidebarCopyTableNameSeparator } from "@/lib/sidebar/sidebarTableNameCopy";
 import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
-import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
+import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlSnippetTemplates";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { canonicalSqlShortcutSql, DEFAULT_SQL_SHORTCUTS, deriveSqlShortcutDatabaseTypes, mergeDefaultSqlShortcuts, normalizeSqlShortcutDatabaseTypes, normalizeSqlShortcutKind, normalizeSqlShortcutLimit, normalizeSqlShortcutSqlByDatabaseType } from "@/lib/sql/sqlShortcutActions";
 import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } from "@/lib/sql/sqlVariableSyntax";
@@ -1963,6 +1963,7 @@ export const useSettingsStore = defineStore("settings", () => {
   const isMcpGlobalPolicyLoaded = ref(false);
   const isEditorSettingsLoaded = ref(false);
   let initEditorSettingsPromise: Promise<void> | null = null;
+  let initAiConfigsPromise: Promise<void> | null = null;
   let pendingEditorSettingsPatches: Partial<EditorSettings>[] = [];
   let editorSettingsOperationQueue: Promise<void> | null = null;
   let editorSettingsPatchRevision = 0;
@@ -2168,7 +2169,15 @@ export const useSettingsStore = defineStore("settings", () => {
 
   async function initAiConfigs(): Promise<void> {
     if (isAiConfigLoaded.value) return;
+    if (!initAiConfigsPromise) {
+      initAiConfigsPromise = loadAiConfigurationState().finally(() => {
+        initAiConfigsPromise = null;
+      });
+    }
+    await initAiConfigsPromise;
+  }
 
+  async function loadAiConfigurationState(): Promise<void> {
     // 尝试加载新格式
     const newConfigs = await api.loadAiConfigs();
 

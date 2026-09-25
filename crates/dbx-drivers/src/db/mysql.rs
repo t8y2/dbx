@@ -1629,9 +1629,25 @@ fn mysql_setup_fallback_ladder(fallback_mode: MySqlSetupMode, error: &str) -> Ve
 /// session-variable change as a forbidden global-variable operation.
 fn mysql_group_concat_rejection_is_variable_level(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
+    // A proxy that caps the echoed variable name (`... variable 'group_concat_'`) is
+    // reporting dbx's own floor statement failing to parse, not the variable being
+    // absent: the plain literal rung never mentions a variable and is still worth
+    // trying. If that rung is rejected too, the caller keeps the rung that only drops
+    // the built-in statement, so the server value survives either way.
+    if mysql_group_concat_truncated_variable_rejection(&lower) {
+        return false;
+    }
     lower.contains("unknown system variable")
         || lower.contains("set global variables is forbidden")
         || (lower.contains("sphinxql") && lower.contains("only 0 and 1 could be used as boolean values"))
+}
+
+/// TXSQL/TDSQL proxy layers cap the echoed variable name to a fixed length before
+/// quoting it back, so the 1193 error reports `Unknown system variable 'group_concat_'`
+/// with `max_len` cut off (issue #10197). Keep the match narrow: the truncated prefix
+/// must end at the quote, so a variable that merely shares the prefix is not caught.
+fn mysql_group_concat_truncated_variable_rejection(lower: &str) -> bool {
+    lower.contains("unknown system variable 'group_concat_'")
 }
 
 /// MySQL older than 5.5.3 has no `utf8mb4` charset, so the built-in `SET NAMES utf8mb4`
@@ -8847,6 +8863,10 @@ mod tests {
             "MySQL connection failed: Server error: `ERROR 1105 (HY000): strconv.ParseInt: parsing \"cast(greatest(@@session.group_concat_max_len,1048576)asunsigned)\": invalid syntax'",
             "MySQL connection failed: Server error: `ERROR 1232 (42000): Incorrect argument type to variable 'group_concat_max_len'`",
             "MySQL connection failed: Server error: `ERROR 1231 (42000): Variable 'group_concat_max_len' can't be set to the value of 'x'`",
+            // TXSQL/TDSQL proxies cut the echoed variable name before `max_len`, which
+            // is the floor expression failing to parse rather than the variable being
+            // missing, so the literal rung still applies (issue #10197).
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_'`",
         ] {
             let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error)
                 .or_else(|| mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, error))
@@ -8866,7 +8886,6 @@ mod tests {
         let url = "mysql://root:pw@host:3306/app";
         for error in [
             "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_max_len'`",
-            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_'`",
             "MySQL connection failed: Server error: `ERROR 1064 (42000): sphinxql: syntax error, unexpected IDENT, expecting '=' near 'group_concat_max_len' - only 0 and 1 could be used as boolean values`",
             "MySQL connection failed: Server error: `ERROR 10192 (HY000): set global variables is forbidden`",
         ] {
@@ -8875,6 +8894,35 @@ mod tests {
                 .unwrap_or_else(|| panic!("no fallback for {error}"));
             assert_eq!(mysql_setup_fallback_ladder(fallback, error), vec![MySqlSetupMode::Compatible], "{error}");
         }
+    }
+
+    #[test]
+    fn mysql_group_concat_truncated_variable_name_still_tries_the_literal_floor() {
+        // TXSQL/TDSQL proxy layers echo the built-in floor statement back as 1193 with the
+        // variable name cut to `group_concat_` (issue #10197). That is the expression
+        // failing to parse, not the variable being absent, so the two-rung ladder stays:
+        // connect without the statement, read the server's own value, and apply the
+        // literal only while that value is below dbx's floor.
+        let url = "mysql://root:pw@host:3306/app";
+        let truncated =
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_'`";
+        let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, truncated)
+            .or_else(|| mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, truncated))
+            .unwrap_or_else(|| panic!("no fallback for {truncated}"));
+        assert_eq!(
+            mysql_setup_fallback_ladder(fallback, truncated),
+            vec![MySqlSetupMode::Compatible, MySqlSetupMode::LiteralFloor]
+        );
+
+        // The full name is a genuinely unknown variable; it must not cost an extra attempt.
+        let full = "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_max_len'`";
+        let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, full).unwrap();
+        assert_eq!(mysql_setup_fallback_ladder(fallback, full), vec![MySqlSetupMode::Compatible]);
+
+        // A variable that merely shares the prefix stays out of both branches.
+        let sibling =
+            "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_foo'`";
+        assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, sibling), None);
     }
 
     #[test]

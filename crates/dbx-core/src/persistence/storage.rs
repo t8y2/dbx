@@ -6189,6 +6189,32 @@ impl Storage {
         .await
     }
 
+    /// Counts the stored `connections` rows without decrypting secrets or
+    /// running the data-security upgrade. Diagnostics use it to report the
+    /// table state truthfully even when the store cannot be fully opened (for
+    /// example a headless CLI that cannot read the OS keychain key), so a
+    /// failed open is never misreported as a missing table. `None` means the
+    /// opened schema has no `connections` table at all.
+    pub async fn stored_connection_count(&self) -> Result<Option<u64>, String> {
+        self.with_conn(|conn| {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'connections')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !exists {
+                return Ok(None);
+            }
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            Ok(Some(count.max(0) as u64))
+        })
+        .await
+    }
+
     pub async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
         let rows: Vec<(String, String)> = self
             .with_conn(|conn| {
@@ -13065,5 +13091,33 @@ mod tests {
         assert!(super::migration_backup_paths(&invalid).is_err());
         let valid = serde_json::json!({"backupPaths": ["/tmp/dbx-secret-migration-a"]});
         assert_eq!(super::migration_backup_paths(&valid).unwrap(), vec!["/tmp/dbx-secret-migration-a"]);
+    }
+
+    #[tokio::test]
+    async fn stored_connection_count_reads_the_table_without_loading_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), Some(0));
+
+        storage
+            .with_conn(|conn| {
+                conn.execute("INSERT INTO connections (id, config_json) VALUES ('a', '{}'), ('b', '{}')", [])
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), Some(2));
+
+        // `None` is what lets `dbx doctor` tell a missing table apart from a
+        // table it could not load.
+        storage
+            .with_conn(|conn| {
+                conn.execute("DROP TABLE connections", []).map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), None);
     }
 }

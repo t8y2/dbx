@@ -4,6 +4,7 @@ use dbx_core::{
     models::connection::{ConnectionConfig, DatabaseType},
     production_safety::{is_production_database, targets_production_database},
     sql_risk::{classify_sql_risk_for_database, SqlRisk},
+    storage::Storage,
     types::{ColumnInfo, QueryMessage, QueryResult, TableInfo},
 };
 use dbx_mcp::{
@@ -889,12 +890,30 @@ async fn diagnostics() -> Diagnostics {
         Ok(connections) => (true, connections, None),
         Err(error) => (false, Vec::new(), Some(error)),
     };
+    // Opening the store can fail for reasons that say nothing about the
+    // schema: a headless CLI cannot read a keychain-only encryption key, an
+    // unfinished data-security upgrade blocks writes, and so on. Probing the
+    // table directly keeps "table missing" apart from "connection loading
+    // failed"; when the probe itself cannot read the file, keep the previous
+    // load-based answer instead of inventing one.
+    let (connections_table_exists, connection_row_count) = if db_path_exists {
+        match Storage::open_unmigrated(&db_path).await {
+            Ok(storage) => match storage.stored_connection_count().await {
+                Ok(Some(count)) => (true, count as usize),
+                Ok(None) => (false, 0),
+                Err(_) => (load_connections_ok, connections.len()),
+            },
+            Err(_) => (load_connections_ok, connections.len()),
+        }
+    } else {
+        (false, 0)
+    };
     Diagnostics {
         app_data_dir: app_data_dir.display().to_string(),
         db_path: db_path.display().to_string(),
         db_path_exists,
-        connections_table_exists: load_connections_ok,
-        connection_row_count: connections.len(),
+        connections_table_exists,
+        connection_row_count,
         load_connections_ok,
         loaded_connection_count: connections.len(),
         load_connections_error: error,

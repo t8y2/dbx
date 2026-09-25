@@ -854,3 +854,25 @@ describe("PluginContributionsPanel marketplace sort", () => {
     expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
   });
 });
+
+describe("PluginContributionsPanel marketplace card layout", () => {
+  it("wraps the grid card header and pins the version badge so it never clips in a narrow panel", async () => {
+    state.batchMode = false;
+    state.marketplaceViewMode = "grid";
+    await nextTick();
+
+    const card = host.querySelector("article");
+    expect(card, "a marketplace grid card should render").not.toBeNull();
+
+    // The header row (icon + name + github/globe/date/version cluster) must be allowed to wrap,
+    // otherwise the non-shrinkable right cluster overflows the narrow column and the version
+    // badge is clipped (e.g. "v0.1.C") when the plugin center shares width with the AI panel.
+    const header = card!.querySelector(":scope > div");
+    expect(header?.classList.contains("flex-wrap"), "grid card header row should wrap").toBe(true);
+
+    // The version badge must not shrink, so it is never squished even when it stays on one line.
+    const versionBadge = [...host.querySelectorAll<HTMLElement>("[data-stub='Badge']")].find((element) => element.textContent?.trim() === "v3.0.0");
+    expect(versionBadge, "version badge should render").toBeDefined();
+    expect(versionBadge!.classList.contains("shrink-0"), "version badge should be shrink-0").toBe(true);
+  });
+});

@@ -12679,6 +12679,49 @@ mod ddl_tests {
     }
 
     #[test]
+    fn sqlserver_table_ddl_renders_computed_columns_with_their_definition() {
+        let mut columns = vec![column("id", "nvarchar(100)"), column("code", "binary(32)")];
+        columns[1].is_nullable = false;
+        columns[1].extra = Some("computed".to_string());
+        let computed = HashMap::from([(
+            "code".to_string(),
+            "AS (CONVERT([binary](32),hashbytes('SHA2_256',[id]))) PERSISTED".to_string(),
+        )]);
+
+        let ddl = render_sqlserver_table_ddl_with_computed("dbo", "authorization", &columns, &computed, &[], &[], None);
+
+        assert!(
+            ddl.contains("\n  [code] AS (CONVERT([binary](32),hashbytes('SHA2_256',[id]))) PERSISTED NOT NULL"),
+            "computed column keeps its definition: {ddl}"
+        );
+        // The derived result type must not be rendered as a storable column.
+        assert!(!ddl.contains("[code] binary(32)"), "derived result type must be dropped: {ddl}");
+        assert!(ddl.contains("[id] nvarchar(100)"), "plain columns are unchanged: {ddl}");
+    }
+
+    #[test]
+    fn sqlserver_table_ddl_ignores_computed_clauses_for_other_columns() {
+        let columns = vec![column("id", "int")];
+        let computed = HashMap::from([("other".to_string(), "AS (1)".to_string())]);
+
+        let ddl = render_sqlserver_table_ddl_with_computed("dbo", "users", &columns, &computed, &[], &[], None);
+
+        assert_eq!(ddl, render_sqlserver_table_ddl("dbo", "users", &columns, &[], &[], None));
+        assert!(ddl.contains("[id] int"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn sqlserver_table_ddl_skips_blank_computed_clauses() {
+        let mut columns = vec![column("code", "binary(32)")];
+        columns[0].is_nullable = false;
+        let computed = HashMap::from([("code".to_string(), "   ".to_string())]);
+
+        let ddl = render_sqlserver_table_ddl_with_computed("dbo", "users", &columns, &computed, &[], &[], None);
+
+        assert!(ddl.contains("[code] binary(32) NOT NULL"), "blank clause falls back to the type: {ddl}");
+    }
+
+    #[test]
     fn sqlserver_table_ddl_includes_column_comments() {
         let mut display_name = column("display]name", "nvarchar(100)");
         display_name.comment = Some("User's display name".to_string());
@@ -14597,12 +14640,36 @@ pub async fn build_sqlserver_ddl(
     schema: &str,
     table: &str,
 ) -> Result<String, String> {
-    let columns = db::sqlserver::get_columns(client, schema, table).await?;
+    // The computed-column definitions come from the same metadata query as the
+    // columns, so the DDL path reads the richer driver record instead of the
+    // flattened `ColumnInfo` (which cannot carry `AS (...) PERSISTED`).
+    let metadata = db::sqlserver::get_column_metadata(client, schema, table).await?;
     let indexes = db::sqlserver::list_indexes(client, schema, table).await?;
     let fkeys = db::sqlserver::list_foreign_keys(client, schema, table).await?;
     let table_comment = db::sqlserver::get_table_comment(client, schema, table).await?;
 
-    Ok(render_sqlserver_table_ddl(schema, table, &columns, &indexes, &fkeys, table_comment.as_deref()))
+    let columns = metadata.iter().map(|metadata| metadata.column.clone()).collect::<Vec<_>>();
+    let computed_clauses = metadata
+        .iter()
+        .filter_map(|metadata| {
+            metadata
+                .computed_clause
+                .as_deref()
+                .map(str::trim)
+                .filter(|clause| !clause.is_empty())
+                .map(|clause| (metadata.column.name.clone(), clause.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    Ok(render_sqlserver_table_ddl_with_computed(
+        schema,
+        table,
+        &columns,
+        &computed_clauses,
+        &indexes,
+        &fkeys,
+        table_comment.as_deref(),
+    ))
 }
 
 fn sqlserver_fk_action_clause(kind: &str, value: Option<&str>) -> String {
@@ -14624,11 +14691,40 @@ pub fn render_sqlserver_table_ddl(
     fkeys: &[db::ForeignKeyInfo],
     table_comment: Option<&str>,
 ) -> String {
+    render_sqlserver_table_ddl_with_computed(schema, table, columns, &HashMap::new(), indexes, fkeys, table_comment)
+}
+
+/// Renders a `CREATE TABLE` script for a SQL Server table. `computed_clauses`
+/// maps a column name to its `AS (expression) [PERSISTED]` definition: those
+/// columns have no storable `data_type` of their own in metadata (only the
+/// derived result type), so the definition is written instead of the type.
+#[allow(clippy::too_many_arguments)]
+pub fn render_sqlserver_table_ddl_with_computed(
+    schema: &str,
+    table: &str,
+    columns: &[db::ColumnInfo],
+    computed_clauses: &HashMap<String, String>,
+    indexes: &[db::IndexInfo],
+    fkeys: &[db::ForeignKeyInfo],
+    table_comment: Option<&str>,
+) -> String {
     let table_name = format!("{}.{}", sqlserver_ident(schema), sqlserver_ident(table));
     let mut ddl = format!("CREATE TABLE {table_name} (\n");
     let col_lines: Vec<String> = columns
         .iter()
         .map(|c| {
+            // A computed column can never have a default, and its `data_type`
+            // is only the derived result type: rendering either would emit a
+            // table that differs from the one being scripted.
+            if let Some(clause) =
+                computed_clauses.get(&c.name).map(String::as_str).map(str::trim).filter(|clause| !clause.is_empty())
+            {
+                let mut line = format!("  {} {clause}", sqlserver_ident(&c.name));
+                if !c.is_nullable {
+                    line.push_str(" NOT NULL");
+                }
+                return line;
+            }
             let mut line = format!("  {} {}", sqlserver_ident(&c.name), c.data_type);
             if let Some(identity) = sqlserver_identity_clause(c.extra.as_deref()) {
                 line.push_str(&format!(" {identity}"));

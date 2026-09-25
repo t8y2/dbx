@@ -198,6 +198,11 @@ pub struct SqlServerColumnMetadata {
     pub is_computed: bool,
     pub is_hidden: bool,
     pub generated_always_type: i32,
+    /// `AS (expression) [PERSISTED]` of a computed column. `column.data_type`
+    /// only carries the derived result type of those columns, so a rebuilt
+    /// `CREATE TABLE` has to use this definition instead of the type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computed_clause: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -2979,6 +2984,12 @@ fn sqlserver_column_metadata_from_row(row: &Row) -> SqlServerColumnMetadata {
         },
         _ => base,
     };
+    let is_computed = row.get::<i32, _>(12).unwrap_or(0) == 1;
+    let computed_clause = if is_computed {
+        sqlserver_computed_column_clause(row.get::<&str, _>(15).unwrap_or(""), row.get::<i32, _>(16).unwrap_or(0) == 1)
+    } else {
+        None
+    };
     let column = ColumnInfo {
         name: row.get::<&str, _>(0).unwrap_or("").to_string(),
         data_type,
@@ -2996,10 +3007,28 @@ fn sqlserver_column_metadata_from_row(row: &Row) -> SqlServerColumnMetadata {
     SqlServerColumnMetadata {
         column,
         is_identity: row.get::<i32, _>(11).unwrap_or(0) == 1,
-        is_computed: row.get::<i32, _>(12).unwrap_or(0) == 1,
+        is_computed,
         is_hidden: row.get::<i32, _>(13).unwrap_or(0) == 1,
         generated_always_type: row.get::<i32, _>(14).unwrap_or(0),
+        computed_clause,
     }
+}
+
+/// SQL Server stores a computed column's definition as the normalized parse
+/// tree (`(CONVERT([binary](32),hashbytes('SHA2_256',[c])))`) in
+/// `sys.computed_columns`. `CREATE TABLE` needs `AS (<expression>)`, so the
+/// stored text is reused verbatim when it is already parenthesized (SQL Server
+/// always wraps the full expression) and wrapped otherwise. `PERSISTED` is
+/// part of the column definition and has to travel with the expression —
+/// `data_type` only carries the derived result type, which must not be written
+/// into the script.
+fn sqlserver_computed_column_clause(definition: &str, is_persisted: bool) -> Option<String> {
+    let definition = definition.trim();
+    if definition.is_empty() {
+        return None;
+    }
+    let expression = if definition.starts_with('(') { definition.to_string() } else { format!("({definition})") };
+    Some(if is_persisted { format!("AS {expression} PERSISTED") } else { format!("AS {expression}") })
 }
 
 fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
@@ -3030,13 +3059,16 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
          CONVERT(INT, COLUMNPROPERTY(c.object_id, c.name, 'IsIdentity')) AS IS_IDENTITY, \
          CONVERT(INT, COLUMNPROPERTY(c.object_id, c.name, 'IsComputed')) AS IS_COMPUTED, \
          CONVERT(INT, COLUMNPROPERTY(c.object_id, c.name, 'IsHidden')) AS IS_HIDDEN, \
-         CONVERT(INT, COLUMNPROPERTY(c.object_id, c.name, 'GeneratedAlwaysType')) AS GENERATED_ALWAYS_TYPE \
+         CONVERT(INT, COLUMNPROPERTY(c.object_id, c.name, 'GeneratedAlwaysType')) AS GENERATED_ALWAYS_TYPE, \
+         cc.definition AS COMPUTED_DEFINITION, \
+         CONVERT(INT, ISNULL(cc.is_persisted, 0)) AS IS_PERSISTED \
          FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          JOIN sys.columns c ON c.object_id = o.object_id \
          JOIN sys.types ty ON ty.user_type_id = c.user_type_id \
          LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id \
          LEFT JOIN sys.identity_columns ic ON ic.object_id = c.object_id AND ic.column_id = c.column_id \
+         LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id \
          LEFT JOIN ( \
            SELECT ic.object_id, ic.column_id \
            FROM sys.indexes i \
@@ -3969,18 +4001,18 @@ mod tests {
         requires_simple_query_batch, restore_sqlserver_blank_column_names, restore_sqlserver_legacy_probe_output_names,
         restore_sqlserver_spatial_column_types, restore_sqlserver_unsafe_column_types, server_messages_query_result,
         sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
-        sqlserver_completion_assistant_sql, sqlserver_constraints_sql, sqlserver_dml_output_returns_rows,
-        sqlserver_done_trace_event, sqlserver_filter_definition_error, sqlserver_foreign_keys_sql,
-        sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
-        sqlserver_legacy_probe_with_nonce, sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql,
-        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_narrow_i32, sqlserver_probe_explicit_alias,
-        sqlserver_query_messages, sqlserver_query_transport_for_engine_edition, sqlserver_query_transport_for_request,
-        sqlserver_referential_action, sqlserver_schema_name_predicate, sqlserver_spatial_marker,
-        sqlserver_split_name_list, sqlserver_supports_session_database_switch, sqlserver_table_comment_sql,
-        sqlserver_table_objects_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
-        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
-        SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn,
-        SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_completion_assistant_sql, sqlserver_computed_column_clause, sqlserver_constraints_sql,
+        sqlserver_dml_output_returns_rows, sqlserver_done_trace_event, sqlserver_filter_definition_error,
+        sqlserver_foreign_keys_sql, sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql,
+        sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce, sqlserver_legacy_wildcard_metadata_query,
+        sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_narrow_i32,
+        sqlserver_probe_explicit_alias, sqlserver_query_messages, sqlserver_query_transport_for_engine_edition,
+        sqlserver_query_transport_for_request, sqlserver_referential_action, sqlserver_schema_name_predicate,
+        sqlserver_spatial_marker, sqlserver_split_name_list, sqlserver_supports_session_database_switch,
+        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_triggers_sql,
+        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
+        SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet,
+        SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -4877,6 +4909,34 @@ mod tests {
         assert!(sql.contains("ep.minor_id = c.column_id"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("c.is_computed = 1 THEN 'computed'"));
+    }
+
+    #[test]
+    fn sqlserver_columns_sql_reads_computed_column_definitions() {
+        let sql = sqlserver_columns_sql("dbo", "orders");
+
+        assert!(sql.contains(
+            "LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id"
+        ));
+        assert!(sql.contains("cc.definition AS COMPUTED_DEFINITION"));
+        assert!(sql.contains("CONVERT(INT, ISNULL(cc.is_persisted, 0)) AS IS_PERSISTED"));
+    }
+
+    #[test]
+    fn sqlserver_computed_column_clause_reuses_the_stored_definition() {
+        // SQL Server stores the whole expression already wrapped in parentheses.
+        assert_eq!(
+            sqlserver_computed_column_clause("(CONVERT([binary](32),hashbytes('SHA2_256',[c])))", true).as_deref(),
+            Some("AS (CONVERT([binary](32),hashbytes('SHA2_256',[c]))) PERSISTED")
+        );
+        assert_eq!(sqlserver_computed_column_clause("(upper([id]))", false).as_deref(), Some("AS (upper([id]))"));
+    }
+
+    #[test]
+    fn sqlserver_computed_column_clause_wraps_a_bare_expression() {
+        assert_eq!(sqlserver_computed_column_clause(" [a] + [b] ", false).as_deref(), Some("AS ([a] + [b])"));
+        assert_eq!(sqlserver_computed_column_clause("   ", true), None);
+        assert_eq!(sqlserver_computed_column_clause("", false), None);
     }
 
     #[test]

@@ -2613,6 +2613,7 @@ export default withEnglishFallback({
     copyExtractorPipeSeparated: "パイプ区切り",
     copyExtractorPretty: "テーブルテキスト",
     copyExtractorConfigure: "データ抽出の設定…",
+    copyExtractorSaved: "データ抽出設定を保存しました",
     copyExtractorDefaultFormat: "デフォルトのコピー動作",
     copyExtractorFormat: "抽出器",
     copyExtractorColumnSeparator: "列区切り文字",

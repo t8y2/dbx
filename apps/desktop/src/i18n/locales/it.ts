@@ -2593,6 +2593,7 @@ export default withEnglishFallback({
     copyExtractorPipeSeparated: "Separato da pipe",
     copyExtractorPretty: "Testo tabellare",
     copyExtractorConfigure: "Configura estrattore dati…",
+    copyExtractorSaved: "Impostazioni dell'estrattore di dati salvate",
     copyExtractorDefaultFormat: "Comportamento di copia predefinito",
     copyExtractorFormat: "Estrattore",
     copyExtractorColumnSeparator: "Separatore di colonna",

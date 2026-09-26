@@ -1840,6 +1840,7 @@ export default withEnglishFallback({
     copyExtractorPipeSeparated: "Şaquli xətlə ayrılmış",
     copyExtractorPretty: "Formatlanmış cədvəl",
     copyExtractorConfigure: "Verilənləri çıxarma vasitələrini tənzimlə…",
+    copyExtractorSaved: "Veri çıxarıcı parametrləri yadda saxlanıldı",
     copyExtractorDefaultFormat: "Standart kopyalama davranışı",
     copyExtractorFormat: "Çıxarma vasitəsi",
     copyExtractorColumnSeparator: "Sütun ayırıcısı",

@@ -2087,6 +2087,7 @@ export default withEnglishFallback({
     copyExtractorPipeSeparated: "竖线分隔",
     copyExtractorPretty: "表格文本",
     copyExtractorConfigure: "配置数据提取器…",
+    copyExtractorSaved: "数据提取器配置已保存",
     copyExtractorDefaultFormat: "默认复制方式",
     copyExtractorFormat: "提取器",
     copyExtractorColumnSeparator: "列分隔符",

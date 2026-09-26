@@ -295,6 +295,33 @@ export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
 ]);
 
 /**
+ * The operations a `bulkWrite()` array accepts, and the fields each one allows.
+ *
+ * Both lists are exactly what the shell parser accepts: it rejects an unknown operation key and
+ * an unknown field inside one, so anything extra here would complete into a command that fails.
+ */
+export const BULK_WRITE_OPERATIONS: MongoOperatorSpec[] = specs([
+  ["insertOne", "Insert one document", "insertOne: { document: { ${} } }"],
+  ["updateOne", "Update the first matching document", "updateOne: { filter: { ${} }, update: { $set: { ${} } } }"],
+  ["updateMany", "Update every matching document", "updateMany: { filter: { ${} }, update: { $set: { ${} } } }"],
+  ["replaceOne", "Replace the first matching document", "replaceOne: { filter: { ${} }, replacement: { ${} } }"],
+  ["deleteOne", "Delete the first matching document", "deleteOne: { filter: { ${} } }"],
+  ["deleteMany", "Delete every matching document", "deleteMany: { filter: { ${} } }"],
+]);
+
+const BULK_WRITE_FILTER: Spec = ["filter", "Documents the operation applies to", "filter: { ${} }"];
+const BULK_WRITE_UPSERT: Spec = ["upsert", "Insert the document when the filter matches nothing", "upsert: true"];
+
+export const BULK_WRITE_OPERATION_FIELDS: Record<string, MongoOperatorSpec[]> = {
+  insertOne: specs([["document", "Document to insert", "document: { ${} }"]]),
+  updateOne: specs([BULK_WRITE_FILTER, ["update", "Update operators or an aggregation pipeline", "update: { $set: { ${} } }"], BULK_WRITE_UPSERT, ["arrayFilters", "Conditions for the $[<identifier>] positional operator", 'arrayFilters: [{ "${elem}.${field}": ${} }]']]),
+  updateMany: specs([BULK_WRITE_FILTER, ["update", "Update operators or an aggregation pipeline", "update: { $set: { ${} } }"], BULK_WRITE_UPSERT, ["arrayFilters", "Conditions for the $[<identifier>] positional operator", 'arrayFilters: [{ "${elem}.${field}": ${} }]']]),
+  replaceOne: specs([BULK_WRITE_FILTER, ["replacement", "Whole document that replaces the match", "replacement: { ${} }"], BULK_WRITE_UPSERT]),
+  deleteOne: specs([BULK_WRITE_FILTER]),
+  deleteMany: specs([BULK_WRITE_FILTER]),
+};
+
+/**
  * Option keys accepted by a collection method's trailing options argument.
  *
  * Only methods whose options DBX actually applies appear here, and only with the keys they

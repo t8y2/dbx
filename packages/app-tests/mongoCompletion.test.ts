@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildMongoCompletionItems, getMongoCompletionContext, getMongoCompletionResultValidFor, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
-import { ACCUMULATORS, EXPRESSION_OPERATORS, EXTENDED_JSON_VALUES, METHOD_OPTION_KEYS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
+import { ACCUMULATORS, BULK_WRITE_OPERATION_FIELDS, BULK_WRITE_OPERATIONS, EXPRESSION_OPERATORS, EXTENDED_JSON_VALUES, METHOD_OPTION_KEYS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
 import { parseMongoCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 
 const collections = ["users", "user_events", "order-items", "audit.logs"];
@@ -493,8 +493,8 @@ test("stays quiet inside string values, comments and unmodelled arguments", () =
   assert.deepEqual(labels('db.users.find({ name: "Ad', { fields }), []);
   assert.deepEqual(labels("// db.users.fi", { fields }), []);
   assert.deepEqual(labels('db.users.find({ _id: ObjectId("6a04', { fields }), []);
-  // bulkWrite operation entries are still unmodelled; its options argument is not.
-  assert.deepEqual(labels("db.users.bulkWrite([{ insertOne: { do", { fields }), []);
+  // An operation name bulkWrite() does not accept has no fields to offer.
+  assert.deepEqual(labels("db.users.bulkWrite([{ mapReduceOne: { ", { fields }), []);
 });
 
 test("suggests only helpers the shell parser accepts", () => {
@@ -586,6 +586,61 @@ test("every suggested option key parses on the method that offers it", () => {
       const command = `db.users.${method}(${args}, { ${option.label}: ${value} })`;
       assert.ok(parseMongoCommand(command), `${command} must parse`);
     }
+  }
+});
+
+test("completes bulkWrite operations, their fields, and the shapes inside them", () => {
+  assert.deepEqual(labels("db.users.bulkWrite([{ "), ["deleteMany", "deleteOne", "insertOne", "replaceOne", "updateMany", "updateOne"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ upd"), ["updateMany", "updateOne"]);
+
+  assert.deepEqual(labels("db.users.bulkWrite([{ insertOne: { "), ["document"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ deleteMany: { "), ["filter"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ replaceOne: { "), ["filter", "replacement", "upsert"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ updateOne: { "), ["arrayFilters", "filter", "update", "upsert"]);
+
+  // Inside a field the shapes are the ordinary ones.
+  assert.ok(labels("db.users.bulkWrite([{ updateOne: { filter: { ", { fields }).includes("$or"));
+  assert.deepEqual(labels("db.users.bulkWrite([{ updateOne: { filter: { na", { fields }), ["name"]);
+  assert.ok(labels("db.users.bulkWrite([{ updateOne: { filter: { age: { $g", { fields }).includes("$gte"));
+  assert.ok(labels("db.users.bulkWrite([{ updateOne: { update: { $s", { fields }).includes("$set"));
+  assert.deepEqual(labels("db.users.bulkWrite([{ updateOne: { update: { $set: { na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ insertOne: { document: { na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ replaceOne: { replacement: { na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ updateOne: { arrayFilters: [{ na", { fields }), ["name"]);
+
+  // An operation the parser does not accept has nothing to offer.
+  assert.deepEqual(labels("db.users.bulkWrite([{ notAnOperation: { ", { fields }), []);
+});
+
+test("every suggested bulkWrite operation and field parses", () => {
+  // The parser rejects an unknown operation key and an unknown field inside one, so a suggestion
+  // that only exists in the table would complete into a command that fails at Run.
+  const fieldValues: Record<string, string> = {
+    document: "{ a: 1 }",
+    filter: "{ a: 1 }",
+    update: "{ $set: { b: 2 } }",
+    replacement: "{ b: 2 }",
+    upsert: "true",
+    arrayFilters: '[{ "e.f": 1 }]',
+  };
+
+  assert.deepEqual(
+    BULK_WRITE_OPERATIONS.map((operation) => operation.label).sort(),
+    Object.keys(BULK_WRITE_OPERATION_FIELDS).sort(),
+    "every offered operation needs a field list, and vice versa",
+  );
+
+  for (const [operation, fieldSpecs] of Object.entries(BULK_WRITE_OPERATION_FIELDS)) {
+    // Every field of an operation at once, so each one is exercised against the parser.
+    const body = fieldSpecs
+      .map((field) => {
+        const value = fieldValues[field.label];
+        assert.ok(value !== undefined, `${field.label} needs a sample value in this test`);
+        return `${field.label}: ${value}`;
+      })
+      .join(", ");
+    const command = `db.users.bulkWrite([{ ${operation}: { ${body} } }])`;
+    assert.ok(parseMongoCommand(command), `${command} must parse`);
   }
 });
 

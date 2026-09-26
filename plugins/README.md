@@ -523,6 +523,21 @@ Every entry has `name`, canonical `uri`, `kind` (`file`, `directory`, `symlink`,
 
 Mutation methods return `{ success, message?, entry? }` and are rejected unless the provider declares the matching capability. Inline read/write payloads are capped at 4 MiB. The built-in file manager currently owns directory navigation, pagination, and bounded file preview. Large upload/download and PTY/SFTP streams use `stdio-framed` binary channels with plugin-defined transfer methods, chunk acknowledgements, cancellation, and progress events; they must not be encoded as one large JSON value.
 
+### `mcp`
+
+A backend that implements the optional MCP tool bridge (`mcp/tools` + `mcp/call`, see "Tools for the built-in AI assistant" below) is discovered automatically: DBX probes installed, compatible backends and exposes their tools on the built-in AI agent and on the external `dbx` MCP server (`dbx-mcp`) without any manifest change. This optional contribution only *narrows* that default:
+
+```json
+{
+  "type": "mcp",
+  "id": "vendor.ssh.mcp",
+  "description": "Terminal and file tools over SSH connections.",
+  "ai_tools": false
+}
+```
+
+Only `id` is required; `ai_tools` and `external_tools` default to `true`, and setting one to `false` keeps the tools off that surface (here: AI only). At most one `mcp` contribution is allowed per manifest, and it requires a backend entrypoint. Declaring it makes the manifest unreadable to hosts that predate the contribution type, so plugins that must install on older hosts should stay undeclared and rely on the detection default. The runtime gates stay in force on every call regardless: open connections for the AI surface, the global MCP policy plus per-connection allowlist for the external surface, per-call approval for anything not `annotations.readOnlyHint: true`, and the Plugin Center switch (which always wins) to turn a plugin's AI tools off entirely.
+
 ### Table Schema Metadata
 
 A plugin can read narrow, read-only schema metadata for one table without owning a driver, connection pool, credential, or SQL string. It reuses the canonical `PluginTableContext` identity used by table contributions:
@@ -735,7 +750,7 @@ A backend can expose tools to the built-in DBX AI agent through the MCP-shaped s
 
 Host rules (`crates/dbx-core/src/ai/plugin_tools.rs`):
 
-- Tools are offered only for plugins the user enabled in Plugin Center → Installed → Built-in AI tools, only in Agent mode with API model providers, and only for plugin connections that are currently open.
+- Tools are offered automatically for every installed tool-capable plugin: implementing the `mcp/tools` bridge is the author's declaration of intent, and a manifest `mcp` contribution with `ai_tools: false` narrows it. The Plugin Center switch turns a plugin off for good. Tools appear only in Agent mode with API model providers, and only for plugin connections that are currently open.
 - The host binds the connection: `connectionId` / `connectionName` are removed from the model-facing schema, and the bound `connectionId` is injected into the forwarded arguments when the plugin schema declares it. With several open connections the model chooses through an added `dbx_connection` argument.
 - A tool runs without asking only when its entry sets `annotations.readOnlyHint: true`. Every other call pauses the run behind an inline approval that shows the exact forwarded arguments; unanswered approvals are denied after five minutes (`crates/dbx-core/src/ai/tool_approval.rs`). The hint is trusted because the plugin's native backend is already trusted code; the approval protects against model mistakes and prompt injection, not against a hostile plugin.
 - Names are exposed as `<prefix>__<tool>` (`io.dbx.ssh` → `ssh__…`). Schemas are reduced to a provider-portable subset (`type`, `description`, `properties`, `required`, `items`, string `enum`, numeric/length/item bounds); argument names must match `[A-Za-z_][A-Za-z0-9_]{0,63}`.
@@ -824,7 +839,7 @@ Sidecars are shared per plugin process, not spawned per tab. Plugins own their i
 - **Secret persistence:** plugin secrets are removed from connection JSON and stored through DBX's secret-store path. Ordinary cloud-sync snapshots always contain redacted placeholders. Secrets enter sync data only inside the encrypted payload when the user has configured a sync passphrase; without one, plugin secrets remain local and are not synchronized.
 - **Native backend trust:** a native sidecar runs with the current OS user's privileges. A signature identifies the repository that approved and published the package; it is not an OS sandbox or proof that the author is harmless. Install only plugins whose backend code you trust.
 - **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX. `host.plans:read` grants reading host-generated estimated execution plans only; it never grants SQL execution, writes, DDL, or actual plans. `host.schema:read` grants only narrow metadata for a table on an already-open host connection; it never grants arbitrary SQL, writes, or reconnects. `host.storage` confines the workbench UI to a small JSON store inside its own `plugin-data/<id>` directory; it grants no other filesystem reach. `host.ai` lets a workbench open a built-in AI conversation seeded with a snapshot the plugin supplies; the plugin gets no model output, no model configuration, and no SQL execution out of it. `host.data:read` grants single read-only statements only on connections the user consented to, per plugin and connection, revocable in Plugin Center; it never grants writes, DDL, locking reads, database switches, or reconnects.
-- **AI tool exposure:** plugin MCP tools reach the built-in AI agent only after the user enables the plugin for it, only on open connections, and — unless declared read-only — only after a per-call approval.
+- **AI tool exposure:** plugin MCP tools reach the built-in AI agent only on open connections and — unless declared read-only — only after a per-call approval. Agent-side visibility comes from automatic detection and can be revoked per plugin in Plugin Center (a manifest `ai_tools: false` also opts out); the external `dbx` MCP server additionally applies the global MCP connection allowlist and can be narrowed with `external_tools: false`.
 
 Custom repository public keys can be added or removed in Plugin Center. Obtain them through a channel independent from the downloaded package.
 

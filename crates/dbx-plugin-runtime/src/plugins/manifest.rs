@@ -250,6 +250,7 @@ pub enum PluginContribution {
     ResultView(PluginResultViewContribution),
     Command(PluginCommandContribution),
     Menus(PluginMenusContribution),
+    Mcp(PluginMcpContribution),
 }
 
 impl PluginContribution {
@@ -262,8 +263,43 @@ impl PluginContribution {
             Self::ResultView(contribution) => &contribution.id,
             Self::Command(contribution) => &contribution.id,
             Self::Menus(contribution) => &contribution.id,
+            Self::Mcp(contribution) => &contribution.id,
         }
     }
+}
+
+/// Optional surface override for a sidecar that implements the MCP tool
+/// bridge (`mcp/tools` + `mcp/call`, see `plugins/README.md` "Tools for the
+/// built-in AI assistant").
+///
+/// Detection is the default: every installed, compatible plugin with a
+/// backend has its tools discovered automatically, on the built-in AI agent
+/// and on the external `dbx` MCP server alike — implementing the optional
+/// bridge methods is the author's declaration of intent. This contribution is
+/// only needed to *narrow* that default: `ai_tools: false` keeps the tools
+/// off the built-in AI agent, `external_tools: false` keeps them off the
+/// external `dbx` MCP server. The Plugin Center switch and the global MCP
+/// policy still override either surface per user. Note that declaring this
+/// contribution makes the manifest unreadable to hosts that predate it, so
+/// plugins that must install on older hosts should not declare it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMcpContribution {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Keep the tools on the built-in AI agent. Defaults to `true`; set to
+    /// `false` to opt out of the detection default for this surface.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub ai_tools: bool,
+    /// Keep the tools on the external `dbx` MCP server. Defaults to `true`;
+    /// set to `false` to opt out of the detection default for this surface.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub external_tools: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -976,6 +1012,28 @@ impl PluginManifest {
         }))
     }
 
+    /// The plugin's single MCP tool declaration, if any. A manifest declaring
+    /// more than one is rejected during validation, so first match is exact.
+    pub fn mcp_contribution(&self) -> Option<&PluginMcpContribution> {
+        self.contributions.iter().find_map(|contribution| match contribution {
+            PluginContribution::Mcp(mcp) => Some(mcp),
+            _ => None,
+        })
+    }
+
+    /// Whether the optional `mcp` declaration keeps the sidecar tools off the
+    /// built-in AI agent (`ai_tools: false`). Without the declaration the
+    /// detection default applies: the tools participate.
+    pub fn ai_tools_excluded(&self) -> bool {
+        self.mcp_contribution().is_some_and(|mcp| !mcp.ai_tools)
+    }
+
+    /// Whether the optional `mcp` declaration keeps the sidecar tools off the
+    /// external `dbx` MCP server (`external_tools: false`).
+    pub fn external_tools_excluded(&self) -> bool {
+        self.mcp_contribution().is_some_and(|mcp| !mcp.external_tools)
+    }
+
     pub fn compatibility(&self, plugin_dir: &Path, dbx_version: &str) -> PluginCompatibility {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
@@ -1257,6 +1315,7 @@ fn validate_contributions(
     let mut command_ids = HashSet::new();
     let mut command_workbench_references = Vec::new();
     let mut menu_command_references = Vec::new();
+    let mut mcp_contributions = 0usize;
 
     for (index, contribution) in contributions.iter().enumerate() {
         let id = contribution.id();
@@ -1459,9 +1518,23 @@ fn validate_contributions(
                     menu_command_references.push((id.to_string(), item.command.clone()));
                 }
             }
+            PluginContribution::Mcp(mcp) => {
+                mcp_contributions += 1;
+                validate_optional_text(
+                    mcp.description.as_deref(),
+                    &format!("Mcp contribution '{id}' description"),
+                    errors,
+                );
+                if !has_backend {
+                    errors.push(format!("Mcp contribution '{id}' requires a backend entrypoint"));
+                }
+            }
         }
     }
 
+    if mcp_contributions > 1 {
+        errors.push(format!("A manifest declares {mcp_contributions} mcp contributions; at most one is allowed"));
+    }
     for (provider, workbench) in workbench_references {
         if !workbench_ids.contains(&workbench) {
             errors.push(format!("Connection provider '{provider}' references missing workbench '{workbench}'"));
@@ -1839,8 +1912,8 @@ mod tests {
         parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions, validate_contributions,
         PluginCommandAction, PluginCommandContribution, PluginCommandPresentation, PluginCommandRestore,
         PluginCommandReuse, PluginConnectionActionContribution, PluginConnectionProviderContribution,
-        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMenuItem, PluginMenuLocation,
-        PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
+        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMcpContribution, PluginMenuItem,
+        PluginMenuLocation, PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
         SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
@@ -1866,6 +1939,86 @@ mod tests {
             }]
         }))?;
         Ok((dir, manifest))
+    }
+
+    #[test]
+    fn mcp_contribution_parses_the_frozen_contract() {
+        // Defaults: both automatic surfaces participate (the declaration with
+        // no flags documents intent without narrowing anything).
+        let mcp: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.example.mcp"
+        }))
+        .unwrap();
+        let PluginContribution::Mcp(mcp) = mcp else { unreachable!("parsed as mcp above") };
+        assert!(mcp.ai_tools);
+        assert!(mcp.external_tools);
+
+        let narrowed: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.example.mcp",
+            "external_tools": false
+        }))
+        .unwrap();
+        let PluginContribution::Mcp(narrowed) = narrowed else { unreachable!() };
+        assert!(narrowed.ai_tools);
+        assert!(!narrowed.external_tools);
+
+        // Unknown fields inside the contribution reject (frozen contract).
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "mcp", "id": "x", "entrypoint": "bin/example"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_contribution_requires_a_backend_and_stays_single() {
+        let plugin_dir = std::env::temp_dir();
+        let mcp = PluginContribution::Mcp(PluginMcpContribution {
+            id: "io.dbx.example.mcp".to_string(),
+            description: None,
+            ai_tools: true,
+            external_tools: true,
+        });
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), false, false, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("requires a backend entrypoint")), "{errors:?}");
+
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), true, false, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let two = vec![mcp.clone(), mcp];
+        let mut errors = Vec::new();
+        validate_contributions(&two, true, false, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("at most one")), "{errors:?}");
+    }
+
+    #[test]
+    fn full_manifest_parses_the_mcp_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&binary_dir).unwrap();
+        std::fs::write(binary_dir.join("example"), b"example").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "backend": { "executable": "bin/example" } },
+            "contributions": [{
+                "type": "mcp",
+                "id": "io.dbx.example.mcp",
+                "external_tools": false
+            }]
+        }))
+        .unwrap();
+        assert!(!manifest.ai_tools_excluded(), "ai_tools defaults to participating");
+        assert!(manifest.external_tools_excluded());
+        let compatibility = manifest.compatibility(dir.path(), "0.6.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
     }
 
     #[test]
@@ -2428,6 +2581,7 @@ mod tests {
             ("result-view", "resultViewContribution"),
             ("command", "commandContribution"),
             ("menus", "menusContribution"),
+            ("mcp", "mcpContribution"),
         ];
         assert_eq!(referenced, kinds.iter().map(|(_, def)| def.to_string()).collect::<Vec<_>>());
         for (tag, def) in kinds {

@@ -366,8 +366,13 @@ function localizePluginMetadata(plugin: InstalledPlugin, localization?: PluginMa
 
 function localizeContribution(contribution: PluginContribution, localization: PluginContributionLocalization | undefined, pluginName: string): PluginContribution {
   // Menus entries carry no display text of their own — labels come from the
-  // referenced commands, so they pass through localization untouched.
+  // referenced commands, so they pass through localization untouched. The
+  // `mcp` declaration is host-surface metadata without a label either; only
+  // its optional description localizes.
   if (contribution.type === "menus") return contribution;
+  if (contribution.type === "mcp") {
+    return { ...contribution, description: localizedOptionalText(contribution.description, localization?.description) };
+  }
   const fallbackLabel = contribution.type === "connection-provider" ? optionalTrimmed(contribution.label) || optionalTrimmed(pluginName) || contribution.id : contribution.label;
   const localized = {
     ...contribution,

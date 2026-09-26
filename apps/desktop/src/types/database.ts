@@ -571,6 +571,20 @@ export interface PluginMenusContribution {
 }
 
 /**
+ * Declares that the plugin sidecar speaks the optional MCP tool bridge
+ * (`mcp/tools` + `mcp/call`) and opts its tools into the host's automatic
+ * surfaces: the built-in AI agent and the external `dbx` MCP server. Both
+ * default to true; the Plugin Center switch still overrides the AI surface.
+ */
+export interface PluginMcpContribution {
+  type: "mcp";
+  id: string;
+  description?: string;
+  ai_tools?: boolean;
+  external_tools?: boolean;
+}
+
+/**
  * Contribution types the host renders through the plugin's own UI entrypoint in
  * a plugin tab. A `workbench` is launched from the sidebar, the plugin center,
  * or `host.openWorkbench`; a `result-view` is launched from the query-result
@@ -580,7 +594,7 @@ export interface PluginMenusContribution {
  */
 export type PluginUiContribution = PluginWorkbenchContribution | PluginResultViewContribution;
 
-export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution;
+export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution | PluginMcpContribution;
 
 export interface PluginEngines {
   dbx: string;

@@ -1172,6 +1172,12 @@ async fn serve() {
         .route("/history/options", get(routes::history::load_history_connection_options))
         .route("/history/{id}", delete(routes::history::delete_history_entry))
         // Saved SQL
+        .route("/favorites/tables", get(routes::favorites::list).post(routes::favorites::create))
+        .route(
+            "/favorites/tables/{id}",
+            axum::routing::patch(routes::favorites::update).delete(routes::favorites::remove),
+        )
+        .route("/favorites/tables/{id}/target", axum::routing::patch(routes::favorites::relink))
         .route(
             "/saved-sql",
             get(routes::saved_sql::load_saved_sql_library).post(routes::saved_sql::save_saved_sql_file),

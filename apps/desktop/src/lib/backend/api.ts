@@ -176,6 +176,11 @@ export async function reinstallJre(jreKey?: string, operationId?: string) {
 export const uninstallJre = forward("uninstallJre");
 export const listenAgentInstallProgress = forward("listenAgentInstallProgress");
 export const loadSavedSqlLibrary = forward("loadSavedSqlLibrary");
+export const listTableFavorites = forward("listTableFavorites");
+export const createTableFavorite = forward("createTableFavorite");
+export const updateTableFavorite = forward("updateTableFavorite");
+export const relinkTableFavorite = forward("relinkTableFavorite");
+export const removeTableFavorite = forward("removeTableFavorite");
 export const loadSavedSqlFilesForSync = forward("loadSavedSqlFilesForSync");
 export const loadSavedSqlFile = forward("loadSavedSqlFile");
 export const saveSavedSqlFolder = forward("saveSavedSqlFolder");

@@ -75,6 +75,7 @@ import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
 import TabModeIcon from "@/components/layout/TabModeIcon.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { tableTabFavoriteMenuItems } from "@/lib/favorites/tabMenu";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { EditorSettings } from "@/stores/settingsStore";
@@ -1147,6 +1148,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       visible: !!activeTabSidebarTarget(tab),
       onLocate: () => emit("locate-tab", tab),
     }),
+    ...tableTabFavoriteMenuItems(tab, connectionStore.getConfig(tab.connectionId), t),
     { label: "", separator: true },
     createPinTabMenuItem({
       label: tab.pinned ? t("contextMenu.unpinTab") : t("contextMenu.pinTab"),

@@ -7,6 +7,7 @@ import {
   FIELD_QUERY_OPERATORS,
   PIPELINE_STAGES,
   PUSH_MODIFIERS,
+  METHOD_OPTION_KEYS,
   STAGE_OPTION_KEYS,
   TOP_LEVEL_QUERY_OPERATORS,
   UPDATE_OPERATORS,
@@ -46,7 +47,8 @@ export type MongoCompletionMode =
   | "expression"
   | "accumulator"
   | "stage"
-  | "stageOption";
+  | "stageOption"
+  | "methodOption";
 
 export interface MongoCompletionField {
   name: string;
@@ -74,6 +76,8 @@ export interface MongoCompletionContext {
   collection?: string;
   /** Enclosing aggregation stage (`$lookup`, `$group`, …), when inside one. */
   stage?: string;
+  /** Collection method whose options object the cursor sits in. */
+  method?: string;
 }
 
 export interface MongoCompletionInput {
@@ -191,12 +195,12 @@ const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number
 type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options";
 
 const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
-  find: ["filter", "projection", "options"],
+  find: ["filter", "projection"],
   findOne: ["filter", "projection", "options"],
-  countDocuments: ["filter", "options"],
-  count: ["filter", "options"],
-  deleteOne: ["filter", "options"],
-  deleteMany: ["filter", "options"],
+  countDocuments: ["filter"],
+  count: ["filter"],
+  deleteOne: ["filter"],
+  deleteMany: ["filter"],
   findOneAndDelete: ["filter", "options"],
   updateOne: ["filter", "update", "options"],
   updateMany: ["filter", "update", "options"],
@@ -204,8 +208,8 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   bulkWrite: ["operations", "options"],
   findOneAndUpdate: ["filter", "update", "options"],
   findOneAndReplace: ["filter", "replacement", "options"],
-  insertOne: ["document", "options"],
-  insertMany: ["documents", "options"],
+  insertOne: ["document"],
+  insertMany: ["documents"],
   aggregate: ["pipeline", "options"],
   createIndex: ["keys", "options"],
   distinct: ["fieldName", "filter"],
@@ -249,7 +253,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const collection = extractActiveCollection(text, safeCursor);
   const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
   const replaceClosingQuote = closingQuoteAtCursor(prefix, text, safeCursor);
-  const at = (mode: MongoCompletionMode, stage?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage });
+  const at = (mode: MongoCompletionMode, stage?: string, method?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage, method });
 
   if (isInsideMongoComment(text, safeCursor)) return { mode: "none", prefix: "", from: safeCursor };
 
@@ -294,7 +298,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   if (!scan) return at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
-  return { ...at(classified.mode, classified.stage), collection: classified.collection ?? collection };
+  return { ...at(classified.mode, classified.stage, classified.method), collection: classified.collection ?? collection };
 }
 
 export function buildMongoCompletionItems(text: string, cursor: number, input: MongoCompletionInput = {}): MongoCompletionItem[] {
@@ -370,6 +374,9 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "stageOption":
       items = specItems(STAGE_OPTION_KEYS[context.stage ?? ""] ?? [], prefix, `${context.stage} option`, 100);
+      break;
+    case "methodOption":
+      items = specItems(METHOD_OPTION_KEYS[context.method ?? ""] ?? [], prefix, `${context.method}() option`, 100);
       break;
     default:
       items = [];
@@ -547,6 +554,7 @@ interface MongoCursorClass {
   mode: MongoCompletionMode;
   stage?: string;
   collection?: string;
+  method?: string;
 }
 
 /**
@@ -649,8 +657,9 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
       return classifyPipeline(scan);
     // bulkWrite operations are `{ <op>: { filter, update, … } }` entries; completing inside them is a follow-up.
     case "operations":
-    case "options":
       return { mode: "none" };
+    case "options":
+      return classifyMethodOptions(method, scan);
     default:
       return { mode: "none" };
   }
@@ -718,6 +727,22 @@ function classifyKeyMap(scan: MongoCallScan, rootIndex: number): MongoCompletion
   if (!inner || scan.inValue) return "none";
   if (inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return "none";
   return "field";
+}
+
+/** Option keys whose value is a field-to-value map, so the cursor completes field names there. */
+const FIELD_MAP_OPTION_KEYS = new Set(["sort", "projection"]);
+
+function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursorClass {
+  const inner = innermost(scan);
+  const depth = innerDepth(scan, 0);
+  if (!inner || depth < 0) return { mode: "none" };
+
+  // `{ sort: { … } }` and `{ projection: { … } }` are field maps one level in.
+  if (depth === 1 && inner.kind === "object" && FIELD_MAP_OPTION_KEYS.has(inner.key ?? "")) {
+    return { mode: scan.inValue ? "none" : "field", method };
+  }
+  if (depth !== 0 || scan.inValue) return { mode: "none" };
+  return { mode: inner.kind === "object" ? "methodOption" : "none", method };
 }
 
 function classifyPipeline(scan: MongoCallScan): MongoCursorClass {

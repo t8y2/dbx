@@ -279,6 +279,12 @@ export interface PluginDriverManifest {
   database_type?: string;
 }
 
+export interface PluginCapabilityManifest {
+  id: string;
+  label: string;
+  kind?: string;
+}
+
 export type PluginFormFieldType = "text" | "password" | "number" | "boolean" | "select" | "radio" | "textarea";
 export type PluginFormFieldBinding = "config" | "secret" | "name" | "host" | "port" | "username" | "password" | "database";
 
@@ -646,6 +652,7 @@ export interface PluginManifest {
   homepage?: string;
   executable?: string;
   drivers: PluginDriverManifest[];
+  capabilities?: PluginCapabilityManifest[];
   contributions?: PluginContribution[];
   localizations?: Record<string, PluginManifestLocalization>;
 }

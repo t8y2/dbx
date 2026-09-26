@@ -100,6 +100,17 @@ export interface AiConfigItem extends AiConfig {
   isDefault?: boolean;
 }
 
+export interface CcSwitchImportSkipped {
+  appType: string;
+  name: string;
+  reason: string;
+}
+
+export interface CcSwitchImportResult {
+  configs: AiConfigItem[];
+  skipped: CcSwitchImportSkipped[];
+}
+
 export interface AiActiveModelSelection {
   configId: string;
   modelId: string;

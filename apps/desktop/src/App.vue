@@ -4253,6 +4253,10 @@ onUnmounted(() => {
                     closeSettingsPage();
                     openPluginCenterPage();
                   "
+                  @open-cc-switch-plugin-center="
+                    closeSettingsPage();
+                    openPluginCenterPage({ pluginId: 'cc-switch' });
+                  "
                   @open-mcp-settings="openSettings('mcp')"
                   @ai-config-deep-link-handled="settingsAiConfigDraft = null"
                 />

@@ -254,6 +254,11 @@ export interface AiProviderPreset extends Omit<AiConfig, "apiKey"> {
   group?: "builtin" | "partner";
 }
 
+export interface AiBuiltinProviderPreset extends AiProviderPreset {
+  id: string;
+  group: "builtin";
+}
+
 export interface AiPartnerProviderPreset extends AiProviderPreset {
   id: string;
   group: "partner";
@@ -464,6 +469,20 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
   },
 };
 
+/** UI-only entry for the optional CC-SWITCH integration. It must never become an AiConfig provider. */
+export const CC_SWITCH_PROVIDER_ID = "cc-switch";
+export const CC_SWITCH_PROVIDER_PRESET: AiBuiltinProviderPreset = {
+  id: CC_SWITCH_PROVIDER_ID,
+  label: "CC-SWITCH",
+  provider: "custom",
+  endpoint: "",
+  model: "",
+  apiStyle: "completions",
+  authMethod: "bearer",
+  requiresApiKey: false,
+  group: "builtin",
+};
+
 /** Brand names stay as preset labels; only the generic "custom" entry is localized. */
 export function aiProviderLabel(provider: AiProvider, t: (key: string) => string): string {
   if (provider === "custom") return t("ai.providerCustom");
@@ -533,11 +552,11 @@ export function getAiProviderPreset(provider: AiProvider, endpoint = ""): AiProv
   return partnerPreset ?? AI_PROVIDER_PRESETS[provider];
 }
 
-export function getAiProviderPresetOption(id: string): AiProviderPreset | AiPartnerProviderPreset {
-  return AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === id) ?? AI_PROVIDER_PRESETS[id as AiProvider] ?? AI_PROVIDER_PRESETS.custom;
+export function getAiProviderPresetOption(id: string): AiProviderPreset | AiBuiltinProviderPreset | AiPartnerProviderPreset {
+  return id === CC_SWITCH_PROVIDER_ID ? CC_SWITCH_PROVIDER_PRESET : (AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === id) ?? AI_PROVIDER_PRESETS[id as AiProvider] ?? AI_PROVIDER_PRESETS.custom);
 }
 
-export function getAiProviderPresetDefaultEndpoint(preset: AiProviderPreset | AiPartnerProviderPreset, locale: string): string {
+export function getAiProviderPresetDefaultEndpoint(preset: AiProviderPreset | AiBuiltinProviderPreset | AiPartnerProviderPreset, locale: string): string {
   if (preset.provider === "minimax" && locale === "zh-CN") {
     return "https://api.minimaxi.com/v1";
   }

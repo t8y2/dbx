@@ -799,7 +799,7 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
     } else {
         // `WHERE 1=0` rather than `WHERE 0`: PostgreSQL-family engines (HighGo, Kingbase,
-        // Vastbase, ...) and DuckDB require a boolean in WHERE and reject a bare integer
+        // ...) and DuckDB require a boolean in WHERE and reject a bare integer
         // with "argument of WHERE must be type boolean, not type integer" (#9950).
         // `1=0` is a valid false predicate in every dialect, including the permissive
         // MySQL/SQLite-style engines that also accepted `0`.
@@ -1099,6 +1099,7 @@ fn is_postgres_like_structure_copy(database_type: DatabaseType) -> bool {
             | DatabaseType::Gaussdb
             | DatabaseType::Kwdb
             | DatabaseType::OpenGauss
+            | DatabaseType::Vastbase
             | DatabaseType::Questdb
     )
 }
@@ -2298,13 +2299,35 @@ mod tests {
             identifier_quote: Some("\"".to_string()),
         });
         let expected_statements = vec![
-            "CREATE TABLE \"业\"\"务\".\"订\"\"单_副本\" AS SELECT * FROM \"业\"\"务\".\"订\"\"单\" WHERE 1=0",
+            "CREATE TABLE \"业\"\"务\".\"订\"\"单_副本\" (LIKE \"业\"\"务\".\"订\"\"单\" INCLUDING ALL)",
             "COMMENT ON TABLE \"业\"\"务\".\"订\"\"单_副本\" IS '  客户''s;订单  '",
             "COMMENT ON COLUMN \"业\"\"务\".\"订\"\"单_副本\".\"备\"\"注\" IS '用户''s;备注'",
             "COMMENT ON COLUMN \"业\"\"务\".\"订\"\"单_副本\".\"路径\" IS E'C:\\\\订单\\n明细\\t\\''",
         ];
         assert_eq!(sql, format!("{};", expected_statements.join(";\n")));
         assert_eq!(crate::sql::split_sql_statements_for_database(&sql, DatabaseType::Vastbase), expected_statements);
+    }
+
+    #[test]
+    fn duplicate_table_structure_vastbase_keeps_constraints_and_indexes() {
+        // Regression for t8y2/dbx#10345: Vastbase G100 used to clone through
+        // `CREATE TABLE ... AS SELECT ... WHERE 1=0`, which silently dropped the primary key,
+        // unique constraints and secondary indexes. `LIKE ... INCLUDING ALL` copies all of them
+        // (verified against a live Vastbase G100 3.0.9 instance).
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Vastbase),
+                schema: Some("public".to_string()),
+                source_name: "orders".to_string(),
+                target_name: "orders_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+                primary_key_columns: vec!["id".to_string()],
+                primary_key_constraint_name: Some("orders_copy_pkey".to_string()),
+                identifier_quote: Some("\"".to_string()),
+            }),
+            "CREATE TABLE \"public\".\"orders_copy\" (LIKE \"public\".\"orders\" INCLUDING ALL);"
+        );
     }
 
     #[test]
@@ -2329,7 +2352,7 @@ mod tests {
                         primary_key_constraint_name: None,
                         identifier_quote: None,
                     });
-                    let mut expected = "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;".to_string();
+                    let mut expected = "CREATE TABLE \"copy\" (LIKE \"source\" INCLUDING ALL);".to_string();
                     match table_comment {
                         Some("表注释") => expected.push_str("\nCOMMENT ON TABLE \"copy\" IS '表注释';"),
                         Some("路径\\'\n归档") => {
@@ -2411,15 +2434,11 @@ mod tests {
     #[test]
     fn duplicate_table_structure_uses_boolean_false_predicate_for_pg_family_fallbacks() {
         // Regression for #9950: the generic fallback used `WHERE 0`. PostgreSQL-family
-        // engines require a boolean there, so cloning a HighGo/Kingbase/Vastbase table
-        // failed with "argument of WHERE must be type boolean, not type integer".
-        for database_type in [
-            DatabaseType::Highgo,
-            DatabaseType::Kingbase,
-            DatabaseType::Vastbase,
-            DatabaseType::DuckDb,
-            DatabaseType::Sqlite,
-        ] {
+        // engines require a boolean there, so cloning a HighGo/Kingbase table failed with
+        // "argument of WHERE must be type boolean, not type integer". Vastbase now clones
+        // through `LIKE ... INCLUDING ALL` (t8y2/dbx#10345) and no longer hits this branch.
+        for database_type in [DatabaseType::Highgo, DatabaseType::Kingbase, DatabaseType::DuckDb, DatabaseType::Sqlite]
+        {
             assert_eq!(
                 build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
                     database_type: Some(database_type),

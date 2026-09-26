@@ -10554,7 +10554,14 @@ mod tests {
         assert_eq!(raw_connection_json(&storage, "future").await, future_json);
         assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
 
+        // Saving a list no longer replaces the whole table: an empty save is a no-op, so
+        // rows the caller never saw (like the unreadable "future" row) survive it.
         storage.save_connections(&[]).await.unwrap();
+        assert_eq!(storage.load_connections().await.unwrap().len(), 1);
+        assert_eq!(raw_connection_json(&storage, "future").await, future_json);
+
+        // Deleting a connection is explicit now, and still only touches the given ids.
+        storage.delete_connections(&["known".to_string()]).await.unwrap();
         assert!(storage.load_connections().await.unwrap().is_empty());
         assert_eq!(raw_connection_json(&storage, "future").await, future_json);
         assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
@@ -11068,7 +11075,9 @@ mod tests {
 
         // Non-MCP callers remain governed by the ordinary DBX UI permissions.
         storage.save_connections(std::slice::from_ref(&kept)).await.unwrap();
-        assert_eq!(storage.load_connections().await.unwrap()[0].id, kept.id);
+        let after_plain_save = storage.load_connections().await.unwrap();
+        assert_eq!(after_plain_save.len(), 3);
+        assert!(after_plain_save.iter().any(|config| config.id == kept.id));
 
         let _ = std::fs::remove_file(path);
     }

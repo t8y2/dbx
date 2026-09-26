@@ -2,7 +2,7 @@
 import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
-import { CalendarClock, Check, Copy, Database, ListFilter, LoaderCircle, Minus, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
+import { CalendarClock, Check, Copy, Database, ListFilter, LoaderCircle, Maximize2, Minimize2, Minus, RefreshCw, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -34,18 +34,24 @@ const connectionStore = useConnectionStore();
 const props = defineProps<{
   currentConnectionId?: string;
   currentDatabase?: string;
+  maximized?: boolean;
 }>();
 
 const emit = defineEmits<{
   restore: [sql: string, entry: HistoryEntry];
   analyzeAi: [entry: HistoryEntry];
   close: [];
+  toggleMaximize: [];
 }>();
 
-type HistoryFilter = "all" | "query" | "data_change" | "schema_change" | "failed";
+type HistoryFilter = "all" | "query" | "data_change" | "schema_change" | "failed" | "mcp_success";
+type HistorySource = "sql" | "mcp";
 
 const searchText = ref("");
+const mcpToolName = ref("");
+const mcpToolOptions = ref<string[]>([]);
 const activeFilter = ref<HistoryFilter>("all");
+const activeSource = ref<HistorySource>("sql");
 const dateRange = ref<HistoryDateRange>({ startDate: "", endDate: "" });
 const dateRangeDraft = ref<HistoryDateRange>({ startDate: "", endDate: "" });
 const dateRangeOpen = ref(false);
@@ -71,7 +77,9 @@ const filtersScrollable = ref(false);
 let filterScrollResizeObserver: ResizeObserver | null = null;
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-const filters: HistoryFilter[] = ["all", "query", "data_change", "schema_change", "failed"];
+const filters = computed<HistoryFilter[]>(() => (activeSource.value === "mcp" ? ["all", "failed", "mcp_success"] : ["all", "query", "data_change", "schema_change", "failed"]));
+const mcpQuickTools = computed(() => mcpToolOptions.value);
+const canClearHistory = computed(() => store.total > 0);
 const hasDateFilter = computed(() => hasHistoryDateRange(dateRange.value));
 const dateRangeDraftValid = computed(() => historyDateRangeIsValid(dateRangeDraft.value));
 const dateRangeSummary = computed(() => {
@@ -93,6 +101,10 @@ const emptyMessage = computed(() => (hasScopeFilter.value || hasDateFilter.value
 
 function activityKind(entry: HistoryEntry) {
   return resolveHistoryActivityKind(entry);
+}
+
+function isMcpEntry(entry: HistoryEntry) {
+  return entry.source === "mcp" || historyEntrySource(entry) === "MCP";
 }
 
 function restore(entry: HistoryEntry) {
@@ -123,13 +135,13 @@ function executeDelete() {
 }
 
 function confirmClearHistory() {
-  if (store.total > 0 || store.connectionOptions.length > 0) {
+  if (canClearHistory.value) {
     showClearConfirm.value = true;
   }
 }
 
 function executeClear() {
-  store.clear();
+  void store.clear(activeSource.value);
   showClearConfirm.value = false;
 }
 
@@ -149,11 +161,31 @@ function truncateSql(sql: string): string {
   return line.length > 120 ? line.slice(0, 120) + "..." : line;
 }
 
+function formatHistoryJson(value?: string | null): string {
+  if (!value) return "-";
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+function isLegacyResponse(value?: string | null): boolean {
+  try {
+    const parsed = JSON.parse(value || "null");
+    return !!parsed && typeof parsed.content_blocks === "number" && !("content" in parsed);
+  } catch {
+    return false;
+  }
+}
+
 function entryTitle(entry: HistoryEntry) {
+  if (isMcpEntry(entry)) return entry.mcp_tool_name || entry.operation || "MCP call";
   return entry.target || entry.operation || truncateSql(entry.sql);
 }
 
 function entrySubtitle(entry: HistoryEntry) {
+  if (isMcpEntry(entry)) return truncateSql(entry.mcp_request_json || entry.target || entry.operation || "-");
   if (activityKind(entry) === "query") return truncateSql(entry.sql);
   return truncateSql(entry.sql || entry.target || entry.operation || "");
 }
@@ -266,11 +298,13 @@ function buildHistorySearchRequest(): HistorySearchRequest {
     search_text: searchText.value,
     connections: selectedConnections.value.map((connection) => ({ ...connection })),
     databases: selectedDatabases.value.map((database) => ({ ...database })),
-    activity_kind: activeFilter.value !== "all" && activeFilter.value !== "failed" ? activeFilter.value : undefined,
-    success: activeFilter.value === "failed" ? false : undefined,
+    activity_kind: activeFilter.value !== "all" && activeFilter.value !== "failed" && activeFilter.value !== "mcp_success" ? activeFilter.value : undefined,
+    success: activeFilter.value === "failed" ? false : activeFilter.value === "mcp_success" ? true : undefined,
     started_at: localDateBoundary(dateRange.value.startDate, false),
     ended_at: localDateBoundary(dateRange.value.endDate, true),
     limit: 100,
+    source: activeSource.value,
+    mcp_tool_name: activeSource.value === "mcp" ? mcpToolName.value.trim() || undefined : undefined,
   };
 }
 
@@ -280,6 +314,10 @@ async function runHistorySearch() {
   } catch {
     // The panel already renders the backend error; avoid a duplicate toast.
   }
+}
+
+function refreshHistory() {
+  void runHistorySearch();
 }
 
 // Debounce all filter changes through one timer to avoid redundant history scans.
@@ -362,6 +400,7 @@ function detailsRows(entry: HistoryEntry) {
     [t("history.detail.rollback"), canRollbackHistoryEntry(entry) ? t("history.rollbackAvailable") : t("history.rollbackUnavailable")],
     [t("history.detail.status"), entry.success ? t("history.success") : t("history.failed")],
   ];
+  if (entry.source === "mcp" || historyEntrySource(entry) === "MCP") rows.splice(1, 0, [t("history.detail.mcpTool"), entry.mcp_tool_name || entry.operation || "-"]);
   if (entry.error) rows.push([t("history.detail.error"), entry.error]);
   return rows;
 }
@@ -477,6 +516,7 @@ async function closeHistory() {
 }
 
 function getHistoryMenuItems(entry: HistoryEntry): ContextMenuItem[] {
+  const isMcp = isMcpEntry(entry);
   return [
     {
       label: t("history.viewDetails"),
@@ -484,22 +524,35 @@ function getHistoryMenuItems(entry: HistoryEntry): ContextMenuItem[] {
         selectedEntry.value = entry;
       },
     },
-    { label: t("history.restore"), action: () => restore(entry) },
-    { label: t("history.analyzeWithAi"), action: () => emit("analyzeAi", entry), icon: Sparkles },
-    { label: t("history.copy"), action: () => copyText(entry.sql) },
-    ...(canRollbackHistoryEntry(entry) ? [{ label: t("history.rollback"), action: () => rollback(entry) }] : []),
+    ...(isMcp
+      ? []
+      : [
+          { label: t("history.restore"), action: () => restore(entry) },
+          { label: t("history.analyzeWithAi"), action: () => emit("analyzeAi", entry), icon: Sparkles },
+          { label: t("history.copy"), action: () => copyText(entry.sql) },
+          ...(canRollbackHistoryEntry(entry) ? [{ label: t("history.rollback"), action: () => rollback(entry) }] : []),
+        ]),
     { label: t("history.delete"), action: () => confirmDeleteEntry(entry.id), variant: "destructive" as const },
   ];
 }
 
+watch(activeSource, () => {
+  void nextTick(updateFilterScrollability);
+});
+
 watch(
-  () => filters.map((filter) => filterLabel(filter)).join("\0"),
-  () => {
-    void nextTick(updateFilterScrollability);
+  () => store.entries,
+  (entries) => {
+    const known = new Set(mcpToolOptions.value);
+    for (const entry of entries) {
+      if (isMcpEntry(entry) && entry.mcp_tool_name) known.add(entry.mcp_tool_name);
+    }
+    mcpToolOptions.value = [...known].sort().slice(0, 50);
   },
+  { deep: true },
 );
 
-watch([searchText, activeFilter, () => dateRange.value.startDate, () => dateRange.value.endDate, () => selectedConnections.value.map(connectionKey).join("\0"), () => selectedDatabases.value.map(databaseKey).join("\0")], scheduleHistorySearch);
+watch([searchText, mcpToolName, activeSource, activeFilter, () => dateRange.value.startDate, () => dateRange.value.endDate, () => selectedConnections.value.map(connectionKey).join("\0"), () => selectedDatabases.value.map(databaseKey).join("\0")], scheduleHistorySearch);
 
 onMounted(() => {
   store.setHistoryPanelActive(true);
@@ -530,8 +583,15 @@ onBeforeUnmount(() => {
       <span class="text-xs font-medium">{{ t("history.title") }}</span>
       <span v-if="store.total > 0" class="text-[10px] text-muted-foreground">{{ store.total }}</span>
       <span class="flex-1" />
-      <Button v-if="store.total > 0 || store.connectionOptions.length > 0" variant="ghost" size="icon" class="h-5 w-5" @click="confirmClearHistory">
+      <Button v-if="canClearHistory" variant="ghost" size="icon" class="h-5 w-5" @click="confirmClearHistory">
         <Trash2 class="h-3 w-3" />
+      </Button>
+      <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="store.loading" :title="t('history.refresh')" :aria-label="t('history.refresh')" @click="refreshHistory">
+        <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': store.loading }" />
+      </Button>
+      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t(maximized ? 'diff.restore' : 'diff.maximize')" :aria-label="t(maximized ? 'diff.restore' : 'diff.maximize')" :aria-pressed="!!maximized" @click="emit('toggleMaximize')">
+        <Minimize2 v-if="maximized" class="h-3 w-3" />
+        <Maximize2 v-else class="h-3 w-3" />
       </Button>
       <Button variant="ghost" size="icon" class="h-5 w-5" :aria-label="t('common.close')" :disabled="resolvingTransaction || (isRollingBack && !!pendingRollback)" @click="closeHistory">
         <X class="h-3 w-3" />
@@ -545,14 +605,42 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="border-b shrink-0">
+      <div class="flex gap-1 px-2 pt-2">
+        <button
+          v-for="source in ['sql', 'mcp'] as HistorySource[]"
+          :key="source"
+          type="button"
+          class="h-7 rounded border px-3 text-xs"
+          :class="activeSource === source ? 'border-primary bg-primary text-primary-foreground' : 'bg-background'"
+          @click="
+            activeSource = source;
+            activeFilter = 'all';
+          "
+        >
+          {{ t(`history.sources.${source}`) }}
+        </button>
+      </div>
       <div ref="filterScrollRef" class="history-filter-scroll flex gap-1 px-2 pt-2" :class="{ 'history-filter-scroll--scrollable': filtersScrollable }">
         <button v-for="filter in filters" :key="filter" type="button" class="h-6 shrink-0 rounded border px-2 text-xs" :class="activeFilter === filter ? 'border-primary bg-primary text-primary-foreground' : 'bg-background'" @click="activeFilter = filter">
           {{ filterLabel(filter) }}
         </button>
       </div>
       <div class="relative flex items-center px-2 py-1">
-        <Search class="absolute left-3 w-3 h-3 text-muted-foreground pointer-events-none" />
-        <input data-history-search v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 text-xs bg-transparent border rounded pl-5 pr-1 outline-none placeholder:text-muted-foreground" :placeholder="t('history.search')" />
+        <select v-if="activeSource === 'mcp'" data-mcp-tool-search v-model="mcpToolName" class="mr-1 h-5 max-w-52 rounded border bg-background px-1 text-xs outline-none" :title="t('history.mcp.toolSearch')">
+          <option value="">{{ t("history.mcp.allTools") }}</option>
+          <option v-for="tool in mcpQuickTools" :key="tool" :value="tool">{{ tool }}</option>
+        </select>
+        <Search v-if="activeSource !== 'mcp'" class="absolute left-3 w-3 h-3 text-muted-foreground pointer-events-none" />
+        <input
+          data-history-search
+          v-model="searchText"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck="false"
+          class="flex-1 h-5 text-xs bg-transparent border rounded pr-1 outline-none placeholder:text-muted-foreground"
+          :class="activeSource === 'mcp' ? 'pl-1' : 'pl-5'"
+          :placeholder="t('history.search')"
+        />
         <Popover :open="dateRangeOpen" @update:open="setDateRangeOpen">
           <PopoverTrigger as-child>
             <button
@@ -688,28 +776,30 @@ onBeforeUnmount(() => {
       <RecycleScroller v-if="shouldVirtualizeHistory(store.entries.length)" class="min-h-0 flex-1" :items="store.entries" :item-size="HISTORY_ROW_HEIGHT" :buffer="HISTORY_SCROLL_BUFFER" :skip-hover="true" key-field="id">
         <template #default="{ item: entry }">
           <CustomContextMenu :items="getHistoryMenuItems(entry)" v-slot="{ onContextMenu, isOpen }">
-            <div class="h-[72px] cursor-pointer select-none border-b border-border/50 px-3 py-2 text-xs" :class="isOpen || selectedEntry?.id === entry.id ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40'" @click="selectedEntry = entry" @contextmenu="onContextMenu">
-              <div class="mb-0.5 flex items-center gap-1">
-                <span class="inline-flex h-5 w-9 shrink-0 items-center justify-center rounded border px-1 text-[10px] leading-none text-muted-foreground">
-                  {{ kindShortLabel(entry) }}
-                </span>
-                <span class="truncate font-medium">{{ entryTitle(entry) }}</span>
-                <span v-if="historyEntrySource(entry)" class="inline-flex h-5 shrink-0 items-center rounded border border-primary/30 bg-primary/5 px-1 text-[10px] font-medium text-primary">
-                  {{ historyEntrySource(entry) }}
-                </span>
-                <span class="ml-auto shrink-0 text-muted-foreground">{{ formatTime(entry.executed_at) }}</span>
-              </div>
-              <div class="truncate font-mono text-muted-foreground">{{ entrySubtitle(entry) }}</div>
-              <div class="mt-0.5 flex items-center gap-2">
-                <span class="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
-                  <Database class="h-3 w-3 shrink-0" />
-                  <span class="truncate">
-                    {{ entry.connection_name }}<template v-if="entry.database"> / {{ entry.database }}</template>
+            <div class="h-[80px] cursor-pointer select-none border-b border-border/50 px-2 py-1.5 text-xs" :class="isOpen || selectedEntry?.id === entry.id ? 'bg-accent text-accent-foreground' : ''" @click="selectedEntry = entry" @contextmenu="onContextMenu">
+              <div class="h-full rounded-md border bg-card px-2 py-1.5 shadow-sm transition-colors hover:border-primary/30 hover:bg-accent/40">
+                <div class="mb-0.5 flex items-center gap-1">
+                  <span class="inline-flex h-5 w-9 shrink-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] leading-none text-muted-foreground">
+                    {{ isMcpEntry(entry) ? "MCP" : kindShortLabel(entry) }}
                   </span>
-                </span>
-                <span class="ml-auto shrink-0" :class="entry.success ? 'text-green-500' : 'text-red-500'">
-                  {{ entry.success ? formatQueryDuration(entry.execution_time_ms) : t("history.failed") }}
-                </span>
+                  <span class="truncate font-medium">{{ entryTitle(entry) }}</span>
+                  <span v-if="historyEntrySource(entry) && !isMcpEntry(entry)" class="inline-flex h-5 shrink-0 items-center rounded border border-primary/30 bg-primary/5 px-1 text-[10px] font-medium text-primary">
+                    {{ historyEntrySource(entry) }}
+                  </span>
+                  <span class="ml-auto shrink-0 text-muted-foreground">{{ formatTime(entry.executed_at) }}</span>
+                </div>
+                <div class="truncate font-mono text-muted-foreground">{{ entrySubtitle(entry) }}</div>
+                <div class="mt-0.5 flex items-center gap-2">
+                  <span class="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
+                    <Database class="h-3 w-3 shrink-0" />
+                    <span class="truncate">
+                      {{ entry.connection_name || entry.target || t("history.scope.unknownConnection") }}<template v-if="entry.database"> / {{ entry.database }}</template>
+                    </span>
+                  </span>
+                  <span class="ml-auto shrink-0" :class="entry.success ? 'text-green-500' : 'text-red-500'">
+                    {{ entry.success ? formatQueryDuration(entry.execution_time_ms) : t("history.failed") }}
+                  </span>
+                </div>
               </div>
             </div>
           </CustomContextMenu>
@@ -744,7 +834,24 @@ onBeforeUnmount(() => {
               <div class="min-w-0 break-words">{{ value }}</div>
             </template>
           </div>
-          <div>
+          <div v-if="selectedEntry.source === 'mcp' || historyEntrySource(selectedEntry) === 'MCP'" class="space-y-2">
+            <div class="mb-1 flex items-center justify-between">
+              <div class="text-sm font-medium">{{ t("history.mcp.request") }}</div>
+              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('history.copy')" :aria-label="t('history.copy')" @click="copyText(selectedEntry.mcp_request_json || selectedEntry.sql || selectedEntry.details_json || '-')">
+                <Copy class="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <pre class="max-h-64 overflow-auto rounded border bg-muted/30 p-3 text-xs">{{ formatHistoryJson(selectedEntry.mcp_request_json || selectedEntry.sql || selectedEntry.details_json) }}</pre>
+            <div class="mb-1 flex items-center justify-between">
+              <div class="text-sm font-medium">{{ t("history.mcp.response") }}</div>
+              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('history.copy')" :aria-label="t('history.copy')" @click="copyText(selectedEntry.mcp_response_json || '-')">
+                <Copy class="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <p v-if="isLegacyResponse(selectedEntry.mcp_response_json)" class="text-xs text-muted-foreground">{{ t("history.mcp.legacyResponse") }}</p>
+            <pre class="max-h-[min(50vh,32rem)] overflow-auto rounded border bg-muted/30 p-3 text-xs">{{ formatHistoryJson(selectedEntry.mcp_response_json) }}</pre>
+          </div>
+          <div v-else>
             <div class="mb-1 flex items-center justify-between">
               <div class="text-sm font-medium">SQL</div>
               <Button variant="ghost" size="sm" class="h-7" @click="copyText(selectedEntry.sql)">
@@ -766,11 +873,11 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" @click="selectedEntry && emit('analyzeAi', selectedEntry)">
+          <Button v-if="selectedEntry && selectedEntry.source !== 'mcp' && historyEntrySource(selectedEntry) !== 'MCP'" variant="outline" @click="selectedEntry && emit('analyzeAi', selectedEntry)">
             <Sparkles class="h-4 w-4" />
             {{ t("history.analyzeWithAi") }}
           </Button>
-          <Button variant="outline" @click="selectedEntry && restore(selectedEntry)">{{ t("history.restore") }}</Button>
+          <Button v-if="selectedEntry && selectedEntry.source !== 'mcp' && historyEntrySource(selectedEntry) !== 'MCP'" variant="outline" @click="selectedEntry && restore(selectedEntry)">{{ t("history.restore") }}</Button>
           <label v-if="selectedEntry && canRollbackHistoryEntry(selectedEntry) && canUseManualRollback" class="flex items-center gap-2 text-xs" :title="t('history.manualRollbackHint')">
             <input v-model="manualRollback" type="checkbox" :disabled="rollbackLocked" />
             {{ t("toolbar.manualTransaction") }}
@@ -801,7 +908,7 @@ onBeforeUnmount(() => {
         <DialogHeader>
           <DialogTitle>{{ t("history.clear") }}</DialogTitle>
         </DialogHeader>
-        <p class="text-sm text-muted-foreground">{{ t("history.confirmClear") }}</p>
+        <p class="text-sm text-muted-foreground">{{ t("history.confirmClearSource", { source: t(`history.sources.${activeSource}`) }) }}</p>
         <DialogFooter>
           <Button variant="outline" @click="showClearConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
           <Button variant="destructive" @click="executeClear">{{ t("dangerDialog.confirm") }}</Button>

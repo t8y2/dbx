@@ -380,6 +380,8 @@ export const saveSqlFileUploadMaxMb = forward("saveSqlFileUploadMaxMb");
 export const saveMaxAgentTurns = forward("saveMaxAgentTurns");
 export const loadHistoryRetentionLimit = forward("loadHistoryRetentionLimit");
 export const saveHistoryRetentionLimit = forward("saveHistoryRetentionLimit");
+export const loadMcpHistoryRetentionLimit = forward("loadMcpHistoryRetentionLimit");
+export const saveMcpHistoryRetentionLimit = forward("saveMcpHistoryRetentionLimit");
 export const loadMaxRetries = forward("loadMaxRetries");
 export const saveMaxRetries = forward("saveMaxRetries");
 export const completeAppClose = forward("completeAppClose");
@@ -916,6 +918,8 @@ export const searchHistory = forward("searchHistory");
 export const loadHistoryConnectionOptions = forward("loadHistoryConnectionOptions");
 export const loadRedisHistory = forward("loadRedisHistory");
 export const clearHistory = forward("clearHistory");
+export const clearHistoryBySource = forward("clearHistoryBySource");
+export const cleanupMcpHistoryRetention = forward("cleanupMcpHistoryRetention");
 export const clearRedisHistory = forward("clearRedisHistory");
 export const deleteHistoryEntry = forward("deleteHistoryEntry");
 

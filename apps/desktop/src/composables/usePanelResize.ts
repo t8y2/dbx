@@ -14,6 +14,11 @@ function restoredPanelWidth(storageKey: string, fallback: number): number {
   return Math.max(PANEL_MIN_WIDTH, Number(safeLocalStorageGet(storageKey)) || fallback);
 }
 
+function restoredHistoryPanelWidth(): number {
+  const fallback = Math.round(window.innerWidth * 0.6);
+  return Math.max(PANEL_MIN_WIDTH, fallback);
+}
+
 /**
  * Prefer the layout-owning panel root over the handle's immediate parent.
  * Vertical tab handles live inside a nested `.app-tab-bar`, while width is
@@ -41,10 +46,21 @@ function availableAiPanelMaxWidth(handle: HTMLElement | null) {
   return Math.max(PANEL_MIN_WIDTH, panelRect.width + panelRect.left - contentRect.left);
 }
 
+// History may have another auxiliary panel (including a hidden AI panel)
+// before it. Only borrow space from the editor, never from that sibling.
+function availableHistoryPanelMaxWidth(handle: HTMLElement | null) {
+  const panel = resolveResizePanel(handle);
+  const editor = panel?.parentElement?.querySelector<HTMLElement>(":scope > [data-editor-content]");
+  if (!panel || !editor) return availableAiPanelMaxWidth(handle);
+  return Math.max(PANEL_MIN_WIDTH, panel.getBoundingClientRect().width + editor.getBoundingClientRect().width);
+}
+
 export function usePanelResize() {
   const sidebarWidth = ref(restoredPanelWidth("dbx-sidebar-width", 260));
   const aiPanelWidth = ref(restoredPanelWidth("dbx-ai-panel-width", 360));
-  const historyWidth = ref(restoredPanelWidth("dbx-history-width", 288));
+  // History opens at a comfortable content-area width; users can still resize
+  // it or switch to the explicit full-width mode from its toolbar.
+  const historyWidth = ref(restoredHistoryPanelWidth());
   const sqlLibraryWidth = ref(restoredPanelWidth("dbx-sql-library-width", 288));
   const sqlFilePanelWidth = ref(restoredPanelWidth("dbx-sql-file-panel-width", 288));
   const tabBarWidth = ref(restoredPanelWidth("dbx-tab-bar-width", 240));
@@ -108,7 +124,9 @@ export function usePanelResize() {
         endPanelResize();
         resizeOverlay.remove();
         widthRef.value = currentWidth;
-        safeLocalStorageSet(storageKey, String(widthRef.value));
+        // History deliberately starts at 60% on every application launch;
+        // resizing remains available for the current session only.
+        if (storageKey !== "dbx-history-width") safeLocalStorageSet(storageKey, String(widthRef.value));
       };
 
       document.addEventListener("pointermove", onPointerMove);
@@ -120,7 +138,7 @@ export function usePanelResize() {
 
   const startSidebarResize = startPanelResize(sidebarWidth, "dbx-sidebar-width", "right");
   const startAiPanelResize = startPanelResize(aiPanelWidth, "dbx-ai-panel-width", "left", availableAiPanelMaxWidth);
-  const startHistoryResize = startPanelResize(historyWidth, "dbx-history-width", "left");
+  const startHistoryResize = startPanelResize(historyWidth, "dbx-history-width", "left", availableHistoryPanelMaxWidth);
   const startSqlLibraryResize = startPanelResize(sqlLibraryWidth, "dbx-sql-library-width", "left");
   const startSqlFilePanelResize = startPanelResize(sqlFilePanelWidth, "dbx-sql-file-panel-width", "left");
   const startLeftTabBarResize = startPanelResize(tabBarWidth, "dbx-tab-bar-width", "right");

@@ -402,6 +402,7 @@ const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
 const showAiPanel = ref(safeLocalStorageGet("dbx-ai-panel-open") === "true");
 const isAiPanelMaximized = ref(false);
+const isHistoryPanelMaximized = ref(false);
 const isZenMode = ref(false);
 const showSqlLibraryPanel = ref(safeLocalStorageGet("dbx-sql-library-open") === "true");
 const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
@@ -943,9 +944,16 @@ function requestActiveEditorExecute(source?: "pointer" | "keyboard", tabId?: str
   void tryExecute(undefined, targetTabId ? { tabId: targetTabId } : undefined);
 }
 
-function requestActiveEditorExecuteInNewResultTab() {
-  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
-  void tryExecuteInNewResultTab();
+function requestActiveEditorExecuteInNewResultTab(source?: "pointer" | "keyboard", tabId?: string) {
+  const snapshot = pendingToolbarExecutionSnapshot.value;
+  pendingToolbarExecutionSnapshot.value = undefined;
+  const targetTabId = tabId ?? (source === "pointer" ? snapshot?.tabId : undefined);
+  if (source === "pointer" && snapshot && snapshot.tabId === targetTabId) {
+    void tryExecuteInNewResultTab(snapshot, { tabId: targetTabId });
+    return;
+  }
+  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.(targetTabId)) return;
+  void tryExecuteInNewResultTab(undefined, targetTabId ? { tabId: targetTabId } : undefined);
 }
 
 const toolbarAgentDriverUpdateCount = computed(() => Math.max(agentDriverUpdateCount.value, componentUpdates.driverUpdateCount.value));
@@ -989,6 +997,7 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   databaseRequiredSignalFor: (tabId: string) => (databaseRequiredTabId.value === tabId ? databaseRequiredSignal.value : 0),
   captureExecutionSnapshot: captureActiveEditorExecutionSnapshot,
   toolbarExecute: requestActiveEditorExecute,
+  toolbarExecuteInNewResultTab: requestActiveEditorExecuteInNewResultTab,
   cancelExecution: (tabId: string) => cancelActiveExecution(tabId),
   explain: (tabId: string) => tryExplain(undefined, { tabId }),
   formatSql: formatActiveSql,
@@ -1681,6 +1690,7 @@ function applyRightSidebarPanelState(next: RightSidebarPanelState) {
 }
 
 function setRightSidebarPanelOpen(panelId: RightSidebarPanelId, open: boolean) {
+  if ((panelId === "history" && !open) || (panelId !== "history" && open)) isHistoryPanelMaximized.value = false;
   if (panelId === "ai" && !open) {
     isAiPanelMaximized.value = false;
   } else if (open && panelId !== "ai" && isAiPanelMaximized.value) {
@@ -4184,7 +4194,11 @@ onUnmounted(() => {
             @mousedown="rememberSidebarSearchSurface"
           />
 
-          <div v-show="!isAiPanelMaximized || isZenMode" :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
+          <div
+            data-editor-content
+            v-show="(!isAiPanelMaximized && !isHistoryPanelMaximized) || isZenMode"
+            :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'"
+          >
             <div class="h-full flex min-h-0 min-w-0 flex-col">
               <AppTabBar
                 v-if="!isDetachedWindowContext"
@@ -4456,7 +4470,7 @@ onUnmounted(() => {
 
           <div
             v-if="!isDetachedWindowContext && showAiPanel"
-            v-show="!isZenMode"
+            v-show="!isHistoryPanelMaximized && !isZenMode"
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full']"
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
           >
@@ -4485,20 +4499,28 @@ onUnmounted(() => {
           <div
             v-if="!isDetachedWindowContext && showHistory"
             v-show="!isAiPanelMaximized && !isZenMode"
-            :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
-            :style="{ width: historyWidth + 'px' }"
+            :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isHistoryPanelMaximized ? 'min-w-0 flex-1' : 'shrink-0 max-w-full']"
+            :style="isHistoryPanelMaximized ? {} : { width: historyWidth + 'px' }"
           >
-            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
+            <div v-if="!isHistoryPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('history')">
               <div data-history-panel class="h-full min-h-0">
-                <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
+                <QueryHistory
+                  :maximized="isHistoryPanelMaximized"
+                  @toggle-maximize="isHistoryPanelMaximized = !isHistoryPanelMaximized"
+                  :current-connection-id="activeTab?.connectionId"
+                  :current-database="activeTab?.database"
+                  @restore="restoreHistorySql"
+                  @analyze-ai="analyzeHistoryWithAi"
+                  @close="closeRightSidebarPanel('history')"
+                />
               </div>
             </div>
           </div>
 
           <div
             v-if="!isDetachedWindowContext && showSqlLibraryPanel"
-            v-show="!isAiPanelMaximized && !isZenMode"
+            v-show="!isAiPanelMaximized && !isHistoryPanelMaximized && !isZenMode"
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
             :style="{ width: sqlLibraryWidth + 'px' }"
           >
@@ -4512,7 +4534,7 @@ onUnmounted(() => {
 
           <div
             v-if="!isDetachedWindowContext && showSqlFilePanel"
-            v-show="!isAiPanelMaximized && !isZenMode"
+            v-show="!isAiPanelMaximized && !isHistoryPanelMaximized && !isZenMode"
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
             :style="{ width: sqlFilePanelWidth + 'px' }"
           >

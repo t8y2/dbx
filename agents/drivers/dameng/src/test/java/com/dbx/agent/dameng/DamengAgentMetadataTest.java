@@ -1727,7 +1727,12 @@ class DamengAgentMetadataTest {
             Arrays.asList("DEFAULT_VALUE", "VARCHAR2", "Y", null, null, 80, 20, null, "default length"),
             Arrays.asList("WORD_VALUE", "VARCHAR2", "Y", null, null, 128, 32, "BYTE", "word byte length"),
             Arrays.asList("NATIONAL_VALUE", "NVARCHAR2", "Y", null, null, 80, 20, "C", "national length"),
-            Arrays.asList("NATIONAL_FIXED", "NCHAR", "Y", null, null, 40, 10, "B", "national fixed length")
+            Arrays.asList("NATIONAL_FIXED", "NCHAR", "Y", null, null, 40, 10, "B", "national fixed length"),
+            // DM8 reports CHAR_USED as 'B' for byte- and character-length columns alike and
+            // records the declared unit in SCALE instead.
+            Arrays.asList("SCALE_CHAR_VAR", "VARCHAR2", "Y", null, 7, 40, 10, "B", "dameng char unit"),
+            Arrays.asList("SCALE_CHAR_FIXED", "CHAR", "Y", null, 8, 10, 10, "B", "dameng fixed char unit"),
+            Arrays.asList("SCALE_BYTE_VAR", "VARCHAR2", "Y", null, 0, 10, 10, "B", "dameng byte unit")
         )));
 
         List<ColumnInfo> columns = agent.getColumns("APP", "USERS");
@@ -1739,6 +1744,28 @@ class DamengAgentMetadataTest {
         Assertions.assertEquals("VARCHAR2(128 BYTE)", columns.get(4).getData_type());
         Assertions.assertEquals("NVARCHAR2(20)", columns.get(5).getData_type());
         Assertions.assertEquals("NCHAR(10)", columns.get(6).getData_type());
+        Assertions.assertEquals("VARCHAR2(10 CHAR)", columns.get(7).getData_type());
+        Assertions.assertEquals("CHAR(10 CHAR)", columns.get(8).getData_type());
+        Assertions.assertEquals("VARCHAR2(10 BYTE)", columns.get(9).getData_type());
+    }
+
+    @Test
+    void readsDeclaredLengthWhenAllTabColumnsHasNoCharacterLength() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, metadataConnectionForColumns(
+            List.of(
+                // DM8 leaves CHAR_LENGTH at 0 for NVARCHAR2 and reports the byte length in
+                // DATA_LENGTH, so the declared character length has to come from SYSCOLUMNS.
+                Arrays.asList("NATIONAL_VALUE", "NVARCHAR2", "Y", null, 7, 400, 0, null, "national length"),
+                Arrays.asList("BIG_CHAR_VALUE", "VARCHAR2", "Y", null, 7, 800, 0, "B", "char unit from scale")
+            ),
+            List.of(Arrays.asList("NATIONAL_VALUE", 100), Arrays.asList("BIG_CHAR_VALUE", 200))
+        ));
+
+        List<ColumnInfo> columns = agent.getColumns("APP", "USERS");
+
+        Assertions.assertEquals("NVARCHAR2(100)", columns.get(0).getData_type());
+        Assertions.assertEquals("VARCHAR2(200 CHAR)", columns.get(1).getData_type());
     }
 
     @Test
@@ -2200,6 +2227,13 @@ class DamengAgentMetadataTest {
     }
 
     private static Connection metadataConnectionForColumns(List<List<Object>> columnRows) {
+        return metadataConnectionForColumns(columnRows, null);
+    }
+
+    private static Connection metadataConnectionForColumns(
+        List<List<Object>> columnRows,
+        List<List<Object>> declaredColumnLengths
+    ) {
         return metadataConnection(
             "id comment",
             null,
@@ -2207,7 +2241,10 @@ class DamengAgentMetadataTest {
             List.of(),
             null,
             "CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER\n);",
-            columnRows
+            columnRows,
+            null,
+            null,
+            declaredColumnLengths
         );
     }
 
@@ -2266,6 +2303,32 @@ class DamengAgentMetadataTest {
         String dbmsMetadataError,
         SQLException systemIndexError
     ) {
+        return metadataConnection(
+            allColumnComment,
+            fallbackColumnComment,
+            includeMaterializedView,
+            independentIndexes,
+            sqls,
+            dbmsMetadataDdl,
+            columnRows,
+            dbmsMetadataError,
+            systemIndexError,
+            null
+        );
+    }
+
+    private static Connection metadataConnection(
+        String allColumnComment,
+        String fallbackColumnComment,
+        boolean includeMaterializedView,
+        List<List<Object>> independentIndexes,
+        List<String> sqls,
+        String dbmsMetadataDdl,
+        List<List<Object>> columnRows,
+        String dbmsMetadataError,
+        SQLException systemIndexError,
+        List<List<Object>> declaredColumnLengths
+    ) {
         boolean[] dbmsMetadataResultOpen = {false};
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
@@ -2294,6 +2357,9 @@ class DamengAgentMetadataTest {
                 }
                 if (sql.contains("ALL_CONS_COLUMNS")) {
                     return metadataStatement(List.of(List.of("ID")));
+                }
+                if (sql.contains("SYS.SYSCOLUMNS") && sql.contains("LENGTH$")) {
+                    return metadataStatement(declaredColumnLengths == null ? List.of() : declaredColumnLengths);
                 }
                 if (sql.contains("SYS.SYSCOLUMNS")) {
                     return metadataStatement(List.of(List.of("ID")));

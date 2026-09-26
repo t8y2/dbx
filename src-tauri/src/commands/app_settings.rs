@@ -105,6 +105,16 @@ pub async fn save_history_retention_limit(state: State<'_, Arc<AppState>>, limit
 }
 
 #[tauri::command]
+pub async fn load_mcp_history_retention_limit(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
+    state.storage.load_mcp_history_retention_limit().await
+}
+
+#[tauri::command]
+pub async fn save_mcp_history_retention_limit(state: State<'_, Arc<AppState>>, limit: u32) -> Result<(), String> {
+    state.storage.save_mcp_history_retention_limit(limit).await
+}
+
+#[tauri::command]
 pub async fn load_max_retries(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
     state.storage.load_max_retries().await
 }

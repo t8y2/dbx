@@ -821,10 +821,10 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
     file.write_all(&serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|error| error.to_string())?;
-    }
-    std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+    // std::fs::rename atomically replaces an existing destination on POSIX
+    // and Windows alike; remove-then-rename could lose the repository
+    // document to a crash between the two calls.
+    crate::plugins::installer::rename_with_transient_lock_retry(&temporary, path).map_err(|error| error.to_string())?;
     Ok(())
 }
 

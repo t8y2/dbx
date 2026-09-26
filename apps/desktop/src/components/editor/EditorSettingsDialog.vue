@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
 import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
 import type { Ref } from "vue";
@@ -305,7 +306,10 @@ const { t, locale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const historyRetention = useHistoryRetentionSetting();
+const mcpHistoryRetention = useHistoryRetentionSetting(loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit);
 const { draft: editHistoryRetentionLimit, loaded: historyRetentionLoaded, loading: historyRetentionLoading, saving: historyRetentionSaving, loadError: historyRetentionLoadError } = historyRetention;
+const { draft: editMcpHistoryRetentionLimit, loaded: mcpHistoryRetentionLoaded, loading: mcpHistoryRetentionLoading, saving: mcpHistoryRetentionSaving, loadError: mcpHistoryRetentionLoadError } = mcpHistoryRetention;
+const mcpHistoryCleanupLoading = ref(false);
 const connectionStore = useConnectionStore();
 const hasSqlServerConnection = computed(() => connectionStore.connections.some((connection) => effectiveDatabaseTypeForConnection(connection) === "sqlserver"));
 const savedSqlStore = useSavedSqlStore();
@@ -1908,6 +1912,7 @@ watch(
     if (open) {
       syncEditorSettingsDraftFromStore();
       void historyRetention.load();
+      void mcpHistoryRetention.load();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
@@ -1917,6 +1922,7 @@ watch(
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     } else {
       historyRetention.discard();
+      mcpHistoryRetention.discard();
       clearThemePaletteOptionPreview();
       clearUiFontOptionPreview();
       restoreLocaleOptionPreview();
@@ -2116,11 +2122,25 @@ const queryResultRowLimitDraftTouched = computed(
     normalizeTableOpenPageSizeDraft(editPageSize.value) !== normalizeTableOpenPageSizeDraft(editEditorSettingsBase.value.pageSize),
 );
 const hasBlockingQueryResultRowLimit = computed(() => queryResultRowLimitViolated.value && queryResultRowLimitDraftTouched.value);
-const hasApplyBlocker = computed(() => historyRetention.invalid.value || historyRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
+const hasApplyBlocker = computed(() => historyRetention.invalid.value || mcpHistoryRetention.invalid.value || historyRetentionSaving.value || mcpHistoryRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
+
+async function cleanupMcpHistory() {
+  if (mcpHistoryCleanupLoading.value) return;
+  mcpHistoryCleanupLoading.value = true;
+  try {
+    const deleted = await cleanupMcpHistoryRetention();
+    toast(t("settings.mcpHistoryCleanupCompleted", { count: deleted }));
+  } catch (error) {
+    toast(t("settings.mcpHistoryCleanupFailed", { error: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    mcpHistoryCleanupLoading.value = false;
+  }
+}
 
 function hasChanges(): boolean {
   return (
     historyRetention.changed.value ||
+    mcpHistoryRetention.changed.value ||
     hasImportedSettingsPendingApply.value ||
     hasEditorDraftChanges.value ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
@@ -2137,6 +2157,7 @@ function hasChanges(): boolean {
 async function persistSettings() {
   if (hasApplyBlocker.value) return;
   await historyRetention.save();
+  await mcpHistoryRetention.save();
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
@@ -2316,6 +2337,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   } else if (tab === "data") {
     historyRetention.reset();
+    mcpHistoryRetention.reset();
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editShowColumnHeaderTooltips.value = DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips;
@@ -2377,6 +2399,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
 
 function resetAllDefaults() {
   historyRetention.reset();
+  mcpHistoryRetention.reset();
   // Same contract as resetDefaultsForTab: a full reset also exits any
   // in-progress shortcut capture (#9066).
   editingShortcutId.value = null;
@@ -7681,11 +7704,13 @@ onUnmounted(() => {
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" data-settings-search-id="data" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('data')]">
-              <div data-settings-search-id="history-retention" :class="['space-y-2', settingsSearchTargetClass('history-retention')]">
-                <Label for="history-retention-limit">{{ t("settings.historyRetentionLimit") }}</Label>
-                <p class="text-xs text-muted-foreground">{{ t("settings.historyRetentionDescription") }}</p>
+              <div data-settings-search-id="history-retention" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('history-retention')]">
+                <div class="min-w-0 space-y-1">
+                  <Label for="history-retention-limit">{{ t("settings.historyRetentionLimit") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.historyRetentionDescription") }}</p>
+                </div>
                 <Select :model-value="String(editHistoryRetentionLimit)" :disabled="!historyRetentionLoaded || historyRetentionSaving" @update:model-value="(value) => (editHistoryRetentionLimit = Number(value))">
-                  <SelectTrigger id="history-retention-limit" class="w-40"><SelectValue /></SelectTrigger>
+                  <SelectTrigger id="history-retention-limit" class="w-40 shrink-0"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem v-for="limit in HISTORY_RETENTION_LIMITS" :key="limit" :value="String(limit)">{{ limit === 0 ? t("settings.historyRetentionUnlimited") : String(limit) }}</SelectItem>
                   </SelectContent>
@@ -7694,6 +7719,28 @@ onUnmounted(() => {
                 <div v-if="historyRetentionLoadError" class="flex items-center gap-2 text-xs text-destructive" role="alert">
                   <span>{{ t("settings.historyRetentionLoadFailed", { error: historyRetentionLoadError }) }}</span>
                   <Button type="button" variant="outline" size="sm" @click="historyRetention.load">{{ t("common.retry") }}</Button>
+                </div>
+              </div>
+              <div data-settings-search-id="mcp-history-retention" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('mcp-history-retention')]">
+                <div class="min-w-0 space-y-1">
+                  <Label for="mcp-history-retention-limit">{{ t("settings.mcpHistoryRetentionLimit") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.mcpHistoryRetentionDescription") }}</p>
+                </div>
+                <div class="flex shrink-0 items-center gap-2">
+                  <Select :model-value="String(editMcpHistoryRetentionLimit)" :disabled="!mcpHistoryRetentionLoaded || mcpHistoryRetentionSaving" @update:model-value="(value) => (editMcpHistoryRetentionLimit = Number(value))">
+                    <SelectTrigger id="mcp-history-retention-limit" class="w-40"><SelectValue /></SelectTrigger>
+                    <SelectContent
+                      ><SelectItem v-for="limit in HISTORY_RETENTION_LIMITS" :key="limit" :value="String(limit)">{{ limit === 0 ? t("settings.historyRetentionUnlimited") : String(limit) }}</SelectItem></SelectContent
+                    >
+                  </Select>
+                  <p v-if="mcpHistoryRetentionLoading" class="text-xs text-muted-foreground">{{ t("common.loading") }}</p>
+                  <div v-if="mcpHistoryRetentionLoadError" class="flex items-center gap-2 text-xs text-destructive" role="alert">
+                    <span>{{ t("settings.historyRetentionLoadFailed", { error: mcpHistoryRetentionLoadError }) }}</span>
+                    <Button type="button" variant="outline" size="sm" @click="mcpHistoryRetention.load">{{ t("common.retry") }}</Button>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" :disabled="mcpHistoryCleanupLoading || !mcpHistoryRetentionLoaded" @click="cleanupMcpHistory">
+                    {{ mcpHistoryCleanupLoading ? t("common.loading") : t("settings.mcpHistoryCleanup") }}
+                  </Button>
                 </div>
               </div>
               <div id="data-grid-toolbar-layout" data-settings-search-id="data-grid-toolbar-layout" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('data-grid-toolbar-layout')]">

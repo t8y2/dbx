@@ -154,6 +154,23 @@ pub async fn save_history_retention_limit(
     Ok(Json(()))
 }
 
+pub async fn load_mcp_history_retention_limit(State(state): State<Arc<WebState>>) -> Result<Json<u32>, AppError> {
+    state.app.storage.load_mcp_history_retention_limit().await.map(Json).map_err(AppError::from)
+}
+
+pub async fn save_mcp_history_retention_limit(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveHistoryRetentionLimitRequest>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::history::validate_history_retention_limit(body.limit).map_err(AppError::bad_request)?;
+    state.app.storage.save_mcp_history_retention_limit(body.limit).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn cleanup_mcp_history_retention(State(state): State<Arc<WebState>>) -> Result<Json<u64>, AppError> {
+    state.app.storage.cleanup_mcp_history_retention().await.map(Json).map_err(AppError::from)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveMaxRetriesRequest {

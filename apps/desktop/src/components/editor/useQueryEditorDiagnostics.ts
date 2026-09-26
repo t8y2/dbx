@@ -69,6 +69,7 @@ interface QueryEditorDiagnosticsOptions {
   semanticCompletionEnabled: boolean;
   maxCompletionTables: number;
   unknownObjectHighlightEnabled: boolean;
+  fullFeaturesEnabled?: () => boolean;
   runtime: QueryEditorDiagnosticsRuntime;
   metadata: QueryEditorDiagnosticMetadata;
 }
@@ -200,7 +201,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
   }
 
   function shouldSkipSqlSemanticDiagnostics() {
-    return props.databaseType === "victoriametrics" || props.databaseType === "salesforce" || (props.databaseType !== "redis" && props.databaseType !== "mongodb" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
+    return options.fullFeaturesEnabled?.() === false || props.databaseType === "victoriametrics" || props.databaseType === "salesforce" || (props.databaseType !== "redis" && props.databaseType !== "mongodb" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
   }
 
   function rangesOverlap(left: { from: number; to: number }, right: { from: number; to: number }): boolean {

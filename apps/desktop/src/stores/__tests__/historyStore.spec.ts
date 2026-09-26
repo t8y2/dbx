@@ -9,6 +9,7 @@ vi.mock("@/lib/backend/api", () => ({
   saveHistory: vi.fn(),
   deleteHistoryEntry: vi.fn(),
   clearHistory: vi.fn(),
+  clearHistoryBySource: vi.fn(),
   loadHistoryConnectionOptions: vi.fn(),
 }));
 
@@ -90,6 +91,15 @@ describe("historyStore", () => {
     expect(store.entries).toEqual([]);
     expect(store.total).toBe(0);
     expect(store.nextCursor).toBeNull();
+  });
+
+  it("clears only the requested history source", async () => {
+    vi.mocked(api.clearHistoryBySource).mockResolvedValue(undefined);
+    const store = useHistoryStore();
+    await store.clear("mcp");
+    expect(api.clearHistoryBySource).toHaveBeenCalledWith("mcp");
+    expect(api.clearHistory).not.toHaveBeenCalled();
+    expect(api.loadHistoryConnectionOptions).toHaveBeenCalled();
   });
 
   it("ignores a search started while deletion is pending", async () => {

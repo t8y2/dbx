@@ -87,7 +87,6 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
     if (!rules.value.length && toValue(options.columns).length) rules.value = [defaultRule()];
   }
   function addRule() {
-    ensureRule();
     rules.value = [...rules.value, defaultRule()];
   }
   function removeRule(id: string) {

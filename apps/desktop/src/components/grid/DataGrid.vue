@@ -1277,14 +1277,9 @@ let structuredFilterHydrationRequestId = 0;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
 const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");
-const isFilterEditorPinnedOpen = computed(() => isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);
-const effectiveFilterBuilderOpen = computed({
-  get: () => isFilterEditorPinnedOpen.value || filterBuilderOpen.value,
-  set: (open: boolean) => {
-    if (isFilterEditorPinnedOpen.value) return;
-    filterBuilderOpen.value = open;
-  },
-});
+// Keep the persisted preference as the initial state for persistent views, but
+// do not use it as a lock: the toolbar toggle must always be able to close them.
+filterBuilderOpen.value = isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 interface ForeignKeyDisplayLabelState {
@@ -1652,7 +1647,7 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
 
 async function applyStructuredWhere(where: string) {
   appliedStructuredWhereInput.value = where;
-  if (!isFilterEditorPinnedOpen.value) filterBuilderOpen.value = false;
+  if (filterEditorView.value === "quick") filterBuilderOpen.value = false;
   await applyWhereFilter();
 }
 
@@ -1712,9 +1707,16 @@ function copyFilterSqlPreview() {
 watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
 
 watch(filterEditorView, (view) => {
-  filterBuilderOpen.value = false;
+  filterBuilderOpen.value = (view === "conditions" || view === "text") && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
   if (view === "conditions" || view === "text") ensureStructuredFilterRule();
 });
+
+watch(
+  () => settingsStore.editorSettings.dataGridKeepFilterEditorExpanded,
+  (expanded) => {
+    if (isPersistentFilterView.value) filterBuilderOpen.value = expanded;
+  },
+);
 
 const filterPreviewVisible = computed(() => canUseWhereSearch.value && (filterEditorView.value === "conditions" || filterEditorView.value === "text"));
 watch(
@@ -12202,7 +12204,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 <DataGridQueryControls
                   v-model:where-input="whereFilterInput"
                   v-model:order-by-input="orderByInput"
-                  v-model:filter-builder-open="effectiveFilterBuilderOpen"
+                  v-model:filter-builder-open="filterBuilderOpen"
                   :filter-editor-view="filterEditorView"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
                   :condition-columns="conditionColumns"
@@ -12372,7 +12374,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           </DataGridToolbar>
         </div>
         <DataGridFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'conditions' && effectiveFilterBuilderOpen"
+          v-if="canUseWhereSearch && filterEditorView === 'conditions' && filterBuilderOpen"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"
           :columns="filterBuilderColumnOptions"
@@ -12394,7 +12396,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @update-rule="updateStructuredFilterRule"
         />
         <DataGridTextFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'text' && effectiveFilterBuilderOpen"
+          v-if="canUseWhereSearch && filterEditorView === 'text' && filterBuilderOpen"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"

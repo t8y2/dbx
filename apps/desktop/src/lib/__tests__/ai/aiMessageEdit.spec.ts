@@ -1,5 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
+import { retryableUserMessageIndex, visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
+
+describe("retryableUserMessageIndex", () => {
+  it("finds the closest preceding user turn", () => {
+    const messages = [
+      { role: "user" as const, content: "first" },
+      { role: "assistant" as const, content: "reply" },
+      { role: "user" as const, content: "latest" },
+      { role: "assistant" as const, content: "latest reply" },
+    ];
+    expect(retryableUserMessageIndex(messages, 3)).toBe(2);
+  });
+
+  it("keeps attachment-only requests retryable", () => {
+    const messages = [
+      { role: "user" as const, content: "", imageAttachments: [{}] },
+      { role: "assistant" as const, content: "reply" },
+    ];
+    expect(retryableUserMessageIndex(messages, 1)).toBe(0);
+  });
+
+  it("returns -1 when no preceding user request exists", () => {
+    expect(retryableUserMessageIndex([{ role: "assistant", content: "reply" }], 0)).toBe(-1);
+  });
+});
 
 describe("visibleToActualIndex", () => {
   it("maps visible index 0 to first non-summary message", () => {

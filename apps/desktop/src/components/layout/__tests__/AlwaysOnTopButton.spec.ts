@@ -149,6 +149,16 @@ describe("always-on-top button visibility", () => {
     setActivePinia(pinia);
   });
 
+  it("keeps the actual title bar on Tauri's intentional native drag path", async () => {
+    const { host, unmount } = mount(AppToolbar, toolbarProps);
+    await settled();
+
+    expect(host.querySelector(".app-toolbar")?.getAttribute("data-tauri-drag-region")).toBe("");
+    expect(host.querySelector('.app-toolbar > [data-tauri-drag-region=""]')).not.toBeNull();
+
+    unmount();
+  });
+
   it("hides the main toolbar pin control until the appearance setting opts in", async () => {
     const settingsStore = useSettingsStore();
     const { host, unmount } = mount(AppToolbar, toolbarProps);

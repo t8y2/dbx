@@ -582,6 +582,35 @@ class KafkaAgentTest {
     }
 
     @Test
+    void reverseDnsIsSkippedOnlyForSupportedNonKerberosSaslMechanisms() {
+        assertTrue(KafkaAgent.shouldAvoidSaslReverseDns(connectionWithSecurity(
+            "SASL_PLAINTEXT", "PLAIN")));
+        assertTrue(KafkaAgent.shouldAvoidSaslReverseDns(connectionWithSecurity(
+            "SASL_SSL", "SCRAM-SHA-512")));
+        assertFalse(KafkaAgent.shouldAvoidSaslReverseDns(connectionWithSecurity(
+            "SASL_PLAINTEXT", "GSSAPI")));
+        assertFalse(KafkaAgent.shouldAvoidSaslReverseDns(connectionWithSecurity(
+            "PLAINTEXT", "PLAIN")));
+        assertFalse(KafkaAgent.shouldAvoidSaslReverseDns(connectionWithSecurity(
+            "SSL", "PLAIN")));
+        assertFalse(KafkaAgent.shouldAvoidSaslReverseDns(connectionWithSecurity(
+            "SASL_PLAINTEXT", "CUSTOM")));
+        assertFalse(KafkaAgent.shouldAvoidSaslReverseDns(connectionWithSecurity(
+            "SASL_PLAINTEXT", "")));
+    }
+
+    @Test
+    void explicitKafkaPropertiesControlReverseDnsMode() {
+        JsonObject connection = connectionWithSecurity("SASL_PLAINTEXT", "PLAIN");
+        JsonObject properties = new JsonObject();
+        properties.addProperty("security.protocol", "SASL_SSL");
+        properties.addProperty("sasl.mechanism", "GSSAPI");
+        connection.add("properties", properties);
+
+        assertFalse(KafkaAgent.shouldAvoidSaslReverseDns(connection));
+    }
+
+    @Test
     void producerDefaultsToLegacyCompatibleNonIdempotentDelivery() {
         JsonObject connection = new JsonObject();
         connection.addProperty("bootstrap_servers", "legacy-broker:9092");
@@ -590,6 +619,13 @@ class KafkaAgentTest {
 
         assertEquals("all", properties.getProperty(ProducerConfig.ACKS_CONFIG));
         assertEquals("false", properties.getProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG));
+    }
+
+    private static JsonObject connectionWithSecurity(String protocol, String mechanism) {
+        JsonObject connection = new JsonObject();
+        connection.addProperty("security_protocol", protocol);
+        connection.addProperty("sasl_mechanism", mechanism);
+        return connection;
     }
 
     @Test

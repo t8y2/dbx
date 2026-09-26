@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    net::Ipv6Addr,
     sync::{Arc, RwLock},
 };
 
@@ -253,8 +254,14 @@ fn normalize_hosts(hosts: impl IntoIterator<Item = String>) -> Result<Vec<HostRu
 }
 
 fn parse_host_rule(value: &str) -> Result<HostRule, String> {
-    let authority =
-        axum::http::uri::Authority::try_from(value.trim()).map_err(|_| format!("invalid allowed host: {value}"))?;
+    let value = value.trim();
+    // `Authority` requires IPv6 literals to use URI brackets (`[::1]`), while
+    // the loopback defaults and settings UI naturally expose the bare form
+    // (`::1`). Normalize that form before parsing so loopback HTTP services do
+    // not fail immediately during startup.
+    let normalized = if value.parse::<Ipv6Addr>().is_ok() { format!("[{value}]") } else { value.to_string() };
+    let authority = axum::http::uri::Authority::try_from(normalized.as_str())
+        .map_err(|_| format!("invalid allowed host: {value}"))?;
     if value.contains('@') {
         return Err(format!("invalid allowed host: {value}"));
     }
@@ -319,5 +326,15 @@ mod tests {
         assert!(!auth.host_is_allowed(&uri, &headers));
         assert!(parse_host_rule("https://dbx.example.test").is_err());
         assert!(parse_host_rule("user@dbx.example.test:4224").is_err());
+    }
+
+    #[test]
+    fn bare_ipv6_loopback_host_is_normalized_for_uri_authority_parsing() {
+        let auth = HttpAuth::new_with_hosts(Some("token".to_string()), ["::1".to_string()], Vec::<String>::new(), true)
+            .unwrap();
+        let uri: Uri = "/mcp".parse().unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("[::1]"));
+        assert!(auth.host_is_allowed(&uri, &headers));
     }
 }

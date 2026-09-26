@@ -50,10 +50,11 @@ interface QueryEditorSqlExtensionsOptions {
   currentExecutableStatementRange: (view: EditorViewType) => SqlTextRange | null;
   executeSqlStatementFromGutter: (view: EditorViewType, line: { from: number; to: number }, event: Event) => boolean;
   signatureHelpWindowChars: number;
+  fullFeaturesEnabled: () => boolean;
 }
 
 export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensionsOptions) {
-  const { props, runtime: codeMirrorRuntime, settingsStore, t, sqlBehaviorDialect, sqlDriverProfile, sqlStatementParameterOptions, queryEditorSelectionLanguage, cache, batchSelection, currentExecutableStatementRange, executeSqlStatementFromGutter } = options;
+  const { props, runtime: codeMirrorRuntime, settingsStore, t, sqlBehaviorDialect, sqlDriverProfile, sqlStatementParameterOptions, queryEditorSelectionLanguage, cache, batchSelection, currentExecutableStatementRange, executeSqlStatementFromGutter, fullFeaturesEnabled } = options;
   const { EditorView, Decoration, StateField, StateEffect, GutterMarker, RangeSet, lineNumberMarkers, gutter, showTooltip, autocompletion, ViewPlugin, highlightingFor, syntaxTree, langSql, Prec, EditorState, ensureSyntaxTree, layer, RectangleMarker } = options.modules;
   const { provideSqlCompletions } = options.completion;
   const { renderBatchColumnSelectionActionMarker, renderBatchColumnSelectionCheckbox } = batchSelection;
@@ -73,6 +74,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   });
 
   codeMirrorRuntime.buildSqlDiagnosticExtension = () => {
+    if (!fullFeaturesEnabled()) return [];
     const diagnosticEffect = codeMirrorRuntime.setSqlDiagnosticsEffect;
     const buildDecorations = (state: import("@codemirror/state").EditorState) => {
       const errorDecorations = sqlErrorDecorationRange(state).map((range) =>
@@ -241,6 +243,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   codeMirrorRuntime.setStatementExecutionMarkersEffect = StateEffect.define<StatementExecutionMarker[]>();
 
   codeMirrorRuntime.buildRunStatementGutterExtension = () => {
+    if (!fullFeaturesEnabled()) return [];
     const effectType = codeMirrorRuntime.setStatementExecutionMarkersEffect!;
     const showRunButtons = !props.hideExecutionControls && settingsStore.editorSettings.showStatementRunButtons;
     const markersForState = (state: import("@codemirror/state").EditorState, markers: readonly StatementExecutionMarker[]) => {
@@ -290,8 +293,9 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
     return field;
   };
 
-  codeMirrorRuntime.buildSqlSignatureExtension = () =>
-    showTooltip.compute(["doc", "selection"], (currentState) => {
+  codeMirrorRuntime.buildSqlSignatureExtension = () => {
+    if (!fullFeaturesEnabled()) return [];
+    return showTooltip.compute(["doc", "selection"], (currentState) => {
       const cursor = currentState.selection.main.head;
       // Signature detection only scans backward from the cursor, so window the
       // text instead of materializing the whole document prefix on every
@@ -306,9 +310,11 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
         create: () => ({ dom: createSqlSignatureTooltipDom(signature) }),
       };
     });
+  };
 
-  codeMirrorRuntime.buildSqlCompletionExtension = () =>
-    autocompletion({
+  codeMirrorRuntime.buildSqlCompletionExtension = () => {
+    if (!fullFeaturesEnabled()) return [];
+    return autocompletion({
       activateOnTyping: true,
       defaultKeymap: false,
       selectOnOpen: settingsStore.editorSettings.selectFirstCompletionOnOpen,
@@ -322,13 +328,16 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
       ],
       override: [async (context: CompletionContext) => provideSqlCompletions(context)],
     });
+  };
 
   const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });
 
   codeMirrorRuntime.buildSqlLanguageExtension = () => [
-    langSql.sql({
-      dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
-    }),
+    fullFeaturesEnabled()
+      ? langSql.sql({
+          dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
+        })
+      : [],
     // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
     // comment marker that toggleLineComment reads from language data.
     Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(props.databaseType) }])),
@@ -345,148 +354,151 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
   const refreshSqlSemanticHighlightEffect = StateEffect.define<null>();
 
-  codeMirrorRuntime.buildSqlSemanticHighlightExtension = () => [
-    createSqlAliasHighlights({ databaseType: props.databaseType, dialect: sqlBehaviorDialect(), enabled: queryEditorSelectionLanguage() === "sql" }),
-    ViewPlugin.fromClass(
-      class {
-        decorations: import("@codemirror/view").DecorationSet;
-        private refreshTask = createDeferredEditorTask(() => {
-          if (this.currentView.dom.isConnected) this.currentView.dispatch({ effects: refreshSqlSemanticHighlightEffect.of(null) });
-        }, SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS);
-        private cachedDoc: import("@codemirror/state").Text | null = null;
-        private prewarmedDoc: import("@codemirror/state").Text | null = null;
-        private cachedSql = "";
-        private cachedDialectId = "";
-        private cachedDatabaseType: DatabaseType | undefined;
-        private cachedWindows: Array<{
-          from: number;
-          to: number;
-          spans: Array<{ start: number; end: number }>;
-        }> = [];
-
-        constructor(private currentView: import("@codemirror/view").EditorView) {
-          this.decorations = Decoration.none;
-          this.decorations = this.buildDecorations(currentView);
-        }
-
-        update(update: import("@codemirror/view").ViewUpdate) {
-          const refreshRequested = update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(refreshSqlSemanticHighlightEffect)));
-          if (update.docChanged) {
-            this.decorations = this.decorations.map(update.changes);
-            this.scheduleRefresh(update.view);
-            return;
-          }
-          if (refreshRequested) {
-            this.cancelRefresh();
-            this.decorations = this.buildDecorations(update.view);
-          } else if (update.viewportChanged) {
-            // Keep existing decorations while scrolling. Parse only after the
-            // viewport settles instead of blocking CodeMirror's layout update.
-            this.scheduleRefresh(update.view);
-          }
-        }
-
-        scheduleRefresh(currentView: import("@codemirror/view").EditorView) {
-          this.currentView = currentView;
-          this.refreshTask.schedule();
-        }
-
-        cancelRefresh() {
-          this.refreshTask.cancel();
-        }
-
-        destroy() {
-          this.cancelRefresh();
-        }
-
-        buildDecorations(currentView: import("@codemirror/view").EditorView) {
-          const dialectId = resolveSqlDialectId({ databaseType: props.databaseType, dialect: sqlBehaviorDialect() });
-          const doc = currentView.state.doc;
-          if (this.cachedDoc !== doc || this.cachedDialectId !== dialectId || this.cachedDatabaseType !== props.databaseType) {
-            this.cachedDoc = doc;
-            this.cachedSql = doc.toString();
-            this.cachedDialectId = dialectId;
-            this.cachedDatabaseType = props.databaseType;
-            this.cachedWindows = [];
-          }
-
-          const sql = this.cachedSql;
-          const shouldPrewarmFullDocument = this.cachedWindows.length === 0 && this.prewarmedDoc !== doc && sql.length <= MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH;
-          const windows: Array<{
+  codeMirrorRuntime.buildSqlSemanticHighlightExtension = () => {
+    if (!fullFeaturesEnabled()) return [];
+    return [
+      createSqlAliasHighlights({ databaseType: props.databaseType, dialect: sqlBehaviorDialect(), enabled: queryEditorSelectionLanguage() === "sql" }),
+      ViewPlugin.fromClass(
+        class {
+          decorations: import("@codemirror/view").DecorationSet;
+          private refreshTask = createDeferredEditorTask(() => {
+            if (this.currentView.dom.isConnected) this.currentView.dispatch({ effects: refreshSqlSemanticHighlightEffect.of(null) });
+          }, SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS);
+          private cachedDoc: import("@codemirror/state").Text | null = null;
+          private prewarmedDoc: import("@codemirror/state").Text | null = null;
+          private cachedSql = "";
+          private cachedDialectId = "";
+          private cachedDatabaseType: DatabaseType | undefined;
+          private cachedWindows: Array<{
             from: number;
             to: number;
             spans: Array<{ start: number; end: number }>;
           }> = [];
-          const pendingWindows: Array<{ from: number; to: number }> = [];
-          const rangesToHighlight = shouldPrewarmFullDocument ? [{ from: 0, to: sql.length }] : currentView.visibleRanges;
-          for (const visibleRange of rangesToHighlight) {
-            const cached = this.cachedWindows.find((candidate) => candidate.from <= visibleRange.from && candidate.to >= visibleRange.to);
-            if (cached) {
-              if (!windows.includes(cached)) windows.push(cached);
-              continue;
-            }
 
-            const next = expandToSqlStatementWindow(sql, visibleRange.from, visibleRange.to, dialectId);
-            const cachedWindow = this.cachedWindows.find((candidate) => candidate.from <= next.from && candidate.to >= next.to);
-            if (cachedWindow) {
-              if (!windows.includes(cachedWindow)) windows.push(cachedWindow);
-              continue;
-            }
-
-            const previous = pendingWindows[pendingWindows.length - 1];
-            if (previous && next.from <= previous.to) previous.to = Math.max(previous.to, next.to);
-            else pendingWindows.push({ ...next });
+          constructor(private currentView: import("@codemirror/view").EditorView) {
+            this.decorations = Decoration.none;
+            this.decorations = this.buildDecorations(currentView);
           }
 
-          if (pendingWindows.length > 0) {
-            const requestedTo = Math.max(...pendingWindows.map((window) => window.to));
-            const tree = ensureSyntaxTree(currentView.state, requestedTo, requestedTo === sql.length ? 250 : 25);
-            if (!tree) {
-              // The Lezer parse has not reached the pending windows yet (long
-              // documents). Keep the decorations that are still valid and let
-              // the deferred refresh rebuild them once parsing catches up —
-              // returning an empty set here wiped table-name colors after
-              // scrolling stopped or when a freshly mounted editor (tab
-              // switch) had no later viewport change to trigger a rebuild.
-              this.scheduleRefresh(currentView);
-              return this.decorations;
+          update(update: import("@codemirror/view").ViewUpdate) {
+            const refreshRequested = update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(refreshSqlSemanticHighlightEffect)));
+            if (update.docChanged) {
+              this.decorations = this.decorations.map(update.changes);
+              this.scheduleRefresh(update.view);
+              return;
             }
-            if (shouldPrewarmFullDocument) this.prewarmedDoc = doc;
-            for (const window of pendingWindows) {
-              const entry = {
-                ...window,
-                spans: sqlSemanticTableNameSpansForSyntaxTree(sql, window, tree, {
-                  databaseType: props.databaseType,
-                  dialect: sqlBehaviorDialect(),
-                }),
-              };
-              this.cachedWindows.push(entry);
-              windows.push(entry);
-            }
-            if (this.cachedWindows.length > MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS) {
-              this.cachedWindows.splice(0, this.cachedWindows.length - MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS);
+            if (refreshRequested) {
+              this.cancelRefresh();
+              this.decorations = this.buildDecorations(update.view);
+            } else if (update.viewportChanged) {
+              // Keep existing decorations while scrolling. Parse only after the
+              // viewport settles instead of blocking CodeMirror's layout update.
+              this.scheduleRefresh(update.view);
             }
           }
 
-          const ranges = windows.flatMap((window) => window.spans);
-          return Decoration.set(
-            ranges.map((range) =>
-              Decoration.mark({
-                class: "cm-sql-table-name",
-                attributes: {
-                  "data-sql-token": "table",
-                },
-              }).range(range.start, range.end),
-            ),
-            true,
-          );
-        }
-      },
-      { decorations: (value) => value.decorations },
-    ),
-    sqlSemanticHighlightTheme(EditorView),
-    shellLineCommentTheme(EditorView),
-  ];
+          scheduleRefresh(currentView: import("@codemirror/view").EditorView) {
+            this.currentView = currentView;
+            this.refreshTask.schedule();
+          }
+
+          cancelRefresh() {
+            this.refreshTask.cancel();
+          }
+
+          destroy() {
+            this.cancelRefresh();
+          }
+
+          buildDecorations(currentView: import("@codemirror/view").EditorView) {
+            const dialectId = resolveSqlDialectId({ databaseType: props.databaseType, dialect: sqlBehaviorDialect() });
+            const doc = currentView.state.doc;
+            if (this.cachedDoc !== doc || this.cachedDialectId !== dialectId || this.cachedDatabaseType !== props.databaseType) {
+              this.cachedDoc = doc;
+              this.cachedSql = doc.toString();
+              this.cachedDialectId = dialectId;
+              this.cachedDatabaseType = props.databaseType;
+              this.cachedWindows = [];
+            }
+
+            const sql = this.cachedSql;
+            const shouldPrewarmFullDocument = this.cachedWindows.length === 0 && this.prewarmedDoc !== doc && sql.length <= MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH;
+            const windows: Array<{
+              from: number;
+              to: number;
+              spans: Array<{ start: number; end: number }>;
+            }> = [];
+            const pendingWindows: Array<{ from: number; to: number }> = [];
+            const rangesToHighlight = shouldPrewarmFullDocument ? [{ from: 0, to: sql.length }] : currentView.visibleRanges;
+            for (const visibleRange of rangesToHighlight) {
+              const cached = this.cachedWindows.find((candidate) => candidate.from <= visibleRange.from && candidate.to >= visibleRange.to);
+              if (cached) {
+                if (!windows.includes(cached)) windows.push(cached);
+                continue;
+              }
+
+              const next = expandToSqlStatementWindow(sql, visibleRange.from, visibleRange.to, dialectId);
+              const cachedWindow = this.cachedWindows.find((candidate) => candidate.from <= next.from && candidate.to >= next.to);
+              if (cachedWindow) {
+                if (!windows.includes(cachedWindow)) windows.push(cachedWindow);
+                continue;
+              }
+
+              const previous = pendingWindows[pendingWindows.length - 1];
+              if (previous && next.from <= previous.to) previous.to = Math.max(previous.to, next.to);
+              else pendingWindows.push({ ...next });
+            }
+
+            if (pendingWindows.length > 0) {
+              const requestedTo = Math.max(...pendingWindows.map((window) => window.to));
+              const tree = ensureSyntaxTree(currentView.state, requestedTo, requestedTo === sql.length ? 250 : 25);
+              if (!tree) {
+                // The Lezer parse has not reached the pending windows yet (long
+                // documents). Keep the decorations that are still valid and let
+                // the deferred refresh rebuild them once parsing catches up —
+                // returning an empty set here wiped table-name colors after
+                // scrolling stopped or when a freshly mounted editor (tab
+                // switch) had no later viewport change to trigger a rebuild.
+                this.scheduleRefresh(currentView);
+                return this.decorations;
+              }
+              if (shouldPrewarmFullDocument) this.prewarmedDoc = doc;
+              for (const window of pendingWindows) {
+                const entry = {
+                  ...window,
+                  spans: sqlSemanticTableNameSpansForSyntaxTree(sql, window, tree, {
+                    databaseType: props.databaseType,
+                    dialect: sqlBehaviorDialect(),
+                  }),
+                };
+                this.cachedWindows.push(entry);
+                windows.push(entry);
+              }
+              if (this.cachedWindows.length > MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS) {
+                this.cachedWindows.splice(0, this.cachedWindows.length - MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS);
+              }
+            }
+
+            const ranges = windows.flatMap((window) => window.spans);
+            return Decoration.set(
+              ranges.map((range) =>
+                Decoration.mark({
+                  class: "cm-sql-table-name",
+                  attributes: {
+                    "data-sql-token": "table",
+                  },
+                }).range(range.start, range.end),
+              ),
+              true,
+            );
+          }
+        },
+        { decorations: (value) => value.decorations },
+      ),
+      sqlSemanticHighlightTheme(EditorView),
+      shellLineCommentTheme(EditorView),
+    ];
+  };
 
   function createViewDecorations() {
     const currentStatementFrameExtension = currentStatementFrameLayer(

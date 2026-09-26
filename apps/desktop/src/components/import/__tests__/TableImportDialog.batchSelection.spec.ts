@@ -270,6 +270,24 @@ afterEach(() => {
 });
 
 describe("TableImportDialog batch selection", () => {
+  it("lets the import setup dialog be minimized and restored before import starts", async () => {
+    await mountDialog();
+    expect(button("Next").disabled).toBe(false);
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Minimize import"]')!.click();
+    await flushAsyncUpdates();
+
+    expect(document.body.querySelector('button[aria-label="Restore import"]')).toBeTruthy();
+    expect(document.body.querySelector('button[aria-label="Next"]')).toBeNull();
+    expect(document.body.textContent).toContain("Ready to import");
+    expect(document.body.textContent).not.toContain("Writing data");
+
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Restore import"]')!.click();
+    await flushAsyncUpdates();
+    expect(button("Next").disabled).toBe(false);
+    expect(document.body.querySelector('button[aria-label="Minimize import"]')).toBeTruthy();
+    expect(mocks.importTableFile).not.toHaveBeenCalled();
+  });
+
   it("hides the skip-duplicates option for dialects without conflict handling", async () => {
     mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
     await mountDialog([new File(["id,name\n1,a"], "rows.csv")], "sqlserver-1");
@@ -412,6 +430,41 @@ describe("TableImportDialog batch selection", () => {
     pending[1]!.resolve({ importId: pending[1]!.request.importId, rowsImported: 5, totalRows: 5, elapsedMs: 1 });
     await flushAsyncUpdates();
     expect(document.body.textContent).toContain("7 / 7");
+    expect(document.body.textContent).toContain("Import complete");
+  });
+
+  it("keeps the import and its progress active while minimized, then restores the same dialog state", async () => {
+    let finish!: (summary: TableImportSummary) => void;
+    mocks.importTableFile.mockImplementation((request, onProgress) => {
+      onProgress({ importId: request.importId, status: "running", phase: "writing", rowsImported: 1, totalRows: 2, elapsedMs: 1 });
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    await mountDialog();
+    await selectTask("rows_Second", false);
+    await selectTask("rows_Third", false);
+    await startImport();
+
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    const minimizeButton = document.body.querySelector<HTMLButtonElement>('button[aria-label="Minimize import"]');
+    expect(minimizeButton).toBeTruthy();
+    minimizeButton!.click();
+    await flushAsyncUpdates();
+
+    expect(document.body.querySelector('button[aria-label="Minimize import"]')).toBeNull();
+    expect(document.body.textContent).toContain("Writing data");
+    expect(document.body.textContent).toMatch(/\d+%/);
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Restore import"]')!.click();
+    await flushAsyncUpdates();
+    expect(document.body.querySelector('button[aria-label="Minimize import"]')).toBeTruthy();
+    expect(document.body.textContent).toContain("1 / 2");
+    expect(taskCheckbox("rows_First").disabled).toBe(true);
+
+    finish({ importId: "finished-import", rowsImported: 2, totalRows: 2, elapsedMs: 2 });
+    await flushAsyncUpdates();
     expect(document.body.textContent).toContain("Import complete");
   });
 

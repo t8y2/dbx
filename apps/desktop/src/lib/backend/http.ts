@@ -570,7 +570,12 @@ export async function closeDatabaseConnection(connectionId: string, database: st
   return post("/api/connection/close-database", { connectionId, database });
 }
 
-export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
+export async function saveConnections(configs: ConnectionConfig[], removedIds: string[] = []): Promise<void> {
+  // Saving upserts; ids this client deleted are sent explicitly so that a
+  // stale local list can never drop connections another client created.
+  if (removedIds.length) {
+    return post("/api/connection/save", { configs, removedIds });
+  }
   return post("/api/connection/save", { configs });
 }
 
@@ -2265,6 +2270,19 @@ export async function loadHistoryRetentionLimit(): Promise<number> {
 
 export async function saveHistoryRetentionLimit(limit: number): Promise<void> {
   const res = await fetch(apiUrl("/api/app-settings/history-retention-limit"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+}
+
+export async function loadMcpHistoryRetentionLimit(): Promise<number> {
+  return get("/api/app-settings/mcp-history-retention-limit");
+}
+
+export async function saveMcpHistoryRetentionLimit(limit: number): Promise<void> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-history-retention-limit"), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ limit }),
@@ -5190,6 +5208,14 @@ export async function loadRedisHistory(limit = 100, offset = 0): Promise<History
 
 export async function clearHistory(): Promise<void> {
   return del("/api/history");
+}
+
+export async function clearHistoryBySource(source: string): Promise<void> {
+  return del(`/api/history?source=${encodeURIComponent(source)}`);
+}
+
+export async function cleanupMcpHistoryRetention(): Promise<number> {
+  return post("/api/app-settings/mcp-history-retention-cleanup", {});
 }
 
 export async function clearRedisHistory(): Promise<void> {

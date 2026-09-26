@@ -178,7 +178,7 @@ import { DBX_TABLE_REFERENCE_DROP_EVENT, clearActiveTableReferencePayload } from
 import { canSubmitAiPrompt, isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
 import { isActionableWriteProposalMessage, isActionableWriteSqlProposal, looksLikeActionProposal, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { classifyIntentByLlm, routeIntentByRules, type AiIntentRouteInput } from "@/lib/ai/aiIntentRouter";
-import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
+import { retryableUserMessageIndex, visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 import { saveTextFile } from "@/lib/export/saveTextFile";
 import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
@@ -4285,6 +4285,37 @@ function canCopyMessage(msg: ChatMessage): boolean {
   return messageCopyText(msg) !== null;
 }
 
+/** Returns whether a user message can be submitted again. The helper accepts
+ * the following visible index so the same eligibility rules cover text,
+ * mentions, and attachment-only requests. */
+function canRetryUserMessage(visibleIndex: number): boolean {
+  return retryableUserMessageIndex(visibleMessages.value, visibleIndex + 1) === visibleIndex;
+}
+
+/** Re-runs a user request through the existing edit-and-resend path. This
+ * removes the selected turn and later replies before sending with the current
+ * AI configuration. */
+function retryUserMessage(visibleIndex: number) {
+  if (isGenerating.value) return;
+  if (!canRetryUserMessage(visibleIndex)) return;
+  startEditMessage(visibleIndex);
+  submitEdit(visibleIndex);
+}
+
+const retryConfirmMessageIndex = ref<number | null>(null);
+
+function cancelRetryUserMessage() {
+  retryConfirmMessageIndex.value = null;
+}
+
+function confirmRetryUserMessage() {
+  const visibleIndex = retryConfirmMessageIndex.value;
+  retryConfirmMessageIndex.value = null;
+  if (visibleIndex !== null) retryUserMessage(visibleIndex);
+}
+
+watch(conversationId, cancelRetryUserMessage);
+
 function messageCopyKey(index: number): string {
   return `message:${index}`;
 }
@@ -5620,8 +5651,26 @@ async function openExternalUrl(url: string) {
                         <span class="truncate">{{ t("ai.routing.chip", { action: actionLabelFor(routedActionOf(msg)) }) }}</span>
                       </button>
                     </div>
-                    <div v-if="canCopyMessage(msg)" class="mt-1 flex justify-end">
+                    <div v-if="canCopyMessage(msg) || (!isGenerating && canRetryUserMessage(i))" class="mt-1 flex justify-end gap-1">
+                      <Popover v-if="!isGenerating && canRetryUserMessage(i)" :open="retryConfirmMessageIndex === i" @update:open="(open: boolean) => (retryConfirmMessageIndex = open ? i : null)">
+                        <PopoverTrigger as-child>
+                          <button data-ai-message-retry="user" type="button" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.retryMessage')" :aria-label="t('ai.retryMessage')">
+                            <RefreshCw class="h-3.5 w-3.5" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent side="top" align="end" :side-offset="8" class="w-72 max-w-[calc(100vw-2rem)] gap-2 p-3" @click.stop>
+                          <p class="flex items-start gap-2 text-xs text-foreground">
+                            <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+                            <span>{{ t("ai.retryConfirmDescription") }}</span>
+                          </p>
+                          <div class="flex justify-end gap-2">
+                            <Button type="button" size="sm" variant="outline" class="h-7 px-2 text-xs" @click="cancelRetryUserMessage">{{ t("common.cancel") }}</Button>
+                            <Button type="button" size="sm" variant="destructive" class="h-7 px-2 text-xs" @click="confirmRetryUserMessage">{{ t("common.confirm") }}</Button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
                       <button
+                        v-if="canCopyMessage(msg)"
                         data-ai-message-copy="user"
                         type="button"
                         class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"

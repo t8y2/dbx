@@ -58,6 +58,7 @@ const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
+const MCP_HISTORY_RETENTION_LIMIT_KEY: &str = "mcp_history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
 /// Plugin ids whose MCP tools the built-in AI agent may call.
 const AI_PLUGIN_TOOL_PLUGINS_KEY: &str = "ai_plugin_tool_plugins";
@@ -955,6 +956,11 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         affected_rows INTEGER,
         rollback_sql TEXT,
         details_json TEXT
+        ,source TEXT NOT NULL DEFAULT 'sql'
+        ,mcp_tool_name TEXT
+        ,mcp_request_json TEXT
+        ,mcp_response_json TEXT
+        ,mcp_session_id TEXT
     )",
     "CREATE TABLE IF NOT EXISTS ai_config (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -2743,6 +2749,11 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
         ("affected_rows", "INTEGER"),
         ("rollback_sql", "TEXT"),
         ("details_json", "TEXT"),
+        ("source", "TEXT NOT NULL DEFAULT 'sql'"),
+        ("mcp_tool_name", "TEXT"),
+        ("mcp_request_json", "TEXT"),
+        ("mcp_response_json", "TEXT"),
+        ("mcp_session_id", "TEXT"),
     ];
 
     let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('history')").map_err(|e| e.to_string())?;
@@ -2758,6 +2769,19 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
         }
         conn.execute(&format!("ALTER TABLE history ADD COLUMN {name} {definition}"), []).map_err(|e| e.to_string())?;
     }
+    // Older MCP SQL entries carried their source only in details_json. Guard
+    // malformed legacy JSON so opening the database cannot fail during upgrade.
+    conn.execute(
+        "UPDATE history SET source = 'mcp' WHERE source = 'sql' AND \
+         CASE WHEN json_valid(details_json) THEN json_extract(details_json, '$.source') = 'mcp' ELSE 0 END",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_source_time ON history(source, executed_at DESC, id DESC);
+         CREATE INDEX IF NOT EXISTS idx_history_mcp_tool_time ON history(mcp_tool_name, executed_at DESC);",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -3147,6 +3171,15 @@ fn history_search_predicate(request: &HistorySearchRequest) -> (String, Vec<Valu
     let mut values = Vec::new();
     append_history_scope_clause(&mut clauses, &mut values, &request.connections, &request.databases);
 
+    if let Some(source) = request.source.as_ref().filter(|value| !value.is_empty()) {
+        clauses.push("source = ?".to_string());
+        values.push(Value::Text(source.clone()));
+    }
+    if let Some(tool) = request.mcp_tool_name.as_ref().filter(|value| !value.is_empty()) {
+        clauses.push("mcp_tool_name = ?".to_string());
+        values.push(Value::Text(tool.clone()));
+    }
+
     if let Some(kind) = request.activity_kind.as_ref().filter(|kind| !kind.is_empty()) {
         clauses.push("activity_kind = ?".to_string());
         values.push(Value::Text(kind.clone()));
@@ -3167,7 +3200,7 @@ fn history_search_predicate(request: &HistorySearchRequest) -> (String, Vec<Valu
     let search_text = request.search_text.trim();
     if !search_text.is_empty() {
         let pattern = format!("%{}%", escape_history_like_pattern(search_text));
-        let fields = ["sql_text", "connection_name", "database", "operation", "target"];
+        let fields = ["sql_text", "connection_name", "database", "operation", "target", "mcp_tool_name"];
         clauses.push(format!(
             "({})",
             fields
@@ -3207,6 +3240,11 @@ fn map_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
         affected_rows: row.get(12)?,
         rollback_sql: row.get(13)?,
         details_json: row.get(14)?,
+        source: row.get::<_, String>(15).unwrap_or_else(|_| "sql".to_string()),
+        mcp_tool_name: row.get(16).ok(),
+        mcp_request_json: row.get(17).ok(),
+        mcp_response_json: row.get(18).ok(),
+        mcp_session_id: row.get(19).ok(),
     })
 }
 
@@ -3242,6 +3280,16 @@ fn app_settings_map_from_conn(conn: &Connection) -> Result<serde_json::Map<Strin
             .map_err(|e| format!("invalid app settings JSON: {e}")),
         None => Ok(serde_json::Map::new()),
     }
+}
+
+fn load_mcp_history_retention_limit_from_conn(conn: &Connection) -> Result<u32, String> {
+    let settings = app_settings_map_from_conn(conn)?;
+    Ok(settings
+        .get(MCP_HISTORY_RETENTION_LIMIT_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| crate::history::validate_history_retention_limit(*value).is_ok())
+        .unwrap_or(1000))
 }
 
 fn write_app_settings_map(
@@ -3288,12 +3336,17 @@ impl Storage {
         self.with_conn(move |conn| {
             let tx =
                 conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
-            let limit = load_history_retention_limit_from_conn(&tx)?;
+            let source = if entry.source.is_empty() { "sql" } else { entry.source.as_str() };
+            let limit = if source == "mcp" {
+                load_mcp_history_retention_limit_from_conn(&tx)?
+            } else {
+                load_history_retention_limit_from_conn(&tx)?
+            };
             tx.execute(
                 "INSERT OR REPLACE INTO history \
                  (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, error, \
-                  activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     entry.id,
                     entry.connection_name,
@@ -3309,16 +3362,17 @@ impl Storage {
                     entry.target,
                     entry.affected_rows,
                     entry.rollback_sql,
-                    entry.details_json
+                    entry.details_json,
+                    source, entry.mcp_tool_name, entry.mcp_request_json, entry.mcp_response_json, entry.mcp_session_id
                 ],
             )
             .map_err(|e| e.to_string())?;
 
             if limit != 0 {
                 tx.execute(
-                    "DELETE FROM history WHERE id NOT IN \
-                     (SELECT id FROM history ORDER BY executed_at DESC, id DESC LIMIT ?1)",
-                    [i64::from(limit)],
+                    "DELETE FROM history WHERE source = ?2 AND id NOT IN \
+                     (SELECT id FROM history WHERE source = ?2 ORDER BY executed_at DESC, id DESC LIMIT ?1)",
+                    rusqlite::params![i64::from(limit), source],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -3354,6 +3408,11 @@ impl Storage {
                     affected_rows: row.get(12)?,
                     rollback_sql: row.get(13)?,
                     details_json: row.get(14)?,
+                    source: row.get::<_, String>(15).unwrap_or_else(|_| "sql".to_string()),
+                    mcp_tool_name: row.get(16).ok(),
+                    mcp_request_json: row.get(17).ok(),
+                    mcp_response_json: row.get(18).ok(),
+                    mcp_session_id: row.get(19).ok(),
                 })
             };
 
@@ -3361,7 +3420,7 @@ impl Storage {
                 let mut stmt = conn
                     .prepare(
                         "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id \
                          FROM history WHERE activity_kind = ?1 ORDER BY executed_at DESC LIMIT ?2 OFFSET ?3",
                     )
                     .map_err(|e| e.to_string())?;
@@ -3373,7 +3432,7 @@ impl Storage {
                 let mut stmt = conn
                     .prepare(
                         "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id \
                          FROM history ORDER BY executed_at DESC LIMIT ?1 OFFSET ?2",
                     )
                     .map_err(|e| e.to_string())?;
@@ -3414,7 +3473,7 @@ impl Storage {
             let limit = if request.limit == 0 { 100 } else { request.limit.clamp(1, 200) };
             let sql = format!(
                 "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                 error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                 error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id \
                  FROM history{page_predicate} ORDER BY executed_at DESC, id DESC LIMIT ?"
             );
             page_values.push(Value::Integer((limit + 1) as i64));
@@ -3478,6 +3537,34 @@ impl Storage {
 
     pub async fn clear_history(&self) -> Result<(), String> {
         self.with_conn(|conn| conn.execute("DELETE FROM history", []).map(|_| ()).map_err(|e| e.to_string())).await
+    }
+
+    pub async fn clear_history_by_source(&self, source: &str) -> Result<(), String> {
+        let source = source.trim().to_string();
+        if source.is_empty() {
+            return Err("History source is required".to_string());
+        }
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM history WHERE source = ?1", [source]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn cleanup_mcp_history_retention(&self) -> Result<u64, String> {
+        self.with_conn(|conn| {
+            let limit = load_mcp_history_retention_limit_from_conn(conn)?;
+            if limit == 0 {
+                return Ok(0);
+            }
+            conn.execute(
+                "DELETE FROM history WHERE source = 'mcp' AND id NOT IN \
+                 (SELECT id FROM history WHERE source = 'mcp' ORDER BY executed_at DESC, id DESC LIMIT ?1)",
+                [i64::from(limit)],
+            )
+            .map(|count| count as u64)
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn delete_history_entry(&self, id: &str) -> Result<(), String> {
@@ -4114,6 +4201,7 @@ impl Storage {
                 HISTORY_RETENTION_LIMIT_KEY,
                 AI_PLUGIN_TOOL_PLUGINS_KEY,
                 PLUGIN_DATA_GRANTS_KEY,
+                MCP_HISTORY_RETENTION_LIMIT_KEY,
             ];
             for key in dedicated_keys {
                 settings.remove(key);
@@ -4919,6 +5007,33 @@ impl Storage {
 
     pub async fn load_history_retention_limit(&self) -> Result<u32, String> {
         self.with_conn(|conn| load_history_retention_limit_from_conn(conn)).await
+    }
+
+    pub async fn load_mcp_history_retention_limit(&self) -> Result<u32, String> {
+        self.with_conn(|conn| load_mcp_history_retention_limit_from_conn(conn)).await
+    }
+
+    pub async fn save_mcp_history_retention_limit(&self, limit: u32) -> Result<(), String> {
+        crate::history::validate_history_retention_limit(limit)?;
+        self.with_conn(move |conn| {
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut settings = match current {
+                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            settings.insert(MCP_HISTORY_RETENTION_LIMIT_KEY.to_string(), serde_json::Value::from(limit));
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                [serde_json::Value::Object(settings).to_string()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn save_history_retention_limit(&self, limit: u32) -> Result<(), String> {
@@ -5901,22 +6016,47 @@ impl Storage {
         .await
     }
 
+    /// Insert or update exactly the given connections and leave every other saved
+    /// connection untouched.
+    ///
+    /// Multi-client deployments (the Web/Docker build serves several people from
+    /// one storage) must not replace the whole table: a client that saves a list
+    /// it loaded earlier would otherwise silently delete connections another
+    /// client created in the meantime. Removing a connection therefore has to go
+    /// through [`Storage::delete_connections`] with explicit ids.
     pub async fn save_connections(&self, configs: &[ConnectionConfig]) -> Result<(), String> {
         let configs = configs.to_vec();
         let needs_key = configs.iter().any(connection_config_has_inline_secrets);
         let codec = self.secret_codec_for_write(needs_key).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
-            let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
-            let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
-
             for config in &configs {
+                // `persist_connection_in_tx` uses a plain INSERT, so an update of
+                // an already saved connection has to drop the old row first.
+                tx.execute("DELETE FROM connections WHERE id = ?1", [&config.id]).map_err(|e| e.to_string())?;
                 persist_connection_in_tx(&tx, &codec, config)?;
             }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
 
-            retained_ids.extend(configs.iter().map(|config| config.id.clone()));
-            delete_unreferenced_connection_secrets_in_tx(&tx, &retained_ids)?;
-
+    /// Delete the given saved connections together with their stored secrets.
+    ///
+    /// This is the only removal path for saved connections; ids that no longer
+    /// exist are ignored so a stale client cannot fail the save.
+    pub async fn delete_connections(&self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ids = ids.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            for id in &ids {
+                tx.execute("DELETE FROM connections WHERE id = ?1", [id]).map_err(|e| e.to_string())?;
+                tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [id])
+                    .map_err(|e| e.to_string())?;
+            }
             tx.commit().map_err(|e| e.to_string())
         })
         .await
@@ -6185,6 +6325,32 @@ impl Storage {
             )
             .map(|updated| updated > 0)
             .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Counts the stored `connections` rows without decrypting secrets or
+    /// running the data-security upgrade. Diagnostics use it to report the
+    /// table state truthfully even when the store cannot be fully opened (for
+    /// example a headless CLI that cannot read the OS keychain key), so a
+    /// failed open is never misreported as a missing table. `None` means the
+    /// opened schema has no `connections` table at all.
+    pub async fn stored_connection_count(&self) -> Result<Option<u64>, String> {
+        self.with_conn(|conn| {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'connections')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !exists {
+                return Ok(None);
+            }
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            Ok(Some(count.max(0) as u64))
         })
         .await
     }
@@ -8936,6 +9102,11 @@ mod tests {
             affected_rows: None,
             rollback_sql: None,
             details_json: None,
+            source: "sql".to_string(),
+            mcp_tool_name: None,
+            mcp_request_json: None,
+            mcp_response_json: None,
+            mcp_session_id: None,
         }
     }
 
@@ -9358,6 +9529,121 @@ mod tests {
             }
             tx.commit().map_err(|error| error.to_string())
         }).await.unwrap();
+    }
+
+    async fn seed_mixed_history(storage: &Storage) {
+        seed_history_backlog(storage, 1001).await;
+        storage.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO history (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, source)
+                 SELECT 'mcp-' || id, connection_name, database, sql_text, executed_at, execution_time_ms, success, 'mcp' FROM history WHERE source = 'sql'",
+                [],
+            ).map(|_| ()).map_err(|e| e.to_string())
+        }).await.unwrap();
+    }
+
+    async fn source_count(storage: &Storage, source: &str) -> usize {
+        storage
+            .search_history_entries(HistorySearchRequest { source: Some(source.to_string()), ..Default::default() })
+            .await
+            .unwrap()
+            .total as usize
+    }
+
+    async fn write_source_history(storage: &Storage, source: &str) {
+        let mut entry =
+            history_entry(&format!("new-{source}"), "conn", "Main", "app", "select 2", "2026-07-19T00:00:00Z", true);
+        entry.source = source.to_string();
+        storage.save_history_entry(&entry).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_retention_sources_are_independent_and_unlimited() {
+        for (sql_limit, mcp_limit, sql_expected, mcp_expected) in [
+            (200, 1000, 200, 1000),
+            (1000, 200, 1000, 200),
+            (0, 200, 1002, 200),
+            (200, 0, 200, 1002),
+            (0, 0, 1002, 1002),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+            seed_mixed_history(&storage).await;
+            storage.save_history_retention_limit(sql_limit).await.unwrap();
+            storage.save_mcp_history_retention_limit(mcp_limit).await.unwrap();
+            assert_eq!(source_count(&storage, "sql").await, 1001);
+            assert_eq!(source_count(&storage, "mcp").await, 1001);
+            write_source_history(&storage, "mcp").await;
+            assert_eq!(source_count(&storage, "mcp").await, mcp_expected);
+            assert_eq!(source_count(&storage, "sql").await, 1001);
+            write_source_history(&storage, "sql").await;
+            assert_eq!(source_count(&storage, "sql").await, sql_expected);
+            assert_eq!(source_count(&storage, "mcp").await, mcp_expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_retention_mcp_defaults_and_preserves_saved_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        let storage = Storage::open(&path).await.unwrap();
+        assert_eq!(storage.load_mcp_history_retention_limit().await.unwrap(), 1000);
+        seed_mixed_history(&storage).await;
+        write_source_history(&storage, "mcp").await;
+        assert_eq!(source_count(&storage, "mcp").await, 1000);
+        assert_eq!(source_count(&storage, "sql").await, 1001);
+        let stale = storage.load_app_settings_json().await.unwrap();
+        storage.save_mcp_history_retention_limit(200).await.unwrap();
+        storage.save_app_settings_json(&stale).await.unwrap();
+        assert_eq!(storage.load_mcp_history_retention_limit().await.unwrap(), 200);
+        assert_eq!(source_count(&storage, "mcp").await, 1000);
+        write_source_history(&storage, "sql").await;
+        assert_eq!(source_count(&storage, "mcp").await, 1000);
+        write_source_history(&storage, "mcp").await;
+        assert_eq!(source_count(&storage, "mcp").await, 200);
+        assert!(storage.save_mcp_history_retention_limit(1).await.is_err());
+        drop(storage);
+        let reopened = Storage::open(&path).await.unwrap();
+        assert_eq!(reopened.load_mcp_history_retention_limit().await.unwrap(), 200);
+    }
+
+    #[tokio::test]
+    async fn history_retention_legacy_migration_recovers_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE history (id TEXT PRIMARY KEY, connection_name TEXT NOT NULL,
+                 database TEXT NOT NULL, sql_text TEXT NOT NULL, executed_at TEXT NOT NULL,
+                 execution_time_ms INTEGER NOT NULL, success INTEGER NOT NULL, error TEXT, details_json TEXT);
+                 INSERT INTO history VALUES ('sql', 'Main', 'app', 'select 1', '2026-07-18', 1, 1, NULL, NULL);
+                 INSERT INTO history VALUES ('mcp', 'Main', 'app', 'select 2', '2026-07-18', 1, 1, NULL, '{\"source\":\"mcp\"}');
+                 INSERT INTO history VALUES ('invalid', 'Main', 'app', 'select 3', '2026-07-18', 1, 1, NULL, 'invalid json');"
+            ).unwrap();
+        }
+        for _ in 0..2 {
+            let storage = Storage::open(&path).await.unwrap();
+            assert_eq!(source_count(&storage, "sql").await, 2);
+            assert_eq!(source_count(&storage, "mcp").await, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_source_clear_and_mcp_cleanup_are_isolated() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        seed_mixed_history(&storage).await;
+        storage.save_mcp_history_retention_limit(200).await.unwrap();
+
+        assert_eq!(storage.cleanup_mcp_history_retention().await.unwrap(), 801);
+        assert_eq!(source_count(&storage, "mcp").await, 200);
+        assert_eq!(source_count(&storage, "sql").await, 1001);
+
+        storage.clear_history_by_source("mcp").await.unwrap();
+        assert_eq!(source_count(&storage, "mcp").await, 0);
+        assert_eq!(source_count(&storage, "sql").await, 1001);
+        assert!(storage.clear_history_by_source(" ").await.is_err());
     }
 
     #[tokio::test]
@@ -10503,7 +10789,14 @@ mod tests {
         assert_eq!(raw_connection_json(&storage, "future").await, future_json);
         assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
 
+        // Saving a list no longer replaces the whole table: an empty save is a no-op, so
+        // rows the caller never saw (like the unreadable "future" row) survive it.
         storage.save_connections(&[]).await.unwrap();
+        assert_eq!(storage.load_connections().await.unwrap().len(), 1);
+        assert_eq!(raw_connection_json(&storage, "future").await, future_json);
+
+        // Deleting a connection is explicit now, and still only touches the given ids.
+        storage.delete_connections(&["known".to_string()]).await.unwrap();
         assert!(storage.load_connections().await.unwrap().is_empty());
         assert_eq!(raw_connection_json(&storage, "future").await, future_json);
         assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
@@ -11017,7 +11310,9 @@ mod tests {
 
         // Non-MCP callers remain governed by the ordinary DBX UI permissions.
         storage.save_connections(std::slice::from_ref(&kept)).await.unwrap();
-        assert_eq!(storage.load_connections().await.unwrap()[0].id, kept.id);
+        let after_plain_save = storage.load_connections().await.unwrap();
+        assert_eq!(after_plain_save.len(), 3);
+        assert!(after_plain_save.iter().any(|config| config.id == kept.id));
 
         let _ = std::fs::remove_file(path);
     }
@@ -13065,5 +13360,33 @@ mod tests {
         assert!(super::migration_backup_paths(&invalid).is_err());
         let valid = serde_json::json!({"backupPaths": ["/tmp/dbx-secret-migration-a"]});
         assert_eq!(super::migration_backup_paths(&valid).unwrap(), vec!["/tmp/dbx-secret-migration-a"]);
+    }
+
+    #[tokio::test]
+    async fn stored_connection_count_reads_the_table_without_loading_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), Some(0));
+
+        storage
+            .with_conn(|conn| {
+                conn.execute("INSERT INTO connections (id, config_json) VALUES ('a', '{}'), ('b', '{}')", [])
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), Some(2));
+
+        // `None` is what lets `dbx doctor` tell a missing table apart from a
+        // table it could not load.
+        storage
+            .with_conn(|conn| {
+                conn.execute("DROP TABLE connections", []).map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), None);
     }
 }

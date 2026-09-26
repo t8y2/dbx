@@ -16,6 +16,11 @@ pub struct HistoryQuery {
 }
 
 #[derive(Deserialize)]
+pub struct HistoryClearQuery {
+    pub source: Option<String>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveHistoryRequest {
     pub entry: HistoryEntry,
@@ -53,8 +58,15 @@ pub async fn load_history_connection_options(
     state.app.storage.load_history_connection_options().await.map(Json).map_err(AppError::from)
 }
 
-pub async fn clear_history(State(state): State<Arc<WebState>>) -> Result<Json<()>, AppError> {
-    state.app.storage.clear_history().await.map_err(AppError::from)?;
+pub async fn clear_history(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<HistoryClearQuery>,
+) -> Result<Json<()>, AppError> {
+    if let Some(source) = query.source.as_deref().filter(|source| !source.trim().is_empty()) {
+        state.app.storage.clear_history_by_source(source).await.map_err(AppError::from)?;
+    } else {
+        state.app.storage.clear_history().await.map_err(AppError::from)?;
+    }
     Ok(Json(()))
 }
 

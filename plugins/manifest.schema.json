@@ -46,7 +46,7 @@
     "contributions": {
       "type": "array",
       "items": {
-        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }]
+        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }, { "$ref": "#/$defs/commandContribution" }, { "$ref": "#/$defs/menusContribution" }]
       }
     },
     "localizations": {
@@ -367,6 +367,62 @@
           "uniqueItems": true,
           "items": { "enum": ["read", "write", "delete", "rename", "mkdir"] }
         }
+      }
+    },
+    "commandContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "label", "action"],
+      "properties": {
+        "type": { "const": "command" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "icon": { "$ref": "#/$defs/assetPath" },
+        "action": { "$ref": "#/$defs/commandAction" },
+        "enablement": { "$ref": "#/$defs/commandEnablement" }
+      }
+    },
+    "commandAction": {
+      "oneOf": [{ "$ref": "#/$defs/openWorkbenchAction" }]
+    },
+    "openWorkbenchAction": {
+      "type": "object",
+      "required": ["type", "workbench"],
+      "properties": {
+        "type": { "const": "open-workbench" },
+        "workbench": { "$ref": "#/$defs/identifier" },
+        "presentation": { "enum": ["tab", "panel"] },
+        "context": { "type": "object" }
+      }
+    },
+    "menusContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "menus" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/menuItem" } }
+      }
+    },
+    "menuItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["location", "command", "group", "order"],
+      "properties": {
+        "location": { "enum": ["commandPalette", "appToolbar", "appSidebar"] },
+        "command": { "type": "string", "minLength": 1 },
+        "group": { "type": "string" },
+        "order": { "type": "integer" },
+        "default_visible": { "type": "boolean" },
+        "when": { "$ref": "#/$defs/commandEnablement" }
+      }
+    },
+    "commandEnablement": {
+      "type": "object",
+      "properties": {
+        "all": { "type": "array", "items": { "type": "object" } }
       }
     }
   }

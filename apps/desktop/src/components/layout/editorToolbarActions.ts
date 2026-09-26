@@ -28,6 +28,7 @@ export interface EditorToolbarActions {
   /** Captures the acting editor's execution snapshot before a toolbar click. */
   captureExecutionSnapshot(tabId: string): void;
   toolbarExecute(source: "pointer" | "keyboard", tabId: string): void;
+  toolbarExecuteInNewResultTab(source: "pointer" | "keyboard", tabId: string): void;
   cancelExecution(tabId: string): void;
   explain(tabId: string): void;
   formatSql(tabId: string): void;
@@ -75,6 +76,7 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
     databaseRequiredSignalFor: () => 0,
     captureExecutionSnapshot: noop,
     toolbarExecute: noop,
+    toolbarExecuteInNewResultTab: noop,
     cancelExecution: noop,
     explain: noop,
     formatSql: noop,

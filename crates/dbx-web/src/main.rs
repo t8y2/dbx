@@ -1305,6 +1305,12 @@ async fn serve() {
                 .put(routes::app_settings::save_history_retention_limit),
         )
         .route(
+            "/app-settings/mcp-history-retention-limit",
+            get(routes::app_settings::load_mcp_history_retention_limit)
+                .put(routes::app_settings::save_mcp_history_retention_limit),
+        )
+        .route("/app-settings/mcp-history-retention-cleanup", post(routes::app_settings::cleanup_mcp_history_retention))
+        .route(
             "/app-settings/max-retries",
             get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
         )

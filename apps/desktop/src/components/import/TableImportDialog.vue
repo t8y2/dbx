@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, watch } from "vue";
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, Maximize2, Minimize2, RefreshCw, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -40,6 +40,27 @@ const store = useConnectionStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
+const minimized = ref(false);
+const backgroundMode = ref(false);
+const dialogDragOffset = ref({ x: 0, y: 0 });
+const isDraggingDialog = ref(false);
+let activeDialogDrag:
+  | {
+      pointerId: number;
+      startX: number;
+      startY: number;
+      startLeft: number;
+      startTop: number;
+      width: number;
+      height: number;
+      offsetX: number;
+      offsetY: number;
+    }
+  | undefined;
+const dialogStyle = computed(() => ({
+  transform: dialogDragOffset.value.x || dialogDragOffset.value.y ? `translate(${dialogDragOffset.value.x}px, ${dialogDragOffset.value.y}px)` : undefined,
+  transition: isDraggingDialog.value ? "none" : undefined,
+}));
 
 const props = defineProps<{
   prefillConnectionId?: string;
@@ -238,6 +259,7 @@ const terminalStatus = computed(() => !!progress.value?.status && ["done", "erro
 const displayedElapsedMs = computed(() => resolveTableImportElapsed(liveElapsedMs.value, progress.value?.elapsedMs, terminalStatus.value));
 const progressLabelKey = computed(() => {
   if (terminalStatus.value) return `tableImport.status_${progress.value?.status || "idle"}`;
+  if (!running.value && !progress.value) return "tableImport.status_idle";
   return `tableImport.phase_${progress.value?.phase || "writing"}`;
 });
 
@@ -254,6 +276,67 @@ function stopImportElapsedClock() {
   }
 }
 
+function stopDialogDrag() {
+  activeDialogDrag = undefined;
+  isDraggingDialog.value = false;
+  window.removeEventListener("pointermove", onDialogDragMove);
+  window.removeEventListener("pointerup", stopDialogDrag);
+  window.removeEventListener("pointercancel", stopDialogDrag);
+}
+
+function onDialogDragMove(event: PointerEvent) {
+  const drag = activeDialogDrag;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+
+  const maxLeft = Math.max(8, window.innerWidth - drag.width - 8);
+  const maxTop = Math.max(8, window.innerHeight - drag.height - 8);
+  const left = Math.min(maxLeft, Math.max(8, drag.startLeft + event.clientX - drag.startX));
+  const top = Math.min(maxTop, Math.max(8, drag.startTop + event.clientY - drag.startY));
+  dialogDragOffset.value = {
+    x: drag.offsetX + left - drag.startLeft,
+    y: drag.offsetY + top - drag.startTop,
+  };
+}
+
+function startDialogDrag(event: PointerEvent) {
+  if (event.button !== 0 || !(event.target instanceof Element) || event.target.closest("button, a, input, select, textarea")) return;
+  const content = (event.currentTarget as HTMLElement).closest<HTMLElement>('[data-slot="dialog-content"]');
+  if (!content) return;
+
+  const rect = content.getBoundingClientRect();
+  activeDialogDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    startLeft: rect.left,
+    startTop: rect.top,
+    width: rect.width,
+    height: rect.height,
+    offsetX: dialogDragOffset.value.x,
+    offsetY: dialogDragOffset.value.y,
+  };
+  isDraggingDialog.value = true;
+  window.addEventListener("pointermove", onDialogDragMove);
+  window.addEventListener("pointerup", stopDialogDrag);
+  window.addEventListener("pointercancel", stopDialogDrag);
+  event.preventDefault();
+}
+
+function handleOpenChange(value: boolean) {
+  if (!value && running.value) return;
+  open.value = value;
+}
+
+function minimizeImport() {
+  minimized.value = true;
+  backgroundMode.value = true;
+}
+
+function restoreImport() {
+  minimized.value = false;
+  if (!running.value) backgroundMode.value = false;
+}
+
 function refreshImportElapsedClock() {
   if (importStartedAt > 0) {
     liveElapsedMs.value = Math.max(0, Math.round(performance.now() - importStartedAt));
@@ -268,6 +351,11 @@ function startImportElapsedClock() {
 }
 
 function resetState() {
+  stopDialogDrag();
+  minimized.value = false;
+  backgroundMode.value = false;
+  dialogDragOffset.value = { x: 0, y: 0 };
+  progressPercentFloor.value = 0;
   stopImportElapsedClock();
   closeDataTypePicker();
   importStartedAt = 0;
@@ -816,6 +904,7 @@ async function startImport() {
   const currentPreview = preview.value;
   const tableName = targetTableName.value;
   if (!canImport.value || !currentPreview || !props.prefillConnectionId || !tableName) return;
+  backgroundMode.value = true;
   running.value = true;
   progressPercentFloor.value = 0;
   cancelling.value = false;
@@ -884,6 +973,7 @@ async function startImport() {
     stopImportElapsedClock();
     running.value = false;
     cancelling.value = false;
+    if (!minimized.value) backgroundMode.value = false;
   }
 }
 
@@ -892,6 +982,7 @@ async function startBatchImport() {
   // Keep original indices for the active preview and error state, even when
   // the import queue excludes worksheets between selected tasks.
   const tasks = batchTasks.value.map((task, index) => ({ task, index })).filter(({ task }) => task.selected);
+  backgroundMode.value = true;
   running.value = true;
   progressPercentFloor.value = 0;
   cancelling.value = false;
@@ -997,6 +1088,7 @@ async function startBatchImport() {
     await releaseTableImportSources();
     running.value = false;
     cancelling.value = false;
+    if (!minimized.value) backgroundMode.value = false;
   }
 }
 
@@ -1076,12 +1168,17 @@ watch(
       resetState();
       void loadTargetColumns();
       void loadDataTypeOptions();
-    } else if (!running.value) {
-      void releaseTableImportSources();
+    } else {
+      minimized.value = false;
+      backgroundMode.value = false;
+      dialogDragOffset.value = { x: 0, y: 0 };
+      if (!running.value) void releaseTableImportSources();
     }
   },
   { immediate: true },
 );
+
+onBeforeUnmount(stopDialogDrag);
 
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
 watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
@@ -1120,13 +1217,19 @@ watch(rawProgressPercent, (percent) => {
 </script>
 
 <template>
-  <Dialog v-model:open="open">
-    <DialogScrollContent class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
-      <DialogHeader class="shrink-0 pr-8">
-        <DialogTitle class="flex items-center gap-2 text-base">
+  <Dialog :open="open" :modal="!backgroundMode" @update:open="handleOpenChange">
+    <DialogScrollContent v-if="!minimized" class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :style="dialogStyle" :trap-focus="false" :show-overlay="!backgroundMode" :show-close-button="false" @interact-outside.prevent>
+      <DialogHeader class="shrink-0 flex-row items-center pr-8" @pointerdown="startDialogDrag">
+        <DialogTitle class="flex min-w-0 flex-1 items-center gap-2 text-base">
           <FileUp class="h-4 w-4" />
           {{ t("tableImport.title") }}
         </DialogTitle>
+        <Button variant="ghost" size="icon-sm" :aria-label="t('tableImport.minimize')" :title="t('tableImport.minimize')" @pointerdown.stop @click="minimizeImport">
+          <Minimize2 class="h-4 w-4" />
+        </Button>
+        <Button v-if="!running" variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @pointerdown.stop @click="handleOpenChange(false)">
+          <X class="h-4 w-4" />
+        </Button>
       </DialogHeader>
 
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1">
@@ -1592,6 +1695,10 @@ watch(rawProgressPercent, (percent) => {
               <div class="h-full bg-primary transition-all" :style="{ width: `${progressPercent}%` }" />
             </div>
           </div>
+          <div v-if="running" class="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
+            <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{{ t("tableImport.backgroundWarning") }}</span>
+          </div>
           <div v-if="errorMessage || progress?.error" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {{ errorMessage || progress?.error }}
           </div>
@@ -1658,4 +1765,19 @@ watch(rawProgressPercent, (percent) => {
       </DialogFooter>
     </DialogScrollContent>
   </Dialog>
+
+  <Teleport to="body">
+    <div v-if="minimized" class="fixed bottom-4 right-4 z-[100] flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-md border bg-popover px-3 py-2 text-popover-foreground shadow-lg" :title="running ? t('tableImport.backgroundWarning') : undefined">
+      <Loader2 v-if="running" class="h-4 w-4 shrink-0 animate-spin text-primary" />
+      <CheckCircle2 v-else-if="progress?.status === 'done'" class="h-4 w-4 shrink-0 text-emerald-600" />
+      <AlertTriangle v-else class="h-4 w-4 shrink-0 text-destructive" />
+      <span class="min-w-0 truncate text-xs">{{ t(progressLabelKey) }} · {{ progressPercent }}%</span>
+      <Button variant="ghost" size="icon-sm" :aria-label="t('tableImport.restoreImport')" :title="t('tableImport.restoreImport')" @click="restoreImport">
+        <Maximize2 class="h-4 w-4" />
+      </Button>
+      <Button v-if="!running" variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @click="handleOpenChange(false)">
+        <X class="h-4 w-4" />
+      </Button>
+    </div>
+  </Teleport>
 </template>

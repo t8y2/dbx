@@ -5,6 +5,7 @@ import QueryHistory from "../QueryHistory.vue";
 
 const mocks = vi.hoisted(() => ({
   add: vi.fn(),
+  search: vi.fn(),
   beginManualTransaction: vi.fn(),
   executeInManualTransaction: vi.fn(),
   commitManualTransaction: vi.fn(),
@@ -40,7 +41,7 @@ vi.mock("@/stores/historyStore", () => ({
     nextCursor: null,
     setHistoryPanelActive: vi.fn(),
     loadConnectionOptions: vi.fn().mockResolvedValue(undefined),
-    search: vi.fn().mockResolvedValue(undefined),
+    search: mocks.search,
     add: mocks.add,
   }),
 }));
@@ -227,5 +228,24 @@ describe("QueryHistory manual rollback SQL", () => {
     await vi.waitFor(() => expect(mocks.add).toHaveBeenCalledOnce());
     expect(mocks.executeScript).toHaveBeenCalledWith("ob-test", "SYS", mocks.entry.rollback_sql);
     expect(mocks.beginManualTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("QueryHistory source filters", () => {
+  it("searches MCP independently and resets success when switching back to SQL", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(QueryHistory);
+    app.mount(root);
+    await nextTick();
+    button("history.sources.mcp").click();
+    await vi.waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ source: "mcp", activity_kind: undefined, success: undefined })));
+    expect(document.body.textContent).not.toContain("history.filters.schema_change");
+    button("history.filters.mcp_success").click();
+    await vi.waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ source: "mcp", success: true, activity_kind: undefined })));
+    button("history.sources.sql").click();
+    await vi.waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ source: "sql", success: undefined, activity_kind: undefined })));
+    expect(document.body.textContent).toContain("history.filters.schema_change");
+    expect(document.body.textContent).not.toContain("history.sources.all");
   });
 });

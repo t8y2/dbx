@@ -6,6 +6,7 @@ import i18n from "@/i18n";
 import type { TreeNode } from "@/types/database";
 import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { filterSidebarTree } from "@/lib/sidebar/sidebarSearchTree";
 import { OBJECT_BROWSER_SEARCH_FOCUS_EVENT } from "@/lib/tabs/objectBrowserSearchFocus";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 
@@ -25,6 +26,7 @@ const connectionStore = {
   loadObjectGroupChildren: vi.fn(async (node: TreeNode) => {
     node.isExpanded = true;
   }),
+  loadTables: vi.fn(async () => undefined),
   loadXuguTablespaces: vi.fn(async (node: TreeNode) => {
     node.isExpanded = true;
   }),
@@ -40,6 +42,8 @@ const queryStore = {
   openObjectBrowser: vi.fn(() => "object-browser-tab"),
 };
 
+const toast = vi.fn();
+
 const settingsStore = {
   editorSettings: {
     sidebarActivation: "single" as "single" | "double",
@@ -49,14 +53,14 @@ const settingsStore = {
 };
 
 vi.mock("@/stores/connectionStore", () => ({
-  CONNECTION_ATTEMPT_CANCELLED_MESSAGE: "connection attempt cancelled",
+  CONNECTION_ATTEMPT_CANCELLED_MESSAGE: "Connection attempt was cancelled",
   useConnectionStore: () => connectionStore,
 }));
 
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => queryStore }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => settingsStore }));
 vi.mock("@/stores/savedSqlStore", () => ({ useSavedSqlStore: () => ({}) }));
-vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast }) }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: vi.fn() }) }));
 vi.mock("@/composables/useSidebarDataOpenRuntime", () => ({ useSidebarDataOpenRuntime: () => ({ openData: vi.fn() }) }));
 vi.mock("@/composables/useDatabaseOptions", () => ({ useDatabaseOptions: () => ({ getDatabaseOptions: vi.fn() }) }));
@@ -82,6 +86,7 @@ afterEach(() => {
   connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(true);
   connectionStore.getConfig.mockReturnValue({ db_type: "mysql", name: "connection" });
   connectionStore.getEtcdAccessCapabilities.mockReturnValue({ admin: true, writable: true, writePermissions: null });
+  connectionStore.loadTables.mockResolvedValue(undefined);
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
@@ -149,6 +154,76 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(queryStore.createTab).not.toHaveBeenCalled();
     expect(queryStore.updateSql).not.toHaveBeenCalled();
     expect(queryStore.setTableMeta).not.toHaveBeenCalled();
+  });
+
+  it("keeps a searched database browse-and-expand activation current through the complete double-click sequence", async () => {
+    let resolveConnection!: () => void;
+    const connection = new Promise<void>((resolve) => {
+      resolveConnection = resolve;
+    });
+    connectionStore.ensureConnected.mockReturnValue(connection);
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+
+    const database: TreeNode = {
+      id: "mysql:inventory",
+      label: "inventory",
+      type: "database",
+      connectionId: "mysql",
+      database: "inventory",
+      isExpanded: false,
+      children: [],
+    };
+    const root: TreeNode = {
+      id: "mysql",
+      label: "local-mysql",
+      type: "connection",
+      connectionId: "mysql",
+      isExpanded: true,
+      children: [database],
+    };
+    connectionStore.treeNodes = [root];
+    const searchedDatabase = filterSidebarTree([root], "inventory", new Set())[0]?.children?.[0];
+    expect(searchedDatabase).toBeDefined();
+    expect(searchedDatabase).not.toBe(database);
+
+    const cancellationHandled = vi.fn();
+    const cancellation = {
+      get message() {
+        cancellationHandled();
+        return "Connection attempt was cancelled";
+      },
+    };
+    connectionStore.loadTables.mockImplementationOnce(async () => {
+      await connectionStore.ensureConnected("mysql");
+      throw cancellation;
+    });
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: searchedDatabase!, depth: 1 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+
+    // A browser double click emits click(1), click(2), then dblclick. Only the
+    // first event activates a database in single-click mode.
+    host.value!.handleRowClick(searchedDatabase!, 1);
+    await vi.waitFor(() => expect(connectionStore.ensureConnected).toHaveBeenCalledOnce());
+    host.value!.handleRowClick(searchedDatabase!, 2);
+    host.value!.handleRowDoubleClick(searchedDatabase!, new MouseEvent("dblclick", { detail: 2 }));
+
+    expect(connectionStore.loadTables).toHaveBeenCalledOnce();
+    expect(connectionStore.ensureConnected).toHaveBeenCalledTimes(2);
+
+    resolveConnection();
+    // Reading the cancellation proves the original request still owns its
+    // completion; a stale request returns before classifying the failure.
+    await vi.waitFor(() => expect(cancellationHandled).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledOnce());
+    expect(queryStore.openObjectBrowser).toHaveBeenCalledWith("mysql", "inventory", undefined, undefined, undefined, false, undefined, undefined);
+    expect(toast).not.toHaveBeenCalled();
   });
 
   it("activates the owning connection when a cached node toggles locally", async () => {

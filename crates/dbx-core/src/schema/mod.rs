@@ -17,6 +17,7 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+mod agent_pg_sequences;
 mod kingbase;
 mod mongodb_columns;
 pub mod plugin_metadata;
@@ -3155,7 +3156,8 @@ mod tests {
     use super::{list_databases_core, list_tables_core};
     use super::{
         object_types_include_custom_types, object_types_include_relations, object_types_include_routines,
-        object_types_only_custom_types, supports_custom_type_details, supports_pg_custom_type_objects,
+        object_types_include_sequences, object_types_only_custom_types, supports_custom_type_details,
+        supports_pg_custom_type_objects, with_agent_pg_sequence_objects,
     };
 
     use crate::connection::{AppState, PoolKind};
@@ -3477,6 +3479,32 @@ mod tests {
         assert!(object_types_include_custom_types(Some(&["table".to_string(), "type".to_string()])));
         assert!(!object_types_include_custom_types(Some(&["TABLE".to_string()])));
         assert!(!object_types_include_custom_types(Some(&["FUNCTION".to_string()])));
+    }
+
+    #[test]
+    fn object_types_include_sequences_only_for_sequence_requests() {
+        assert!(object_types_include_sequences(None));
+        assert!(object_types_include_sequences(Some(&["SEQUENCE".to_string()])));
+        assert!(object_types_include_sequences(Some(&["sequence".to_string()])));
+        assert!(object_types_include_sequences(Some(&["TABLE".to_string(), "SEQUENCE".to_string()])));
+        assert!(!object_types_include_sequences(Some(&["TABLE".to_string()])));
+        assert!(!object_types_include_sequences(Some(&[])));
+    }
+
+    #[test]
+    fn with_agent_pg_sequence_objects_merges_without_duplicating() {
+        let objects = vec![test_object_info("dbx9016_serial", "TABLE"), test_object_info("dbx9016_seq", "SEQUENCE")];
+        let sequences =
+            vec![test_object_info("dbx9016_seq", "SEQUENCE"), test_object_info("dbx9016_serial_id_seq", "SEQUENCE")];
+
+        let merged = with_agent_pg_sequence_objects(objects, &sequences);
+
+        assert_eq!(
+            merged.iter().map(|object| object.name.as_str()).collect::<Vec<_>>(),
+            ["dbx9016_serial", "dbx9016_seq", "dbx9016_serial_id_seq"]
+        );
+        assert_eq!(merged[1].object_type, "SEQUENCE");
+        assert_eq!(merged[2].object_type, "SEQUENCE");
     }
 
     #[test]
@@ -7023,7 +7051,7 @@ async fn list_objects_once(
             let mut client = lock_sqlserver_metadata_client(&client).await?;
             return db::sqlserver::list_objects(&mut client, schema).await.map(unpaged_object_list);
         }
-        if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+        if let Some(agent_client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
             let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
             let filter_locally_after_oracle_comments =
@@ -7031,11 +7059,21 @@ async fn list_objects_once(
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
             let fallback_config = db_config.clone();
             if is_oracle && !use_oracle_agent_paging {
-                return oracle_agent_list_objects(client, database, schema, timeout_duration)
+                return oracle_agent_list_objects(agent_client, database, schema, timeout_duration)
                     .await
                     .map(unpaged_object_list);
             }
-            let mut client = client.lock().await;
+            // KingbaseES/Vastbase agents list relations, routines and types but
+            // never sequences, so their pg_class-backed sequence list is merged
+            // into whatever the agent returns (t8y2/dbx#9016).
+            let sequence_objects = if db_config.as_ref().is_some_and(is_agent_pg_sequence_config)
+                && object_types_include_sequences(object_types)
+            {
+                agent_pg_sequence_objects(agent_client.clone(), database, schema, timeout_duration).await
+            } else {
+                Vec::new()
+            };
+            let mut client = agent_client.lock().await;
             let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
             let agent_limit = if filter_locally_after_oracle_comments || force_local_table_name_filter {
                 None
@@ -7074,7 +7112,7 @@ async fn list_objects_once(
                         )
                         .await?;
                     }
-                    return Ok(unpaged_object_list(objects));
+                    return Ok(unpaged_object_list(with_agent_pg_sequence_objects(objects, &sequence_objects)));
                 }
                 Ok(objects) => {
                     if object_types_only_custom_types(object_types) {
@@ -7087,11 +7125,13 @@ async fn list_objects_once(
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return list_native_postgres_objects(&pool, config, schema)
-                                    .await
-                                    .map(unpaged_object_list)
+                                let objects = list_native_postgres_objects(&pool, config, schema).await?;
+                                return Ok(unpaged_object_list(with_agent_pg_sequence_objects(
+                                    objects,
+                                    &sequence_objects,
+                                )));
                             }
-                            Ok(None) => return Ok(unpaged_object_list(objects)),
+                            Ok(None) => {}
                             Err(error) => {
                                 log::warn!(
                                     "[schema][agent:list_objects:fallback-failed] connection_id={} database={} schema={} error={}",
@@ -7103,7 +7143,7 @@ async fn list_objects_once(
                             }
                         }
                     }
-                    return Ok(unpaged_object_list(objects));
+                    return Ok(unpaged_object_list(with_agent_pg_sequence_objects(objects, &sequence_objects)));
                 }
                 Err(agent_error) => {
                     if object_types_only_custom_types(object_types) {
@@ -8825,6 +8865,19 @@ pub async fn list_sequences_core(
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
+        if db_config.as_ref().is_some_and(is_agent_pg_sequence_config) {
+            let pool_handle = state.pool_handle(&pool_key).await;
+            if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+                return agent_pg_sequences::list_sequences(
+                    client,
+                    database,
+                    schema,
+                    with_last_values,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await;
+            }
+        }
         let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
 
         match &pool {
@@ -9392,6 +9445,70 @@ fn is_opengauss_constraint_config(config: &ConnectionConfig) -> bool {
     config.db_type == DatabaseType::OpenGauss || config.driver_profile.as_deref() == Some("opengauss")
 }
 
+/// KingbaseES and Vastbase run through Agent pools but expose PostgreSQL's
+/// sequence catalogs, so their sequence metadata is queried over the agent
+/// connection (t8y2/dbx#9016). HighGo/UXDB stay on their existing paths.
+fn is_agent_pg_sequence_config(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::Kingbase | DatabaseType::Vastbase)
+}
+
+/// Sequences for agent-backed PostgreSQL-family engines, shaped like the
+/// relation listing the native PostgreSQL driver returns for `relkind = 'S'`.
+async fn agent_pg_sequence_objects(
+    client: Arc<db::agent_driver::PooledAgentClient>,
+    database: &str,
+    schema: &str,
+    timeout_duration: Option<Duration>,
+) -> Vec<db::ObjectInfo> {
+    match agent_pg_sequences::list_sequences(client, database, schema, false, timeout_duration).await {
+        Ok(sequences) => sequences
+            .into_iter()
+            .map(|sequence| db::ObjectInfo {
+                name: sequence.name,
+                object_type: "SEQUENCE".to_string(),
+                schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                valid: None,
+                signature: None,
+                custom_type_kind: None,
+                has_members: None,
+                comment: None,
+                created_at: None,
+                updated_at: None,
+                parent_schema: None,
+                parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
+            })
+            .collect(),
+        Err(error) => {
+            log::warn!(
+                "[schema][agent:list_objects:sequences-failed] database={} schema={} error={}",
+                database,
+                schema,
+                error
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn with_agent_pg_sequence_objects(
+    mut objects: Vec<db::ObjectInfo>,
+    sequences: &[db::ObjectInfo],
+) -> Vec<db::ObjectInfo> {
+    for sequence in sequences {
+        let already_listed = objects.iter().any(|object| {
+            object.name == sequence.name
+                && normalize_object_info_object_type(&object.object_type)
+                    == normalize_object_info_object_type(&sequence.object_type)
+        });
+        if !already_listed {
+            objects.push(sequence.clone());
+        }
+    }
+    objects
+}
+
 fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
         || matches!(config.driver_profile.as_deref(), Some("opengauss" | "gaussdb"))
@@ -9428,6 +9545,10 @@ fn object_types_include_relations(object_types: Option<&[String]>) -> bool {
             )
         })
     })
+}
+
+fn object_types_include_sequences(object_types: Option<&[String]>) -> bool {
+    object_types.is_none_or(|types| types.iter().any(|t| t.eq_ignore_ascii_case("SEQUENCE")))
 }
 
 fn object_types_include_routines(object_types: Option<&[String]>) -> bool {
@@ -10626,6 +10747,29 @@ async fn get_object_source_once(
                     agent_metadata_timeout(db_config.as_ref()),
                 )
                 .await?
+            } else if matches!(object_type, db::ObjectSourceKind::Sequence)
+                && db_config.as_ref().is_some_and(is_agent_pg_sequence_config)
+            {
+                match agent_pg_sequences::sequence_source(
+                    client.clone(),
+                    database,
+                    schema,
+                    name,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await?
+                {
+                    Some(source) => {
+                        return Ok(db::ObjectSource {
+                            name: name.to_string(),
+                            object_type,
+                            schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                            source,
+                            editable: None,
+                        });
+                    }
+                    None => String::new(),
+                }
             } else {
                 let mut client = client.lock().await;
                 let result: db::ObjectSource = client

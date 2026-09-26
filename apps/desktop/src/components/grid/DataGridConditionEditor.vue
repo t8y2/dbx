@@ -84,8 +84,18 @@ const highlightTokens = computed(() => tokenizeDataGridCondition(modelValue.valu
 const collapsedHighlightScrollLeft = ref(0);
 const expandedHighlightScrollLeft = ref(0);
 const expandedHighlightScrollTop = ref(0);
+// The highlight layer is a plain div and never gives up content width to a
+// scrollbar, while the transparent-text textarea above it does. Both wrap with
+// `white-space: pre-wrap` + `overflow-wrap: anywhere`, so an uncompensated
+// scrollbar makes the two layers break at different characters and the visible
+// text drifts away from the caret. Compensate with the measured width instead
+// of assuming one.
+const expandedHighlightScrollbarWidth = ref(0);
 const collapsedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translateX(${-collapsedHighlightScrollLeft.value}px)` }));
-const expandedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translate(${-expandedHighlightScrollLeft.value}px, ${-expandedHighlightScrollTop.value}px)` }));
+const expandedHighlightStyle = computed<CSSProperties>(() => ({
+  transform: `translate(${-expandedHighlightScrollLeft.value}px, ${-expandedHighlightScrollTop.value}px)`,
+  "--data-grid-condition-highlight-scrollbar": `${expandedHighlightScrollbarWidth.value}px`,
+}));
 
 function highlightTokenClass(type: DataGridConditionTokenType): string | undefined {
   if (type === "plain") return undefined;
@@ -177,6 +187,21 @@ function fitExpandedHeightToOverlay() {
   }
 }
 
+function syncExpandedHighlightScrollbar() {
+  const overlay = overlayRef.value;
+  if (!overlay) return;
+  const scrollbar = Math.max(0, overlay.offsetWidth - overlay.clientWidth);
+  if (scrollbar !== expandedHighlightScrollbarWidth.value) expandedHighlightScrollbarWidth.value = scrollbar;
+}
+
+function syncExpandedLayout() {
+  syncExpandedHighlightScrollbar();
+  // Re-fit once the compensation has been applied: the highlight layer now
+  // wraps exactly like the textarea, so the pane can size itself to the real
+  // content height instead of leaving a scrollbar that only the textarea sees.
+  void nextTick(fitExpandedHeightToOverlay);
+}
+
 function measureExpandedRect(input: HTMLTextAreaElement) {
   const inputRect = input.getBoundingClientRect();
   const control = controlRef.value;
@@ -238,7 +263,7 @@ function resizeEditor(forceExpand = false) {
       const nextRect = measureExpandedRect(input);
       expandedRect.value = nextRect;
       expandedHeight.value = measureExpandedHeight(input, nextRect);
-      void nextTick(fitExpandedHeightToOverlay);
+      void nextTick(syncExpandedLayout);
     }
     expanded.value = nextExpanded;
     updateSuggestionPosition();
@@ -923,7 +948,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   min-width: 0;
   height: auto;
   margin-right: calc(-1 * var(--data-grid-expanded-scrollbar-offset));
-  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem calc(var(--data-grid-condition-prefix-indent) + 0.125rem);
+  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem + var(--data-grid-condition-highlight-scrollbar, 0px)) 0.0625rem calc(var(--data-grid-condition-prefix-indent) + 0.125rem);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

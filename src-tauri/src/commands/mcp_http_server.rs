@@ -217,11 +217,22 @@ impl McpHttpServerState {
         let ip = settings.host.parse::<IpAddr>().map_err(|_| "MCP HTTP host must be an IP address".to_string())?;
         let bind_addr = SocketAddr::new(ip, settings.port);
         let allowed_hosts = if ip.is_loopback() {
-            vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()]
+            // IPv6 authorities must be bracketed when they are parsed as HTTP
+            // Host rules. The parser still normalizes the host to `::1` for
+            // request matching, so this accepts both loopback address forms.
+            vec!["localhost".to_string(), "127.0.0.1".to_string(), "[::1]".to_string()]
         } else {
             settings.allowed_hosts.clone()
         };
-        let auth = HttpAuth::new(token, settings.allowed_origins.clone(), ip.is_loopback())?;
+        // Validate the Host rules before replacing the current listener. This
+        // keeps invalid configuration errors on the save/start call instead
+        // of reporting success and failing later inside the server task.
+        let auth = HttpAuth::new_with_hosts(
+            Some(token),
+            allowed_hosts.clone(),
+            settings.allowed_origins.clone(),
+            ip.is_loopback(),
+        )?;
         Ok(HttpRuntimeConfig::new(bind_addr, settings.path.clone(), auth, allowed_hosts))
     }
 

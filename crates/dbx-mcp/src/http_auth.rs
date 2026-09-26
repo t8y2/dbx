@@ -319,5 +319,7 @@ mod tests {
         assert!(!auth.host_is_allowed(&uri, &headers));
         assert!(parse_host_rule("https://dbx.example.test").is_err());
         assert!(parse_host_rule("user@dbx.example.test:4224").is_err());
+        assert!(parse_host_rule("[::1]").is_ok());
+        assert!(parse_host_rule("::1").is_err());
     }
 }

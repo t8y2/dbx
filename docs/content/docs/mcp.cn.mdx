@@ -255,7 +255,7 @@ Desktop 可以选择直接托管 Streamable HTTP MCP 服务。该服务**默认�
 本机 MCP 客户端的接入步骤：
 
 1. 打开 **设置 → MCP → HTTP 服务**，开启 **Streamable HTTP 服务**。除非确实需要让其他设备访问，否则保持默认本机回环地址。
-2. 点击 **保存并启动服务**。修改地址、端口或路径后保存，会通过重启服务来应用新配置。
+2. 点击 **保存并应用**。该按钮会保存配置，并根据开关状态启动、重启或停止服务；修改地址、端口或路径时会自动重启服务。
 3. 将页面展示的服务地址和 Bearer Token 复制到 MCP 客户端。
 
 不同客户端的字段名称可能不同，但核心配置如下：
@@ -383,7 +383,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
   <Accordion title="npm 没有安装当前平台包">不要使用 `--no-optional`，重新安装 `@dbx-app/mcp-server`，并用 `node -p 'process.platform + "-" + process.arch'` 检查平台。Alpine Linux 默认使用 musl，目前不在 Linux 发布包支持范围内。</Accordion>
   <Accordion title="找不到 dbx.db">将 `DBX_DATA_DIR` 设置为包含 `dbx.db` 的目录。Windows 便携版通常是 `DBX.exe` 旁边的 `data` 目录。</Accordion>
   <Accordion title="提示 DBX 未运行">只有 `dbx_open_table` 和 `dbx_execute_and_show` 需要桌面端运行；本地查询工具可以在 DBX 关闭时执行。</Accordion>
-  <Accordion title="Desktop HTTP 客户端提示 ERR_CONNECTION_REFUSED">进入 **设置 → MCP → HTTP 服务**，确认服务已开启并点击 **保存并启动服务**。客户端应使用页面展示的地址、路径和当前 Bearer Token。默认的 `127.0.0.1` 只接受同一台电脑上的连接。</Accordion>
+  <Accordion title="Desktop HTTP 客户端提示 ERR_CONNECTION_REFUSED">进入 **设置 → MCP → HTTP 服务**，确认服务已开启并点击 **保存并应用**。客户端应使用页面展示的地址、路径和当前 Bearer Token。默认的 `127.0.0.1` 只接受同一台电脑上的连接。</Accordion>
   <Accordion title="Desktop 提示 HTTP 地址已被占用">已有其他进程监听了所选地址和端口。请在 **设置 → MCP → HTTP 服务** 中改用未被占用的端口，再保存配置以重启服务。不要让两个 DBX Desktop 实例使用相同 HTTP 端点。</Accordion>
   <Accordion title="请求返回 DATABASE_OUT_OF_SCOPE">该连接虽然已暴露给 MCP，但请求的数据库不在它的 MCP 数据库范围内。请在 **设置 → MCP** 中添加精确的数据库名称，或在合适时将该连接设为全部数据库。指定范围时，应先调用 `dbx_list_databases`，再使用返回的名称。</Accordion>
   <Accordion title="之前可见的工具现在被拒绝">该工具已不在 **设置 → MCP** 的选中范围内，或当前权限策略不允许它。修改工具 allowlist 后请刷新 MCP 客户端的工具列表；服务端同样会拒绝缓存的旧工具调用。</Accordion>

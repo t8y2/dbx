@@ -108,9 +108,13 @@ impl RuntimeConfig {
         }
 
         let token = http_token_from_environment()?;
-        let auth = HttpAuth::new(token, allowed_origins.clone(), is_loopback)?;
-        let allowed_hosts =
-            if is_loopback { vec!["localhost".into(), "127.0.0.1".into(), "::1".into()] } else { allowed_hosts };
+        let allowed_hosts = if is_loopback {
+            // HTTP Host authorities require brackets around IPv6 literals.
+            vec!["localhost".into(), "127.0.0.1".into(), "[::1]".into()]
+        } else {
+            allowed_hosts
+        };
+        let auth = HttpAuth::new_with_hosts(Some(token), allowed_hosts.clone(), allowed_origins.clone(), is_loopback)?;
 
         Ok(Self { transport, http: Some(HttpRuntimeConfig { bind_addr, path, auth, allowed_hosts }) })
     }

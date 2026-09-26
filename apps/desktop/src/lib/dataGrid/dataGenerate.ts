@@ -1195,9 +1195,35 @@ export interface ColumnAttrs {
   numericPrecision?: number | null;
   numericScale?: number | null;
   characterMaximumLength?: number | null;
+  /// True when a single-column unique constraint (primary key or unique index)
+  /// covers this column on the target table.
+  uniqueConstraint?: boolean;
 }
 
+/// Generators that already produce a distinct value per row, so an extra
+/// uniqueness check would only burn attempts without changing the result.
+const INHERENTLY_UNIQUE_GENERATORS = new Set(["sequence", "uuid"]);
+
+/**
+ * Resolve the default parameters for one column.
+ *
+ * Columns covered by a single-column unique constraint (PRIMARY KEY or UNIQUE
+ * index) must not receive duplicated values: a multi-row INSERT that repeats a
+ * value is rejected by the server, so the whole batch is lost behind an opaque
+ * "Statement N failed" error (#5958). Turn the per-column uniqueness
+ * bookkeeping on by default for those columns; users can still clear the
+ * "唯一" checkbox when they want raw random values.
+ *
+ * `sequence` / `uuid` already emit a distinct value per row, so the extra
+ * bookkeeping stays off for them.
+ */
 export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, generatorKey: string): GeneratorParams {
+  const params = buildDefaultGeneratorParams(_columnName, attrs, generatorKey);
+  if (attrs.uniqueConstraint && !INHERENTLY_UNIQUE_GENERATORS.has(generatorKey)) params.unique = true;
+  return params;
+}
+
+function buildDefaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, generatorKey: string): GeneratorParams {
   const params: GeneratorParams = {};
   const type = attrs.dataType.toLowerCase();
   const precision = attrs.numericPrecision ?? null;
@@ -1914,6 +1940,14 @@ export function generateTableRowsChunk(config: TableGenerateConfig, state: Table
         let found = false;
         for (let attempt = 0; attempt < MAX_UNIQUE_GENERATION_ATTEMPTS; attempt++) {
           value = generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault);
+          // Neither NULLs nor raw SQL expressions can be deduplicated on the
+          // client: every engine we support accepts repeated NULLs in a unique
+          // index, and an expression is evaluated per row by the server, so two
+          // identical expression strings are not necessarily equal values.
+          if (value === null || isGeneratedSqlExpression(value)) {
+            found = true;
+            break;
+          }
           const identity = generatedValueIdentity(value);
           if (!seen.has(identity)) {
             seen.add(identity);

@@ -20,6 +20,7 @@ import {
 } from "@/lib/dataGrid/dataGenerate";
 import { errorMessage, isQueryCanceledError, summarizeBatchResults } from "@/lib/dataGrid/generateInsertAccounting";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { uniqueConstraintColumns } from "@/lib/table/uniqueConstraintColumns";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -162,6 +163,7 @@ async function loadSchemas() {
           const prefillTableInfo = tables.find((table) => table.name === props.prefillTable);
           if (prefillTableInfo) {
             const cols = await api.getColumns(cid, db, targetSchema, props.prefillTable);
+            const uniqueColumns = await singleColumnUniqueConstraints(cid, db, targetSchema, props.prefillTable);
             const key = tableKey(targetSchema, props.prefillTable);
             configs[key] = {
               tableName: props.prefillTable,
@@ -186,6 +188,7 @@ async function loadSchemas() {
                       numericPrecision: c.numeric_precision,
                       numericScale: c.numeric_scale,
                       characterMaximumLength: c.character_maximum_length,
+                      uniqueConstraint: uniqueColumns.has(c.name),
                     },
                     gKey,
                   ),
@@ -213,6 +216,21 @@ async function loadSchemas() {
     // silently fail
   } finally {
     loading.value = false;
+  }
+}
+
+/**
+ * Columns covered by a single-column unique constraint (PRIMARY KEY or UNIQUE
+ * index). The generator switches per-column uniqueness on for them so an
+ * INSERT batch never repeats a value the server will reject (#5958).
+ */
+async function singleColumnUniqueConstraints(cid: string, db: string, schema: string, table: string): Promise<Set<string>> {
+  try {
+    return uniqueConstraintColumns(await api.listIndexes(cid, db, schema, table));
+  } catch {
+    // Index metadata is a best-effort hint: without it the generator keeps the
+    // previous behaviour instead of failing to open the dialog.
+    return new Set<string>();
   }
 }
 
@@ -261,6 +279,7 @@ async function loadColumns(schema: string, table: string) {
   if (configs[key]) return configs[key];
   if (!props.prefillConnectionId || !props.prefillDatabase) return null;
   const cols = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, schema, table);
+  const uniqueColumns = await singleColumnUniqueConstraints(props.prefillConnectionId, props.prefillDatabase, schema, table);
   const cfg: TableGenerateConfig = {
     tableName: table,
     tableType: tableInfo(schema, table)?.table_type,
@@ -284,6 +303,7 @@ async function loadColumns(schema: string, table: string) {
             numericPrecision: c.numeric_precision,
             numericScale: c.numeric_scale,
             characterMaximumLength: c.character_maximum_length,
+            uniqueConstraint: uniqueColumns.has(c.name),
           },
           gKey,
         ),

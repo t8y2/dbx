@@ -5901,22 +5901,47 @@ impl Storage {
         .await
     }
 
+    /// Insert or update exactly the given connections and leave every other saved
+    /// connection untouched.
+    ///
+    /// Multi-client deployments (the Web/Docker build serves several people from
+    /// one storage) must not replace the whole table: a client that saves a list
+    /// it loaded earlier would otherwise silently delete connections another
+    /// client created in the meantime. Removing a connection therefore has to go
+    /// through [`Storage::delete_connections`] with explicit ids.
     pub async fn save_connections(&self, configs: &[ConnectionConfig]) -> Result<(), String> {
         let configs = configs.to_vec();
         let needs_key = configs.iter().any(connection_config_has_inline_secrets);
         let codec = self.secret_codec_for_write(needs_key).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
-            let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
-            let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
-
             for config in &configs {
+                // `persist_connection_in_tx` uses a plain INSERT, so an update of
+                // an already saved connection has to drop the old row first.
+                tx.execute("DELETE FROM connections WHERE id = ?1", [&config.id]).map_err(|e| e.to_string())?;
                 persist_connection_in_tx(&tx, &codec, config)?;
             }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
 
-            retained_ids.extend(configs.iter().map(|config| config.id.clone()));
-            delete_unreferenced_connection_secrets_in_tx(&tx, &retained_ids)?;
-
+    /// Delete the given saved connections together with their stored secrets.
+    ///
+    /// This is the only removal path for saved connections; ids that no longer
+    /// exist are ignored so a stale client cannot fail the save.
+    pub async fn delete_connections(&self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ids = ids.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            for id in &ids {
+                tx.execute("DELETE FROM connections WHERE id = ?1", [id]).map_err(|e| e.to_string())?;
+                tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [id])
+                    .map_err(|e| e.to_string())?;
+            }
             tx.commit().map_err(|e| e.to_string())
         })
         .await

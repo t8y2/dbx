@@ -173,7 +173,9 @@ pub async fn load_mcp_global_policy(state: State<'_, Arc<AppState>>) -> Result<M
 
 #[tauri::command]
 pub async fn save_mcp_global_policy(state: State<'_, Arc<AppState>>, policy: McpGlobalPolicy) -> Result<(), String> {
-    state.storage.save_mcp_global_policy(&policy).await
+    state.storage.save_mcp_global_policy(&policy).await?;
+    super::mcp_bridge::clear_mcp_sql_approvals();
+    Ok(())
 }
 
 #[tauri::command]

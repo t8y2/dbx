@@ -421,6 +421,10 @@ pub struct McpGlobalPolicy {
     pub read_only: bool,
     #[serde(default)]
     pub allow_dangerous_sql: bool,
+    /// Ask the desktop user before high-risk SQL when the effective mode is safe-write.
+    /// This never relaxes read-only, connection, database-scope or production protections.
+    #[serde(default)]
+    pub prompt_high_risk_sql: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
     /// Stable sidebar group ids whose current descendant connections are
     /// exposed when an explicit connection scope is configured.
@@ -596,6 +600,8 @@ pub struct McpGlobalPolicyState {
     pub configured: bool,
     pub read_only: bool,
     pub allow_dangerous_sql: bool,
+    #[serde(default)]
+    pub prompt_high_risk_sql: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
     #[serde(default)]
     pub allowed_group_ids: Vec<String>,
@@ -614,6 +620,7 @@ impl McpGlobalPolicyState {
         McpGlobalPolicy {
             read_only: self.read_only,
             allow_dangerous_sql: self.allow_dangerous_sql,
+            prompt_high_risk_sql: self.prompt_high_risk_sql,
             allowed_connection_ids: self.allowed_connection_ids.clone(),
             allowed_group_ids: self.allowed_group_ids.clone(),
             allowed_tool_names: self.allowed_tool_names.clone(),
@@ -755,6 +762,7 @@ impl McpGlobalPolicy {
         Self {
             read_only: self.read_only,
             allow_dangerous_sql: !self.read_only && self.allow_dangerous_sql,
+            prompt_high_risk_sql: !self.read_only && self.prompt_high_risk_sql,
             allowed_connection_ids,
             allowed_group_ids,
             allowed_tool_names,
@@ -4159,6 +4167,7 @@ impl Storage {
                         configured: false,
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
+                        prompt_high_risk_sql: policy.prompt_high_risk_sql,
                         allowed_connection_ids: policy.allowed_connection_ids,
                         allowed_group_ids: policy.allowed_group_ids,
                         allowed_tool_names: policy.allowed_tool_names,
@@ -4175,6 +4184,7 @@ impl Storage {
                         configured: false,
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
+                        prompt_high_risk_sql: policy.prompt_high_risk_sql,
                         allowed_connection_ids: policy.allowed_connection_ids,
                         allowed_group_ids: policy.allowed_group_ids,
                         allowed_tool_names: policy.allowed_tool_names,
@@ -4190,6 +4200,7 @@ impl Storage {
                     configured: true,
                     read_only: policy.read_only,
                     allow_dangerous_sql: policy.allow_dangerous_sql,
+                    prompt_high_risk_sql: policy.prompt_high_risk_sql,
                     allowed_connection_ids: policy.allowed_connection_ids,
                     allowed_group_ids: policy.allowed_group_ids,
                     allowed_tool_names: policy.allowed_tool_names,
@@ -10852,6 +10863,7 @@ mod tests {
                 configured: false,
                 read_only: false,
                 allow_dangerous_sql: false,
+                prompt_high_risk_sql: false,
                 allowed_connection_ids: None,
                 allowed_group_ids: Vec::new(),
                 allowed_tool_names: None,
@@ -10879,6 +10891,7 @@ mod tests {
                 configured: true,
                 read_only: true,
                 allow_dangerous_sql: false,
+                prompt_high_risk_sql: false,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
                 allowed_group_ids: Vec::new(),
                 allowed_tool_names: None,
@@ -10897,6 +10910,15 @@ mod tests {
 
         storage.save_desktop_settings(&DesktopSettings::default()).await.unwrap();
         assert!(storage.load_mcp_global_policy().await.unwrap().read_only);
+    }
+
+    #[test]
+    fn legacy_mcp_policy_does_not_enable_high_risk_prompts() {
+        let policy: McpGlobalPolicy =
+            serde_json::from_str(r#"{"readOnly":false,"allowDangerousSql":false,"allowedConnectionIds":null}"#)
+                .unwrap();
+        assert!(!policy.prompt_high_risk_sql);
+        assert!(!policy.normalized().prompt_high_risk_sql);
     }
 
     #[tokio::test]

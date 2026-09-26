@@ -576,6 +576,60 @@ impl McpScope {
 }
 
 impl DbxMcpServer {
+    /// A desktop confirmation can lift only the high-risk SQL tier for one
+    /// already-scoped operation. All other policy checks run before the prompt.
+    async fn approved_sql_policy(
+        &self,
+        connection: &ConnectionConfig,
+        policy: &McpGlobalPolicy,
+        database: &str,
+        sql: &str,
+        allow_database_switch: bool,
+        bridge_execution: bool,
+    ) -> Result<(McpGlobalPolicy, Option<String>), CallToolResult> {
+        let high_risk = classify_sql_risk_for_database(sql, connection.db_type).is_ok_and(|risk| risk == SqlRisk::Ddl)
+            || is_dangerous_sql_for_database(sql, connection.db_type);
+        if policy.allow_dangerous_sql || !policy.prompt_high_risk_sql || !high_risk {
+            return Ok((policy.clone(), None));
+        }
+        let mut approved = policy.clone();
+        approved.allow_dangerous_sql = true;
+        validate_sql_policy(connection, &approved, database, sql, allow_database_switch)?;
+        let token = self
+            .backend
+            .approve_high_risk_sql(&connection.id, database, sql)
+            .await
+            .map_err(|error| tool_error("SQL_BLOCKED", error))?;
+        // A user may change the scope, connection, or permissions while the dialog
+        // is open. The approval is valid only for the original target and SQL.
+        let refreshed = self
+            .resolve_connection(&ConnectionSelector {
+                connection_id: Some(connection.id.clone()),
+                connection_name: None,
+            })
+            .await?;
+        if refreshed.connection != *connection {
+            return Err(tool_error("SQL_BLOCKED", "Connection changed while awaiting approval."));
+        }
+        self.resolve_database(Some(database.to_string()), &refreshed)?;
+        ensure_sql_database_scope(&refreshed.database_scope, connection, database, sql)?;
+        ensure_sql_database_execution_scope(&refreshed.policy, connection, database, sql)?;
+        let mut current =
+            effective_policy_for_database_with_groups(&refreshed.policy, &refreshed.group_ids, connection, database);
+        if !current.prompt_high_risk_sql || current.read_only {
+            return Err(tool_error("SQL_BLOCKED", "High-risk SQL approval was revoked."));
+        }
+        current.allow_dangerous_sql = true;
+        validate_sql_policy(connection, &current, database, sql, allow_database_switch)?;
+        if !bridge_execution {
+            self.backend
+                .consume_high_risk_sql_approval(&token, &connection.id, database, sql)
+                .await
+                .map_err(|error| tool_error("SQL_BLOCKED", error))?;
+        }
+        Ok((current, Some(token)))
+    }
+
     pub fn new(backend: Arc<dyn DbxBackend>) -> Self {
         Self::with_runtime_options(backend, McpScope::from_env(), std::env::var_os("DBX_WEB_URL").is_some())
     }
@@ -1054,6 +1108,13 @@ impl DbxMcpServer {
                 return error;
             }
         }
+        let (policy, approval_token) = match self
+            .approved_sql_policy(connection, &policy, &database, &request.sql, allow_database_switch, false)
+            .await
+        {
+            Ok(approval) => approval,
+            Err(error) => return error,
+        };
         let permissions = match validate_sql_policy(connection, &policy, &database, &request.sql, allow_database_switch)
         {
             Ok(permissions) => permissions,
@@ -1114,12 +1175,15 @@ impl DbxMcpServer {
             ) {
                 return error;
             }
-            let refreshed_policy = effective_policy_for_database_with_groups(
+            let mut refreshed_policy = effective_policy_for_database_with_groups(
                 &refreshed.policy,
                 &refreshed.group_ids,
                 &refreshed.connection,
                 &session.database,
             );
+            if approval_token.is_some() && refreshed_policy.prompt_high_risk_sql && !refreshed_policy.read_only {
+                refreshed_policy.allow_dangerous_sql = true;
+            }
             let refreshed_permissions = match validate_sql_policy(
                 &refreshed.connection,
                 &refreshed_policy,
@@ -1356,6 +1420,11 @@ impl DbxMcpServer {
         // Classify the whole script as a unit so a single write/DDL statement in
         // the batch fails closed under read-only / dangerous-SQL / production
         // policy, exactly as the Web /api/query/execute-multi route does.
+        let (policy, approval_token) =
+            match self.approved_sql_policy(connection, &policy, &database, sql, allow_database_switch, false).await {
+                Ok(approval) => approval,
+                Err(error) => return error,
+            };
         let permissions = match validate_sql_policy(connection, &policy, &database, sql, allow_database_switch) {
             Ok(permissions) => permissions,
             Err(error) => return error,
@@ -1414,12 +1483,15 @@ impl DbxMcpServer {
             {
                 return error;
             }
-            let refreshed_policy = effective_policy_for_database_with_groups(
+            let mut refreshed_policy = effective_policy_for_database_with_groups(
                 &refreshed.policy,
                 &refreshed.group_ids,
                 &refreshed.connection,
                 &session.database,
             );
+            if approval_token.is_some() && refreshed_policy.prompt_high_risk_sql && !refreshed_policy.read_only {
+                refreshed_policy.allow_dangerous_sql = true;
+            }
             let refreshed_permissions =
                 match validate_sql_policy(&refreshed.connection, &refreshed_policy, &session.database, sql, false) {
                     Ok(permissions) => permissions,
@@ -2354,6 +2426,14 @@ impl DbxMcpServer {
                 return error;
             }
         }
+        let (policy, approval_token) = if connection.db_type == DatabaseType::MongoDb {
+            (policy, None)
+        } else {
+            match self.approved_sql_policy(connection, &policy, &database, &request.sql, false, true).await {
+                Ok(approval) => approval,
+                Err(error) => return error,
+            }
+        };
         let permissions = if connection.db_type == DatabaseType::MongoDb {
             mcp_permissions(connection, &policy)
         } else {
@@ -2383,6 +2463,7 @@ impl DbxMcpServer {
                     "connection_name": connection.name,
                     "sql": request.sql,
                     "database": database,
+                    "approval_token": approval_token,
                     "allow_writes": permissions.allow_writes,
                     "allow_dangerous": permissions.allow_dangerous,
                 }),
@@ -4364,6 +4445,9 @@ mod tests {
         transaction_open_error: Option<String>,
         policy_override: std::sync::Mutex<Option<McpGlobalPolicy>>,
         salesforce_identity: Option<SalesforceCurrentUser>,
+        approved_sql: std::sync::Mutex<Vec<String>>,
+        consumed_sql: std::sync::Mutex<Vec<String>>,
+        revoke_on_approval: bool,
     }
 
     impl Default for FakeBackend {
@@ -4386,6 +4470,9 @@ mod tests {
                 transaction_open_error: None,
                 policy_override: std::sync::Mutex::new(None),
                 salesforce_identity: None,
+                approved_sql: std::sync::Mutex::new(Vec::new()),
+                consumed_sql: std::sync::Mutex::new(Vec::new()),
+                revoke_on_approval: false,
             }
         }
     }
@@ -4403,6 +4490,86 @@ mod tests {
             "ssl": false
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn high_risk_sql_approval_is_bound_to_one_execution_and_rechecked() {
+        let sql = "CREATE TABLE approved_test (id INT)";
+        let policy = McpGlobalPolicy { prompt_high_risk_sql: true, ..Default::default() };
+        let conn = connection("mysql", "MySQL", "mysql", "app");
+        let backend =
+            Arc::new(FakeBackend { connections: vec![conn.clone()], policy: policy.clone(), ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let (approved, token) = server.approved_sql_policy(&conn, &policy, "app", sql, false, false).await.unwrap();
+        assert!(approved.allow_dangerous_sql);
+        assert_eq!(token.as_deref(), Some("test-approval-token"));
+        assert_eq!(backend.consumed_sql.lock().unwrap().as_slice(), [sql]);
+
+        let replay = server.approved_sql_policy(&conn, &policy, "app", sql, false, false).await.unwrap_err();
+        assert!(result_text(&replay).contains("replayed"));
+
+        let revoked = Arc::new(FakeBackend {
+            connections: vec![conn.clone()],
+            policy: policy.clone(),
+            revoke_on_approval: true,
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(revoked.clone(), McpScope::default(), false);
+        let error = server.approved_sql_policy(&conn, &policy, "app", sql, false, false).await.unwrap_err();
+        assert!(result_text(&error).contains("revoked"));
+        assert!(revoked.consumed_sql.lock().unwrap().is_empty());
+
+        let read_only = McpGlobalPolicy { read_only: true, ..policy.clone() };
+        let error = server.approved_sql_policy(&conn, &read_only, "app", sql, false, false).await.unwrap_err();
+        assert!(result_text(&error).contains("MCP_READ_ONLY"));
+
+        let mut production = conn.clone();
+        production.is_production = true;
+        let error = server.approved_sql_policy(&production, &policy, "app", sql, false, false).await.unwrap_err();
+        assert!(result_text(&error).contains("PRODUCTION_WRITE_BLOCKED"));
+    }
+
+    #[tokio::test]
+    async fn high_risk_sql_tools_require_and_consume_desktop_approval() {
+        let query_sql = "CREATE TABLE approved_query (id INT)";
+        let batch_sql = "CREATE TABLE approved_batch (id INT); INSERT INTO approved_batch VALUES (1)";
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "MySQL", "mysql", "app")],
+            policy: McpGlobalPolicy { prompt_high_risk_sql: true, ..Default::default() },
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let query = || ExecuteQueryRequest {
+            selector: selector("mysql"),
+            database: None,
+            sql: query_sql.to_string(),
+            session_id: None,
+            cell_char_offset: None,
+            cell_char_limit: None,
+            max_rows: None,
+        };
+
+        assert_eq!(result_text(&server.execute_query(Parameters(query())).await), "ok");
+        let replay = server.execute_query(Parameters(query())).await;
+        assert!(result_text(&replay).contains("replayed"));
+
+        let batch = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("mysql"),
+                cell_window: CellWindowArgs::default(),
+                database: None,
+                sql: batch_sql.to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: None,
+            }))
+            .await;
+        assert!(!batch.is_error.unwrap_or(false), "{}", result_text(&batch));
+        assert_eq!(backend.approved_sql.lock().unwrap().as_slice(), [query_sql, query_sql, batch_sql]);
+        assert_eq!(backend.consumed_sql.lock().unwrap().as_slice(), [query_sql, batch_sql]);
+        let recorded = backend.recorded_arguments.lock().unwrap();
+        assert_eq!(recorded.iter().filter(|(name, _)| name == "execute_query").count(), 1);
+        assert_eq!(recorded.iter().filter(|(name, _)| name == "execute_batch").count(), 1);
     }
 
     fn resolved_connection_for_test(connection: ConnectionConfig) -> ResolvedConnection {
@@ -4428,6 +4595,34 @@ mod tests {
 
     #[async_trait]
     impl DbxBackend for FakeBackend {
+        async fn approve_high_risk_sql(
+            &self,
+            _connection_id: &str,
+            _database: &str,
+            sql: &str,
+        ) -> Result<String, String> {
+            self.approved_sql.lock().unwrap().push(sql.to_string());
+            if self.revoke_on_approval {
+                *self.policy_override.lock().unwrap() =
+                    Some(McpGlobalPolicy { read_only: true, ..self.policy.clone() });
+            }
+            Ok("test-approval-token".to_string())
+        }
+
+        async fn consume_high_risk_sql_approval(
+            &self,
+            token: &str,
+            _connection_id: &str,
+            _database: &str,
+            sql: &str,
+        ) -> Result<(), String> {
+            if token != "test-approval-token" || self.consumed_sql.lock().unwrap().contains(&sql.to_string()) {
+                return Err("SQL_BLOCKED: Invalid or replayed approval".to_string());
+            }
+            self.consumed_sql.lock().unwrap().push(sql.to_string());
+            Ok(())
+        }
+
         async fn save_history_entry(&self, entry: &dbx_core::history::HistoryEntry) -> Result<(), String> {
             self.history.lock().unwrap().push(entry.clone());
             Ok(())

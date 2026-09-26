@@ -3476,6 +3476,7 @@ async function saveMcpPolicy(
   partial: {
     readOnly?: boolean;
     allowDangerousSql?: boolean;
+    promptHighRiskSql?: boolean;
     allowedConnectionIds?: string[] | null;
     allowedGroupIds?: string[];
     allowedToolNames?: string[] | null;
@@ -3516,7 +3517,7 @@ function onMcpExecutionModeChange(mode: McpExecutionMode) {
   if (mode === "high_risk_write" && !window.confirm(t("settings.mcpExecutionModeHighRiskConfirm"))) {
     return;
   }
-  void saveMcpPolicy(mcpPolicyFieldsForExecutionMode(mode));
+  void saveMcpPolicy({ ...mcpPolicyFieldsForExecutionMode(mode), promptHighRiskSql: mode === "safe_write" && settingsStore.mcpGlobalPolicy.promptHighRiskSql });
 }
 
 function onMcpExecutionModeKeydown(event: KeyboardEvent, mode: McpExecutionMode) {
@@ -10166,6 +10167,10 @@ LIMIT 100;</pre
                             </Button>
                           </div>
                           <p class="text-[11px] text-muted-foreground">{{ t("settings.mcpPermissionGlobalDefaultHint") }}</p>
+                          <label class="flex items-center gap-2 text-xs">
+                            <input type="checkbox" :checked="settingsStore.mcpGlobalPolicy.promptHighRiskSql" :disabled="mcpPolicyControlsDisabled || mcpExecutionMode !== 'safe_write'" @change="void saveMcpPolicy({ promptHighRiskSql: ($event.target as HTMLInputElement).checked })" />
+                            {{ t("settings.mcpPromptHighRiskSql") }}
+                          </label>
                           <div class="space-y-2 border-t border-border/60 pt-3">
                             <div>
                               <p class="text-xs font-medium">{{ t("settings.mcpCapabilityTitle") }}</p>

@@ -617,6 +617,7 @@ describe("normalizeMcpGlobalPolicy", () => {
     expect(normalizeMcpGlobalPolicy(undefined)).toEqual({
       readOnly: false,
       allowDangerousSql: false,
+      promptHighRiskSql: false,
       allowedConnectionIds: null,
       allowedGroupIds: [],
       allowedToolNames: null,
@@ -638,6 +639,7 @@ describe("normalizeMcpGlobalPolicy", () => {
     ).toEqual({
       readOnly: true,
       allowDangerousSql: true,
+      promptHighRiskSql: false,
       allowedConnectionIds: ["connection-1", "connection-2"],
       allowedGroupIds: [],
       allowedToolNames: null,
@@ -650,6 +652,11 @@ describe("normalizeMcpGlobalPolicy", () => {
 
   it("preserves an empty allowlist as deny all", () => {
     expect(normalizeMcpGlobalPolicy({ allowedConnectionIds: [] }).allowedConnectionIds).toEqual([]);
+  });
+
+  it("enables high-risk SQL prompts only when explicitly configured", () => {
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true }).promptHighRiskSql).toBe(true);
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: "true" } as any).promptHighRiskSql).toBe(false);
   });
 
   it("keeps only selected-database execution policies and normalizes their names", () => {
@@ -1018,6 +1025,7 @@ describe("settingsStore MCP policy persistence", () => {
     const previous = {
       readOnly: true,
       allowDangerousSql: false,
+      promptHighRiskSql: false,
       allowedConnectionIds: ["connection-1"],
       allowedGroupIds: [],
       allowedToolNames: null,
@@ -1035,6 +1043,7 @@ describe("settingsStore MCP policy persistence", () => {
     expect(store.mcpGlobalPolicy).toEqual({
       readOnly: false,
       allowDangerousSql: false,
+      promptHighRiskSql: false,
       allowedConnectionIds: [],
       allowedGroupIds: [],
       allowedToolNames: null,

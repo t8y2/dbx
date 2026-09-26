@@ -26,6 +26,7 @@ vi.mock("@/stores/connectionStore", () => ({
     getConfig: (id: string) => {
       if (id === "connection-1") return { id, name: "SQLite", db_type: "sqlite" };
       if (id === "postgres-1") return { id, name: "PostgreSQL", db_type: "postgres" };
+      if (id === "sqlserver-1") return { id, name: "SQL Server", db_type: "sqlserver" };
       return undefined;
     },
     ensureConnected: mocks.ensureConnected,
@@ -158,6 +159,21 @@ import TableImportDialog from "@/components/import/TableImportDialog.vue";
 const mountedApps: App[] = [];
 const sheets = ["First", "Second", "Third"];
 
+function delimitedPreview(): TableImportPreview {
+  return {
+    fileName: "rows.csv",
+    filePath: "/tmp/rows.csv",
+    sourceRef: "delimited-source",
+    fileType: "csv",
+    sizeBytes: 10,
+    columns: ["id", "name"],
+    rows: [[1, "a"]],
+    totalRows: 2,
+    totalRowsExact: true,
+    sourceFingerprint: "rows-csv",
+  };
+}
+
 function workbookPreview(sheetName: string): TableImportPreview {
   const index = sheets.indexOf(sheetName);
   return {
@@ -182,10 +198,10 @@ async function flushAsyncUpdates() {
   }
 }
 
-async function mountDialog(files = [new File(["workbook"], "rows.xlsx")]) {
+async function mountDialog(files = [new File(["workbook"], "rows.xlsx")], connectionId = "connection-1") {
   const container = document.createElement("div");
   document.body.append(container);
-  const app = createApp(defineComponent({ setup: () => () => h(TableImportDialog, { open: true, prefillConnectionId: "connection-1", prefillDatabase: "main" }) }));
+  const app = createApp(defineComponent({ setup: () => () => h(TableImportDialog, { open: true, prefillConnectionId: connectionId, prefillDatabase: "main" }) }));
   mountedApps.push(app);
   app.use(i18n);
   app.mount(container);
@@ -254,6 +270,22 @@ afterEach(() => {
 });
 
 describe("TableImportDialog batch selection", () => {
+  it("hides the skip-duplicates option for dialects without conflict handling", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name\n1,a"], "rows.csv")], "sqlserver-1");
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("Trim values");
+    expect(document.body.textContent).not.toContain("Skip duplicate rows");
+  });
+
+  it("offers the skip-duplicates option for dialects with conflict handling", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name\n1,a"], "rows.csv")]);
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("Trim values");
+    expect(document.body.textContent).toContain("Skip duplicate rows");
+  });
+
   it("keeps every worksheet selected by default and imports them in workbook order", async () => {
     await mountDialog();
     for (const name of ["rows_First", "rows_Second", "rows_Third"]) expect(taskCheckbox(name).checked).toBe(true);

@@ -32,7 +32,7 @@ import {
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import type { ColumnInfo } from "@/types/database";
+import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
@@ -155,6 +155,10 @@ const wizardSteps: Array<{ value: TableImportWizardStep; labelKey: string }> = [
 
 const selectedConnection = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined));
 const structureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(selectedConnection.value));
+// Mirrors the dialect list in skip-generator dispatch (transfer.rs): only these
+// engines turn the skip-duplicates option into conflict-handling INSERTs.
+const SKIP_DUPLICATE_ROWS_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "kingbase", "opengauss", "sqlite", "cloudflare-d1", "duckdb", "mysql", "doris", "starrocks"]);
+const supportsSkipDuplicateRows = computed(() => structureDatabaseType.value !== undefined && SKIP_DUPLICATE_ROWS_DATABASE_TYPES.has(structureDatabaseType.value));
 const targetSchema = computed(() => metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema));
 const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(structureDatabaseType.value), Object.values(columnDataTypes.value)));
 const hasExistingTarget = computed(() => !!props.prefillTable || loadingExistingTables.value || existingTableNames.value.length > 0);
@@ -848,7 +852,7 @@ async function startImport() {
         mode: targetMode.value === "create" ? "append" : importMode.value,
         createTable: targetMode.value === "create",
         batchSize: Math.max(1, Number(batchSize.value) || 500),
-        skipDuplicateRows: skipDuplicateRows.value,
+        skipDuplicateRows: supportsSkipDuplicateRows.value && skipDuplicateRows.value,
         dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
         preparedSource: preparedImportSource(currentPreview),
       },
@@ -936,7 +940,7 @@ async function startBatchImport() {
           mode: "append",
           createTable: true,
           batchSize: Math.max(1, Number(batchSize.value) || 500),
-          skipDuplicateRows: skipDuplicateRows.value,
+          skipDuplicateRows: supportsSkipDuplicateRows.value && skipDuplicateRows.value,
           dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
           preparedSource: preparedImportSource(task.preview),
           retainSource: true,
@@ -1315,7 +1319,7 @@ watch(rawProgressPercent, (percent) => {
               <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
               {{ t("tableImport.emptyStringAsNull") }}
             </label>
-            <label class="flex items-center gap-2 text-xs">
+            <label v-if="supportsSkipDuplicateRows" class="flex items-center gap-2 text-xs">
               <input v-model="skipDuplicateRows" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
               {{ t("tableImport.skipDuplicateRows") }}
             </label>

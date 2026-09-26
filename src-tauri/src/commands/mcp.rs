@@ -177,14 +177,20 @@ impl NodeRuntime {
 
     fn install_or_update(&self) -> Result<CommandOutput, String> {
         match self.mcp_installation.as_ref().map(|installation| &installation.package_manager) {
+            // `pnpm update -g <pkg>` only moves inside the range recorded in the
+            // global manifest, while `pnpm add -g <pkg>@<version>` records an exact
+            // version there (`"1.3.0"` / `"0.4.98"`, checked with pnpm 11.22). For
+            // those installs every "update" re-resolved the pinned version, so the
+            // update badge never went away (#9687). Pin `@latest` here exactly like
+            // the npm and bun paths do.
             Some(McpPackageManager::Pnpm { command_path, pnpm_home, global_dir }) => {
                 let global_dir = global_dir.as_os_str().to_os_string();
                 run_package_manager_command(
                     command_path,
                     &[
-                        OsString::from("update"),
+                        OsString::from("add"),
                         OsString::from("-g"),
-                        OsString::from(MCP_PACKAGE_NAME),
+                        OsString::from("@dbx-app/mcp-server@latest"),
                         OsString::from("--global-dir"),
                         global_dir,
                     ],
@@ -2750,7 +2756,9 @@ mod tests {
         let update_output = probed.install_or_update().unwrap();
         assert!(update_output.success);
         let pnpm_log = std::fs::read_to_string(&pnpm_log_path).unwrap();
-        assert!(pnpm_log.contains("ARGS=update -g @dbx-app/mcp-server --global-dir"));
+        // `add ...@latest` (not `update -g`) so an exact pin in the pnpm global
+        // manifest cannot keep re-installing the version that is already there.
+        assert!(pnpm_log.contains("ARGS=add -g @dbx-app/mcp-server@latest --global-dir"));
         assert!(pnpm_log.contains(global_dir.to_string_lossy().as_ref()));
         assert!(!pnpm_log.contains("--registry"));
         assert!(pnpm_log.contains(&format!("PNPM_HOME={}", pnpm_home.display())));

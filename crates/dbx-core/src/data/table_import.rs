@@ -2382,6 +2382,14 @@ pub fn xlsx_cell_label(cell: &Data) -> String {
     xlsx_cell_label_with_temporal_kind(cell, None)
 }
 
+fn xlsx_cell_is_empty(cell: &Data) -> bool {
+    matches!(cell, Data::Empty)
+}
+
+fn xlsx_cell_ref_is_empty(cell: &DataRef<'_>) -> bool {
+    matches!(cell, DataRef::Empty)
+}
+
 fn xlsx_cell_ref_value_with_temporal_kind(
     cell: &DataRef<'_>,
     temporal_kind: Option<XlsxTemporalKind>,
@@ -2727,6 +2735,20 @@ struct XlsxPreviewRawCell {
     inline_value: String,
     has_value: bool,
     has_inline_value: bool,
+}
+
+impl XlsxPreviewRawCell {
+    /// Whether the worksheet recorded a value for this cell.
+    ///
+    /// Excel and LibreOffice write style-only cells (`<c r="A3" s="4"/>`, no
+    /// `<v>`/`<is>` child) for rows a user inserted and left blank. Such a row
+    /// carries no data and must not be imported as an all-NULL row (#8604),
+    /// while any cell with a value element keeps the row - including explicit
+    /// empty strings (`<is><t></t></is>`), matching the `.xls` parser and dbx's
+    /// own empty-string options.
+    fn has_content(&self) -> bool {
+        self.has_inline_value || self.has_value
+    }
 }
 
 fn xlsx_dimension_bounds(reference: &str) -> Option<((usize, usize), (usize, usize))> {
@@ -3256,7 +3278,12 @@ fn parse_xlsx_preview_file_with_options(
     if last_preview_row < first_preview_row {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
+    // Rows made of style-only cells (blank rows inserted by a spreadsheet app) carry no
+    // data and are skipped here as well so the preview matches what the import writes (#8604).
+    let rows_with_content =
+        raw_cells.iter().filter(|(_, cell)| cell.has_content()).map(|((row, _), _)| *row).collect::<HashSet<_>>();
     let rows = (first_preview_row..=last_preview_row)
+        .filter(|absolute_row| rows_with_content.contains(absolute_row))
         .map(|absolute_row| {
             (0..columns.len())
                 .map(|index| {
@@ -3384,6 +3411,7 @@ fn parse_xlsx_file_with_options_and_text_columns(
             xlsx_cell_ref_value_with_temporal_kind,
             xlsx_cell_ref_text_value,
             xlsx_cell_ref_is_numeric,
+            xlsx_cell_ref_is_empty,
         );
     }
 
@@ -3412,6 +3440,7 @@ fn parse_xlsx_file_with_options_and_text_columns(
         xlsx_cell_value_with_temporal_kind,
         xlsx_cell_text_value,
         xlsx_cell_is_numeric,
+        xlsx_cell_is_empty,
     )
 }
 
@@ -3482,6 +3511,7 @@ struct XlsxStreamRowsState {
     rows_seen: usize,
     current_row: Option<usize>,
     current_values: Vec<serde_json::Value>,
+    current_row_has_content: bool,
     batch_size: usize,
 }
 
@@ -3507,6 +3537,7 @@ impl XlsxStreamRowsState {
             rows_seen: 0,
             current_row: None,
             current_values: Vec::new(),
+            current_row_has_content: false,
             batch_size,
         }
     }
@@ -3555,6 +3586,7 @@ impl XlsxStreamRowsState {
         absolute_row: usize,
         absolute_column: usize,
         value: serde_json::Value,
+        has_content: bool,
         progress: u64,
     ) -> Result<(), String> {
         self.initialize_range(absolute_row, absolute_column);
@@ -3562,6 +3594,7 @@ impl XlsxStreamRowsState {
             self.flush_current_row(progress)?;
             self.current_row = Some(absolute_row);
         }
+        self.current_row_has_content |= has_content;
         let column_offset = absolute_column.checked_sub(self.start_column).ok_or_else(|| {
             format!("Excel row {absolute_row} contains a cell before the detected import range start column")
         })?;
@@ -3580,13 +3613,15 @@ impl XlsxStreamRowsState {
             return Ok(());
         };
         let values = std::mem::take(&mut self.current_values);
-        self.flush_row(absolute_row, values, progress)
+        let has_content = std::mem::take(&mut self.current_row_has_content);
+        self.flush_row(absolute_row, values, has_content, progress)
     }
 
     fn flush_row(
         &mut self,
         absolute_row: usize,
         mut values: Vec<serde_json::Value>,
+        has_content: bool,
         progress: u64,
     ) -> Result<(), String> {
         if self.row_range.title_row == Some(absolute_row) {
@@ -3605,6 +3640,12 @@ impl XlsxStreamRowsState {
         if absolute_row < self.row_range.data_start_row
             || self.row_range.last_data_row.is_some_and(|last| absolute_row > last)
         {
+            return Ok(());
+        }
+        // A row whose cells are all blank (Excel keeps style-only cells behind
+        // when a blank row is inserted) is not a data row: importing it would
+        // insert an all-NULL row and fail on NOT NULL columns (#8604).
+        if !has_content {
             return Ok(());
         }
         if self.columns.is_empty() {
@@ -3797,7 +3838,7 @@ fn stream_xlsx_rows_to_channel_with_control(
                     .unwrap_or_else(|| (current_row.max(1), current_column.saturating_add(1).max(1)));
                 current_row = position.0;
                 current_column = position.1;
-                rows.push_cell(position.0, position.1, serde_json::Value::Null, progress)?;
+                rows.push_cell(position.0, position.1, serde_json::Value::Null, false, progress)?;
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"c") => {
                 let position = xml_attr_value(&reader, &element, b"r")
@@ -3852,7 +3893,7 @@ fn stream_xlsx_rows_to_channel_with_control(
                         format_as_text,
                         empty_string_as_null,
                     )?;
-                    rows.push_cell(row, column, value, progress)?;
+                    rows.push_cell(row, column, value, current_cell.has_content(), progress)?;
                     current_cell = XlsxPreviewRawCell::default();
                 }
                 inline_phonetic_depth = 0;
@@ -3954,7 +3995,8 @@ async fn validate_xlsx_worksheet_for_import(
     columns.ok_or_else(|| "Excel stream ended before providing a header".to_string())
 }
 
-fn parse_xlsx_range<T, Label, Value, TextValue, IsNumeric>(
+#[allow(clippy::too_many_arguments)]
+fn parse_xlsx_range<T, Label, Value, TextValue, IsNumeric, IsEmpty>(
     range: &Range<T>,
     options: &TableImportParseOptions,
     preview_limit: usize,
@@ -3965,6 +4007,7 @@ fn parse_xlsx_range<T, Label, Value, TextValue, IsNumeric>(
     cell_value: Value,
     cell_text_value: TextValue,
     is_numeric: IsNumeric,
+    is_empty: IsEmpty,
 ) -> Result<ParsedImportFile, String>
 where
     T: CellType,
@@ -3972,6 +4015,7 @@ where
     Value: Fn(&T, Option<XlsxTemporalKind>, bool) -> serde_json::Value,
     TextValue: Fn(&T, Option<&XlsxCellStyle>) -> Option<String>,
     IsNumeric: Fn(&T) -> bool,
+    IsEmpty: Fn(&T) -> bool,
 {
     let (range_start_row, range_start_column) =
         range.start().map(|(row, column)| (row as usize, column as usize)).unwrap_or_default();
@@ -3998,6 +4042,11 @@ where
         }
         if row_range.last_data_row.is_some_and(|last| row_number > last) {
             break;
+        }
+        // Style-only cells (blank rows inserted by a spreadsheet app) are not data, so the
+        // row must not be materialized as an all-NULL row (#8604).
+        if source_row.iter().all(&is_empty) {
+            continue;
         }
         if columns.is_empty() {
             columns = (0..source_row.len()).map(|index| format!("column_{}", index + 1)).collect();
@@ -8500,6 +8549,73 @@ mod tests {
     #[test]
     fn xlsx_defaults_explicit_empty_strings_to_null() {
         assert_xlsx_empty_string_option(TableImportParseOptions::default(), vec![serde_json::Value::Null; 5]);
+    }
+
+    /// Excel/LibreOffice keep style-only cells behind when a user inserts a row and leaves it
+    /// blank. Such a row has no data and must not be imported as an all-NULL row - it used to
+    /// fail on NOT NULL target columns (#8604) - and the preview must agree with the import.
+    #[test]
+    fn xlsx_style_only_blank_rows_are_skipped_by_preview_parse_and_streaming() {
+        let blank_rows = [
+            r#"<c r="A3" s="0"/><c r="B3" s="0"/>"#,
+            r#"<c r="A3" s="0"></c><c r="B3" s="0"></c>"#,
+            r#"<c r="A3"/><c r="B3"/>"#,
+        ];
+        for blank_row in blank_rows {
+            let path = std::env::temp_dir().join(format!("dbx-table-import-blank-rows-{}.xlsx", uuid::Uuid::new_v4()));
+            let sheet_xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:B4"/>
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>id</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>other</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2"><v>1</v></c>
+      <c r="B2" t="inlineStr"><is><t>a</t></is></c>
+    </row>
+    <row r="3">{blank_row}</row>
+    <row r="4">
+      <c r="A4"><v>2</v></c>
+      <c r="B4" t="inlineStr"><is><t>b</t></is></c>
+    </row>
+  </sheetData>
+</worksheet>"#
+            );
+            std::fs::write(&path, build_preview_test_xlsx(&sheet_xml, None)).unwrap();
+            let options = TableImportParseOptions::default();
+            let expected_rows = vec![
+                vec![serde_json::json!(1), serde_json::json!("a")],
+                vec![serde_json::json!(2), serde_json::json!("b")],
+            ];
+
+            let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+            let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+            stream_xlsx_rows_to_channel(&path.to_string_lossy(), &options, 500, None, HashSet::new(), false, sender)
+                .unwrap();
+            let mut streamed_columns = Vec::new();
+            let mut streamed_rows = Vec::new();
+            while let Some(message) = receiver.blocking_recv() {
+                match message.unwrap() {
+                    XlsxStreamMessage::Header(columns) => streamed_columns = columns,
+                    XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                    _ => {}
+                }
+            }
+
+            assert_eq!(parsed.columns, vec!["id", "other"], "{blank_row}");
+            assert_eq!(parsed.rows, expected_rows, "{blank_row}");
+            assert_eq!(parsed.total_rows, 2, "{blank_row}");
+            assert_eq!(preview.columns, parsed.columns, "{blank_row}");
+            assert_eq!(preview.rows, parsed.rows, "{blank_row}");
+            assert_eq!(preview.total_rows, 2, "{blank_row}");
+            assert_eq!(streamed_columns, parsed.columns, "{blank_row}");
+            assert_eq!(streamed_rows, parsed.rows, "{blank_row}");
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

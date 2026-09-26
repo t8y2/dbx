@@ -119,6 +119,7 @@ const titleRow = ref(1);
 const dataStartRow = ref(2);
 const lastDataRow = ref(0);
 const trimValues = ref(false);
+const skipDuplicateRows = ref(false);
 const emptyStringAsNull = ref(defaultTableImportEmptyStringAsNull(sourceFormat.value));
 const selectedSheet = ref("");
 const jsonShape = ref<api.TableImportJsonShape>("auto");
@@ -291,6 +292,7 @@ function resetState() {
   dataStartRow.value = 2;
   lastDataRow.value = 0;
   trimValues.value = false;
+  skipDuplicateRows.value = false;
   emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
   selectedSheet.value = "";
   jsonShape.value = "auto";
@@ -846,6 +848,7 @@ async function startImport() {
         mode: targetMode.value === "create" ? "append" : importMode.value,
         createTable: targetMode.value === "create",
         batchSize: Math.max(1, Number(batchSize.value) || 500),
+        skipDuplicateRows: skipDuplicateRows.value,
         dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
         preparedSource: preparedImportSource(currentPreview),
       },
@@ -933,6 +936,7 @@ async function startBatchImport() {
           mode: "append",
           createTable: true,
           batchSize: Math.max(1, Number(batchSize.value) || 500),
+          skipDuplicateRows: skipDuplicateRows.value,
           dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
           preparedSource: preparedImportSource(task.preview),
           retainSource: true,
@@ -1310,6 +1314,10 @@ watch(rawProgressPercent, (percent) => {
             <label class="flex items-center gap-2 text-xs">
               <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
               {{ t("tableImport.emptyStringAsNull") }}
+            </label>
+            <label class="flex items-center gap-2 text-xs">
+              <input v-model="skipDuplicateRows" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
+              {{ t("tableImport.skipDuplicateRows") }}
             </label>
           </div>
 

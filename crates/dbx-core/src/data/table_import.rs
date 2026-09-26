@@ -28,9 +28,8 @@ use crate::models::connection::DatabaseType;
 use crate::sql::SqlParsingOptions;
 use crate::sql_file_import::{SqlFileStreamDecoder, StreamingSqlFileSplitter};
 use crate::transfer::{
-    escape_value_typed, execute_on_pool, generate_insert_typed_from_value_rows,
-    generate_insert_typed_sql_batches_from_value_rows, get_columns_for_transfer, normalize_integer_literal,
-    normalize_thousands_numeric_literal, qualified_table, quote_identifier, SqlBatchLimits,
+    escape_value_typed, execute_on_pool, generate_insert_typed_from_value_rows, get_columns_for_transfer,
+    normalize_integer_literal, normalize_thousands_numeric_literal, qualified_table, quote_identifier, SqlBatchLimits,
 };
 
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
@@ -272,6 +271,8 @@ pub struct TableImportRequest {
     pub prepared_source: Option<TableImportPreparedSource>,
     #[serde(default)]
     pub retain_source: bool,
+    #[serde(default)]
+    pub skip_duplicate_rows: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4297,6 +4298,7 @@ fn build_import_insert_batches_with_plan(
     schema: &str,
     db_type: &DatabaseType,
     kingbase_oracle_mode: bool,
+    skip_duplicate_rows: bool,
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
@@ -4304,7 +4306,7 @@ fn build_import_insert_batches_with_plan(
         return Ok(Vec::new());
     }
     let value_rows = import_value_rows_sql(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
-    let batches = generate_insert_typed_sql_batches_from_value_rows(
+    let batches = crate::data::transfer::generate_insert_typed_sql_batches_from_value_rows_with_options(
         &plan.target_columns,
         &value_rows,
         table,
@@ -4312,6 +4314,7 @@ fn build_import_insert_batches_with_plan(
         db_type,
         None,
         SqlBatchLimits::for_database(db_type, rows.len()).with_hard_sql_bytes(hard_sql_bytes),
+        skip_duplicate_rows,
     )?;
     Ok(batches.into_iter().map(|(sql, row_count)| ImportSqlBatch { sql, row_count }).collect())
 }
@@ -4377,6 +4380,7 @@ fn build_import_execution_batches(
     schema: &str,
     db_type: &DatabaseType,
     kingbase_oracle_mode: bool,
+    skip_duplicate_rows: bool,
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
@@ -4388,6 +4392,7 @@ fn build_import_execution_batches(
             schema,
             db_type,
             kingbase_oracle_mode,
+            skip_duplicate_rows,
             date_time_format,
             hard_sql_bytes,
         );
@@ -4411,6 +4416,7 @@ fn build_import_execution_batches(
         schema,
         db_type,
         kingbase_oracle_mode,
+        skip_duplicate_rows,
         date_time_format,
         hard_sql_bytes,
     )
@@ -4609,6 +4615,7 @@ fn build_import_insert_batches_with_format(
             schema,
             db_type,
             kingbase_oracle_mode,
+            false,
             date_time_format,
             None,
         )?);
@@ -5583,31 +5590,36 @@ async fn execute_import_rows_batch(
     postgres_copy_accumulator: &mut Option<PostgresCopyAccumulator>,
     sqlite_append_transaction: &mut Option<SqliteAppendTransaction>,
     kingbase_oracle_mode: bool,
+    skip_duplicate_rows: bool,
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
     db_write_ms: &mut u128,
     statement_count: &mut usize,
 ) -> Result<usize, ImportRowsBatchError> {
     let execution_policy = import_batch_execution_policy(mode, pending_truncate, db_type);
-    if let Some((import_plan, bulk_plan)) = sqlserver_bulk_plans_for_rows(db_type, plan, sqlserver_bulk_plan, rows) {
-        return execute_sqlserver_bulk_rows_batch(
-            state,
-            pool_key,
-            import_id,
-            is_cancelled,
-            rows,
-            import_plan,
-            bulk_plan,
-            execution_policy.include_truncate,
-            date_time_format,
-            db_write_ms,
-            statement_count,
-        )
-        .await;
+    if !skip_duplicate_rows {
+        if let Some((import_plan, bulk_plan)) = sqlserver_bulk_plans_for_rows(db_type, plan, sqlserver_bulk_plan, rows)
+        {
+            return execute_sqlserver_bulk_rows_batch(
+                state,
+                pool_key,
+                import_id,
+                is_cancelled,
+                rows,
+                import_plan,
+                bulk_plan,
+                execution_policy.include_truncate,
+                date_time_format,
+                db_write_ms,
+                statement_count,
+            )
+            .await;
+        }
     }
     // COPY is used only for plain scalar PostgreSQL rows and ordinary tables. Any unsupported
     // value or table feature falls through to the portable INSERT generator below.
-    if execution_policy.allow_postgres_copy
+    if !skip_duplicate_rows
+        && execution_policy.allow_postgres_copy
         && *db_type == DatabaseType::Postgres
         && !rows
             .iter()
@@ -5650,6 +5662,7 @@ async fn execute_import_rows_batch(
         schema,
         db_type,
         kingbase_oracle_mode,
+        skip_duplicate_rows,
         date_time_format,
         hard_sql_bytes,
     )
@@ -5700,7 +5713,7 @@ async fn execute_import_rows_batch(
             statements.push(truncate_sql(table, schema, db_type));
         }
         statements.extend(batches.into_iter().map(|batch| batch.sql));
-        execute_import_transaction(
+        let result = execute_import_transaction(
             state,
             pool_key,
             connection_id,
@@ -5712,14 +5725,22 @@ async fn execute_import_rows_batch(
         )
         .await
         .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
-        return Ok(rows_imported.saturating_add(rows.len()));
+        return Ok(if skip_duplicate_rows {
+            rows_imported.saturating_add(result.affected_rows as usize)
+        } else {
+            rows_imported.saturating_add(rows.len())
+        });
     }
     for batch in batches {
         ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
-        if let Err(error) = execute_import_statement(state, pool_key, &batch.sql, db_write_ms, statement_count).await {
-            return Err(ImportRowsBatchError::with_rows_imported(rows_imported, error));
-        }
-        rows_imported = rows_imported.saturating_add(batch.row_count);
+        let result = execute_import_statement(state, pool_key, &batch.sql, db_write_ms, statement_count)
+            .await
+            .map_err(|error| ImportRowsBatchError::with_rows_imported(rows_imported, error))?;
+        rows_imported = if skip_duplicate_rows {
+            rows_imported.saturating_add(result.affected_rows as usize)
+        } else {
+            rows_imported.saturating_add(batch.row_count)
+        };
     }
     Ok(rows_imported)
 }
@@ -6879,6 +6900,7 @@ where
                         &mut postgres_copy_accumulator,
                         &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
+                        request.skip_duplicate_rows,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
                         &mut db_write_ms,
@@ -7381,6 +7403,7 @@ where
                         &mut postgres_copy_accumulator,
                         &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
+                        request.skip_duplicate_rows,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
                         &mut db_write_ms,
@@ -7729,6 +7752,7 @@ where
             &mut postgres_copy_accumulator,
             &mut sqlite_append_transaction,
             kingbase_oracle_mode,
+            request.skip_duplicate_rows,
             request.date_time_format.as_deref(),
             import_sql_hard_limit,
             &mut db_write_ms,
@@ -7973,6 +7997,7 @@ mod tests {
                 total_rows_exact: true,
                 effective_encoding: Some(TableImportTextEncoding::Utf8),
             }),
+            skip_duplicate_rows: false,
             retain_source: false,
         };
 
@@ -9619,6 +9644,7 @@ mod tests {
             batch_size: 500,
             date_time_format: None,
             prepared_source: None,
+            skip_duplicate_rows: false,
             retain_source: false,
         };
         let started_at = Instant::now();
@@ -10029,6 +10055,7 @@ mod tests {
             batch_size: 1,
             date_time_format: None,
             prepared_source: None,
+            skip_duplicate_rows: false,
             retain_source: false,
         };
 
@@ -10118,6 +10145,7 @@ mod tests {
             batch_size: 1,
             date_time_format: None,
             prepared_source: None,
+            skip_duplicate_rows: false,
             retain_source: false,
         };
 
@@ -10198,6 +10226,7 @@ mod tests {
             batch_size: 1,
             date_time_format: None,
             prepared_source: None,
+            skip_duplicate_rows: false,
             retain_source: false,
         };
 
@@ -11553,6 +11582,7 @@ mod tests {
             "dbo",
             &DatabaseType::SqlServer,
             false,
+            false,
             None,
             None,
         )
@@ -11875,8 +11905,9 @@ mod tests {
             &DatabaseType::Sqlite,
             &TableImportMode::Append,
             false,
-            &mut postgres_copy_accumulator,
             &mut sqlite_append_transaction,
+            &mut postgres_copy_accumulator,
+            false,
             false,
             None,
             None,
@@ -12095,6 +12126,7 @@ mod tests {
                 &mut self.postgres_copy_accumulator,
                 &mut self.transaction,
                 false,
+                false,
                 None,
                 None,
                 &mut self.db_write_ms,
@@ -12219,6 +12251,7 @@ mod tests {
             batch_size: 2,
             date_time_format: None,
             prepared_source: None,
+            skip_duplicate_rows: false,
             retain_source: false,
         };
 

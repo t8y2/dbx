@@ -3979,6 +3979,52 @@ pub fn generate_upsert_typed(
     )
 }
 
+fn generate_insert_ignore_duplicates_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    overrides_postgres_system_values: bool,
+    quote_target_column_names: bool,
+) -> String {
+    if value_rows.is_empty() || columns.is_empty() {
+        return String::new();
+    }
+
+    let full_table = qualified_table(table, schema, db_type, catalog);
+    let col_list = columns
+        .iter()
+        .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
+        " OVERRIDING SYSTEM VALUE"
+    } else {
+        ""
+    };
+
+    let mut sql = format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n{}", value_rows.join(",\n"));
+
+    match db_type {
+        db_type
+            if (is_postgres_transfer_dialect(db_type) && !matches!(db_type, DatabaseType::OpenGauss))
+                || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb) =>
+        {
+            sql.push_str("\nON CONFLICT DO NOTHING");
+        }
+        db_type if uses_mysql_style_upsert(db_type) => {
+            let first_column = transfer_column_identifier(&columns[0], db_type, quote_target_column_names);
+            sql.push_str(&format!("\nON DUPLICATE KEY UPDATE {first_column} = {first_column}"));
+        }
+        _ => {}
+    }
+
+    sql
+}
+
 /// Upsert targets that take the MySQL-style `INSERT ... ON DUPLICATE KEY UPDATE
 /// ... VALUES(col)` arm. openGauss belongs here instead of the PostgreSQL
 /// `ON CONFLICT` arm: its INSERT grammar has no `ON CONFLICT` clause, but it
@@ -4591,9 +4637,114 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
-    generate_insert_sql_batches_from_value_rows(
-        columns, value_rows, table, schema, db_type, catalog, limits, false, true,
+    generate_insert_typed_sql_batches_from_value_rows_with_options(
+        columns, value_rows, table, schema, db_type, catalog, limits, false,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    skip_duplicate_rows: bool,
+) -> Result<Vec<(String, usize)>, String> {
+    if !skip_duplicate_rows {
+        return generate_insert_sql_batches_from_value_rows(
+            columns, value_rows, table, schema, db_type, catalog, limits, false, true,
+        );
+    }
+
+    if value_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_rows = limits.max_rows.max(1).min(match db_type {
+        DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
+        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        _ => usize::MAX,
+    });
+    let target_sql_bytes = limits.target_sql_bytes.max(1);
+    let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
+
+    let template = InsertSqlTemplate::new_with_column_quoting(columns, table, schema, db_type, catalog, false, true);
+
+    let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
+
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+
+    while start < value_rows.len() {
+        let mut end = start;
+        let mut rows_bytes = 0usize;
+
+        while end < value_rows.len() && end - start < max_rows {
+            let single_row_bytes = template.statement_bytes(value_row_bytes[end], 1, db_type);
+
+            if let Some(hard_sql_bytes) = limits.hard_sql_bytes {
+                if single_row_bytes > hard_sql_bytes {
+                    return Err(format!(
+                        "SQL batch row {} requires {} bytes and exceeds the {} byte hard limit",
+                        end + 1,
+                        single_row_bytes,
+                        hard_sql_bytes
+                    ));
+                }
+            }
+
+            let candidate_rows_bytes = rows_bytes.saturating_add(value_row_bytes[end]);
+            let candidate_row_count = end - start + 1;
+            let candidate_bytes = template.statement_bytes(candidate_rows_bytes, candidate_row_count, db_type);
+
+            if candidate_row_count > 1 && candidate_bytes > batch_sql_bytes {
+                break;
+            }
+
+            rows_bytes = candidate_rows_bytes;
+            end += 1;
+        }
+
+        let value_rows_batch = &value_rows[start..end];
+
+        let mut sql = if matches!(
+            db_type,
+            DatabaseType::Postgres
+                | DatabaseType::Kingbase
+                | DatabaseType::Sqlite
+                | DatabaseType::CloudflareD1
+                | DatabaseType::DuckDb
+                | DatabaseType::Mysql
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::OpenGauss
+        ) {
+            generate_insert_ignore_duplicates_from_value_rows(
+                columns,
+                value_rows_batch,
+                table,
+                schema,
+                db_type,
+                catalog,
+                false,
+                true,
+            )
+        } else {
+            template.build(value_rows_batch)
+        };
+
+        if sql.is_empty() {
+            return Err("Generated empty SQL batch".to_string());
+        }
+
+        statements.push((std::mem::take(&mut sql), end - start));
+        start = end;
+    }
+
+    Ok(statements)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -16405,6 +16556,70 @@ SELECT 1 FROM dual"#
         );
 
         assert_eq!(sql, "INSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES\n(42, 'Ada')");
+    }
+
+    #[test]
+    fn postgres_insert_can_skip_duplicate_rows() {
+        let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
+            &[String::from("id"), String::from("name")],
+            &[String::from("(42, 'Ada')"), String::from("(43, 'Bob')")],
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 2);
+        assert!(batches[0].0.contains("ON CONFLICT DO NOTHING"));
+        assert!(batches[0].0.contains("(42, 'Ada')"));
+        assert!(batches[0].0.contains("(43, 'Bob')"));
+    }
+
+    #[test]
+    fn mysql_insert_can_skip_duplicate_rows() {
+        let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
+            &[String::from("id"), String::from("name")],
+            &[String::from("(42, 'Ada')"), String::from("(43, 'Bob')")],
+            "users",
+            "public",
+            &DatabaseType::Mysql,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 2);
+        assert!(batches[0].0.contains("ON DUPLICATE KEY UPDATE"));
+        assert!(batches[0].0.contains("`id` = `id`"));
+        assert!(batches[0].0.contains("(42, 'Ada')"));
+        assert!(batches[0].0.contains("(43, 'Bob')"));
+    }
+
+    #[test]
+    fn sqlite_insert_can_skip_duplicate_rows() {
+        let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
+            &[String::from("id"), String::from("name")],
+            &[String::from("(42, 'Ada')"), String::from("(43, 'Bob')")],
+            "users",
+            "",
+            &DatabaseType::Sqlite,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 2);
+        assert!(batches[0].0.contains("ON CONFLICT DO NOTHING"));
+        assert!(batches[0].0.contains("(42, 'Ada')"));
+        assert!(batches[0].0.contains("(43, 'Bob')"));
     }
 
     #[test]

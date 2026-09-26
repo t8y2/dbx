@@ -6832,6 +6832,7 @@ export default {
     lastDataRow: "Last data row (0 for end)",
     trimValues: "Trim values",
     emptyStringAsNull: "Empty string as NULL",
+    skipDuplicateRows: "Skip duplicate rows",
     jsonShape: "JSON rows",
     jsonShapeAuto: "Auto-detect",
     jsonShapeObjects: "Objects",

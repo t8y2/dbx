@@ -1940,14 +1940,6 @@ export function generateTableRowsChunk(config: TableGenerateConfig, state: Table
         let found = false;
         for (let attempt = 0; attempt < MAX_UNIQUE_GENERATION_ATTEMPTS; attempt++) {
           value = generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault);
-          // Neither NULLs nor raw SQL expressions can be deduplicated on the
-          // client: every engine we support accepts repeated NULLs in a unique
-          // index, and an expression is evaluated per row by the server, so two
-          // identical expression strings are not necessarily equal values.
-          if (value === null || isGeneratedSqlExpression(value)) {
-            found = true;
-            break;
-          }
           const identity = generatedValueIdentity(value);
           if (!seen.has(identity)) {
             seen.add(identity);

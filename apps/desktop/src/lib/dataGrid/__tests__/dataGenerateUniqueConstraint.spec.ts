@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTableGenerateState, defaultGeneratorParams, formatGeneratedRowValues, generateTableRowsChunk, type ColumnAttrs, type TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
+import { createTableGenerateState, defaultGeneratorParams, generateTableRowsChunk, type ColumnAttrs, type TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
 
 const ROW_COUNT = 400;
 
@@ -65,19 +65,9 @@ describe("data generation with a single-column unique constraint (#5958)", () =>
     expect(new Set(values).size).toBeLessThan(ROW_COUNT);
   });
 
-  it("does not treat repeated NULLs or SQL expressions as duplicate values", () => {
+  it("still reports exhaustion when the constrained generator only emits NULLs", () => {
     const config = intColumn(true, { includeNull: true, nullPercent: 100 });
     const state = createTableGenerateState(config, "mysql");
-    const rows = generateTableRowsChunk(config, state, 5);
-    expect(rows.map((row) => row[0])).toEqual([null, null, null, null, null]);
-
-    const expressionConfig = intColumn(true);
-    expressionConfig.columns[0]!.columnDefault = "(uuid())";
-    expressionConfig.columns[0]!.generatorParams = { ...expressionConfig.columns[0]!.generatorParams, includeDefault: true, defaultPercent: 100 };
-    const expressionState = createTableGenerateState(expressionConfig, "mysql");
-    const expressionRows = generateTableRowsChunk(expressionConfig, expressionState, 5);
-    expect(expressionRows.map((row) => row[0])).toHaveLength(5);
-    const formatted = expressionRows.map((row) => formatGeneratedRowValues(expressionConfig, "mysql", expressionState, row));
-    expect(formatted).toEqual(["(uuid())", "(uuid())", "(uuid())", "(uuid())", "(uuid())"]);
+    expect(() => generateTableRowsChunk(config, state, 5)).toThrow(/unique value.*code.*t_5958/i);
   });
 });

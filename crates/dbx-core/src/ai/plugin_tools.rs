@@ -4,9 +4,12 @@
 //! and `mcp/call` (execution). This module turns them into agent tools under
 //! three host-owned rules:
 //!
-//! * **Opt-in per plugin.** Only plugins the user enabled for the built-in AI
-//!   in the Plugin Center contribute tools, so a plugin cannot put its tools —
-//!   and whatever they read — in front of the model on install alone.
+//! * **Detected plugins, revocable.** Every installed, compatible plugin with
+//!   a backend contributes tools automatically — implementing the optional
+//!   `mcp/tools` bridge is the author's declaration of intent (a manifest
+//!   `mcp` contribution with `ai_tools: false` narrows it). The Plugin Center
+//!   switch still turns a plugin off for good, and the opt-out outlives
+//!   restarts and plugin updates.
 //! * **Open connections only.** Tools run against plugin connections DBX
 //!   already has open. The host binds the connection: the model picks among
 //!   the open ones by DBX id, the lifecycle payload (credentials, runtime
@@ -23,7 +26,10 @@
 //! Tool definitions are reduced to a JSON-Schema subset every supported
 //! provider accepts (OpenAI, Anthropic, and Gemini's OpenAPI-style
 //! `parameters`), and exposed as `<plugin>__<tool>` names that satisfy all of
-//! their naming rules.
+//! their naming rules. The naming, schema-reduction, and listing helpers are
+//! shared with the external `dbx` MCP server
+//! (`crates/dbx-mcp/src/plugin_tools.rs`) so one plugin tool surfaces under
+//! the same exposed name on both automatic surfaces.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
@@ -46,8 +52,10 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 /// task tools (e.g. SSH `ssh_run_bg`), not in one blocking call.
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_OPEN_CONNECTIONS: usize = 8;
-const MAX_TOOLS_PER_PLUGIN: usize = 64;
-const MAX_TOTAL_TOOLS: usize = 96;
+/// Shared with the external `dbx` MCP server so one plugin tool keeps the
+/// same bounds on both automatic surfaces.
+pub const MAX_TOOLS_PER_PLUGIN: usize = 64;
+pub const MAX_TOTAL_TOOLS: usize = 96;
 const MAX_DESCRIPTION_CHARS: usize = 1_500;
 const MAX_SCHEMA_PROPERTIES: usize = 64;
 const MAX_SCHEMA_DEPTH: usize = 6;
@@ -62,7 +70,7 @@ const PLUGIN_PREFIX_MAX_CHARS: usize = 20;
 pub const CONNECTION_ARGUMENT: &str = "dbx_connection";
 /// Plugin arguments the host fills from the bound connection; the model never
 /// supplies them, so it cannot address a connection the user did not open.
-const HOST_BOUND_ARGUMENTS: &[&str] = &["connectionId", "connectionName"];
+pub const HOST_BOUND_ARGUMENTS: &[&str] = &["connectionId", "connectionName"];
 
 /// An open plugin connection whose tools the agent may call.
 #[derive(Debug, Clone)]
@@ -249,20 +257,55 @@ impl PluginToolBinding {
     }
 }
 
+/// Plugin ids whose sidecar tools the built-in AI agent may use.
+///
+/// Detection-first: every installed, compatible plugin with a backend
+/// contributes — implementing the optional `mcp/tools` bridge is the author's
+/// declaration of intent. Two subtractions apply: a manifest `mcp`
+/// contribution with `ai_tools: false` keeps a plugin off this surface, and
+/// the ids the user explicitly turned off in the Plugin Center always win
+/// (over detection and over the declaration). If the plugin registry cannot
+/// be read, discovery degrades to the legacy Plugin Center opt-in list so a
+/// transient IO failure does not silently widen or narrow anything.
+pub async fn effective_ai_tool_plugin_ids(state: &AppState) -> HashSet<String> {
+    let detected = match state.plugins.list_installed() {
+        Ok(plugins) => plugins
+            .iter()
+            .filter(|plugin| {
+                plugin.compatibility.compatible
+                    && plugin.manifest.backend_entrypoint().is_some()
+                    && !plugin.manifest.ai_tools_excluded()
+            })
+            .map(|plugin| plugin.manifest.id.clone())
+            .collect::<HashSet<_>>(),
+        Err(error) => {
+            log::warn!("[agent][plugin-tools] cannot apply AI tool detection: {error}");
+            state.storage.load_ai_plugin_tool_plugin_ids().await.unwrap_or_default().into_iter().collect()
+        }
+    };
+    let disabled: HashSet<String> = state
+        .storage
+        .load_ai_plugin_tool_disabled_plugin_ids()
+        .await
+        .unwrap_or_else(|error| {
+            log::warn!("[agent][plugin-tools] cannot read AI plugin opt-outs: {error}");
+            Vec::new()
+        })
+        .into_iter()
+        .collect();
+    detected.into_iter().filter(|plugin_id| !disabled.contains(plugin_id)).collect()
+}
+
 /// Collects the plugin tools the built-in agent may use right now. Any
 /// failure degrades to fewer (or no) plugin tools; it never fails the run.
 pub async fn discover_plugin_tools(
     state: &Arc<AppState>,
     host_runtime: Option<&tokio::runtime::Handle>,
 ) -> PluginToolSet {
-    let enabled = match state.storage.load_ai_plugin_tool_plugin_ids().await {
-        Ok(ids) if !ids.is_empty() => ids.into_iter().collect::<HashSet<_>>(),
-        Ok(_) => return PluginToolSet::default(),
-        Err(error) => {
-            log::warn!("[agent][plugin-tools] cannot read AI plugin tool settings: {error}");
-            return PluginToolSet::default();
-        }
-    };
+    let enabled = effective_ai_tool_plugin_ids(state).await;
+    if enabled.is_empty() {
+        return PluginToolSet::default();
+    }
     let plugin_names = match tool_capable_plugins(state, &enabled) {
         Ok(names) if !names.is_empty() => names,
         Ok(_) => return PluginToolSet::default(),
@@ -390,7 +433,7 @@ pub async fn execute_plugin_tool(
     prepared: &PreparedPluginToolCall,
 ) -> ToolResult {
     let outcome = async {
-        let enabled = state.storage.load_ai_plugin_tool_plugin_ids().await?;
+        let enabled = effective_ai_tool_plugin_ids(state).await;
         if !enabled.contains(&prepared.plugin_id) {
             return Err("Built-in AI access to this plugin has been disabled".to_string());
         }
@@ -560,15 +603,18 @@ impl<T> Drop for AbortOnDrop<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct RawPluginTool {
-    name: String,
-    description: String,
-    input_schema: Value,
-    read_only: bool,
+pub struct RawPluginTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub read_only: bool,
+    /// Raw MCP `annotations` object; the external `dbx` MCP server passes it
+    /// through on `tools/list`, the AI surface only reads `readOnlyHint`.
+    pub annotations: Value,
 }
 
 /// Parses an `mcp/tools` answer (`{ tools: [...] }` or a bare array).
-fn parse_tool_list(value: &Value) -> Vec<RawPluginTool> {
+pub fn parse_tool_list(value: &Value) -> Vec<RawPluginTool> {
     let tools = value.get("tools").and_then(Value::as_array).or_else(|| value.as_array());
     let Some(tools) = tools else {
         return Vec::new();
@@ -592,6 +638,7 @@ fn parse_tool_list(value: &Value) -> Vec<RawPluginTool> {
                 description: tool.get("description").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
                 input_schema,
                 read_only: tool.pointer("/annotations/readOnlyHint").and_then(Value::as_bool) == Some(true),
+                annotations: tool.get("annotations").cloned().unwrap_or_else(|| json!({})),
             })
         })
         .take(MAX_TOOLS_PER_PLUGIN)
@@ -655,8 +702,9 @@ fn tool_description(plugin_name: &str, tool: &RawPluginTool, connections: &[Open
 
 /// A short, stable, name-safe prefix per plugin (`io.dbx.ssh` → `ssh`).
 /// Plugins that reduce to the same prefix are told apart by a counter, in
-/// plugin-id order so the assignment is deterministic.
-fn plugin_prefixes<'a>(plugin_ids: impl Iterator<Item = &'a str>) -> HashMap<String, String> {
+/// plugin-id order so the assignment is deterministic. Shared with the
+/// external `dbx` MCP server.
+pub fn plugin_prefixes<'a>(plugin_ids: impl Iterator<Item = &'a str>) -> HashMap<String, String> {
     let mut used = HashSet::new();
     let mut prefixes = HashMap::new();
     for plugin_id in plugin_ids {
@@ -678,7 +726,8 @@ fn plugin_prefixes<'a>(plugin_ids: impl Iterator<Item = &'a str>) -> HashMap<Str
 
 /// `<prefix>__<tool>`: starts with a letter, only `[A-Za-z0-9_]`, at most 64
 /// characters. Truncated or colliding names get a hash of the original.
-fn exposed_tool_name(prefix: &str, tool_name: &str, used: &mut HashSet<String>) -> String {
+/// Shared with the external `dbx` MCP server.
+pub fn exposed_tool_name(prefix: &str, tool_name: &str, used: &mut HashSet<String>) -> String {
     let sanitized = sanitize_identifier(tool_name);
     let mut name = format!("{prefix}__{sanitized}");
     if name.chars().count() > MAX_EXPOSED_NAME_CHARS || used.contains(&name) {
@@ -763,8 +812,9 @@ fn tool_parameters(input_schema: &Value, connections: &[OpenPluginConnection]) -
 /// Reduces a JSON Schema to keywords OpenAI, Anthropic, and Gemini's
 /// OpenAPI-style `parameters` all accept. Anything outside the subset is
 /// dropped rather than passed through: one unsupported keyword makes a
-/// provider reject the whole request, not just this tool.
-fn sanitize_schema(schema: &Value, depth: usize) -> Value {
+/// provider reject the whole request, not just this tool. Shared with the
+/// external `dbx` MCP server.
+pub fn sanitize_schema(schema: &Value, depth: usize) -> Value {
     let Some(object) = schema.as_object() else {
         return json!({ "type": "string" });
     };
@@ -937,6 +987,26 @@ mod tests {
             connection_name: name.to_string(),
             plugin_id: plugin_id.to_string(),
         }
+    }
+
+    /// Writes a minimal installable plugin container: one manifest, one
+    /// backend executable. `contributions` carries extra entries such as the
+    /// `mcp` surface override.
+    fn write_fake_plugin(plugins_dir: &std::path::Path, plugin_id: &str, contributions: Value) {
+        let container = plugins_dir.join(plugin_id);
+        std::fs::create_dir_all(container.join("bin")).unwrap();
+        std::fs::write(container.join("bin").join("backend"), b"backend").unwrap();
+        let manifest = json!({
+            "manifest_version": 1,
+            "id": plugin_id,
+            "name": plugin_id,
+            "version": "1.0.0",
+            "publisher": "test",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "backend": { "executable": "bin/backend" } },
+            "contributions": contributions,
+        });
+        std::fs::write(container.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
 
     fn tool_call(name: &str, arguments: Value) -> ToolCall {
@@ -1127,10 +1197,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detection_enables_installed_plugins_and_opt_outs_win() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&root.path().join("dbx.db")).await.unwrap();
+        let plugins_dir = root.path().join("plugins");
+        write_fake_plugin(&plugins_dir, "io.test.ssh", serde_json::json!([]));
+        write_fake_plugin(
+            &plugins_dir,
+            "io.test.quiet",
+            serde_json::json!([{ "type": "mcp", "id": "io.test.quiet.mcp", "ai_tools": false }]),
+        );
+        write_fake_plugin(&plugins_dir, "io.test.ui_only", serde_json::json!([]));
+        // Remove the backend from the UI-only plugin after writing it.
+        let backend = plugins_dir.join("io.test.ui_only").join("bin").join("backend");
+        std::fs::remove_file(&backend).unwrap();
+
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, plugins_dir));
+        let ids = effective_ai_tool_plugin_ids(&state).await;
+        assert!(ids.contains("io.test.ssh"), "detection includes tool-capable plugins");
+        assert!(!ids.contains("io.test.quiet"), "ai_tools:false excludes the AI surface");
+        assert!(!ids.contains("io.test.ui_only"), "plugins without a backend stay invisible");
+
+        // The Plugin Center opt-out always wins over detection.
+        state.storage.set_ai_plugin_tool_plugin_enabled("io.test.ssh", false).await.unwrap();
+        let ids = effective_ai_tool_plugin_ids(&state).await;
+        assert!(!ids.contains("io.test.ssh"));
+    }
+
+    #[tokio::test]
     async fn stale_tool_bindings_cannot_bypass_revoked_ai_access() {
         let root = tempfile::tempdir().unwrap();
         let storage = crate::persistence::test_storage::open(&root.path().join("dbx.db")).await.unwrap();
-        let state = Arc::new(AppState::new(storage));
+        let plugins_dir = root.path().join("plugins");
+        write_fake_plugin(&plugins_dir, "io.dbx.kafka", serde_json::json!([]));
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, plugins_dir));
         state.storage.set_ai_plugin_tool_plugin_enabled("io.dbx.kafka", true).await.unwrap();
         let set = build_tool_set(
             &names(),

@@ -2467,6 +2467,7 @@ dependencies = [
  "chrono",
  "dbx-core",
  "dirs",
+ "futures",
  "log",
  "mysql_async",
  "reqwest 0.12.28",

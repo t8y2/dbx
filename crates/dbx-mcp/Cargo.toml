@@ -24,6 +24,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
+futures = "0.3"
 dbx-core = { path = "../dbx-core", default-features = false }
 dirs = "6"
 log = "0.4"

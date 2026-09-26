@@ -2902,19 +2902,23 @@ impl DbxMcpServer {
     }
 
     /// The advertised `tools/list` view: router-enabled tools narrowed to the
-    /// global policy's tool allowlist. When the policy cannot be loaded every
+    /// global policy's tool allowlist, plus the automatically exposed plugin
+    /// tools (`dbx_<prefix>__<tool>`). When the policy cannot be loaded every
     /// tool call already fails with `MCP_POLICY_UNAVAILABLE`, so fall back to
     /// the plain router view rather than adding a new failure mode here.
-    async fn policy_filtered_tools(&self) -> Vec<rmcp::model::Tool> {
-        match self.load_policy().await {
-            Ok(policy) => self
+    pub async fn policy_filtered_tools(&self) -> Vec<rmcp::model::Tool> {
+        let policy = self.load_policy().await.ok();
+        let mut tools: Vec<rmcp::model::Tool> = match &policy {
+            Some(policy) => self
                 .tool_router
                 .list_all()
                 .into_iter()
-                .filter(|tool| policy_allows_tool(&policy, tool.name.as_ref()))
+                .filter(|tool| policy_allows_tool(policy, tool.name.as_ref()))
                 .collect(),
-            Err(_) => self.tool_router.list_all(),
-        }
+            None => self.tool_router.list_all(),
+        };
+        tools.extend(self.plugin_tools_view(policy.as_ref()).await);
+        tools
     }
 
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
@@ -3064,6 +3068,130 @@ impl DbxMcpServer {
             _ => Err(tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &allowed))),
         }
     }
+    /// Saved plugin connections the global MCP policy (and a scoped CLI/AI
+    /// session) allows, grouped per owning plugin. Used both to decorate the
+    /// exposed plugin tools with a connection selector and to bind calls.
+    /// Connections not in the map are unreachable through plugin tools.
+    #[allow(clippy::result_large_err)]
+    async fn allowed_plugin_connections(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<(String, String)>>, CallToolResult> {
+        let policy = self.load_policy().await?;
+        let group_paths = self
+            .load_group_paths_for_policy(&policy)
+            .await
+            .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
+        let connections =
+            self.backend.load_connections().await.map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
+        let mut allowed: std::collections::BTreeMap<String, Vec<(String, String)>> = std::collections::BTreeMap::new();
+        for config in connections {
+            let Some(plugin_id) = config.plugin_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            if self.scope.connection_scope_enabled() && !self.scope.matches(&config) {
+                continue;
+            }
+            if !policy_allows_connection(&policy, group_paths.get(&config.id), &config) {
+                continue;
+            }
+            allowed.entry(plugin_id.to_string()).or_default().push((config.id.clone(), config.name.clone()));
+        }
+        for list in allowed.values_mut() {
+            list.sort();
+        }
+        Ok(allowed)
+    }
+
+    /// The plugin portion of the advertised `tools/list`. Discovery failures
+    /// degrade to an empty view (the static tools keep working); the global
+    /// policy's tool allowlist narrows exposed plugin names exactly like the
+    /// static ones. In a scoped session only plugins with at least one
+    /// in-scope connection are listed, matching the scoped dbx_* behavior.
+    async fn plugin_tools_view(&self, policy: Option<&McpGlobalPolicy>) -> Vec<rmcp::model::Tool> {
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => {
+                log::debug!("[mcp][plugin-tools] no plugin tools on this backend: {error}");
+                return Vec::new();
+            }
+        };
+        let entries = crate::plugin_tools::build_catalog(&providers);
+        // Tool calls fail closed on policy errors anyway; keep the view.
+        let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
+        entries
+            .into_iter()
+            .filter(|entry| policy.is_none_or(|policy| policy_allows_tool(policy, &entry.exposed_name)))
+            .filter(|entry| !self.scope.enabled() || allowed.contains_key(&entry.plugin_id))
+            .map(|entry| {
+                let connections = allowed.get(&entry.plugin_id).cloned().unwrap_or_default();
+                crate::plugin_tools::to_rmcp_tool(&entry, &connections)
+            })
+            .collect()
+    }
+
+    /// Dispatches a plugin-tool call (`dbx_<prefix>__<tool>`): policy check,
+    /// name resolution over a fresh discovery pass, host-side connection
+    /// binding from the policy-allowed set, and lifecycle generation from the
+    /// saved connection in the backend — credentials never reach the caller.
+    #[allow(clippy::result_large_err)]
+    pub async fn call_plugin_tool_dispatch(
+        &self,
+        name: &str,
+        mut arguments: serde_json::Value,
+    ) -> Result<CallToolResult, ErrorData> {
+        if let Err(error) = self.ensure_tool_allowed(name).await {
+            return Ok(error);
+        }
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => return Ok(backend_tool_error("DBX_TOOL_ERROR", error)),
+        };
+        let entry = crate::plugin_tools::build_catalog(&providers).into_iter().find(|entry| entry.exposed_name == name);
+        let Some(entry) = entry else {
+            return Ok(tool_error("TOOL_NOT_FOUND", format!("Plugin tool \"{name}\" is not available.")));
+        };
+        let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
+        if let Some(object) = arguments.as_object_mut() {
+            for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
+                object.remove(*key);
+            }
+        }
+        let allowed = match self.allowed_plugin_connections().await {
+            Ok(allowed) => allowed.get(&entry.plugin_id).cloned().unwrap_or_default(),
+            Err(error) => return Ok(error),
+        };
+        let bound = match crate::plugin_tools::select_connection(&allowed, selector.as_deref()) {
+            Ok(bound) => bound.cloned(),
+            Err(message) => return Ok(tool_error("CONNECTION_NOT_FOUND", message)),
+        };
+        if let Some((connection_id, connection_name)) = &bound {
+            let _ = CALL_HISTORY.try_with(|history| {
+                let mut history = history.lock().unwrap();
+                history.connection_id.clone_from(connection_id);
+                history.connection_name.clone_from(connection_name);
+            });
+        }
+        if entry.injects_connection_id {
+            if let Some((connection_id, _)) = &bound {
+                if let Some(object) = arguments.as_object_mut() {
+                    object.insert("connectionId".to_string(), serde_json::Value::String(connection_id.clone()));
+                }
+            }
+        }
+        match self
+            .backend
+            .call_plugin_mcp_tool(
+                &entry.plugin_id,
+                &entry.tool.name,
+                bound.as_ref().map(|(connection_id, _)| connection_id.as_str()),
+                &arguments,
+            )
+            .await
+        {
+            Ok(value) => Ok(crate::plugin_tools::call_result_to_rmcp(value)),
+            Err(error) => Ok(backend_tool_error("DBX_TOOL_ERROR", error)),
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -3099,12 +3227,21 @@ impl ServerHandler for DbxMcpServer {
             mcp_session_id: args.get("session_id").and_then(|v| v.as_str()).map(str::to_owned),
         };
         let mut guard = CallHistoryGuard { backend: self.backend.clone(), fallback: Some(entry.clone()), started };
+        let tool_name = request.name.to_string();
+        let is_plugin_tool = crate::plugin_tools::is_plugin_tool_name(&tool_name);
         CALL_HISTORY.scope(std::sync::Mutex::new(entry), async {
             let cancellation = context.ct.clone();
-            let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-            let result = tokio::select! {
-                result = self.tool_router.call(tcc) => result,
-                _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.")),
+            let result = if is_plugin_tool {
+                tokio::select! {
+                    result = self.call_plugin_tool_dispatch(&tool_name, args) => result,
+                    _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.")),
+                }
+            } else {
+                let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+                tokio::select! {
+                    result = self.tool_router.call(tcc) => result,
+                    _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.")),
+                }
             };
             let mut entry = CALL_HISTORY.with(|entry| entry.lock().unwrap().clone());
             entry.execution_time_ms = started.elapsed().as_millis();
@@ -4639,6 +4776,8 @@ mod tests {
         }
     }
 
+    type RecordedPluginToolCalls = std::sync::Mutex<Vec<(String, String, Option<String>, serde_json::Value)>>;
+
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
         policy: McpGlobalPolicy,
@@ -4657,6 +4796,8 @@ mod tests {
         transaction_open_error: Option<String>,
         policy_override: std::sync::Mutex<Option<McpGlobalPolicy>>,
         salesforce_identity: Option<SalesforceCurrentUser>,
+        plugin_providers: Vec<crate::plugin_tools::PluginToolProvider>,
+        plugin_tool_calls: RecordedPluginToolCalls,
     }
 
     impl Default for FakeBackend {
@@ -4679,6 +4820,8 @@ mod tests {
                 transaction_open_error: None,
                 policy_override: std::sync::Mutex::new(None),
                 salesforce_identity: None,
+                plugin_providers: Vec::new(),
+                plugin_tool_calls: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -4731,6 +4874,29 @@ mod tests {
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
             Ok(self.connections.clone())
+        }
+
+        async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
+            Ok(self.plugin_providers.clone())
+        }
+
+        async fn call_plugin_mcp_tool(
+            &self,
+            plugin_id: &str,
+            tool: &str,
+            connection_id: Option<&str>,
+            arguments: &serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            self.plugin_tool_calls.lock().unwrap().push((
+                plugin_id.to_string(),
+                tool.to_string(),
+                connection_id.map(str::to_string),
+                arguments.clone(),
+            ));
+            Ok(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("{plugin_id}/{tool} ok") }],
+                "isError": false
+            }))
         }
 
         async fn open_transaction_owner(
@@ -4957,6 +5123,163 @@ mod tests {
             assert_eq!(args["count"], 20);
             assert_eq!(args["topic"]["topic"], "events");
         }
+    }
+
+    fn plugin_connection(id: &str, name: &str, plugin_id: &str) -> ConnectionConfig {
+        serde_json::from_value(json!({
+            "id": id,
+            "name": name,
+            "db_type": "plugin",
+            "plugin_id": plugin_id,
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": ""
+        }))
+        .unwrap()
+    }
+
+    fn plugin_provider(
+        plugin_id: &str,
+        plugin_name: &str,
+        tools: serde_json::Value,
+    ) -> crate::plugin_tools::PluginToolProvider {
+        crate::plugin_tools::PluginToolProvider {
+            plugin_id: plugin_id.to_string(),
+            plugin_name: plugin_name.to_string(),
+            tools: dbx_core::ai::plugin_tools::parse_tool_list(&tools),
+        }
+    }
+
+    fn kafka_plugin_listing() -> serde_json::Value {
+        json!({
+            "tools": [
+                {
+                    "name": "kafka_topics_delete",
+                    "description": "Delete topics",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "connectionId": { "type": "string" },
+                            "topics": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["connectionId", "topics"]
+                    }
+                },
+                {
+                    "name": "kafka_topics_list",
+                    "description": "List topics",
+                    "annotations": { "readOnlyHint": true },
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "connectionId": { "type": "string" } }
+                    }
+                }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_merge_into_tools_list_with_connection_selector() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                plugin_connection("k1", "prod", "io.dbx.kafka"),
+                plugin_connection("k2", "test", "io.dbx.kafka"),
+                plugin_connection("s1", "shell", "io.dbx.ssh"),
+            ],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let tools = server.policy_filtered_tools().await;
+        assert!(tools.iter().any(|tool| tool.name.as_ref() == "dbx_list_connections"), "static tools remain");
+        let delete = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "dbx_kafka__kafka_topics_delete")
+            .expect("plugin tool listed");
+        let properties = delete.input_schema.get("properties").expect("object schema");
+        let selector = properties.get("dbx_connection").expect("selector present for multiple connections");
+        assert_eq!(selector["enum"], json!(["k1", "k2"]));
+        assert!(properties.get("connectionId").is_none(), "host-bound argument stays out of the advertised schema");
+        let list = tools.iter().find(|tool| tool.name.as_ref() == "dbx_kafka__kafka_topics_list").unwrap();
+        assert!(list.annotations.as_ref().and_then(|a| a.read_only_hint).expect("readOnlyHint passthrough"));
+    }
+
+    #[tokio::test]
+    async fn plugin_tool_calls_bind_connections_and_respect_policy() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                plugin_connection("k1", "prod", "io.dbx.kafka"),
+                plugin_connection("k2", "test", "io.dbx.kafka"),
+                plugin_connection("s1", "shell", "io.dbx.ssh"),
+            ],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        // Several connections: a missing selector is an error that names the argument.
+        let missing = server
+            .call_plugin_tool_dispatch("dbx_kafka__kafka_topics_delete", json!({ "topics": ["t"] }))
+            .await
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
+        assert!(result_text(&missing).contains("dbx_connection"), "{}", result_text(&missing));
+
+        // A selector pointing at another plugin's connection is rejected.
+        let cross = server
+            .call_plugin_tool_dispatch(
+                "dbx_kafka__kafka_topics_delete",
+                json!({ "topics": ["t"], "dbx_connection": "s1" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross.is_error, Some(true));
+        assert!(result_text(&cross).contains("not an allowed connection"), "{}", result_text(&cross));
+
+        // An explicit selector binds host-side; selector keys are stripped and
+        // the plugin's declared connectionId is injected.
+        let ok = server
+            .call_plugin_tool_dispatch(
+                "dbx_kafka__kafka_topics_delete",
+                json!({ "topics": ["t"], "dbx_connection": "k2" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.is_error, Some(false), "{}", result_text(&ok));
+        {
+            let calls = backend.plugin_tool_calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, "io.dbx.kafka");
+            assert_eq!(calls[0].1, "kafka_topics_delete");
+            assert_eq!(calls[0].2.as_deref(), Some("k2"));
+            assert_eq!(calls[0].3["connectionId"], "k2");
+            assert!(calls[0].3.get("dbx_connection").is_none());
+        }
+
+        // Unknown plugin namespace name fails cleanly.
+        let unknown = server.call_plugin_tool_dispatch("dbx_kafka__nope", json!({})).await.unwrap();
+        assert!(result_text(&unknown).contains("not available"), "{}", result_text(&unknown));
+
+        // The global policy tool allowlist applies to exposed plugin names.
+        let restricted = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy {
+                allowed_tool_names: Some(vec!["dbx_list_connections".to_string()]),
+                ..Default::default()
+            },
+            connections: backend.connections.clone(),
+            plugin_providers: backend.plugin_providers.clone(),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(restricted, McpScope::default(), false);
+        let blocked = server
+            .call_plugin_tool_dispatch("dbx_kafka__kafka_topics_delete", json!({ "topics": ["t"] }))
+            .await
+            .unwrap();
+        assert_eq!(blocked.is_error, Some(true));
+        assert!(result_text(&blocked).contains("TOOL_OUT_OF_SCOPE"), "{}", result_text(&blocked));
+        let tools = server.policy_filtered_tools().await;
+        assert!(!tools.iter().any(|tool| tool.name.as_ref() == "dbx_kafka__kafka_topics_delete"));
     }
 
     #[cfg(feature = "mq-admin")]

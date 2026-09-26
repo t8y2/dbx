@@ -175,7 +175,7 @@ export default withEnglishFallback({
     aiTools: {
       title: "Strumenti IA integrati",
       description:
-        "Consente all'assistente IA di DBX (modalità Agent) di usare gli strumenti di questo plugin sulle connessioni del plugin che hai aperto. Gli strumenti non dichiarati di sola lettura chiedono la tua approvazione prima di ogni chiamata e il loro output viene inviato al tuo modello IA.",
+        "I plugin con strumenti vengono rilevati automaticamente: l'assistente IA di DBX (modalità Agent) può usare gli strumenti di questo plugin sulle connessioni aperte. Spegni l'interruttore per revocare l'accesso; gli strumenti non di sola lettura chiederanno comunque approvazione a ogni chiamata.",
       preview: "Mostra strumenti",
       previewHint: "Avvia il plugin se non è in esecuzione.",
       previewFailed: "Impossibile elencare gli strumenti: {message}",

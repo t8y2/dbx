@@ -175,7 +175,7 @@ export default withEnglishFallback({
     dataAccessConsentTitle: "データアクセスの要求",
     aiTools: {
       title: "組み込み AI ツール",
-      description: "DBX AI アシスタント（Agent モード）が、開いているこのプラグインの接続でプラグインのツールを呼び出せるようにします。読み取り専用と宣言されていないツールは呼び出しのたびに承認を求め、ツールの出力は設定した AI モデルに送信されます。",
+      description: "ツール対応プラグインは自動的に検出されます：DBX AIアシスタント（Agentモード）は、開いているこのプラグインの接続でツールを呼び出せます。オフにするとアクセスを取り消せます。読み取り専用以外のツールは毎回承認を求めます。",
       preview: "ツールを表示",
       previewHint: "プラグインが実行されていない場合は起動します。",
       previewFailed: "ツール一覧を取得できませんでした: {message}",

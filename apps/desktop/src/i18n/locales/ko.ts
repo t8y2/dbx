@@ -1982,6 +1982,7 @@ export default withEnglishFallback({
     copyExtractorPipeSeparated: "파이프(|) 구분",
     copyExtractorPretty: "보기 좋은 표",
     copyExtractorConfigure: "데이터 추출기 설정…",
+    copyExtractorSaved: "데이터 추출기 설정이 저장되었습니다",
     copyExtractorDefaultFormat: "기본 복사 동작",
     copyExtractorFormat: "추출기",
     copyExtractorColumnSeparator: "열 구분자",

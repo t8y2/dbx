@@ -2057,6 +2057,7 @@ export default withEnglishFallback({
     copyExtractorPipeSeparated: "С разделителем-вертикальной чертой",
     copyExtractorPretty: "Удобная таблица",
     copyExtractorConfigure: "Настроить извлечение данных…",
+    copyExtractorSaved: "Настройки извлечения данных сохранены",
     copyExtractorDefaultFormat: "Поведение копирования по умолчанию",
     copyExtractorFormat: "Извлечение",
     copyExtractorColumnSeparator: "Разделитель столбцов",

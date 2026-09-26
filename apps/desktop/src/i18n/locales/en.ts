@@ -2175,6 +2175,7 @@ export default {
     copyExtractorPipeSeparated: "Pipe-separated",
     copyExtractorPretty: "Pretty Table",
     copyExtractorConfigure: "Configure Data Extractors…",
+    copyExtractorSaved: "Data extractor settings saved",
     copyExtractorDefaultFormat: "Default copy behavior",
     copyExtractorFormat: "Extractor",
     copyExtractorColumnSeparator: "Column separator",

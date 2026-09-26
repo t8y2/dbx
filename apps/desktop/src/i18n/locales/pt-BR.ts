@@ -2594,6 +2594,7 @@ export default withEnglishFallback({
     copyExtractorPipeSeparated: "Separado por pipe",
     copyExtractorPretty: "Tabela formatada",
     copyExtractorConfigure: "Configurar extrator de dados…",
+    copyExtractorSaved: "Configurações do extrator de dados salvas",
     copyExtractorDefaultFormat: "Comportamento de cópia padrão",
     copyExtractorFormat: "Extrator",
     copyExtractorColumnSeparator: "Separador de coluna",

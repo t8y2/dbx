@@ -664,6 +664,25 @@ pub struct PluginWorkbenchContribution {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<PluginWorkbenchAiContribution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginWorkbenchAiContribution {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommendations: Vec<PluginAiRecommendation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginAiRecommendation {
+    pub id: String,
+    pub label: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
 }
 
 /// Native context-menu entry contributed to DBX surfaces. Legacy entries
@@ -1320,6 +1339,9 @@ fn validate_contributions(
                 if !has_ui {
                     errors.push(format!("Workbench contribution '{id}' requires a UI entrypoint"));
                 }
+                if let Some(ai) = &workbench.ai {
+                    validate_ai_recommendations(&ai.recommendations, id, errors);
+                }
             }
             PluginContribution::ResultView(result_view) => {
                 validate_required_text(&result_view.label, &format!("Result view '{id}' label"), errors);
@@ -1489,6 +1511,108 @@ fn validate_contributions(
             errors.push(format!("Command '{command}' references missing workbench '{workbench}'"));
         }
     }
+}
+
+fn validate_ai_recommendations(
+    recommendations: &[PluginAiRecommendation],
+    workbench_id: &str,
+    errors: &mut Vec<String>,
+) {
+    if recommendations.len() > 5 {
+        errors.push(format!(
+            "Workbench '{workbench_id}' declares {} AI recommendations; at most 5 are allowed",
+            recommendations.len()
+        ));
+    }
+    let mut seen_ids = HashSet::new();
+    for recommendation in recommendations {
+        if !valid_identifier(&recommendation.id) {
+            errors.push(format!("Workbench '{workbench_id}' AI recommendation has an invalid id"));
+        } else if !seen_ids.insert(recommendation.id.as_str()) {
+            errors.push(format!(
+                "Workbench '{workbench_id}' declares duplicate AI recommendation id '{}'",
+                recommendation.id
+            ));
+        }
+        validate_required_text(
+            &recommendation.label,
+            &format!("Workbench '{workbench_id}' AI recommendation label"),
+            errors,
+        );
+        validate_required_text(
+            &recommendation.prompt,
+            &format!("Workbench '{workbench_id}' AI recommendation prompt"),
+            errors,
+        );
+        validate_ai_recommendation_template(&recommendation.label, workbench_id, &recommendation.id, "label", errors);
+        validate_ai_recommendation_template(&recommendation.prompt, workbench_id, &recommendation.id, "prompt", errors);
+        if recommendation.label.chars().count() > 200 {
+            errors.push(format!(
+                "Workbench '{workbench_id}' AI recommendation '{}' label exceeds 200 characters",
+                recommendation.id
+            ));
+        }
+        if recommendation.prompt.chars().count() > 32_000 {
+            errors.push(format!(
+                "Workbench '{workbench_id}' AI recommendation '{}' prompt exceeds 32000 characters",
+                recommendation.id
+            ));
+        }
+    }
+}
+
+/// Validate the only interpolation syntax supported by the workbench AI
+/// recommendation contract. Ordinary single braces remain valid prompt text;
+/// double braces must contain a safe dotted context path.
+fn validate_ai_recommendation_template(
+    value: &str,
+    workbench_id: &str,
+    recommendation_id: &str,
+    field: &str,
+    errors: &mut Vec<String>,
+) {
+    let mut offset = 0;
+    loop {
+        let remainder = &value[offset..];
+        let Some(open_relative) = remainder.find("{{") else {
+            if remainder.contains("}}") {
+                errors.push(format!("Workbench '{workbench_id}' AI recommendation '{recommendation_id}' {field} contains an unmatched placeholder close").to_string());
+            }
+            return;
+        };
+        if remainder[..open_relative].contains("}}") {
+            errors.push(format!("Workbench '{workbench_id}' AI recommendation '{recommendation_id}' {field} contains an unmatched placeholder close").to_string());
+            return;
+        }
+        let content_start = offset + open_relative + 2;
+        let Some(close_relative) = value[content_start..].find("}}") else {
+            errors.push(format!("Workbench '{workbench_id}' AI recommendation '{recommendation_id}' {field} contains an unterminated placeholder").to_string());
+            return;
+        };
+        let path = value[content_start..content_start + close_relative].trim();
+        if !valid_template_path(path) {
+            errors.push(format!("Workbench '{workbench_id}' AI recommendation '{recommendation_id}' {field} contains an invalid placeholder").to_string());
+        }
+        offset = content_start + close_relative + 2;
+    }
+}
+
+fn valid_template_path(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    value.split('.').enumerate().all(|(index, segment)| {
+        if index > 0 && segment.chars().all(|character| character.is_ascii_digit()) {
+            return !segment.is_empty();
+        }
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        (first.is_ascii_alphabetic() || first == '_' || first == '$')
+            && chars.all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '$')
+            && !matches!(segment, "__proto__" | "prototype" | "constructor")
+    })
 }
 
 /// Sidecar method names look like `<domain>/<action>[/<sub>]` (lower-case
@@ -1938,6 +2062,57 @@ mod tests {
             "type": "invoke-sidecar", "method": "x"
         }));
         assert!(rpc.is_err(), "RPC actions are outside the v1 contract");
+    }
+
+    #[test]
+    fn workbench_ai_recommendations_parse_as_an_additive_manifest_field() {
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "contributions": [{
+                "type": "workbench",
+                "id": "io.dbx.example.workbench",
+                "label": "Example",
+                "ai": { "recommendations": [{
+                    "id": "health",
+                    "label": "Inspect {{resource.name}}",
+                    "prompt": "Check {{resource.kind}}/{{resource.name}}",
+                    "order": 10
+                }] }
+            }]
+        }))
+        .unwrap();
+
+        let PluginContribution::Workbench(workbench) = &manifest.contributions[0] else {
+            panic!("expected workbench contribution");
+        };
+        let ai = workbench.ai.as_ref().expect("AI contribution");
+        assert_eq!(ai.recommendations[0].id, "health");
+        assert_eq!(ai.recommendations[0].order, Some(10));
+
+        let plugin_dir = std::env::temp_dir();
+        for invalid in ["Inspect {{resource..name}}", "Inspect {{resource.name", "Inspect resource.name}}"] {
+            let contribution = serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "workbench",
+                "id": "io.dbx.example.workbench",
+                "label": "Example",
+                "ai": { "recommendations": [{ "id": "health", "label": invalid, "prompt": "Check" }] }
+            }))
+            .unwrap();
+            let mut errors = Vec::new();
+            validate_contributions(std::slice::from_ref(&contribution), false, true, &plugin_dir, &mut errors);
+            assert!(
+                errors.iter().any(|error| error.contains("invalid placeholder")
+                    || error.contains("unterminated")
+                    || error.contains("unmatched")),
+                "{invalid:?}: {errors:?}"
+            );
+        }
     }
 
     #[test]

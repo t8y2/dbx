@@ -5,7 +5,7 @@ import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
 import PluginRefreshState from "@/components/plugins/PluginRefreshState.vue";
 import * as api from "@/lib/backend/api";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
-import type { PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
+import type { PluginAiRecommendationHostUpdate, PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
 import type { InstalledPlugin } from "@/types/database";
 import { useQueryStore } from "@/stores/queryStore";
 import { useI18n } from "vue-i18n";
@@ -21,6 +21,7 @@ const props = defineProps<{
 const { t, locale: appLocale } = useI18n();
 const emit = defineEmits<{
   closeTab: [];
+  recommendations: [update: PluginAiRecommendationHostUpdate];
 }>();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
@@ -129,6 +130,6 @@ defineExpose({ refresh });
       <AlertTriangle class="mt-0.5 size-4 shrink-0" />
       <span>{{ error || t("pluginPlatform.workbenchUnavailableFallback") }}</span>
     </div>
-    <PluginWorkbenchHost v-else class="min-h-0 flex-1" :plugin="entry.plugin" :contribution="entry.contribution" :context="hostContext" @open-workbench="openWorkbench" @open-filesystem="openFilesystem" @close-tab="emit('closeTab')" />
+    <PluginWorkbenchHost v-else class="min-h-0 flex-1" :plugin="entry.plugin" :contribution="entry.contribution" :context="hostContext" @open-workbench="openWorkbench" @open-filesystem="openFilesystem" @close-tab="emit('closeTab')" @recommendations="emit('recommendations', $event)" />
   </div>
 </template>

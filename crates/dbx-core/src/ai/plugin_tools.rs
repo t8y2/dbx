@@ -254,6 +254,7 @@ impl PluginToolBinding {
 pub async fn discover_plugin_tools(
     state: &Arc<AppState>,
     host_runtime: Option<&tokio::runtime::Handle>,
+    connection_id: Option<&str>,
 ) -> PluginToolSet {
     let enabled = match state.storage.load_ai_plugin_tool_plugin_ids().await {
         Ok(ids) if !ids.is_empty() => ids.into_iter().collect::<HashSet<_>>(),
@@ -271,7 +272,8 @@ pub async fn discover_plugin_tools(
             return PluginToolSet::default();
         }
     };
-    let connections = open_plugin_connections(state, &plugin_names).await;
+    let mut connections = open_plugin_connections(state, &plugin_names).await;
+    restrict_connections(&mut connections, connection_id);
     if connections.is_empty() {
         return PluginToolSet::default();
     }
@@ -355,6 +357,12 @@ async fn open_plugin_connections(state: &AppState, plugins: &HashMap<String, Str
     });
     connections.truncate(MAX_OPEN_CONNECTIONS);
     connections
+}
+
+fn restrict_connections(connections: &mut Vec<OpenPluginConnection>, connection_id: Option<&str>) {
+    if let Some(connection_id) = connection_id {
+        connections.retain(|connection| connection.connection_id == connection_id);
+    }
 }
 
 /// The lifecycle payload of `connection_id` if it is still open, with a fresh
@@ -948,6 +956,16 @@ mod tests {
             ("io.dbx.kafka".to_string(), "Kafka Studio".to_string()),
             ("io.github.summery-yk.portainer".to_string(), "Portainer".to_string()),
         ])
+    }
+
+    #[test]
+    fn bound_plugin_agent_sees_only_its_connection() {
+        let mut connections =
+            vec![connection("k1", "cluster-a", "io.dbx.kafka"), connection("k2", "cluster-b", "io.dbx.kafka")];
+        restrict_connections(&mut connections, Some("k2"));
+        assert_eq!(connections.iter().map(|item| item.connection_id.as_str()).collect::<Vec<_>>(), ["k2"]);
+        restrict_connections(&mut connections, None);
+        assert_eq!(connections.len(), 1);
     }
 
     fn kafka_listing() -> Value {

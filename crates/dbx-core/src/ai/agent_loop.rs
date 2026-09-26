@@ -297,7 +297,10 @@ async fn run_agent_loop_inner(
     // Plugin tools join agent runs only; ask mode keeps its database-only
     // read tools.
     let plugin_tool_set = if is_agent_mode {
-        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref()).await
+        let bound_plugin_connection =
+            (agent_ctx.db_type == DatabaseType::Plugin).then_some(agent_ctx.connection_id.as_str());
+        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref(), bound_plugin_connection)
+            .await
     } else {
         PluginToolSet::default()
     };

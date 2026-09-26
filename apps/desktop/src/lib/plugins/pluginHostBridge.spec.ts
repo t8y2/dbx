@@ -141,6 +141,87 @@ describe("PluginHostBridge", () => {
     expect(messages[0].capabilities.ai).toBe(false);
   });
 
+  it("does not publish recommendation defaults without the host.ai permission", () => {
+    const updates: unknown[] = [];
+    const target = { postMessage: vi.fn() } as unknown as Window;
+    const contribution = {
+      ...workbench,
+      ai: { recommendations: [{ id: "health", label: "Health", prompt: "Check health" }] },
+    } as PluginWorkbenchContribution;
+    new PluginHostBridge(plugin([], [contribution]), contribution, { workbenchId: "wb-1" }, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      setAiRecommendations: (update) => updates.push(update),
+    });
+    expect(updates).toHaveLength(0);
+  });
+
+  it("publishes manifest and runtime AI recommendations per workbench instance", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const updates: any[] = [];
+    const contribution = {
+      ...workbench,
+      ai: { recommendations: [{ id: "health", label: "Inspect {{resource.name}}", prompt: "Check {{resource.name}}", order: 1 }] },
+    } as PluginWorkbenchContribution;
+    const bridge = new PluginHostBridge(plugin(["host.ai"], [contribution]), contribution, { workbenchId: "wb-1", connectionId: "conn-1", resource: { name: "orders" } }, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      openAiConversation: vi.fn().mockResolvedValue(undefined),
+      setAiRecommendations: (update) => updates.push(update),
+    });
+
+    expect(updates[0]).toMatchObject({ workbenchId: "wb-1", items: [{ label: "Inspect orders", prompt: "Check orders" }] });
+    bridge.handleWindowMessage({
+      source: target,
+      data: {
+        source: "dbx-plugin",
+        version: 1,
+        type: "request",
+        id: "set",
+        method: "host.ai.setRecommendations",
+        params: { context: { connectionId: "other-connection", resource: { name: "customers" } }, items: [{ id: "custom", label: "Review {{resource.name}}", prompt: "Review {{resource.name}}" }] },
+      },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages.some((message) => message.id === "set" && message.result === null)).toBe(true));
+    expect(updates[updates.length - 1]).toMatchObject({
+      pluginId: "sample",
+      pluginName: "Sample",
+      workbenchId: "wb-1",
+      context: { connectionId: "conn-1", resource: { name: "customers" } },
+      items: [{ label: "Review customers", prompt: "Review customers" }],
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "clear", method: "host.ai.clearRecommendations", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages.some((message) => message.id === "clear" && message.result === null)).toBe(true));
+    expect(updates[updates.length - 1]).toMatchObject({ workbenchId: "wb-1", items: [] });
+  });
+
+  it("rejects malformed runtime recommendation placeholders", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      openAiConversation: vi.fn().mockResolvedValue(undefined),
+      setAiRecommendations: vi.fn(),
+    });
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "bad", method: "host.ai.setRecommendations", params: { context: {}, items: [{ id: "bad", label: "Inspect {{resource..name}}", prompt: "Check" }] } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages[0]?.error).toContain("invalid placeholder"));
+  });
+
   it("binds backend calls to the owning plugin identity", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

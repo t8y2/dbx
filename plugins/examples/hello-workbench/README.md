@@ -9,6 +9,7 @@ This example exercises the complete manifest v1 path instead of mocking a contri
 - per-connection backend registry;
 - asynchronous connection/progress events;
 - sandboxed workbench UI using `window.dbxPlugin`;
+- declarative AI recommendation chips for the active workbench resource;
 - workbench-to-sidecar RPC plus a read-only filesystem contribution rendered by DBX's host-owned file manager;
 - `mcp/tools` / `mcp/call` tools for the built-in DBX AI assistant: `hello_greet` is declared read-only, `hello_set_greeting` changes state and therefore asks the user first;
 - unsigned `.dbxp` candidate packaging plus separate repository signing;
@@ -60,6 +61,7 @@ In DBX, open **Plugin Center**, enable **Allow unsigned development package**, a
 6. Invoke the sidecar from the workbench.
 7. Click **Open host files** to browse and preview the virtual `hello:/` filesystem without plugin-owned file-browser UI.
 8. In Plugin Center → Installed, turn on **Built-in AI tools** for the plugin, keep the Hello connection open, and ask the AI assistant in Agent mode to greet someone or change the greeting. The greeting change pauses for your approval.
+9. Open the AI assistant from the workbench and click the **Inspect current workbench** recommendation to send a prompt immediately.
 
 The example token is persisted through `connection_secrets`; the raw connection `config_json` contains only an empty placeholder. The iframe receives the saved connection ID, never the token.
 

@@ -3,6 +3,7 @@ import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNa
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
+import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
@@ -418,6 +419,11 @@ export interface PluginWorkbenchContribution {
   label: string;
   description?: string;
   icon?: string;
+  ai?: PluginWorkbenchAiContribution;
+}
+
+export interface PluginWorkbenchAiContribution {
+  recommendations?: PluginAiRecommendation[];
 }
 
 export interface PluginFilesystemProviderContribution {

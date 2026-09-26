@@ -2,6 +2,8 @@ import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayl
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
 import { createPluginAiConversation, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
+import { isValidPluginAiRecommendationTemplate, resolvePluginAiRecommendationUpdate, type PluginAiRecommendationContext, type PluginAiRecommendationUpdate } from "@/lib/plugins/pluginAiRecommendations";
+import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
 import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_SQL_CHARS, MAX_PLUGIN_DATA_TIMEOUT_MS, PLUGIN_DATA_ACCESS_NOT_GRANTED, PLUGIN_DATA_CAPABILITY, PLUGIN_DATA_READ_PERMISSION, type PluginDataQueryRequest, type PluginDataQueryResult } from "@/types/pluginData";
 
@@ -144,6 +146,7 @@ export interface PluginHostBridgeApi {
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
   openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
+  setAiRecommendations?(update: PluginAiRecommendationHostUpdate): void;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
@@ -222,6 +225,15 @@ export interface PluginHostBridgeApi {
   storageDelete?(pluginId: string, key: string): Promise<void>;
 }
 
+export interface PluginAiRecommendationHostUpdate {
+  pluginId: string;
+  pluginName: string;
+  contributionId: string;
+  workbenchId: string;
+  context: PluginAiRecommendationContext;
+  items: readonly PluginAiRecommendation[];
+}
+
 interface PluginRequestMessage {
   source: typeof PLUGIN_MESSAGE_SOURCE;
   version: typeof BRIDGE_VERSION;
@@ -250,6 +262,7 @@ export class PluginHostBridge {
   /** One consent prompt per connection at a time; concurrent queries share it. */
   private pendingDataAccess = new Map<string, Promise<void>>();
   private inFlightDataQueries = 0;
+  private runtimeAiRecommendations: PluginAiRecommendationUpdate | null | undefined;
 
   /** Bounded audit trail of this session's clipboard read attempts (oldest first). */
   get clipboardAudit(): readonly PluginClipboardAuditEntry[] {
@@ -271,6 +284,7 @@ export class PluginHostBridge {
     this.context = snapshotPluginWorkbenchContext(context);
     this.locale = locale;
     this.theme = theme ? clonePluginData(theme) : undefined;
+    this.publishAiRecommendations();
   }
 
   handleWindowMessage(event: MessageEvent): boolean {
@@ -341,6 +355,7 @@ export class PluginHostBridge {
     this.disposed = true;
     for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
     this.downloads.clear();
+    this.publishAiRecommendations({ context: {}, items: [] });
   }
 
   private disposed = false;
@@ -400,6 +415,7 @@ export class PluginHostBridge {
         [PLUGIN_DATA_CAPABILITY]: !!this.api.queryData && !!this.api.hasDataGrant && !!this.api.confirmDataAccess && !!this.api.grantDataAccess,
         storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
         ai: !!this.api.openAiConversation,
+        aiRecommendations: !!this.api.openAiConversation && !!this.api.setAiRecommendations,
         // Additive with the same "absence means unsupported" contract: an older
         // host omits these, and a web host has neither.
         clipboardWrite: !!this.api.copyText,
@@ -416,7 +432,40 @@ export class PluginHostBridge {
    */
   updateContext(context: PluginWorkbenchContext): void {
     this.context = snapshotPluginWorkbenchContext(context);
+    this.runtimeAiRecommendations = undefined;
+    this.publishAiRecommendations();
     this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "context", context: snapshotPluginWorkbenchContext(this.context) });
+  }
+
+  private publishAiRecommendations(override?: PluginAiRecommendationUpdate): void {
+    if (!this.hasPermission("host.ai") || !this.api.openAiConversation || !this.api.setAiRecommendations) return;
+    const workbenchId = typeof this.context.workbenchId === "string" ? this.context.workbenchId : "";
+    const contribution = this.contribution.type === "workbench" ? this.contribution : undefined;
+    const defaults = contribution?.ai?.recommendations;
+    const runtime = override ?? this.runtimeAiRecommendations;
+    // Runtime updates usually contain only the resource-specific fields used by
+    // placeholders. Keep host-owned routing fields authoritative so clicking a
+    // recommendation remains bound to this workbench's connection even when the
+    // plugin does not repeat connectionId in every update.
+    const runtimeContext = runtime
+      ? snapshotPluginWorkbenchContext({
+          ...runtime.context,
+          ...(this.context.connectionId === undefined ? {} : { connectionId: this.context.connectionId }),
+          ...(this.context.database === undefined ? {} : { database: this.context.database }),
+          ...(this.context.schema === undefined ? {} : { schema: this.context.schema }),
+          ...(this.context.workbenchId === undefined ? {} : { workbenchId: this.context.workbenchId }),
+        })
+      : this.context;
+    const effectiveRuntime = runtime === null ? { context: {}, items: [] } : runtime ? { ...runtime, context: runtimeContext } : undefined;
+    const items = resolvePluginAiRecommendationUpdate(defaults, effectiveRuntime, this.context);
+    this.api.setAiRecommendations({
+      pluginId: this.plugin.manifest.id,
+      pluginName: this.plugin.manifest.name,
+      contributionId: this.contribution.id,
+      workbenchId,
+      context: runtime ? runtimeContext : this.context,
+      items,
+    });
   }
 
   /** Notify the plugin UI about a locale change without a reload. */
@@ -492,6 +541,21 @@ export class PluginHostBridge {
       if (!this.api.openAiConversation) throw new Error("DBX AI conversation panel is unavailable");
       const request = createPluginAiConversation(this.plugin.manifest, params);
       await this.api.openAiConversation(request);
+      return null;
+    }
+    if (method === "host.ai.setRecommendations") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation || !this.api.setAiRecommendations) throw new Error("DBX AI recommendations are unavailable");
+      const update = requirePluginAiRecommendationUpdate(params);
+      this.runtimeAiRecommendations = update;
+      this.publishAiRecommendations();
+      return null;
+    }
+    if (method === "host.ai.clearRecommendations") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation || !this.api.setAiRecommendations) throw new Error("DBX AI recommendations are unavailable");
+      this.runtimeAiRecommendations = { context: {}, items: [] };
+      this.publishAiRecommendations();
       return null;
     }
     if (method === "backend.invoke") {
@@ -1037,7 +1101,11 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       downloadFile: (options) => request('host.downloadFile', options),
       cancelDownload: (downloadId) => request('host.cancelDownload', { downloadId }),
       request,
-      ai: Object.freeze({ openConversation: (options) => request('host.ai.openConversation', options) }),
+      ai: Object.freeze({
+        openConversation: (options) => request('host.ai.openConversation', options),
+        setRecommendations: (update) => request('host.ai.setRecommendations', update),
+        clearRecommendations: () => request('host.ai.clearRecommendations'),
+      }),
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       stream,
       notify: (method, params) => request('backend.notify', { method, params }),
@@ -1323,6 +1391,29 @@ function clampPluginPlanTimeout(value: unknown): number {
 function requireHandleId(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > 128) throw new Error("handleId is invalid");
   return value;
+}
+
+function requirePluginAiRecommendationUpdate(value: unknown): PluginAiRecommendationUpdate {
+  const input = requireRecord(value, "AI recommendation update");
+  if (!isRecord(input.context)) throw new Error("AI recommendation context must be an object");
+  if (!Array.isArray(input.items)) throw new Error("AI recommendation items must be an array");
+  if (input.items.length > 5) throw new Error("At most 5 AI recommendations may be registered");
+  const context = snapshotPluginWorkbenchContext(input.context) as PluginAiRecommendationContext;
+  const items = input.items.map((candidate, index) => {
+    if (!isRecord(candidate)) throw new Error(`AI recommendation ${index} must be an object`);
+    if (typeof candidate.id !== "string" || !candidate.id.trim()) throw new Error(`AI recommendation ${index} requires id`);
+    if (typeof candidate.label !== "string" || !candidate.label.trim() || candidate.label.length > 200) throw new Error(`AI recommendation ${index} label is invalid`);
+    if (typeof candidate.prompt !== "string" || !candidate.prompt.trim() || candidate.prompt.length > 32000) throw new Error(`AI recommendation ${index} prompt is invalid`);
+    if (!isValidPluginAiRecommendationTemplate(candidate.label) || !isValidPluginAiRecommendationTemplate(candidate.prompt)) throw new Error(`AI recommendation ${index} contains an invalid placeholder`);
+    if (candidate.order !== undefined && (typeof candidate.order !== "number" || !Number.isFinite(candidate.order))) throw new Error(`AI recommendation ${index} order is invalid`);
+    return {
+      id: candidate.id.trim(),
+      label: candidate.label.trim(),
+      prompt: candidate.prompt.trim(),
+      ...(candidate.order === undefined ? {} : { order: candidate.order }),
+    };
+  });
+  return { context, items };
 }
 
 function requireOffset(value: unknown): number {

@@ -14,6 +14,7 @@ import AiAssistant from "@/components/editor/AiAssistant.vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { ConnectionConfig } from "@/types/database";
+import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -38,10 +39,10 @@ afterEach(() => {
   while (cleanups.length) cleanups.pop()?.();
 });
 
-async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig, configureSettings?: (settings: ReturnType<typeof useSettingsStore>) => void) {
+async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig, configureSettings?: (settings: ReturnType<typeof useSettingsStore>) => void, pluginRecommendations?: PluginAiRecommendationHostUpdate) {
   const pinia = createPinia();
   const errors: unknown[] = [];
-  const app = createApp({ render: () => h(TooltipProvider, () => h(AiAssistant, { connection })) });
+  const app = createApp({ render: () => h(TooltipProvider, () => h(AiAssistant, { connection, pluginRecommendations })) });
   app.use(pinia);
   app.use(i18n);
   app.config.errorHandler = (error) => errors.push(error);
@@ -63,6 +64,40 @@ async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig
 }
 
 describe("AiAssistant mount", () => {
+  it("keeps the real Agent mode and an interactive picker after clicking a plugin recommendation", async () => {
+    const { container, errors } = await mountPanel(
+      true,
+      { id: "plugin-connection", name: "Sample", db_type: "plugin", plugin_id: "sample.plugin", host: "localhost", port: 22, username: "", password: "" },
+      (settings) => {
+        settings.defaultAiMode = "agent";
+      },
+      {
+        pluginId: "sample.plugin",
+        pluginName: "Sample",
+        contributionId: "workbench",
+        workbenchId: "cluster",
+        context: { connectionId: "plugin-connection" },
+        items: [{ id: "overview", label: "Inspect cluster", prompt: "Inspect cluster" }],
+      },
+    );
+    expect(container.querySelector(".ai-mode-action-trigger")?.textContent).toContain(i18n.global.t("ai.modes.agent"));
+    container.querySelector<HTMLButtonElement>('button[title="Inspect cluster"]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const trigger = container.querySelector<HTMLButtonElement>(".ai-mode-action-trigger");
+    expect(trigger).not.toBeNull();
+    expect(trigger?.textContent).toContain(i18n.global.t("ai.modes.agent"));
+    expect(container.querySelector(".ai-mode-static-trigger")).toBeNull();
+    trigger!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
+    const askButton = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((button) => button.textContent?.trim() === i18n.global.t("ai.modes.ask"));
+    expect(askButton).toBeDefined();
+    askButton!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(trigger?.textContent).toContain(i18n.global.t("ai.modes.ask"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
   it("opens when the AI config was loaded before the panel mounted", async () => {
     expect((await mountPanel(true)).errors.map(String)).toEqual([]);
   });

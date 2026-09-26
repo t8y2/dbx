@@ -16,6 +16,7 @@ import {
   type PluginSaveFileRequest,
   type PluginSaveFileResult,
   type PluginWorkbenchContext,
+  type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
 import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
@@ -42,6 +43,7 @@ const emit = defineEmits<{
   openWorkbench: [pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }];
   openFilesystem: [pluginId: string, providerId: string, context?: PluginWorkbenchContext];
   closeTab: [];
+  recommendations: [update: PluginAiRecommendationHostUpdate];
 }>();
 
 const { t, locale: appLocale } = useI18n();
@@ -381,6 +383,7 @@ function createBridge() {
       sendBinary: api.sendPluginBinary,
       readAsset: api.readPluginUiAsset,
       openAiConversation,
+      setAiRecommendations: (update) => emit("recommendations", update),
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),

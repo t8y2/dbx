@@ -1,6 +1,6 @@
 import type { InjectionKey } from "vue";
 import { snapshotPluginWorkbenchContext } from "@/lib/plugins/pluginData";
-import type { AiConfig } from "@/types/ai";
+import type { AiAssistantMode, AiConfig } from "@/types/ai";
 import type { AiCompletionRequest, AiMessage, AiStreamChunk, AgentEvent } from "@/lib/backend/tauri";
 
 /** Data owned by a conversation, independent of the currently selected DBX tab. */
@@ -10,12 +10,16 @@ export interface AiPluginContext {
   title: string;
   capturedAt: string;
   data: Record<string, unknown>;
+  /** Persisted so reopening a live recommendation conversation keeps Agent mode. */
+  mode?: AiAssistantMode;
 }
 
 export interface AiPluginConversationRequest {
   context: AiPluginContext;
   prompt: string;
   send: boolean;
+  /** Legacy plugin calls stay on snapshot Ask mode unless they opt into live Agent mode. */
+  mode?: AiAssistantMode;
 }
 
 export const OPEN_PLUGIN_AI_CONVERSATION: InjectionKey<(request: AiPluginConversationRequest) => Promise<void>> = Symbol("open-plugin-ai-conversation");
@@ -27,6 +31,7 @@ export function createPluginAiConversation(plugin: { id: string; name: string },
   if (typeof input.prompt !== "string" || !input.prompt.trim() || input.prompt.length > 32000) throw new Error("AI conversation prompt must contain 1–32000 characters");
   if (!input.context || typeof input.context !== "object" || Array.isArray(input.context)) throw new Error("AI conversation context must be an object");
   if (input.send !== undefined && typeof input.send !== "boolean") throw new Error("AI conversation send must be a boolean");
+  if (input.mode !== undefined && input.mode !== "ask" && input.mode !== "agent") throw new Error("AI conversation mode must be ask or agent");
   return {
     context: {
       pluginId: plugin.id,
@@ -34,9 +39,11 @@ export function createPluginAiConversation(plugin: { id: string; name: string },
       title: input.title.trim(),
       capturedAt: new Date().toISOString(),
       data: snapshotPluginWorkbenchContext(input.context as Record<string, unknown>),
+      ...(input.mode === undefined ? {} : { mode: input.mode }),
     },
     prompt: input.prompt.trim(),
     send: input.send === true,
+    ...(input.mode === undefined ? {} : { mode: input.mode }),
   };
 }
 
@@ -46,6 +53,25 @@ export function pluginContextFromMessages(messages: readonly { pluginContext?: A
 
 export function pluginContextText(context: AiPluginContext): string {
   return `${context.pluginName} · ${context.title}\n${context.capturedAt}\n\n${JSON.stringify(context.data, null, 2)}`;
+}
+
+/** A plugin may include the DBX connection id in its snapshot context. */
+export function pluginContextConnectionId(context: AiPluginContext): string | undefined {
+  const value = context.data.connectionId;
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+/**
+ * Label shown in the AI composer for a plugin-backed conversation.
+ *
+ * The plugin title describes the request and can change for every
+ * recommendation. The composer is bound to a connection instead, so prefer
+ * the resolved connection name and use the persisted name for conversations
+ * whose connection was removed. Older plugin conversations may have neither,
+ * in which case the plugin name is the safest available fallback.
+ */
+export function pluginComposerConnectionLabel(context: AiPluginContext, boundConnectionName?: string, persistedConnectionName?: string): string {
+  return boundConnectionName?.trim() || persistedConnectionName?.trim() || context.pluginName;
 }
 
 export function buildPluginAiRequest(config: AiConfig, context: AiPluginContext, messages: AiMessage[], instructions?: string[]): AiCompletionRequest {

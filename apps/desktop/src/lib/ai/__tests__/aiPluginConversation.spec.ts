@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildPluginAiRequest, createPluginAiConversation, pluginContextFromMessages, streamPluginAiConversation } from "../aiPluginConversation";
+import { buildPluginAiRequest, createPluginAiConversation, pluginComposerConnectionLabel, pluginContextConnectionId, pluginContextFromMessages, streamPluginAiConversation } from "../aiPluginConversation";
 import type { AiConfig } from "@/types/ai";
 import type { AgentEvent } from "@/lib/backend/tauri";
 
@@ -7,6 +7,19 @@ const identity = { id: "market", name: "Market Watch" };
 const input = () => ({ title: "AAPL", prompt: "Analyse risks", context: { quotes: [{ symbol: "AAPL", price: 100, currency: "USD" }], snapshotId: "snap-1" } });
 
 describe("plugin conversations in DBX AI", () => {
+  it("keeps the composer label on the connection instead of the recommendation title", () => {
+    const context = createPluginAiConversation(identity, input()).context;
+    expect(pluginComposerConnectionLabel(context, "orb", "Saved connection")).toBe("orb");
+    expect(pluginComposerConnectionLabel(context, undefined, "Saved connection")).toBe("Saved connection");
+    expect(pluginComposerConnectionLabel(context)).toBe("Market Watch");
+  });
+
+  it("reads an optional connection id from the plugin snapshot without requiring it", () => {
+    const context = createPluginAiConversation(identity, { ...input(), context: { connectionId: "conn-orb" } }).context;
+    expect(pluginContextConnectionId(context)).toBe("conn-orb");
+    expect(pluginContextConnectionId(createPluginAiConversation(identity, input()).context)).toBeUndefined();
+  });
+
   it("binds the host identity and freezes a data snapshot without auto-sending by default", () => {
     const request = input();
     const opened = createPluginAiConversation(identity, { ...request, pluginId: "other-plugin", pluginName: "spoof" });
@@ -14,6 +27,16 @@ describe("plugin conversations in DBX AI", () => {
     expect(opened.send).toBe(false);
     expect(opened.context).toMatchObject({ pluginId: "market", pluginName: "Market Watch", data: { quotes: [{ price: 100 }] } });
     expect(opened).not.toHaveProperty("apiKey");
+  });
+
+  it("keeps legacy opens in snapshot Ask mode and accepts explicit Agent mode", () => {
+    const legacy = createPluginAiConversation(identity, input());
+    expect(legacy.mode).toBeUndefined();
+    expect(legacy.context.mode).toBeUndefined();
+    const live = createPluginAiConversation(identity, { ...input(), mode: "agent" });
+    expect(live.mode).toBe("agent");
+    expect(live.context.mode).toBe("agent");
+    expect(() => createPluginAiConversation(identity, { ...input(), mode: "invalid" })).toThrow();
   });
 
   it.each([{ title: "" }, { prompt: "" }, { context: [] }, { send: "true" }, { context: { callback: () => {} } }, { context: { big: "x".repeat(2 * 1024 * 1024) } }])("rejects malformed or oversized requests", (override) => {

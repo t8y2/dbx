@@ -13,7 +13,7 @@
     "dbx": ">=0.5.68",
     "host_api": "^1.0"
   },
-  "permissions": ["host.events", "host.filesystem", "host.data:read"],
+  "permissions": ["host.events", "host.filesystem", "host.data:read", "host.ai"],
   "entrypoints": {
     "backend": {
       "executable": "bin/dbx-example-hello"
@@ -88,7 +88,17 @@
       "type": "workbench",
       "id": "dbx.example.hello.main",
       "label": "Hello Workbench",
-      "description": "A sandboxed plugin UI hosted in a normal DBX workbench tab."
+      "description": "A sandboxed plugin UI hosted in a normal DBX workbench tab.",
+      "ai": {
+        "recommendations": [
+          {
+            "id": "inspect-resource",
+            "label": "Inspect current workbench",
+            "prompt": "Analyze the current Hello workbench context and summarize its health risks.",
+            "order": 10
+          }
+        ]
+      }
     },
     {
       "type": "filesystem-provider",

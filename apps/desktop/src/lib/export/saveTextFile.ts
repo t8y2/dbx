@@ -1,7 +1,7 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { appendDebugLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 
-export async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string, diagnostics: { exportId?: string; operation?: string } = {}) {
+export async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string, diagnostics: { exportId?: string; operation?: string } = {}): Promise<boolean> {
   const logSaveStage = (stage: string, details: Record<string, unknown> = {}) => {
     if (!isDebugLoggingEnabled()) return;
     appendDebugLog("info", `[DBX][export:save:${stage}]`, {
@@ -25,7 +25,7 @@ export async function saveTextFile(content: string, defaultFileName: string, fil
     logSaveStage("dialog-result", { selected: !!path });
     if (path) await writeTextFile(path, content);
     if (path) logSaveStage("write-done");
-    return;
+    return Boolean(path);
   }
 
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
@@ -36,6 +36,20 @@ export async function saveTextFile(content: string, defaultFileName: string, fil
   a.click();
   URL.revokeObjectURL(url);
   logSaveStage("browser-download-triggered");
+  return true;
+}
+
+/**
+ * Export file base name for a query result (#9894).
+ *
+ * The result tab is already named after the SQL's nearby comment (`-- name: x`
+ * or a plain leading comment) or after the `schema.table` that produced it, so
+ * an export of that result should reuse the same name instead of the generic
+ * query tab title ("query 3", "查询 3"). Table data tabs keep passing their
+ * table name, which is why the caller decides the fallback.
+ */
+export function queryResultExportBaseName(resultLabel: string | undefined, tabTitle: string | undefined): string | undefined {
+  return resultLabel?.trim() || tabTitle?.trim() || undefined;
 }
 
 export function sanitizeExportBaseName(value: string): string {

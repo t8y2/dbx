@@ -13,7 +13,6 @@ use dbx_core::query::{
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
 use dbx_core::sql_file_import::execute_sql_file_path;
-use dbx_core::storage::Storage;
 use dbx_core::table_import::{
     build_import_insert_batch_from_rows, parse_csv_bytes, parse_xlsx_file, TableImportColumnMapping,
 };
@@ -46,7 +45,7 @@ fn live_mysql_sql_file_config(id: &str) -> ConnectionConfig {
 
 async fn app_state_with_config(config: ConnectionConfig) -> (AppState, std::path::PathBuf) {
     let db_path = std::env::temp_dir().join(format!("dbx-live-sql-file-{}.db", uuid::Uuid::new_v4().simple()));
-    let storage = Storage::open(&db_path).await.expect("open temp storage");
+    let storage = dbx_core::persistence::test_storage::open(&db_path).await.expect("open temp storage");
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
     (state, db_path)
@@ -436,7 +435,7 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
     let config = live_mysql_query_export_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-query-export-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 
@@ -480,10 +479,13 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         csv_quote_mode: Default::default(),
         export_table_name: None,
         export_column_types: None,
+        export_column_extras: None,
         column_comments: None,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {
@@ -528,7 +530,7 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
     let config = live_mysql_query_export_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-issue-8803-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 
@@ -571,10 +573,13 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         csv_quote_mode: Default::default(),
         export_table_name: None,
         export_column_types: None,
+        export_column_extras: None,
         column_comments: None,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     export_query_result_core(&state, &request, None, |_| {}).await.expect("export fixture");
 
@@ -639,7 +644,7 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
     let config = live_mysql_query_export_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-query-export-timeout-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 
@@ -686,10 +691,13 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         csv_quote_mode: Default::default(),
         export_table_name: None,
         export_column_types: None,
+        export_column_extras: None,
         column_comments: None,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let rows_exported = AtomicU64::new(0);
     let done_seen = AtomicBool::new(false);
@@ -1279,6 +1287,7 @@ INSERT INTO install_check (id) VALUES (1), (2);
 "#
     );
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
@@ -1367,6 +1376,7 @@ INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
 "#
     );
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
@@ -1442,6 +1452,7 @@ async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
     script.extend_from_slice(&[0xAC, b'\\', 0xED, b'\\', b'0', 0x05]);
     script.extend_from_slice(b"');\n");
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),

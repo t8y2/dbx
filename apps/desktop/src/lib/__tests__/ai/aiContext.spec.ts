@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { aiSchemaSelectionSupported, buildAiContext, resolveAiDatabaseTarget, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
+import { aiSchemaSelectionSupported, buildAiContext, resolveAiDatabaseTarget, resolveAiMentionDatabase, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
 import type { AiConfig } from "@/types/ai";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
@@ -145,6 +145,14 @@ describe("Dameng AI context routing", () => {
     expect(resolveDefaultAiSchema(connection, ["REPORTING", "ARCHIVE"])).toBe("REPORTING");
   });
 
+  it("lists @ mention tables from the database picked in the composer", () => {
+    const connection = postgresConnection();
+    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, ["db_second"])).toBe("db_second");
+    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, ["db_second", "db_first"])).toBe("db_second");
+    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, [])).toBe("db_first");
+    expect(resolveAiMentionDatabase(queryTab("db_first"), damengConnection(), ["ignored"])).toBe("db_first");
+  });
+
   it("does not change non-Dameng namespace behavior", () => {
     expect(resolveAiDatabaseTarget(queryTab("analytics"), sqliteConnection())).toEqual({ database: "analytics" });
   });
@@ -207,5 +215,24 @@ describe("AI schema selector visibility", () => {
     const postgres: ConnectionConfig = { ...gbaseLikeMysql, id: "pg-1", db_type: "postgres" };
     expect(aiSchemaSelectionSupported(postgres)).toBe(true);
     expect(resolveAiDatabaseTarget(queryTab("app", "public"), postgres)).toEqual({ database: "app", schema: "public" });
+  });
+});
+
+describe("Plugin AI context", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each([false, true])("skips database metadata even with stale table context: %s", async (withTable) => {
+    const connection: ConnectionConfig = { ...postgresConnection(), db_type: "plugin", plugin_id: "sample.plugin" };
+    const tab = { ...queryTab("stale-db", "public"), connectionId: connection.id, tableMeta: withTable ? { schema: "public", tableName: "stale_table", columns: [] } : undefined };
+    const context = await buildAiContext(tab, connection, { mentionedTables: [{ schema: "public", table: "stale_mention" }], sqlFiles: [{ name: "notes.sql", content: "SELECT 1" }] });
+    expect(context.databaseType).toBe("plugin");
+    expect(context.connectionName).toBe(connection.name);
+    expect(context.tables).toEqual([]);
+    expect(context.truncated).toBe(false);
+    expect(context.sqlFiles).toEqual([{ name: "notes.sql", content: "SELECT 1" }]);
+    expect(apiMock.listTables).not.toHaveBeenCalled();
+    expect(apiMock.getColumns).not.toHaveBeenCalled();
+    expect(apiMock.listIndexes).not.toHaveBeenCalled();
+    expect(apiMock.listForeignKeys).not.toHaveBeenCalled();
   });
 });

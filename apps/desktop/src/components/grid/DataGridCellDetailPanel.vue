@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridValueTransform from "@/components/grid/DataGridValueTransform.vue";
 import { computed, toRef } from "vue";
 import { Code2, Copy, Download, Eye, FileDiff, FileUp, Pencil, X } from "@lucide/vue";
@@ -46,6 +47,7 @@ const detailEditValue = defineModel<string>("value", { default: "" });
 
 const emit = defineEmits<{
   startEdit: [];
+  formatJson: [];
   compactJson: [];
   compareJson: [];
   toggleFormatted: [];
@@ -142,14 +144,18 @@ defineExpose({ openSearch });
         <div class="flex min-h-5 min-w-0 flex-wrap items-center justify-between gap-2">
           <div class="shrink-0 text-muted-foreground">{{ t("grid.cellValue") }}</div>
           <div class="min-w-0 flex flex-1 flex-wrap items-center justify-end gap-1">
+            <!-- 与下载菜单同一道闸门：两者都读已提交的 `0x<hex>`，编辑中不对草稿做只读文本预览。 -->
+            <DataGridCellDetailTextPreview v-if="!editing && isBinaryCellColumnType(detail.type)" :identity="`${detail.rowId}:${detail.colIndex}`" :value="detail.value" :column-type="detail.type" :database-type="databaseType" :incomplete="detail.isSourceTruncated" />
             <DataGridValueTransform
-              v-if="!isBinaryCellColumnType(detail.type)"
+              v-else-if="!isBinaryCellColumnType(detail.type)"
               :source="(detail.isNull ?? detail.value === null) && (!editing || !detailEditValue || detailEditValue === detail.rawValue) ? null : editing ? detailEditValue : detail.rawValue"
               :identity="`${detail.rowId}:${detail.colIndex}:${editing}`"
               :incomplete="detail.isSourceTruncated"
               :unsafe-number="typeof detail.value === 'number' && Number.isInteger(detail.value) && !Number.isSafeInteger(detail.value) && (!editing || detailEditValue === detail.rawValue)"
             />
             <Button v-if="editing && showCompareJson" variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-xs" :disabled="!canCompareJson" :title="t('grid.compareJson')" @mousedown.prevent @click="emit('compareJson')"><FileDiff class="h-3 w-3" />{{ t("grid.compareJson") }}</Button>
+            <!-- issue #9832：编辑中「压缩 JSON」作用于草稿，格式化入口不能再被 !editing 挡掉，否则压缩后就无法展开。 -->
+            <Button v-if="showCompactJson" variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-xs" :disabled="!canCompactJson" :title="t('grid.formatJson')" @click="emit('formatJson')"><Code2 class="h-3 w-3" />{{ t("grid.formatJson") }}</Button>
             <Button v-if="showCompactJson" variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-xs" :disabled="!canCompactJson" :title="t('grid.compactJson')" @click="emit('compactJson')"><Code2 class="h-3 w-3" />{{ t("grid.compactJson") }}</Button>
             <Button v-if="!editing && detail.formattedJson" :variant="sideJsonView ? 'secondary' : 'ghost'" size="sm" class="h-5 gap-1 px-1.5 text-xs" :title="t('grid.formattedJson')" @click="emit('toggleFormatted')"><Code2 class="h-3 w-3" />{{ t("grid.formattedJson") }}</Button>
             <Button v-if="!editing && detail.isEditable" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.editValue')" @click="emit('startEdit')"><Pencil class="h-3 w-3" /></Button>

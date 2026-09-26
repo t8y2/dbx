@@ -14,7 +14,36 @@ AI agent → DBX MCP → your database → results
                     ↘ DBX desktop app (open or display results)
 ```
 
-## Quick Start
+## Native installation (recommended)
+
+No Node.js is required. On macOS or Linux:
+
+```bash
+curl -fsSL https://dbxio.com/install-mcp | sh
+```
+
+On Windows, run in PowerShell:
+
+```powershell
+irm https://dbxio.com/install-mcp.ps1 | iex
+```
+
+The installer verifies the download, installs `dbx-mcp` into `~/.dbx/bin`, and prints ready-to-paste Claude Code, Cursor, Codex, ZCode, and generic MCP configurations. Use the **expanded absolute executable path** it prints, not `~` or the bare `dbx-mcp` command: GUI clients do not necessarily inherit your shell's PATH. Existing environment settings such as `DBX_DATA_DIR` remain applicable. DBX desktop settings prefer a discovered native binary, with the existing npm launcher as fallback.
+
+Rerun the same install command to upgrade. A matching version reports `already up to date`. Version probing uses `dbx-mcp --version`, falling back to `~/.dbx/bin/.dbx-mcp-version` for older binaries. Offline installation fails without replacing an existing binary. Download sources are tried in order: npmjs, npmmirror, then GitHub Releases; an integrity mismatch stops installation.
+
+Homebrew is also available on macOS and Linux:
+
+```bash
+brew install t8y2/tap/dbx-mcp
+brew upgrade t8y2/tap/dbx-mcp
+```
+
+For Homebrew client configurations, use the absolute path printed by `echo "$(brew --prefix)/bin/dbx-mcp"`. This installs the MCP server, not the separate `dbx` CLI.
+
+The npm/npx channel remains supported unchanged. DBX desktop now installs the standalone native server by default and shows existing npm users a recommended native migration action. Migration keeps the npm package as a fallback and does not rewrite external client files automatically: replace their launch command with the generated native absolute path, remove Node/npx arguments, and preserve `env`. Removing the old global package with `npm rm -g @dbx-app/mcp-server` remains optional. The desktop can update and uninstall the active standalone or Homebrew native installation; uninstalling a standalone native installation reveals any retained npm installation again.
+
+## Quick Start with npm
 
 <Steps>
   <Step>
@@ -101,17 +130,40 @@ DBX MCP provides the following tools (availability depends on build features and
 | `dbx_list_routines` | List stored procedures and functions in a schema, with an optional `routine_type` filter (PROCEDURE or FUNCTION) |
 | `dbx_get_routine_source` | Return the source of a stored procedure or function by name, with an optional `signature` for overloaded names |
 | `dbx_get_schema_context` | Return compact schema context for an AI model |
-| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
+| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning 100 rows by default (up to 1000 with the `max_rows` parameter) |
 | `dbx_execute_batch` | Execute a SQL script containing multiple statements in one call, returning a result per statement (or a single merged result with `use_transaction` on a multi-statement script) |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
+| `dbx_begin_transaction` | Begin a transaction on a transaction-enabled native MySQL session |
+| `dbx_commit_transaction` | Commit the active session transaction after MySQL acknowledges `COMMIT` |
+| `dbx_rollback_transaction` | Roll back the active session transaction |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
+| `dbx_salesforce_current_user` | Show the Salesforce user and org behind a connection, including whether the profile holds "Modify All Data" |
+| `dbx_salesforce_prepare_write` | Prepare one Salesforce record write and return a summary plus a single-use confirm token |
+| `dbx_salesforce_apply_write` | Apply a prepared Salesforce write using its confirm token |
 | `dbx_peek_messages` | Read Kafka messages without committing consumer offsets |
 | `dbx_send_message` | Send a message to a supported message queue topic or queue |
 | `dbx_open_table` | Open a table in the running DBX desktop app |
 | `dbx_execute_and_show` | Execute a query and display the result in DBX |
 
+`dbx_execute_query` row controls:
+
+- `max_rows`: 1–1000, defaults to 100. Out-of-range values are clamped, not rejected. It applies to SQL connections only — MongoDB shell commands always return at most 100 rows, and multi-statement scripts routed to the batch executor return at most 100 rows per statement.
+
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
+
+## Resources
+
+Clients that support MCP Resources can read the connection catalog and expand templates for database metadata:
+
+| Resource URI | Description |
+| --- | --- |
+| `dbx://connections` | Connections visible to the current MCP scope |
+| `dbx://connections/{connection_id}/databases` | Databases visible through one connection |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | Tables and views in an optional database/schema |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | Column definitions for a table; `table` is required |
+
+Resource discovery and reads reuse the corresponding Tool allowlist plus connection, group, database, and runtime scopes. Query parameter values must be URI encoded. SQL execution and all write-capable operations remain Tools.
 
 ## Read Kafka Messages
 
@@ -155,9 +207,44 @@ Regular `dbx_execute_query` calls are independent. When a workflow must preserve
 - Session variables and settings
 - Explicit transactions or multi-step diagnostics that require one connection
 
-Sessions support SQL connections only and are bound to one connection and database. Unknown, closed, or expired IDs fail instead of silently falling back to an ordinary query. Call `dbx_close_session` when finished. Idle sessions are reclaimed after 30 minutes, and the server allows at most 32 concurrent sessions.
+Sessions support SQL connections only and are bound to one connection and database. Unknown, closed, or expired IDs fail instead of silently falling back to an ordinary query. Call `dbx_close_session` when finished. Idle sessions are reclaimed after 30 minutes by default, and the server allows at most 32 concurrent sessions. Set `DBX_SESSION_IDLE_TTL_SECS=43200` in the process hosting MCP to allow 12 hours of inactivity, including transaction-owned connections. The value must be positive whole seconds; unset, invalid, zero, negative or unrepresentable values keep the 1800-second default. Restart the host after changing it. For embedded DBX Web MCP, set it on the Web server; for the standalone launcher, set it in the launcher environment.
 
 <Callout type="warn">A stateful session does not widen SQL policy. `USE` is meaningful only inside a session, while writes, DDL, production protection, connection read-only state, and database privileges are rechecked for every request.</Callout>
+
+### Explicit native MySQL transactions
+
+Set `enable_transactions: true` when calling `dbx_open_session` to reserve one physical native MySQL connection eagerly. Then use `dbx_begin_transaction`, one or more `dbx_execute_query` or `dbx_execute_batch` calls with the returned `session_id`, and finally `dbx_commit_transaction` or `dbx_rollback_transaction`. Queries before and after a transaction still use the same owned connection. `use_transaction` remains incompatible with `session_id`; it is the separate atomic-batch feature described above.
+
+This opt-in mode is available only for local native MySQL connections. DBX Web/`DBX_WEB_URL`, external driver profiles, compatibility engines, and other database types return `TRANSACTION_UNSUPPORTED` instead of falling back to auto-commit. Transaction-session SQL accepts one parsed `SELECT` (including locking reads), `INSERT`, `UPDATE`, `DELETE`, or `REPLACE` statement per operation. It rejects raw transaction control, DDL and temporary DDL, `CALL`, `LOAD`, table locks, `SET`, `USE`, XA, file/output clauses, executable comments, optimizer hints, and multi-statements. Complete batches hold one operation slot and report the resulting transaction state for every statement.
+
+Responses include `transaction_state` (`idle`, `active`, or `unknown`) and, when known, `transaction_outcome` (`committed`, `rolled_back`, or `unknown`). A normal MySQL statement error can leave the transaction active; DBX probes fresh state on the same connection before reporting it. A timeout, cancellation, transport failure, or lost `COMMIT` acknowledgement makes the outcome `unknown`, permanently blocks more SQL on that session, and disposes the connection without replaying the statement or `COMMIT`. A positive connection query timeout applies to transaction operations; when the connection is configured as unlimited (`0`), transaction owners still apply their default 300-second operation cap so busy work remains bounded. Closing, expiry, protocol-session deletion, and server shutdown attempt bounded rollback for a known active transaction and then dispose the connection.
+
+<Callout type="warn">Rollback guarantees require transactional storage such as InnoDB. Triggers, stored functions, nontransactional tables, and external side effects can have effects that MySQL cannot roll back. DBX rechecks the current connection/database scope, tool allowlist, read-only and production protections, and confirmed SQL after queue waiting. Rollback and close remain available for cleanup after write permission is revoked.</Callout>
+
+## Salesforce SOQL and DML
+
+Salesforce connections speak SOQL, not SQL, and DBX shapes the MCP surface around that:
+
+- `dbx_list_tables` lists the org's objects, `dbx_describe_table` lists an object's fields, and `dbx_execute_query` runs SOQL (`SELECT Id, Name FROM Account LIMIT 10`).
+- `dbx_list_databases` explains that one Salesforce org is one scope instead of inventing databases.
+- `dbx_execute_batch` and `dbx_open_session` are refused: SOQL is read-only so there is no multi-statement script to batch, and every call is a stateless REST request — there is no session to pin and no transaction to open.
+- A record write is never a query. `dbx_execute_query` rejects write attempts with `SALESFORCE_DML_REQUIRES_CONFIRMATION` so the confirmation below cannot be bypassed.
+
+### Confirming a write
+
+Writing goes through two calls, and the second one only works if a human saw the first one's summary:
+
+1. `dbx_salesforce_prepare_write` with `connection_id` (or `connection_name`), `op` (`insert`, `update`, or `delete`), `object` (an API name such as `Account` or `Invoice__c`), the record `id` for `update`/`delete`, and `fields` for `insert`/`update`. Nothing is sent to Salesforce.
+2. Show the returned summary to the user: the operation, object, record Id, every field value, the connection, and the identity the change will be attributed to.
+3. `dbx_salesforce_apply_write` with the `confirm_token` from step 1.
+
+The token is single-use, expires 5 minutes after it was issued, and is bound to that exact statement — a changed write needs a new prepare. A replayed, expired, or never-issued token fails with `CONFIRM_TOKEN_INVALID`. DBX re-checks the connection scope, tool allowlist, read-only and production protections, and the DML opt-in at apply time, so revoking permission between the two calls takes effect immediately.
+
+<Callout type="warn">Salesforce writes are not transactional. Once `dbx_salesforce_apply_write` returns, the record has changed in the org and DBX cannot roll it back. Each call touches exactly one record: `upsert`, bulk, and composite writes are rejected at prepare time with `SALESFORCE_DML_INVALID`. Preparing a write needs the per-connection **Allow DML** switch in **Settings → MCP**, which is off by default and returns `SALESFORCE_DML_DISABLED` until a person turns it on; a read-only execution mode ignores the switch entirely.</Callout>
+
+### Who the write is attributed to
+
+`dbx_salesforce_current_user` returns the connected user, their profile, the org display name, and whether that profile holds **Modify All Data** — the flag that decides whether field-level security and record sharing apply at all. Call it before preparing a write, and use it to tell a permission failure apart from a bad record Id. `dbx_salesforce_prepare_write` includes the same identity in its summary; if the lookup fails the summary says the identity is unknown and still prepares the write, leaving the decision with the user.
 
 ## Database Access
 
@@ -217,7 +304,9 @@ DBX Web and Docker require the same standalone DuckDB driver. Install it from Dr
 
 ### Native Streamable HTTP for DBX Web
 
-DBX Web can also host MCP itself. This mode is disabled unless `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) is configured. It uses the existing Web listener and the `/mcp` path, so Docker and reverse-proxy deployments do not need a second exposed port. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities that clients send in the `Host` header, including a mapped port when applicable. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
+DBX Web can also host MCP itself on its existing listener at `/mcp`, so Docker and reverse-proxy deployments do not need a second exposed port. A single-instance deployment with a Web login password can enable it in **Settings → MCP → HTTP Service** after entering the allowed Hosts. DBX generates a bearer token in its encrypted secret store; the page can copy, rotate, or disable it, with changes applying to new requests immediately. The page does not show `/mcp` as a usable endpoint while it is disabled. Page-managed MCP is inactive without a Web login password; demo deployments disable MCP entirely.
+
+Deployment configuration takes precedence: when `DBX_WEB_MCP_TOKEN` or `DBX_WEB_MCP_TOKEN_FILE` is set, the page shows read-only status and cannot replace the deployment secret. A previously enabled page-managed token remains stored and becomes active again if the deployment token is removed and Web is restarted. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities clients send in the `Host` header, including mapped ports. Multi-instance deployments should use a shared deployment secret and allowlist, not the page-managed mode. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
 
 For example, a container published as `4225:4224` uses `http://localhost:4225/mcp`:
 
@@ -269,6 +358,7 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
 | Variable | Purpose |
 | --- | --- |
 | `DBX_DATA_DIR` | Override the local DBX data directory |
+| `DBX_SESSION_IDLE_TTL_SECS` | Stateful session idle timeout in positive whole seconds (default: `1800`). Invalid, zero, negative or unrepresentable values use the default. Applies to transaction-owned connections too; restart the MCP host after changing it. |
 | `DBX_WEB_URL` | Use a DBX Web/Docker backend |
 | `DBX_WEB_PASSWORD` | Authenticate to DBX Web |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | Standard system proxy variables for DBX Web requests; empty value means no proxy. Auth via `http://user:pass@host:port` |

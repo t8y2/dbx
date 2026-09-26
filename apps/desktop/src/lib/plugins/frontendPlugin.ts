@@ -1,6 +1,9 @@
 import type {
   ConnectionConfig,
   InstalledPlugin,
+  PluginCommandContribution,
+  PluginConditionClause,
+  PluginConditionContextKeys,
   PluginConnectionAction,
   PluginConnectionProviderContribution,
   PluginContribution,
@@ -12,6 +15,7 @@ import type {
   PluginFormFieldLocalization,
   PluginFormFieldValue,
   PluginManifestLocalization,
+  PluginUiContribution,
   PluginWorkbenchContribution,
 } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
@@ -57,7 +61,7 @@ export class FrontendPluginRegistry {
     return this.listContributions("filesystem-provider");
   }
 
-  /** Native context-menu entries declared for a specific menu surface such as `connection`. */
+  /** Native context-menu entries declared for a specific menu surface. */
   listContextMenuItems(menu: string): PluginContributionEntry<PluginContextMenuContribution>[] {
     return this.listContributions("context-menu").filter((entry) => entry.contribution.menu === menu);
   }
@@ -71,12 +75,109 @@ export class FrontendPluginRegistry {
     return this.listWorkbenches().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
   }
 
+  listCommands(): PluginContributionEntry<PluginCommandContribution>[] {
+    return this.listContributions("command");
+  }
+
+  findCommand(pluginId: string, contributionId: string): PluginContributionEntry<PluginCommandContribution> | undefined {
+    return this.listCommands().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
+  }
+
+  /** First command of the plugin whose action opens the given workbench (§4.1). */
+  findCommandTargetingWorkbench(pluginId: string, workbenchContributionId: string): PluginCommandContribution | undefined {
+    for (const contribution of this.findPlugin(pluginId)?.contributions ?? []) {
+      if (contribution.type !== "command") continue;
+      const action = contribution.action;
+      if (action.type === "open-workbench" && action.workbench === workbenchContributionId) return contribution;
+    }
+    return undefined;
+  }
+
+  /**
+   * PR-A4 appToolbar placements (HOST_PLUGIN_UI_SPEC §5.1): one icon entry
+   * per visible toolbar placement, ordered by `order` then the full command
+   * id so the result never depends on manifest or install order. Toolbar
+   * entries stay hidden unless the manifest sets `default_visible: true`
+   * (§5.2: toolbar items default to hidden).
+   */
+  listToolbarMenuCommands(): Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> {
+    const result: Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> = [];
+    for (const definition of this.definitions) {
+      for (const contribution of definition.contributions) {
+        if (contribution.type !== "menus") continue;
+        const placements = contribution.items.filter((item) => item.location === "appToolbar" && item.default_visible === true && evaluateWhen(item.when, "appToolbar")).sort((a, b) => a.order - b.order || a.command.localeCompare(b.command));
+        for (const item of placements) {
+          const command = definition.contributions.find((candidate): candidate is PluginCommandContribution => candidate.type === "command" && candidate.id === item.command);
+          if (command) result.push({ plugin: definition.plugin, command, order: item.order });
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * commandPalette placements (HOST_PLUGIN_UI_SPEC §5): palette declarations have no
+   * a default_visible gate (§5.2 only mandates hidden-by-default for toolbar items). Commands sort by `order`
+   * ascending, then by the fully qualified command id (`${pluginId}.${commandId}`) for a stable order independent of
+   * manifest or install order.
+   */
+  listPaletteMenuCommands(): Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> {
+    const result: Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> = [];
+    for (const definition of this.definitions) {
+      for (const contribution of definition.contributions) {
+        if (contribution.type !== "menus") continue;
+        for (const item of contribution.items) {
+          if (item.location !== "commandPalette") continue;
+          if (!evaluateWhen(item.when, "commandPalette")) continue;
+          const command = definition.contributions.find((candidate): candidate is PluginCommandContribution => candidate.type === "command" && candidate.id === item.command);
+          if (command) result.push({ plugin: definition.plugin, command, order: item.order });
+        }
+      }
+    }
+    return result.sort((left, right) => left.order - right.order || `${left.plugin.manifest.id}.${left.command.id}`.localeCompare(`${right.plugin.manifest.id}.${right.command.id}`));
+  }
+
+  /**
+   * Resolve any contribution the plugin UI entrypoint can render, whichever host
+   * surface opened the tab — a `workbench` opened from the sidebar or a
+   * `result-view` opened from the query-result toolbar. Lookups stay scoped to
+   * the renderable contribution types, so an id owned by a native context menu
+   * or a filesystem provider is not a plugin UI surface.
+   */
+  findUiContribution(pluginId: string, contributionId: string): PluginContributionEntry<PluginUiContribution> | undefined {
+    return [...this.listWorkbenches(), ...this.listResultViews()].find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
+  }
+
   private listContributions<T extends PluginContribution["type"]>(type: T): Array<PluginContributionEntry<Extract<PluginContribution, { type: T }>>> {
     return this.definitions
       .filter((definition) => definition.plugin.compatibility.compatible)
       .flatMap((definition) => definition.contributions.filter((contribution): contribution is Extract<PluginContribution, { type: T }> => contribution.type === type).map((contribution) => ({ plugin: definition.plugin, contribution })))
-      .sort((left, right) => `${left.plugin.manifest.name}:${left.contribution.label || left.contribution.id}`.localeCompare(`${right.plugin.manifest.name}:${right.contribution.label || right.contribution.id}`));
+      .sort((left, right) => `${left.plugin.manifest.name}:${pluginContributionSortLabel(left.contribution)}`.localeCompare(`${right.plugin.manifest.name}:${pluginContributionSortLabel(right.contribution)}`));
   }
+}
+
+/** menus contributions carry no label of their own (copy comes from the referenced command); the sort key degrades to the id. */
+function pluginContributionSortLabel(contribution: PluginContribution): string {
+  return (contribution as { label?: string }).label || contribution.id;
+}
+
+/**
+ * §5.3/§5.4 condition evaluation (pure): implicit AND within `all`; clauses referencing a missing key evaluate to false for all
+ * operators. contextKeys are snapshots provided by the host per scenario.
+ */
+export function evaluatePluginCommandConditions(clauses: PluginConditionClause[] | undefined, contextKeys: PluginConditionContextKeys): boolean {
+  return (clauses ?? []).every((clause) => {
+    const actual = contextKeys[clause.key];
+    if (actual === undefined) return false;
+    if (clause.operator === "equals") return String(actual) === String(clause.value);
+    if (clause.operator === "notEquals") return String(actual) !== String(clause.value);
+    return Array.isArray(clause.value) && clause.value.map(String).includes(String(actual));
+  });
+}
+
+/** Placement render gate: when defaults to visible; evaluated against the placement surface snapshot. */
+function evaluateWhen(when: { all: PluginConditionClause[] } | undefined, surface: string): boolean {
+  return evaluatePluginCommandConditions(when?.all, { surface });
 }
 
 export function createFrontendPluginRegistry(plugins: readonly InstalledPlugin[], locale = "en"): FrontendPluginRegistry {
@@ -105,6 +206,22 @@ export function pluginConnectionProviderIcon(entry: PluginContributionEntry<Plug
   return entry.contribution.icon || entry.plugin.manifest.icon;
 }
 
+/**
+ * Well-known provider field key whose declared default seeds the typed
+ * `ConnectionConfig.connect_timeout_secs`. A plugin knows its own transport
+ * (SSH handshakes on slow links need far more than the generic 10s), so a
+ * declared default wins over the global timeout unless the user explicitly
+ * picks a per-connection value in the dialog's Advanced tab.
+ */
+export const PLUGIN_CONNECT_TIMEOUT_FIELD_KEY = "connect_timeout_secs";
+
+export function pluginConnectionConnectTimeoutDefault(contribution: PluginConnectionProviderContribution): number | undefined {
+  const field = contribution.fields.find((candidate) => candidate.key === PLUGIN_CONNECT_TIMEOUT_FIELD_KEY && effectiveFieldBinding(candidate) === "config");
+  const value = field?.default;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(300, Math.max(1, Math.trunc(value)));
+}
+
 export function pluginConnectionActionsForDialog(contribution: PluginConnectionProviderContribution, editing: boolean): PluginConnectionAction[] {
   const actions: PluginConnectionAction[] = [
     ...(contribution.actions || []).map((action) => ({ ...action, kind: "custom" as const })),
@@ -115,7 +232,9 @@ export function pluginConnectionActionsForDialog(contribution: PluginConnectionP
 }
 
 export function initialPluginFormValues(contribution: PluginConnectionProviderContribution): Record<string, PluginFormFieldValue> {
-  return Object.fromEntries(contribution.fields.filter((field) => field.default !== undefined).map((field) => [field.key, field.default])) as Record<string, PluginFormFieldValue>;
+  // `null` means "no default" (older hosts serialized the absent case that way),
+  // so it must not seed the form with a value the user never typed.
+  return Object.fromEntries(contribution.fields.filter((field) => field.default !== undefined && field.default !== null).map((field) => [field.key, field.default])) as Record<string, PluginFormFieldValue>;
 }
 
 export function pluginConnectionFormValues(contribution: PluginConnectionProviderContribution, config?: ConnectionConfig): Record<string, PluginFormFieldValue> {
@@ -125,22 +244,9 @@ export function pluginConnectionFormValues(contribution: PluginConnectionProvide
   const secrets = config.connection_secrets || {};
   for (const field of contribution.fields) {
     const binding = effectiveFieldBinding(field);
+    const secret = secrets[field.key] ?? externalConfig[field.key];
     const value =
-      binding === "name"
-        ? config.name
-        : binding === "host"
-          ? config.host
-          : binding === "port"
-            ? config.port
-            : binding === "username"
-              ? config.username
-              : binding === "password"
-                ? config.password
-                : binding === "database"
-                  ? config.database
-                  : binding === "secret"
-                    ? (secrets[field.key] ?? externalConfig[field.key])
-                    : externalConfig[field.key];
+      binding === "name" ? config.name : binding === "host" ? config.host : binding === "port" ? config.port : binding === "username" ? config.username : binding === "password" ? config.password : binding === "database" ? config.database : binding === "secret" ? secret : externalConfig[field.key];
     // Port 0 is the stored representation of an optional, automatic port.
     // Keep that input empty on reopen so its protocol-default hint remains visible.
     if (binding === "port" && value === 0 && field.default === undefined) delete values[field.key];
@@ -170,7 +276,7 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     plugin_connection_type: contribution.database_type,
     connection_secrets: connectionSecrets,
     transport_layers: existing?.transport_layers || [],
-    connect_timeout_secs: existing?.connect_timeout_secs || 10,
+    connect_timeout_secs: existing?.connect_timeout_secs || pluginConnectionConnectTimeoutDefault(contribution) || 10,
     query_timeout_secs: existing?.query_timeout_secs || 60,
     idle_timeout_secs: existing?.idle_timeout_secs || 60,
     keepalive_interval_secs: existing?.keepalive_interval_secs || 30,
@@ -180,7 +286,11 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     production_databases: existing?.production_databases || [],
   };
   for (const field of contribution.fields) {
-    const value = values[field.key] ?? field.default;
+    // A `null` coming from the form (or from a host that hydrated absent
+    // defaults as `null`) means "unset": fall back to the declared default and
+    // otherwise clear the stored value instead of persisting a null.
+    const raw = values[field.key];
+    const value = raw === null ? undefined : (raw ?? field.default ?? undefined);
     const binding = effectiveFieldBinding(field);
     if (binding === "config") {
       if (value === undefined) delete externalConfig[field.key];
@@ -203,6 +313,17 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
       config.password = String(value || "");
     } else if (binding === "database") {
       config.database = value === undefined || value === "" ? undefined : String(value);
+    }
+  }
+  // A config-bound connect_timeout_secs field is the plugin's own handshake
+  // timeout (the SSH plugin lets advanced users tune it). Mirror the resolved
+  // value into the typed field so the host RPC deadline never fires before the
+  // plugin's own timeout. Only applies while the provider declares the field —
+  // a stale external_config key from an older manifest must not leak through.
+  if (pluginConnectionConnectTimeoutDefault(contribution) !== undefined) {
+    const pluginConnectTimeout = externalConfig[PLUGIN_CONNECT_TIMEOUT_FIELD_KEY];
+    if (typeof pluginConnectTimeout === "number" && Number.isFinite(pluginConnectTimeout) && pluginConnectTimeout > 0) {
+      config.connect_timeout_secs = Math.min(300, Math.max(1, Math.trunc(pluginConnectTimeout)));
     }
   }
   return config;
@@ -244,6 +365,9 @@ function localizePluginMetadata(plugin: InstalledPlugin, localization?: PluginMa
 }
 
 function localizeContribution(contribution: PluginContribution, localization: PluginContributionLocalization | undefined, pluginName: string): PluginContribution {
+  // Menus entries carry no display text of their own — labels come from the
+  // referenced commands, so they pass through localization untouched.
+  if (contribution.type === "menus") return contribution;
   const fallbackLabel = contribution.type === "connection-provider" ? optionalTrimmed(contribution.label) || optionalTrimmed(pluginName) || contribution.id : contribution.label;
   const localized = {
     ...contribution,
@@ -258,7 +382,9 @@ function localizeContribution(contribution: PluginContribution, localization: Pl
       label: localizedRequiredText(action.label, localization?.actions?.[action.id]?.label),
       description: localizedOptionalText(action.description, localization?.actions?.[action.id]?.description),
     }));
-  } else if (localized.type === "workbench") {
+  } else if (localized.type === "workbench" || localized.type === "command" || localized.type === "result-view") {
+    // Workbench, command and result-view contributions all resolve their icon
+    // asset path the same way.
     localized.icon = optionalPluginAssetPath(localized.icon);
   }
   return localized;
@@ -304,6 +430,6 @@ function isPluginFormFieldValue(value: unknown): value is PluginFormFieldValue {
   return value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

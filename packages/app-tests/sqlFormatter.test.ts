@@ -18,7 +18,10 @@ test("rejects very large SQL before importing formatter", async () => {
 });
 
 test("formats SQL with uppercase keywords and readable line breaks by default", async () => {
-  const formatted = await formatSqlText("select id, name from users where active = 1 order by name", "postgres");
+  const formatted = await formatSqlText(
+    "select id, name, email, created_at, updated_at, deleted_at, tenant_id from users where active = 1 and verified = 1 order by name, created_at desc",
+    "postgres",
+  );
 
   assert.match(formatted, /^SELECT\b/);
   assert.match(formatted, /\nFROM\b/);
@@ -26,22 +29,35 @@ test("formats SQL with uppercase keywords and readable line breaks by default", 
   assert.match(formatted, /\nORDER BY\b/);
 });
 
+test("collapses a statement that fits on one line", async () => {
+  const formatted = await formatSqlText("select id, name from users where active = 1 order by name", "postgres");
+
+  assert.equal(formatted, "SELECT id, name FROM users WHERE active = 1 ORDER BY name");
+});
+
 test("formats SQL with custom keyword case and indentation settings", async () => {
-  const formatted = await formatSqlText("select id from users where active = 1", "postgres", {
-    keywordCase: "lower",
-    dataTypeCase: "preserve",
-    functionCase: "preserve",
-    useTabs: true,
-    tabWidth: 2,
-    logicalOperatorNewline: "before",
-    expressionWidth: 50,
-    linesBetweenQueries: 1,
-    denseOperators: false,
-    newlineBeforeSemicolon: false,
-  });
+  const formatted = await formatSqlText(
+    "select id, name, email, created_at, updated_at, deleted_at, tenant_id from users where active = 1 and verified = 1 order by name, created_at desc",
+    "postgres",
+    {
+      keywordCase: "lower",
+      dataTypeCase: "preserve",
+      functionCase: "preserve",
+      useTabs: true,
+      tabWidth: 2,
+      logicalOperatorNewline: "before",
+      expressionWidth: 50,
+      linesBetweenQueries: 1,
+      denseOperators: false,
+      newlineBeforeSemicolon: false,
+    },
+  );
 
   assert.match(formatted, /^select\b/);
   assert.match(formatted, /\nfrom\b/);
+  // Continuations align under the first element, and that padding is indentation
+  // at a column past the first tab stop, so it starts with tabs.
+  assert.match(formatted, /\n\t+ name,/);
   assert.doesNotMatch(formatted, /^SELECT\b/);
 });
 
@@ -51,6 +67,41 @@ test("leaves blank SQL unchanged", async () => {
 
 test("rejects very large SQL before loading formatter work", async () => {
   await assert.rejects(() => formatSqlText("x".repeat(MAX_SQL_FORMAT_CHARS + 1), "generic"), /too large/i);
+});
+
+test("keeps a trailing line comment from swallowing the column after it", async () => {
+  // Oracle stores a view's text as written, so a comment at the end of a column
+  // line is followed by the next column on its own line. A `--` comment consumes
+  // the rest of its line, so the next column has to start a new line instead of
+  // being appended to that comment.
+  const formatted = await formatSqlText(
+    'CREATE VIEW "TEMP_TEST_VIEW" AS SELECT trunc(sysdate) AS dates, -- 测试\n(SELECT sysdate FROM dual t) AS nows\nFROM dual;',
+    "oracle",
+    { keywordCase: "upper" },
+  );
+
+  assert.equal(
+    formatted,
+    'CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates,\n       -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;',
+  );
+});
+
+test("keeps a line comment from swallowing the separator after it", async () => {
+  const formatted = await formatSqlText("select a -- c\n, b from t", "postgres", { keywordCase: "upper" });
+
+  assert.equal(formatted, "SELECT a -- c\n,\n       b\nFROM t");
+});
+
+test("keeps a line comment from swallowing the statement terminator", async () => {
+  const formatted = await formatSqlText("select a -- c\n;", "postgres", { keywordCase: "upper" });
+
+  assert.equal(formatted, "SELECT a -- c\n;");
+});
+
+test("formats a comment on its own line without extra breaks", async () => {
+  const formatted = await formatSqlText("select a, -- c\nb from t", "postgres", { keywordCase: "upper" });
+
+  assert.equal(formatted, "SELECT a,\n       -- c\n       b\nFROM t");
 });
 
 test("compressSqlText collapses whitespace into single spaces", () => {

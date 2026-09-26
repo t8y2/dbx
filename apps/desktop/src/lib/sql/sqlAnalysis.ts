@@ -75,23 +75,31 @@ export function resolveMetadataColumnName(databaseType: string, sourceName: stri
   if (sourceNameQuoted === undefined) {
     const exact = metadataColumns.find((column) => column === sourceName);
     if (exact || POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType) || ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) return exact;
-    const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
-    return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+    return uniqueCaseInsensitiveColumn(metadataColumns, sourceName);
   }
 
+  // Dialect folding is only an assumption about what the server stored: Dameng
+  // keeps the case an unquoted identifier was created with (issue #10233), so
+  // the folded spelling can miss even though the column exists. Fall back to a
+  // case-only match when it is unambiguous -- never when the folded name itself
+  // resolves, so quoted or equally-spelled columns keep their exact identity.
   if (POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
     const folded = sourceName.toLowerCase();
-    return metadataColumns.find((column) => column === folded);
+    return metadataColumns.find((column) => column === folded) ?? uniqueCaseInsensitiveColumn(metadataColumns, folded);
   }
   if (ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
     const folded = sourceName.toUpperCase();
-    return metadataColumns.find((column) => column === folded);
+    return metadataColumns.find((column) => column === folded) ?? uniqueCaseInsensitiveColumn(metadataColumns, folded);
   }
 
   const exact = metadataColumns.find((column) => column === sourceName);
   if (exact) return exact;
-  const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
-  return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+  return uniqueCaseInsensitiveColumn(metadataColumns, sourceName);
+}
+
+function uniqueCaseInsensitiveColumn(metadataColumns: readonly string[], name: string): string | undefined {
+  const matches = metadataColumns.filter((column) => column.toLowerCase() === name.toLowerCase());
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export interface ResolvedSourceColumnRef {
@@ -748,7 +756,28 @@ function readIdentifier(text: string, start: number): { value: string; quoted: b
     return null;
   }
   const match = text.slice(pos).match(/^[\p{ID_Start}_][\p{ID_Continue}$]*/u);
-  return match ? { value: match[0], quoted: false, end: pos + match[0].length } : null;
+  if (match) return { value: match[0], quoted: false, end: pos + match[0].length };
+  // MySQL/MariaDB also allow an unquoted identifier to begin with a digit as long as it is not a
+  // pure number, so `select * from 01_tablename` maps back to a base table while `123` / `1e3`
+  // stay literals (#9992).
+  const digitMatch = text.slice(pos).match(/^[0-9][\p{ID_Continue}$]*/u);
+  if (digitMatch && !isNumberShapedToken(digitMatch[0])) {
+    return { value: digitMatch[0], quoted: false, end: pos + digitMatch[0].length };
+  }
+  return null;
+}
+
+/**
+ * Mirrors `sqlNavigation.isNumberShapedToken`: a digit-leading token is only an identifier when
+ * it is not a number (`123`, `1e3`, `0x1f`, `0b101`). See #9992.
+ */
+function isNumberShapedToken(value: string): boolean {
+  if (!/^[0-9]/.test(value)) return false;
+  const rest = value.slice(1).toLowerCase();
+  if (rest === "") return true;
+  if (rest.startsWith("x")) return /^x[0-9a-f]+$/.test(rest);
+  if (rest.startsWith("b")) return /^b[01]+$/.test(rest);
+  return /^[0-9e]+$/.test(rest);
 }
 
 function skipWhitespace(text: string, pos: number): number {

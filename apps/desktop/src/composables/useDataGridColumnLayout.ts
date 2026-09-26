@@ -99,6 +99,11 @@ export function dataGridHorizontalColumnWindow(options: { widths: readonly numbe
   return { start, end, beforeWidth: offsets[start] ?? 0, afterWidth: Math.max(0, columnsWidth - visibleWidth) };
 }
 
+export function stableDataGridHorizontalColumnWindow(previous: DataGridHorizontalColumnWindow | undefined, next: DataGridHorizontalColumnWindow): DataGridHorizontalColumnWindow {
+  if (previous && previous.start === next.start && previous.end === next.end && previous.beforeWidth === next.beforeWidth && previous.afterWidth === next.afterWidth) return previous;
+  return next;
+}
+
 export function useDataGridColumnLayoutState(options: {
   columns: MaybeRefOrGetter<readonly string[]>;
   sourceColumns?: MaybeRefOrGetter<readonly (string | undefined)[] | undefined>;
@@ -297,6 +302,38 @@ export function useDataGridColumnLayoutState(options: {
     setFrozenColumnCount(selectedActualIdxs.length);
   }
 
+  function freezeSelectedColumnsIncrementally(selectedVisibleColIdxs: number[]) {
+    if (selectedVisibleColIdxs.length === 0) return;
+    const visibleIdxs = visibleColumnIndexes.value;
+    const selectedActualIdxs = [...new Set(selectedVisibleColIdxs.map((vIdx) => visibleIdxs[vIdx]).filter((idx): idx is number => idx !== undefined))];
+    if (selectedActualIdxs.length === 0) return;
+    const currentOrder = orderedDisplayableColumnIndexes.value;
+    const frozenVisibleIndexes = visibleColumnIndexes.value.slice(0, frozenColumnCount.value);
+    const frozenSet = new Set(frozenVisibleIndexes);
+    const additions = selectedActualIdxs.filter((idx) => !frozenSet.has(idx));
+    if (additions.length === 0) return;
+    if (columnOrderSnapshotBeforeFreeze.value === null) columnOrderSnapshotBeforeFreeze.value = [...persistedColumnOrderKeys.value];
+    const remaining = currentOrder.filter((idx) => !additions.includes(idx));
+    const frozenEnd = frozenVisibleIndexes.reduce((end, idx) => Math.max(end, remaining.indexOf(idx) + 1), 0);
+    persistColumnOrder([...remaining.slice(0, frozenEnd), ...additions, ...remaining.slice(frozenEnd)]);
+    setFrozenColumnCount(frozenColumnCount.value + additions.length);
+  }
+
+  function unfreezeSelectedColumns(selectedVisibleColIdxs: number[]) {
+    if (selectedVisibleColIdxs.length === 0 || frozenColumnCount.value === 0) return;
+    const visibleIdxs = visibleColumnIndexes.value;
+    const selected = new Set(selectedVisibleColIdxs.map((vIdx) => visibleIdxs[vIdx]).filter((idx): idx is number => idx !== undefined));
+    const currentOrder = orderedDisplayableColumnIndexes.value;
+    const frozen = visibleColumnIndexes.value.slice(0, frozenColumnCount.value);
+    const removing = frozen.filter((idx) => selected.has(idx));
+    if (removing.length === 0) return;
+    if (columnOrderSnapshotBeforeFreeze.value === null) columnOrderSnapshotBeforeFreeze.value = [...persistedColumnOrderKeys.value];
+    const nextFrozen = frozen.filter((idx) => !selected.has(idx));
+    persistColumnOrder(currentOrder.filter((idx) => !removing.includes(idx)).concat(removing));
+    setFrozenColumnCount(nextFrozen.length);
+    if (nextFrozen.length === 0) unfreezeAllColumns();
+  }
+
   function unfreezeAllColumns() {
     setFrozenColumnCount(0);
     if (columnOrderSnapshotBeforeFreeze.value !== null) {
@@ -441,6 +478,8 @@ export function useDataGridColumnLayoutState(options: {
     frozenColumnCount,
     freezeToColumn,
     freezeSelectedColumns,
+    freezeSelectedColumnsIncrementally,
+    unfreezeSelectedColumns,
     unfreezeAllColumns,
   };
 }
@@ -469,16 +508,19 @@ export function useDataGridColumnLayout(options: {
 }) {
   const renderedColumnOffsets = computed(() => dataGridColumnOffsets(toValue(options.renderedColumnWidths)));
   const frozenColumnCount = computed(() => toValue(options.frozenColumnCount ?? 0));
-  const horizontalColumnWindow = computed(() =>
-    dataGridHorizontalColumnWindow({
-      widths: toValue(options.renderedColumnWidths),
-      offsets: renderedColumnOffsets.value,
-      columnCount: toValue(options.visibleColumnIndexes).length,
-      scrollLeft: toValue(options.scrollLeft),
-      viewportWidth: toValue(options.viewportWidth),
-      rowNumberWidth: toValue(options.rowNumberWidth),
-      bufferPx: options.bufferPx ?? 900,
-    }),
+  const horizontalColumnWindow = computed<DataGridHorizontalColumnWindow>((previous) =>
+    stableDataGridHorizontalColumnWindow(
+      previous,
+      dataGridHorizontalColumnWindow({
+        widths: toValue(options.renderedColumnWidths),
+        offsets: renderedColumnOffsets.value,
+        columnCount: toValue(options.visibleColumnIndexes).length,
+        scrollLeft: toValue(options.scrollLeft),
+        viewportWidth: toValue(options.viewportWidth),
+        rowNumberWidth: toValue(options.rowNumberWidth),
+        bufferPx: options.bufferPx ?? 900,
+      }),
+    ),
   );
   const renderedGridColumns = computed<RenderedDataGridColumn[]>(() => {
     const columnNames = toValue(options.columnNames);

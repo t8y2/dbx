@@ -128,6 +128,7 @@
           <input id="name" value="DBX" aria-label="Name" />
           <button id="greet">Invoke sidecar</button>
           <button id="files" class="secondary">Open host files</button>
+          <button id="rows" hidden>Re-run with queryData</button>
         </div>
         <div id="result" class="result">Waiting for the plugin host…</div>
         <div class="meta">
@@ -157,6 +158,10 @@
           openSaved: "Open this workbench from a saved Hello connection.",
           calling: "Calling native sidecar…",
           error: "Error",
+          rows: "Re-run with queryData",
+          resultView: "Opened from a query result. Re-run it through host.data:read; DBX asks for your consent once per connection.",
+          noDataApi: "This DBX host does not offer host.data:read.",
+          querying: "Running a read-only query through the host…",
         },
         "zh-CN": {
           eyebrow: "受沙箱保护的 DBX 插件",
@@ -175,6 +180,10 @@
           openSaved: "请从已保存的 Hello 连接打开此工作台。",
           calling: "正在调用原生 Sidecar…",
           error: "错误",
+          rows: "用 queryData 重新查询",
+          resultView: "已从查询结果打开。可通过 host.data:read 重新执行；每个连接 DBX 只会征求一次你的同意。",
+          noDataApi: "当前 DBX 宿主不支持 host.data:read。",
+          querying: "正在通过宿主执行只读查询…",
         },
         "zh-TW": {
           eyebrow: "受沙箱保護的 DBX 外掛",
@@ -193,6 +202,10 @@
           openSaved: "請從已儲存的 Hello 連線開啟此工作台。",
           calling: "正在呼叫原生 Sidecar…",
           error: "錯誤",
+          rows: "用 queryData 重新查詢",
+          resultView: "已從查詢結果開啟。可透過 host.data:read 重新執行；每個連線 DBX 只會徵求一次你的同意。",
+          noDataApi: "目前的 DBX 主程式不支援 host.data:read。",
+          querying: "正在透過主程式執行唯讀查詢…",
         },
         ja: {
           eyebrow: "サンドボックス化された DBX プラグイン",
@@ -211,6 +224,10 @@
           openSaved: "保存済みの Hello 接続からこのワークベンチを開いてください。",
           calling: "ネイティブ Sidecar を呼び出し中…",
           error: "エラー",
+          rows: "queryData で再実行",
+          resultView: "クエリ結果から開かれました。host.data:read で再実行できます。DBX は接続ごとに一度だけ許可を求めます。",
+          noDataApi: "この DBX ホストは host.data:read を提供していません。",
+          querying: "ホスト経由で読み取り専用クエリを実行中…",
         },
         es: {
           eyebrow: "Plugin de DBX aislado",
@@ -229,6 +246,10 @@
           openSaved: "Abre esta área de trabajo desde una conexión Hello guardada.",
           calling: "Invocando el sidecar nativo…",
           error: "Error",
+          rows: "Volver a ejecutar con queryData",
+          resultView: "Abierto desde un resultado de consulta. Vuelve a ejecutarlo con host.data:read; DBX pide tu consentimiento una vez por conexión.",
+          noDataApi: "Este host de DBX no ofrece host.data:read.",
+          querying: "Ejecutando una consulta de solo lectura a través del host…",
         },
         it: {
           eyebrow: "Plugin DBX in sandbox",
@@ -247,6 +268,10 @@
           openSaved: "Apri quest'area di lavoro da una connessione Hello salvata.",
           calling: "Chiamata del sidecar nativo…",
           error: "Errore",
+          rows: "Riesegui con queryData",
+          resultView: "Aperto da un risultato di query. Rieseguilo tramite host.data:read; DBX chiede il tuo consenso una volta per connessione.",
+          noDataApi: "Questo host DBX non offre host.data:read.",
+          querying: "Esecuzione di una query di sola lettura tramite l'host…",
         },
         "pt-BR": {
           eyebrow: "Plugin DBX em sandbox",
@@ -265,14 +290,22 @@
           openSaved: "Abra esta área de trabalho a partir de uma conexão Hello salva.",
           calling: "Invocando o sidecar nativo…",
           error: "Erro",
+          rows: "Executar novamente com queryData",
+          resultView: "Aberto a partir de um resultado de consulta. Execute-o novamente via host.data:read; o DBX pede seu consentimento uma vez por conexão.",
+          noDataApi: "Este host do DBX não oferece host.data:read.",
+          querying: "Executando uma consulta somente leitura pelo host…",
         },
       };
       const result = document.querySelector("#result");
       const button = document.querySelector("#greet");
       const input = document.querySelector("#name");
       const files = document.querySelector("#files");
+      const rows = document.querySelector("#rows");
       let connectionId = "";
       let copy = translations.en;
+      // Set when DBX opens this page as the "Hello rows" result view: the
+      // context then carries the query result's connection, database, and SQL.
+      let resultContext = null;
 
       function applyLocale(locale) {
         copy = translations[locale] || translations.en;
@@ -283,6 +316,7 @@
         input.setAttribute("aria-label", copy.name);
         button.textContent = copy.invoke;
         files.textContent = copy.files;
+        rows.textContent = copy.rows;
         document.querySelector("#plugin-label").textContent = copy.plugin;
         document.querySelector("#workbench-label").textContent = copy.workbench;
         document.querySelector("#connection-label").textContent = copy.connection;
@@ -292,14 +326,25 @@
       window.dbxPlugin.onEvent((event) => {
         document.querySelector("#event").textContent = `${event.method}: ${JSON.stringify(event.params)}`;
       });
+      function showContext(context) {
+        resultContext = context?.result && typeof context.sql === "string" ? context : null;
+        const isResultView = !!resultContext;
+        for (const element of [input, button, files]) element.hidden = isResultView;
+        rows.hidden = !isResultView;
+        document.querySelector("#workbench").textContent = isResultView ? "dbx.example.hello.rows" : "dbx.example.hello.main";
+        connectionId = context?.connectionId || "";
+        document.querySelector("#connection").textContent = connectionId || copy.noConnection;
+        if (isResultView) result.textContent = window.dbxPlugin.capabilities.dataApi ? copy.resultView : copy.noDataApi;
+        else result.textContent = connectionId ? copy.ready : copy.openSaved;
+      }
+
       window.dbxPlugin.ready.then((context) => {
         applyLocale(window.dbxPlugin.locale);
         document.querySelector("#plugin").textContent = "dbx.example.hello";
-        document.querySelector("#workbench").textContent = "dbx.example.hello.main";
-        connectionId = context?.connectionId || "";
-        document.querySelector("#connection").textContent = connectionId || copy.noConnection;
-        result.textContent = connectionId ? copy.ready : copy.openSaved;
+        showContext(context);
       });
+      // Reopening the result view for another result pushes a new context.
+      window.dbxPlugin.onContext(showContext);
       button.addEventListener("click", async () => {
         button.disabled = true;
         result.textContent = copy.calling;
@@ -310,6 +355,33 @@
           result.textContent = `${copy.error}: ${error.message}`;
         } finally {
           button.disabled = false;
+        }
+      });
+      // host.data:read: the first query for a connection asks the user; later
+      // ones run directly until the grant is revoked in the Plugin Center.
+      rows.addEventListener("click", async () => {
+        rows.disabled = true;
+        result.textContent = copy.querying;
+        try {
+          const data = await window.dbxPlugin.queryData({
+            connectionId: resultContext.connectionId,
+            database: resultContext.database || undefined,
+            sql: resultContext.sql,
+            maxRows: 1000,
+          });
+          const summary = {
+            dbType: data.dbType,
+            columns: data.columns.map((column) => column.name),
+            rows: data.rows.length,
+            truncated: data.truncated,
+            elapsedMs: data.elapsedMs,
+            firstRows: data.rows.slice(0, 5),
+          };
+          result.textContent = JSON.stringify(summary, null, 2);
+        } catch (error) {
+          result.textContent = `${copy.error}: ${error.message}`;
+        } finally {
+          rows.disabled = false;
         }
       });
       files.addEventListener("click", async () => {

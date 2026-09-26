@@ -1,22 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
+import { queryResultNameFromPreamble, queryResultSourceLabel, queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
 
 describe("queryResultNameFromPreamble", () => {
-  it("uses the nearest non-empty Name line comment", () => {
-    expect(queryResultNameFromPreamble("-- Name: Old name\n-- unrelated\r\n  -- NAME :  Latest name  \r\n")).toBe("Latest name");
-    expect(queryResultNameFromPreamble("-- Name: kept\n-- Name:   \n")).toBe("kept");
-    expect(queryResultNameFromPreamble("-- Name: explicit\n-- nearest ordinary comment\n")).toBe("explicit");
+  it("uses only the immediately preceding line comment", () => {
+    expect(queryResultNameFromPreamble("-- Name: Latest name\r\n")).toBe("Latest name");
+    expect(queryResultNameFromPreamble("-- unrelated\n")).toBe("unrelated");
+    expect(queryResultNameFromPreamble("-- indented\n   ")).toBe("indented");
+    expect(queryResultNameFromPreamble("-- Name: Old name\n-- unrelated\n")).toBe("unrelated");
+    expect(queryResultNameFromPreamble("-- Name: explicit\n--   \n")).toBeUndefined();
   });
 
-  it("falls back to the nearest non-empty line comment", () => {
-    expect(queryResultNameFromPreamble("-- older comment\n/*\n-- Name: block\n*/\n-- 当前时间\n")).toBe("当前时间");
-    expect(queryResultNameFromPreamble("/* -- block only */\n--   \n")).toBeUndefined();
+  it("stops at a blank line and ignores non-line comments", () => {
+    expect(queryResultNameFromPreamble("-- older comment\n\n")).toBeUndefined();
+    expect(queryResultNameFromPreamble("/* Name: block */\n")).toBeUndefined();
+    expect(queryResultNameFromPreamble("-- earlier comment\n/* block */\n")).toBeUndefined();
   });
 
   it("accepts hash comments for MySQL without treating them as portable SQL comments", () => {
-    expect(queryResultNameFromPreamble("# MySQL report\nSELECT 1", { databaseType: "mysql" })).toBe("MySQL report");
-    expect(queryResultNameFromPreamble("# temporary table\nSELECT 1", { databaseType: "sqlserver" })).toBeUndefined();
-    expect(queryResultNameFromPreamble("# portable comment\nSELECT 1")).toBeUndefined();
+    expect(queryResultNameFromPreamble("# MySQL report\n", { databaseType: "mysql" })).toBe("MySQL report");
+    expect(queryResultNameFromPreamble("# temporary table\n", { databaseType: "sqlserver" })).toBeUndefined();
+    expect(queryResultNameFromPreamble("# portable comment\n")).toBeUndefined();
+    expect(queryResultNameFromPreamble("# MySQL report\n\n", { databaseType: "mysql" })).toBeUndefined();
   });
 });
 
@@ -59,5 +63,17 @@ describe("queryResultSourceLabel", () => {
     expect(queryResultSourceLabel("SELECT * FROM (SELECT * FROM users) nested", { database: "app", databaseType: "mysql" })).toBeUndefined();
     expect(queryResultSourceLabel("SELECT * FROM read_csv('users.csv') csv", { database: "main", databaseType: "duckdb" })).toBeUndefined();
     expect(queryResultSourceLabel("SELECT 1", { database: "app", databaseType: "mysql" })).toBeUndefined();
+  });
+});
+
+describe("queryResultSourceNameParts", () => {
+  it("keeps the qualifier separate even when the database name contains dots", () => {
+    expect(queryResultSourceNameParts("SELECT * FROM data_monitor", { database: "cosimulation2.0", databaseType: "mysql" })).toEqual({ qualifier: "cosimulation2.0", name: "data_monitor" });
+  });
+
+  it("prefers the explicit qualifier and drops an empty one", () => {
+    expect(queryResultSourceNameParts("SELECT * FROM analytics.events", { database: "app", databaseType: "mysql" })).toEqual({ qualifier: "analytics", name: "events" });
+    expect(queryResultSourceNameParts("SELECT * FROM events", { databaseType: "mysql" })).toEqual({ name: "events" });
+    expect(queryResultSourceNameParts("SELECT 1", { database: "app", databaseType: "mysql" })).toBeUndefined();
   });
 });

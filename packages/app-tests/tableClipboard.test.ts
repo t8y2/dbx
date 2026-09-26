@@ -66,16 +66,25 @@ test("table data copy uses only writable columns for first-class databases", () 
     columns: ["id", "name"],
     postgresOverridingSystemValue: false,
     sqlserverIdentityInsert: true,
+    damengIdentityInsert: false,
+  });
+  assert.deepEqual(tableDataCopyColumnOptions("dameng", columns), {
+    columns: ["id", "name"],
+    postgresOverridingSystemValue: false,
+    sqlserverIdentityInsert: false,
+    damengIdentityInsert: true,
   });
   assert.deepEqual(tableDataCopyColumnOptions("postgres", [{ ...columns[0], extra: "generated always as identity" }, { ...columns[1] }, { ...columns[2], extra: "generated always as (name) stored" }]), {
     columns: ["id", "name"],
     postgresOverridingSystemValue: true,
     sqlserverIdentityInsert: false,
+    damengIdentityInsert: false,
   });
   assert.deepEqual(tableDataCopyColumnOptions("mysql", [{ ...columns[0], extra: "auto_increment" }, { ...columns[1] }, { ...columns[2], extra: "STORED GENERATED" }, column("expr_default", "DEFAULT_GENERATED"), column("expr_default_on_update", "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"), column("virtual_full_name", "VIRTUAL GENERATED"), column("stored_full_name", "GENERATED ALWAYS AS (concat(first_name, ' ', last_name)) STORED")]), {
     columns: ["id", "name", "expr_default", "expr_default_on_update"],
     postgresOverridingSystemValue: false,
     sqlserverIdentityInsert: false,
+    damengIdentityInsert: false,
   });
 });
 
@@ -94,15 +103,18 @@ test("table data copy skips only SQL Server rowversion types", () => {
     columns: ["id", "name", "fixed_binary", "variable_binary"],
     postgresOverridingSystemValue: false,
     sqlserverIdentityInsert: true,
+    damengIdentityInsert: false,
   });
   assert.deepEqual(tableDataCopyColumnOptions("postgres", [column("updated_at", "timestamp")]), {
     columns: ["updated_at"],
     postgresOverridingSystemValue: false,
     sqlserverIdentityInsert: false,
+    damengIdentityInsert: false,
   });
   assert.deepEqual(tableDataCopyColumnOptions("mysql", [column("updated_at", "timestamp")]), {
     columns: ["updated_at"],
     postgresOverridingSystemValue: false,
     sqlserverIdentityInsert: false,
+    damengIdentityInsert: false,
   });
 });

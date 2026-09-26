@@ -100,6 +100,40 @@ describe("sqlSemanticModel baseline fixtures", () => {
     expect(model.rowSources.some((source) => source.name === "users")).toBe(false);
   });
 
+  it("enriches derived tables inside a CTE body but never outside one", () => {
+    const { sql, cursor } = sqlFixtureCursor("WITH w AS (SELECT x.id FROM (SELECT t.id FROM orders t) x) SELECT w.| FROM w");
+    const model = buildSqlSemanticModel(sql, cursor);
+    const definition = model.rowSources.find((source) => source.id.startsWith("cte:"))!;
+    const inner = definition.bodySources?.find((source) => source.kind === "subquery");
+
+    // The inline view mirrors a CTE definition's body metadata so lineage can descend into it.
+    expect(inner?.cteOutputs?.map((output) => output.name)).toEqual(["id"]);
+    expect(inner?.cteStars).toEqual([]);
+    expect(inner?.bodySources?.map((source) => source.name)).toEqual(["orders"]);
+    // Its tables still stay nested on the source and never leak to the outer model.
+    expect(definition.bodySources?.some((source) => source.name === "orders")).toBe(false);
+
+    // A derived table outside a CTE body keeps its previous metadata-free shape.
+    const plain = buildSqlSemanticModel("SELECT * FROM (SELECT id FROM users) sq WHERE sq.id = 1", 20);
+    const outer = plain.rowSources.find((source) => source.kind === "subquery")!;
+    expect(outer.cteOutputs).toBeUndefined();
+    expect(outer.cteStars).toBeUndefined();
+    expect(outer.bodySources).toBeUndefined();
+  });
+
+  it("enriches only the outermost derived table of a CTE body", () => {
+    const sql = "WITH w AS (SELECT x.id FROM (SELECT y.id FROM (SELECT t.id FROM orders t) y) x) SELECT id FROM w";
+    const model = buildSqlSemanticModel(sql, sql.length);
+    const definition = model.rowSources.find((source) => source.id.startsWith("cte:"))!;
+    const outerView = definition.bodySources?.find((source) => source.kind === "subquery");
+    const nestedView = outerView?.bodySources?.find((source) => source.kind === "subquery");
+
+    expect(outerView?.name).toBe("x");
+    expect(outerView?.bodySources?.map((source) => source.name)).toEqual(["y"]);
+    expect(nestedView?.name).toBe("y");
+    expect(nestedView?.bodySources).toBeUndefined();
+  });
+
   it("suppresses completion inside string literals without metadata scope", () => {
     const { sql, cursor } = sqlFixtureCursor("SELECT 'u.|' FROM users");
     const model = buildSqlSemanticModel(sql, cursor);
@@ -426,5 +460,121 @@ describe("sqlSemanticModel baseline fixtures", () => {
 
     expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["#temp", "##global_temp", "#temp"]);
     expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "#temp", kind: "table" })]));
+  });
+});
+
+describe("CTE 富化边界与熔断", () => {
+  function cteDefinitionOf(sql: string, cursor = sql.length) {
+    const model = buildSqlSemanticModel(sql, cursor);
+    const definition = model.rowSources.find((source) => source.id.startsWith("cte:"));
+    expect(definition, "未解析出 CTE 定义源").toBeDefined();
+    return definition!;
+  }
+
+  it("多段星号链 s.t.* 记录完整限定符链", () => {
+    const sql = "WITH w AS (SELECT s.t.* FROM s.t) SELECT id FROM w";
+    const definition = cteDefinitionOf(sql);
+    const star = definition.cteStars?.[0];
+
+    expect(definition.cteStars?.map((item) => item.qualifierParts)).toEqual([["s", "t"]]);
+    expect(sql.slice(star!.starSpan.start, star!.starSpan.end)).toBe("*");
+    expect(definition.cteOutputs).toEqual([]);
+    expect(definition.bodySources?.map((source) => ({ name: source.name, qualifierParts: source.qualifierParts }))).toEqual([{ name: "t", qualifierParts: ["s"] }]);
+  });
+
+  it("无别名的表达式投影只提供跳转范围，不挂 origin", () => {
+    const sql = "WITH w AS (SELECT n + 1 FROM orders) SELECT id FROM w";
+    const definition = cteDefinitionOf(sql);
+    const output = definition.cteOutputs?.[0];
+
+    expect(output?.name).toBe("n");
+    expect(output?.origin).toBeUndefined();
+    expect(sql.slice(output!.jumpSpan.start, output!.jumpSpan.end)).toBe("n + 1");
+  });
+
+  it("body 没有顶层 SELECT（如 VALUES）时不产生星号，显式列名保留但无 origin", () => {
+    const sql = "WITH w(a) AS (VALUES (1)) SELECT a FROM w";
+    const definition = cteDefinitionOf(sql);
+
+    expect(definition.cteStars).toEqual([]);
+    expect(definition.cteOutputs?.map((column) => column.name)).toEqual(["a"]);
+    expect(definition.cteOutputs?.[0]?.origin).toBeUndefined();
+  });
+
+  it("多星号 body 保留全部星号与来源表（供上层按序回退）", () => {
+    const sql = "WITH w AS (SELECT a.*, b.* FROM t1 a, t2 b) SELECT c FROM w";
+    const definition = cteDefinitionOf(sql);
+
+    expect(definition.cteStars?.map((star) => star.qualifierParts)).toEqual([["a"], ["b"]]);
+    expect(definition.bodySources?.map((source) => source.name)).toEqual(["t1", "t2"]);
+  });
+
+  it("派生表别名列 X(a) 按位改名到外层名字，origin 仍指向内层真实列", () => {
+    const sql = "WITH w AS (SELECT X.a FROM (SELECT id FROM orders) X(a)) SELECT id FROM w";
+    const definition = cteDefinitionOf(sql);
+    const derived = definition.bodySources?.find((source) => source.name === "X");
+
+    expect(derived?.columns).toEqual(["a"]);
+    expect(derived?.cteOutputs?.map((column) => column.name)).toEqual(["a"]);
+    expect(derived?.cteOutputs?.[0]?.origin).toEqual({ qualifierParts: [], column: "id" });
+    expect(sql.slice(derived!.cteOutputs![0]!.jumpSpan.start, derived!.cteOutputs![0]!.jumpSpan.end)).toBe("id");
+    expect(derived?.bodySources?.map((source) => source.name)).toEqual(["orders"]);
+  });
+
+  it("派生表别名列与星号共存时不改名（无法按位对应）", () => {
+    const sql = "WITH w AS (SELECT X.a FROM (SELECT * FROM orders) X(a)) SELECT id FROM w";
+    const definition = cteDefinitionOf(sql);
+    const derived = definition.bodySources?.find((source) => source.name === "X");
+
+    // columns 走宽松规则拿到别名，cteOutputs 走严格规则不接受改名 —— 两者故意不一致。
+    expect(derived?.columns).toEqual(["a"]);
+    expect(derived?.cteOutputs).toEqual([]);
+    expect(derived?.cteStars).toHaveLength(1);
+  });
+
+  it("派生表别名列长度与投影长度不符时不改名，count 少的一方不被补齐", () => {
+    const sql = "WITH w AS (SELECT X.a FROM (SELECT id FROM orders) X(a, b)) SELECT id FROM w";
+    const definition = cteDefinitionOf(sql);
+    const derived = definition.bodySources?.find((source) => source.name === "X");
+
+    // 别名多于投影：columns 按位截断为 ["a"]，cteOutputs 保持内层名字 ["id"]。
+    expect(derived?.columns).toEqual(["a"]);
+    expect(derived?.cteOutputs?.map((column) => column.name)).toEqual(["id"]);
+  });
+
+  it("括号未闭合时 bodySpan 收敛到已解析的最后一个 token，不越界", () => {
+    const sql = "WITH w AS (SELECT id FROM orders";
+    const definition = cteDefinitionOf(sql, 0);
+
+    expect(sql.slice(definition.bodySpan!.start, definition.bodySpan!.end)).toBe("(SELECT id FROM orders");
+    expect(definition.bodySpan!.end).toBeLessThanOrEqual(sql.length);
+  });
+
+  it("语句 token 超限时整体跳过富化，扁平列名仍可用", () => {
+    const filler = Array.from({ length: 7000 }, () => "a = 1 or").join(" ");
+    const sql = `WITH w AS (SELECT id FROM orders) SELECT id FROM w where ${filler} 1 = 1`;
+    const definition = cteDefinitionOf(sql, 0);
+
+    expect(definition.cteOutputs).toBeUndefined();
+    expect(definition.cteStars).toBeUndefined();
+    expect(definition.bodySources).toBeUndefined();
+    expect(definition.columns).toEqual(["id"]);
+  });
+
+  it("仅 body token 超限时只跳过该 body，同语句其它 CTE 仍完整富化", () => {
+    const projections = Array.from({ length: 2501 }, (_, index) => `c${index}`).join(",");
+    const sql = `WITH w AS (SELECT ${projections} FROM orders), small AS (SELECT id FROM orders) SELECT id FROM small`;
+    const model = buildSqlSemanticModel(sql, 0);
+    const definitions = model.rowSources.filter((source) => source.id.startsWith("cte:"));
+    const oversized = definitions.find((source) => source.name === "w");
+    const neighbor = definitions.find((source) => source.name === "small");
+
+    expect(oversized?.cteOutputs).toBeUndefined();
+    expect(oversized?.cteStars).toBeUndefined();
+    expect(oversized?.bodySources).toBeUndefined();
+    expect(oversized?.columns).toHaveLength(2501);
+    // 同语句里的其它 CTE 不受影响，说明熔断是按 body 粒度生效的。
+    expect(neighbor?.cteOutputs?.map((column) => column.name)).toEqual(["id"]);
+    expect(neighbor?.bodySources?.map((source) => source.name)).toEqual(["orders"]);
   });
 });

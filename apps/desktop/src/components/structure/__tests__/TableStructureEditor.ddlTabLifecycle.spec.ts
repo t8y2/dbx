@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, ref, type App } from "vue";
+import { createApp, nextTick, reactive, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   getTablePartitionStatus: vi.fn(),
   getTableOwner: vi.fn(),
   toast: vi.fn(),
+  copyToClipboard: vi.fn(),
 }));
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -37,6 +38,7 @@ vi.mock("@lucide/vue", async () => {
     Check: Icon,
     ChevronDown: Icon,
     ChevronUp: Icon,
+    ClipboardList: Icon,
     Copy: Icon,
     Database: Icon,
     Info: Icon,
@@ -47,6 +49,8 @@ vi.mock("@lucide/vue", async () => {
     Maximize2: Icon,
     Plus: Icon,
     RefreshCw: Icon,
+    RotateCcw: Icon,
+    Rows3: Icon,
     Save: Icon,
     Search: Icon,
     Settings: Icon,
@@ -174,12 +178,11 @@ vi.mock("@/stores/connectionStore", () => ({
 vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({ requestConfirmation: vi.fn() }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRefreshVersion: () => 0 }) }));
 vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
+const settings = reactive({ editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [], theme: "default", fontSize: 13, fontFamily: "monospace", generateSqlQuoteIdentifiers: true, excludeDdlStorage: true } });
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({
-    editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [], theme: "default", fontSize: 13, fontFamily: "monospace", generateSqlQuoteIdentifiers: true },
-    updateEditorSettings: vi.fn(),
-  }),
+  useSettingsStore: () => ({ ...settings, updateEditorSettings: (patch: object) => Object.assign(settings.editorSettings, patch) }),
 }));
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboard }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false), themePalette: ref({}) }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/lib/sql/sqlHighlighter", () => ({ createShikiSqlHighlighter: vi.fn(async () => (sql: string) => sql) }));
@@ -231,6 +234,8 @@ function selectTab(button: HTMLButtonElement) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.connection.db_type = "postgres";
+  settings.editorSettings.excludeDdlStorage = true;
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.executeQuery.mockResolvedValue({ columns: [], rows: [] });
   mocks.listDataTypes.mockResolvedValue([]);
@@ -252,6 +257,37 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor DDL tab lifecycle", () => {
+  it("toggles OceanBase storage, copies the displayed DDL and protects an edited draft", async () => {
+    mocks.connection.db_type = "oceanbase-oracle";
+    const ddl = 'CREATE TABLE "T" ("ID" NUMBER) PCTFREE=0 PARTITION BY HASH("ID") PARTITIONS 2;';
+    mocks.loadObjectDdl.mockResolvedValue({ ddl, cacheStatus: "remote" });
+    const root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(TableStructureEditor, { connectionId: mocks.connection.id, database: "APP", schema: "APP", tableName: "T", initialTab: "ddl" });
+    app.mount(root);
+    const content = () => root.querySelector(".cm-content")?.textContent ?? "";
+    const toggle = () => root.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    await vi.waitFor(() => expect(content()).toContain("PARTITION BY HASH"));
+    expect(content()).not.toContain("PCTFREE");
+    expect(toggle().getAttribute("aria-checked")).toBe("true");
+    toggle().click();
+    await vi.waitFor(() => expect(content()).toContain("PCTFREE"));
+    buttonWithText(root, "grid.copyDdl").click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenLastCalledWith(content()));
+    const { EditorView } = await import("@codemirror/view");
+    const view = EditorView.findFromDOM(root.querySelector(".cm-content")!)!;
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\n-- local edit" } });
+    await nextTick();
+    expect(toggle().disabled).toBe(true);
+    settings.editorSettings.excludeDdlStorage = true;
+    await nextTick();
+    expect(content()).toContain("PCTFREE");
+    expect(content()).toContain("-- local edit");
+    buttonWithText(root, "structureEditor.resetDdl").click();
+    await vi.waitFor(() => expect(content()).not.toContain("PCTFREE"));
+    expect(content()).not.toContain("-- local edit");
+    expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1);
+  });
   it("restores cached DDL after switching to columns and back", async () => {
     const root = document.createElement("div");
     document.body.append(root);

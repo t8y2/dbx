@@ -7,7 +7,7 @@ import { ANNOTATION_FILE_KEYS, COLUMN_ANNOTATION_KEYS, GROUP_ANNOTATION_KEYS, PR
 // that Rust does not declare turns every save into a deserialization error at
 // runtime. vue-tsc cannot see across the language boundary, so this reads the
 // Rust source and compares the field sets directly.
-const rustSource = readFileSync(path.resolve(__dirname, "../../../../../crates/dbx-core/src/docs/annotations.rs"), "utf8");
+const rustSource = readFileSync(path.resolve(__dirname, "../../../../../crates/dbx-core/src/data/docs/annotations.rs"), "utf8");
 
 function rustFields(structName: string): string[] {
   const start = rustSource.indexOf(`pub struct ${structName} {`);

@@ -228,7 +228,8 @@ pub async fn install_marketplace_plugin(
 ) -> Result<Json<PluginInstallResponse>, AppError> {
     let marketplace =
         PluginMarketplace::new(state.app.plugins.root_dir().to_path_buf(), state.app.plugins.app_version().to_string())
-            .map_err(AppError::from)?;
+            .map_err(AppError::from)?
+            .with_lifecycle(state.app.plugins.lifecycle());
     let result = marketplace.install(request).await.map_err(AppError::bad_request)?;
     state.app.remove_plugin_connection_pools(&result.plugin.manifest.id).await;
     stop_external_driver_pools(&state, &result.plugin).await;
@@ -288,6 +289,7 @@ pub async fn install_plugin(
         if query.allow_unsigned { PluginInstallPolicy::LocalDevelopment } else { PluginInstallPolicy::LocalSigned };
     let root_dir = state.app.plugins.root_dir().to_path_buf();
     let app_version = state.app.plugins.app_version().to_string();
+    let lifecycle = state.app.plugins.lifecycle();
     let result = tokio::task::spawn_blocking(move || {
         let installer = if query.from_url {
             let trust_store = dbx_core::plugins::url_install_trust_store(&root_dir)?;
@@ -295,7 +297,7 @@ pub async fn install_plugin(
         } else {
             PluginPackageInstaller::new(root_dir.clone(), app_version)?
         };
-        installer.install_bytes(&package, policy)
+        installer.with_lifecycle(lifecycle).install_bytes(&package, policy)
     })
     .await
     .map_err(|error| AppError::internal(error.to_string()))?
@@ -310,17 +312,18 @@ pub async fn rollback_plugin(
     State(state): State<Arc<WebState>>,
     Json(request): Json<PluginIdRequest>,
 ) -> Result<Json<PluginRollbackResponse>, AppError> {
-    state.app.remove_plugin_connection_pools(&request.plugin_id).await;
-    state.app.plugin_host.stop(&request.plugin_id).await;
     let root_dir = state.app.plugins.root_dir().to_path_buf();
     let app_version = state.app.plugins.app_version().to_string();
+    let lifecycle = state.app.plugins.lifecycle();
     let result = tokio::task::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.rollback(&request.plugin_id)
+        PluginPackageInstaller::new(root_dir, app_version)?.with_lifecycle(lifecycle).rollback(&request.plugin_id)
     })
     .await
     .map_err(|error| AppError::internal(error.to_string()))?
     .map_err(AppError::bad_request)?;
+    state.app.remove_plugin_connection_pools(&result.plugin.manifest.id).await;
     stop_external_driver_pools(&state, &result.plugin).await;
+    state.app.plugin_host.stop(&result.plugin.manifest.id).await;
     Ok(Json(result.response()))
 }
 
@@ -350,18 +353,16 @@ pub async fn uninstall_plugin(
     }
     let plugin = state.app.plugins.find_plugin(&request.plugin_id).map_err(AppError::from)?;
     state.app.remove_plugin_connection_pools(&request.plugin_id).await;
-    state.app.plugin_host.stop(&request.plugin_id).await;
     if let Some(plugin) = &plugin {
         stop_external_driver_pools(&state, plugin).await;
     }
-    let root_dir = state.app.plugins.root_dir().to_path_buf();
-    let app_version = state.app.plugins.app_version().to_string();
-    tokio::task::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.uninstall(&request.plugin_id)
-    })
-    .await
-    .map_err(|error| AppError::internal(error.to_string()))?
-    .map_err(AppError::bad_request)?;
+    // Stops the runtime and uninstalls the store under one lifecycle update lease, so a plugin
+    // call cannot re-activate the sidecar (and re-lock its container) in between.
+    state.app.plugin_host.uninstall_plugin(&request.plugin_id).await.map_err(AppError::bad_request)?;
+    // A reinstall must ask for AI tool access and data grants again.
+    if let Err(error) = state.app.storage.forget_plugin_permissions(&request.plugin_id).await {
+        log::warn!("Failed to clear permissions of uninstalled plugin {}: {error}", request.plugin_id);
+    }
     list_plugins(State(state)).await
 }
 

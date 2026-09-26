@@ -121,6 +121,9 @@ export interface DataCompareSyncPlan {
   syncSql: string;
 }
 
+/** Minimal column shape a match-column picker needs, so it can be fed straight from `getColumns`. */
+export type CompareKeyColumnOption = Pick<ColumnInfo, "name" | "is_primary_key">;
+
 /**
  * Safely infers the columns to use as comparison keys for a table.
  *
@@ -134,12 +137,47 @@ export interface DataCompareSyncPlan {
  * (category, status, date, ...) and make the whole table comparison fail with
  * an unhelpful duplicate-key error.
  */
-export function inferCompareKeyColumns(columns: Pick<ColumnInfo, "name" | "is_primary_key">[]): string[] {
+export function inferCompareKeyColumns(columns: CompareKeyColumnOption[]): string[] {
   const primaryKeys: string[] = [];
   for (const column of columns) {
     if (column.is_primary_key) primaryKeys.push(column.name);
   }
   return primaryKeys;
+}
+
+/**
+ * Normalizes a match-column selection: trims entries, drops blanks and removes
+ * case-insensitive duplicates while keeping the caller's order.
+ *
+ * Order is preserved because the backend builds each row key from `keyColumns`
+ * in order; a stable order keeps diff keys identical between runs, and it lets a
+ * composite primary key keep the column order the table declares.
+ */
+export function normalizeKeyColumns(columns: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const column of columns) {
+    const name = column.trim();
+    if (!name) continue;
+    const lowerName = name.toLowerCase();
+    if (seen.has(lowerName)) continue;
+    seen.add(lowerName);
+    normalized.push(name);
+  }
+  return normalized;
+}
+
+/**
+ * Compares two match-column selections ignoring order and identifier case.
+ * Used to decide whether a manual selection still equals the inferred primary
+ * key, in which case it carries no override.
+ */
+export function sameKeyColumns(a: readonly string[], b: readonly string[]): boolean {
+  const normalizedA = normalizeKeyColumns(a);
+  const normalizedB = normalizeKeyColumns(b);
+  if (normalizedA.length !== normalizedB.length) return false;
+  const lowerB = new Set(normalizedB.map((column) => column.toLowerCase()));
+  return normalizedA.every((column) => lowerB.has(column.toLowerCase()));
 }
 
 export interface CompareColumnIntersection {

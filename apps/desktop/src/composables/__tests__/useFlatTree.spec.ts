@@ -55,6 +55,9 @@ describe("createFlatTreeIndex", () => {
     expect(index.nextSchemaContainerIndexByIndex[2]).toBe(4);
     expect(index.nextSchemaContainerIndexByIndex[4]).toBe(-1);
     expect(index.nextSchemaContainerIndexByIndex[9]).toBe(-1);
+    expect(index.nextBoundaryIndexByIndex[1]).toBe(8);
+    expect(index.nextBoundaryIndexByIndex[6]).toBe(8);
+    expect(index.nextBoundaryIndexByIndex[9]).toBe(-1);
   });
 
   it("keeps indexes isolated across connections without database containers", () => {
@@ -65,6 +68,7 @@ describe("createFlatTreeIndex", () => {
     expect(index.stickyContainerIndexByIndex[2]).toBe(1);
     expect(index.stickyContainerIndexByIndex[4]).toBe(-1);
     expect(index.nextSchemaContainerIndexByIndex[1]).toBe(-1);
+    expect(index.nextBoundaryIndexByIndex[1]).toBe(3);
     expect(index.flatNodeIndexById.get("table-b")).toBe(4);
   });
 

@@ -108,6 +108,21 @@ describe("settingsTransfer", () => {
     expect(result.error.detail).toContain("wordWrap");
   });
 
+  it("transfers the column header hover tooltip preference as a data setting", () => {
+    expect(transferCategoryForKey("showColumnHeaderTooltips")).toBe("data");
+
+    const result = parseSettingsTransferFile(fileWith({ showColumnHeaderTooltips: false }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.showColumnHeaderTooltips).toBe(false);
+    expect(result.value.categories).toContain("data");
+
+    const rejected = parseSettingsTransferFile(fileWith({ showColumnHeaderTooltips: "no" }));
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) return;
+    expect(rejected.error.detail).toContain("showColumnHeaderTooltips");
+  });
+
   it("rejects toolbar items whose known keys are not booleans", () => {
     const result = parseSettingsTransferFile(fileWith({ toolbarItems: { dataTransfer: "yes" } }));
     expect(result.ok).toBe(false);
@@ -195,6 +210,7 @@ describe("settingsTransfer", () => {
     for (const key of EDITOR_SETTINGS_DRAFT_KEYS) {
       expect(transferCategoryForKey(key), key).toBeDefined();
     }
+    expect(transferCategoryForKey("ddlOpenMode")).toBe("editor");
     expect(transferCategoryForKey("notARealSetting")).toBeUndefined();
   });
 
@@ -232,6 +248,22 @@ describe("settingsTransfer", () => {
     if (!result.ok) return;
     expect(result.value.editorSettings.pageSize).toBe(200);
     expect(result.value.editorSettings.snippets).toEqual(settings.snippets);
+  });
+
+  it("round-trips table default sorting settings", () => {
+    const settings = {
+      ...DEFAULT_EDITOR_SETTINGS,
+      tableOpenSortMode: "database",
+      tableDatabaseSortDirection: "desc",
+      tableLocalSortDirection: "asc",
+    } as EditorSettings;
+    const result = parseSettingsTransferFile(serializeSettingsTransfer(settings));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.tableOpenSortMode).toBe("database");
+    expect(result.value.editorSettings.tableDatabaseSortDirection).toBe("desc");
+    expect(result.value.editorSettings.tableLocalSortDirection).toBe("asc");
+    expect(transferCategoryForKey("tableOpenSortMode")).toBe("data");
   });
 
   it("rejects custom theme items that lack id or name", () => {

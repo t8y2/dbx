@@ -1,6 +1,5 @@
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-use dbx_core::storage::Storage;
 use dbx_core::transfer::{
     drop_backup_tables, rename_tables_to_backup, transfer_table, TransferContent, TransferMode,
     TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
@@ -155,7 +154,8 @@ async fn live_sqlserver_transfer_rebuild_releases_constraint_and_index_names() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-rebuild-{suffix}"));
     std::fs::create_dir_all(&dir).expect("create rebuild directory");
-    let storage = Storage::open(&dir.join("storage.db")).await.expect("open rebuild storage");
+    let storage =
+        dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.expect("open rebuild storage");
     let state = Arc::new(AppState::new(storage));
     let config = live_sqlserver_config(&connection_id, &source_db);
     state.configs.write().await.insert(connection_id.clone(), config);
@@ -318,7 +318,8 @@ async fn live_sqlserver_transfer_overwrite_handles_existing_identity_target() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-8690-{suffix}"));
     std::fs::create_dir_all(&dir).expect("create issue #8690 directory");
-    let storage = Storage::open(&dir.join("storage.db")).await.expect("open issue #8690 storage");
+    let storage =
+        dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.expect("open issue #8690 storage");
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), live_sqlserver_config(&connection_id, &database));
     let pool_key = state.get_or_create_pool(&connection_id, Some(&database)).await.expect("create SQL Server pool");
@@ -423,7 +424,8 @@ async fn live_sqlserver_keyset_pagination_copies_every_row() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-keyset-{suffix}"));
     std::fs::create_dir_all(&dir).expect("create keyset directory");
-    let storage = Storage::open(&dir.join("storage.db")).await.expect("open keyset storage");
+    let storage =
+        dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.expect("open keyset storage");
     let state = Arc::new(AppState::new(storage));
     state
         .configs
@@ -543,7 +545,8 @@ async fn live_sqlserver_progress_read_survives_total_duration_beyond_timeout() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-progress-{suffix}"));
     std::fs::create_dir_all(&dir).expect("create progress directory");
-    let storage = Storage::open(&dir.join("storage.db")).await.expect("open progress storage");
+    let storage =
+        dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.expect("open progress storage");
     let state = Arc::new(AppState::new(storage));
     // The read runs under the source's query timeout; keep it at 1s so the test only
     // passes when the transfer treats it as an inactivity budget, not a wall clock.
@@ -662,7 +665,7 @@ async fn live_sqlserver_keyset_uniqueidentifier_datetime2_composite_key() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-typed-{suffix}"));
     std::fs::create_dir_all(&dir).expect("create typed directory");
-    let storage = Storage::open(&dir.join("storage.db")).await.expect("open typed storage");
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.expect("open typed storage");
     let state = Arc::new(AppState::new(storage));
     state
         .configs

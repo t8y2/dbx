@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, ChevronsDownUp, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
+import { ArrowDownWideNarrow, ChevronsDownUp, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, Loader2, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -21,10 +21,11 @@ import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
+import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
-import { exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
+import { uniqueSavedSqlExportFileName, exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent } from "@/lib/selection/orderedListSelection";
 import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
@@ -96,6 +97,10 @@ function uniqueImportedName(name: string, takenNames: Set<string>) {
   }
 }
 
+function savedSqlImportNameScopeKey(target: Pick<SavedSqlFile, "connectionId" | "catalog" | "database">, folderId?: string) {
+  return JSON.stringify([savedSqlDatabaseScopeKey(target), folderId || null]);
+}
+
 async function exportSingleFile(file: SavedSqlFile) {
   try {
     const loadedFile = await savedSqlStore.ensureFileContent(file.id);
@@ -136,10 +141,11 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
         await mkdir(childDir, { recursive: true });
         await writeFolder(child, childDir);
       }
+      const exportedNames = new Set<string>();
       for (const file of savedSqlStore.filesInFolder(libraryFolder.id)) {
         const loadedFile = await savedSqlStore.ensureFileContent(file.id);
         if (!loadedFile) continue;
-        const filePath = await join(dir, sanitizeFileSystemSegment(ensureSqlExtension(file.name)));
+        const filePath = await join(dir, uniqueSavedSqlExportFileName(file.name, exportedNames));
         await writeTextFile(filePath, loadedFile.sql);
       }
     };
@@ -157,10 +163,11 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
       if (unfiled.length > 0) {
         const unfiledDir = await join(rootDir, sanitizeFileSystemSegment(t("sqlLibrary.unfiled")));
         await mkdir(unfiledDir, { recursive: true });
+        const exportedNames = new Set<string>();
         for (const file of unfiled) {
           const loadedFile = await savedSqlStore.ensureFileContent(file.id);
           if (!loadedFile) continue;
-          const filePath = await join(unfiledDir, sanitizeFileSystemSegment(ensureSqlExtension(file.name)));
+          const filePath = await join(unfiledDir, uniqueSavedSqlExportFileName(file.name, exportedNames));
           await writeTextFile(filePath, loadedFile.sql);
         }
       }
@@ -218,18 +225,19 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
     }
 
     const folderCache = new Map<string, SavedSqlFolder>();
-    const takenNamesByFolder = new Map<string, Set<string>>();
+    const takenNamesByScope = new Map<string, Set<string>>();
     const folderConnectionId = targetFolder?.connectionId ?? "";
 
     for (const file of importFiles) {
       const sourceTarget = resolveExternalSqlFileTarget(file.path, (connectionId) => !!connectionStore.getConfig(connectionId), unassociatedExternalSqlFileTarget());
       const importTarget = savedSqlImportTarget(sourceTarget, targetFolder);
       const folderId = await resolveImportedFolder(folderConnectionId, targetFolder?.id, file.folderNames, folderCache);
-      const folderKey = folderId || "";
-      let takenNames = takenNamesByFolder.get(folderKey);
+      const nameScopeKey = savedSqlImportNameScopeKey(importTarget, folderId);
+      let takenNames = takenNamesByScope.get(nameScopeKey);
       if (!takenNames) {
-        takenNames = new Set((folderId ? savedSqlStore.filesInFolder(folderId) : savedSqlStore.filesWithoutFolder()).map((savedFile) => savedFile.name));
-        takenNamesByFolder.set(folderKey, takenNames);
+        const filesInTargetFolder = folderId ? savedSqlStore.filesInFolder(folderId) : savedSqlStore.filesWithoutFolder();
+        takenNames = new Set(filesInTargetFolder.filter((savedFile) => savedSqlDatabaseScopeKey(savedFile) === savedSqlDatabaseScopeKey(importTarget)).map((savedFile) => savedFile.name));
+        takenNamesByScope.set(nameScopeKey, takenNames);
       }
       const path = file.path;
       const content = await api.readExternalSqlFile(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
@@ -445,7 +453,9 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
   const connectionId = folder?.connectionId || connectionStore.activeConnectionId || connectionStore.connections[0]?.id;
   if (!connectionId) return;
 
-  const takenNames = folder ? new Set(savedSqlStore.filesInFolder(folder.id).map((f) => f.name)) : new Set(savedSqlStore.filesWithoutFolder().map((f) => f.name));
+  const target = { connectionId, database: "" };
+  const filesInTargetFolder = folder ? savedSqlStore.filesInFolder(folder.id) : savedSqlStore.filesWithoutFolder();
+  const takenNames = new Set(filesInTargetFolder.filter((file) => savedSqlDatabaseScopeKey(file) === savedSqlDatabaseScopeKey(target)).map((file) => file.name));
   const name = uniqueImportedName("new_query.sql", takenNames);
   try {
     const file = await savedSqlStore.saveFile({
@@ -1436,7 +1446,12 @@ function showDropInside(targetId: string) {
             </div>
             <!-- End tree structure -->
 
-            <div v-if="!hasAnyVisibleItem" class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
+            <div v-if="savedSqlStore.loadState === 'idle' || savedSqlStore.loadState === 'loading'" class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground" role="status" aria-live="polite">
+              <Loader2 class="h-6 w-6 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              <p class="text-[13px]">{{ t("common.loading") }}</p>
+            </div>
+
+            <div v-else-if="!hasAnyVisibleItem" class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
               <Library class="h-8 w-8 opacity-30" />
               <p class="text-[13px]">{{ t("sqlLibrary.empty") }}</p>
             </div>

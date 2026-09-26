@@ -33,6 +33,9 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     private boolean pooledConnectionPoisoned;
 
     @Override
+    public boolean supportsQueryTiming() { return true; }
+
+    @Override
     public final Connection getConnection() {
         return connection;
     }
@@ -185,8 +188,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        long prepareStarted = System.nanoTime();
         Connection conn = requireConnected();
         uncheckedVoid(() -> beforeQueryExecution(conn, options.getTimeoutSecs()));
+        QueryTiming.record("session_prepare", prepareStarted);
         return JdbcExecutor.current().execute(
             conn,
             sql,
@@ -204,8 +209,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        long prepareStarted = System.nanoTime();
         Connection conn = requireConnected();
         uncheckedVoid(() -> beforeQueryExecution(conn, options.getTimeoutSecs()));
+        QueryTiming.record("session_prepare", prepareStarted);
         return JdbcExecutor.current().executePage(
             conn,
             sql,
@@ -593,6 +600,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     }
 
     protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
+    }
+
+    /** Called for each session RPC before its SQL can replace the connection's last trace ID. */
+    protected void beforeAgentMethod(String method, String querySessionId) {
     }
 
     protected boolean advancePastUpdateCounts() {

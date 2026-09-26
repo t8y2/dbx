@@ -368,6 +368,12 @@ onBeforeUnmount(resetColumnDragState);
           {{ t("grid.noSearchResults") }}
         </div>
       </div>
+      <div v-if="grid?.autoFitAllColumns" class="flex items-center justify-between gap-2 border-t bg-muted/30 px-2 py-1.5">
+        <span class="text-[11px] leading-4 text-muted-foreground">{{ t("grid.columnWidth") }}</span>
+        <Button variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-xs" data-column-auto-fit-all :title="t('grid.autoFitColumnWidthsHint')" @click="grid?.autoFitAllColumns?.()">
+          {{ t("grid.autoFitColumnWidths") }}
+        </Button>
+      </div>
       <div class="flex flex-col gap-1 border-t bg-muted/30 px-2 py-1.5">
         <span class="text-[11px] leading-4 text-muted-foreground">
           {{ t("grid.columnVisibilityHint") }}

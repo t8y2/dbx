@@ -1,6 +1,28 @@
 ﻿import type { AiAgentPlan, AiAgentStep } from "@/lib/ai/aiAgentPlan";
+import type { AiToolApprovalOutcome } from "@/types/pluginAiTools";
 
 export type AiAgentStepTone = "success" | "active" | "warning" | "danger" | "muted";
+
+/**
+ * Approval state of a plugin tool call that may change state. `pending` shows
+ * the approve/deny buttons; `submitting` is the in-flight answer; `expired`
+ * means the backend no longer waited when the answer arrived.
+ */
+export type AiAgentStepApprovalStatus = "pending" | "submitting" | "expired" | AiToolApprovalOutcome;
+
+export interface AiAgentStepApproval {
+  approvalId: string;
+  /** Agent session that asked; the answer must go back to the same run. */
+  sessionId: string;
+  pluginName: string;
+  pluginTool: string;
+  connectionName: string;
+  /** Exactly the arguments DBX forwards when approved. */
+  args: Record<string, unknown>;
+  /** Wall-clock deadline after which the backend treats the call as denied. */
+  expiresAtMs: number;
+  status: AiAgentStepApprovalStatus;
+}
 
 export interface AiAgentStepItem {
   key: string;
@@ -24,6 +46,8 @@ export interface AiAgentStepItem {
   endedAtMs?: number;
   /** Computed tool duration (endedAtMs - startedAtMs), present only when both stamps exist */
   durationMs?: number;
+  /** Present while (and after) a plugin tool call asked the user for approval */
+  approval?: AiAgentStepApproval;
 }
 
 /** Backend fallback tool_call_id values that repeat across calls and must not be used as stable merge keys. */
@@ -52,11 +76,34 @@ export function upsertAgentStep(steps: AiAgentStepItem[], step: AiAgentStepItem)
   if (!merged.explainData && existing.explainData) merged.explainData = existing.explainData;
   if (!merged.titleKey && existing.titleKey) merged.titleKey = existing.titleKey;
   if (!merged.titleParams && existing.titleParams) merged.titleParams = existing.titleParams;
+  if (!merged.approval && existing.approval) merged.approval = existing.approval;
   if (merged.startedAtMs === undefined && existing.startedAtMs !== undefined) merged.startedAtMs = existing.startedAtMs;
   if (merged.endedAtMs !== undefined && merged.startedAtMs !== undefined) {
     merged.durationMs = Math.max(0, merged.endedAtMs - merged.startedAtMs);
   }
   steps.splice(idx, 1, merged);
+}
+
+/**
+ * Apply an approval change to the step keyed `toolCallKey`. Returns false when
+ * the card does not exist (yet), so callers can decide whether to create it.
+ */
+export function updateAgentStepApproval(steps: AiAgentStepItem[], toolCallKey: string, update: (approval: AiAgentStepApproval | undefined) => AiAgentStepApproval | undefined): boolean {
+  const idx = steps.findIndex((step) => step.key === toolCallKey);
+  if (idx < 0) return false;
+  const approval = update(steps[idx].approval);
+  steps.splice(idx, 1, { ...steps[idx], approval });
+  return true;
+}
+
+/**
+ * `ssh__ssh_exec` → `ssh › ssh_exec`: plugin tools carry a DBX prefix that the
+ * card shows as provenance; built-in tool names pass through unchanged.
+ */
+export function formatAgentToolName(toolName: string): string {
+  const separator = toolName.indexOf("__");
+  if (separator <= 0 || separator + 2 >= toolName.length) return toolName;
+  return `${toolName.slice(0, separator)} › ${toolName.slice(separator + 2)}`;
 }
 
 /**

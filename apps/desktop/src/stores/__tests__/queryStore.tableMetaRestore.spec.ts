@@ -17,6 +17,25 @@ describe("data tab snapshot restore vs tableMetaPending", () => {
     setActivePinia(createPinia());
   });
 
+  it("keeps projection-only metadata pending until complete identity metadata arrives", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const metadata = { tableName: "users", schema: "public", columns: [column("id")], primaryKeys: ["id"] };
+    store.setTableMeta(tabId, metadata);
+    expect(tab.tableMetaPending).toBe(false);
+
+    store.setTableMeta(tabId, { ...metadata, columns: [{ ...column("id"), is_primary_key: false }], primaryKeys: [] }, { rowIdentityPending: true });
+    expect(tab.tableMetaPending).toBe(true);
+    expect(tab.tableMeta?.primaryKeys).toEqual([]);
+    store.setTableMeta(tabId, { ...metadata, columns: [], primaryKeys: [] });
+    expect(tab.tableMetaPending).toBe(true);
+
+    store.setTableMeta(tabId, metadata);
+    expect(tab.tableMetaPending).toBe(false);
+  });
+
   it("does not roll back real metadata to a placeholder snapshot and re-pends placeholder restores", async () => {
     vi.doMock("@/lib/tabs/tabResultCache", async (importOriginal) => {
       const actual = await importOriginal<typeof import("@/lib/tabs/tabResultCache")>();

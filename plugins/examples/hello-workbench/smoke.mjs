@@ -15,6 +15,12 @@ try {
   run("cargo", ["run", "--locked", "-p", "dbx-core", "--no-default-features", "--example", "plugin_package_smoke", "--", packagePath], {
     CARGO_TARGET_DIR: cargoTarget,
   });
+  // The same package through the built-in AI agent's plugin tool path. It
+  // opens a DBX storage, so it needs a SQLite that exposes the extension API
+  // (macOS system SQLite does not); `sqlite-bundled` is the test build's choice.
+  run("cargo", ["run", "--locked", "-p", "dbx-core", "--no-default-features", "--features", "sqlite-bundled", "--example", "plugin_ai_tools_smoke", "--", packagePath], {
+    CARGO_TARGET_DIR: cargoTarget,
+  });
 } finally {
   if (ownedBuildRoot) await rm(ownedBuildRoot, { recursive: true, force: true });
 }

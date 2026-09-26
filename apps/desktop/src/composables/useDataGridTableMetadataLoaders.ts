@@ -1,6 +1,6 @@
 import { computed, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
-import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
@@ -8,7 +8,7 @@ import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { columnIndexMetadataRequestCurrent, columnIndexTableIdentity } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { foreignKeyMetadataRequestCurrent, foreignKeyTableIdentity } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
-import type { ColumnInfo, ConstraintInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConstraintInfo, DatabaseType, ForeignKeyInfo, IndexInfo, PgTablePartitioning, TriggerInfo } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 
 type SettingsStore = ReturnType<typeof import("@/stores/settingsStore").useSettingsStore>;
@@ -55,6 +55,11 @@ interface TableMetadataState {
   constraintsLoaded: Ref<boolean>;
   constraintsLoading: Ref<boolean>;
   constraintsError: Ref<string>;
+  partitioning: Ref<PgTablePartitioning | null>;
+  partitioningLoaded: Ref<boolean>;
+  partitioningLoading: Ref<boolean>;
+  partitioningError: Ref<string>;
+  partitioningRequestGeneration: Ref<number>;
   tableInfoColumnsRequestGeneration: Ref<number>;
   tableOwnerRequestGeneration: Ref<number>;
   indexesRequestGeneration: Ref<number>;
@@ -119,7 +124,8 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
     try {
       const { ddl } = await loadObjectDdl(request, { force });
       const formatDialect = sqlFormatDialectForDbType(options.resolvedDatabaseType.value);
-      state.ddlContent.value = options.settingsStore.editorSettings.generateSqlQuoteIdentifiers ? ddl : omitDdlIdentifierQuotes(ddl, formatDialect);
+      const unqualified = applyDdlDatabaseQualifier(ddl, formatDialect, options.resolvedDatabaseType.value, options.settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.tableMeta?.database, props.tableMeta?.catalog);
+      state.ddlContent.value = options.settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
     } catch (error: any) {
       state.ddlContent.value = `-- Error: ${error}`;
     } finally {
@@ -247,6 +253,26 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
     }
   }
 
+  async function fetchPartitions(force = false) {
+    const request = tableRequest();
+    if (!request || state.partitioningLoading.value) return;
+    if (state.partitioningLoaded.value && !force) return;
+    const requestGeneration = ++state.partitioningRequestGeneration.value;
+    state.partitioningLoading.value = true;
+    state.partitioningError.value = "";
+    try {
+      const value = await api.getTablePartitioning(request.connectionId, request.database, request.schema, request.tableName);
+      if (requestGeneration !== state.partitioningRequestGeneration.value) return;
+      state.partitioning.value = value;
+      state.partitioningLoaded.value = true;
+    } catch (error: any) {
+      if (requestGeneration !== state.partitioningRequestGeneration.value) return;
+      state.partitioningError.value = String(error?.message || error);
+    } finally {
+      if (requestGeneration === state.partitioningRequestGeneration.value) state.partitioningLoading.value = false;
+    }
+  }
+
   async function fetchConstraints() {
     const request = tableRequest();
     const requestIdentity = currentTableIdentity("constraints");
@@ -285,6 +311,7 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
     fetchForeignKeys,
     fetchTriggers,
     fetchConstraints,
+    fetchPartitions,
   };
 }
 

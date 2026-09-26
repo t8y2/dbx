@@ -30,7 +30,7 @@
       "uniqueItems": true,
       "items": {
         "anyOf": [
-          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem"] },
+          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai", "host.clipboard:read", "host.data:read"] },
           { "type": "string", "pattern": "^host\\.network:https://[A-Za-z0-9._-]+(:[0-9]+)?$" }
         ]
       }
@@ -46,7 +46,7 @@
     "contributions": {
       "type": "array",
       "items": {
-        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }]
+        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }, { "$ref": "#/$defs/commandContribution" }, { "$ref": "#/$defs/menusContribution" }]
       }
     },
     "localizations": {
@@ -104,6 +104,32 @@
         "value": { "type": "string" }
       }
     },
+    "fieldPicker": {
+      "description": "Local-file action on a text/password/textarea field. Desktop hosts store the chosen absolute path in the declaring field; browser hosts cannot read a client path and upload the file content into 'content_field' instead.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "description": "'directory' is desktop-only: a browser cannot hand a folder to the plugin.",
+          "enum": ["file", "directory"]
+        },
+        "accept": {
+          "description": "Filters offered by the picker: file extensions ('.pem') or MIME types ('text/plain').",
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(\\.[A-Za-z0-9]{1,16}|[A-Za-z0-9+*._-]{1,64}/[A-Za-z0-9+*._-]{1,64})$"
+          }
+        },
+        "content_field": {
+          "description": "Declared sibling field that receives the file content on hosts without a client filesystem.",
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
     "formFieldLocalization": {
       "type": "object",
       "additionalProperties": false,
@@ -142,12 +168,64 @@
       }
     },
     "fieldCondition": {
+      "oneOf": [
+        { "$ref": "#/$defs/fieldConditionClause" },
+        { "$ref": "#/$defs/fieldConditionAllOf" },
+        { "$ref": "#/$defs/fieldConditionAnyOf" },
+        { "$ref": "#/$defs/fieldConditionNot" }
+      ]
+    },
+    "fieldConditionClause": {
       "type": "object",
       "additionalProperties": false,
       "required": ["field", "one_of"],
       "properties": {
         "field": { "$ref": "#/$defs/identifier" },
-        "one_of": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        "one_of": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "description": "Compared against the referenced field's value by canonical string form, so `false` and `\"false\"` both match a boolean false.",
+            "type": ["string", "boolean", "number"]
+          }
+        }
+      }
+    },
+    "fieldConditionAllOf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["all_of"],
+      "properties": {
+        "all_of": {
+          "description": "Matches only when every nested condition matches.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/fieldCondition" }
+        }
+      }
+    },
+    "fieldConditionAnyOf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["any_of"],
+      "properties": {
+        "any_of": {
+          "description": "Matches when at least one nested condition matches.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/fieldCondition" }
+        }
+      }
+    },
+    "fieldConditionNot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["not"],
+      "properties": {
+        "not": {
+          "description": "Inverts the nested condition.",
+          "$ref": "#/$defs/fieldCondition"
+        }
       }
     },
     "formField": {
@@ -164,6 +242,7 @@
         "default": { "type": ["string", "number", "boolean", "null"] },
         "options": { "type": "array", "items": { "$ref": "#/$defs/selectOption" } },
         "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] },
+        "picker": { "$ref": "#/$defs/fieldPicker" },
         "visible_when": { "$ref": "#/$defs/fieldCondition" },
         "required_when": { "$ref": "#/$defs/fieldCondition" }
       },
@@ -205,6 +284,7 @@
           "uniqueItems": true,
           "items": { "enum": ["test", "connect", "disconnect"] }
         },
+        "proxy_route": { "type": "boolean", "default": false },
         "actions": { "type": "array", "items": { "$ref": "#/$defs/connectionAction" } }
       }
     },
@@ -245,7 +325,17 @@
         "label": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
         "icon": { "$ref": "#/$defs/assetPath" },
-        "menu": { "const": "connection" }
+        "menu": { "enum": ["connection", "table"] },
+        "action": { "$ref": "#/$defs/contextMenuAction" }
+      }
+    },
+    "contextMenuAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "workbench"],
+      "properties": {
+        "type": { "const": "open-workbench" },
+        "workbench": { "$ref": "#/$defs/identifier" }
       }
     },
     "resultViewContribution": {
@@ -277,6 +367,62 @@
           "uniqueItems": true,
           "items": { "enum": ["read", "write", "delete", "rename", "mkdir"] }
         }
+      }
+    },
+    "commandContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "label", "action"],
+      "properties": {
+        "type": { "const": "command" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "icon": { "$ref": "#/$defs/assetPath" },
+        "action": { "$ref": "#/$defs/commandAction" },
+        "enablement": { "$ref": "#/$defs/commandEnablement" }
+      }
+    },
+    "commandAction": {
+      "oneOf": [{ "$ref": "#/$defs/openWorkbenchAction" }]
+    },
+    "openWorkbenchAction": {
+      "type": "object",
+      "required": ["type", "workbench"],
+      "properties": {
+        "type": { "const": "open-workbench" },
+        "workbench": { "$ref": "#/$defs/identifier" },
+        "presentation": { "enum": ["tab", "panel"] },
+        "context": { "type": "object" }
+      }
+    },
+    "menusContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "menus" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/menuItem" } }
+      }
+    },
+    "menuItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["location", "command", "group", "order"],
+      "properties": {
+        "location": { "enum": ["commandPalette", "appToolbar", "appSidebar"] },
+        "command": { "type": "string", "minLength": 1 },
+        "group": { "type": "string" },
+        "order": { "type": "integer" },
+        "default_visible": { "type": "boolean" },
+        "when": { "$ref": "#/$defs/commandEnablement" }
+      }
+    },
+    "commandEnablement": {
+      "type": "object",
+      "properties": {
+        "all": { "type": "array", "items": { "type": "object" } }
       }
     }
   }

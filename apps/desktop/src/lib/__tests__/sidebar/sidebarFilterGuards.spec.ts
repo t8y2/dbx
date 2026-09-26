@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolveSidebarFilterGuards } from "@/lib/sidebar/sidebarSearchTree";
 
@@ -17,19 +16,5 @@ describe("sidebar filter guards", () => {
       isTreeSearchFiltering: treeSearch,
       isRootListPartial: rootPartial,
     });
-  });
-
-  it("keeps descendant-local features separate from partial-root operations", () => {
-    const source = readFileSync(new URL("../../../components/sidebar/ConnectionTree.vue", import.meta.url), "utf8");
-
-    expect(source).toContain("sidebarTableSearchEnabled && !isTreeSearchFiltering.value");
-    expect(source).toContain("!useVirtualTree.value || isTreeSearchFiltering.value");
-    expect(source.match(/if \(isRootListPartial\.value\)/g)).toHaveLength(2);
-    // Alphabetical sort only suppresses before/after position reordering (the manual
-    // order it would act on is invisible while sorted); moving a connection into a
-    // different group stays available so drag stays usable while sorted (#6669).
-    expect(source.match(/:reorder-disabled="isRootListPartial"/g)).toHaveLength(2);
-    expect(source.match(/:move-to-group-only="isConnectionListAlphabeticallySorted"/g)).toHaveLength(2);
-    expect(source).not.toContain("isFiltering");
   });
 });

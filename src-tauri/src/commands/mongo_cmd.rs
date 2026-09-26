@@ -146,6 +146,47 @@ pub async fn mongo_find_documents(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
+pub async fn mongo_explain_find(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    skip: u64,
+    limit: i64,
+    filter: Option<String>,
+    projection: Option<String>,
+    sort: Option<String>,
+    collation: Option<String>,
+    verbosity: Option<String>,
+    execution_id: Option<String>,
+    mcp_request: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let app = state.inner().clone();
+    if mcp_request == Some(true) {
+        crate::commands::mcp_bridge::ensure_mcp_read_allowed_by_id(&app, &connection_id, &database).await?;
+    }
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_explain_find_core(
+            &app,
+            &connection_id,
+            &database,
+            &collection,
+            skip,
+            limit,
+            filter.as_deref(),
+            projection.as_deref(),
+            sort.as_deref(),
+            collation.as_deref(),
+            verbosity.as_deref().unwrap_or("queryPlanner"),
+        ),
+    )
+    .await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn mongo_find_one(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

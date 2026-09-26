@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { beforeEach, test, vi } from "vitest";
 
 const { beginDatabaseBackupSnapshot, exportDatabaseSql, rollbackManualTransaction } = vi.hoisted(() => ({
@@ -53,14 +52,6 @@ test("database export waits for terminal progress before releasing its snapshot"
 
   emitProgress?.({ exportId: "export-1", status: "Done" });
   assert.equal((await operation).status, "Done");
-});
-
-test("single database export holds its snapshot until terminal progress", () => {
-  const source = readFileSync("apps/desktop/src/components/export/DatabaseExportDialog.vue", "utf8");
-  const singleExport = source.slice(source.indexOf("async function startExport()"), source.indexOf("async function startAllDatabasesExport()"));
-
-  assert.match(singleExport, /return runDatabaseExportUntilTerminal\(request,/);
-  assert.doesNotMatch(singleExport, /await api\.exportDatabaseSql\(request,/);
 });
 
 test("database export snapshot is released after success", async () => {

@@ -119,6 +119,10 @@ describe("connection query actions", () => {
     expect(supportsConnectionQueryActions("mq")).toBe(false);
     expect(supportsConnectionQueryActions("mqtt")).toBe(false);
   });
+
+  it("hides the sidebar new-query entry for Meilisearch", () => {
+    expect(supportsConnectionQueryActions("meilisearch")).toBe(false);
+  });
 });
 
 describe("message queue query capabilities", () => {
@@ -322,6 +326,10 @@ describe("supportsTableImport", () => {
   it("enables OceanBase Oracle table import", () => {
     expect(supportsTableImport("oceanbase-oracle")).toBe(true);
   });
+
+  it("keeps Xugu table import available", () => {
+    expect(supportsTableImport("xugu")).toBe(true);
+  });
 });
 
 describe("database property editing", () => {
@@ -368,8 +376,9 @@ describe("database namespace creation", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "duckdb" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "sqlite" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb" })).toBe("special");
-    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBeNull();
-    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "legacy" })).toBeNull();
+    // The Legacy Agent creates databases through runCommand, so it gets the same flow.
+    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBe("special");
+    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "legacy" })).toBe("special");
   });
 
   it("hides persistent SQLite attachment for memory and SQLCipher connections", () => {

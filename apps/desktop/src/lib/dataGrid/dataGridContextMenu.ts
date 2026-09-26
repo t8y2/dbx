@@ -90,7 +90,8 @@ export function createDataGridColumnContextMenuItems(options: {
   labels: Record<
     "copyName" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
     string
-  >;
+  > &
+    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn", string>>;
   icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort">;
   actions: {
     copyName: () => void;
@@ -100,6 +101,8 @@ export function createDataGridColumnContextMenuItems(options: {
     sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void;
     freezeToColumn: () => void;
     freezeSelectedColumns: () => void;
+    freezeCurrentColumn?: () => void;
+    unfreezeCurrentColumn?: () => void;
     unfreezeColumns: () => void;
     hideColumn: () => void;
     hideSelectedColumns: () => void;
@@ -142,11 +145,13 @@ export function createDataGridColumnContextMenuItems(options: {
       items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
     }
     if ((options.frozenColumnCount ?? 0) > 0) {
+      if ((options.contextVisibleColIdx ?? -1) < (options.frozenColumnCount ?? 0) && options.labels.unfreezeCurrentColumn && options.actions.unfreezeCurrentColumn) items.push({ label: options.labels.unfreezeCurrentColumn, action: options.actions.unfreezeCurrentColumn });
       items.push({ label: options.labels.unfreezeColumns, action: options.actions.unfreezeColumns });
     }
     if (options.hasColumnSelection) {
       items.push({ label: options.labels.freezeSelectedColumns, action: options.actions.freezeSelectedColumns });
     }
+    if (options.labels.freezeCurrentColumn && options.actions.freezeCurrentColumn) items.push({ label: options.labels.freezeCurrentColumn, action: options.actions.freezeCurrentColumn });
     items.push({ label: options.labels.freezeToColumn, action: options.actions.freezeToColumn });
   }
   return items;

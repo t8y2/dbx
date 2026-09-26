@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, Check, ChevronDown, Globe2, KeyRound, Lock, Loader2, Plus, RefreshCcw, Search, ShieldCheck, Table2, Trash2, Unlock, UserRound } from "@lucide/vue";
+import { AlertTriangle, Check, Globe2, KeyRound, Lock, Loader2, Plus, RefreshCcw, Search, ShieldCheck, Trash2, Unlock, UserRound } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import AuthorizationScopeEditor from "@/components/admin/AuthorizationScopeEditor.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
@@ -22,10 +22,10 @@ import {
   authorizationPlanStatus,
   authorizationPrivileges,
   buildCreateUserAuthorizationPlan,
+  buildGrantAuthorizationPlan,
   executeAuthorizationPlan,
   type AuthorizationAccountType,
   type AuthorizationPlan,
-  type AuthorizationPreset,
   type AuthorizationStepResult,
   type DatabaseAuthorizationSelection,
 } from "@/lib/database/databaseAuthorizationPlan";
@@ -90,12 +90,9 @@ const createCanLogin = ref(true);
 const createAccountType = ref<AuthorizationAccountType>("standard");
 const createDatabases = ref<string[]>([]);
 const createDatabasesLoading = ref(false);
-const createDatabaseSearch = ref("");
 const createDatabaseAuthorizations = ref<DatabaseAuthorizationSelection[]>([]);
-const createDatabaseTables = ref<Record<string, string[]>>({});
-const createDatabaseTablesLoading = ref<Record<string, boolean>>({});
-const createDatabaseTableErrors = ref<Record<string, string>>({});
-const createDatabaseTableSearch = ref<Record<string, string>>({});
+// 权限编辑面板的授权范围选择（MySQL 表级授权场景），与新增用户弹窗复用同一个范围编辑器
+const privilegeAuthorizations = ref<DatabaseAuthorizationSelection[]>([]);
 let createPlanRequestId = 0;
 let preserveRestoredPrivilegeSelection = restoredUiState.selectedPrivileges !== undefined || restoredUiState.grantOption !== undefined;
 
@@ -141,18 +138,10 @@ const selectedDetail = computed(() => {
 const grantsSqlText = computed(() => grants.value.join("\n") || t("userAdmin.noGrants"));
 const highlightedGrantsSql = computed(() => highlight(grantsSqlText.value));
 const highlightedPendingSql = computed(() => highlight(pendingSql.value));
-const filteredCreateDatabases = computed(() => {
-  const query = createDatabaseSearch.value.trim().toLowerCase();
-  return query ? createDatabases.value.filter((database) => database.toLowerCase().includes(query)) : createDatabases.value;
-});
-const selectedCreateDatabaseSet = computed(() => new Set(createDatabaseAuthorizations.value.map((selection) => selection.database)));
-const createDatabaseAuthorizationsValid = computed(() =>
-  createDatabaseAuthorizations.value.every((selection) => {
-    if (selection.tables !== undefined && selection.tables.length === 0) return false;
-    if (selection.preset !== "custom") return true;
-    return createPrivilegesForAuthorization(selection).some((privilege) => selection.privileges?.includes(privilege));
-  }),
-);
+const createDatabaseAuthorizationsValid = computed(() => authorizationSelectionsValid(createDatabaseAuthorizations.value));
+// MySQL 表级授权场景下，权限编辑面板复用与新增用户一致的授权范围编辑器
+const usePrivilegeScopeEditor = computed(() => canEditPrivileges.value && supportsCreateTableGrants.value && privilegeScope.value !== "role");
+const privilegeAuthorizationsValid = computed(() => authorizationSelectionsValid(privilegeAuthorizations.value));
 const pendingStatus = computed(() => (pendingResults.value.length > 0 ? authorizationPlanStatus(pendingResults.value) : undefined));
 const canPreviewHostChange = computed(() => {
   const host = newHost.value.trim();
@@ -267,17 +256,8 @@ function togglePrivilege(privilege: string) {
   selectedPrivileges.value = Array.from(set);
 }
 
-async function openCreateUserDialog() {
-  createDialogOpen.value = true;
-  createAccountType.value = "standard";
-  createCanLogin.value = true;
-  createPassword.value = "";
-  createDatabaseSearch.value = "";
-  createDatabaseAuthorizations.value = [];
-  createDatabaseTables.value = {};
-  createDatabaseTablesLoading.value = {};
-  createDatabaseTableErrors.value = {};
-  createDatabaseTableSearch.value = {};
+// 加载当前连接下的数据库列表：新增用户弹窗与权限编辑面板的授权范围编辑器共用
+async function loadDatabases() {
   if (createDatabasesLoading.value) return;
   createDatabases.value = [];
   createDatabasesLoading.value = true;
@@ -292,108 +272,27 @@ async function openCreateUserDialog() {
   }
 }
 
-function createAuthorization(database: string): DatabaseAuthorizationSelection | undefined {
-  return createDatabaseAuthorizations.value.find((selection) => selection.database === database);
+async function openCreateUserDialog() {
+  createDialogOpen.value = true;
+  createAccountType.value = "standard";
+  createCanLogin.value = true;
+  createPassword.value = "";
+  createDatabaseAuthorizations.value = [];
+  await loadDatabases();
 }
 
-function toggleCreateDatabase(database: string) {
-  const existing = createAuthorization(database);
-  if (existing) {
-    createDatabaseAuthorizations.value = createDatabaseAuthorizations.value.filter((selection) => selection.database !== database);
-  } else {
-    createDatabaseAuthorizations.value = [...createDatabaseAuthorizations.value, { database, preset: "readOnly", privileges: ["SELECT"] }];
-  }
-}
-
-function createPrivilegesForAuthorization(selection?: DatabaseAuthorizationSelection): string[] {
+/**
+ * 校验授权选择是否可生成语句：指定表时必须至少选一张表；自定义权限时必须命中至少一项可用权限。
+ * 表级与库级可用权限不同（例如 MySQL 表级不支持 CREATE ROUTINE / EVENT），因此按选择的目标作用域取权限集合。
+ */
+function authorizationSelectionsValid(selections: DatabaseAuthorizationSelection[]): boolean {
   const userProvider = provider.value;
-  if (!userProvider || !selection) return [];
-  return authorizationPrivileges(userProvider, selection.tables === undefined ? "database" : "table");
-}
-
-function createAuthorizationUsesSelectedTables(database: string): boolean {
-  return createAuthorization(database)?.tables !== undefined;
-}
-
-function createAuthorizationTableSelected(database: string, table: string): boolean {
-  return createAuthorization(database)?.tables?.includes(table) ?? false;
-}
-
-function allCreateDatabaseTablesSelected(database: string): boolean {
-  const tables = createDatabaseTables.value[database] ?? [];
-  return tables.length > 0 && createAuthorization(database)?.tables?.length === tables.length;
-}
-
-function filteredCreateDatabaseTables(database: string): string[] {
-  const query = (createDatabaseTableSearch.value[database] ?? "").trim().toLowerCase();
-  const tables = createDatabaseTables.value[database] ?? [];
-  return query ? tables.filter((table) => table.toLowerCase().includes(query)) : tables;
-}
-
-async function updateCreateDatabaseTableScope(database: string, selectedTables: boolean) {
-  const selection = createAuthorization(database);
-  if (!selection) return;
-  if (!selectedTables) {
-    delete selection.tables;
-    return;
-  }
-  selection.tables = selection.tables ?? [];
-  if (selection.preset === "custom") {
-    const allowed = new Set(createPrivilegesForAuthorization(selection));
-    selection.privileges = (selection.privileges ?? []).filter((privilege) => allowed.has(privilege));
-  }
-  await loadCreateDatabaseTables(database);
-}
-
-async function loadCreateDatabaseTables(database: string) {
-  if (createDatabaseTables.value[database] || createDatabaseTablesLoading.value[database]) return;
-  createDatabaseTablesLoading.value = { ...createDatabaseTablesLoading.value, [database]: true };
-  createDatabaseTableErrors.value = { ...createDatabaseTableErrors.value, [database]: "" };
-  try {
-    const tables = await api.listTables(props.connection.id, database, "");
-    createDatabaseTables.value = {
-      ...createDatabaseTables.value,
-      [database]: Array.from(new Set(tables.map((table) => table.name.trim()).filter(Boolean))).sort((left, right) => left.localeCompare(right)),
-    };
-  } catch (error: any) {
-    createDatabaseTableErrors.value = {
-      ...createDatabaseTableErrors.value,
-      [database]: error?.message || String(error),
-    };
-  } finally {
-    createDatabaseTablesLoading.value = { ...createDatabaseTablesLoading.value, [database]: false };
-  }
-}
-
-function toggleCreateDatabaseTable(database: string, table: string) {
-  const selection = createAuthorization(database);
-  if (!selection?.tables) return;
-  const tables = new Set(selection.tables);
-  if (tables.has(table)) tables.delete(table);
-  else tables.add(table);
-  selection.tables = Array.from(tables);
-}
-
-function toggleAllCreateDatabaseTables(database: string) {
-  const selection = createAuthorization(database);
-  if (!selection?.tables) return;
-  const tables = createDatabaseTables.value[database] ?? [];
-  selection.tables = selection.tables.length === tables.length ? [] : [...tables];
-}
-
-function updateCreateDatabasePreset(database: string, preset: unknown) {
-  const selection = createAuthorization(database);
-  if (!selection || typeof preset !== "string") return;
-  selection.preset = preset as AuthorizationPreset;
-}
-
-function toggleCreateDatabasePrivilege(database: string, privilege: string) {
-  const selection = createAuthorization(database);
-  if (!selection) return;
-  const privileges = new Set(selection.privileges ?? []);
-  if (privileges.has(privilege)) privileges.delete(privilege);
-  else privileges.add(privilege);
-  selection.privileges = Array.from(privileges);
+  if (!userProvider) return false;
+  return selections.every((selection) => {
+    if (selection.tables !== undefined && selection.tables.length === 0) return false;
+    if (selection.preset !== "custom") return true;
+    return authorizationPrivileges(userProvider, selection.tables === undefined ? "database" : "table").some((privilege) => selection.privileges?.includes(privilege));
+  });
 }
 
 function previewSql(sql: string, options: { danger?: boolean; afterApply?: () => Promise<void> } = {}) {
@@ -495,6 +394,9 @@ function authorizationStepLabel(result: AuthorizationStepResult): string {
   if (step.operation === "grantDatabase") {
     return step.targetTable ? t("userAdmin.stepGrantTable", { user: step.subject, database: step.targetDatabase, table: step.targetTable }) : t("userAdmin.stepGrantDatabase", { user: step.subject, database: step.targetDatabase });
   }
+  if (step.operation === "revokePrivileges") {
+    return step.targetTable ? t("userAdmin.stepRevokeTable", { user: step.subject, database: step.targetDatabase, table: step.targetTable }) : t("userAdmin.stepRevokeDatabase", { user: step.subject, database: step.targetDatabase });
+  }
   if (step.operation === "grantCurrentObjects") {
     return t("userAdmin.stepGrantCurrentObjects", {
       user: step.subject,
@@ -564,11 +466,31 @@ function previewLoginChange(enabled: boolean) {
   previewSql(alterLoginSql(user, enabled), { danger: true });
 }
 
+/**
+ * 打开授权计划预览：多库/多表会展开为多条 GRANT / REVOKE，
+ * 复用既有 SQL 预览弹窗的逐步执行结果与生产环境守卫，无需新增执行链路。
+ */
+function previewPlan(plan: AuthorizationPlan, options: { danger?: boolean } = {}) {
+  if (plan.steps.length === 0) return;
+  pendingPlan.value = plan;
+  pendingSql.value = authorizationPlanSql(plan);
+  pendingResults.value = [];
+  pendingDanger.value = !!options.danger;
+  pendingAfterApply.value = undefined;
+  sqlDialogOpen.value = true;
+}
+
 function previewGrant() {
   const user = selectedUser.value;
   const userProvider = provider.value;
   const grantPrivilegesSql = userProvider?.grantPrivilegesSql;
-  if (!user || !grantPrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
+  if (!user || !userProvider || !grantPrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
+  if (usePrivilegeScopeEditor.value) {
+    // MySQL 表级授权：按所选库/表展开为多条 GRANT（仅追加，不回收该用户已有权限）
+    if (!privilegeAuthorizationsValid.value) return;
+    previewPlan(buildGrantAuthorizationPlan({ provider: userProvider, user, databases: privilegeAuthorizations.value, grantOption: grantOption.value }));
+    return;
+  }
   previewSql(
     grantPrivilegesSql({
       user,
@@ -586,7 +508,13 @@ function previewRevoke() {
   const user = selectedUser.value;
   const userProvider = provider.value;
   const revokePrivilegesSql = userProvider?.revokePrivilegesSql;
-  if (!user || !revokePrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
+  if (!user || !userProvider || !revokePrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
+  if (usePrivilegeScopeEditor.value) {
+    // 与授权保持同一套选择：按所选库/表展开为多条 REVOKE
+    if (!privilegeAuthorizationsValid.value) return;
+    previewPlan(buildGrantAuthorizationPlan({ provider: userProvider, user, databases: privilegeAuthorizations.value, revoke: true }), { danger: true });
+    return;
+  }
   previewSql(
     revokePrivilegesSql({
       user,
@@ -624,6 +552,8 @@ watch(
   () => selectedUserKey.value,
   () => {
     grantsLoaded.value = false;
+    // 切换用户时清空上一位用户选择的授权范围，避免把权限误授给当前用户
+    privilegeAuthorizations.value = [];
     void loadGrants();
   },
 );
@@ -634,16 +564,14 @@ watch(
     users.value = [];
     createDatabases.value = [];
     createDatabaseAuthorizations.value = [];
-    createDatabaseTables.value = {};
-    createDatabaseTablesLoading.value = {};
-    createDatabaseTableErrors.value = {};
-    createDatabaseTableSearch.value = {};
+    privilegeAuthorizations.value = [];
     selectedUserKey.value = "";
     grants.value = [];
     grantsLoaded.value = false;
     privilegeScope.value = provider.value?.defaultScope ?? "mysql";
     resetPrivilegeDefaults(privilegeScope.value);
     void loadUsers();
+    if (usePrivilegeScopeEditor.value) void loadDatabases();
   },
 );
 
@@ -671,7 +599,11 @@ watch(
 
 watch([privilegeDatabase, privilegeTable], syncPrivilegeSelectionFromGrants);
 
-onMounted(loadUsers);
+onMounted(() => {
+  void loadUsers();
+  // 权限编辑面板的授权范围选择需要数据库列表，进入页面即预加载（仅 MySQL 表级授权场景）
+  if (usePrivilegeScopeEditor.value) void loadDatabases();
+});
 </script>
 
 <template>
@@ -789,7 +721,7 @@ onMounted(loadUsers);
           <aside v-if="canEditPrivileges" class="flex min-h-0 flex-col bg-muted/10">
             <div class="border-b p-3">
               <div class="text-xs font-semibold">{{ t("userAdmin.privilegeEditor") }}</div>
-              <div class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t("userAdmin.privilegeHint") }}</div>
+              <div class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t(usePrivilegeScopeEditor ? "userAdmin.privilegeAppendHint" : "userAdmin.privilegeHint") }}</div>
             </div>
             <div class="min-h-0 flex-1 overflow-auto p-3">
               <template v-if="isPostgres">
@@ -811,6 +743,7 @@ onMounted(loadUsers);
                 <label class="mb-2 block text-xs font-medium">{{ t("userAdmin.memberRole") }}</label>
                 <Input v-model="privilegeRole" class="mb-3 h-8 text-xs" :placeholder="t('userAdmin.memberRole')" />
               </template>
+              <AuthorizationScopeEditor v-else-if="usePrivilegeScopeEditor" v-model="privilegeAuthorizations" compact :provider="provider" :databases="createDatabases" :databases-loading="createDatabasesLoading" :connection-id="connection.id" />
               <template v-else>
                 <label class="mb-2 block text-xs font-medium">
                   {{ isPostgres && privilegeScope !== "database" ? t("userAdmin.schema") : t("userAdmin.database") }}
@@ -822,8 +755,8 @@ onMounted(loadUsers);
                 </template>
               </template>
 
-              <div v-if="hasPrivilegePicker" class="mb-2 text-xs font-medium">{{ t("userAdmin.privileges") }}</div>
-              <div v-if="hasPrivilegePicker" class="grid grid-cols-2 gap-1.5">
+              <div v-if="hasPrivilegePicker && !usePrivilegeScopeEditor" class="mb-2 text-xs font-medium">{{ t("userAdmin.privileges") }}</div>
+              <div v-if="hasPrivilegePicker && !usePrivilegeScopeEditor" class="grid grid-cols-2 gap-1.5">
                 <button
                   v-for="privilege in availablePrivileges"
                   :key="privilege"
@@ -838,16 +771,20 @@ onMounted(loadUsers);
                   <span class="truncate">{{ privilege }}</span>
                 </button>
               </div>
-              <label class="mt-3 flex items-center gap-2 text-xs">
-                <input v-model="grantOption" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
-                {{ privilegeScope === "role" ? t("userAdmin.adminOption") : t("userAdmin.grantOption") }}
-              </label>
             </div>
+            <label class="flex shrink-0 items-start gap-2 border-t px-3 py-2 text-xs leading-4">
+              <input v-model="grantOption" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" />
+              <span class="min-w-0 flex-1">
+                {{ privilegeScope === "role" ? t("userAdmin.adminOption") : t("userAdmin.grantOption") }}
+                <!-- 撤权语句本身不带 GRANT OPTION，明确说明避免误解 -->
+                <span v-if="privilegeScope !== 'role'" class="mt-0.5 block text-[10px] text-muted-foreground">{{ t("userAdmin.grantOptionHint") }}</span>
+              </span>
+            </label>
             <div class="flex shrink-0 items-center justify-end gap-2 border-t p-3">
-              <Button v-if="canRevokePrivileges" variant="outline" size="sm" class="h-7 px-2 text-xs" @click="previewRevoke">
+              <Button v-if="canRevokePrivileges" variant="outline" size="sm" class="h-7 px-2 text-xs" :disabled="usePrivilegeScopeEditor && !privilegeAuthorizationsValid" @click="previewRevoke">
                 {{ t("userAdmin.revoke") }}
               </Button>
-              <Button v-if="canGrantPrivileges" size="sm" class="h-7 px-2 text-xs" @click="previewGrant">
+              <Button v-if="canGrantPrivileges" size="sm" class="h-7 px-2 text-xs" :disabled="usePrivilegeScopeEditor && !privilegeAuthorizationsValid" @click="previewGrant">
                 {{ t("userAdmin.grant") }}
               </Button>
             </div>
@@ -893,117 +830,7 @@ onMounted(loadUsers);
             {{ t("userAdmin.adminUserWarning") }}
           </div>
 
-          <div v-else class="grid gap-2">
-            <div class="flex items-center justify-between gap-3">
-              <div>
-                <div class="text-xs font-medium">{{ t("userAdmin.databaseAccess") }}</div>
-                <div class="mt-1 text-[11px] text-muted-foreground">{{ t("userAdmin.databaseAccessHint") }}</div>
-              </div>
-              <Badge variant="outline">{{ t("userAdmin.selectedDatabaseCount", { count: createDatabaseAuthorizations.length }) }}</Badge>
-            </div>
-            <div class="flex h-8 items-center gap-2 rounded-md border px-2">
-              <Search class="h-3.5 w-3.5 text-muted-foreground" />
-              <input v-model="createDatabaseSearch" class="min-w-0 flex-1 bg-transparent text-xs outline-none" :placeholder="t('userAdmin.searchDatabase')" />
-            </div>
-            <div class="max-h-64 overflow-auto rounded-md border">
-              <div v-if="createDatabasesLoading" class="flex items-center gap-2 p-3 text-xs text-muted-foreground">
-                <Loader2 class="h-3.5 w-3.5 animate-spin" />
-                {{ t("userAdmin.loadingDatabases") }}
-              </div>
-              <div v-else-if="filteredCreateDatabases.length === 0" class="p-3 text-center text-xs text-muted-foreground">{{ t("userAdmin.emptyDatabases") }}</div>
-              <div v-for="database in filteredCreateDatabases" :key="database" class="border-b p-2 last:border-b-0">
-                <div class="flex items-center gap-2">
-                  <input :checked="selectedCreateDatabaseSet.has(database)" type="checkbox" class="h-3.5 w-3.5 accent-primary" @change="toggleCreateDatabase(database)" />
-                  <button type="button" class="min-w-0 flex-1 truncate text-left text-xs font-medium" @click="toggleCreateDatabase(database)">{{ database }}</button>
-                  <Select v-if="selectedCreateDatabaseSet.has(database)" :model-value="createAuthorization(database)?.preset" @update:model-value="updateCreateDatabasePreset(database, $event)">
-                    <SelectTrigger class="h-7 w-32 text-xs"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="readWrite">{{ t("userAdmin.presetReadWrite") }}</SelectItem>
-                      <SelectItem value="readOnly">{{ t("userAdmin.presetReadOnly") }}</SelectItem>
-                      <SelectItem value="ddl">{{ t("userAdmin.presetDdl") }}</SelectItem>
-                      <SelectItem value="dml">{{ t("userAdmin.presetDml") }}</SelectItem>
-                      <SelectItem value="custom">{{ t("userAdmin.presetCustom") }}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div v-if="supportsCreateTableGrants && selectedCreateDatabaseSet.has(database)" class="mt-2 flex items-center gap-2 pl-5">
-                  <span class="shrink-0 text-[11px] text-muted-foreground">{{ t("userAdmin.tableScope") }}</span>
-                  <div class="flex h-7 shrink-0 items-center rounded-md border bg-muted/30 p-0.5">
-                    <button type="button" class="h-5 rounded px-2 text-[10px]" :class="!createAuthorizationUsesSelectedTables(database) ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'" @click="updateCreateDatabaseTableScope(database, false)">
-                      {{ t("userAdmin.allTables") }}
-                    </button>
-                    <button type="button" class="h-5 rounded px-2 text-[10px]" :class="createAuthorizationUsesSelectedTables(database) ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'" @click="updateCreateDatabaseTableScope(database, true)">
-                      {{ t("userAdmin.specificTables") }}
-                    </button>
-                  </div>
-                  <Popover v-if="createAuthorizationUsesSelectedTables(database)">
-                    <PopoverTrigger as-child>
-                      <button type="button" class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border bg-background px-2 text-left text-[11px] hover:bg-accent">
-                        <Table2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <span class="min-w-0 flex-1 truncate">
-                          {{ createAuthorization(database)?.tables?.length ? t("userAdmin.selectedTableCount", { count: createAuthorization(database)?.tables?.length }) : t("userAdmin.chooseTables") }}
-                        </span>
-                        <Loader2 v-if="createDatabaseTablesLoading[database]" class="h-3.5 w-3.5 shrink-0 animate-spin" />
-                        <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      </button>
-                    </PopoverTrigger>
-                    <PopoverContent align="end" class="w-72 p-0">
-                      <div class="flex items-center gap-2 border-b p-2">
-                        <div class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border px-2">
-                          <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <input v-model="createDatabaseTableSearch[database]" class="min-w-0 flex-1 bg-transparent text-[11px] outline-none" :placeholder="t('userAdmin.searchTable')" />
-                        </div>
-                        <button type="button" class="shrink-0 text-[11px] text-primary disabled:text-muted-foreground" :disabled="!(createDatabaseTables[database]?.length > 0)" @click="toggleAllCreateDatabaseTables(database)">
-                          {{ t(allCreateDatabaseTablesSelected(database) ? "userAdmin.clearAllTables" : "userAdmin.selectAllTables") }}
-                        </button>
-                      </div>
-                      <div class="max-h-56 overflow-auto p-1">
-                        <div v-if="createDatabaseTablesLoading[database]" class="flex items-center justify-center gap-2 px-3 py-6 text-xs text-muted-foreground">
-                          <Loader2 class="h-3.5 w-3.5 animate-spin" />
-                          {{ t("userAdmin.loadingTables") }}
-                        </div>
-                        <div v-else-if="createDatabaseTableErrors[database]" class="px-3 py-4 text-center text-xs text-destructive">
-                          <p class="break-words">{{ t("userAdmin.loadTablesFailed", { message: createDatabaseTableErrors[database] }) }}</p>
-                          <button type="button" class="mt-2 text-primary" @click="loadCreateDatabaseTables(database)">{{ t("userAdmin.retry") }}</button>
-                        </div>
-                        <div v-else-if="filteredCreateDatabaseTables(database).length === 0" class="px-3 py-6 text-center text-xs text-muted-foreground">
-                          {{ t("userAdmin.emptyTables") }}
-                        </div>
-                        <button v-for="table in filteredCreateDatabaseTables(database)" :key="table" type="button" class="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-xs hover:bg-accent" @click="toggleCreateDatabaseTable(database, table)">
-                          <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border" :class="createAuthorizationTableSelected(database, table) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">
-                            <Check v-if="createAuthorizationTableSelected(database, table)" class="h-2.5 w-2.5" />
-                          </span>
-                          <span class="min-w-0 flex-1 truncate">{{ table }}</span>
-                        </button>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                </div>
-                <p v-if="createAuthorizationUsesSelectedTables(database) && !createAuthorization(database)?.tables?.length" class="mt-1 pl-5 text-[10px] text-destructive">
-                  {{ t("userAdmin.tableSelectionRequired") }}
-                </p>
-                <div v-if="createAuthorization(database)?.preset === 'custom'" class="mt-2 grid grid-cols-3 gap-1.5 pl-5">
-                  <button
-                    v-for="privilege in createPrivilegesForAuthorization(createAuthorization(database))"
-                    :key="privilege"
-                    type="button"
-                    class="flex h-7 items-center gap-1.5 rounded border px-2 text-[10px]"
-                    :class="createAuthorization(database)?.privileges?.includes(privilege) ? 'border-primary bg-primary/10 text-primary' : 'bg-background'"
-                    @click="toggleCreateDatabasePrivilege(database, privilege)"
-                  >
-                    <Check v-if="createAuthorization(database)?.privileges?.includes(privilege)" class="h-3 w-3" />
-                    <span class="truncate">{{ privilege }}</span>
-                  </button>
-                  <p v-if="!createAuthorization(database)?.privileges?.length" class="col-span-3 text-[10px] text-destructive">
-                    {{ t("userAdmin.customPrivilegeRequired") }}
-                  </p>
-                </div>
-                <p v-if="isPostgres && selectedCreateDatabaseSet.has(database) && createAuthorization(database)?.preset === 'ddl'" class="mt-2 pl-5 text-[10px] text-muted-foreground">
-                  {{ t("userAdmin.postgresDdlHint") }}
-                </p>
-              </div>
-            </div>
-          </div>
+          <AuthorizationScopeEditor v-else v-model="createDatabaseAuthorizations" :provider="provider" :databases="createDatabases" :databases-loading="createDatabasesLoading" :connection-id="connection.id" />
         </div>
         <DialogFooter>
           <Button variant="outline" @click="createDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
@@ -1042,27 +869,29 @@ onMounted(loadUsers);
     </Dialog>
 
     <Dialog v-model:open="sqlDialogOpen">
-      <DialogContent class="max-w-2xl">
+      <DialogContent class="max-w-2xl grid-rows-[auto_minmax(0,1fr)_auto]">
         <DialogHeader>
           <DialogTitle class="flex items-center gap-2">
             <AlertTriangle v-if="pendingDanger" class="h-4 w-4 text-destructive" />
             {{ t("userAdmin.sqlPreview") }}
           </DialogTitle>
         </DialogHeader>
-        <pre class="max-h-[50vh] min-h-44 overflow-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-3 font-mono text-xs leading-5" v-html="highlightedPendingSql" />
-        <div v-if="pendingResults.length > 0" class="grid gap-2 rounded-md border p-3">
-          <div class="text-xs font-semibold" :class="pendingStatus === 'success' ? 'text-green-600' : pendingStatus === 'partial' ? 'text-amber-600' : 'text-destructive'">
-            {{ t(pendingStatus === "success" ? "userAdmin.resultSuccess" : pendingStatus === "partial" ? "userAdmin.resultPartial" : "userAdmin.resultFailed") }}
-          </div>
-          <div v-for="result in pendingResults" :key="result.step.id" class="flex items-start gap-2 text-xs">
-            <Check v-if="result.status === 'success'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />
-            <AlertTriangle v-else-if="result.status === 'failed'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
-            <span v-else class="mt-1 h-2 w-2 shrink-0 rounded-full bg-muted-foreground" />
-            <span class="min-w-0">
-              <span class="block">{{ authorizationStepLabel(result) }}</span>
-              <span v-if="result.message" class="mt-0.5 block break-all text-destructive">{{ result.message }}</span>
-              <span v-else-if="result.status === 'skipped'" class="mt-0.5 block text-muted-foreground">{{ t("userAdmin.stepSkipped") }}</span>
-            </span>
+        <div class="grid min-h-0 max-h-full min-w-0 gap-3 overflow-hidden" :class="pendingResults.length > 0 ? 'h-[70vh] grid-rows-[minmax(0,1fr)_minmax(0,1fr)]' : 'h-[50vh] grid-rows-[minmax(0,1fr)]'">
+          <pre class="min-h-0 min-w-0 overflow-auto overscroll-contain whitespace-pre-wrap rounded-md border bg-muted/30 p-3 font-mono text-xs leading-5" v-html="highlightedPendingSql" />
+          <div v-if="pendingResults.length > 0" class="grid min-h-0 min-w-0 content-start gap-2 overflow-y-auto overscroll-contain rounded-md border p-3">
+            <div class="text-xs font-semibold" :class="pendingStatus === 'success' ? 'text-green-600' : pendingStatus === 'partial' ? 'text-amber-600' : 'text-destructive'">
+              {{ t(pendingStatus === "success" ? "userAdmin.resultSuccess" : pendingStatus === "partial" ? "userAdmin.resultPartial" : "userAdmin.resultFailed") }}
+            </div>
+            <div v-for="result in pendingResults" :key="result.step.id" class="flex items-start gap-2 text-xs">
+              <Check v-if="result.status === 'success'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />
+              <AlertTriangle v-else-if="result.status === 'failed'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+              <span v-else class="mt-1 h-2 w-2 shrink-0 rounded-full bg-muted-foreground" />
+              <span class="min-w-0">
+                <span class="block">{{ authorizationStepLabel(result) }}</span>
+                <span v-if="result.message" class="mt-0.5 block break-all text-destructive">{{ result.message }}</span>
+                <span v-else-if="result.status === 'skipped'" class="mt-0.5 block text-muted-foreground">{{ t("userAdmin.stepSkipped") }}</span>
+              </span>
+            </div>
           </div>
         </div>
         <DialogFooter>

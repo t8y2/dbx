@@ -1,5 +1,5 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 
 export function savedSqlExportFileName(name: string): string {
   return (
@@ -7,6 +7,19 @@ export function savedSqlExportFileName(name: string): string {
       .replace(/[<>:"/\\|?*\p{Cc}]/gu, "_")
       .trim() || "untitled.sql"
   );
+}
+
+export function uniqueSavedSqlExportFileName(name: string, takenNames: Set<string>): string {
+  const normalized = savedSqlExportFileName(name);
+  const occupied = new Set([...takenNames].map((taken) => taken.toLocaleLowerCase()));
+  const base = stripSqlExtension(normalized);
+  let candidate = normalized;
+  let counter = 2;
+  while (occupied.has(candidate.toLocaleLowerCase())) {
+    candidate = `${base} (${counter++}).sql`;
+  }
+  takenNames.add(candidate);
+  return candidate;
 }
 
 export async function exportSavedSqlFileContent(sql: string, fileName: string): Promise<"saved" | "cancelled"> {

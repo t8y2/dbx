@@ -23,6 +23,16 @@ const mocks = vi.hoisted(() => ({
   getTablePartitionStatus: vi.fn(),
   getTableOwner: vi.fn(),
   updateEditorSettings: vi.fn(),
+  editorSettings: {
+    structureEditorDensity: "compact",
+    sqlFormatter: {},
+    tableColumnTemplateFields: [],
+    fontSize: 13,
+    fontFamily: "monospace",
+    theme: "default",
+    generateSqlIncludeDatabaseName: true,
+    generateSqlQuoteIdentifiers: true,
+  },
   loadObjectDdl: vi.fn(),
   invalidateObjectDdl: vi.fn(),
   loadObjectMetadataFacet: vi.fn(),
@@ -43,6 +53,7 @@ vi.mock("@lucide/vue", async () => {
     ChevronLeft: Icon,
     ChevronRight: Icon,
     ChevronUp: Icon,
+    ClipboardList: Icon,
     Copy: Icon,
     Database: Icon,
     Info: Icon,
@@ -55,6 +66,7 @@ vi.mock("@lucide/vue", async () => {
     Plus: Icon,
     RefreshCw: Icon,
     RotateCcw: Icon,
+    Rows3: Icon,
     Save: Icon,
     Search: Icon,
     Settings: Icon,
@@ -259,7 +271,7 @@ vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRe
 vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [], fontSize: 13, fontFamily: "monospace", theme: "default", generateSqlQuoteIdentifiers: true },
+    editorSettings: mocks.editorSettings,
     updateEditorSettings: mocks.updateEditorSettings,
   }),
 }));
@@ -293,7 +305,7 @@ import TableStructureEditor from "@/components/structure/TableStructureEditor.vu
 const mountedApps: App[] = [];
 let lastDraft: Record<string, unknown> | undefined;
 
-async function mountStructureEditor() {
+async function mountStructureEditor(props: Record<string, unknown> = {}) {
   const root = document.createElement("div");
   document.body.append(root);
   const app = createApp(TableStructureEditor, {
@@ -301,6 +313,7 @@ async function mountStructureEditor() {
     database: "test",
     tableName: "users",
     initialTab: "columns",
+    ...props,
     "onUpdate:draft": (draft: Record<string, unknown> | undefined) => {
       lastDraft = draft;
     },
@@ -373,6 +386,8 @@ async function editDdl(root: HTMLElement, script: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   lastDraft = undefined;
+  mocks.connection.db_type = "mysql";
+  mocks.editorSettings.generateSqlIncludeDatabaseName = true;
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.executeQuery.mockResolvedValue({ columns: [], rows: [] });
   mocks.executeBatch.mockResolvedValue({ rowsAffected: 0 });
@@ -433,8 +448,28 @@ describe("TableStructureEditor DDL tab", () => {
     buttonWithText(root, "structureEditor.apply").click();
     await vi.waitFor(() => expect(mocks.executeBatch).toHaveBeenCalledTimes(1), { timeout: 3000 });
     expect(mocks.executeBatch.mock.calls[0][2]).toEqual(["ALTER TABLE `users` ADD COLUMN `nickname` varchar(64)", "ALTER TABLE `users` ADD INDEX `idx_email` (`email`)"]);
+    // No partition DDL in this batch: it keeps the auto-commit path.
+    expect(mocks.executeBatch.mock.calls[0][5]).toBe(false);
     // The structure builder must not have contributed statements to that batch.
     expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+  });
+
+  it("executes generated external-catalog DDL without dropping qualifiers", async () => {
+    mocks.connection.db_type = "doris";
+    mocks.editorSettings.generateSqlIncludeDatabaseName = false;
+    mocks.buildTableStructureChangeSql.mockResolvedValue({
+      statements: ["ALTER TABLE `iceberg`.`analytics`.`users` ADD COLUMN `nickname` STRING;"],
+      warnings: [],
+    });
+
+    const root = await mountStructureEditor({ database: "analytics", catalog: "iceberg" });
+    buttonWithText(root, "structureEditor.addColumn").click();
+
+    await vi.waitFor(() => expect(buttonWithText(root, "structureEditor.apply").disabled).toBe(false), { timeout: 3000 });
+    buttonWithText(root, "structureEditor.apply").click();
+
+    await vi.waitFor(() => expect(mocks.executeBatch).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(mocks.executeBatch.mock.calls[0][2]).toEqual(["ALTER TABLE `iceberg`.`analytics`.`users` ADD COLUMN `nickname` STRING;"]);
   });
 
   it("carries the edited script in the draft so the tab reports unsaved work", async () => {

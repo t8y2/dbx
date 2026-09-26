@@ -1,9 +1,14 @@
 // @vitest-environment happy-dom
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyHoverSearchHighlights, clearHoverSearchHighlights, createHoverSearch, findHoverSearchMatches } from "@/lib/editor/sqlHoverSearch";
 
 const DDL = ["create table `orders` (", "    `id`                    bigint      not null,", "    `customer_order_status` varchar(32) null,", "    `USER_ID`               bigint      null,", "    `amount`                decimal(10,2) null", ");"].join("\n");
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  document.body.replaceChildren();
+});
 
 describe("findHoverSearchMatches", () => {
   it("returns no matches for an empty or whitespace query", () => {
@@ -93,12 +98,25 @@ describe("applyHoverSearchHighlights", () => {
     expect(container.querySelector("mark")).toBeNull();
     expect(container.textContent).toBe(DDL);
   });
+
+  it("groups fragments of one logical match across syntax-highlight spans", () => {
+    const container = document.createElement("div");
+    container.innerHTML = "<span>order</span><span>_id</span> + <span>order_id</span>";
+    const originalText = container.textContent!;
+    const marks = applyHoverSearchHighlights(container, findHoverSearchMatches(originalText, "order_id"));
+
+    expect(marks.map((mark) => mark.getAttribute("data-sql-hover-search-match-index"))).toEqual(["0", "0", "1"]);
+    expect(marks.map((mark) => mark.hasAttribute("data-sql-hover-search-active"))).toEqual([true, true, false]);
+    expect(container.querySelectorAll("span")).toHaveLength(3);
+    expect(container.textContent).toBe(originalText);
+  });
 });
 
 describe("createHoverSearch", () => {
-  function setup() {
+  function setup(html?: string) {
     const target = document.createElement("div");
-    target.textContent = DDL;
+    if (html === undefined) target.textContent = DDL;
+    else target.innerHTML = html;
     const controller = createHoverSearch({
       target,
       originalHtml: target.innerHTML,
@@ -106,7 +124,19 @@ describe("createHoverSearch", () => {
       noResultLabel: "No matching columns",
     });
     const input = controller.element.querySelector<HTMLInputElement>('[data-sql-hover-search-input="true"]')!;
-    return { target, controller, input };
+    const count = controller.element.querySelector<HTMLElement>('[data-sql-hover-search-count="true"]')!;
+    return { target, controller, input, count };
+  }
+
+  function pressKey(input: HTMLInputElement, key: string, options: KeyboardEventInit = {}) {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...options });
+    input.dispatchEvent(event);
+    input.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, ...options }));
+    return event;
+  }
+
+  function activeMarks(target: HTMLElement) {
+    return [...target.querySelectorAll<HTMLElement>('[data-sql-hover-search-active="true"]')];
   }
 
   it("highlights correctly when line breaks render as <br> elements", () => {
@@ -176,19 +206,19 @@ describe("createHoverSearch", () => {
   });
 
   it("stops keydown propagation so the editor keymap never sees typing", () => {
-    const { input } = setup();
+    const { controller, input } = setup();
     let leaked = false;
-    document.addEventListener("keydown", () => (leaked = true));
+    controller.element.addEventListener("keydown", () => (leaked = true));
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(leaked).toBe(false);
   });
 
   it("clears the query on Escape but keeps propagation stopped (tooltip stays open)", () => {
-    const { target, input } = setup();
+    const { target, controller, input } = setup();
     input.value = "id";
     input.dispatchEvent(new Event("input"));
     let leaked = false;
-    document.addEventListener("keydown", () => (leaked = true));
+    controller.element.addEventListener("keydown", () => (leaked = true));
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(input.value).toBe("");
@@ -197,9 +227,9 @@ describe("createHoverSearch", () => {
   });
 
   it("keeps pointerdown from bubbling to the editor (click focuses the input)", () => {
-    const { input } = setup();
+    const { controller, input } = setup();
     let leaked = false;
-    document.addEventListener("pointerdown", () => (leaked = true));
+    controller.element.addEventListener("pointerdown", () => (leaked = true));
     input.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     expect(leaked).toBe(false);
   });
@@ -211,5 +241,179 @@ describe("createHoverSearch", () => {
     input.dispatchEvent(new Event("input"));
     // No re-render after destroy.
     expect(target.querySelector("mark")).toBeNull();
+  });
+
+  it("shows the current match count and cycles forward on Enter without rerendering", () => {
+    const { target, controller, input, count } = setup("insurance_class + insurance_class AS insurance_class");
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    document.body.append(controller.element, target);
+    input.focus();
+    input.value = "insurance_class";
+    input.dispatchEvent(new Event("input"));
+    const marks = [...target.querySelectorAll("mark")];
+
+    expect(count.hidden).toBe(false);
+    expect(count.textContent).toBe("1 / 3");
+    expect(count.getAttribute("role")).toBe("status");
+    expect(count.getAttribute("aria-live")).toBe("polite");
+    expect(activeMarks(target)).toEqual([marks[0]]);
+    expect(scroll).toHaveBeenCalledTimes(1);
+
+    for (const index of [1, 2, 0]) {
+      expect(pressKey(input, "Enter").defaultPrevented).toBe(true);
+      expect(count.textContent).toBe(`${index + 1} / 3`);
+      expect(activeMarks(target)).toEqual([marks[index]]);
+      expect(scroll.mock.instances.at(-1)).toBe(marks[index]);
+    }
+
+    expect(scroll).toHaveBeenCalledTimes(4);
+    expect(target.querySelector("mark")).toBe(marks[0]);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("cycles backward on Shift+Enter and handles one match", () => {
+    const { target, input, count } = setup("id + id + id");
+    input.value = "id";
+    input.dispatchEvent(new Event("input"));
+
+    pressKey(input, "Enter", { shiftKey: true });
+    expect(count.textContent).toBe("3 / 3");
+    pressKey(input, "Enter", { shiftKey: true });
+    expect(count.textContent).toBe("2 / 3");
+
+    input.value = "id + id + id";
+    input.dispatchEvent(new Event("input"));
+    pressKey(input, "Enter");
+    pressKey(input, "Enter", { shiftKey: true });
+    expect(count.textContent).toBe("1 / 1");
+    expect(activeMarks(target)).toHaveLength(1);
+  });
+
+  it("counts cross-span matches once and navigates every fragment together", () => {
+    const { target, input, count } = setup("<span>order</span><span>_id</span><br><span>order_id</span>");
+    input.value = "order_id";
+    input.dispatchEvent(new Event("input"));
+    const marks = [...target.querySelectorAll("mark")];
+
+    expect(marks).toHaveLength(3);
+    expect(count.textContent).toBe("1 / 2");
+    expect(activeMarks(target)).toEqual([marks[0], marks[1]]);
+    pressKey(input, "Enter");
+    expect(count.textContent).toBe("2 / 2");
+    expect(activeMarks(target)).toEqual([marks[2]]);
+    pressKey(input, "Enter");
+    expect(activeMarks(target)).toEqual([marks[0], marks[1]]);
+    expect(target.querySelectorAll("span")).toHaveLength(3);
+    expect(target.querySelectorAll("br")).toHaveLength(1);
+  });
+
+  it("resets the active match when the query changes and hides the count on Escape", () => {
+    const { target, controller, input, count } = setup();
+    expect(count.hidden).toBe(true);
+    input.value = "id";
+    input.dispatchEvent(new Event("input"));
+    pressKey(input, "Enter");
+    expect(count.textContent).toBe("2 / 2");
+
+    input.value = "order";
+    input.dispatchEvent(new Event("input"));
+    expect(count.textContent).toBe("1 / 2");
+    expect(activeMarks(target)[0]).toBe(target.querySelector("mark"));
+    pressKey(input, "Escape");
+    expect(input.value).toBe("");
+    expect(count.hidden).toBe(true);
+    expect(count.textContent).toBe("");
+    expect(controller.status.hidden).toBe(true);
+    expect(target.textContent).toBe(DDL);
+    expect(target.querySelector("mark")).toBeNull();
+  });
+
+  it("shows zero matches without scrolling and ignores navigation for blank queries", () => {
+    const { target, controller, input, count } = setup();
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    input.value = "missing";
+    input.dispatchEvent(new Event("input"));
+    pressKey(input, "Enter");
+    pressKey(input, "Enter", { shiftKey: true });
+    expect(count.hidden).toBe(false);
+    expect(count.textContent).toBe("0 / 0");
+    expect(controller.status.hidden).toBe(false);
+    expect(activeMarks(target)).toHaveLength(0);
+
+    input.value = "   ";
+    input.dispatchEvent(new Event("input"));
+    pressKey(input, "Enter");
+    expect(count.hidden).toBe(true);
+    expect(controller.status.hidden).toBe(true);
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it.each(["Enter", "Escape"])("preserves %s while the keyboard event is composing", (key) => {
+    const { target, input } = setup("id + id");
+    input.value = "id";
+    input.dispatchEvent(new Event("input"));
+    const firstMatch = activeMarks(target)[0];
+
+    const event = pressKey(input, key, { isComposing: true });
+    expect(event.defaultPrevented).toBe(false);
+    expect(input.value).toBe("id");
+    expect(activeMarks(target)).toEqual([firstMatch]);
+  });
+
+  it("uses composition lifecycle events when a key event omits isComposing", () => {
+    const { target, input, count } = setup("id + id");
+    input.value = "id";
+    input.dispatchEvent(new Event("input"));
+    const firstMatch = activeMarks(target)[0];
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+
+    expect(pressKey(input, "Enter").defaultPrevented).toBe(false);
+    expect(pressKey(input, "Escape").defaultPrevented).toBe(false);
+    expect(input.value).toBe("id");
+    expect(activeMarks(target)).toEqual([firstMatch]);
+
+    input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    pressKey(input, "Enter");
+    expect(count.textContent).toBe("2 / 2");
+  });
+
+  it("ignores the legacy IME key code and does not clear on Escape keyup", () => {
+    const { target, input } = setup("id + id");
+    input.value = "id";
+    input.dispatchEvent(new Event("input"));
+    const firstMatch = activeMarks(target)[0];
+
+    expect(pressKey(input, "Enter", { keyCode: 229 }).defaultPrevented).toBe(false);
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape", bubbles: true }));
+    expect(input.value).toBe("id");
+    expect(activeMarks(target)).toEqual([firstMatch]);
+  });
+
+  it.each([{ ctrlKey: true }, { metaKey: true }, { altKey: true }])("does not navigate or leak modified Enter with %j", (modifiers) => {
+    const { target, controller, input } = setup("id + id");
+    const keydown = vi.fn();
+    const keyup = vi.fn();
+    controller.element.addEventListener("keydown", keydown);
+    controller.element.addEventListener("keyup", keyup);
+    input.value = "id";
+    input.dispatchEvent(new Event("input"));
+    const firstMatch = activeMarks(target)[0];
+
+    pressKey(input, "Enter", modifiers);
+    expect(activeMarks(target)).toEqual([firstMatch]);
+    expect(keydown).not.toHaveBeenCalled();
+    expect(keyup).not.toHaveBeenCalled();
+  });
+
+  it("stops navigation after destroy", () => {
+    const { target, controller, input, count } = setup("id + id");
+    input.value = "id";
+    input.dispatchEvent(new Event("input"));
+    const firstMatch = activeMarks(target)[0];
+    controller.destroy();
+
+    expect(pressKey(input, "Enter").defaultPrevented).toBe(false);
+    expect(count.textContent).toBe("1 / 2");
+    expect(activeMarks(target)).toEqual([firstMatch]);
   });
 });

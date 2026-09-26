@@ -11,6 +11,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoNamespace;
 import com.mongodb.MongoCredential;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
@@ -1166,6 +1167,32 @@ public final class MongoAgent {
         return result;
     }
 
+    private static Object renameCollection(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        String newName = params.get("new_name").getAsString();
+        requireRenameableCollectionNames(collection, newName);
+        c.getDatabase(database).getCollection(collection).renameCollection(new MongoNamespace(database, newName));
+        return Collections.singletonMap("ok", true);
+    }
+
+    /** Mirrors the native driver's checks so both paths reject the same names before asking the server. */
+    static void requireRenameableCollectionNames(String collection, String newName) {
+        if (collection == null || collection.isBlank()) {
+            throw new IllegalArgumentException("Collection name is required");
+        }
+        if (newName == null || newName.isBlank()) {
+            throw new IllegalArgumentException("New collection name is required");
+        }
+        if (collection.equals(newName)) {
+            throw new IllegalArgumentException("New collection name must differ from the current name");
+        }
+        if (collection.startsWith("system.") || newName.startsWith("system.")) {
+            throw new IllegalArgumentException("System collections cannot be renamed");
+        }
+    }
+
     private static Object dropCollection(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
@@ -2280,6 +2307,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS -> updateDocuments(params);
             case AgentProtocol.MONGO_METHOD_REPLACE_DOCUMENT -> replaceDocument(params);
             case AgentProtocol.MONGO_METHOD_BULK_WRITE -> bulkWrite(params);
+            case AgentProtocol.MONGO_METHOD_RENAME_COLLECTION -> renameCollection(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENT -> deleteDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENTS -> deleteDocuments(params);
             case AgentProtocol.MONGO_METHOD_RUN_COMMAND -> runCommand(params);

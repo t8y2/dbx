@@ -1,6 +1,6 @@
 [package]
 name = "dbx-mcp"
-version = "0.4.89"
+version = "0.4.98"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -8,7 +8,15 @@ license = "Apache-2.0"
 default = ["duckdb-sidecar", "mq-admin", "sqlite-bundled"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 mq-admin = ["dbx-core/mq-admin"]
+# `--no-default-features` runs (skip DuckDB) must re-add this via
+# `--features sqlite-bundled`, otherwise tests/bins link the system SQLite.
 sqlite-bundled = ["dbx-core/sqlite-bundled"]
+# Native macOS/Windows builds enable this so CLI/MCP can read the OS
+# keychain key Desktop provisioned during the data security upgrade; the
+# Linux zigbuild legs cannot link the dbus Secret Service backend and keep
+# falling back to the managed .dbx/secret.key file.
+os-keyring = ["dbx-core/os-keyring"]
+transaction-test-hooks = []
 
 [[bin]]
 name = "dbx-mcp"
@@ -19,13 +27,16 @@ async-trait = "0.1"
 dbx-core = { path = "../dbx-core", default-features = false }
 dirs = "6"
 log = "0.4"
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 axum = "0.8"
+chrono = "0.4"
 rmcp = { version = "2.2.0", features = ["client", "transport-io", "transport-streamable-http-server"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlparser = { version = "0.62", features = ["visitor"] }
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal"] }
 tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["cors"] }
@@ -33,6 +44,7 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 
 [dev-dependencies]
+rmcp = { version = "2.2.0", features = ["transport-streamable-http-client-reqwest"] }
 rustls-pemfile = "2.2"
 tempfile = "3"
 tokio = { version = "1", features = ["net", "io-util"] }

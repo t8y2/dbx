@@ -79,6 +79,12 @@ Artifact metadata always includes target, URL, SHA-256, and size. The generated 
 
 Use `--sdk-root /path/to/dbx` only with Rust or Go templates while developing unpublished SDK changes from a DBX checkout. Normal npm installations use the SDK sources bundled with `@dbx-app/plugin-cli`. Generated release workflows pin the precompiled CLI version so local and CI packaging use the same SDK contract.
 
+Generated workflows pin the reusable workflow to the same `plugin-cli-v<version>` tag as the CLI. Go projects skip Rust setup, Rust projects skip Go setup, and frontend-only projects skip both. Source-built CLIs still install Rust even when the plugin does not need it.
+
+The reusable workflow restores Go module/build caches using `go.sum` files under the configured working directory, including `backend/go.sum`. npm and pnpm download caches follow the project's lockfile; pnpm uses the version declared in `package.json#packageManager`, with version 10.27.0 as the fallback for existing lockfile-only projects. Projects without a lockfile do not attempt to restore a dependency cache. Svelte projects must commit the lockfile produced by their first `npm install`; their release command uses `npm ci` and builds the frontend before packaging.
+
+Existing plugins pinned to an older workflow tag do not inherit these changes. Upgrade their workflow reference only after the new shared workflow has been published, keeping an immutable tag or commit rather than following `main`. A source checkout of the CLI can scaffold an unpublished workflow version; publish the matching CLI/workflow tag before using that generated release workflow.
+
 ## Signing
 
 Official plugin authors do not create or manage signing keys. They publish unsigned candidates; DBX Store signs approved packages with the official repository key.

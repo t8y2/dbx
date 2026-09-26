@@ -32,7 +32,12 @@ jobs:
       - run: npm run lint --prefix plugins/sdk/dev-host
       - run: npm run fmt:check --prefix plugins/sdk/dev-host
       - run: npm test --prefix plugins/sdk/dev-host
-      - run: cargo test --locked --manifest-path plugins/sdk/cli/Cargo.toml
+        timeout-minutes: 5
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        with:
+          tool: cargo-nextest@0.9.137
+      - run: cargo nextest run --locked --manifest-path plugins/sdk/cli/Cargo.toml --no-fail-fast
+      - run: cargo test --doc --locked --manifest-path plugins/sdk/cli/Cargo.toml
       - run: npm test --prefix packages/plugin-cli
       - run: node scripts/verify-plugin-cli-package.mjs
         env:

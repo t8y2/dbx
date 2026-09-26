@@ -256,6 +256,15 @@ jobs:
           # instead of loading potentially incompatible modules from the host.
           sudo apt-get install -y fcitx5-frontend-gtk3 ibus-gtk3 libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev xdg-utils
 
+      - name: Prepare Wayland-capable AppImage bundler
+        if: startsWith(matrix.platform, 'ubuntu')
+        shell: bash
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/dbx-tauri-cache
+        run: |
+          echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> "$GITHUB_ENV"
+          ./.github/scripts/prepare-appimage-bundler.sh "${{ matrix.target }}"
+
       - name: Setup Tauri signing key
         shell: bash
         run: |
@@ -281,7 +290,7 @@ jobs:
           assetNamePattern: ${{ matrix.asset_pattern }}
           args: --target ${{ matrix.target }}
 
-      - name: Verify AppImage input methods
+      - name: Verify AppImage runtime bundle
         if: startsWith(matrix.platform, 'ubuntu')
         shell: bash
         run: ./.github/scripts/verify-appimage-input-methods.sh "target/${{ matrix.target }}/release/bundle/appimage"
@@ -564,15 +573,14 @@ jobs:
     needs: release-ready
     runs-on: windows-2022
     environment: release-signing
-    # No sccache here: the loader patch rewrites a file inside the cargo
-    # registry, which is invisible to any compile cache. v0.6.0 shipped a
-    # binary linked against the wrong (>= 1.0.1054.31) WebView2 loader even
-    # though the patched 1.0.902.49 loader was verified on disk, so caching is
-    # disabled for this target until the patch is vendored into the source
-    # tree.
+    # The vendored loader is a tracked Cargo input, so Rust compile caching is safe.
     env:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
+      SCCACHE_IDLE_TIMEOUT: "0"
       VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
       VSIGN_OPERATOR_SHA1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
       VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
@@ -596,6 +604,10 @@ jobs:
         with:
           toolchain: nightly-2026-07-22
           components: rust-src
+
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh
@@ -682,6 +694,11 @@ jobs:
           gh release upload "${env:GITHUB_REF_NAME}" $offlineName $checksumName `
             --repo "${env:GITHUB_REPOSITORY}" --clobber
 
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: ${SCCACHE_PATH} --show-stats
+
       - name: Remove temporary VSign files
         if: always()
         shell: pwsh
@@ -694,6 +711,89 @@ jobs:
           if (Test-Path -LiteralPath $workDir) {
             Remove-Item -LiteralPath $workDir -Recurse -Force
           }
+
+  build-windows-7-static-browser:
+    needs: release-ready
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-win7-windows-msvc
+            arch: x86_64
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Setup Rust for Windows 7
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+
+      - name: Install NASM
+        run: choco install nasm -y --no-progress
+
+      - name: Add NASM to PATH
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "C:\Program Files\NASM"
+
+      - name: Build DBX for Windows 7 ${{ matrix.arch }}
+        shell: pwsh
+        run: |
+          cargo build --locked --package dbx-web --release --no-default-features --features embed-static,duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled --target ${{ matrix.target }} -Z build-std=std,panic_abort
+
+      - name: Audit Windows 7 PE imports
+        shell: pwsh
+        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/${{ matrix.target }}/release/dbx-web.exe
+
+      - name: Upload Windows portable ${{ matrix.arch }} ZIP
+        timeout-minutes: 20
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $arch = "${{ matrix.arch }}"
+          $portableRoot = "portable"
+          $portableDir = Join-Path $portableRoot "DBX_${version}_${arch}"
+          $zipName = "dbx-web_${version}_${arch}-browser-static.zip"
+          $zipSha256 = "dbx-web_${version}_${arch}-browser-static.zip.sha256"
+          $exePath = "target/${{ matrix.target }}/release/dbx-web.exe"
+
+          if (!(Test-Path $exePath)) {
+            Write-Error "Missing Windows executable: $exePath"
+            exit 1
+          }
+
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          Copy-Item $exePath (Join-Path $portableDir "dbx-web.exe") -Force
+          Copy-Item "LICENSE" (Join-Path $portableDir "LICENSE") -Force
+          Copy-Item "README.md" (Join-Path $portableDir "README.md") -Force
+          Copy-Item ".github\scripts\start-dbx-web.bat" (Join-Path $portableDir "start.bat") -Force
+
+          Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
+
+          $zip_sha256 = (Get-FileHash -LiteralPath $zipName -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path $zipSha256 -Value $zip_sha256 -Encoding utf8NoBOM
+
+          gh release upload "${env:GITHUB_REF_NAME}" $zipName $zipSha256 --repo "${env:GITHUB_REPOSITORY}" --clobber
 
   static-browser:
     # Fully static musl builds of the browser (dbx-web) variant. No glibc
@@ -791,7 +891,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           cargo zigbuild --release -p dbx-web --target ${{ matrix.target }} \
-            --no-default-features --features "duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled"
+            --no-default-features --features "embed-static,duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled"
 
       - name: Package static browser runtime
         env:
@@ -930,7 +1030,8 @@ jobs:
 
   publish:
     # Keep the release as a draft until every release-blocking platform job passes.
-    # Nix packaging is advisory and runs independently from publication.
+    # Nix packaging and the Windows 7 static-browser build are advisory and
+    # upload their release assets independently of publication.
     needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, static-browser]
     runs-on: ubuntu-latest
     steps:
@@ -985,6 +1086,25 @@ jobs:
             --retain 5 \
             --apply
 
+  notify-feishu:
+    name: Notify Feishu group
+    needs: [publish, sync-release-to-cnb]
+    # Card sends once the release is public even if the CNB mirror sync failed.
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Send release card to Feishu
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+        run: python3 scripts/notify_feishu.py "${{ github.ref_name }}"
+
   docker:
     runs-on: ubuntu-latest
     strategy:
@@ -1033,6 +1153,9 @@ jobs:
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
+          # The CNB registry rejects provenance attestation manifests
+          # ("artifact type UNKNOWN is not allowed"); Docker Hub accepts them.
+          provenance: false
 
       - name: Export digests
         run: |

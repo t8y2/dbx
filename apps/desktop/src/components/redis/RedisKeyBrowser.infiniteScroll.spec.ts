@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   redisCheckJsonModule: vi.fn(),
   redisDeleteKey: vi.fn(),
   redisDeleteKeys: vi.fn(),
+  redisDeleteKeysByPattern: vi.fn(),
   redisExecuteCommand: vi.fn(),
   saveHistory: vi.fn(),
   toast: vi.fn(),
@@ -61,6 +62,7 @@ vi.mock("@/lib/backend/api", () => ({
   redisCheckJsonModule: mocks.redisCheckJsonModule,
   redisDeleteKey: mocks.redisDeleteKey,
   redisDeleteKeys: mocks.redisDeleteKeys,
+  redisDeleteKeysByPattern: mocks.redisDeleteKeysByPattern,
   redisExecuteCommand: mocks.redisExecuteCommand,
   saveHistory: mocks.saveHistory,
 }));
@@ -1001,7 +1003,7 @@ describe("RedisKeyBrowser continuation ownership (issue #7779)", () => {
 
 // `iterations` (aka `max_iterations`) is the 6th positional arg the frontend
 // sends to `redisScanKeysBatch` — the same unit the backend spends as real
-// Redis SCAN calls (see `crates/dbx-core/src/db/redis_driver.rs`).
+// Redis SCAN calls (see `crates/dbx-driver-redis/src/lib.rs`).
 function totalIterationsRequested(): number {
   return mocks.redisScanKeysBatch.mock.calls.reduce((sum: number, call: unknown[]) => sum + (call[5] as number), 0);
 }

@@ -14,7 +14,36 @@ AI 助手 → DBX MCP → 你的数据库 → 返回结果
                     ↘ DBX 桌面端（打开或展示结果）
 ```
 
-## 快速开始
+## 原生安装（推荐）
+
+无需 Node.js。macOS 或 Linux 执行：
+
+```bash
+curl -fsSL https://dbxio.com/install-mcp | sh
+```
+
+Windows 在 PowerShell 中执行：
+
+```powershell
+irm https://dbxio.com/install-mcp.ps1 | iex
+```
+
+脚本校验下载内容，将 `dbx-mcp` 安装到 `~/.dbx/bin`，并打印 Claude Code、Cursor、Codex、ZCode 和通用 MCP 配置。请使用输出中**展开后的可执行文件绝对路径**，不要填写 `~` 或裸命令 `dbx-mcp`：GUI 客户端不一定继承 shell 的 PATH。已有的 `DBX_DATA_DIR` 等环境配置继续有效。DBX 桌面设置优先使用发现的原生二进制，找不到时保留原有 npm 启动方式。
+
+重跑同一安装命令即可升级；版本相同时提示 `already up to date`。版本优先读取 `dbx-mcp --version`，旧版二进制不支持时回退读取 `~/.dbx/bin/.dbx-mcp-version`。断网时安装失败但不会替换现有二进制。下载源依次为 npmjs、npmmirror、GitHub Releases；内容校验不匹配时立即拒绝安装。
+
+macOS 和 Linux 也可以使用 Homebrew：
+
+```bash
+brew install t8y2/tap/dbx-mcp
+brew upgrade t8y2/tap/dbx-mcp
+```
+
+Homebrew 安装后，客户端配置使用 `echo "$(brew --prefix)/bin/dbx-mcp"` 输出的绝对路径。此通道只安装 MCP 服务器，不安装独立的 `dbx` CLI。
+
+npm/npx 通道保持兼容。DBX 桌面端现在默认安装独立原生服务，并为已有 npm 用户显示推荐的原生迁移入口。迁移会保留 npm 包作为兜底，也不会自动改写外部客户端文件：请将启动命令替换为页面生成的原生绝对路径，删除 Node/npx 参数并保留 `env`。仍可选择执行 `npm rm -g @dbx-app/mcp-server` 清理旧包。桌面端可以更新和卸载当前的独立原生或 Homebrew 安装；卸载独立原生版本后，保留的 npm 安装会重新成为兜底。
+
+## npm 快速开始
 
 <Steps>
   <Step>
@@ -101,17 +130,40 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 | `dbx_list_routines` | 列出 Schema 中的存储过程和函数，支持可选的 `routine_type` 过滤（PROCEDURE 或 FUNCTION） |
 | `dbx_get_routine_source` | 按名称返回存储过程或函数的源码，重载场景可用可选的 `signature` 区分 |
 | `dbx_get_schema_context` | 返回适合 AI 使用的紧凑 Schema 上下文 |
-| `dbx_execute_query` | 执行 SQL 或支持的 MongoDB shell 命令，最多返回 100 行 |
+| `dbx_execute_query` | 执行 SQL 或支持的 MongoDB shell 命令，默认返回 100 行，可用 `max_rows` 参数提高到最多 1000 行 |
 | `dbx_execute_batch` | 一次执行包含多条语句的 SQL 脚本，按语句返回结果（多语句脚本搭配 `use_transaction` 时返回单个合并结果） |
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
+| `dbx_begin_transaction` | 在已启用事务的原生 MySQL 会话上开始事务 |
+| `dbx_commit_transaction` | 在 MySQL 确认 `COMMIT` 后提交当前会话事务 |
+| `dbx_rollback_transaction` | 回滚当前会话事务 |
 | `dbx_close_session` | 关闭会话并释放固定连接资源 |
 | `dbx_execute_redis_command` | 执行 Redis 命令 |
+| `dbx_salesforce_current_user` | 显示连接背后的 Salesforce 用户与组织，包括简档是否具有 “Modify All Data” |
+| `dbx_salesforce_prepare_write` | 准备一条 Salesforce 记录写入，返回摘要和一次性确认令牌 |
+| `dbx_salesforce_apply_write` | 使用确认令牌应用已准备的 Salesforce 写入 |
 | `dbx_peek_messages` | 读取 Kafka 消息，不提交消费位点 |
 | `dbx_send_message` | 向支持的消息队列 Topic 或队列发送消息 |
 | `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
 
+`dbx_execute_query` 返回行数：
+
+- `max_rows`：取值 1–1000，默认 100。越界值会被夹取到范围内，而不是报错。仅对 SQL 连接生效——MongoDB shell 命令始终最多返回 100 行，路由到批量执行器的多语句脚本每条语句最多返回 100 行。
+
 启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
+
+## Resources
+
+支持 MCP Resources 的客户端可以读取连接目录，并通过模板获取数据库元数据：
+
+| Resource URI | 说明 |
+| --- | --- |
+| `dbx://connections` | 当前 MCP 范围内可见的连接 |
+| `dbx://connections/{connection_id}/databases` | 指定连接中可见的数据库 |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | 可选数据库或 Schema 中的表和视图 |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | 指定表的字段定义；`table` 为必填参数 |
+
+Resource 的发现和读取会复用对应 Tool 的白名单，以及连接、分组、数据库和运行时范围限制。查询参数值必须进行 URI 编码。SQL 执行和所有可写操作仍只通过 Tool 提供。
 
 ## 读取 Kafka 消息
 
@@ -155,9 +207,44 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 - Session 变量和设置
 - 需要固定连接的显式事务或多步诊断
 
-会话只支持 SQL 连接，并固定到一个连接和数据库。未知、已关闭或过期的 `sessionId` 会失败，不会静默退化为普通查询。完成后应调用 `dbx_close_session`；空闲 30 分钟的会话会被回收，同时最多允许 32 个并发会话。
+会话只支持 SQL 连接，并固定到一个连接和数据库。未知、已关闭或过期的 `sessionId` 会失败，不会静默退化为普通查询。完成后应调用 `dbx_close_session`；会话默认空闲 30 分钟后回收，同时最多允许 32 个并发会话。在 MCP 宿主进程设置 `DBX_SESSION_IDLE_TTL_SECS=43200` 可将空闲时间延长为 12 小时，事务专属连接也使用此配置。值必须为正整数秒；未设置、非法值、零、负数或无法表示的时长均保留默认 1800 秒。修改后需重启宿主。使用嵌入式 DBX Web MCP 时，在 Web 服务端设置；使用独立启动器时，在启动器环境中设置。
 
 <Callout type="warn">有状态会话不会放宽 SQL 策略。`USE` 只有在会话中才有意义，但写入、DDL、生产保护、连接只读和数据库权限仍按每次请求重新检查。</Callout>
+
+### 原生 MySQL 显式事务
+
+调用 `dbx_open_session` 时传入 `enable_transactions: true`，DBX 会立即保留一条物理原生 MySQL 连接。随后依次调用 `dbx_begin_transaction`、带该 `session_id` 的一个或多个 `dbx_execute_query`/`dbx_execute_batch`，最后调用 `dbx_commit_transaction` 或 `dbx_rollback_transaction`。事务前后的查询仍使用同一条受管连接。`use_transaction` 仍不能与 `session_id` 同时使用；它是前文所述的独立原子批处理功能。
+
+该 opt-in 模式仅支持本地原生 MySQL 连接。DBX Web/`DBX_WEB_URL`、外部驱动 profile、兼容引擎及其他数据库类型会返回 `TRANSACTION_UNSUPPORTED`，不会静默退化为自动提交。事务会话每次操作只接受一条经过解析的 `SELECT`（含锁定读）、`INSERT`、`UPDATE`、`DELETE` 或 `REPLACE`；原始事务控制、DDL/临时 DDL、`CALL`、`LOAD`、表锁、`SET`、`USE`、XA、文件/输出子句、可执行注释、优化器 hint 及多语句均会被拒绝。完整批次持有同一个操作槽位，并为每条语句返回执行后的事务状态。
+
+响应包含 `transaction_state`（`idle`、`active` 或 `unknown`），并在适用时包含 `transaction_outcome`（`committed`、`rolled_back` 或 `unknown`）。普通 MySQL 语句错误可能仍让事务保持 active；DBX 会在同一连接上重新探测服务器状态后再返回。超时、取消、传输故障或丢失 `COMMIT` 确认会把结果永久标为 `unknown`，禁止该会话继续执行 SQL，并在不重放语句或 `COMMIT` 的前提下销毁连接。显式正值的连接查询超时同样用于事务操作；当连接配置为“无限制”（`0`）时，事务 owner 仍使用默认 300 秒操作上限，确保 busy 操作保持有界。关闭、过期、协议会话删除和服务退出会对状态已知的 active 事务执行有界回滚，然后销毁连接。
+
+<Callout type="warn">回滚保证依赖 InnoDB 等事务型存储。触发器、存储函数、非事务表及外部副作用可能产生 MySQL 无法回滚的效果。DBX 会在排队完成后重新检查当前连接/数据库范围、工具 allowlist、只读与生产保护以及已确认 SQL。即使写权限被撤销，仍允许原会话执行回滚和关闭以完成清理。</Callout>
+
+## Salesforce SOQL 与 DML
+
+Salesforce 连接使用 SOQL 而非 SQL，DBX 据此调整了 MCP 的行为：
+
+- `dbx_list_tables` 列出组织中的对象，`dbx_describe_table` 列出对象字段，`dbx_execute_query` 执行 SOQL（例如 `SELECT Id, Name FROM Account LIMIT 10`）。
+- `dbx_list_databases` 会说明一个 Salesforce 组织就是一个作用域，而不会虚构数据库。
+- `dbx_execute_batch` 与 `dbx_open_session` 会被拒绝：SOQL 只读，不存在需要批处理的多语句脚本；每次调用都是无状态 REST 请求，没有可固定的会话，也没有可开启的事务。
+- 写入记录永远不会走查询通道。`dbx_execute_query` 会以 `SALESFORCE_DML_REQUIRES_CONFIRMATION` 拒绝写入尝试，因此下面的确认流程无法被绕过。
+
+### 写入确认
+
+写入分为两次调用，且只有当人看到第一步的摘要后第二步才可能执行：
+
+1. 调用 `dbx_salesforce_prepare_write`，传入 `connection_id`（或 `connection_name`）、`op`（`insert`、`update` 或 `delete`）、`object`（API 名称，如 `Account` 或 `Invoice__c`）；`update`/`delete` 需要记录 `id`，`insert`/`update` 需要 `fields`。此时不会向 Salesforce 发送任何请求。
+2. 把返回的摘要展示给用户：操作、对象、记录 Id、每个字段值、连接，以及该变更所归属的身份。
+3. 调用 `dbx_salesforce_apply_write`，传入第 1 步返回的 `confirm_token`。
+
+令牌只能使用一次，签发 5 分钟后过期，并与那一条语句绑定——写入内容变了就必须重新准备。重放、过期或从未签发的令牌会以 `CONFIRM_TOKEN_INVALID` 失败。DBX 在应用阶段会重新检查连接范围、工具白名单、只读与生产保护以及 DML 开关，因此两次调用之间撤销权限会立即生效。
+
+<Callout type="warn">Salesforce 写入不是事务性的。`dbx_salesforce_apply_write` 返回后，组织中的记录已经改变，DBX 无法回滚。每次调用只影响一条记录：`upsert`、批量与 composite 写入会在准备阶段以 `SALESFORCE_DML_INVALID` 拒绝。准备写入需要 **设置 → MCP** 中该连接的 **允许 DML** 开关，它默认关闭，未开启时返回 `SALESFORCE_DML_DISABLED`；执行模式为只读时该开关一律无效。</Callout>
+
+### 写入归属的身份
+
+`dbx_salesforce_current_user` 返回当前连接用户、简档、组织显示名，以及该简档是否具有 **Modify All Data**——这个标志决定字段级安全和记录共享规则是否生效。准备写入前先调用它，也可以用它区分权限失败与记录 Id 错误。`dbx_salesforce_prepare_write` 的摘要中包含同样的身份信息；若查询失败，摘要会写明身份未知并仍然完成准备，把是否应用的决定权留给用户。
 
 ## 数据库访问
 
@@ -217,7 +304,9 @@ DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 D
 
 ### DBX Web 原生 Streamable HTTP
 
-DBX Web 也可以直接托管 MCP。只有配置 `DBX_WEB_MCP_TOKEN` 或 `DBX_WEB_MCP_TOKEN_FILE` 后才会启用。它复用现有 Web 监听器和 `/mcp` 路径，因此 Docker 和反向代理部署不需要额外暴露第二个端口。将 `DBX_WEB_MCP_ALLOWED_HOSTS` 配置为客户端在 `Host` 请求头中发送的公网访问地址；如有端口映射，必须包含映射后的端口。生产环境请使用 `DBX_WEB_MCP_TOKEN_FILE` 或部署平台的 Secret 管理能力，不要把真实 Token 提交到 Compose 文件中。
+DBX Web 可以直接托管 MCP，复用现有 Web 监听器和 `/mcp` 路径，因此 Docker 和反向代理部署不需要额外暴露第二个端口。单实例、已启用 Web 登录密码的部署可在 **设置 → MCP → HTTP 服务**填写允许的 Host 并启用服务；DBX 自动生成 Bearer Token，使用现有加密 Secret 存储，可在页面复制、轮换或禁用，修改立即对新请求生效。未启用时页面不会把 `/mcp` 显示为可连接地址。无 Web 登录密码时，页面管理的 MCP 不会生效；演示部署禁用 MCP。
+
+部署环境变量仍然优先：配置 `DBX_WEB_MCP_TOKEN` 或 `DBX_WEB_MCP_TOKEN_FILE` 后，页面只读显示状态，不会覆盖部署 Secret。此前启用的页面 Token 仍会保留；移除部署 Token 并重启 Web 后，它会重新生效。将 `DBX_WEB_MCP_ALLOWED_HOSTS` 配置为客户端在 `Host` 请求头中发送的公网访问地址；如有端口映射，必须包含映射后的端口。多实例部署应使用一致的部署 Secret 与白名单，而不是页面管理模式。生产环境请使用 `DBX_WEB_MCP_TOKEN_FILE` 或部署平台的 Secret 管理能力，不要把真实 Token 提交到 Compose 文件中。
 
 例如容器映射为 `4225:4224` 时，MCP 地址为 `http://localhost:4225/mcp`：
 
@@ -269,6 +358,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | 变量 | 用途 |
 | --- | --- |
 | `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
+| `DBX_SESSION_IDLE_TTL_SECS` | 有状态会话空闲超时，单位为正整数秒，默认 `1800`。非法值、零、负数或无法表示的时长回退默认值；同样适用于事务专属连接。修改后需重启 MCP 宿主进程。 |
 | `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
 | `DBX_WEB_PASSWORD` | 登录 DBX Web |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web 请求的标准系统代理变量；空值表示不走代理。认证格式 `http://user:pass@host:port` |

@@ -8,8 +8,22 @@
 //   not re-enter Workers, so the pass-through cannot loop.
 // - dbxio.com/api/plugins/install: fire-and-forget beacon the desktop app can
 //   send after a successful marketplace install. Decorative statistics only.
+// - dbxio.com/api/plugins/stats: public read of the display counters (installs
+//   per plugin) from the archive summary — consumed by the website cards.
 // - dbxio.com/api/plugins/archive: token-gated manual trigger for the daily
 //   aggregation (same handler the cron runs), for verification and backfills.
+//
+// Event kinds (blob1):
+// - dl:   artifact download (server-side, per .dbxp GET)
+// - inst: fresh install (beacon `kind:"install"`); legacy beacons without a
+//         kind also land here — they keep feeding the historical mixed-event
+//         base until the fleet upgrades, so the inst curve stays comparable
+// - updt: version update (beacon `kind:"update"`)
+//
+// Identity (blob4, only used for per-day unique counts):
+// - inst/updt events carry the app's anonymous random installation id when
+//   available (stable across days → true per-machine uniques)
+// - dl events and legacy beacons fall back to a day-scoped IP HMAC
 //
 // Storage:
 // - Workers Analytics Engine (binding PLUGIN_STATS) — one datapoint per event.
@@ -34,22 +48,39 @@ type Env = {
   STATS_SALT: string;
 };
 
+type EventKind = "dl" | "inst" | "updt";
+
 const DOWNLOAD_PATTERN = /^\/plugins\/([A-Za-z0-9._-]{1,64})\/([0-9A-Za-z.+-]{1,32})\//;
 const ARTIFACT_SUFFIX_PATTERN = /\.dbxp$/;
 const PLUGIN_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const VERSION_PATTERN = /^[0-9A-Za-z.+-]{1,32}$/;
+const CLIENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const INSTALL_BODY_LIMIT_BYTES = 512;
-const COUNTED_KINDS = new Set(["dl", "inst"]);
+const COUNTED_KINDS = new Set(["dl", "inst", "updt"]);
 const ARCHIVE_META_KEY = "meta:last-success";
 const ARCHIVE_SUMMARY_KEY = "summary";
 const ARCHIVE_TRIGGER_HEADER = "x-archive-token";
 const SQL_ENDPOINT = "https://api.cloudflare.com/client/v4/accounts";
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
   "Access-Control-Max-Age": "86400",
 };
+
+// Served from the archive summary's `inst` section: the agreed public display
+// number (fresh installs; the pre-2026-09-19 mixed install+update base). Raw
+// dl/updt and unique counters stay internal.
+async function handleStatsRequest(env: Env): Promise<Response> {
+  let installs: Record<string, number> = {};
+  try {
+    const summary = JSON.parse((await env.PLUGIN_ARCHIVE.get(ARCHIVE_SUMMARY_KEY)) ?? "{}") as Record<string, Record<string, number>>;
+    installs = summary.inst ?? {};
+  } catch (error) {
+    console.error("plugin-stats summary read failed", error);
+  }
+  return Response.json({ installs }, { headers: { ...CORS_HEADERS, "Cache-Control": "public, max-age=300" } });
+}
 
 // Truncated HMAC of (salt, ip|utc-day): lets aggregations count distinct
 // downloaders per group without storing IPs. Anti-inflation only — a
@@ -64,7 +95,7 @@ async function ipDayIdentity(env: Env, request: Request): Promise<string> {
   return [...new Uint8Array(mac)].slice(0, 8).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function recordEvent(env: Env, kind: "dl" | "inst", pluginId: string, version: string, identity: string): Promise<void> {
+async function recordEvent(env: Env, kind: EventKind, pluginId: string, version: string, identity: string): Promise<void> {
   try {
     env.PLUGIN_STATS.writeDataPoint({
       // index on pluginId keeps per-plugin queries well-sharded
@@ -179,7 +210,7 @@ async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<Window
 // marker is only advanced after every write lands, so a failed run retries the
 // same window on the next cron; a crash mid-write can double-count a window,
 // which is acceptable for decorative stats.
-async function runAggregation(env: Env, fromOverride?: string): Promise<{ from: string; to: string; activeKeys: number }> {
+async function runAggregation(env: Env, fromOverride?: string): Promise<{ from: string; to: string; activeKeys: number; uniqueDays: number }> {
   const to = new Date();
   // `x-archive-from: reset` re-aggregates from the epoch (backfill after a fix);
   // totals are additive, so only use it when the archived window is known-empty.
@@ -221,6 +252,10 @@ async function handleInstallBeacon(request: Request, env: Env): Promise<Response
   if (request.method === "OPTIONS") return emptyResponse(204);
 
   const url = new URL(request.url);
+  if (url.pathname === "/api/plugins/stats") {
+    if (request.method !== "GET" && request.method !== "HEAD") return emptyResponse(405);
+    return handleStatsRequest(env);
+  }
   if (url.pathname === "/api/plugins/archive") {
     if (request.method !== "POST") return emptyResponse(405);
     if (request.headers.get(ARCHIVE_TRIGGER_HEADER) !== env.ANALYTICS_TOKEN) return emptyResponse(401);
@@ -242,11 +277,18 @@ async function handleInstallBeacon(request: Request, env: Env): Promise<Response
   } catch {
     return emptyResponse(400);
   }
-  const { id, version } = (payload ?? {}) as Record<string, unknown>;
+  const { id, version, kind, clientId } = (payload ?? {}) as Record<string, unknown>;
   if (typeof id !== "string" || !PLUGIN_ID_PATTERN.test(id)) return emptyResponse(400);
   if (typeof version !== "string" || !VERSION_PATTERN.test(version)) return emptyResponse(400);
+  // `kind:"update"` classifies version updates separately; every other value
+  // (including the absent field on legacy beacons) counts as a fresh install so
+  // the historical mixed-event base stays continuous until the fleet upgrades.
+  const eventKind: "inst" | "updt" = kind === "update" ? "updt" : "inst";
+  // The app's random installation id gives stable per-machine uniques; legacy
+  // beacons fall back to the day-scoped IP HMAC.
+  const identity = typeof clientId === "string" && CLIENT_ID_PATTERN.test(clientId) ? clientId : await ipDayIdentity(env, request);
 
-  await recordEvent(env, "inst", id, version, await ipDayIdentity(env, request));
+  await recordEvent(env, eventKind, id, version, identity);
   return emptyResponse(204);
 }
 

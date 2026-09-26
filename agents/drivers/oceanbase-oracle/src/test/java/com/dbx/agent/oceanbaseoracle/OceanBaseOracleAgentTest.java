@@ -1,17 +1,24 @@
 package com.dbx.agent.oceanbaseoracle;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.CompletionAssistantMatchMode;
+import com.dbx.agent.CompletionAssistantObjectKind;
+import com.dbx.agent.CompletionAssistantRequest;
+import com.dbx.agent.CompletionAssistantResponse;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
+import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -131,6 +138,113 @@ class OceanBaseOracleAgentTest {
     @Test
     void rejectsNegativeQueryTimeout() {
         Assertions.assertThrows(IllegalArgumentException.class, () -> OceanBaseOracleAgent.queryTimeoutSql(-1));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"10, 1000, false", "1, 1000, false", "1, 1, true", "2, 2, false"})
+    void returnsCursorRowsWithoutAdditionalAuditQueries(int pageSize, int maxRows, boolean truncated) {
+        List<Integer> auditLimits = new ArrayList<>();
+        List<String> auditSql = new ArrayList<>();
+        Connection auditConnection = auditTimingConnection(1, 2, false, auditSql, new ArrayList<>(), auditLimits);
+        int[] row = {-1};
+        int[] queryLimit = {0}; // JDBC's default, independent of the client-side cap.
+        boolean[] queryStarted = {false};
+        boolean[] resultClosed = {false};
+        boolean[] statementClosed = {false};
+        ResultSetMetaData meta = proxy(ResultSetMetaData.class, (method, args) -> {
+            if ("getColumnCount".equals(method.getName())) return 1;
+            if ("getColumnLabel".equals(method.getName())) return "N";
+            if ("getColumnType".equals(method.getName())) return Types.INTEGER;
+            if ("getColumnTypeName".equals(method.getName())) return "NUMBER";
+            return defaultValue(method.getReturnType());
+        });
+        ResultSet cursor = proxy(ResultSet.class, (method, args) -> {
+            if ("next".equals(method.getName())) return ++row[0] < 2;
+            if ("getMetaData".equals(method.getName())) return meta;
+            if ("getObject".equals(method.getName()) || "getInt".equals(method.getName())) return row[0] + 1;
+            if ("close".equals(method.getName())) resultClosed[0] = true;
+            return defaultValue(method.getReturnType());
+        });
+        Statement statement = proxy(Statement.class, (method, args) -> {
+            if ("setMaxRows".equals(method.getName())) queryLimit[0] = (Integer) args[0];
+            if ("execute".equals(method.getName())) {
+                queryStarted[0] = !String.valueOf(args[0]).startsWith("ALTER SESSION");
+                statementClosed[0] = false;
+                return queryStarted[0];
+            }
+            if ("getResultSet".equals(method.getName())) return cursor;
+            if ("close".equals(method.getName())) statementClosed[0] = true;
+            return defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                if (!queryStarted[0]) return statement;
+                Assertions.assertTrue(resultClosed[0] && statementClosed[0], "close the cursor before reading its trace");
+                return auditConnection.createStatement();
+            }
+            if ("prepareStatement".equals(method.getName())) return auditConnection.prepareStatement((String) args[0]);
+            return defaultValue(method.getReturnType());
+        });
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, connection);
+        QueryPageResult result = agent.executeQueryPage("SELECT N FROM T", null, new QueryPageOptions(pageSize, null, maxRows, 5));
+        List<List<Object>> rows = new ArrayList<>(result.getRows());
+        if (result.getHas_more()) {
+            Assertions.assertNull(result.getServer_execute_time_us());
+            Assertions.assertTrue(auditSql.isEmpty(), "do not sample an open cursor");
+            result = agent.fetchQueryPage(result.getSession_id(), pageSize);
+            rows.addAll(result.getRows());
+        }
+        Assertions.assertFalse(result.getHas_more());
+        Assertions.assertEquals(truncated, result.getTruncated());
+        Assertions.assertEquals(truncated ? List.of(List.of(1)) : List.of(List.of(1), List.of(2)), rows);
+        Assertions.assertEquals(0, queryLimit[0], "the paging cap must not change the JDBC statement limit");
+        Assertions.assertTrue(auditSql.isEmpty(), "completed queries must not read trace or audit records");
+        Assertions.assertTrue(auditLimits.isEmpty());
+        Assertions.assertNull(result.getServer_execute_time_us());
+    }
+
+    @Test
+    void finishesCursorWithoutCreatingDiagnosticStatements() {
+        int[] row = {-1};
+        ResultSetMetaData meta = proxy(ResultSetMetaData.class, (method, args) -> {
+            if ("getColumnCount".equals(method.getName())) return 1;
+            if ("getColumnLabel".equals(method.getName())) return "N";
+            if ("getColumnType".equals(method.getName())) return Types.INTEGER;
+            if ("getColumnTypeName".equals(method.getName())) return "NUMBER";
+            return defaultValue(method.getReturnType());
+        });
+        ResultSet cursor = proxy(ResultSet.class, (method, args) -> {
+            if ("next".equals(method.getName())) return ++row[0] < 2;
+            if ("getMetaData".equals(method.getName())) return meta;
+            if ("getObject".equals(method.getName()) || "getInt".equals(method.getName())) return row[0] + 1;
+            return defaultValue(method.getReturnType());
+        });
+        int[] statementsCreated = {0};
+        Statement statement = proxy(Statement.class, (method, args) -> {
+            if ("execute".equals(method.getName())) return !String.valueOf(args[0]).startsWith("ALTER SESSION");
+            if ("getResultSet".equals(method.getName())) return cursor;
+            return defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                statementsCreated[0]++;
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) return false;
+            return defaultValue(method.getReturnType());
+        });
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, connection);
+        QueryPageResult first = agent.executeQueryPage("SELECT N FROM T", null, new QueryPageOptions(1, null, 10, 5));
+        Assertions.assertTrue(first.getHas_more());
+        Assertions.assertEquals(2, statementsCreated[0]);
+
+
+        QueryPageResult last = agent.fetchQueryPage(first.getSession_id(), 1);
+        Assertions.assertFalse(last.getHas_more());
+        Assertions.assertNull(last.getServer_execute_time_us());
+        Assertions.assertEquals(2, statementsCreated[0], "no diagnostic query may run when the cursor finishes");
     }
 
     @Test
@@ -332,6 +446,64 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void globalCompletionTableSearchOmitsOwnerFilter() {
+        CompletionAssistantRequest request = completionRequest("DWD", null, "STAG", true);
+        OceanBaseOracleAgent.CompletionTablesQuery query = OceanBaseOracleAgent.buildCompletionTablesQuery(request, "DWD", 21);
+
+        Assertions.assertTrue(query.sql.contains("FROM ALL_OBJECTS"), query.sql);
+        Assertions.assertTrue(query.sql.contains("FROM ALL_SYNONYMS"), query.sql);
+        Assertions.assertTrue(query.sql.contains("UPPER(o.OBJECT_NAME) LIKE ?"), query.sql);
+        Assertions.assertFalse(query.sql.contains("UPPER(o.OWNER) = ?"), query.sql);
+        Assertions.assertFalse(query.sql.contains("UPPER(s.OWNER) = ?"), query.sql);
+        Assertions.assertTrue(query.sql.contains("ROWNUM <= ?"), query.sql);
+        Assertions.assertEquals(List.of("STAG%", "STAG%", "DWD", "STAG", 21), query.args);
+    }
+
+    @Test
+    void completionTableSearchFoldsLowercaseMasksForFuzzyMatch() {
+        CompletionAssistantRequest request = completionRequest("dwd", null, "ord", true);
+        setField(request, "match_mode", CompletionAssistantMatchMode.CONTAINS);
+        OceanBaseOracleAgent.CompletionTablesQuery query = OceanBaseOracleAgent.buildCompletionTablesQuery(request, "dwd", 21);
+
+        Assertions.assertTrue(query.sql.contains("UPPER(o.OBJECT_NAME) LIKE ?"), query.sql);
+        Assertions.assertTrue(query.sql.contains("UPPER(OWNER) = ?"), query.sql);
+        Assertions.assertTrue(query.sql.contains("UPPER(OBJECT_NAME) = ?"), query.sql);
+        Assertions.assertFalse(query.sql.contains("LIKE UPPER(?)"), query.sql);
+        Assertions.assertEquals(List.of("%ORD%", "%ORD%", "DWD", "ORD", 21), query.args);
+    }
+
+    @Test
+    void scopedCompletionTableSearchFiltersOwnerCaseInsensitively() {
+        CompletionAssistantRequest request = completionRequest("dwd", "staging", "ord", false);
+        OceanBaseOracleAgent.CompletionTablesQuery query = OceanBaseOracleAgent.buildCompletionTablesQuery(request, "dwd", 21);
+
+        Assertions.assertTrue(query.sql.contains("UPPER(o.OWNER) = ?"), query.sql);
+        Assertions.assertTrue(query.sql.contains("UPPER(s.OWNER) = ?"), query.sql);
+        Assertions.assertEquals(List.of("ORD%", "STAGING", "ORD%", "STAGING", "DWD", "ORD", 21), query.args);
+    }
+
+    @Test
+    void completionAssistantSearchReturnsGlobalTableCandidates() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE", "TARGET_OWNER", "TARGET_NAME"},
+            new Object[][]{
+                {"DWD", "ORDERS", "TABLE", null, null},
+                {"STAGING", "ORDERS", "TABLE", null, null}
+            }
+        )));
+
+        CompletionAssistantResponse response = agent.completionAssistantSearch(completionRequest("DWD", null, "ORD", true));
+
+        Assertions.assertEquals(2, response.getCandidates().size());
+        Assertions.assertEquals("ORDERS", response.getCandidates().get(0).getName());
+        Assertions.assertEquals("DWD", response.getCandidates().get(0).getSchema());
+        Assertions.assertEquals("STAGING", response.getCandidates().get(1).getSchema());
+        Assertions.assertFalse(sql.get(0).contains("UPPER(o.OWNER) = ?"), sql.get(0));
+    }
+
+    @Test
     void readsViewDdlWithDbmsMetadataForSchemaCompare() {
         List<String> sql = new ArrayList<>();
         List<String> params = new ArrayList<>();
@@ -345,13 +517,89 @@ class OceanBaseOracleAgentTest {
             )
         ));
 
-        ObjectSource source = agent.getObjectSource("app", "ACTIVE_USERS", "VIEW");
+        ObjectSource source = agent.getObjectSource("MixedOwner", "MixedView", "VIEW");
 
         Assertions.assertEquals("VIEW", source.getObject_type());
-        Assertions.assertEquals("app", source.getSchema());
+        Assertions.assertEquals("MixedOwner", source.getSchema());
         Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE VIEW"), source.getSource());
-        Assertions.assertEquals(List.of("VIEW", "ACTIVE_USERS", "app"), params);
+        Assertions.assertEquals(List.of("VIEW", "MixedView", "MixedOwner"), params);
         Assertions.assertTrue(sql.get(0).contains("DBMS_METADATA.GET_DDL"), sql.get(0));
+    }
+
+    @Test
+    void setSchemaSQLPreservesSelectedSchemaName() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        Assertions.assertEquals("ALTER SESSION SET CURRENT_SCHEMA = \"MixedOwner\"", agent.setSchemaSQL("MixedOwner"));
+        Assertions.assertEquals("", agent.setSchemaSQL(""));
+        Assertions.assertEquals("", agent.setSchemaSQL(null));
+    }
+
+    @Test
+    void getColumnsPreservesMetadataIdentifierSpelling() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            sql,
+            params,
+            columnResultSet(new Object[][]{{"MIXED_ID", "NUMBER", "N", 19, 0, 22, null, null, null, 1}}),
+            columnResultSet(new Object[][]{{"UPPER_ID", "NUMBER", "N", 19, 0, 22, null, null, null, 1}})
+        ));
+
+        List<ColumnInfo> mixedColumns = agent.getColumns("MixedOwner", "Mixed");
+        List<ColumnInfo> upperColumns = agent.getColumns("MixedOwner", "MIXED");
+
+        Assertions.assertEquals(List.of("MIXED_ID"), mixedColumns.stream().map(ColumnInfo::getName).toList());
+        Assertions.assertEquals(List.of("UPPER_ID"), upperColumns.stream().map(ColumnInfo::getName).toList());
+        Assertions.assertEquals(
+            List.of("MixedOwner", "Mixed", "MixedOwner", "Mixed", "MixedOwner", "MIXED", "MixedOwner", "MIXED"),
+            params
+        );
+        Assertions.assertTrue(sql.get(0).contains("FROM ALL_TAB_COLUMNS"), sql.get(0));
+    }
+
+    @Test
+    void getObjectSourcePreservesMetadataIdentifierSpelling() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(
+            sql,
+            params,
+            resultSet(
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE OR REPLACE VIEW \"APP\".\"ACTIVE_USERS\" AS SELECT ID FROM USERS"}}
+            )
+        ));
+
+        ObjectSource source = agent.getObjectSource("MixedOwner", "MixedView", "VIEW");
+
+        Assertions.assertEquals("MixedView", source.getName());
+        Assertions.assertEquals("MixedOwner", source.getSchema());
+        Assertions.assertEquals(List.of("VIEW", "MixedView", "MixedOwner"), params);
+    }
+
+    @Test
+    void getTableDdlPreservesMetadataIdentifierSpelling() {
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), params,
+            resultSet(
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE TABLE \"Mixed\" (\"ID\" NUMBER)"}}
+            ),
+            resultSet(new String[]{"INDEX_NAME"}, new Object[][]{}),
+            resultSet(new String[]{"COMMENTS"}, new Object[][]{{null}}),
+            resultSet(new String[]{"COLUMN_NAME", "COMMENTS"}, new Object[][]{}),
+            resultSet(new String[]{"GRANTEE", "PRIVILEGE", "GRANTABLE"}, new Object[][]{})
+        ));
+
+        String ddl = agent.getTableDdl("MixedOwner", "Mixed");
+
+        Assertions.assertTrue(ddl.contains("CREATE TABLE"), ddl);
+        Assertions.assertEquals("TABLE", params.get(0));
+        Assertions.assertEquals("Mixed", params.get(1));
+        Assertions.assertEquals("MixedOwner", params.get(2));
     }
 
     @Test
@@ -365,15 +613,15 @@ class OceanBaseOracleAgentTest {
             resultSet(new String[]{"TEXT"}, new Object[][]{{"SELECT ID FROM USERS"}})
         ));
 
-        ObjectSource source = agent.getObjectSource("APP", "ACTIVE_USERS", "VIEW");
+        ObjectSource source = agent.getObjectSource("MixedOwner", "MixedView", "VIEW");
 
         Assertions.assertEquals("SELECT ID FROM USERS", source.getSource());
-        Assertions.assertEquals(List.of("VIEW", "ACTIVE_USERS", "APP", "APP", "ACTIVE_USERS"), params);
+        Assertions.assertEquals(List.of("VIEW", "MixedView", "MixedOwner", "MixedOwner", "MixedView"), params);
         Assertions.assertTrue(sql.get(1).contains("ALL_VIEWS"), sql.get(1));
     }
 
     @Test
-    void fallsBackToAllSourceForOracleRoutineAndPackageTypes() {
+    void readsOracleRoutineAndPackageTypesFromAllSourceFirst() {
         for (String[] object : new String[][]{
             {"PROCEDURE", "PROCEDURE"},
             {"FUNCTION", "FUNCTION"},
@@ -383,7 +631,7 @@ class OceanBaseOracleAgentTest {
             List<String> sql = new ArrayList<>();
             List<String> params = new ArrayList<>();
             OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
-            TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(
+            TestSupport.setPrivateConnection(agent, objectSourceConnection(
                 sql,
                 params,
                 resultSet(
@@ -392,13 +640,109 @@ class OceanBaseOracleAgentTest {
                 )
             ));
 
-            ObjectSource source = agent.getObjectSource("APP", "ACCOUNT_API", object[0]);
+            ObjectSource source = agent.getObjectSource("MixedOwner", "MixedRoutine", object[0]);
 
             Assertions.assertEquals(object[0], source.getObject_type());
             Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE " + object[1]), source.getSource());
-            Assertions.assertEquals(object[1], params.get(params.size() - 1));
-            Assertions.assertTrue(sql.get(1).contains("ALL_SOURCE"), sql.get(1));
-            Assertions.assertTrue(sql.get(1).contains("ORDER BY LINE"), sql.get(1));
+            Assertions.assertEquals(
+                List.of("MixedOwner", "MixedRoutine", object[1]),
+                params
+            );
+            Assertions.assertEquals(1, sql.size());
+            Assertions.assertTrue(sql.get(0).contains("ALL_SOURCE"), sql.get(0));
+            Assertions.assertTrue(sql.get(0).contains("ORDER BY LINE"), sql.get(0));
+        }
+    }
+
+    @Test
+    void fallsBackToDbmsMetadataWhenAllSourceIsUnavailable() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(
+            sql,
+            params,
+            resultSet(
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE OR REPLACE PROCEDURE APP.P1 AS BEGIN NULL; END;"}}
+            )
+        ));
+
+        ObjectSource source = agent.getObjectSource("APP", "P1", "PROCEDURE");
+
+        Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE PROCEDURE"), source.getSource());
+        Assertions.assertTrue(sql.get(0).contains("ALL_SOURCE"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("DBMS_METADATA.GET_DDL"), sql.get(1));
+        Assertions.assertEquals(List.of("APP", "P1", "PROCEDURE", "PROCEDURE", "P1", "APP"), params);
+    }
+
+    @Test
+    void synonymSourcePreservesOwnersQuotedNamesAndRemoteLinkDomains() {
+        for (String owner : List.of("Mixed.Owner", "PUBLIC")) {
+            List<String> sql = new ArrayList<>();
+            List<String> params = new ArrayList<>();
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, preparedConnection(sql, params, resultSet(
+                new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"},
+                new Object[][]{{"Target.Owner", "A\"B", "REMOTE.EXAMPLE"}}
+            )));
+            ObjectSource source = agent.getObjectSource(owner, "Syn.Name", "SYNONYM");
+            String declaration = owner.equals("PUBLIC") ? "PUBLIC SYNONYM \"Syn.Name\"" : "SYNONYM \"Mixed.Owner\".\"Syn.Name\"";
+            Assertions.assertEquals("CREATE OR REPLACE " + declaration + " FOR \"Target.Owner\".\"A\"\"B\"@REMOTE.EXAMPLE;", source.getSource());
+            Assertions.assertEquals(List.of(owner, "Syn.Name"), params);
+            Assertions.assertEquals(1, sql.size());
+            Assertions.assertTrue(sql.get(0).contains("ALL_SYNONYMS"));
+        }
+    }
+
+    @Test
+    void synonymSourceHandlesMissingAndLocalTargetsWithoutGuessing() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+            new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"}, new Object[][]{{null, "T", null}}
+        )));
+        Assertions.assertEquals("CREATE OR REPLACE SYNONYM \"APP\".\"S\" FOR \"T\";", agent.getObjectSource("APP", "S", "SYNONYM").getSource());
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+            new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"}, new Object[][]{}
+        )));
+        Assertions.assertEquals("", agent.getObjectSource("APP", "missing", "SYNONYM").getSource());
+    }
+
+    @Test
+    void synonymSourceRejectsUnsafeRemoteMetadata() {
+        for (String link : List.of("x; DROP TABLE T", "x--", "a..b")) {
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+                new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"}, new Object[][]{{"APP", "T", link}}
+            )));
+            Assertions.assertThrows(RuntimeException.class, () -> agent.getObjectSource("APP", "S", "SYNONYM"));
+        }
+    }
+
+    @Test
+    void sequenceFallbackUsesExactIntegerMetadataWithoutConsumingNextValue() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(sql, params, resultSet(
+            new String[]{"MIN_VALUE", "MAX_VALUE", "INCREMENT_BY", "CYCLE_FLAG", "ORDER_FLAG", "CACHE_SIZE", "LAST_NUMBER"},
+            new Object[][]{{"-999", "9999999999999999999999999999", "-2", "N", "Y", "0", "40"}}
+        )));
+        String source = agent.getObjectSource("Mixed.Owner", "S\"Q", "SEQUENCE").getSource();
+        Assertions.assertEquals("CREATE SEQUENCE \"Mixed.Owner\".\"S\"\"Q\"\n  MINVALUE -999\n  MAXVALUE 9999999999999999999999999999\n  INCREMENT BY -2\n  START WITH 40\n  NOCACHE\n  NOCYCLE\n  ORDER;", source);
+        Assertions.assertEquals(List.of("SEQUENCE", "S\"Q", "Mixed.Owner", "Mixed.Owner", "S\"Q"), params);
+        Assertions.assertFalse(sql.stream().anyMatch(query -> query.contains("NEXTVAL")));
+    }
+
+    @Test
+    void sequenceFallbackRejectsIncompleteOrNonIntegerMetadata() {
+        for (String maximum : Arrays.asList(null, "1.5", "1E28", "1; DROP TABLE T")) {
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(new ArrayList<>(), new ArrayList<>(), resultSet(
+                new String[]{"MIN_VALUE", "MAX_VALUE", "INCREMENT_BY", "CYCLE_FLAG", "ORDER_FLAG", "CACHE_SIZE", "LAST_NUMBER"},
+                new Object[][]{{"1", maximum, "1", "N", "N", "20", "40"}}
+            )));
+            Assertions.assertThrows(RuntimeException.class, () -> agent.getObjectSource("APP", "SEQ", "SEQUENCE"));
         }
     }
 
@@ -446,7 +790,7 @@ class OceanBaseOracleAgentTest {
         TestSupport.setPrivateConnection(agent, currentSchemaColumnConnection(
             sql,
             params,
-            resultSet(new String[]{"CURRENT_SCHEMA"}, new Object[][]{{"APP"}}),
+            resultSet(new String[]{"CURRENT_SCHEMA"}, new Object[][]{{"MixedOwner"}}),
             columnResultSet(new Object[][]{
                 {"PARAM_VALUE", "VARCHAR2", "Y", null, null, 100, 100, null, null, 0}
             })
@@ -455,7 +799,7 @@ class OceanBaseOracleAgentTest {
         List<ColumnInfo> columns = agent.getColumns("", "TBPARAM");
 
         Assertions.assertEquals(List.of("PARAM_VALUE"), columns.stream().map(ColumnInfo::getName).toList());
-        Assertions.assertEquals(List.of("APP", "TBPARAM", "APP", "TBPARAM"), params);
+        Assertions.assertEquals(List.of("MixedOwner", "TBPARAM", "MixedOwner", "TBPARAM"), params);
         Assertions.assertTrue(sql.get(0).contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')"), sql.get(0));
         Assertions.assertTrue(sql.get(1).contains("FROM ALL_TAB_COLUMNS"), sql.get(1));
     }
@@ -465,11 +809,11 @@ class OceanBaseOracleAgentTest {
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
             resultSet(
-                new String[]{"INDEX_NAME", "COLUMN_NAME", "COLUMN_POSITION", "UNIQUENESS", "CONSTRAINT_TYPE", "INDEX_TYPE"},
-                new Object[][]{}
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE TABLE \"AUDIT_LOG\" (\"CREATED_AT\" TIMESTAMP DEFAULT SYSDATE NOT NULL, \"INTERNAL_NOTE\" VARCHAR2(100))"}}
             ),
             resultSet(
-                new String[]{"CONSTRAINT_NAME", "COLUMN_NAME", "TABLE_NAME", "REF_COLUMN_NAME"},
+                new String[]{"INDEX_NAME"},
                 new Object[][]{}
             ),
             resultSet(
@@ -492,7 +836,7 @@ class OceanBaseOracleAgentTest {
 
         String ddl = agent.getTableDdl("APP", "AUDIT_LOG");
 
-        Assertions.assertTrue(ddl.contains("\"CREATED_AT\" TIMESTAMP NOT NULL DEFAULT SYSDATE"), ddl);
+        Assertions.assertTrue(ddl.contains("\"CREATED_AT\" TIMESTAMP DEFAULT SYSDATE NOT NULL"), ddl);
         Assertions.assertTrue(
             ddl.contains("COMMENT ON COLUMN \"APP\".\"AUDIT_LOG\".\"CREATED_AT\" IS 'Created timestamp';"),
             ddl
@@ -508,11 +852,11 @@ class OceanBaseOracleAgentTest {
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(sql,
             resultSet(
-                new String[]{"INDEX_NAME", "COLUMN_NAME", "COLUMN_POSITION", "UNIQUENESS", "CONSTRAINT_TYPE", "INDEX_TYPE"},
-                new Object[][]{}
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE TABLE \"USERS\" (\"ID\" NUMBER PRIMARY KEY, \"NAME\" VARCHAR2(100)) PARTITION BY RANGE(\"ID\") (PARTITION P1 VALUES LESS THAN(MAXVALUE))"}}
             ),
             resultSet(
-                new String[]{"CONSTRAINT_NAME", "COLUMN_NAME", "TABLE_NAME", "REF_COLUMN_NAME"},
+                new String[]{"INDEX_NAME"},
                 new Object[][]{}
             ),
             resultSet(
@@ -567,11 +911,11 @@ class OceanBaseOracleAgentTest {
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, dbaFallbackPrivilegeConnection(sql,
             resultSet(
-                new String[]{"INDEX_NAME", "COLUMN_NAME", "COLUMN_POSITION", "UNIQUENESS", "CONSTRAINT_TYPE", "INDEX_TYPE"},
-                new Object[][]{}
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE TABLE \"USERS\" (\"ID\" NUMBER PRIMARY KEY, \"NAME\" VARCHAR2(100)) PARTITION BY RANGE(\"ID\") (PARTITION P1 VALUES LESS THAN(MAXVALUE))"}}
             ),
             resultSet(
-                new String[]{"CONSTRAINT_NAME", "COLUMN_NAME", "TABLE_NAME", "REF_COLUMN_NAME"},
+                new String[]{"INDEX_NAME"},
                 new Object[][]{}
             ),
             resultSet(
@@ -616,11 +960,11 @@ class OceanBaseOracleAgentTest {
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, privilegeFailingDdlConnection(sql,
             resultSet(
-                new String[]{"INDEX_NAME", "COLUMN_NAME", "COLUMN_POSITION", "UNIQUENESS", "CONSTRAINT_TYPE", "INDEX_TYPE"},
-                new Object[][]{}
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE TABLE \"USERS\" (\"ID\" NUMBER PRIMARY KEY, \"NAME\" VARCHAR2(100)) PARTITION BY RANGE(\"ID\") (PARTITION P1 VALUES LESS THAN(MAXVALUE))"}}
             ),
             resultSet(
-                new String[]{"CONSTRAINT_NAME", "COLUMN_NAME", "TABLE_NAME", "REF_COLUMN_NAME"},
+                new String[]{"INDEX_NAME"},
                 new Object[][]{}
             ),
             resultSet(
@@ -642,6 +986,59 @@ class OceanBaseOracleAgentTest {
         );
     }
 
+    @Test
+    void tableDdlPreservesPartitionsAndNativeLocalIndexes() {
+        var agent = new OceanBaseOracleAgent();
+        String nativeTable = "CREATE TABLE \"T\" (\"ID\" NUMBER, CONSTRAINT \"CK\" CHECK (\"ID\" > 0)) "
+            + "REPLICA_NUM = 1 PARTITION BY RANGE(\"ID\") (PARTITION P1 VALUES LESS THAN(MAXVALUE))";
+        String nativeIndex = "CREATE INDEX \"APP\".\"IX\" ON \"APP\".\"T\"(\"ID\") LOCAL;";
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"DDL"}, new Object[][]{{nativeTable}}),
+            resultSet(new String[]{"INDEX_NAME"}, new Object[][]{{"IX"}}),
+            resultSet(new String[]{"DDL"}, new Object[][]{{nativeIndex}}),
+            resultSet(new String[]{"COMMENTS"}, new Object[][]{{"Owner's table"}}),
+            resultSet(new String[]{"COLUMN_NAME", "COMMENTS"}, new Object[][]{}),
+            resultSet(new String[]{"GRANTEE", "PRIVILEGE", "GRANTABLE"}, new Object[][]{}),
+            resultSet(new String[]{"GRANTEE", "COLUMN_NAME", "PRIVILEGE", "GRANTABLE"}, new Object[][]{})
+        ));
+        String ddl = agent.getTableDdl("APP", "T");
+        Assertions.assertTrue(ddl.startsWith(nativeTable.replace("CREATE TABLE \"T\"", "CREATE TABLE \"APP\".\"T\"") + ";"), ddl);
+        Assertions.assertTrue(ddl.contains(nativeIndex), ddl);
+        Assertions.assertTrue(ddl.contains("COMMENT ON TABLE \"APP\".\"T\" IS 'Owner''s table';"), ddl);
+    }
+
+    @Test
+    void emptyMetadataDdlFailsInsteadOfReturningAnIncompleteTable() {
+        var agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"DDL"}, new Object[][]{{" "}})));
+        Assertions.assertThrows(RuntimeException.class, () -> agent.getTableDdl("APP", "T"));
+    }
+
+    @Test
+    void partitionsPreserveDictionaryOrderCompositeKeysAndNullHashBounds() {
+        List<String> sql = new ArrayList<>();
+        var agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql,
+            resultSet(new String[]{"COLUMN_NAME"}, new Object[][]{{"ID"}, {"A\"B"}}),
+            resultSet(new String[]{"NAME", "POSITION", "HIGH_VALUE", "PARTITION_TYPE"}, new Object[][]{
+                {"P1", 1, "100, 'East'", "RANGE"}, {"PM", 2, "MAXVALUE, MAXVALUE", "RANGE"}}),
+            resultSet(new String[]{"COLUMN_NAME"}, new Object[][]{{"REGION"}}),
+            resultSet(new String[]{"NAME", "POSITION", "HIGH_VALUE", "PARTITION_TYPE"}, new Object[][]{
+                {"S1", 1, null, "HASH"}})
+        ));
+        var partitions = agent.listPartitions("APP", "T");
+        Assertions.assertEquals(List.of("P1", "PM"), partitions.stream().map(com.dbx.agent.PartitionInfo::name).toList());
+        Assertions.assertEquals("\"ID\", \"A\"\"B\"", partitions.get(0).partition_key());
+        Assertions.assertEquals("100, 'East'", partitions.get(0).value());
+        var subpartitions = agent.listSubpartitions("APP", "T");
+        Assertions.assertEquals("", subpartitions.get(0).value());
+        Assertions.assertEquals("HASH", subpartitions.get(0).partition_type());
+        Assertions.assertTrue(sql.get(0).contains("ORDER BY COLUMN_POSITION"));
+        Assertions.assertTrue(sql.get(1).contains("WHERE p.TABLE_OWNER = ? AND p.TABLE_NAME = ?"));
+        Assertions.assertTrue(sql.get(3).contains("ALL_TAB_SUBPARTITIONS"));
+    }
+
     private static ResultSet columnResultSet(Object[][] rows) {
         return resultSet(
             new String[]{
@@ -661,6 +1058,10 @@ class OceanBaseOracleAgentTest {
     }
 
     private static Connection preparedConnection(List<String> sql, ResultSet... resultSets) {
+        return preparedConnection(sql, null, resultSets);
+    }
+
+    private static Connection preparedConnection(List<String> sql, List<String> params, ResultSet... resultSets) {
         int[] resultSetIndex = {0};
         PreparedStatement statement = proxy(PreparedStatement.class, (method, args) -> {
             if ("executeQuery".equals(method.getName())) {
@@ -668,7 +1069,13 @@ class OceanBaseOracleAgentTest {
                 resultSetIndex[0] += 1;
                 return resultSets[current];
             }
-            if ("setString".equals(method.getName()) || "setInt".equals(method.getName()) || "close".equals(method.getName())) {
+            if ("setString".equals(method.getName())) {
+                if (params != null) {
+                    params.add(String.valueOf(args[1]));
+                }
+                return null;
+            }
+            if ("setInt".equals(method.getName()) || "close".equals(method.getName())) {
                 return null;
             }
             return defaultValue(method.getReturnType());
@@ -986,6 +1393,50 @@ class OceanBaseOracleAgentTest {
         });
     }
 
+    private static Connection auditTimingConnection(int auditRows, long returnedRows, boolean denied,
+                                                    List<String> sql, List<String> parameters, List<Integer> maxRows) {
+        ResultSet trace = resultSet(new String[]{"TRACE_ID"}, new Object[][]{{"trace-1"}});
+        int[] auditIndex = {-1};
+        ResultSet audit = proxy(ResultSet.class, (method, args) -> {
+            switch (method.getName()) {
+                case "next":
+                    auditIndex[0]++;
+                    return auditIndex[0] < auditRows;
+                case "getLong":
+                    return ((Number) args[0]).intValue() == 1 ? 370L : returnedRows;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+        Statement traceStatement = proxy(Statement.class, (method, args) -> {
+            if ("setQueryTimeout".equals(method.getName())) Assertions.assertEquals(1, args[0]);
+            if ("setMaxRows".equals(method.getName())) maxRows.add((Integer) args[0]);
+            if ("executeQuery".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return trace;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        PreparedStatement auditStatement = proxy(PreparedStatement.class, (method, args) -> {
+            if ("setQueryTimeout".equals(method.getName())) Assertions.assertEquals(1, args[0]);
+            if ("setMaxRows".equals(method.getName())) maxRows.add((Integer) args[0]);
+            if ("setString".equals(method.getName())) parameters.add(String.valueOf(args[1]));
+            if ("executeQuery".equals(method.getName())) {
+                if (denied) throw new SQLException("audit access denied", "42000", 1044);
+                return audit;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) return traceStatement;
+            if ("prepareStatement".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return auditStatement;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
     private static ResultSet blobResultSet() {
         String[] columns = {"PAYLOAD", "EMPTY_PAYLOAD", "DESCRIPTION"};
         int[] sqlTypes = {Types.BLOB, Types.BLOB, Types.VARCHAR};
@@ -1080,6 +1531,33 @@ class OceanBaseOracleAgentTest {
             }
         }
         return null;
+    }
+
+    private static CompletionAssistantRequest completionRequest(
+        String schema,
+        String parentSchema,
+        String mask,
+        boolean globalSearch
+    ) {
+        CompletionAssistantRequest request = new CompletionAssistantRequest();
+        setField(request, "database", "OBORCL");
+        setField(request, "schema", schema);
+        setField(request, "parent_schema", parentSchema);
+        setField(request, "mask", mask);
+        setField(request, "global_search", globalSearch);
+        setField(request, "max_results", 20);
+        setField(request, "object_kinds", List.of(CompletionAssistantObjectKind.TABLE, CompletionAssistantObjectKind.VIEW));
+        return request;
+    }
+
+    private static void setField(Object target, String name, Object value) {
+        try {
+            var field = target.getClass().getDeclaredField(name);
+            field.setAccessible(true);
+            field.set(target, value);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static <T> T proxy(Class<T> type, MethodHandler handler) {

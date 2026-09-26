@@ -15,6 +15,7 @@ fn basic_table_info(name: &str) -> TableInfo {
     TableInfo {
         name: name.to_string(),
         table_type: "BASE TABLE".to_string(),
+        valid: None,
         comment: None,
         parent_schema: None,
         parent_name: None,
@@ -35,6 +36,7 @@ fn col(name: &str, data_type: &str) -> ColumnInfo {
         numeric_precision: None,
         numeric_scale: None,
         character_maximum_length: None,
+        metadata_capabilities: None,
         enum_values: None,
         character_set: None,
         collation: None,

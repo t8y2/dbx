@@ -113,6 +113,26 @@ export class Sidecar extends EventEmitter {
       const message = packet.message;
       if (message.jsonrpc !== "2.0") throw new Error("Invalid JSON-RPC message");
       if (message.id !== undefined) {
+        // Host API 1.1: a plugin may call back into the host with a *string*
+        // id. The dev host has no user interface, so answer like a headless
+        // host does and never leave the plugin waiting for a dialog.
+        if (typeof message.id === "string" && message.method) {
+          void this.write(
+            0,
+            Buffer.from(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: message.id,
+                error: {
+                  code: -32001,
+                  message: `The DBX development host cannot answer '${message.method}': run the plugin in DBX to reach the user interface`,
+                },
+              }),
+            ),
+          ).catch(() => undefined);
+          this.emit("diagnostic", { level: "info", message: "宿主请求无法在开发宿主中应答", details: { method: protocolName(message.method) } });
+          return;
+        }
         const waiter = this.pending.get(message.id);
         if (!waiter) return;
         this.pending.delete(message.id);

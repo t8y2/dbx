@@ -2,8 +2,9 @@ import { reactive, computed } from "vue";
 import * as api from "@/lib/backend/api";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import { uuid } from "@/lib/common/utils";
+import { formatQueryDuration } from "@/lib/format/duration";
 
-export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer" | "multi-db-execution" | "schema-diff" | "data-compare";
+export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
@@ -48,6 +49,9 @@ export interface ExportTask {
   failureCount?: number;
   affectedRows?: number;
   elapsedMs?: number;
+  bytesRead?: number;
+  totalBytes?: number;
+  sqlFilePhase?: api.SqlFileProgress["phase"];
   startedAt?: number;
   finishedAt?: number;
   statementSummary?: string;
@@ -82,6 +86,12 @@ export interface ExportTask {
   compareAddedCount?: number;
   compareRemovedCount?: number;
   compareModifiedCount?: number;
+  dictionaryPhase?: "preparing" | "collecting" | "generating" | "saving";
+  dictionaryCompleted?: number;
+  dictionaryTotal?: number;
+  dictionaryCurrent?: string;
+  dictionaryWarnings?: number;
+  dictionaryProgressKnown?: boolean;
   canCancel?: boolean;
   onOpen?: () => void;
   onRemove?: () => void;
@@ -343,20 +353,10 @@ function finishExportTask(task: ExportTask) {
   task.finishedAt ??= Date.now();
 }
 
-export function formatDataTransferDuration(elapsedMs: number): string {
-  const safeElapsedMs = Math.max(0, Number.isFinite(elapsedMs) ? Math.round(elapsedMs) : 0);
-  if (safeElapsedMs < 1000) return `${safeElapsedMs} ms`;
-
-  if (safeElapsedMs < 60_000) return `${(Math.floor(safeElapsedMs / 100) / 10).toFixed(1)} s`;
-
-  const totalSeconds = Math.floor(safeElapsedMs / 1000);
-  const seconds = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes < 60) return `${totalMinutes}m ${seconds}s`;
-
-  const hours = Math.floor(totalMinutes / 60);
-  return `${hours}h ${totalMinutes % 60}m ${seconds}s`;
-}
+// Implementation lives in @/lib/format/duration (shared with the DataGrid
+// footer / history elapsed hints); the data-transfer name is kept for the
+// export/multi-db call sites.
+export { formatQueryDuration as formatDataTransferDuration };
 
 function targetTableName(table: string, nameCase: api.TransferTableNameCase): string {
   if (nameCase === "lower") return table.toLowerCase();
@@ -426,6 +426,35 @@ export function useExportTracker() {
     });
     taskMap.set(exportId, task);
     return task;
+  }
+
+  function addDataDictionaryTask(exportId: string, label: string, total: number): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId,
+      kind: "data-dictionary",
+      tableName: label,
+      format: "pdf",
+      filePath: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      errorMessage: null,
+      dictionaryPhase: "preparing",
+      dictionaryCompleted: 0,
+      dictionaryTotal: total,
+      dictionaryProgressKnown: false,
+      canCancel: false,
+      startedAt: Date.now(),
+    });
+    taskMap.set(exportId, task);
+    return task;
+  }
+
+  function updateDataDictionaryTask(exportId: string, changes: Partial<ExportTask>): void {
+    const task = taskMap.get(exportId);
+    if (!task || task.kind !== "data-dictionary") return;
+    Object.assign(task, changes);
+    if (task.status === "Done" || task.status === "Error") finishExportTask(task);
   }
 
   function addSqlFileTask(executionId: string, fileName: string, filePath: string): ExportTask {
@@ -661,9 +690,12 @@ export function useExportTracker() {
     task.failureCount = progress.failureCount;
     task.affectedRows = progress.affectedRows;
     task.elapsedMs = progress.elapsedMs;
+    task.bytesRead = progress.bytesRead ?? task.bytesRead;
+    task.totalBytes = progress.totalBytes ?? task.totalBytes;
+    task.sqlFilePhase = progress.phase ?? task.sqlFilePhase;
     task.statementSummary = progress.statementSummary;
     task.rowsExported = progress.successCount + progress.failureCount;
-    task.totalRows = Math.max(progress.statementIndex, progress.successCount + progress.failureCount) || null;
+    task.totalRows = null;
   }
 
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {
@@ -774,6 +806,8 @@ export function useExportTracker() {
     hasActive,
     addTask,
     addDatabaseExportTask,
+    addDataDictionaryTask,
+    updateDataDictionaryTask,
     addSqlFileTask,
     addDataTransferTask,
     addSchemaDiffTask,

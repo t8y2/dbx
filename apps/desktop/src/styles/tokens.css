@@ -40,6 +40,9 @@
 @theme inline {
   --font-sans: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --font-heading: var(--font-sans);
+  /* Baseline mono token; App.vue overrides it inline with the editor font
+     setting, and plugin sandboxes receive the resolved value via the bridge. */
+  --font-mono: 'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -91,6 +94,10 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
+  /* Opaque background for inverted text (`bg-foreground text-background-solid`).
+     useBackgroundImage publishes `--background-solid` while a wallpaper is active,
+     so tooltips/toasts keep readable glyphs when the surfaces turn translucent. */
+  --color-background-solid: var(--background-solid, var(--background));
   --radius-sm: var(--dbx-radius-sm);
   --radius-md: var(--dbx-radius-md);
   --radius-lg: var(--dbx-radius-lg);
@@ -100,6 +107,7 @@
 :root {
   --background: rgb(255 255 255);
   --foreground: rgb(10 10 10);
+  --dbx-foreground-rgb: 10, 10, 10;
   --card: rgb(255 255 255);
   --card-foreground: rgb(10 10 10);
   --popover: rgb(255 255 255);
@@ -144,6 +152,7 @@
   --success-foreground: rgb(240 253 244);
   --success-bg: color-mix(in srgb, var(--success) 12%, transparent);
   --warning: rgb(217 119 6);
+  --dbx-warning-rgb: 217, 119, 6;
   --warning-foreground: rgb(255 251 235);
   --warning-bg: color-mix(in srgb, var(--warning) 14%, transparent);
   --info: rgb(37 99 235);
@@ -162,6 +171,7 @@
 .dark {
   --background: rgb(19 20 22);
   --foreground: rgb(215 215 219);
+  --dbx-foreground-rgb: 215, 215, 219;
   --card: rgb(27 27 30);
   --card-foreground: rgb(215 215 219);
   --popover: rgb(30 30 32);
@@ -197,6 +207,7 @@
   --success-foreground: rgb(20 30 24);
   --success-bg: color-mix(in srgb, var(--success) 16%, transparent);
   --warning: rgb(251 191 36);
+  --dbx-warning-rgb: 251, 191, 36;
   --warning-foreground: rgb(40 32 12);
   --warning-bg: color-mix(in srgb, var(--warning) 16%, transparent);
   --info: rgb(96 165 250);

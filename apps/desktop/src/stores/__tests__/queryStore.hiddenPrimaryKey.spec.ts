@@ -159,6 +159,42 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   }, 10_000);
 
+  it("appends the hidden primary key for Dameng tables whose columns keep the created case", async () => {
+    // #10233: Dameng keeps the case an unquoted identifier was created with, so the
+    // server reports `name` while the Oracle-family dialect handling folds the SQL
+    // token to `NAME`. The binding has to survive that mismatch, otherwise the result
+    // stays read-only even though the table has a primary key.
+    getConnectionConfig.mockReturnValue({ id: "dameng-1", name: "Dameng", db_type: "dameng", database: "SYSDBA", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "id", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "name", data_type: "VARCHAR(50)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    // Mirror what the analyzer reports for this dialect: the user's unquoted token
+    // keeps its spelling and quoting flag (the store then folds it, like the real
+    // Oracle-family path), while the hidden key dbx appends is quoted as `"id"`.
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "users",
+        selectStar: false,
+        columns: [{ sourceName: "name", sourceNameQuoted: false, resultName: "name", expression: "name" }, ...(sql.includes("__DBX_PK_0") ? [{ sourceName: "id", sourceNameQuoted: true, resultName: "__DBX_PK_0", expression: '"id"' }] : [])],
+      },
+    }));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("dameng-1", "SYSDBA", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    expect(executeMulti).toHaveBeenCalledWith("dameng-1", "SYSDBA", 'SELECT name, "id" AS "__DBX_PK_0" FROM users', undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.hidden_column_indexes).toEqual([1]);
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  }, 10_000);
+
   it("keeps MySQL expression columns read-only without disabling direct columns", async () => {
     const sql = "SELECT id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl FROM items";
     getColumns.mockResolvedValue([
@@ -1785,6 +1821,71 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.hidden_column_indexes).toEqual([1]);
     await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("primary-key-not-returned"));
     expect(tab.queryAnalysis).toBeUndefined();
+  });
+
+  it("removes the generated row number before appending OceanBase Oracle pages", async () => {
+    const sql = "SELECT LEVEL AS N FROM DUAL CONNECT BY LEVEL <= 4";
+    getConnectionConfig.mockReturnValue({ id: "ob-1", name: "OceanBase", db_type: "oceanbase-oracle", database: "app" });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: options.sql,
+      pageLimit: options.pagination.limit,
+      pageOffset: options.pagination.offset,
+      countSql: undefined,
+      useAgentResultSession: false,
+      paginationRowNumberColumn: options.pagination.offset > 0 ? "__dbx_row_num" : undefined,
+    }));
+    executeMulti.mockResolvedValueOnce([{ columns: ["N"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1 }]).mockResolvedValueOnce([
+      {
+        columns: ["N", "__dbx_row_num"],
+        rows: [
+          [3, 3],
+          [4, 4],
+        ],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "app", "Query");
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 0 } });
+    await store.executeTabSql(tabId, sql, {
+      pagination: { limit: 2, offset: 2 },
+      preserveResultDuringExecution: true,
+      appendResult: { maxRows: 10 },
+    });
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.columns).toEqual(["N"]);
+    expect(tab.result?.rows).toEqual([[1], [2], [3], [4]]);
+
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: options.sql,
+      pageLimit: 2,
+      pageOffset: options.pagination.offset,
+      countSql: undefined,
+      useAgentResultSession: false,
+      paginationRowNumberColumn: options.pagination.offset > 0 ? "__dbx_row_num" : undefined,
+    }));
+    executeMulti
+      .mockResolvedValueOnce([{ columns: ["N"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1 }])
+      .mockResolvedValueOnce([
+        {
+          columns: ["N", "__dbx_row_num"],
+          rows: [
+            [3, 3],
+            [4, 4],
+          ],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      ])
+      .mockResolvedValueOnce([{ columns: ["N", "__dbx_row_num"], rows: [], affected_rows: 0, execution_time_ms: 1 }]);
+    const exported = await store.fetchTabResultForExport(tabId);
+    expect(exported?.columns).toEqual(["N"]);
+    expect(exported?.rows).toEqual([[1], [2], [3], [4]]);
   });
 
   it("records the returned row count when a page is known to be incomplete without count sql", async () => {

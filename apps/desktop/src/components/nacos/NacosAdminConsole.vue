@@ -3,8 +3,9 @@ import { useUpdateBlocker } from "@/lib/app/updatePreparation";
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, useId, watch } from "vue";
 import { Compartment, StateEffect, StateField } from "@codemirror/state";
 import { ensureSyntaxTree } from "@codemirror/language";
+import { setDiagnostics } from "@codemirror/lint";
 import { Decoration, EditorView } from "@codemirror/view";
-import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, ExternalLink, FileClock, FileInput, FileText, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
+import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, ExternalLink, FileClock, FileInput, FileText, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, ReplaceAll, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
@@ -19,6 +20,7 @@ import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue"
 import NacosConfigHistoryDialog from "@/components/nacos/NacosConfigHistoryDialog.vue";
 import NacosConfigBatchDialog, { type NacosBatchDialogMode, type NacosConfigTransferDialogPayload, type NacosConfigTransferTarget } from "@/components/nacos/NacosConfigBatchDialog.vue";
 import NacosContentSearchDialog from "@/components/nacos/NacosContentSearchDialog.vue";
+import NacosContentReplaceDialog from "@/components/nacos/NacosContentReplaceDialog.vue";
 import { useToast } from "@/composables/useToast";
 import { useNacosConfigListColumnResize, type ToggleableNacosConfigListColumnKey } from "@/composables/useNacosConfigListColumnResize";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -60,8 +62,10 @@ import { useTheme } from "@/composables/useTheme";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
-import { validateNacosConfigContent, type NacosConfigDiagnostic } from "@/lib/nacos/nacosConfigValidation";
+import { validateNacosConfigContent, nacosConfigDiagnosticSeverity, nacosConfigValidationBlocksPublish, type NacosConfigDiagnostic } from "@/lib/nacos/nacosConfigValidation";
 import { loadNacosConfigLanguage, resolveNacosConfigFormat } from "@/lib/nacos/nacosConfigLanguage";
+import { nacosConfigYamlLintDiagnostics, nacosConfigYamlLintExtension } from "@/lib/nacos/nacosConfigYamlLint";
+import { translateNacosYamlDiagnostic } from "@/lib/nacos/nacosYamlDiagnostics";
 import type { NacosConfigEditorViewport } from "@/types/database";
 import type {
   NacosBatchPreview,
@@ -218,6 +222,7 @@ const configEditorWheelZoomGestureGuard = createEditorWheelZoomGestureGuard();
 const knownConfigFormats = ref<Record<string, string>>({});
 const selectedConfigKeys = ref<string[]>([]);
 const searchOpen = ref(false);
+const contentReplaceOpen = ref(false);
 const searchLoading = ref(false);
 const searchError = ref("");
 const searchResult = ref<NacosContentSearchResult | null>(null);
@@ -550,6 +555,8 @@ function currentCustomThemeColors() {
 }
 
 function configValidationHighlightExtension() {
+  // Formats without a native linter keep this decoration; YAML uses the linter
+  // installed by `nacosConfigYamlLintExtension` instead (#9405).
   const decorationsFor = (state: import("@codemirror/state").EditorState, diagnostics: NacosConfigDiagnostic[]) => {
     const ranges = diagnostics
       .filter(() => state.doc.length > 0)
@@ -632,6 +639,7 @@ async function mountConfigEditor() {
         },
       }),
       configEditorLanguage.of(language),
+      ...(format === "yaml" ? [nacosConfigYamlLintExtension(configDiagnosticTranslate)] : []),
       configValidationHighlight.of(configValidationHighlightExtension()),
       configEditorTheme.of(theme),
       configEditorFontTheme.of(editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true })),
@@ -670,6 +678,9 @@ async function mountConfigEditor() {
     return;
   }
   configEditorView.value = view;
+  // `linter()` only schedules a run after a document change, so a config opened
+  // with an existing error would look clean until the first keystroke.
+  if (format === "yaml") view.dispatch(setDiagnostics(view.state, nacosConfigYamlLintDiagnostics(view.state.doc.toString(), configDiagnosticTranslate)));
   view.scrollDOM.addEventListener("scroll", scheduleConfigEditorViewportCapture, { passive: true });
   restoreConfigEditorViewport();
 }
@@ -844,6 +855,24 @@ function clearConfigValidation(clearHighlight = true) {
   }
 }
 
+/** True when the open config is YAML, which shows diagnostics through CodeMirror's linter rather than the legacy decoration. */
+const configUsesYamlLint = computed(() => resolveNacosConfigFormat(configType.value, configDataId.value) === "yaml");
+
+const configValidationHasError = computed(() => configValidationDiagnostics.value.some((diagnostic) => nacosConfigDiagnosticSeverity(diagnostic) === "error"));
+
+function configDiagnosticTranslate(key: string, params: Record<string, string>) {
+  return t(key, params);
+}
+
+/** YAML diagnostics carry a code so the message follows the active locale; other formats keep their parser text. */
+function configValidationMessage(diagnostic: NacosConfigDiagnostic): string {
+  return diagnostic.code ? translateNacosYamlDiagnostic({ code: diagnostic.code, message: diagnostic.message, params: diagnostic.params ?? {} }, configDiagnosticTranslate) : diagnostic.message;
+}
+
+function configValidationSeverityLabel(diagnostic: NacosConfigDiagnostic): string {
+  return nacosConfigDiagnosticSeverity(diagnostic) === "error" ? t("nacos.validationSeverityError") : t("nacos.validationSeverityWarning");
+}
+
 function refreshConfigValidationHighlights(content: string, generation: number, editorSessionId: number) {
   if (!configValidationHighlightActive) return;
   queueMicrotask(() => {
@@ -862,11 +891,18 @@ function validateCurrentConfig(showSuccess = true): boolean {
   configValidationDiagnostics.value = diagnostics;
   configValidationHighlightActive = false;
   configEditorView.value?.dispatch({ effects: setConfigValidationHighlight.of([]) });
-  if (diagnostics.length) {
+  // Only errors block publishing: a parser warning must never trap a config the
+  // user is entitled to publish (#9405).
+  if (nacosConfigValidationBlocksPublish(diagnostics)) {
     configValidationOpen.value = true;
     return false;
   }
-  if (showSuccess) toast(t("nacos.validationPassed"), 2000);
+  if (!showSuccess) return true;
+  if (diagnostics.length) {
+    configValidationOpen.value = true;
+    return true;
+  }
+  toast(t("nacos.validationPassed"), 2000);
   return true;
 }
 
@@ -875,9 +911,11 @@ function focusConfigValidationDiagnostic() {
   const view = configEditorView.value;
   if (!diagnostic || !view) return;
   configValidationOpen.value = false;
-  configValidationHighlightActive = true;
+  // The YAML linter already marks every diagnostic, so only move the cursor;
+  // reusing the legacy decoration on top would double-render the same range.
+  configValidationHighlightActive = !configUsesYamlLint.value;
   view.dispatch({
-    effects: setConfigValidationHighlight.of(configValidationDiagnostics.value),
+    effects: setConfigValidationHighlight.of(configUsesYamlLint.value ? [] : configValidationDiagnostics.value),
     selection: { anchor: diagnostic.from },
     scrollIntoView: true,
   });
@@ -1427,6 +1465,11 @@ function handleNacosNamespacesChanged(detail: NacosNamespacesChangedDetail) {
 async function openSearchDialog() {
   searchOpen.value = true;
   await loadBatchNamespaces();
+}
+
+async function refreshAfterContentReplace() {
+  await loadConfigsWithRetry(configPageNo.value);
+  if (selectedConfig.value) await selectConfig(selectedConfig.value);
 }
 
 async function openBatchDialog(mode: NacosBatchDialogMode) {
@@ -2767,6 +2810,10 @@ useUpdateBlocker(() =>
             <X class="h-3.5 w-3.5" />
           </Button>
         </div>
+        <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly" :title="t('nacos.contentReplace')" @click="contentReplaceOpen = true">
+          <ReplaceAll class="h-3.5 w-3.5" />
+          {{ t("nacos.contentReplace") }}
+        </Button>
         <Button size="sm" variant="outline" class="h-8 gap-1.5" @click="openBatchDialog('export')">
           <Archive class="h-3.5 w-3.5" />
           {{ t("nacos.batchExport") }}
@@ -3033,7 +3080,7 @@ useUpdateBlocker(() =>
                     :key="format"
                     type="button"
                     class="shrink-0 rounded border px-2 py-0.5 text-[11px] font-medium transition-colors"
-                    :class="configType === format ? 'border-foreground/80 bg-foreground text-background' : 'border-transparent text-muted-foreground hover:border-border hover:bg-background hover:text-foreground'"
+                    :class="configType === format ? 'border-foreground/80 bg-foreground text-background-solid' : 'border-transparent text-muted-foreground hover:border-border hover:bg-background hover:text-foreground'"
                     :disabled="readOnly"
                     :aria-pressed="configType === format"
                     @click="setConfigFormat(format)"
@@ -3366,13 +3413,16 @@ useUpdateBlocker(() =>
     <Dialog :open="configValidationOpen" @update:open="configValidationOpen = $event">
       <DialogContent class="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{{ t("nacos.validationErrorTitle") }}</DialogTitle>
-          <DialogDescription>{{ t("nacos.validationErrorDescription") }}</DialogDescription>
+          <DialogTitle>{{ configValidationHasError ? t("nacos.validationErrorTitle") : t("nacos.validationWarningTitle") }}</DialogTitle>
+          <DialogDescription>{{ configValidationHasError ? t("nacos.validationErrorDescription") : t("nacos.validationWarningDescription") }}</DialogDescription>
         </DialogHeader>
-        <div v-if="configValidationDiagnostics.length" class="max-h-[min(50vh,24rem)] overflow-y-auto rounded-md border border-destructive/30 bg-destructive/5 text-sm">
-          <div v-for="(diagnostic, index) in configValidationDiagnostics" :key="`${diagnostic.from}-${diagnostic.to}-${index}`" class="border-b border-destructive/15 p-4 last:border-b-0">
+        <div v-if="configValidationDiagnostics.length" class="max-h-[min(50vh,24rem)] overflow-y-auto rounded-md border text-sm" :class="configValidationHasError ? 'border-destructive/30 bg-destructive/5' : 'border-warning/30 bg-warning/5'">
+          <div v-for="(diagnostic, index) in configValidationDiagnostics" :key="`${diagnostic.from}-${diagnostic.to}-${index}`" class="border-b p-4 last:border-b-0" :class="configValidationHasError ? 'border-destructive/15' : 'border-warning/15'">
             <div class="min-w-0 space-y-2">
-              <p class="break-words font-medium text-destructive">{{ diagnostic.message }}</p>
+              <p class="break-words font-medium" :class="nacosConfigDiagnosticSeverity(diagnostic) === 'error' ? 'text-destructive' : 'text-warning'">
+                <span class="me-1.5 text-xs uppercase tracking-wide">{{ configValidationSeverityLabel(diagnostic) }}</span
+                >{{ configValidationMessage(diagnostic) }}
+              </p>
               <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                 <span>{{ t("nacos.validationLine", { line: diagnostic.line }) }}</span>
                 <span>{{ t("nacos.validationColumn", { column: diagnostic.column }) }}</span>
@@ -3403,6 +3453,8 @@ useUpdateBlocker(() =>
       @export="exportContentSearchResults"
       @clear="clearContentSearchSession"
     />
+
+    <NacosContentReplaceDialog v-model:open="contentReplaceOpen" :connection-id="connectionId" :current-namespace="namespace" :read-only="readOnly" @changed="refreshAfterContentReplace" />
 
     <NacosConfigBatchDialog
       v-model:open="batchOpen"
@@ -3733,6 +3785,32 @@ useUpdateBlocker(() =>
   font-weight: 700;
   text-decoration: underline wavy var(--destructive);
   text-underline-offset: 3px;
+}
+
+/* The YAML linter marks ranges with `@codemirror/lint`'s hardcoded palette;
+   override it so the underline follows the active light/dark theme the way the
+   legacy decoration above already does. */
+.nacos-config-editor :deep(.cm-lintRange-error),
+.nacos-config-editor :deep(.cm-lintRange-warning) {
+  background-image: none;
+  text-decoration: underline wavy;
+  text-underline-offset: 3px;
+}
+
+.nacos-config-editor :deep(.cm-lintRange-error) {
+  text-decoration-color: var(--destructive);
+}
+
+.nacos-config-editor :deep(.cm-lintRange-warning) {
+  text-decoration-color: var(--warning);
+}
+
+.nacos-config-editor :deep(.cm-diagnostic-error) {
+  border-left-color: var(--destructive);
+}
+
+.nacos-config-editor :deep(.cm-diagnostic-warning) {
+  border-left-color: var(--warning);
 }
 
 .nacos-config-workbench {

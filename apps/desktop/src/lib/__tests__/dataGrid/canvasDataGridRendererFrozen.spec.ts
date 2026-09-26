@@ -146,6 +146,28 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     expect(resolveCanvasBackingStoreMetrics({ width: 801, height: 399, pixelRatio: 5 })).toEqual({ pixelWidth: 3204, pixelHeight: 1596, scaleX: 4, scaleY: 4, measured: false });
   });
 
+  it("reports a completed draw only after obtaining a Canvas context", () => {
+    const canvas = createMockCanvas();
+    const options = createBaseOptions({ canvas, rowCount: 0, rowAt: () => undefined });
+    const fillRect = vi.fn();
+    vi.spyOn(canvas, "getContext")
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce(
+        new Proxy(
+          {},
+          {
+            get: (_target, key) => (key === "fillRect" ? fillRect : key === "measureText" ? () => ({ width: 0 }) : () => {}),
+            set: () => true,
+          },
+        ) as unknown as CanvasRenderingContext2D,
+      );
+
+    expect(drawCanvasDataGrid(options)).toBe(false);
+    expect(fillRect).not.toHaveBeenCalled();
+    expect(drawCanvasDataGrid(options)).toBe(true);
+    expect(fillRect).toHaveBeenCalled();
+  });
+
   it("draws without errors when frozenColumnCount is 0", () => {
     const canvas = createMockCanvas();
     const options = createBaseOptions({ canvas, frozenColumnCount: 0 });

@@ -325,6 +325,10 @@ export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partia
   return matchesShortcut(event, actionShortcut("quickOpen", shortcuts));
 }
 
+export function isGlobalSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("globalSearch", shortcuts));
+}
+
 export function isNavigateTabHistoryBackShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("navigateTabHistoryBack", shortcuts, platform), platform);
 }

@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.6.15"
+version = "0.6.24"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -10,12 +10,13 @@ rust-version = "1.88.0"
 
 [lib]
 name = "dbx_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [features]
-default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts"]
+default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts", "os-keyring"]
 custom-protocol = ["tauri/custom-protocol"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
+os-keyring = ["dbx-core/os-keyring"]
 dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
@@ -29,6 +30,7 @@ tauri-build = { version = "2.5.6", features = [] }
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml_ng = "0.10"
 base64 = "0.22"
 log = "0.4"
 tauri = { version = "2.10.3", features = ["tray-icon", "image-png"] }
@@ -56,6 +58,8 @@ tiberius = { version = "0.12.3", default-features = false, features = ["tds73", 
 tokio-util = { version = "0.7", features = ["compat"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 regex = "1"
+grep = "0.3"
+ignore = "0.4"
 futures = "0.3"
 mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
 percent-encoding = "2"
@@ -76,6 +80,7 @@ sys-locale = "0.3"
 sysinfo = { version = "0.32", features = ["system"] }
 
 [dev-dependencies]
+dbx-core = { path = "../crates/dbx-core", default-features = false, features = ["test-support"] }
 tauri = { version = "2.10.3", features = ["test"] }
 tempfile = "3"
 

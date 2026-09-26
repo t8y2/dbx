@@ -14,6 +14,18 @@ function make(rows: number, spatial?: QueryResult["spatial_columns"]): QueryResu
 }
 
 describe("appendQueryResultSegment spatial merge", () => {
+  it("sums client request wait across loaded pages", () => {
+    const previous = { ...make(1), client_request_wait_ms: 45 };
+    const segment = { ...make(1), client_request_wait_ms: 30 };
+    const merged = appendQueryResultSegment(previous, segment, 100);
+    expect(merged.client_request_wait_ms).toBe(75);
+    expect(merged.rows).toHaveLength(2);
+  });
+  it("does not report a partial wait when either loaded page lacks a sample", () => {
+    const sampled = { ...make(1), client_request_wait_ms: 40 };
+    expect(appendQueryResultSegment(make(1), sampled, 100).client_request_wait_ms).toBeUndefined();
+    expect(appendQueryResultSegment(sampled, make(1), 100).client_request_wait_ms).toBeUndefined();
+  });
   it("keeps the first non-null SRID per column across pages", () => {
     const previous = make(2, [{ column_index: 0, srid: 4326 }]);
     const segment = make(2, [{ column_index: 0, srid: 3857 }]);
@@ -58,5 +70,21 @@ describe("appendQueryResultSegment spatial merge", () => {
     } as unknown as QueryResult;
 
     expect(() => appendQueryResultSegment(previous, segment, 100)).toThrow("relation missing_table does not exist");
+  });
+});
+
+describe("appendQueryResultSegment OceanBase audit timing", () => {
+  it("uses the terminal audit for the whole JDBC cursor without summing page samples", () => {
+    const first = { ...make(100), session_id: "cursor-1", has_more: true };
+    const last = { ...make(50), server_execute_time_us: 370, has_more: false };
+    expect(appendQueryResultSegment(first, last, 1000).server_execute_time_us).toBe(370);
+  });
+
+  it("sums independent SQL pages only when each page has an audit sample", () => {
+    const first = { ...make(100), server_execute_time_us: 200 };
+    const sampledNext = { ...make(100), server_execute_time_us: 150 };
+    expect(appendQueryResultSegment(first, sampledNext, 1000).server_execute_time_us).toBe(350);
+    expect(appendQueryResultSegment(make(100), sampledNext, 1000).server_execute_time_us).toBeUndefined();
+    expect(appendQueryResultSegment(first, make(100), 1000).server_execute_time_us).toBeUndefined();
   });
 });

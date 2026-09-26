@@ -191,7 +191,7 @@ const batchExpiryTtl = ref("");
 const batchExpiryExpireAt = shallowRef<CalendarDateTime | null>(null);
 /** Snapshot taken when the dialog opens so a background refresh cannot retarget the batch. */
 const batchExpiryKeyRaws = shallowRef<string[]>([]);
-const pendingDanger = ref<{ kind: "delete-keys"; title: string; keyRaws: string[]; loadedSearchResults: boolean } | { kind: "command"; command: string } | null>(null);
+const pendingDanger = ref<{ kind: "delete-keys"; title: string; keyRaws: string[]; loadedSearchResults: boolean } | { kind: "delete-group"; title: string; pattern: string; groupId: string; loadedCount: number } | { kind: "command"; command: string } | null>(null);
 const showDangerConfirm = ref(false);
 const commandText = ref("");
 const commandRunning = ref(false);
@@ -422,6 +422,14 @@ const dangerDetails = computed(() => {
     return t(pendingDanger.value.loadedSearchResults ? "redis.deleteLoadedSearchKeysDetails" : "redis.deleteGroupDetails", {
       target: pendingDanger.value.title,
       count: pendingDanger.value.keyRaws.length,
+    });
+  }
+  if (pendingDanger.value.kind === "delete-group") {
+    // 分组删除按前缀在服务端扫全量，未加载的子键也会一起删除，因此这里
+    // 只能把已加载数量作为参考，不能像按 key 删除那样当作删除总数。
+    return t("redis.deleteGroupSubtreeDetails", {
+      target: pendingDanger.value.title,
+      count: pendingDanger.value.loadedCount,
     });
   }
   return pendingDanger.value.command;
@@ -1680,13 +1688,15 @@ function requestBatchDelete() {
 function requestGroupDelete(node: RedisKeyTreeNode, event?: Event) {
   event?.stopPropagation();
   if (node.kind !== "group" || selectionBusy.value) return;
-  const keyRaws = collectRedisGroupKeyRaws(node);
-  if (keyRaws.length === 0) return;
+  // 一个分组是键名前缀：树里只持有已扫描到的那部分子键，按已加载行删除会
+  // 留下一部分键（#10164）。这里改为删除该前缀下的全部键。
+  const pattern = redisGroupSubtreePattern(node.pathSegments, redisKeySeparator.value);
   pendingDanger.value = {
-    kind: "delete-keys",
+    kind: "delete-group",
     title: node.pathSegments.join(redisKeySeparator.value),
-    keyRaws,
-    loadedSearchResults: false,
+    pattern,
+    groupId: node.id,
+    loadedCount: collectRedisGroupKeyRaws(node).length,
   };
   showDangerConfirm.value = true;
 }
@@ -1775,6 +1785,50 @@ function resetLoadedKeys() {
   refreshExpandedGroupIds.clear();
   hasMore.value = false;
   lastTotalKeys.value = 0;
+}
+
+async function deleteGroupSubtree(pattern: string, groupId: string) {
+  if (deletingKeys.value) return;
+
+  // Ignore a late SCAN page while an explicit mutation changes this result set.
+  invalidateScanRequests();
+  fetchAllStopRequested.value = true;
+  deletingKeys.value = true;
+  try {
+    const deletedCount = await api.redisDeleteKeysByPattern(props.connectionId, props.db, pattern);
+    // 删除作用于服务端整个前缀，本地只保留匹配该前缀之外的行；未加载的子键
+    // 也已随服务端删除一起消失，因此不需要再补扫。
+    const matches = createRedisKeyPatternMatcher(pattern);
+    const removed = flatKeys.value.filter((key) => matches(key.key_display, key.key_raw));
+    for (const key of removed) {
+      loadedKeyRaws.delete(key.key_raw);
+      ttlObservedAtByRaw.delete(key.key_raw);
+      positiveTtlKeyRaws.delete(key.key_raw);
+    }
+    replaceFlatKeyRecords(flatKeys.value.filter((key) => !matches(key.key_display, key.key_raw)));
+    if (selectedKeyRaw.value && removed.some((key) => key.key_raw === selectedKeyRaw.value)) {
+      selectedKeyRaw.value = null;
+    }
+    resetCheckedKeys();
+    // 该子树已被整段删除，旧的补扫游标/已扫尽标记对新键不再成立
+    subtreePendingGroupCursors.delete(groupId);
+    subtreeFilledGroupIds.delete(groupId);
+    rebuildTree(false);
+    connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
+      loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+      totalDelta: -deletedCount,
+    });
+    toast(t("redis.deleteGroupSubtreeSuccess", { count: deletedCount }), 3000);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    toast(message, 5000);
+    // A partial scan may already have deleted keys before the error surfaced.
+    // Reload instead of leaving a potentially stale result in the tree.
+    if (redisBrowserIsActive) await loadKeys();
+    else reloadKeysOnActivation = true;
+  } finally {
+    deletingKeys.value = false;
+  }
 }
 
 async function deleteKeyRaws(keys: string[]) {
@@ -2393,6 +2447,10 @@ async function applyDangerAction() {
 
   if (pending.kind === "delete-keys") {
     await deleteKeyRaws(pending.keyRaws);
+    pendingDanger.value = null;
+    showDangerConfirm.value = false;
+  } else if (pending.kind === "delete-group") {
+    await deleteGroupSubtree(pending.pattern, pending.groupId);
     pendingDanger.value = null;
     showDangerConfirm.value = false;
   } else {
@@ -3215,7 +3273,9 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   >{{ customGrouping.enabled ? t("redisGrouping.selectLoaded") : t("redis.selectAllLoaded") }}</Button
                 >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" data-redis-deselect-all @click="clearAllCheckedKeys">{{ t("redis.deselectAll") }}</Button>
-                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.batchExpiry')" data-redis-batch-expiry @click="openBatchExpiryDialog"><Clock class="w-3 h-3 mr-1" />{{ t("redis.batchExpiry") }}</Button>
+                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.batchExpiry')" :aria-label="t('redis.batchExpiry')" data-redis-batch-expiry @click="openBatchExpiryDialog"
+                  ><Clock class="redis-expiry-icon w-3 h-3 mr-1" /><span class="redis-expiry-label">{{ t("redis.batchExpiry") }}</span></Button
+                >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" data-redis-batch-delete @click="requestBatchDelete"><Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}</Button>
                 <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="mutatingKeys || loading || loadingMore || isFetchingAll" @click="loadKeys">
                   <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
@@ -3638,7 +3698,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
       </Pane>
     </Splitpanes>
 
-    <DangerConfirmDialog v-model:open="showDangerConfirm" :message="dangerMessage" :details="dangerDetails" :confirm-label="dangerConfirmLabel" :loading="deletingKeys" :close-on-confirm="pendingDanger?.kind !== 'delete-keys'" @confirm="applyDangerAction" />
+    <DangerConfirmDialog v-model:open="showDangerConfirm" :message="dangerMessage" :details="dangerDetails" :confirm-label="dangerConfirmLabel" :loading="deletingKeys" :close-on-confirm="pendingDanger?.kind === 'delete-keys' || pendingDanger?.kind === 'delete-group'" @confirm="applyDangerAction" />
 
     <Dialog :open="showBatchExpiryDialog" @update:open="onBatchExpiryDialogOpenChange">
       <DialogContent class="sm:max-w-[420px]">
@@ -3828,14 +3888,17 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
   gap: 0.375rem;
 }
 
-.redis-search-mode-group,
-.redis-key-toolbar-actions {
+.redis-search-mode-group {
   flex-wrap: nowrap;
   min-width: 0;
+  justify-self: start;
 }
 
-.redis-search-mode-group {
-  justify-self: start;
+/* Wrapping can never overlap; with nowrap + justify-end an overflowing row
+   spills left and paints over the search-mode segmented control (#9356). */
+.redis-key-toolbar-actions {
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .redis-search-mode-button {
@@ -3856,39 +3919,43 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
   gap: 0.375rem;
 }
 
-@container (max-width: 320px) {
+/* Toolbar max-content is ~730px; collapse the widest label to icon-only before
+   the row reaches the overflow band (covers ~320px..740px, see #9356). */
+@container (max-width: 740px) {
+  .redis-expiry-label {
+    display: none;
+  }
+
+  .redis-expiry-icon {
+    margin-right: 0;
+  }
+}
+
+@container (max-width: 340px) {
+  /* Small-window fallback below the 360px pane floor: two rows —
+     [mode | count] and the action buttons (#9356). */
   .redis-key-toolbar-header {
-    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .redis-search-mode-group {
+    grid-column: 1;
+    grid-row: 1;
   }
 
   .redis-key-count {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    text-align: left;
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .redis-key-toolbar-actions {
-    grid-column: 2;
-    grid-row: 1;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: flex-start;
   }
 }
 
 @container (max-width: 240px) {
-  .redis-search-mode-group {
-    grid-column: 1 / -1;
-    grid-row: 1;
-  }
-
-  .redis-key-count {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .redis-key-toolbar-actions {
-    grid-column: 2;
-    grid-row: 2;
-  }
-
   .redis-fuzzy-label {
     display: none;
   }
@@ -3908,7 +3975,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 }
 
 .redis-workspace-splitpanes > :deep(.splitpanes__pane:first-child) {
-  min-width: min(256px, 64%);
+  min-width: min(360px, 64%);
 }
 
 .redis-workspace-splitpanes :deep(.splitpanes--vertical > .splitpanes__splitter) {

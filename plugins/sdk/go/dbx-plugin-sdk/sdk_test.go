@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -104,5 +106,36 @@ func TestFramedServerDispatchesBinaryInput(t *testing.T) {
 	}
 	if output.Len() == 0 {
 		t.Fatal("expected framed initialize response")
+	}
+}
+
+func TestDataDirHelpers(t *testing.T) {
+	t.Setenv(DataDirEnvVar, "")
+	if DataDir() != "" {
+		t.Fatal("expected empty data dir without host environment")
+	}
+	if _, err := EnsureDataDir(); err == nil {
+		t.Fatal("expected an error without host environment")
+	}
+
+	dir := t.TempDir()
+	t.Setenv(DataDirEnvVar, dir)
+	if DataDir() != dir {
+		t.Fatalf("unexpected data dir: %q", DataDir())
+	}
+	if _, err := EnsureDataDir(); err != nil {
+		t.Fatal(err)
+	}
+	deep := filepath.Join(dir, "nested", "state")
+	t.Setenv(DataDirEnvVar, deep)
+	created, err := EnsureDataDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created != deep {
+		t.Fatalf("unexpected created dir: %q", created)
+	}
+	if info, err := os.Stat(deep); err != nil || !info.IsDir() {
+		t.Fatalf("expected created directory: %v %v", info, err)
 	}
 }

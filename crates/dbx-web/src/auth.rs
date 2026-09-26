@@ -48,7 +48,7 @@ fn api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str>
     path.strip_prefix(base)?.strip_prefix("/api/")
 }
 
-fn middleware_api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
+pub(crate) fn middleware_api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
     if let Some(suffix) = api_path_suffix(path, public_base_path) {
         return Some(suffix);
     }
@@ -137,6 +137,11 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 
     // Update in-memory state
     *state.password_hash.write().await = Some(hash);
+    if state.migration_ready.load(std::sync::atomic::Ordering::Acquire) {
+        if let Err(error) = state.web_mcp.reload(&state.app.storage, true).await {
+            log::error!("Web MCP remained disabled after password setup: {error}");
+        }
+    }
 
     // Auto-login: create session
     let token = uuid::Uuid::new_v4().to_string();
@@ -281,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn middleware_api_path_suffix_handles_nested_router_paths() {
+    pub(crate) fn middleware_api_path_suffix_handles_nested_router_paths() {
         assert_eq!(middleware_api_path_suffix("/auth/check", "/"), Some("auth/check"));
         assert_eq!(middleware_api_path_suffix("/connection/list", "/"), Some("connection/list"));
         assert_eq!(middleware_api_path_suffix("/api/connection/list", "/"), Some("connection/list"));

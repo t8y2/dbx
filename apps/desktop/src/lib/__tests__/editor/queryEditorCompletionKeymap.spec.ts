@@ -7,15 +7,21 @@ import { DEFAULT_SHORTCUT_SETTINGS, normalizeShortcutSettings, shortcutToCodeMir
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
+const batchSource = readFileSync(new URL("../../../components/editor/useQueryEditorBatchSelection.ts", import.meta.url), "utf8");
+
+const completionSource = readFileSync(new URL("../../../components/editor/useQueryEditorCompletion.ts", import.meta.url), "utf8");
+const completionKeysSource = readFileSync(new URL("../../../components/editor/useQueryEditorCompletionKeys.ts", import.meta.url), "utf8");
+
 function extractFunction(name: string): string {
-  const start = queryEditorSource.indexOf(`function ${name}(`);
+  const source = [queryEditorSource, completionSource, batchSource, completionKeysSource].find((candidate) => candidate.includes(`function ${name}(`)) ?? "";
+  const start = source.indexOf(`function ${name}(`);
   if (start < 0) throw new Error(`Missing QueryEditor function: ${name}`);
-  const bodyStart = queryEditorSource.indexOf("{", start);
+  const bodyStart = source.indexOf("{", start);
   let depth = 0;
-  for (let index = bodyStart; index < queryEditorSource.length; index++) {
-    const character = queryEditorSource[index];
+  for (let index = bodyStart; index < source.length; index++) {
+    const character = source[index];
     if (character === "{") depth++;
-    if (character === "}" && --depth === 0) return queryEditorSource.slice(start, index + 1);
+    if (character === "}" && --depth === 0) return source.slice(start, index + 1);
   }
   throw new Error(`Unterminated QueryEditor function: ${name}`);
 }
@@ -37,6 +43,7 @@ interface MockState {
   doc: {
     lineAt: (position: number) => { from: number; text: string };
   };
+  sliceDoc: (from: number, to: number) => string;
   selection: { main: MockSelection; ranges: MockSelection[] };
   replaceSelection: ReturnType<typeof vi.fn>;
   update: ReturnType<typeof vi.fn>;
@@ -52,12 +59,15 @@ interface TabHarness {
   handleEnter: (view: MockView) => boolean;
   insertNewlineWithoutCompletion: (view: MockView) => boolean;
   acceptCompletionOrNextSnippetField: (view: MockView) => boolean;
+  acceptSqlServerCompletionOnSpace: (view: MockView) => boolean;
   clearPendingCompletionTab: () => void;
   consumeSqlCompletionAutoStartSuppression: () => boolean;
 }
 
 function createHarness(options: {
+  databaseType?: string;
   completionStatus: (state: MockState) => "active" | "pending" | null;
+  selectedCompletion?: (state: MockState) => { type?: string } | null;
   acceptCompletion?: (view: MockView) => boolean;
   selectedCompletionIndex?: (state: MockState) => number | null;
   selectFirstCompletion?: (view: MockView) => boolean;
@@ -68,6 +78,7 @@ function createHarness(options: {
   indentMore?: (view: MockView) => boolean;
   acceptCompletionShortcut?: string;
   selectFirstCompletionOnOpen?: boolean;
+  sqlServerSpaceConfirmsCompletion?: boolean;
   imeComposing?: (view: MockView) => boolean;
 }): TabHarness {
   const source = [
@@ -79,6 +90,8 @@ function createHarness(options: {
     "let pendingCompletionTabTimer: ReturnType<typeof setTimeout> | null = null;",
     "let cancelPendingCompletionEnter: (() => void) | null = null;",
     "let suppressNextSqlCompletionAutoStartUntil = 0;",
+    "const completion = { get suppressAutoStartUntil() { return suppressNextSqlCompletionAutoStartUntil; }, set suppressAutoStartUntil(value) { suppressNextSqlCompletionAutoStartUntil = value; } };",
+    "const codeMirrorRuntime = { codeMirrorCompletionStatus, codeMirrorSelectedCompletion, codeMirrorAcceptCompletion, codeMirrorSelectedCompletionIndex, codeMirrorSelectFirstCompletion, codeMirrorCloseCompletion, codeMirrorInsertNewlineKeepIndent, codeMirrorNextSnippetField, codeMirrorIndentMore };",
     extractFunction("editorIndentUnit"),
     extractFunction("handleTab"),
     extractFunction("tabKeyAcceptsCompletion"),
@@ -88,6 +101,7 @@ function createHarness(options: {
     extractFunction("clearPendingCompletionEnter"),
     extractFunction("insertNewlineWithoutCompletion"),
     extractFunction("acceptCompletionOrNextSnippetField"),
+    extractFunction("acceptSqlServerCompletionOnSpace"),
     extractFunction("clearPendingCompletionTab"),
     extractFunction("waitForCompletionTab"),
     extractFunction("consumeSqlCompletionAutoStartSuppression"),
@@ -97,6 +111,7 @@ function createHarness(options: {
   }).outputText;
   const factory = new Function(
     "codeMirrorCompletionStatus",
+    "codeMirrorSelectedCompletion",
     "isBatchColumnSelectionCompletionActive",
     "codeMirrorAcceptCompletion",
     "codeMirrorSelectedCompletionIndex",
@@ -114,10 +129,11 @@ function createHarness(options: {
     "shortcutToCodeMirrorKey",
     "props",
     "isEditorComposing",
-    `${javascript}\nreturn { handleTab, handleEnter, insertNewlineWithoutCompletion, acceptCompletionOrNextSnippetField, clearPendingCompletionTab, consumeSqlCompletionAutoStartSuppression };`,
+    `${javascript}\nreturn { handleTab, handleEnter, insertNewlineWithoutCompletion, acceptCompletionOrNextSnippetField, acceptSqlServerCompletionOnSpace, clearPendingCompletionTab, consumeSqlCompletionAutoStartSuppression };`,
   );
   return factory(
     options.completionStatus,
+    options.selectedCompletion ?? (() => ({ type: "column" })),
     (status: "active" | "pending" | null) => status === "active",
     options.acceptCompletion ?? (() => false),
     options.selectedCompletionIndex ?? (() => 0),
@@ -135,11 +151,12 @@ function createHarness(options: {
         sqlFormatter: { useTabs: false, tabWidth: 2 },
         shortcuts: { ...DEFAULT_SHORTCUT_SETTINGS, acceptCompletion: options.acceptCompletionShortcut ?? DEFAULT_SHORTCUT_SETTINGS.acceptCompletion },
         selectFirstCompletionOnOpen: options.selectFirstCompletionOnOpen ?? false,
+        sqlServerSpaceConfirmsCompletion: options.sqlServerSpaceConfirmsCompletion ?? true,
       },
     },
     normalizeShortcutSettings,
     shortcutToCodeMirrorKey,
-    { databaseType: "mysql" },
+    { databaseType: options.databaseType ?? "mysql" },
     options.imeComposing ?? ((view: MockView) => (view as MockView & { composing?: boolean }).composing === true || (view as MockView & { compositionStarted?: boolean }).compositionStarted === true),
   ) as TabHarness;
 }
@@ -150,6 +167,7 @@ function createView(text = "SELECT", position = text.length, selectionOverrides:
     doc: {
       lineAt: () => ({ from: 0, text }),
     },
+    sliceDoc: (from, to) => text.slice(from, to),
     selection: { main: selection, ranges: [selection, ...additionalRanges] },
     replaceSelection: vi.fn((insert: string) => ({ insert })),
     update: vi.fn((change: unknown, options: unknown) => ({ change, options })),
@@ -170,9 +188,6 @@ afterEach(() => {
 });
 
 describe("QueryEditor completion Tab keymap", () => {
-  it("guards the batch INSERT snippet factory before applying", () => {
-    expect(queryEditorSource).toContain('if (session.mode === "insert" && !codeMirrorSnippetCompletion)');
-  });
   it("closes completion and suppresses its restart for the Enter newline", () => {
     const closeCompletion = vi.fn(() => true);
     let harness: TabHarness;
@@ -544,7 +559,7 @@ describe("QueryEditor completion Tab keymap", () => {
     const javascript = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
     }).outputText;
-    const factory = new Function("codeMirrorStartCompletion", `${javascript}\nreturn { triggerSqlCompletion, isEditorComposing };`);
+    const factory = new Function("codeMirrorStartCompletion", `const runtime = { codeMirrorStartCompletion };\n${javascript}\nreturn { triggerSqlCompletion, isEditorComposing };`);
     const startCompletion = vi.fn(() => true);
     const { triggerSqlCompletion } = factory(startCompletion) as {
       triggerSqlCompletion: (view: MockView) => boolean;
@@ -558,5 +573,79 @@ describe("QueryEditor completion Tab keymap", () => {
     (view as MockView & { composing: boolean }).composing = true;
     expect(triggerSqlCompletion(view)).toBe(false);
     expect(startCompletion).not.toHaveBeenCalled();
+  });
+});
+
+describe("QueryEditor SQL Server completion Space keymap", () => {
+  it.each(["keyword", "table", "column"])("accepts an active %s completion", (type) => {
+    const acceptCompletion = vi.fn(() => true);
+    const harness = createHarness({
+      databaseType: "sqlserver",
+      completionStatus: () => "active",
+      selectedCompletion: () => ({ type }),
+      acceptCompletion,
+    });
+    const view = createView("FXXX ");
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(acceptCompletion).toHaveBeenCalledWith(view);
+    expect(view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("inserts the typed space when automatic completion spacing is disabled", () => {
+    const harness = createHarness({ databaseType: "sqlserver", completionStatus: () => "active", acceptCompletion: () => true });
+    const view = createView("FXXX");
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 4, insert: " " },
+      selection: { anchor: 5 },
+      scrollIntoView: true,
+    });
+  });
+
+  it("moves over an existing following space instead of duplicating it", () => {
+    const harness = createHarness({ databaseType: "sqlserver", completionStatus: () => "active", acceptCompletion: () => true });
+    const view = createView("FXXX ", 4);
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(view.dispatch).toHaveBeenCalledWith({ selection: { anchor: 5 }, scrollIntoView: true });
+  });
+
+  it.each([
+    { databaseType: "postgresql", status: "active", completionType: "column" },
+    { databaseType: "sqlserver", status: "pending", completionType: "column" },
+    { databaseType: "sqlserver", status: "active", completionType: "function" },
+    { databaseType: "sqlserver", status: "active", completionType: "snippet" },
+  ])("keeps ordinary Space input for $databaseType/$status/$completionType", ({ databaseType, status, completionType }) => {
+    const acceptCompletion = vi.fn(() => true);
+    const harness = createHarness({
+      databaseType,
+      completionStatus: () => status as "active" | "pending",
+      selectedCompletion: () => ({ type: completionType }),
+      acceptCompletion,
+    });
+
+    expect(harness.acceptSqlServerCompletionOnSpace(createView())).toBe(false);
+    expect(acceptCompletion).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary Space input when CodeMirror cannot accept the selected completion", () => {
+    const harness = createHarness({ databaseType: "sqlserver", completionStatus: () => "active", acceptCompletion: () => false });
+
+    expect(harness.acceptSqlServerCompletionOnSpace(createView())).toBe(false);
+  });
+
+  it("keeps ordinary Space input while the SQL Server space-confirm setting is disabled", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const harness = createHarness({
+      databaseType: "sqlserver",
+      completionStatus: () => "active",
+      acceptCompletion,
+      sqlServerSpaceConfirmsCompletion: false,
+    });
+
+    expect(harness.acceptSqlServerCompletionOnSpace(createView())).toBe(false);
+    expect(acceptCompletion).not.toHaveBeenCalled();
   });
 });

@@ -18,6 +18,15 @@ const STREAM_ENTRY_PAGE_SIZE: usize = 50;
 const STREAM_PENDING_PAGE_SIZE: usize = 100;
 const COLLECTION_PAGE_SIZE: usize = 200;
 const STRING_PREVIEW_MAX_BYTES: usize = 64 * 1024;
+/// A collection page is capped by payload size as well as item count.
+///
+/// `COLLECTION_PAGE_SIZE` alone bounds a page only when the members are small. A hash, list, set
+/// or sorted set whose members are serialized blobs turns 200 members into hundreds of megabytes,
+/// which then has to cross the IPC boundary and be parsed and rendered, so opening the key looks
+/// like it does nothing. Strings already avoid this through `STRING_PREVIEW_MAX_BYTES`; this is
+/// the same guard for collections, except that no member is ever truncated — the page simply ends
+/// early and the remainder is fetched by the existing "load more" cursor.
+const COLLECTION_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
 const COLLECTION_FILTER_SCAN_MAX_ITERATIONS: usize = 10;
 const DEFAULT_REDIS_DATABASES: u32 = 16;
 const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -2683,8 +2692,10 @@ where
             let end = (COLLECTION_PAGE_SIZE as i64) - 1;
             let v: RedisRawValue =
                 redis::cmd("LRANGE").arg(key).arg(0).arg(end).query_async(con).await.map_err(|e| e.to_string())?;
-            let cursor = if len > COLLECTION_PAGE_SIZE as u64 { Some(COLLECTION_PAGE_SIZE as u64) } else { None };
-            RedisValueData::List { items: redis_list_items_from_raw(v, 0), total: len, scan_cursor: cursor }
+            let mut items = redis_list_items_from_raw(v, 0);
+            items.truncate(budgeted_page_len(&items, COLLECTION_PAGE_SIZE, list_item_page_bytes));
+            let next = items.len() as u64;
+            RedisValueData::List { items, total: len, scan_cursor: (next < len).then_some(next) }
         }
         "set" => {
             let len: u64 = redis::cmd("SCARD").arg(key).query_async(con).await.unwrap_or(0);
@@ -2694,9 +2705,10 @@ where
         "zset" => {
             let len: u64 = redis::cmd("ZCARD").arg(key).query_async(con).await.unwrap_or(0);
             let end = (COLLECTION_PAGE_SIZE as i64) - 1;
-            let items = zrange_page_raw(con, key, 0, end, false).await?;
-            let cursor = if len > COLLECTION_PAGE_SIZE as u64 { Some(COLLECTION_PAGE_SIZE as u64) } else { None };
-            RedisValueData::Zset { items, total: len, scan_cursor: cursor }
+            let mut items = zrange_page_raw(con, key, 0, end, false).await?;
+            items.truncate(budgeted_page_len(&items, COLLECTION_PAGE_SIZE, zset_item_page_bytes));
+            let next = items.len() as u64;
+            RedisValueData::Zset { items, total: len, scan_cursor: (next < len).then_some(next) }
         }
         "hash" => {
             let len: u64 = redis::cmd("HLEN").arg(key).query_async(con).await.unwrap_or(0);
@@ -3891,11 +3903,10 @@ where
             let end = start + count as i64 - 1;
             let v: RedisRawValue =
                 redis::cmd("LRANGE").arg(key).arg(start).arg(end).query_async(con).await.map_err(|e| e.to_string())?;
-            let next = cursor + count as u64;
-            Ok(RedisCollectionPage::List {
-                items: redis_list_items_from_raw(v, cursor),
-                scan_cursor: (next < len).then_some(next),
-            })
+            let mut items = redis_list_items_from_raw(v, cursor);
+            items.truncate(budgeted_page_len(&items, count, list_item_page_bytes));
+            let next = cursor + items.len() as u64;
+            Ok(RedisCollectionPage::List { items, scan_cursor: (next < len).then_some(next) })
         }
         "set" => {
             let (next_cursor, items) = if let Some(query) = filter_query {
@@ -3919,10 +3930,14 @@ where
             let start = cursor as i64;
             let end = start + count as i64;
             let mut items = zrange_page_raw(con, key, start, end, descending).await?;
+            // `zrange_page_raw` reads one extra member to detect a further page; the byte budget
+            // can also end the page before `count`, which likewise leaves members behind.
             let has_more = items.len() > count;
-            items.truncate(count);
-            let next = cursor + count as u64;
-            Ok(RedisCollectionPage::Zset { items, scan_cursor: has_more.then_some(next) })
+            let page_len = budgeted_page_len(&items, count, zset_item_page_bytes);
+            let ended_early = page_len < items.len().min(count);
+            items.truncate(page_len);
+            let next = cursor + items.len() as u64;
+            Ok(RedisCollectionPage::Zset { items, scan_cursor: (has_more || ended_early).then_some(next) })
         }
         "hash" => {
             let (next_cursor, mut items) = if let Some(query) = filter_query {
@@ -4117,7 +4132,8 @@ where
     } else {
         hscan_page_raw(con, key, cursor, count, None).await?
     };
-    let next_cursor = store_hash_overflow_page(key, &mut items, count, next_cursor, filter_query).await;
+    let page_len = budgeted_page_len(&items, count, hash_item_page_bytes);
+    let next_cursor = store_hash_overflow_page(key, &mut items, page_len, next_cursor, filter_query).await;
     Ok((next_cursor, items))
 }
 
@@ -4141,7 +4157,8 @@ where
     } else {
         sscan_page_raw(con, key, cursor, count).await?
     };
-    let next_cursor = store_set_overflow_page(key, &mut items, count, next_cursor, filter_query).await;
+    let page_len = budgeted_page_len(&items, count, set_item_page_bytes);
+    let next_cursor = store_set_overflow_page(key, &mut items, page_len, next_cursor, filter_query).await;
     Ok((next_cursor, items))
 }
 
@@ -4158,7 +4175,9 @@ async fn take_hash_overflow_page(
     let mut sessions = collection_overflow_sessions().lock().await;
     let mut session = sessions.take_matching(cursor, key, RedisCollectionOverflowKind::Hash, filter_query, None)?;
     let page = match &mut session.items {
-        RedisCollectionOverflowItems::Hash(items) => take_vec_page(items, count),
+        RedisCollectionOverflowItems::Hash(items) => {
+            take_vec_page(items, budgeted_page_len(items, count, hash_item_page_bytes))
+        }
         RedisCollectionOverflowItems::Set(_) => return None,
     };
     let has_buffered_items = match &session.items {
@@ -4185,7 +4204,9 @@ async fn take_set_overflow_page(
     let mut sessions = collection_overflow_sessions().lock().await;
     let mut session = sessions.take_matching(cursor, key, RedisCollectionOverflowKind::Set, filter_query, None)?;
     let page = match &mut session.items {
-        RedisCollectionOverflowItems::Set(items) => take_vec_page(items, count),
+        RedisCollectionOverflowItems::Set(items) => {
+            take_vec_page(items, budgeted_page_len(items, count, set_item_page_bytes))
+        }
         RedisCollectionOverflowItems::Hash(_) => return None,
     };
     let has_buffered_items = match &session.items {
@@ -4245,6 +4266,42 @@ async fn store_set_overflow_page(
         last_used: Instant::now(),
     };
     collection_overflow_sessions().lock().await.insert(session)
+}
+
+/// How many leading items fit in one page, honouring both the item count and the byte budget.
+///
+/// Always returns at least one item so a member larger than the whole budget still loads (and
+/// pagination cannot stall), and never more than `items.len()`.
+fn budgeted_page_len<T>(items: &[T], count: usize, size_of: impl Fn(&T) -> usize) -> usize {
+    let limit = count.max(1).min(items.len());
+    let mut used = 0usize;
+    for (index, item) in items.iter().take(limit).enumerate() {
+        used = used.saturating_add(size_of(item));
+        if used > COLLECTION_PAGE_MAX_BYTES {
+            return index.max(1);
+        }
+    }
+    limit
+}
+
+fn blob_page_bytes(blob: &RedisBlob) -> usize {
+    blob.raw_base64.len()
+}
+
+fn hash_item_page_bytes(item: &RedisHashItem) -> usize {
+    blob_page_bytes(&item.field) + blob_page_bytes(&item.value)
+}
+
+fn set_item_page_bytes(item: &RedisSetItem) -> usize {
+    blob_page_bytes(&item.member)
+}
+
+fn list_item_page_bytes(item: &RedisListItem) -> usize {
+    blob_page_bytes(&item.value)
+}
+
+fn zset_item_page_bytes(item: &RedisZsetItem) -> usize {
+    blob_page_bytes(&item.member) + item.score.len()
 }
 
 fn take_vec_page<T>(items: &mut Vec<T>, count: usize) -> Vec<T> {
@@ -4971,6 +5028,49 @@ mod tests {
         assert_eq!(con.command_count("GETRANGE"), 1);
         assert_eq!(con.command_count("GET"), 0);
         assert_eq!(con.command_count("STRLEN"), 1);
+    }
+
+    #[test]
+    fn collection_pages_stop_at_the_byte_budget_without_truncating_a_member() {
+        fn hash_items(count: usize, value_bytes: usize) -> Vec<RedisHashItem> {
+            (0..count)
+                .map(|index| RedisHashItem {
+                    field: text_blob(&format!("f{index}")),
+                    value: text_blob(&"v".repeat(value_bytes)),
+                    field_ttl: None,
+                })
+                .collect()
+        }
+        fn page_bytes(items: &[RedisHashItem]) -> usize {
+            items.iter().map(super::hash_item_page_bytes).sum()
+        }
+
+        // Members are sized as a fraction of the budget; base64 inflates them by 4/3 on the wire,
+        // so the assertions below are on the resulting page rather than on a hand-computed count.
+        for divisor in [2, 3, 8] {
+            let items = hash_items(200, super::COLLECTION_PAGE_MAX_BYTES / divisor);
+            let page_len = super::budgeted_page_len(&items, 200, super::hash_item_page_bytes);
+            assert!((1..200).contains(&page_len), "divisor {divisor}: page_len {page_len}");
+            assert!(
+                page_bytes(&items[..page_len]) <= super::COLLECTION_PAGE_MAX_BYTES,
+                "divisor {divisor} over budget"
+            );
+            assert!(
+                page_bytes(&items[..page_len + 1]) > super::COLLECTION_PAGE_MAX_BYTES,
+                "divisor {divisor}: page ended earlier than the budget required"
+            );
+        }
+
+        // Small members still fill a whole page, and a short input is returned whole.
+        let small = hash_items(500, 1);
+        assert_eq!(super::budgeted_page_len(&small, 200, super::hash_item_page_bytes), 200);
+        assert_eq!(super::budgeted_page_len(&small[..5], 200, super::hash_item_page_bytes), 5);
+
+        // A single member larger than the whole budget still loads, so paging cannot stall.
+        let huge = hash_items(3, super::COLLECTION_PAGE_MAX_BYTES * 2);
+        assert_eq!(super::budgeted_page_len(&huge, 200, super::hash_item_page_bytes), 1);
+
+        assert_eq!(super::budgeted_page_len::<RedisHashItem>(&[], 200, super::hash_item_page_bytes), 0);
     }
 
     #[tokio::test]

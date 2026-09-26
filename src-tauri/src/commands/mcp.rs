@@ -7,13 +7,13 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+#[path = "mcp_native_installation.rs"]
+mod native_installation;
+
 const MCP_PACKAGE_NAME: &str = "@dbx-app/mcp-server";
 const MCP_LATEST_URL: &str = "https://registry.npmjs.org/@dbx-app%2fmcp-server/latest";
-const MCP_INSTALL_COMMAND: &str = "npm install -g @dbx-app/mcp-server@latest";
-const MCP_PNPM_UPDATE_COMMAND: &str = "pnpm update -g @dbx-app/mcp-server";
 const MCP_UNINSTALL_COMMAND: &str = "npm uninstall -g @dbx-app/mcp-server";
 const MCP_PNPM_UNINSTALL_COMMAND: &str = "pnpm remove -g @dbx-app/mcp-server";
-const MCP_BUN_UPDATE_COMMAND: &str = "bun add -g @dbx-app/mcp-server@latest";
 const MCP_BUN_UNINSTALL_COMMAND: &str = "bun remove -g @dbx-app/mcp-server";
 const MCP_MIN_NODE_VERSION: NodeVersion = NodeVersion { major: 18, minor: 18, patch: 0 };
 const MCP_MIN_NODE_VERSION_REQUIREMENT: &str = ">=18.18.0";
@@ -22,7 +22,9 @@ const SHELL_COMMAND_MARKER: &str = "__DBX_MCP_COMMAND_OUTPUT_START__";
 #[derive(Debug, Serialize)]
 pub struct McpServerStatus {
     pub installed: bool,
+    pub installation_source: Option<String>,
     pub npm_available: bool,
+    pub npm_installed: bool,
     pub node_path: Option<String>,
     pub node_version: Option<String>,
     pub current_version: Option<String>,
@@ -163,14 +165,6 @@ impl NodeRuntime {
         )
     }
 
-    fn update_command(&self) -> &'static str {
-        match self.mcp_installation.as_ref().map(|installation| &installation.package_manager) {
-            Some(McpPackageManager::Pnpm { .. } | McpPackageManager::PnpmUnavailable { .. }) => MCP_PNPM_UPDATE_COMMAND,
-            Some(McpPackageManager::Bun { .. }) => MCP_BUN_UPDATE_COMMAND,
-            _ => MCP_INSTALL_COMMAND,
-        }
-    }
-
     fn uninstall_command(&self) -> &'static str {
         match self.mcp_installation.as_ref().map(|installation| &installation.package_manager) {
             Some(McpPackageManager::Pnpm { .. } | McpPackageManager::PnpmUnavailable { .. }) => {
@@ -289,32 +283,60 @@ struct NodeVersion {
 pub async fn check_mcp_server_status(app: AppHandle) -> Result<McpServerStatus, String> {
     let default_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
     let data_dir = crate::data_dir::resolve_data_dir_with_mode(default_data_dir).custom_data_dir().map(path_string);
-    let local_status = tauri::async_runtime::spawn_blocking(resolve_node_runtime);
+    let local_status = tauri::async_runtime::spawn_blocking(|| {
+        let native = native_installation::resolve();
+        let runtime = resolve_node_runtime();
+        (native, runtime)
+    });
     let latest_version = fetch_latest_mcp_version();
     let (local_status, latest_version) = tokio::join!(local_status, latest_version);
-    let runtime = local_status.map_err(|err| err.to_string())?;
+    let (native, runtime) = local_status.map_err(|err| err.to_string())?;
     let installation = runtime.as_ref().and_then(|runtime| runtime.mcp_installation.as_ref());
-    let installation_status = mcp_installation_status_fields(runtime.as_ref());
+    let npm_installed = installation.is_some();
     let npm_available = runtime.is_some();
     let node_path = runtime.as_ref().map(|runtime| path_string(&runtime.node_path));
     let node_version = runtime.as_ref().map(|runtime| runtime.node_version.clone());
+    if let Some(native) = native {
+        let latest_version = latest_version.ok();
+        let update_available = native
+            .version
+            .as_deref()
+            .zip(latest_version.as_deref())
+            .is_some_and(|(current, latest)| dbx_core::update::is_newer_version(latest, current));
+        return Ok(McpServerStatus {
+            installed: true,
+            installation_source: Some(native.source().to_string()),
+            npm_available,
+            npm_installed,
+            node_path,
+            node_version,
+            current_version: native.version.clone(),
+            latest_version,
+            update_available,
+            bin_path: Some(path_string(&native.binary)),
+            native_bin_path: Some(path_string(&native.binary)),
+            script_path: None,
+            data_dir,
+            install_command: native.install_command().to_string(),
+            update_command: native.update_command().to_string(),
+            uninstall_command: native.uninstall_command(),
+            error: None,
+        });
+    }
+    let installation_status = mcp_installation_status_fields(runtime.as_ref());
     let current_version = installation_status.current_version;
     let latest_version = latest_version.ok();
     let update_available = current_version
         .as_deref()
         .zip(latest_version.as_deref())
         .is_some_and(|(current, latest)| dbx_core::update::is_newer_version(latest, current));
-    let error = match runtime.as_ref() {
-        None => Some(format!(
-            "Unable to resolve a compatible Node.js ({}) and npm runtime.",
-            MCP_MIN_NODE_VERSION_REQUIREMENT
-        )),
-        Some(_) => mcp_status_installation_error(installation),
-    };
+    let error = mcp_status_installation_error(installation);
 
     Ok(McpServerStatus {
         installed: installation_status.installed,
+        installation_source: installation_status.installed.then(|| "npm".to_string()),
         npm_available,
+        npm_installed,
         node_path,
         node_version,
         current_version,
@@ -324,8 +346,8 @@ pub async fn check_mcp_server_status(app: AppHandle) -> Result<McpServerStatus, 
         native_bin_path: installation_status.native_bin_path,
         script_path: installation_status.script_path,
         data_dir,
-        install_command: MCP_INSTALL_COMMAND.to_string(),
-        update_command: runtime.as_ref().map(NodeRuntime::update_command).unwrap_or(MCP_INSTALL_COMMAND).to_string(),
+        install_command: native_installation::install_command().to_string(),
+        update_command: native_installation::install_command().to_string(),
         uninstall_command: runtime
             .as_ref()
             .map(NodeRuntime::uninstall_command)
@@ -338,61 +360,89 @@ pub async fn check_mcp_server_status(app: AppHandle) -> Result<McpServerStatus, 
 #[tauri::command]
 pub async fn install_mcp_server() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let runtime = resolve_node_runtime().ok_or_else(|| {
-            format!(
-                "Unable to resolve a compatible Node.js ({}) and npm runtime. Install Node.js with npm and try again.",
-                MCP_MIN_NODE_VERSION_REQUIREMENT
-            )
-        })?;
-        let output = runtime.install_or_update()?;
-
-        if !output.success {
-            let error_msg = if !output.stderr.is_empty() { output.stderr } else { output.stdout };
-            return Err(format!("Installation failed: {}", error_msg));
+        let native = native_installation::resolve();
+        if native.is_some() {
+            let npm_installed = resolve_node_runtime().is_some_and(|runtime| runtime.has_mcp_package());
+            return native_installation::install_or_update(native.as_ref(), npm_installed);
         }
-
-        let installed = runtime.refresh().ok_or_else(|| {
-            format!(
-                "Installation completed, but the Node.js runtime at {} could not be validated.",
-                runtime.node_path.display()
-            )
-        })?;
-        let installation = installed.mcp_installation.as_ref().ok_or_else(|| {
-            format!(
-                "Installation completed, but {} was not found under {}.",
-                MCP_PACKAGE_NAME,
-                installed.npm_root.display()
-            )
-        })?;
-        Ok(format!("Successfully installed @dbx-app/mcp-server@{}", installation.package_version))
+        if let Some(runtime) = resolve_node_runtime().filter(NodeRuntime::has_mcp_package) {
+            return install_or_update_npm_mcp_server_sync(runtime);
+        }
+        native_installation::install_or_update(None, false)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub async fn uninstall_mcp_server() -> Result<String, String> {
+pub async fn install_native_mcp_server() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let runtime = resolve_node_runtime().ok_or_else(|| {
-            format!("Unable to resolve a compatible Node.js ({}) and npm runtime.", MCP_MIN_NODE_VERSION_REQUIREMENT)
-        })?;
-        if !runtime.has_mcp_package() {
-            return Err(format!("{} is not installed in the detected Node.js runtime.", MCP_PACKAGE_NAME));
-        }
-
-        let output = runtime.uninstall()?;
-        if !output.success {
-            let error_msg = if !output.stderr.is_empty() { output.stderr } else { output.stdout };
-            return Err(format!("Uninstallation failed: {}", error_msg));
-        }
-
-        if runtime.refresh().is_some_and(|refreshed| refreshed.has_mcp_package()) {
-            return Err(format!("Uninstallation completed, but {} is still installed.", MCP_PACKAGE_NAME));
-        }
-        Ok(format!("Successfully uninstalled {}", MCP_PACKAGE_NAME))
+        let native = native_installation::resolve();
+        let npm_installed = resolve_node_runtime().is_some_and(|runtime| runtime.has_mcp_package());
+        native_installation::install_or_update(native.as_ref(), npm_installed)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn install_or_update_npm_mcp_server_sync(runtime: NodeRuntime) -> Result<String, String> {
+    let output = runtime.install_or_update()?;
+    if !output.success {
+        let error_msg = if !output.stderr.is_empty() { output.stderr } else { output.stdout };
+        return Err(format!("Installation failed: {}", error_msg));
+    }
+
+    let installed = runtime.refresh().ok_or_else(|| {
+        format!(
+            "Installation completed, but the Node.js runtime at {} could not be validated.",
+            runtime.node_path.display()
+        )
+    })?;
+    let installation = installed.mcp_installation.as_ref().ok_or_else(|| {
+        format!(
+            "Installation completed, but {} was not found under {}.",
+            MCP_PACKAGE_NAME,
+            installed.npm_root.display()
+        )
+    })?;
+    Ok(format!("Successfully installed @dbx-app/mcp-server@{}", installation.package_version))
+}
+
+#[tauri::command]
+pub async fn uninstall_mcp_server() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        if let Some(native) = native_installation::resolve() {
+            return native.uninstall();
+        }
+        uninstall_npm_mcp_server_sync()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn uninstall_npm_mcp_server() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(uninstall_npm_mcp_server_sync).await.map_err(|e| e.to_string())?
+}
+
+fn uninstall_npm_mcp_server_sync() -> Result<String, String> {
+    let runtime = resolve_node_runtime().ok_or_else(|| {
+        format!("Unable to resolve a compatible Node.js ({}) and npm runtime.", MCP_MIN_NODE_VERSION_REQUIREMENT)
+    })?;
+    if !runtime.has_mcp_package() {
+        return Err(format!("{} is not installed in the detected Node.js runtime.", MCP_PACKAGE_NAME));
+    }
+
+    let output = runtime.uninstall()?;
+    if !output.success {
+        let error_msg = if !output.stderr.is_empty() { output.stderr } else { output.stdout };
+        return Err(format!("Uninstallation failed: {}", error_msg));
+    }
+
+    if runtime.refresh().is_some_and(|refreshed| refreshed.has_mcp_package()) {
+        return Err(format!("Uninstallation completed, but {} is still installed.", MCP_PACKAGE_NAME));
+    }
+    Ok(format!("Successfully uninstalled {}", MCP_PACKAGE_NAME))
 }
 
 async fn fetch_latest_mcp_version() -> Result<String, String> {
@@ -424,6 +474,9 @@ pub(crate) async fn resolve_mcp_server_command() -> Result<(String, Vec<String>)
 }
 
 fn resolve_mcp_server_command_sync() -> Option<(String, Vec<String>)> {
+    if let Some(native) = native_installation::resolve() {
+        return Some((path_string(&native.binary), Vec::new()));
+    }
     let runtime = resolve_node_runtime();
     if let Some(command) = runtime.as_ref().and_then(mcp_command_for_runtime) {
         return Some(command);
@@ -2009,7 +2062,6 @@ mod tests {
             native_bin_path: None,
         };
         let runtime = runtime_for_installation(installation, PathBuf::from("/node-root"));
-        assert_eq!(runtime.update_command(), super::MCP_BUN_UPDATE_COMMAND);
         assert_eq!(runtime.uninstall_command(), super::MCP_BUN_UNINSTALL_COMMAND);
     }
 
@@ -2033,7 +2085,6 @@ mod tests {
         assert!(runtime.install_or_update().is_err());
         assert!(runtime.uninstall().is_err());
         // The UI still shows the bun command so the user can act manually.
-        assert_eq!(runtime.update_command(), super::MCP_BUN_UPDATE_COMMAND);
     }
 
     #[test]
@@ -2393,7 +2444,6 @@ mod tests {
                 .unwrap();
         let runtime = runtime_for_installation(installation, npm_root);
 
-        assert_eq!(runtime.update_command(), super::MCP_INSTALL_COMMAND);
         assert_eq!(runtime.uninstall_command(), super::MCP_UNINSTALL_COMMAND);
         assert!(matches!(
             runtime.mcp_installation.as_ref().map(|installation| &installation.package_manager),
@@ -2444,7 +2494,6 @@ mod tests {
         assert_eq!(installation.script_path, canonical_runtime_path(&fixture.script_path).unwrap());
         assert_eq!(installation.launcher_path, canonical_runtime_path(&fixture.launcher_path));
         assert_eq!(installation.native_bin_path, None);
-        assert_eq!(runtime.update_command(), super::MCP_PNPM_UPDATE_COMMAND);
         assert_eq!(runtime.uninstall_command(), super::MCP_PNPM_UNINSTALL_COMMAND);
         assert!(matches!(
             installation.package_manager,
@@ -2687,7 +2736,6 @@ mod tests {
         let installation = probed.mcp_installation.as_ref().unwrap();
         assert_eq!(installation.script_path, canonical_runtime_path(&fixture.script_path).unwrap());
         assert_eq!(installation.package_version, "0.4.71");
-        assert_eq!(probed.update_command(), super::MCP_PNPM_UPDATE_COMMAND);
         assert_eq!(probed.uninstall_command(), super::MCP_PNPM_UNINSTALL_COMMAND);
         // Detection canonicalizes the launcher directory, so the reported launcher,
         // `PNPM_HOME`, `PATH`, and `--global-dir` values are all resolved paths; the

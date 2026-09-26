@@ -25,11 +25,12 @@ const OPENGAUSS_A_OBJECTS: SidebarObjectKind[] = [...POSTGRES_OBJECTS, "PACKAGE"
 const POSTGRES_NO_TYPE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
 
 // Kingbase and Vastbase agents support the same user-defined type listing via
-// their own metadata query, but do not expose sequences. Kingbase additionally
-// has a verified schema-trigger path; keep Vastbase separate until its Agent
+// their own metadata query, and their sequences are read from the PostgreSQL
+// catalogs over the agent connection (t8y2/dbx#9016). Kingbase additionally has
+// a verified schema-trigger path; keep Vastbase separate until its Agent
 // exposes the same parent-table-aware metadata contract.
-const KINGBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE"];
-const VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TYPE"];
+const KINGBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "TYPE"];
+const VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "TYPE"];
 
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
 const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];

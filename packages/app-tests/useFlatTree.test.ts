@@ -104,6 +104,9 @@ test("sticky containers prefer databases and fall back to schemas", () => {
   assert.equal(index.stickyContainerIndexByIndex[3], 1);
   assert.equal(index.stickyContainerIndexByIndex[5], 5);
   assert.equal(index.stickyContainerIndexByIndex[6], 5);
+  assert.equal(index.nextBoundaryIndexByIndex[1], 4);
+  assert.equal(index.nextBoundaryIndexByIndex[2], 4);
+  assert.equal(index.nextBoundaryIndexByIndex[5], -1);
 });
 
 test("shouldVirtualizeFlatTree keeps small/medium trees on the plain renderer", () => {

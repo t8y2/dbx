@@ -255,6 +255,7 @@ export const listDialectDataTypes = forward("listDialectDataTypes");
 
 // Docs
 export const collectDocsSnapshot = forward("collectDocsSnapshot");
+export const collectDocsSnapshotForExport = forward("collectDocsSnapshotForExport");
 export const loadDocsAnnotations = forward("loadDocsAnnotations");
 export const applyDocsAnnotations = forward("applyDocsAnnotations");
 export const saveDocsAnnotations = forward("saveDocsAnnotations");
@@ -603,6 +604,7 @@ export const redisSetExpireAt = forward("redisSetExpireAt");
 export const redisSetKeysTtl = forward("redisSetKeysTtl");
 export const redisSetKeysExpireAt = forward("redisSetKeysExpireAt");
 export const redisDeleteKeys = forward("redisDeleteKeys");
+export const redisDeleteKeysByPattern = forward("redisDeleteKeysByPattern");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
 export const redisLoadMore = forward("redisLoadMore");
@@ -920,12 +922,16 @@ export const deleteHistoryEntry = forward("deleteHistoryEntry");
 // Updates
 export const checkMcpServerStatus = forward("checkMcpServerStatus");
 export const installMcpServer = forward("installMcpServer");
+export const installNativeMcpServer = forward("installNativeMcpServer");
 export const uninstallMcpServer = forward("uninstallMcpServer");
+export const uninstallNpmMcpServer = forward("uninstallNpmMcpServer");
 export const loadMcpHttpServerSettings = forward("loadMcpHttpServerSettings");
 export const saveMcpHttpServerSettings = forward("saveMcpHttpServerSettings");
 export const mcpHttpServerStatus = forward("mcpHttpServerStatus");
 export const rotateMcpHttpServerToken = forward("rotateMcpHttpServerToken");
 export const loadWebMcpHttpStatus = forward("loadWebMcpHttpStatus");
+export const saveWebMcpHttpSettings = forward("saveWebMcpHttpSettings");
+export const rotateWebMcpToken = forward("rotateWebMcpToken");
 export const checkForUpdates = forward("checkForUpdates");
 export const fetchChangelog = forward("fetchChangelog");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
@@ -995,6 +1001,7 @@ export type {
   McpHttpServerSettings,
   McpHttpServerStatus,
   WebMcpHttpStatus,
+  WebMcpHttpSettings,
   UpdateInfo,
   DownloadedUpdate,
   RedisBlob,

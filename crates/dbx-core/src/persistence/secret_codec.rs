@@ -473,6 +473,21 @@ pub fn managed_key_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join(".dbx").join("secret.key")
 }
 
+/// Every file that can supply key material on its own, in resolution order.
+/// Callers that cache a resolved codec can digest these paths to notice a key
+/// file that was added, replaced, or removed afterwards.
+pub fn key_file_candidates(data_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = std::env::var_os("DBX_SECRET_KEY_FILE") {
+        paths.push(std::path::PathBuf::from(path));
+    }
+    if let Some(path) = default_key_path() {
+        paths.push(path);
+    }
+    paths.push(managed_key_path(data_dir));
+    paths
+}
+
 fn read_key_file_with_retry(path: &std::path::Path, reject_symlink: bool) -> Result<SecretCodec, String> {
     let mut last_error = "KEY_FILE_UNAVAILABLE".to_string();
     for attempt in 0..20 {

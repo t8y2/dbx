@@ -30,7 +30,7 @@
 
 | # | 方式 | 模式 | 说明 |
 |---|------|------|------|
-| 1 | OAuth Authorization Code + PKCE | 桌面 | 主路径。复用 `crates/dbx-drivers/src/mongo_oidc.rs` 的模式：本地 `TcpListener` 监听回调 → 系统浏览器授权 → code 换 token。Connected App 需配置 `refresh_token` scope 以获取长期令牌 |
+| 1 | OAuth Authorization Code + PKCE | 桌面 | 主路径。复用 `crates/dbx-driver-mongodb/src/mongo_oidc.rs` 的模式：本地 `TcpListener` 监听回调 → 系统浏览器授权 → code 换 token。Connected App 需配置 `refresh_token` scope 以获取长期令牌 |
 | 2 | OAuth Device Flow | 桌面 + **web** | `grant_type=urn:ietf:params:oauth:grant-type:device_code`。UI 显示 user code，用户在任意设备浏览器输入。**这是 web/Docker 模式下唯一的浏览器授权方式** |
 | 3 | 粘贴 Access Token + instance_url | 桌面 + web | 调试/CI/兜底。Session ID 可直接作 Bearer token。无 refresh 能力，过期后需重新粘贴 |
 | 4 | Username-Password OAuth | 桌面 + web | ⚠️ Salesforce 已弃用（新 Connected App 无法启用）。仅作为 BYO Connected App 的兼容项，UI 上明确标注 deprecated；密码需拼接 security token |
@@ -249,7 +249,7 @@ capabilities 覆盖（MVP）：
 - prepare 时以驱动的 `parse_salesforce_statement` 为权威校验，保证不会为 org 必然拒绝的语句发令牌；`upsert`/bulk/composite 一律 `SALESFORCE_DML_INVALID`（一次只碰一条记录）。
 - 身份查询是 best-effort：失败只在摘要里写「身份未知」，仍然完成 prepare，把是否 apply 的决定权留给人。
 
-风险分级（`crates/dbx-sql/src/query_execution_sql.rs`，fail-closed）：SOQL → `Read`；带 Id 的单记录 DML → `ScopedWrite`（映射 `SqlRisk::Write`，只需 safe_write）；无 Id / 无法判定 → `OpaqueWrite`（映射 `SqlRisk::Ddl`，需 allow_dangerous_sql）。
+风险分级（`crates/dbx-sql-core/src/query_execution_sql.rs`，fail-closed）：SOQL → `Read`；带 Id 的单记录 DML → `ScopedWrite`（映射 `SqlRisk::Write`，只需 safe_write）；无 Id / 无法判定 → `OpaqueWrite`（映射 `SqlRisk::Ddl`，需 allow_dangerous_sql）。
 
 前端开关位置：**设置 → MCP → 连接范围**，仅对 `db_type === "salesforce"` 的连接行渲染（`McpResourceScopePicker.vue`），文案 `settings.mcpConnectionPolicyAllowSalesforceDml`；有效执行模式为只读时点击只提示不保存。工具白名单里三个新工具可独立勾选，因此可以只给 agent 读能力（`current_user` + SOQL）而不给写通道。
 

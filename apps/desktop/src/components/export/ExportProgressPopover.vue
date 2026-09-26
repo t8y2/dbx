@@ -61,6 +61,9 @@ const progressPercent = (totalRows: number | null, rowsExported: number) => {
 };
 
 const progressValue = (task: ExportTask) => {
+  if (task.kind === "data-dictionary") {
+    return task.dictionaryTotal ? Math.min(95, Math.round(((task.dictionaryCompleted ?? 0) / task.dictionaryTotal) * 95)) : 0;
+  }
   if (task.kind === "database-export") {
     if (task.overallPercent !== undefined) return task.overallPercent;
     if (!task.totalObjects || task.totalObjects <= 0) return 0;
@@ -94,6 +97,7 @@ const taskFileName = (task: ExportTask) => {
 };
 
 const taskTitle = (task: ExportTask) => {
+  if (task.kind === "data-dictionary") return `${t("dataDictionary.title")}: ${task.tableName}`;
   // database-export and sql-file keep their task labels on purpose: the former
   // names the database (filePath may be a directory), the latter already names
   // the executed script. Only table-export synthesizes a misleading
@@ -125,6 +129,14 @@ const comparePhaseText = (phase?: string) => {
 };
 
 const rowsText = (task: ExportTask) => {
+  if (task.kind === "data-dictionary") {
+    if (task.status === "Done") return [t("exportProgress.done"), task.dictionaryWarnings ? t("dataDictionary.warningCount", { count: task.dictionaryWarnings }) : ""].filter(Boolean).join(" · ");
+    if (task.status === "Error") return t("exportProgress.error");
+    const phase = t(`dataDictionary.phase${(task.dictionaryPhase ?? "preparing").replace(/^./, (letter) => letter.toUpperCase())}`);
+    const count = task.dictionaryPhase === "collecting" && task.dictionaryTotal ? t("exportProgress.objectsCount", { current: (task.dictionaryCompleted ?? 0).toLocaleString(), total: task.dictionaryTotal.toLocaleString() }) : "";
+    const warnings = task.dictionaryWarnings ? t("dataDictionary.warningCount", { count: task.dictionaryWarnings }) : "";
+    return [phase, count, task.dictionaryCurrent, warnings].filter(Boolean).join(" · ");
+  }
   if (task.kind === "schema-diff") {
     if (isActive(task.status)) {
       const progress = task.compareTotal ? `${task.compareCurrent ?? 0}/${task.compareTotal}` : "";
@@ -217,6 +229,7 @@ const databaseObjectText = (task: ExportTask) => {
 const statusIcon = (task: ExportTask) => {
   if (isActive(task.status)) {
     if (task.kind === "database-export") return DatabaseBackup;
+    if (task.kind === "data-dictionary") return FileDown;
     if (task.kind === "sql-file") return FileCode2;
     if (task.kind === "data-transfer") return ArrowRightLeft;
     if (task.kind === "multi-db-execution") return Layers3;
@@ -262,7 +275,7 @@ function toggleShowAll() {
 // Reveal is offered only for tasks that produce one local output file.
 // sql-file filePath can be a "; "-joined list of input scripts (not an
 // output), and data-transfer has no local file at all.
-const canRevealTaskFile = (task: ExportTask) => (task.kind === "table-export" || task.kind === "database-export") && task.status === "Done" && !!task.filePath && isTauriRuntime();
+const canRevealTaskFile = (task: ExportTask) => (task.kind === "table-export" || task.kind === "database-export" || task.kind === "data-dictionary") && task.status === "Done" && !!task.filePath && isTauriRuntime();
 
 async function revealTaskFile(task: ExportTask) {
   if (!canRevealTaskFile(task) || revealingTaskIds.value.includes(task.exportId)) return;
@@ -359,6 +372,7 @@ function openTask(task: ExportTask): void {
                 v-if="
                   task.totalRows ||
                   (task.kind === 'database-export' && (task.totalObjects || task.overallPercent !== undefined)) ||
+                  (task.kind === 'data-dictionary' && task.dictionaryPhase === 'collecting' && task.dictionaryProgressKnown && task.dictionaryTotal) ||
                   (task.kind === 'data-transfer' && task.totalTables) ||
                   (task.kind === 'multi-db-execution' && task.multiDbTotal) ||
                   ((task.kind === 'schema-diff' || task.kind === 'data-compare') && task.compareTotal)

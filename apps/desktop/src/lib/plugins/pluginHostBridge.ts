@@ -1096,8 +1096,11 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
           if (typeof data === 'string') return request('host.writeFileChunk', { handleId, offset, dataBase64: data });
           // A Uint8Array can be a view into a larger buffer — transferring
           // .buffer blindly would send bytes outside the view. Copy the
-          // visible range into a standalone buffer first.
-          const bytes = data instanceof ArrayBuffer ? data : new Uint8Array(data instanceof Uint8Array ? data.slice().buffer : new Uint8Array(data).buffer);
+          // visible range into a standalone ArrayBuffer first: the transfer
+          // list only accepts ArrayBuffer/MessagePort (a Uint8Array view is
+          // rejected by the engine with "Value at index 0 does not have a
+          // transferable type", which failed every fileTransfer.write).
+          const bytes = data instanceof ArrayBuffer ? data : (data instanceof Uint8Array ? data.slice().buffer : new Uint8Array(data).buffer);
           return request('host.writeFileChunk', { handleId, offset }, { transfer: bytes });
         },
         finish: (handleId) => request('host.finishFileSave', { handleId }),

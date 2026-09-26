@@ -884,6 +884,7 @@ export interface EditorSettings {
   dataGridQuickEntry: boolean;
   dataGridFilterEditorView: DataGridFilterEditorView;
   dataGridToolbarLayout: DataGridToolbarLayout;
+  /** Opens Conditions/Text filter editors initially; users can still collapse them. */
   dataGridKeepFilterEditorExpanded: boolean;
   dataGridTextFilterPanelHeight: number;
   localFilterPopoverWidth: number;
@@ -1875,8 +1876,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
 
 /**
  * Cloud snapshots are applied as partial settings updates rather than loaded
- * through `normalizeEditorSettings`. Translate the removed inverse flag here
- * so older snapshots retain their behavior on every incremental update path.
+ * through `normalizeEditorSettings`. Translate the removed inverse flag into
+ * the current initial-expansion preference on every incremental update path.
  */
 function migrateLegacyFilterEditorExpansionPatch(partial: Partial<EditorSettings>): Partial<EditorSettings> {
   const patch = partial as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown };

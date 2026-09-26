@@ -1,0 +1,35 @@
+[package]
+name = "dbx-driver-agent"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+dbx-platform = { path = "../dbx-platform", features = ["host-prompts", "downloads"] }
+dbx-sql-core = { path = "../dbx-sql-core" }
+dbx-types = { path = "../dbx-types", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+crc = "3"
+flate2 = "1"
+futures = "0.3"
+log = "0.4"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+zstd = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+sysinfo = { version = "0.32", features = ["system"] }

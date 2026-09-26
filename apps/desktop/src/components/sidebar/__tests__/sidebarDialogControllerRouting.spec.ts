@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { reactive, ref, toRefs } from "vue";
-import { createRoutedSidebarDialogController } from "@/components/sidebar/sidebarDialogControllerRouting";
+import { createRoutedSidebarDialogController, routedCanSetCreateDatabaseCharset } from "@/components/sidebar/sidebarDialogControllerRouting";
 
 describe("createRoutedSidebarDialogController", () => {
   it("keeps dialog open flags linked to the shared module refs", () => {
@@ -59,5 +59,22 @@ describe("createRoutedSidebarDialogController", () => {
     expect(routed.showCreateDatabaseDialog).toBe(true);
     routed.showCreateDatabaseDialog = false;
     expect(showCreateDatabaseDialog.value).toBe(false);
+  });
+});
+
+describe("routedCanSetCreateDatabaseCharset", () => {
+  it("exposes the picker for locale-only dialects like GBase 8s (charset flag alone is false)", () => {
+    // Regression: the routed controller used to assign the raw charset-only value, hiding the
+    // create-database locale picker for GBase 8s / Informix even though the DB_LOCALE directive
+    // was still emitted.
+    expect(routedCanSetCreateDatabaseCharset(false, true)).toBe(true);
+  });
+
+  it("exposes the picker for charset-capable dialects like MySQL", () => {
+    expect(routedCanSetCreateDatabaseCharset(true, false)).toBe(true);
+  });
+
+  it("hides the picker when neither charset nor locale applies", () => {
+    expect(routedCanSetCreateDatabaseCharset(false, false)).toBe(false);
   });
 });

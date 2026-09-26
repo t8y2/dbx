@@ -27,7 +27,7 @@ pub fn streamable_http_router(
     auth: HttpAuth,
     allowed_hosts: Vec<String>,
     web_mode: bool,
-) -> Router {
+) -> Result<Router, String> {
     build_streamable_http_router(backend, path, auth, allowed_hosts, web_mode, None, Default::default())
 }
 
@@ -39,8 +39,15 @@ fn build_streamable_http_router(
     web_mode: bool,
     cancellation: Option<CancellationToken>,
     session_manager: Arc<LocalSessionManager>,
-) -> Router {
-    let mut rmcp_config = StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts);
+) -> Result<Router, String> {
+    auth.set_allowed_hosts(allowed_hosts.clone())?;
+    // Web settings update the shared policy without rebuilding the router.
+    // Keep rmcp's existing checks for the standalone server.
+    let mut rmcp_config = if web_mode {
+        StreamableHttpServerConfig::default().disable_allowed_hosts().disable_allowed_origins()
+    } else {
+        StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts)
+    };
     if let Some(cancellation) = cancellation {
         rmcp_config = rmcp_config.with_cancellation_token(cancellation);
     }
@@ -59,14 +66,14 @@ fn build_streamable_http_router(
     let cors_auth = auth.clone();
     let router =
         Router::new().nest_service(path, service).layer(middleware::from_fn_with_state(auth, authorize_request));
-    router.layer(
+    Ok(router.layer(
         CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(move |origin, _| {
                 origin.to_str().is_ok_and(|origin| cors_auth.origin_is_allowed(origin))
             }))
             .allow_methods([Method::GET, Method::POST, Method::DELETE])
             .allow_headers(Any),
-    )
+    ))
 }
 
 /// Serves one stateful rmcp Streamable HTTP endpoint. Every MCP protocol
@@ -111,7 +118,8 @@ pub async fn serve_streamable_http_on_listener(
         false,
         Some(cancellation.child_token()),
         session_manager.clone(),
-    );
+    )
+    .map_err(io::Error::other)?;
     let router = Router::new().route("/healthz", get(health)).route("/readyz", get(health)).merge(mcp_router);
 
     eprintln!("DBX MCP Streamable HTTP listening on http://{}{}", config.bind_addr, config.path);
@@ -322,7 +330,8 @@ mod tests {
             false,
             Some(cancellation.child_token()),
             manager.clone(),
-        );
+        )
+        .unwrap();
         let shutdown = cancellation.clone();
         let shutdown_manager = manager.clone();
         let task = tokio::spawn(async move {

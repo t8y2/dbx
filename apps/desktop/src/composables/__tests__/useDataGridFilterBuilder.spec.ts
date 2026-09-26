@@ -27,6 +27,17 @@ describe("useDataGridFilterBuilder", () => {
     expect(builder.rules.value[0]?.columnName).toBe("");
   });
 
+  it("adds one rule after the final rule is removed", () => {
+    let nextId = 0;
+    const builder = useDataGridFilterBuilder({ columns: ["id"], createId: () => `rule-${++nextId}`, isComplete: () => true, buildCondition: async () => "" });
+
+    builder.ensureRule();
+    builder.removeRule("rule-1");
+    builder.addRule();
+
+    expect(builder.rules.value.map((rule) => rule.id)).toEqual(["rule-2"]);
+  });
+
   it("skips disabled rules and applies conjunctions", async () => {
     let nextId = 0;
     const builder = useDataGridFilterBuilder({

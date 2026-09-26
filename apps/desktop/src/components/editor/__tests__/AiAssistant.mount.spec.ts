@@ -38,7 +38,7 @@ afterEach(() => {
   while (cleanups.length) cleanups.pop()?.();
 });
 
-async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig) {
+async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig, configureSettings?: (settings: ReturnType<typeof useSettingsStore>) => void) {
   const pinia = createPinia();
   const errors: unknown[] = [];
   const app = createApp({ render: () => h(TooltipProvider, () => h(AiAssistant, { connection })) });
@@ -46,7 +46,9 @@ async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig
   app.use(i18n);
   app.config.errorHandler = (error) => errors.push(error);
   app.config.warnHandler = () => {};
-  useSettingsStore(pinia).isAiConfigLoaded = aiConfigLoaded;
+  const settings = useSettingsStore(pinia);
+  settings.isAiConfigLoaded = aiConfigLoaded;
+  configureSettings?.(settings);
   if (connection) useConnectionStore(pinia).connections = [connection];
   const container = document.createElement("div");
   document.body.append(container);
@@ -67,6 +69,39 @@ describe("AiAssistant mount", () => {
 
   it("opens while the AI config is still loading", async () => {
     expect((await mountPanel(false)).errors.map(String)).toEqual([]);
+  });
+
+  it("renders compactable composer controls with accessible labels", async () => {
+    const { errors, container } = await mountPanel(true, undefined, (settings) => {
+      settings.aiConfigs = [
+        {
+          id: "deepseek-default",
+          name: "DeepSeek",
+          provider: "deepseek",
+          apiKey: "test-key",
+          authMethod: "api-key",
+          endpoint: "https://api.deepseek.com",
+          model: "deepseek-chat",
+          apiStyle: "completions",
+          isDefault: true,
+        },
+      ];
+      settings.activeModel = { configId: "deepseek-default", modelId: "deepseek-chat" };
+    });
+
+    expect(errors.map(String)).toEqual([]);
+    expect(container.querySelector(".ai-prompt-context-container")).not.toBeNull();
+    expect(container.querySelector("[data-ai-composer-actions]")).not.toBeNull();
+    expect(container.querySelector<HTMLButtonElement>(".ai-template-selector-trigger")?.getAttribute("aria-label")).toBeTruthy();
+    expect(container.querySelector<HTMLButtonElement>(".ai-skills-selector-trigger")?.getAttribute("aria-label")).toBe(i18n.global.t("ai.skillsEntry"));
+
+    const modeTrigger = container.querySelector<HTMLButtonElement>(".ai-mode-action-trigger");
+    expect(modeTrigger?.getAttribute("aria-label")).toBeTruthy();
+    expect(modeTrigger?.getAttribute("title")).toBe(modeTrigger?.getAttribute("aria-label"));
+
+    const modelTrigger = container.querySelector<HTMLButtonElement>(".ai-model-selector-trigger");
+    expect(modelTrigger?.getAttribute("aria-label")).toBe("deepseek-chat");
+    expect(modelTrigger?.getAttribute("title")).toBe("deepseek-chat");
   });
 
   it.each(["plugin", "etcd"] as const)("hides database and schema selectors for %s connections", async (dbType) => {

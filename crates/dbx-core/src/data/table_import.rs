@@ -14,7 +14,7 @@ use calamine::{
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader as XmlReader;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
     DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Insert, ObjectName, ObjectNamePart,
@@ -36,11 +36,23 @@ use crate::transfer::{
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
 pub const DEFAULT_BATCH_SIZE: usize = 500;
 pub const CREATE_TABLE_INFERENCE_ROWS: usize = 100;
-/// `.sql` 脚本已改为流式解析，不再受体积上限约束；该上限只保留给 JSON 等
-/// 仍然需要整份物化的格式。
+/// 分隔文本、`.sql` 脚本与 JSON 都已改为流式解析，不再受体积上限约束；
+/// 该上限只保留给仍然需要整份物化的 Excel（xlsx）。
 pub const MAX_NON_STREAMING_IMPORT_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_LEGACY_XLS_IMPORT_BYTES: u64 = 50 * 1024 * 1024;
 const IMPORT_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+// JSON 导入的行形状既决定列清单也决定错误文案，内存版与流式版共用同一批常量，
+// 避免两条解析路径对同一种输入给出不同提示。
+const JSON_IMPORT_MUST_BE_OBJECT_OR_ARRAY: &str = "JSON import must be an object or an array";
+const JSON_IMPORT_NO_ROWS: &str = "Import file has no rows";
+const JSON_IMPORT_NO_COLUMNS: &str = "Import file has no columns";
+const JSON_IMPORT_OBJECT_ROWS_REQUIRED: &str =
+    "JSON import is configured for object rows, but at least one row is not an object";
+const JSON_IMPORT_ARRAY_ROWS_REQUIRED: &str =
+    "JSON import is configured for array rows, but at least one row is not an array";
+const JSON_IMPORT_MIXED_ROW_SHAPES: &str =
+    "JSON rows must all be objects or all be arrays; mixed row shapes are not supported";
 // Keep preview parsing bounded even when an XLSX dimension declares a huge sparse range.
 const MAX_FAST_PREVIEW_CELLS: usize = 100_000;
 // Shared strings stay in memory for small workbooks and spill to an indexed temp file for large ones.
@@ -1065,10 +1077,10 @@ pub fn parse_json_bytes_with_options(
     let items = match value {
         serde_json::Value::Array(items) => items,
         serde_json::Value::Object(_) => vec![value],
-        _ => return Err("JSON import must be an object or an array".to_string()),
+        _ => return Err(JSON_IMPORT_MUST_BE_OBJECT_OR_ARRAY.to_string()),
     };
     if items.is_empty() {
-        return Err("Import file has no rows".to_string());
+        return Err(JSON_IMPORT_NO_ROWS.to_string());
     }
 
     let shape = options.json_shape.unwrap_or(TableImportJsonShape::Auto);
@@ -1076,10 +1088,10 @@ pub fn parse_json_bytes_with_options(
     let all_arrays = items.iter().all(|item| item.is_array());
 
     if shape == TableImportJsonShape::Objects && !all_objects {
-        return Err("JSON import is configured for object rows, but at least one row is not an object".to_string());
+        return Err(JSON_IMPORT_OBJECT_ROWS_REQUIRED.to_string());
     }
     if shape == TableImportJsonShape::Arrays && !all_arrays {
-        return Err("JSON import is configured for array rows, but at least one row is not an array".to_string());
+        return Err(JSON_IMPORT_ARRAY_ROWS_REQUIRED.to_string());
     }
 
     if all_objects {
@@ -1094,7 +1106,7 @@ pub fn parse_json_bytes_with_options(
             }
         }
         if columns.is_empty() {
-            return Err("Import file has no columns".to_string());
+            return Err(JSON_IMPORT_NO_COLUMNS.to_string());
         }
         let rows = items
             .iter()
@@ -1113,7 +1125,7 @@ pub fn parse_json_bytes_with_options(
     if all_arrays {
         let max_cols = items.iter().filter_map(|item| item.as_array().map(|row| row.len())).max().unwrap_or(0);
         if max_cols == 0 {
-            return Err("Import file has no columns".to_string());
+            return Err(JSON_IMPORT_NO_COLUMNS.to_string());
         }
         let columns = (0..max_cols).map(|index| format!("column_{}", index + 1)).collect::<Vec<_>>();
         let rows = items
@@ -1129,11 +1141,264 @@ pub fn parse_json_bytes_with_options(
         return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
     }
 
-    Err("JSON rows must all be objects or all be arrays; mixed row shapes are not supported".to_string())
+    Err(JSON_IMPORT_MIXED_ROW_SHAPES.to_string())
 }
 
 pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
     parse_json_bytes_with_options(bytes, &TableImportParseOptions::default(), preview_limit)
+}
+
+// ---------------------------------------------------------------------------
+// JSON 文件导入：流式解析
+//
+// 顶层数组逐元素反序列化，内存只保留列名与预览行，因此不再有 100 MB 体积上限。
+// 列清单来自全体行（对象行取字段并集、数组行取最大列数），所以预览要完整扫一遍
+// 文件；这与分隔文本预览的做法一致。
+// ---------------------------------------------------------------------------
+
+/// 对象行按字段名出列，数组行按位置出列（与 [`parse_json_bytes_with_options`] 一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonRowLayout {
+    Objects,
+    Arrays,
+}
+
+/// 流式扫描 JSON 文件过程中得到的列清单与行统计。
+#[derive(Debug, Default)]
+struct JsonStreamScan {
+    columns: Vec<String>,
+    seen_columns: HashSet<String>,
+    max_columns: usize,
+    total_rows: usize,
+    object_rows: usize,
+    array_rows: usize,
+    other_rows: usize,
+}
+
+impl JsonStreamScan {
+    fn push_object_row(&mut self, object: &serde_json::Map<String, serde_json::Value>) {
+        for key in object.keys() {
+            if self.seen_columns.insert(key.clone()) {
+                self.columns.push(key.clone());
+            }
+        }
+    }
+}
+
+/// 逐元素流式读取 JSON 文件的顶层数组（或顶层对象）并把每个元素交给 `visit`。
+///
+/// 顶层既不是数组也不是对象（标量文件）时返回与内存版一致的错误。
+fn visit_json_file_rows<F>(path: &str, bytes_read: Option<Arc<AtomicU64>>, visit: &mut F) -> Result<(), String>
+where
+    F: FnMut(serde_json::Value) -> Result<(), String>,
+{
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut prefix = [0u8; 3];
+    let prefix_len = file.read(&mut prefix).map_err(|error| error.to_string())?;
+    if prefix_len != 3 || prefix != [0xEF, 0xBB, 0xBF] {
+        file.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+    }
+    let reader = CountingJsonReader { inner: BufReader::with_capacity(256 * 1024, file), bytes_read };
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    // serde_json 会给自定义错误补上「at line 1 column N」，直接透出会让流式与
+    // 内存两条路径对同一种输入给出不同提示；这里单独记下原始文案。
+    let mut failure: Option<String> = None;
+    let parsed = {
+        let visitor = JsonTopLevelVisitor { visit, failure: &mut failure };
+        deserializer.deserialize_any(visitor)
+    };
+    if let Err(error) = parsed {
+        return Err(failure.unwrap_or_else(|| error.to_string()));
+    }
+    // 与 `serde_json::from_slice` 保持一致：结尾出现多余内容时报错而不是忽略。
+    deserializer.end().map_err(|error| error.to_string())
+}
+
+/// 计数读取器：JSON 流式导入的字节进度按读取量上报。
+struct CountingJsonReader<R> {
+    inner: R,
+    bytes_read: Option<Arc<AtomicU64>>,
+}
+
+impl<R: IoRead> IoRead for CountingJsonReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if let Some(bytes_read) = self.bytes_read.as_ref() {
+            bytes_read.fetch_add(read as u64, Ordering::Relaxed);
+        }
+        Ok(read)
+    }
+}
+
+/// 顶层值的 visitor：数组逐元素回调；对象整体作为一行回调；标量直接报错。
+struct JsonTopLevelVisitor<'a, F> {
+    visit: &'a mut F,
+    failure: &'a mut Option<String>,
+}
+
+impl<F> JsonTopLevelVisitor<'_, F> {
+    fn reject_scalar<E: serde::de::Error>(self) -> Result<(), E> {
+        *self.failure = Some(JSON_IMPORT_MUST_BE_OBJECT_OR_ARRAY.to_string());
+        Err(E::custom(JSON_IMPORT_MUST_BE_OBJECT_OR_ARRAY))
+    }
+
+    /// 回调自身返回的错误：记下原始文案再中断解析，避免 serde_json 追加位置后缀。
+    fn reject_row<E: serde::de::Error>(failure: &mut Option<String>, message: String) -> Result<(), E> {
+        *failure = Some(message.clone());
+        Err(E::custom(message))
+    }
+}
+
+impl<'de, 'a, F> serde::de::Visitor<'de> for JsonTopLevelVisitor<'a, F>
+where
+    F: FnMut(serde_json::Value) -> Result<(), String>,
+{
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object or an array")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let Self { visit, failure } = self;
+        while let Some(value) = seq.next_element::<serde_json::Value>()? {
+            if let Err(message) = visit(value) {
+                return Self::reject_row::<A::Error>(failure, message);
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let Self { visit, failure } = self;
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let value = map.next_value::<serde_json::Value>()?;
+            object.insert(key, value);
+        }
+        if let Err(message) = visit(serde_json::Value::Object(object)) {
+            return Self::reject_row::<A::Error>(failure, message);
+        }
+        Ok(())
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+        self.reject_scalar()
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _value: bool) -> Result<(), E> {
+        self.reject_scalar()
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _value: i64) -> Result<(), E> {
+        self.reject_scalar()
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _value: u64) -> Result<(), E> {
+        self.reject_scalar()
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _value: f64) -> Result<(), E> {
+        self.reject_scalar()
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _value: &str) -> Result<(), E> {
+        self.reject_scalar()
+    }
+}
+
+/// 单遍扫描 JSON 文件：校验行形状、汇总列清单，并保留前 `preview_limit` 行原始元素。
+fn scan_json_file_rows(
+    path: &str,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+    bytes_read: Option<Arc<AtomicU64>>,
+) -> Result<(JsonStreamScan, Vec<serde_json::Value>), String> {
+    let shape = options.json_shape.unwrap_or(TableImportJsonShape::Auto);
+    let mut scan = JsonStreamScan::default();
+    let mut preview_rows: Vec<serde_json::Value> = Vec::new();
+    visit_json_file_rows(path, bytes_read, &mut |value| {
+        scan.total_rows += 1;
+        if let Some(object) = value.as_object() {
+            scan.object_rows += 1;
+            if shape == TableImportJsonShape::Arrays {
+                return Err(JSON_IMPORT_ARRAY_ROWS_REQUIRED.to_string());
+            }
+            scan.push_object_row(object);
+        } else if let Some(array) = value.as_array() {
+            scan.array_rows += 1;
+            if shape == TableImportJsonShape::Objects {
+                return Err(JSON_IMPORT_OBJECT_ROWS_REQUIRED.to_string());
+            }
+            scan.max_columns = scan.max_columns.max(array.len());
+        } else {
+            scan.other_rows += 1;
+            match shape {
+                TableImportJsonShape::Objects => return Err(JSON_IMPORT_OBJECT_ROWS_REQUIRED.to_string()),
+                TableImportJsonShape::Arrays => return Err(JSON_IMPORT_ARRAY_ROWS_REQUIRED.to_string()),
+                TableImportJsonShape::Auto => {}
+            }
+        }
+        if preview_rows.len() < preview_limit {
+            preview_rows.push(value);
+        }
+        Ok(())
+    })?;
+    Ok((scan, preview_rows))
+}
+
+/// 由扫描结果推导行布局与列清单，错误文案与内存版逐条对齐。
+fn json_scan_layout_and_columns(scan: &JsonStreamScan) -> Result<(JsonRowLayout, Vec<String>), String> {
+    if scan.total_rows == 0 {
+        return Err(JSON_IMPORT_NO_ROWS.to_string());
+    }
+    let only_objects = scan.object_rows > 0 && scan.array_rows == 0 && scan.other_rows == 0;
+    let only_arrays = scan.array_rows > 0 && scan.object_rows == 0 && scan.other_rows == 0;
+    if only_objects {
+        if scan.columns.is_empty() {
+            return Err(JSON_IMPORT_NO_COLUMNS.to_string());
+        }
+        return Ok((JsonRowLayout::Objects, scan.columns.clone()));
+    }
+    if only_arrays {
+        if scan.max_columns == 0 {
+            return Err(JSON_IMPORT_NO_COLUMNS.to_string());
+        }
+        let columns = (0..scan.max_columns).map(|index| format!("column_{}", index + 1)).collect();
+        return Ok((JsonRowLayout::Arrays, columns));
+    }
+    Err(JSON_IMPORT_MIXED_ROW_SHAPES.to_string())
+}
+
+/// 把一行原始 JSON 元素投影到最终列清单（缺失补 `null`，多余截断）。
+fn project_json_row(value: &serde_json::Value, columns: &[String], layout: JsonRowLayout) -> Vec<serde_json::Value> {
+    match layout {
+        JsonRowLayout::Objects => {
+            let object = value.as_object();
+            columns
+                .iter()
+                .map(|column| object.and_then(|object| object.get(column)).cloned().unwrap_or(serde_json::Value::Null))
+                .collect()
+        }
+        JsonRowLayout::Arrays => {
+            let array = value.as_array();
+            (0..columns.len())
+                .map(|index| array.and_then(|row| row.get(index)).cloned().unwrap_or(serde_json::Value::Null))
+                .collect()
+        }
+    }
+}
+
+/// 流式解析 JSON 文件（预览与建表推断共用）。
+fn parse_json_file_streaming(
+    path: &str,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+) -> Result<ParsedImportFile, String> {
+    let (scan, preview_rows) = scan_json_file_rows(path, options, preview_limit, None)?;
+    let (layout, columns) = json_scan_layout_and_columns(&scan)?;
+    let rows = preview_rows.iter().map(|value| project_json_row(value, &columns, layout)).collect::<Vec<_>>();
+    Ok(ParsedImportFile { columns, rows, total_rows: scan.total_rows, effective_encoding: None })
 }
 
 // ---------------------------------------------------------------------------
@@ -1744,14 +2009,89 @@ impl SqlImportRowStream {
     }
 }
 
+/// 流式 JSON 行来源：先整扫一遍拿到列清单与总行数，再由第二个阻塞线程按批推送行。
+///
+/// 列清单来自全体行（字段并集 / 最大列数），所以第一次扫描必须读完整个文件；
+/// 但两次扫描都只保留当前批次的若干行，内存不再随文件体积增长。
+struct JsonImportRowStream {
+    receiver: tokio::sync::mpsc::Receiver<Result<Vec<Vec<serde_json::Value>>, String>>,
+    columns: Vec<String>,
+    total_rows: usize,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl JsonImportRowStream {
+    async fn open(path: &str, options: &TableImportParseOptions, batch_size: usize) -> Result<Self, String> {
+        let bytes_read = Arc::new(AtomicU64::new(0));
+        let scan_path = path.to_string();
+        let scan_options = options.clone();
+        let scan_bytes_read = bytes_read.clone();
+        let (scan, _) = tokio::task::spawn_blocking(move || {
+            scan_json_file_rows(&scan_path, &scan_options, 0, Some(scan_bytes_read))
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        let (layout, columns) = json_scan_layout_and_columns(&scan)?;
+
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Vec<Vec<serde_json::Value>>, String>>(2);
+        let producer_path = path.to_string();
+        let producer_columns = columns.clone();
+        let producer_bytes_read = bytes_read.clone();
+        tokio::task::spawn_blocking(move || {
+            stream_json_rows_to_channel(
+                &producer_path,
+                &producer_columns,
+                layout,
+                batch_size,
+                sender,
+                producer_bytes_read,
+            );
+        });
+
+        Ok(Self { receiver, columns, total_rows: scan.total_rows, bytes_read })
+    }
+}
+
+/// 第二个扫描遍次：按批把行送进有界通道，消费端跟不上时不会无限堆积内存。
+fn stream_json_rows_to_channel(
+    path: &str,
+    columns: &[String],
+    layout: JsonRowLayout,
+    batch_size: usize,
+    sender: tokio::sync::mpsc::Sender<Result<Vec<Vec<serde_json::Value>>, String>>,
+    bytes_read: Arc<AtomicU64>,
+) {
+    let batch_size = batch_size.max(1);
+    let mut pending: Vec<Vec<serde_json::Value>> = Vec::with_capacity(batch_size);
+    let result = visit_json_file_rows(path, Some(bytes_read), &mut |value| {
+        pending.push(project_json_row(&value, columns, layout));
+        if pending.len() >= batch_size {
+            sender
+                .blocking_send(Ok(std::mem::take(&mut pending)))
+                .map_err(|_| "JSON import consumer closed before the stream finished".to_string())?;
+            pending = Vec::with_capacity(batch_size);
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) if pending.is_empty() => {}
+        Ok(()) => {
+            let _ = sender.blocking_send(Ok(pending));
+        }
+        Err(error) => {
+            let _ = sender.blocking_send(Err(error));
+        }
+    }
+}
+
 /// 表导入的行来源。
 ///
-/// 分隔文本、JSON、Excel 仍然先把行解析进内存；`.sql` 脚本改用
-/// [`SqlImportRowStream`] 增量产出，内存不再随文件体积增长，因此 `.sql`
-/// 不再有 100 MB 的体积上限。
+/// 分隔文本与 Excel 仍然先把行解析进内存；`.sql` 脚本与 JSON 改用流式行来源
+/// 增量产出，内存不再随文件体积增长，因此二者都没有 100 MB 的体积上限。
 enum ImportRowSource {
     Materialized { columns: Vec<String>, rows: std::vec::IntoIter<Vec<serde_json::Value>>, total_rows: usize },
     Sql { stream: Box<SqlImportRowStream>, bytes_read: Arc<AtomicU64>, pending: Option<Vec<Vec<serde_json::Value>>> },
+    Json { stream: Box<JsonImportRowStream> },
 }
 
 impl ImportRowSource {
@@ -1772,6 +2112,10 @@ impl ImportRowSource {
             let pending = stream.next_batch(first_batch_rows).await?;
             return Ok(Self::Sql { stream: Box::new(stream), bytes_read, pending });
         }
+        if source_format == TableImportSourceFormat::Json {
+            let stream = JsonImportRowStream::open(file_path, parse_options, first_batch_rows).await?;
+            return Ok(Self::Json { stream: Box::new(stream) });
+        }
         let parsed = parse_import_file_with_options_and_text_columns(
             file_path,
             Some(source_format),
@@ -1789,6 +2133,7 @@ impl ImportRowSource {
             Self::Sql { stream, .. } => {
                 stream.columns().ok_or_else(|| "No INSERT statements found in SQL file".to_string())
             }
+            Self::Json { stream, .. } => Ok(stream.columns.clone()),
         }
     }
 
@@ -1796,12 +2141,16 @@ impl ImportRowSource {
         match self {
             Self::Materialized { total_rows, .. } => *total_rows,
             Self::Sql { stream, .. } => stream.total_rows(),
+            Self::Json { stream, .. } => stream.total_rows,
         }
     }
 
-    /// 是否在写入前就已知全部行数。SQL 脚本只有在扫描到 EOF 后才知道总行数。
+    /// 是否在写入前就已知全部行数。
+    ///
+    /// SQL 脚本只有在扫描到 EOF 后才知道总行数；JSON 的第一次扫描已经读完整个
+    /// 文件，因此在写入前就可以给出确定的总行数。
     fn total_rows_known(&self) -> bool {
-        matches!(self, Self::Materialized { .. })
+        matches!(self, Self::Materialized { .. } | Self::Json { .. })
     }
 
     /// 已读取的源字节数，用于大脚本的按字节进度；物化来源在解析阶段已经读完。
@@ -1809,6 +2158,7 @@ impl ImportRowSource {
         match self {
             Self::Materialized { .. } => total_bytes,
             Self::Sql { bytes_read, .. } => bytes_read.load(Ordering::Relaxed).min(total_bytes),
+            Self::Json { stream, .. } => stream.bytes_read.load(Ordering::Relaxed).min(total_bytes),
         }
     }
 
@@ -1824,6 +2174,7 @@ impl ImportRowSource {
                 }
                 stream.next_batch(max_rows).await
             }
+            Self::Json { stream, .. } => stream.receiver.recv().await.transpose(),
         }
     }
 }
@@ -3693,8 +4044,8 @@ pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportF
 }
 
 fn ensure_non_streaming_file_size(path: &str, format: TableImportSourceFormat) -> Result<(), String> {
-    // 分隔文本与 SQL 脚本都是流式解析，内存占用不随文件体积增长，没有体积上限。
-    if format.is_delimited() || format == TableImportSourceFormat::Sql {
+    // 分隔文本、SQL 脚本与 JSON 都是流式解析，内存占用不随文件体积增长，没有体积上限。
+    if format.is_delimited() || format == TableImportSourceFormat::Sql || format == TableImportSourceFormat::Json {
         return Ok(());
     }
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
@@ -3744,8 +4095,11 @@ async fn parse_import_file_with_options_and_text_columns(
             .map_err(|e| e.to_string())?
         }
         TableImportSourceFormat::Json => {
-            let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
-            parse_json_bytes_with_options(&bytes, options, preview_limit)
+            let path = path.to_string();
+            let options = options.clone();
+            tokio::task::spawn_blocking(move || parse_json_file_streaming(&path, &options, preview_limit))
+                .await
+                .map_err(|e| e.to_string())?
         }
         TableImportSourceFormat::Sql => {
             // 大脚本走增量解析：只保留前 `preview_limit` 行，内存不随体积增长。
@@ -8786,6 +9140,112 @@ mod tests {
         assert!(error.contains("configured for object rows"));
     }
 
+    fn json_streaming_fixture(tag: &str, body: &[u8]) -> String {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-json-{tag}-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, body).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    /// 流式解析必须与内存版给出完全一致的列清单、行数与行内容。
+    #[test]
+    fn streaming_json_file_parse_matches_the_in_memory_parser() {
+        let fixtures: [String; 7] = [
+            r#"[{"id":1,"name":"Ada"},{"id":2,"active":true}]"#.to_string(),
+            r#"[["id","name"],[1,"Ada"],[2]]"#.to_string(),
+            r#"{"id":1,"nested":{"a":[1,2]},"list":[true,null]}"#.to_string(),
+            "[{\"id\":1,\"name\":\"Ada\"}]".to_string(),
+            r#"[{"名称":"中文"},{"名称":"emoji 😀"}]"#.to_string(),
+            r#"[{"n":1.5},{"n":-2},{"n":9007199254740993}]"#.to_string(),
+            r#"[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5}]"#.to_string(),
+        ];
+        for (index, text) in fixtures.iter().enumerate() {
+            let mut body = text.as_bytes().to_vec();
+            if index == 3 {
+                body.splice(0..0, [0xEF, 0xBB, 0xBF]);
+            }
+            let path = json_streaming_fixture("match", &body);
+            // 预览行数小于总行数时，两条路径都必须按“全体行推列、只保留前 N 行”处理。
+            let expected = parse_json_bytes_with_options(&body, &TableImportParseOptions::default(), 2).unwrap();
+            let parsed = parse_json_file_streaming(&path, &TableImportParseOptions::default(), 2).unwrap();
+
+            assert_eq!(parsed.columns, expected.columns, "columns for {text}");
+            assert_eq!(parsed.total_rows, expected.total_rows, "rows for {text}");
+            assert_eq!(parsed.rows, expected.rows, "preview for {text}");
+            assert_eq!(parsed.effective_encoding, None);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// 流式路径的错误文案与内存版逐条对齐，避免同一种文件给出两种提示。
+    #[test]
+    fn streaming_json_file_parse_reports_the_same_errors_as_the_in_memory_parser() {
+        let cases: [(&[u8], &str); 6] = [
+            (b"[]", JSON_IMPORT_NO_ROWS),
+            (b"{}", JSON_IMPORT_NO_COLUMNS),
+            (b"[[],[]]", JSON_IMPORT_NO_COLUMNS),
+            (b"[1,2]", JSON_IMPORT_MIXED_ROW_SHAPES),
+            (br#"[{"id":1},[1]]"#, JSON_IMPORT_MIXED_ROW_SHAPES),
+            (b"null", JSON_IMPORT_MUST_BE_OBJECT_OR_ARRAY),
+        ];
+        for (body, needle) in cases {
+            let path = json_streaming_fixture("error", body);
+            let expected = parse_json_bytes_with_options(body, &TableImportParseOptions::default(), 10).unwrap_err();
+            let error = parse_json_file_streaming(&path, &TableImportParseOptions::default(), 10).unwrap_err();
+
+            assert!(expected.contains(needle), "{expected} for {}", String::from_utf8_lossy(body));
+            assert_eq!(error, expected, "for {}", String::from_utf8_lossy(body));
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// 语法错误（截断、多余内容）在流式路径上同样报错，且提示与内存版一致。
+    #[test]
+    fn streaming_json_file_parse_rejects_malformed_input() {
+        for body in [&b"[{\"id\":1}]{}"[..], b"[{\"id\":1}", b"", b"[{\"id\":1},]"] {
+            let path = json_streaming_fixture("invalid", body);
+            let expected = parse_json_bytes_with_options(body, &TableImportParseOptions::default(), 10).unwrap_err();
+            let error = parse_json_file_streaming(&path, &TableImportParseOptions::default(), 10).unwrap_err();
+
+            assert_eq!(error, expected, "for {}", String::from_utf8_lossy(body));
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn streaming_json_file_parse_honors_the_configured_row_shape() {
+        let options = TableImportParseOptions {
+            json_shape: Some(TableImportJsonShape::Arrays),
+            ..TableImportParseOptions::default()
+        };
+        let path = json_streaming_fixture("shape", br#"[{"id":1}]"#);
+        let error = parse_json_file_streaming(&path, &options, 10).unwrap_err();
+
+        assert_eq!(error, JSON_IMPORT_ARRAY_ROWS_REQUIRED);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 导入行来源按批产出，不把整个 JSON 文件的行同时留在内存里。
+    #[tokio::test]
+    async fn streaming_json_import_source_batches_rows() {
+        let body = br#"[{"id":1,"name":"Ada"},{"id":2},{"id":3,"name":"Grace"},{"id":4,"name":"Linus"}]"#;
+        let path = json_streaming_fixture("stream", body);
+        let expected = parse_json_bytes_with_options(body, &TableImportParseOptions::default(), 10).unwrap();
+
+        let mut stream = JsonImportRowStream::open(&path, &TableImportParseOptions::default(), 2).await.unwrap();
+        assert_eq!(stream.columns, expected.columns);
+        assert_eq!(stream.total_rows, expected.total_rows);
+
+        let mut rows = Vec::new();
+        let mut batch_sizes = Vec::new();
+        while let Some(batch) = stream.receiver.recv().await.transpose().unwrap() {
+            batch_sizes.push(batch.len());
+            rows.extend(batch);
+        }
+        assert_eq!(batch_sizes, vec![2, 2]);
+        assert_eq!(rows, expected.rows);
+        let _ = std::fs::remove_file(path);
+    }
+
     fn sql_import_options(dialect: DatabaseType) -> TableImportParseOptions {
         TableImportParseOptions { sql_dialect: Some(dialect), ..TableImportParseOptions::default() }
     }
@@ -9117,17 +9577,25 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// `.sql` 已经改成流式解析，不应再受 100 MB 非流式上限约束。
+    /// `.sql` 与 JSON 都已经改成流式解析，不应再受 100 MB 非流式上限约束。
     #[test]
-    fn sql_import_is_not_size_capped() {
+    fn sql_and_json_imports_are_not_size_capped() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-limit-{}.sql", uuid::Uuid::new_v4()));
         let file = File::create(&path).unwrap();
         file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
         drop(file);
 
         ensure_non_streaming_file_size(&path.to_string_lossy(), TableImportSourceFormat::Sql).unwrap();
-        ensure_non_streaming_file_size(&path.to_string_lossy(), TableImportSourceFormat::Json).unwrap_err();
+        ensure_non_streaming_file_size(&path.to_string_lossy(), TableImportSourceFormat::Json).unwrap();
+        let xlsx_path = std::env::temp_dir().join(format!("dbx-table-import-limit-{}.xlsx", uuid::Uuid::new_v4()));
+        let xlsx_file = File::create(&xlsx_path).unwrap();
+        xlsx_file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
+        drop(xlsx_file);
+        let error =
+            ensure_non_streaming_file_size(&xlsx_path.to_string_lossy(), TableImportSourceFormat::Excel).unwrap_err();
+        assert!(error.contains("File too large for excel import"), "{error}");
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(xlsx_path);
     }
 
     /// 流式 `.sql` 在读完整份脚本之前，`total_rows` 只是已解析的部分行数。
@@ -11003,6 +11471,7 @@ mod tests {
             is_computed,
             is_hidden,
             generated_always_type: i32::from(is_hidden),
+            computed_clause: None,
         }
     }
 

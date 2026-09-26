@@ -198,6 +198,11 @@ impl PluginRegistry {
         let mut plugins = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|err| err.to_string())?;
+            if entry.file_name() == std::ffi::OsStr::new(installer::PLUGIN_TRASH_DIR) {
+                // Logical uninstall tombstones are not plugin containers: never discover one, not
+                // even while its physical delete is still pending.
+                continue;
+            }
             let container_path = entry.path();
             if !container_path.is_dir() {
                 continue;
@@ -292,6 +297,12 @@ impl PluginRegistry {
         let plugin =
             self.find_driver(driver_id)?.ok_or_else(|| format!("Plugin driver '{driver_id}' is not installed"))?;
         ensure_plugin_compatible(&plugin)?;
+        // This is a short-lived, one-shot driver invocation: it starts its own sidecar instead of
+        // going through `PluginHost`, so it is not in `PluginHost::sessions` and needs its own
+        // lease. `begin_operation` matches those semantics (not a connection the user keeps open)
+        // and makes the whole start -> invoke -> shutdown sequence mutually exclusive with an
+        // install, rollback, or uninstall of the same plugin.
+        let _operation = self.lifecycle.begin_operation(&plugin.manifest.id)?;
         let env = env.with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
         let session = PluginSidecarSession::start(plugin, self.app_version.clone(), env).await?;
         let result = session.invoke_with_timeout(method, params, Some(driver_id), timeout_duration).await;
@@ -691,6 +702,65 @@ sleep 30
                 && !plugin.compatibility.compatible
                 && plugin.compatibility.errors.iter().any(|error| error.contains("Failed to parse"))
         }));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn driver_invocations_are_gated_by_the_update_lease_for_their_whole_session() {
+        let root = std::env::temp_dir().join(format!("dbx-plugin-driver-lease-test-{}", uuid::Uuid::new_v4()));
+        let plugin_dir = root.join("sample");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            // External drivers only exist on the legacy manifest shape, which is what
+            // `PluginRegistry::find_driver` resolves.
+            serde_json::json!({
+                "id": "sample",
+                "name": "Sample",
+                "version": "1.0.0",
+                "publisher": "example",
+                "protocol_version": 1,
+                "executable": "plugin.sh",
+                "drivers": [{ "id": "sample-driver", "label": "Sample", "kind": "external", "database_type": "sample" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Present but never executable: the manifest stays compatible so the invocation gets past
+        // the lease, while starting the sidecar fails immediately and deterministically on every
+        // platform (no exec bit on unix, not a valid image on Windows).
+        std::fs::write(plugin_dir.join("plugin.sh"), "#!/bin/sh\nexit 1\n").unwrap();
+        let registry = PluginRegistry::new_with_app_version(root.clone(), "0.5.67");
+
+        let update = registry.lifecycle().begin_update("sample").unwrap();
+        let refused = registry
+            .invoke_driver_with_env_and_timeout::<serde_json::Value>(
+                "sample-driver",
+                "testConnection",
+                serde_json::json!({}),
+                PluginRuntimeEnv::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.contains("Plugin update is in progress"), "{refused}");
+        drop(update);
+
+        // Once the update released the lease the invocation runs, and because the sidecar cannot
+        // start it must report that instead of the update error: the guard covered the start
+        // attempt and was released on the way out.
+        let failed_start = registry
+            .invoke_driver_with_env_and_timeout::<serde_json::Value>(
+                "sample-driver",
+                "testConnection",
+                serde_json::json!({}),
+                PluginRuntimeEnv::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(!failed_start.contains("Plugin update is in progress"), "{failed_start}");
+        assert!(registry.lifecycle().begin_update("sample").is_ok(), "a failed invocation must not leak its lease");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -4,7 +4,7 @@ import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import { uuid } from "@/lib/common/utils";
 import { formatQueryDuration } from "@/lib/format/duration";
 
-export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer" | "multi-db-execution" | "schema-diff" | "data-compare";
+export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
@@ -86,6 +86,12 @@ export interface ExportTask {
   compareAddedCount?: number;
   compareRemovedCount?: number;
   compareModifiedCount?: number;
+  dictionaryPhase?: "preparing" | "collecting" | "generating" | "saving";
+  dictionaryCompleted?: number;
+  dictionaryTotal?: number;
+  dictionaryCurrent?: string;
+  dictionaryWarnings?: number;
+  dictionaryProgressKnown?: boolean;
   canCancel?: boolean;
   onOpen?: () => void;
   onRemove?: () => void;
@@ -420,6 +426,35 @@ export function useExportTracker() {
     });
     taskMap.set(exportId, task);
     return task;
+  }
+
+  function addDataDictionaryTask(exportId: string, label: string, total: number): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId,
+      kind: "data-dictionary",
+      tableName: label,
+      format: "pdf",
+      filePath: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      errorMessage: null,
+      dictionaryPhase: "preparing",
+      dictionaryCompleted: 0,
+      dictionaryTotal: total,
+      dictionaryProgressKnown: false,
+      canCancel: false,
+      startedAt: Date.now(),
+    });
+    taskMap.set(exportId, task);
+    return task;
+  }
+
+  function updateDataDictionaryTask(exportId: string, changes: Partial<ExportTask>): void {
+    const task = taskMap.get(exportId);
+    if (!task || task.kind !== "data-dictionary") return;
+    Object.assign(task, changes);
+    if (task.status === "Done" || task.status === "Error") finishExportTask(task);
   }
 
   function addSqlFileTask(executionId: string, fileName: string, filePath: string): ExportTask {
@@ -771,6 +806,8 @@ export function useExportTracker() {
     hasActive,
     addTask,
     addDatabaseExportTask,
+    addDataDictionaryTask,
+    updateDataDictionaryTask,
     addSqlFileTask,
     addDataTransferTask,
     addSchemaDiffTask,

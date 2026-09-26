@@ -9,7 +9,8 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use russh::client::{self, AuthResult, Config, GexParams, Handle, KeyboardInteractiveAuthResponse};
-use russh::keys::agent::{client::AgentClient, AgentIdentity};
+use russh::keys::agent::client::{AgentClient, AgentStream};
+use russh::keys::agent::AgentIdentity;
 use russh::keys::ssh_key::HashAlg;
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
 use russh::MethodKind;
@@ -669,6 +670,39 @@ enum AgentAuthenticationOutcome {
     KeyboardInteractiveRequired,
 }
 
+#[cfg(any(windows, test))]
+const WINDOWS_OPENSSH_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WindowsSshAgentEndpoint {
+    NamedPipe(String),
+    Pageant,
+}
+
+#[cfg(any(windows, test))]
+fn windows_ssh_agent_endpoints(configured_path: &str) -> Vec<WindowsSshAgentEndpoint> {
+    let configured_path = configured_path.trim();
+    if configured_path.is_empty() {
+        vec![
+            WindowsSshAgentEndpoint::NamedPipe(WINDOWS_OPENSSH_AGENT_PIPE.to_string()),
+            WindowsSshAgentEndpoint::Pageant,
+        ]
+    } else {
+        vec![WindowsSshAgentEndpoint::NamedPipe(configured_path.to_string())]
+    }
+}
+
+#[cfg(windows)]
+impl WindowsSshAgentEndpoint {
+    fn label(&self) -> String {
+        match self {
+            Self::NamedPipe(path) => format!("Windows named pipe '{path}'"),
+            Self::Pageant => "Pageant".to_string(),
+        }
+    }
+}
+
 #[cfg(unix)]
 fn resolve_ssh_agent_socket_path(path: &str) -> String {
     expand_tilde(path)
@@ -680,11 +714,11 @@ fn resolve_ssh_agent_socket_path(path: &str) -> String {
 async fn try_authenticate_with_agent(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
-    #[cfg_attr(not(unix), allow(unused_variables))] ssh_agent_sock_path: &str,
+    ssh_agent_sock_path: &str,
     connect_timeout: &Duration,
 ) -> Result<AgentAuthenticationOutcome, String> {
     #[cfg(unix)]
-    let mut agent = if ssh_agent_sock_path.is_empty() {
+    let agent = if ssh_agent_sock_path.is_empty() {
         match AgentClient::connect_env().await {
             Ok(a) => a,
             Err(e) => {
@@ -704,14 +738,62 @@ async fn try_authenticate_with_agent(
         }
     };
 
-    #[cfg(windows)]
-    let mut agent = {
-        let stream = pageant::PageantStream::new()
-            .await
-            .map_err(|e| format!("No SSH password or key provided, and ssh-agent (Pageant) is unavailable: {e}"))?;
-        AgentClient::connect(stream)
-    };
+    #[cfg(unix)]
+    return authenticate_with_agent_client(session, ssh_user, agent, connect_timeout).await;
 
+    #[cfg(windows)]
+    {
+        let mut failures = Vec::new();
+        for endpoint in windows_ssh_agent_endpoints(ssh_agent_sock_path) {
+            let label = endpoint.label();
+            // Every transport keeps its own concrete stream type. Erasing both into one
+            // `dyn AgentStream` (russh's `AgentClient::dynamic`) makes rustc unable to
+            // prove the spawned tunnel task is `Send`: the whole chain is rejected with
+            // "implementation of `std::marker::Send` is not general enough" for the
+            // `&str` user argument, which broke the Windows build.
+            let outcome = match endpoint {
+                WindowsSshAgentEndpoint::NamedPipe(path) => {
+                    match tokio::time::timeout(*connect_timeout, AgentClient::connect_named_pipe(&path)).await {
+                        Ok(Ok(agent)) => authenticate_with_agent_client(session, ssh_user, agent, connect_timeout)
+                            .await
+                            .map_err(|error| format!("{label}: {error}")),
+                        Ok(Err(error)) => Err(format!("{label} is unavailable: {error}")),
+                        Err(_) => Err(format!("{label} connection timed out")),
+                    }
+                }
+                WindowsSshAgentEndpoint::Pageant => {
+                    match tokio::time::timeout(*connect_timeout, AgentClient::connect_pageant()).await {
+                        Ok(Ok(agent)) => authenticate_with_agent_client(session, ssh_user, agent, connect_timeout)
+                            .await
+                            .map_err(|error| format!("{label}: {error}")),
+                        Ok(Err(error)) => Err(format!("{label} is unavailable: {error}")),
+                        Err(_) => Err(format!("{label} connection timed out")),
+                    }
+                }
+            };
+
+            match outcome {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) => failures.push(error),
+            }
+        }
+
+        return Err(format!(
+            "No SSH password or key provided, and all configured Windows ssh-agent transports failed: {}",
+            failures.join("; ")
+        ));
+    }
+}
+
+async fn authenticate_with_agent_client<S>(
+    session: &mut Handle<SshClient>,
+    ssh_user: &str,
+    mut agent: AgentClient<S>,
+    connect_timeout: &Duration,
+) -> Result<AgentAuthenticationOutcome, String>
+where
+    S: AgentStream + Send + Unpin + 'static,
+{
     let identities = match agent.request_identities().await {
         Ok(ids) if ids.is_empty() => {
             return Err("No SSH password or key provided, and ssh-agent has no identities".to_string());
@@ -1946,6 +2028,7 @@ mod tests {
         ssh_client_config, tofu_prompt_deadline, HostKeyState, HostKeyVerifier, PlannedTunnel, TunnelEntry, TunnelKind,
         TunnelManager, TunnelStatus, TOFU_PROMPT_TIMEOUT,
     };
+    use super::{windows_ssh_agent_endpoints, WindowsSshAgentEndpoint, WINDOWS_OPENSSH_AGENT_PIPE};
     use crate::db::ssh_prompt;
     use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
     use russh::client;
@@ -1990,6 +2073,25 @@ mod tests {
         assert_eq!(
             resolve_ssh_agent_socket_path(&format!("~{}/.ssh/agent.sock", user.name)),
             format!("{home}/.ssh/agent.sock")
+        );
+    }
+
+    #[test]
+    fn windows_ssh_agent_defaults_to_openssh_then_pageant() {
+        assert_eq!(
+            windows_ssh_agent_endpoints(""),
+            vec![
+                WindowsSshAgentEndpoint::NamedPipe(WINDOWS_OPENSSH_AGENT_PIPE.to_string()),
+                WindowsSshAgentEndpoint::Pageant,
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_ssh_agent_uses_only_the_configured_pipe() {
+        assert_eq!(
+            windows_ssh_agent_endpoints(r"  \\.\pipe\custom-agent  "),
+            vec![WindowsSshAgentEndpoint::NamedPipe(r"\\.\pipe\custom-agent".to_string())]
         );
     }
 

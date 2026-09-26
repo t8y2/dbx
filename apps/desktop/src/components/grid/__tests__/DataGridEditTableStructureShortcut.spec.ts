@@ -152,6 +152,21 @@ afterEach(() => {
 });
 
 describe("DataGrid edit-table-structure shortcut", () => {
+  it("opens the structure editor from the table-data toolbar", async () => {
+    const { host, openTableStructure } = mountGrid();
+    await settle();
+    const action = host.querySelector<HTMLButtonElement>("[data-grid-edit-table-structure-action]");
+
+    expect(action).not.toBeNull();
+    expect(action?.getAttribute("aria-label")).toBe("Edit Structure");
+    expect(action?.textContent).toContain("Edit Structure");
+    action?.click();
+    await settle();
+
+    expect(openTableStructure).toHaveBeenCalledOnce();
+    expect(openTableStructure).toHaveBeenCalledWith("connection-1", "app", "public", "users", "ddl", undefined, "warehouse", "table");
+  });
+
   it("opens the existing structure editor route for an eligible table-data grid", async () => {
     const { host, openTableStructure } = mountGrid();
     await settle();
@@ -206,6 +221,7 @@ describe("DataGrid edit-table-structure shortcut", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(bubbled).toHaveBeenCalledOnce();
     expect(openTableStructure).not.toHaveBeenCalled();
+    expect(host.querySelector("[data-grid-edit-table-structure-action]")).toBeNull();
   });
 
   it("leaves editable text targets untouched", async () => {
@@ -259,6 +275,7 @@ describe("DataGrid edit-table-structure shortcut", () => {
     expect(keydown).toMatch(
       /if \(!targetAllowsNativeClipboard && props\.context === "table-data" && canOpenTableStructureEditor\.value && isEditTableStructureShortcut\(event, settingsStore\.editorSettings\.shortcuts\)\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?openTableStructureEditor\(\);[\s\S]*?return;/,
     );
+    expect(dataGridSource).toMatch(/data-grid-edit-table-structure-action[\s\S]*?@click="openTableStructureEditor"/);
     expect(dataGridSource).toMatch(/<Button v-if="canOpenTableStructureEditor"[^>]*@click="openTableStructureEditor">/);
   });
 });

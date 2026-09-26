@@ -115,6 +115,9 @@ Cookie: dbx_session=...
 
 ### 保存连接
 
+连接按 `id` 增量写入：请求中未出现的连接保持不变，因此多个客户端共用同一个服务端时不会互相删除
+对方的连接；删除连接通过可选的 `removedIds` 显式声明。
+
 ```http
 POST /api/connection/save
 Content-Type: application/json
@@ -130,7 +133,8 @@ Cookie: dbx_session=...
       "username": "root",
       "database": "app"
     }
-  ]
+  ],
+  "removedIds": ["connection-to-delete"]
 }
 ```
 

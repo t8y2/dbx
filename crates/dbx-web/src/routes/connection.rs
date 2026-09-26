@@ -171,6 +171,11 @@ pub struct WriteUnlockStateResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SaveConnectionsRequest {
     pub configs: Vec<ConnectionConfig>,
+    /// Ids the client deleted locally. Connections are saved by upsert, so a
+    /// client that no longer lists a connection must say so explicitly instead
+    /// of wiping every connection another client may have created meanwhile.
+    #[serde(default)]
+    pub removed_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -715,11 +720,18 @@ pub async fn save_connections(
             .map_err(AppError::from)?;
         }
     }
+    if !body.removed_ids.is_empty() {
+        state.app.storage.delete_connections(&body.removed_ids).await.map_err(AppError::from)?;
+    }
     state.app.storage.save_connections(&body.configs).await.map_err(AppError::from)?;
     let owner = session_token_from_headers(&headers).unwrap_or_default();
     let runtime_configs = body.configs.iter().cloned().map(prepare_runtime_config).collect::<Vec<_>>();
-    let sanitized_configs = runtime_configs.iter().map(|(config, _)| config.clone()).collect::<Vec<_>>();
-    let sync = sync_connection_configs(&state, &sanitized_configs).await;
+    // Saving is an upsert, so the request only describes the connections of this
+    // client. Sync the runtime cache against the whole persisted list instead of
+    // the request payload, otherwise a concurrent save from another client would
+    // drop its runtime config, pool and session credentials.
+    let persisted = state.app.storage.load_connections().await.map_err(AppError::from)?;
+    let sync = sync_connection_configs(&state, &persisted).await;
     for (config, secrets) in &runtime_configs {
         record_session_credentials(&state.app, &owner, &config.id, secrets, config.db_type == DatabaseType::Nacos);
     }
@@ -1414,13 +1426,77 @@ mod tests {
         let result = save_connections(
             State(state.clone()),
             HeaderMap::new(),
-            Json(SaveConnectionsRequest { configs: vec![config.clone()] }),
+            Json(SaveConnectionsRequest { configs: vec![config.clone()], removed_ids: Vec::new() }),
         )
         .await;
         assert!(result.is_ok());
 
         let configs = state.app.configs.read().await;
         assert_eq!(configs.get("sqlite-conn").map(|c| c.host.as_str()), Some(config.host.as_str()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn save_connections_keeps_connections_saved_by_another_client() {
+        let (state, dir) = test_web_state().await;
+        let client_one = sqlite_config("client-one", &dir.join("one.db").to_string_lossy());
+
+        // Client two loaded its list before client one saved anything.
+        let client_two_snapshot = state.app.storage.load_connections().await.unwrap();
+
+        let saved = save_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SaveConnectionsRequest { configs: vec![client_one.clone()], removed_ids: Vec::new() }),
+        )
+        .await;
+        assert!(saved.is_ok());
+
+        // Client two saves its stale snapshot plus its own new connection.
+        let client_two = sqlite_config("client-two", &dir.join("two.db").to_string_lossy());
+        let mut payload = client_two_snapshot;
+        payload.push(client_two.clone());
+        let saved = save_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SaveConnectionsRequest { configs: payload, removed_ids: Vec::new() }),
+        )
+        .await;
+        assert!(saved.is_ok());
+
+        let persisted = state.app.storage.load_connections().await.unwrap();
+        assert!(
+            persisted.iter().any(|config| config.id == client_one.id),
+            "a connection saved by another client must survive a save that does not mention it"
+        );
+        assert!(persisted.iter().any(|config| config.id == client_two.id));
+        let runtime = state.app.configs.read().await;
+        assert!(runtime.contains_key(&client_one.id), "the other client's runtime config must be kept");
+        assert!(runtime.contains_key(&client_two.id));
+        drop(runtime);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn save_connections_deletes_only_explicitly_removed_connections() {
+        let (state, dir) = test_web_state().await;
+        let kept = sqlite_config("kept", &dir.join("kept.db").to_string_lossy());
+        let removed = sqlite_config("removed", &dir.join("removed.db").to_string_lossy());
+        state.app.storage.save_connections(&[kept.clone(), removed.clone()]).await.unwrap();
+
+        let saved = save_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SaveConnectionsRequest { configs: vec![kept.clone()], removed_ids: vec![removed.id.clone()] }),
+        )
+        .await;
+        assert!(saved.is_ok());
+
+        let persisted = state.app.storage.load_connections().await.unwrap();
+        assert_eq!(persisted.iter().map(|config| config.id.as_str()).collect::<Vec<_>>(), vec![kept.id.as_str()]);
+        assert!(!state.app.configs.read().await.contains_key(&removed.id));
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1609,7 +1685,7 @@ mod tests {
         let result = save_connections(
             State(state.clone()),
             HeaderMap::new(),
-            Json(SaveConnectionsRequest { configs: vec![updated.clone()] }),
+            Json(SaveConnectionsRequest { configs: vec![updated.clone()], removed_ids: Vec::new() }),
         )
         .await;
         assert!(result.is_ok());
@@ -1730,10 +1806,13 @@ mod tests {
         let config = nacos_config("nacos-a");
         let headers_a = cookie_headers("token-a");
 
-        let _ =
-            save_connections(State(state.clone()), headers_a, Json(SaveConnectionsRequest { configs: vec![config] }))
-                .await
-                .unwrap();
+        let _ = save_connections(
+            State(state.clone()),
+            headers_a,
+            Json(SaveConnectionsRequest { configs: vec![config], removed_ids: Vec::new() }),
+        )
+        .await
+        .unwrap();
 
         let runtime = state.app.configs.read().await.get("nacos-a").cloned().unwrap();
         assert!(runtime.password.is_empty());
@@ -2024,6 +2103,7 @@ mod tests {
         let (state, dir) = test_web_state().await;
         let kept = sqlite_config("kept", &dir.join("kept.db").to_string_lossy());
         let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
+        state.app.storage.save_connections(&[kept.clone(), removed.clone()]).await.unwrap();
         {
             let mut configs = state.app.configs.write().await;
             configs.insert(kept.id.clone(), kept.clone());
@@ -2034,7 +2114,7 @@ mod tests {
         let result = save_connections(
             State(state.clone()),
             HeaderMap::new(),
-            Json(SaveConnectionsRequest { configs: vec![kept.clone()] }),
+            Json(SaveConnectionsRequest { configs: vec![kept.clone()], removed_ids: vec![removed.id.clone()] }),
         )
         .await;
         assert!(result.is_ok());
@@ -2056,6 +2136,7 @@ mod tests {
         let (state, dir) = test_web_state().await;
         let kept = sqlite_config("kept", &dir.join("kept.db").to_string_lossy());
         let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
+        state.app.storage.save_connections(&[kept.clone(), removed.clone()]).await.unwrap();
         {
             let mut configs = state.app.configs.write().await;
             configs.insert(kept.id.clone(), kept.clone());
@@ -2071,7 +2152,7 @@ mod tests {
         let result = save_connections(
             State(state.clone()),
             HeaderMap::new(),
-            Json(SaveConnectionsRequest { configs: vec![kept.clone()] }),
+            Json(SaveConnectionsRequest { configs: vec![kept.clone()], removed_ids: vec![removed.id.clone()] }),
         )
         .await;
         assert!(result.is_ok());

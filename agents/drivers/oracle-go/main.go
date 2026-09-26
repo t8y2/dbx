@@ -4524,6 +4524,7 @@ func parseSingleOracleTableRef(fromSQL string) (oracleTableRef, bool) {
 		ref.Table = second.Name
 		pos = skipSQLWhitespace(fromSQL, afterSecond)
 	}
+	pos = parseOracleDatabaseLinkSuffix(fromSQL, pos)
 	if pos < len(fromSQL) {
 		if strings.HasPrefix(strings.TrimLeft(fromSQL[pos:], " \t\r\n"), ",") {
 			return oracleTableRef{}, false
@@ -4556,6 +4557,31 @@ func parseSingleOracleTableRef(fromSQL string) (oracleTableRef, bool) {
 		}
 	}
 	return ref, true
+}
+
+// parseOracleDatabaseLinkSuffix consumes the `@link` (or `@!link`) suffix of a
+// remote table reference so that the alias written after the link is still
+// recognized (issues #9171 / #9344). Without it `schema.table@link t` parsed as
+// an unaliased reference, so a `t.*` / `t.column` projection no longer matched
+// the table and go-ora panicked on the user-defined type columns the value
+// rewrite is meant to substitute.
+//
+// A suffix that cannot be read as a link name is left in place, which keeps the
+// previous shape for connect-string links and other unparsable spellings.
+func parseOracleDatabaseLinkSuffix(fromSQL string, pos int) int {
+	if pos >= len(fromSQL) || fromSQL[pos] != '@' {
+		return pos
+	}
+	linkStart := pos + 1
+	if linkStart < len(fromSQL) && fromSQL[linkStart] == '!' {
+		// `table@!link` keeps the same link name; the marker only changes where
+		// the link itself is resolved.
+		linkStart++
+	}
+	if _, afterLink, ok := readOracleIdentifierToken(fromSQL, linkStart); ok {
+		return skipSQLWhitespace(fromSQL, afterLink)
+	}
+	return pos
 }
 
 func splitOracleSelectListModifier(selectList string) (string, string) {

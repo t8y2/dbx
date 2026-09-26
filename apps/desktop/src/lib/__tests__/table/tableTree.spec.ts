@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { appendTableTreeLoadMoreNode, buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren, tablePartitionGroups, withoutTableTreeLoadMoreNodes } from "@/lib/table/tableTree";
+import {
+  appendTableTreeLoadMoreNode,
+  buildGroupedObjectTreeNodes,
+  buildObjectGroupPlaceholderNodes,
+  buildSimpleObjectTreeNodes,
+  buildTableTreeNodes,
+  mergeTableInfosIntoObjects,
+  mergeTableTreePageChildren,
+  tablePageRowAnchorKey,
+  tablePartitionGroups,
+  withoutTableTreeLoadMoreNodes,
+} from "@/lib/table/tableTree";
 import type { ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 
 const context = {
@@ -556,5 +567,16 @@ describe("TDengine table hierarchy", () => {
     expect(level1.map((node) => node.label)).toEqual(["catalog_nested_2024", "catalog_nested_2025"]);
     const yearPartition = level1.find((node) => node.label === "catalog_nested_2024");
     expect(tablePartitionGroups(yearPartition!)[0].children?.map((node) => node.label)).toEqual(["catalog_nested_2024_asia", "catalog_nested_2024_eu"]);
+  });
+});
+
+describe("tablePageRowAnchorKey", () => {
+  it("identifies a paged row without depending on the server's casing", () => {
+    expect(tablePageRowAnchorKey("Orders", "App", "Orders_2024")).toBe(tablePageRowAnchorKey("orders", "app", "orders_2024"));
+  });
+
+  it("keeps a partition's parent in the key so same-named child tables stay distinct", () => {
+    expect(tablePageRowAnchorKey("p_2024", "app", "orders")).not.toBe(tablePageRowAnchorKey("p_2024", "app", "customers"));
+    expect(tablePageRowAnchorKey("p_2024", "app")).not.toBe(tablePageRowAnchorKey("p_2024", "app", "orders"));
   });
 });

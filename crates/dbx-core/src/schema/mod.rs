@@ -17,6 +17,7 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+mod agent_pg_sequences;
 mod kingbase;
 mod mongodb_columns;
 pub mod plugin_metadata;
@@ -3155,7 +3156,8 @@ mod tests {
     use super::{list_databases_core, list_tables_core};
     use super::{
         object_types_include_custom_types, object_types_include_relations, object_types_include_routines,
-        object_types_only_custom_types, supports_custom_type_details, supports_pg_custom_type_objects,
+        object_types_include_sequences, object_types_only_custom_types, supports_custom_type_details,
+        supports_pg_custom_type_objects, with_agent_pg_sequence_objects,
     };
 
     use crate::connection::{AppState, PoolKind};
@@ -3477,6 +3479,32 @@ mod tests {
         assert!(object_types_include_custom_types(Some(&["table".to_string(), "type".to_string()])));
         assert!(!object_types_include_custom_types(Some(&["TABLE".to_string()])));
         assert!(!object_types_include_custom_types(Some(&["FUNCTION".to_string()])));
+    }
+
+    #[test]
+    fn object_types_include_sequences_only_for_sequence_requests() {
+        assert!(object_types_include_sequences(None));
+        assert!(object_types_include_sequences(Some(&["SEQUENCE".to_string()])));
+        assert!(object_types_include_sequences(Some(&["sequence".to_string()])));
+        assert!(object_types_include_sequences(Some(&["TABLE".to_string(), "SEQUENCE".to_string()])));
+        assert!(!object_types_include_sequences(Some(&["TABLE".to_string()])));
+        assert!(!object_types_include_sequences(Some(&[])));
+    }
+
+    #[test]
+    fn with_agent_pg_sequence_objects_merges_without_duplicating() {
+        let objects = vec![test_object_info("dbx9016_serial", "TABLE"), test_object_info("dbx9016_seq", "SEQUENCE")];
+        let sequences =
+            vec![test_object_info("dbx9016_seq", "SEQUENCE"), test_object_info("dbx9016_serial_id_seq", "SEQUENCE")];
+
+        let merged = with_agent_pg_sequence_objects(objects, &sequences);
+
+        assert_eq!(
+            merged.iter().map(|object| object.name.as_str()).collect::<Vec<_>>(),
+            ["dbx9016_serial", "dbx9016_seq", "dbx9016_serial_id_seq"]
+        );
+        assert_eq!(merged[1].object_type, "SEQUENCE");
+        assert_eq!(merged[2].object_type, "SEQUENCE");
     }
 
     #[test]
@@ -7023,7 +7051,7 @@ async fn list_objects_once(
             let mut client = lock_sqlserver_metadata_client(&client).await?;
             return db::sqlserver::list_objects(&mut client, schema).await.map(unpaged_object_list);
         }
-        if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+        if let Some(agent_client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
             let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
             let filter_locally_after_oracle_comments =
@@ -7031,11 +7059,21 @@ async fn list_objects_once(
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
             let fallback_config = db_config.clone();
             if is_oracle && !use_oracle_agent_paging {
-                return oracle_agent_list_objects(client, database, schema, timeout_duration)
+                return oracle_agent_list_objects(agent_client, database, schema, timeout_duration)
                     .await
                     .map(unpaged_object_list);
             }
-            let mut client = client.lock().await;
+            // KingbaseES/Vastbase agents list relations, routines and types but
+            // never sequences, so their pg_class-backed sequence list is merged
+            // into whatever the agent returns (t8y2/dbx#9016).
+            let sequence_objects = if db_config.as_ref().is_some_and(is_agent_pg_sequence_config)
+                && object_types_include_sequences(object_types)
+            {
+                agent_pg_sequence_objects(agent_client.clone(), database, schema, timeout_duration).await
+            } else {
+                Vec::new()
+            };
+            let mut client = agent_client.lock().await;
             let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
             let agent_limit = if filter_locally_after_oracle_comments || force_local_table_name_filter {
                 None
@@ -7074,7 +7112,7 @@ async fn list_objects_once(
                         )
                         .await?;
                     }
-                    return Ok(unpaged_object_list(objects));
+                    return Ok(unpaged_object_list(with_agent_pg_sequence_objects(objects, &sequence_objects)));
                 }
                 Ok(objects) => {
                     if object_types_only_custom_types(object_types) {
@@ -7087,11 +7125,13 @@ async fn list_objects_once(
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return list_native_postgres_objects(&pool, config, schema)
-                                    .await
-                                    .map(unpaged_object_list)
+                                let objects = list_native_postgres_objects(&pool, config, schema).await?;
+                                return Ok(unpaged_object_list(with_agent_pg_sequence_objects(
+                                    objects,
+                                    &sequence_objects,
+                                )));
                             }
-                            Ok(None) => return Ok(unpaged_object_list(objects)),
+                            Ok(None) => {}
                             Err(error) => {
                                 log::warn!(
                                     "[schema][agent:list_objects:fallback-failed] connection_id={} database={} schema={} error={}",
@@ -7103,7 +7143,7 @@ async fn list_objects_once(
                             }
                         }
                     }
-                    return Ok(unpaged_object_list(objects));
+                    return Ok(unpaged_object_list(with_agent_pg_sequence_objects(objects, &sequence_objects)));
                 }
                 Err(agent_error) => {
                     if object_types_only_custom_types(object_types) {
@@ -8825,6 +8865,19 @@ pub async fn list_sequences_core(
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
+        if db_config.as_ref().is_some_and(is_agent_pg_sequence_config) {
+            let pool_handle = state.pool_handle(&pool_key).await;
+            if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+                return agent_pg_sequences::list_sequences(
+                    client,
+                    database,
+                    schema,
+                    with_last_values,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await;
+            }
+        }
         let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
 
         match &pool {
@@ -9179,11 +9232,37 @@ async fn get_table_ddl_core_with_options(
         .await?;
         return Ok(source.source);
     }
+    if let Some(kind) = object_type.clone().filter(ddl_kind_uses_object_source) {
+        // Routines, packages, triggers, types and the other schema objects have no
+        // table DDL: `SHOW CREATE TABLE` or the columns/indexes renderer can only
+        // fabricate `CREATE TABLE <name> ()` for them. Ask for the definition
+        // instead, and keep the previous behaviour when the driver cannot produce
+        // one (engine without a source query, empty definition, …).
+        match get_object_source_core(state, connection_id, database, schema, table, kind, None, None).await {
+            Ok(source) if !source.source.trim().is_empty() => return Ok(source.source),
+            Ok(_) => {}
+            Err(error) => {
+                log::debug!(
+                    "[schema][get_table_ddl:object-source-kind-fallback-failed] connection_id={connection_id} database={database} schema={schema} table={table} error={error}"
+                );
+            }
+        }
+    }
 
     retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
         get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
     })
     .await
+}
+
+/// Whether the DDL of this object kind is its own definition, rather than the
+/// table DDL built from columns and indexes.
+///
+/// Views and materialized views are excluded because they have dedicated
+/// branches in [`get_table_ddl_core_with_options`]: a view is re-wrapped into a
+/// `CREATE ... VIEW` statement, and a materialized view returns the raw source.
+fn ddl_kind_uses_object_source(kind: &db::ObjectSourceKind) -> bool {
+    !matches!(kind, db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView)
 }
 
 /// `pg_ddl_with_partitions` when the caller wants the whole partition tree,
@@ -9366,6 +9445,70 @@ fn is_opengauss_constraint_config(config: &ConnectionConfig) -> bool {
     config.db_type == DatabaseType::OpenGauss || config.driver_profile.as_deref() == Some("opengauss")
 }
 
+/// KingbaseES and Vastbase run through Agent pools but expose PostgreSQL's
+/// sequence catalogs, so their sequence metadata is queried over the agent
+/// connection (t8y2/dbx#9016). HighGo/UXDB stay on their existing paths.
+fn is_agent_pg_sequence_config(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::Kingbase | DatabaseType::Vastbase)
+}
+
+/// Sequences for agent-backed PostgreSQL-family engines, shaped like the
+/// relation listing the native PostgreSQL driver returns for `relkind = 'S'`.
+async fn agent_pg_sequence_objects(
+    client: Arc<db::agent_driver::PooledAgentClient>,
+    database: &str,
+    schema: &str,
+    timeout_duration: Option<Duration>,
+) -> Vec<db::ObjectInfo> {
+    match agent_pg_sequences::list_sequences(client, database, schema, false, timeout_duration).await {
+        Ok(sequences) => sequences
+            .into_iter()
+            .map(|sequence| db::ObjectInfo {
+                name: sequence.name,
+                object_type: "SEQUENCE".to_string(),
+                schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                valid: None,
+                signature: None,
+                custom_type_kind: None,
+                has_members: None,
+                comment: None,
+                created_at: None,
+                updated_at: None,
+                parent_schema: None,
+                parent_name: None,
+                trigger: None,
+                xugu_type_members_expandable: None,
+            })
+            .collect(),
+        Err(error) => {
+            log::warn!(
+                "[schema][agent:list_objects:sequences-failed] database={} schema={} error={}",
+                database,
+                schema,
+                error
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn with_agent_pg_sequence_objects(
+    mut objects: Vec<db::ObjectInfo>,
+    sequences: &[db::ObjectInfo],
+) -> Vec<db::ObjectInfo> {
+    for sequence in sequences {
+        let already_listed = objects.iter().any(|object| {
+            object.name == sequence.name
+                && normalize_object_info_object_type(&object.object_type)
+                    == normalize_object_info_object_type(&sequence.object_type)
+        });
+        if !already_listed {
+            objects.push(sequence.clone());
+        }
+    }
+    objects
+}
+
 fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
         || matches!(config.driver_profile.as_deref(), Some("opengauss" | "gaussdb"))
@@ -9402,6 +9545,10 @@ fn object_types_include_relations(object_types: Option<&[String]>) -> bool {
             )
         })
     })
+}
+
+fn object_types_include_sequences(object_types: Option<&[String]>) -> bool {
+    object_types.is_none_or(|types| types.iter().any(|t| t.eq_ignore_ascii_case("SEQUENCE")))
 }
 
 fn object_types_include_routines(object_types: Option<&[String]>) -> bool {
@@ -10600,6 +10747,29 @@ async fn get_object_source_once(
                     agent_metadata_timeout(db_config.as_ref()),
                 )
                 .await?
+            } else if matches!(object_type, db::ObjectSourceKind::Sequence)
+                && db_config.as_ref().is_some_and(is_agent_pg_sequence_config)
+            {
+                match agent_pg_sequences::sequence_source(
+                    client.clone(),
+                    database,
+                    schema,
+                    name,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await?
+                {
+                    Some(source) => {
+                        return Ok(db::ObjectSource {
+                            name: name.to_string(),
+                            object_type,
+                            schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                            source,
+                            editable: None,
+                        });
+                    }
+                    None => String::new(),
+                }
             } else {
                 let mut client = client.lock().await;
                 let result: db::ObjectSource = client
@@ -11828,6 +11998,31 @@ mod object_source_tests {
 mod ddl_tests {
     use super::*;
 
+    /// Ctrl/Cmd+click on a routine, trigger or package sends its object kind to
+    /// the DDL endpoint. Those requests must be answered from the object source:
+    /// the table renderer can only fabricate `CREATE TABLE <name> ()` for them.
+    #[test]
+    fn ddl_object_kinds_that_need_the_object_source() {
+        for kind in [
+            db::ObjectSourceKind::Procedure,
+            db::ObjectSourceKind::Function,
+            db::ObjectSourceKind::Trigger,
+            db::ObjectSourceKind::Event,
+            db::ObjectSourceKind::Sequence,
+            db::ObjectSourceKind::Synonym,
+            db::ObjectSourceKind::Job,
+            db::ObjectSourceKind::Package,
+            db::ObjectSourceKind::PackageBody,
+            db::ObjectSourceKind::Type,
+            db::ObjectSourceKind::TypeBody,
+        ] {
+            assert!(ddl_kind_uses_object_source(&kind), "{kind:?} must use the object source");
+        }
+        // Views and materialized views keep their dedicated branches.
+        assert!(!ddl_kind_uses_object_source(&db::ObjectSourceKind::View));
+        assert!(!ddl_kind_uses_object_source(&db::ObjectSourceKind::MaterializedView));
+    }
+
     fn column(name: &str, data_type: &str) -> db::ColumnInfo {
         db::ColumnInfo {
             name: name.to_string(),
@@ -12628,6 +12823,49 @@ mod ddl_tests {
     }
 
     #[test]
+    fn sqlserver_table_ddl_renders_computed_columns_with_their_definition() {
+        let mut columns = vec![column("id", "nvarchar(100)"), column("code", "binary(32)")];
+        columns[1].is_nullable = false;
+        columns[1].extra = Some("computed".to_string());
+        let computed = HashMap::from([(
+            "code".to_string(),
+            "AS (CONVERT([binary](32),hashbytes('SHA2_256',[id]))) PERSISTED".to_string(),
+        )]);
+
+        let ddl = render_sqlserver_table_ddl_with_computed("dbo", "authorization", &columns, &computed, &[], &[], None);
+
+        assert!(
+            ddl.contains("\n  [code] AS (CONVERT([binary](32),hashbytes('SHA2_256',[id]))) PERSISTED NOT NULL"),
+            "computed column keeps its definition: {ddl}"
+        );
+        // The derived result type must not be rendered as a storable column.
+        assert!(!ddl.contains("[code] binary(32)"), "derived result type must be dropped: {ddl}");
+        assert!(ddl.contains("[id] nvarchar(100)"), "plain columns are unchanged: {ddl}");
+    }
+
+    #[test]
+    fn sqlserver_table_ddl_ignores_computed_clauses_for_other_columns() {
+        let columns = vec![column("id", "int")];
+        let computed = HashMap::from([("other".to_string(), "AS (1)".to_string())]);
+
+        let ddl = render_sqlserver_table_ddl_with_computed("dbo", "users", &columns, &computed, &[], &[], None);
+
+        assert_eq!(ddl, render_sqlserver_table_ddl("dbo", "users", &columns, &[], &[], None));
+        assert!(ddl.contains("[id] int"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn sqlserver_table_ddl_skips_blank_computed_clauses() {
+        let mut columns = vec![column("code", "binary(32)")];
+        columns[0].is_nullable = false;
+        let computed = HashMap::from([("code".to_string(), "   ".to_string())]);
+
+        let ddl = render_sqlserver_table_ddl_with_computed("dbo", "users", &columns, &computed, &[], &[], None);
+
+        assert!(ddl.contains("[code] binary(32) NOT NULL"), "blank clause falls back to the type: {ddl}");
+    }
+
+    #[test]
     fn sqlserver_table_ddl_includes_column_comments() {
         let mut display_name = column("display]name", "nvarchar(100)");
         display_name.comment = Some("User's display name".to_string());
@@ -12924,6 +13162,91 @@ mod ddl_tests {
         );
     }
 
+    /// Doris answers `SHOW CREATE TABLE <mv>` with a pointer to
+    /// `SHOW CREATE MATERIALIZED VIEW`; the DDL request must follow that hint.
+    #[tokio::test]
+    async fn mysql_ddl_falls_back_to_materialized_view_after_a_doris_refusal() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(mysql_server_error(
+                    1105,
+                    "errCode = 2, detailMessage = not support async materialized view, please use `show create materialized view`",
+                )),
+                Ok("CREATE MATERIALIZED VIEW `mv_daily` (id)".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "dbx_test", "mv_daily").await.unwrap();
+
+        assert_eq!(ddl, "CREATE MATERIALIZED VIEW `mv_daily` (id);");
+        assert_eq!(
+            executor.executed,
+            ["SHOW CREATE TABLE `dbx_test`.`mv_daily`", "SHOW CREATE MATERIALIZED VIEW `dbx_test`.`mv_daily`"]
+        );
+    }
+
+    /// Without a database the materialized view statement stays unqualified,
+    /// matching the qualifier used for the table probe.
+    #[tokio::test]
+    async fn mysql_ddl_falls_back_to_materialized_view_without_a_database() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [
+                Err(mysql_server_error(
+                    1105,
+                    "not support async materialized view, please use `show create materialized view`",
+                )),
+                Ok("CREATE MATERIALIZED VIEW `mv_daily` (id)".to_string()),
+            ]
+            .into(),
+            executed: Vec::new(),
+        };
+
+        let ddl = mysql_ddl_with_executor(&mut executor, "", "mv_daily").await.unwrap();
+
+        assert_eq!(ddl, "CREATE MATERIALIZED VIEW `mv_daily` (id);");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `mv_daily`", "SHOW CREATE MATERIALIZED VIEW `mv_daily`"]);
+    }
+
+    /// Engines without `SHOW CREATE MATERIALIZED VIEW` answer the retry with a
+    /// syntax error; the original table error is what the user should still see.
+    #[tokio::test]
+    async fn mysql_ddl_preserves_the_table_error_when_the_materialized_view_probe_fails() {
+        let refusal = mysql_server_error(
+            1105,
+            "errCode = 2, detailMessage = not support async materialized view, please use `show create materialized view`",
+        );
+        let expected = refusal.to_string();
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(refusal), Err(mysql_server_error(1064, "You have an error in your SQL syntax"))].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "missing").await.unwrap_err();
+
+        assert_eq!(error, expected);
+        assert_eq!(
+            executor.executed,
+            ["SHOW CREATE TABLE `app`.`missing`", "SHOW CREATE MATERIALIZED VIEW `app`.`missing`"]
+        );
+    }
+
+    /// Unrelated failures must not trigger an extra probe, even when the server
+    /// reports them with the same generic error code Doris uses.
+    #[tokio::test]
+    async fn mysql_ddl_does_not_probe_materialized_views_for_unrelated_failures() {
+        let mut executor = FakeMysqlDdlExecutor {
+            outcomes: [Err(mysql_server_error(1105, "errCode = 2, detailMessage = table is broken"))].into(),
+            executed: Vec::new(),
+        };
+
+        let error = mysql_ddl_with_executor(&mut executor, "app", "missing").await.unwrap_err();
+
+        assert_eq!(error, "Server error: `ERROR 1105 (HY000): errCode = 2, detailMessage = table is broken'");
+        assert_eq!(executor.executed, ["SHOW CREATE TABLE `app`.`missing`"]);
+    }
+
     #[tokio::test]
     async fn mysql_ddl_preserves_qualified_error_when_fallback_fails() {
         let first_error = mysql_server_error(1146, "qualified table doesn't exist");
@@ -12997,6 +13320,21 @@ impl MysqlDdlQueryError {
     fn is_no_such_table(&self) -> bool {
         matches!(self, Self::Query(mysql_async::Error::Server(error)) if error.code == 1146)
     }
+
+    /// Doris exposes asynchronous materialized views as base tables and then
+    /// refuses `SHOW CREATE TABLE` / `SHOW CREATE VIEW` on them with a pointer
+    /// to another statement:
+    /// `ERROR 1105 (HY000): errCode = 2, detailMessage = not support async
+    /// materialized view, please use `show create materialized view``.
+    /// Recognize that refusal so the DDL request can be retried with the
+    /// statement the server asked for instead of failing outright.
+    fn is_materialized_view_ddl_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::Query(mysql_async::Error::Server(error))
+                if error.message.to_ascii_lowercase().contains("materialized view")
+        )
+    }
 }
 
 impl std::fmt::Display for MysqlDdlQueryError {
@@ -13044,6 +13382,10 @@ async fn mysql_ddl_with_executor(
         Ok(ddl) => return Ok(normalize_mysql_display_ddl(ddl)),
         Err(error) => error,
     };
+    if qualified_error.is_materialized_view_ddl_refusal() {
+        let name = mysql_qualified_name(database, table);
+        return mysql_materialized_view_ddl(executor, &name, qualified_error).await;
+    }
     if database.trim().is_empty() || !qualified_error.is_no_such_table() {
         return Err(qualified_error.to_string());
     }
@@ -13054,6 +13396,25 @@ async fn mysql_ddl_with_executor(
     match executor.execute(&fallback_sql).await {
         Ok(ddl) => Ok(normalize_mysql_display_ddl(ddl)),
         Err(_) => Err(qualified_error.to_string()),
+    }
+}
+
+/// Reads the definition of a materialized view that the server refused to
+/// describe as a table.
+///
+/// The fallback only replaces the original error when the statement actually
+/// returns a definition: engines without `SHOW CREATE MATERIALIZED VIEW`
+/// (plain MySQL, MariaDB) answer with a syntax error, so the caller still sees
+/// the error it would have seen before this fallback existed.
+async fn mysql_materialized_view_ddl(
+    executor: &mut impl MysqlDdlQueryExecutor,
+    qualified_name: &str,
+    original_error: MysqlDdlQueryError,
+) -> Result<String, String> {
+    let sql = format!("SHOW CREATE MATERIALIZED VIEW {qualified_name}");
+    match executor.execute(&sql).await {
+        Ok(ddl) => Ok(normalize_mysql_display_ddl(ddl)),
+        Err(_) => Err(original_error.to_string()),
     }
 }
 
@@ -14350,7 +14711,7 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
             .map(|(i, c)| {
                 // A real column is quoted via `pg_ident`; an expression/functional key part
                 // arrives as raw expression text (the per-column `pg_get_indexdef` omits the
-                // opclass — see `crates/dbx-drivers/src/db/postgres.rs`), so quoting the whole
+                // opclass — see `crates/dbx-driver-postgres/src/postgres.rs`), so quoting the whole
                 // thing as an identifier would turn it into a nonexistent column reference
                 // (#6295).
                 let is_expr = idx.key_is_expression.get(i).copied().unwrap_or(false);
@@ -14423,12 +14784,36 @@ pub async fn build_sqlserver_ddl(
     schema: &str,
     table: &str,
 ) -> Result<String, String> {
-    let columns = db::sqlserver::get_columns(client, schema, table).await?;
+    // The computed-column definitions come from the same metadata query as the
+    // columns, so the DDL path reads the richer driver record instead of the
+    // flattened `ColumnInfo` (which cannot carry `AS (...) PERSISTED`).
+    let metadata = db::sqlserver::get_column_metadata(client, schema, table).await?;
     let indexes = db::sqlserver::list_indexes(client, schema, table).await?;
     let fkeys = db::sqlserver::list_foreign_keys(client, schema, table).await?;
     let table_comment = db::sqlserver::get_table_comment(client, schema, table).await?;
 
-    Ok(render_sqlserver_table_ddl(schema, table, &columns, &indexes, &fkeys, table_comment.as_deref()))
+    let columns = metadata.iter().map(|metadata| metadata.column.clone()).collect::<Vec<_>>();
+    let computed_clauses = metadata
+        .iter()
+        .filter_map(|metadata| {
+            metadata
+                .computed_clause
+                .as_deref()
+                .map(str::trim)
+                .filter(|clause| !clause.is_empty())
+                .map(|clause| (metadata.column.name.clone(), clause.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    Ok(render_sqlserver_table_ddl_with_computed(
+        schema,
+        table,
+        &columns,
+        &computed_clauses,
+        &indexes,
+        &fkeys,
+        table_comment.as_deref(),
+    ))
 }
 
 fn sqlserver_fk_action_clause(kind: &str, value: Option<&str>) -> String {
@@ -14450,11 +14835,40 @@ pub fn render_sqlserver_table_ddl(
     fkeys: &[db::ForeignKeyInfo],
     table_comment: Option<&str>,
 ) -> String {
+    render_sqlserver_table_ddl_with_computed(schema, table, columns, &HashMap::new(), indexes, fkeys, table_comment)
+}
+
+/// Renders a `CREATE TABLE` script for a SQL Server table. `computed_clauses`
+/// maps a column name to its `AS (expression) [PERSISTED]` definition: those
+/// columns have no storable `data_type` of their own in metadata (only the
+/// derived result type), so the definition is written instead of the type.
+#[allow(clippy::too_many_arguments)]
+pub fn render_sqlserver_table_ddl_with_computed(
+    schema: &str,
+    table: &str,
+    columns: &[db::ColumnInfo],
+    computed_clauses: &HashMap<String, String>,
+    indexes: &[db::IndexInfo],
+    fkeys: &[db::ForeignKeyInfo],
+    table_comment: Option<&str>,
+) -> String {
     let table_name = format!("{}.{}", sqlserver_ident(schema), sqlserver_ident(table));
     let mut ddl = format!("CREATE TABLE {table_name} (\n");
     let col_lines: Vec<String> = columns
         .iter()
         .map(|c| {
+            // A computed column can never have a default, and its `data_type`
+            // is only the derived result type: rendering either would emit a
+            // table that differs from the one being scripted.
+            if let Some(clause) =
+                computed_clauses.get(&c.name).map(String::as_str).map(str::trim).filter(|clause| !clause.is_empty())
+            {
+                let mut line = format!("  {} {clause}", sqlserver_ident(&c.name));
+                if !c.is_nullable {
+                    line.push_str(" NOT NULL");
+                }
+                return line;
+            }
             let mut line = format!("  {} {}", sqlserver_ident(&c.name), c.data_type);
             if let Some(identity) = sqlserver_identity_clause(c.extra.as_deref()) {
                 line.push_str(&format!(" {identity}"));

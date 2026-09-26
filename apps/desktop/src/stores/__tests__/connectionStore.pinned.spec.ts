@@ -157,7 +157,7 @@ describe("connectionStore pinned tree node removal", () => {
 
     expect(store.connections).toEqual([connection]);
     expect(settingsStore.editorSettings.connectTimeoutInheritConnectionIds).toEqual([connection.id]);
-    expect(saveConnections).toHaveBeenCalledWith([]);
+    expect(saveConnections).toHaveBeenCalledWith([], ["connection-1"]);
     expect(saveConnections).toHaveBeenLastCalledWith([connection]);
   });
 

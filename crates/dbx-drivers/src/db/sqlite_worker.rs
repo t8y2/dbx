@@ -373,7 +373,10 @@ pub async fn connect_sqlite_worker(
     };
 
     let platform = remote_linux_platform(&session).await?;
-    if std::env::var_os(WORKER_PATH_ENV).is_none() && !agent_manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY) {
+    // Only the remote host's architecture matters: an offline import of that one
+    // platform is a complete installation and must not trigger a download, while
+    // a missing binary for this host still gets fetched when it can be (#8987).
+    if std::env::var_os(WORKER_PATH_ENV).is_none() && !agent_manager.sqlite_worker_platform_installed(&platform) {
         crate::agent_service::ensure_sqlite_worker_driver_ready(agent_manager).await?;
     }
     let local_worker = resolve_local_worker(agent_manager, &platform).await?;
@@ -459,7 +462,8 @@ async fn resolve_local_worker(agent_manager: &AgentManager, platform: &str) -> R
         return Ok(LocalWorker { digest: sha256_hex(&bytes), bytes });
     }
     Err(format!(
-        "{SQLITE_WORKER_DRIVER_KEY} driver is not installed. Please install it from the Driver Manager or set {WORKER_PATH_ENV}."
+        "{SQLITE_WORKER_DRIVER_KEY} driver for remote platform '{platform}' is not installed. Import the matching \
+dbx-agent-{SQLITE_WORKER_DRIVER_KEY} package from the Driver Manager, or set {WORKER_PATH_ENV}."
     ))
 }
 

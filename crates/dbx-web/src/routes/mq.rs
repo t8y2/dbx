@@ -1532,7 +1532,7 @@ mod tests {
     use axum::Json;
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::ConnectionConfig;
-    use dbx_core::storage::{McpGlobalPolicy, Storage};
+    use dbx_core::storage::McpGlobalPolicy;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock};
@@ -1574,6 +1574,7 @@ mod tests {
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
         });
         (state, dir)
     }

@@ -867,6 +867,10 @@ async function uninstallSelectedPlugin() {
     selectFirstProvider();
   } catch (cause) {
     toast(cause instanceof Error ? cause.message : String(cause), 5000);
+    // A failed uninstall can still have changed the store (the container is renamed out of the
+    // plugin store before its physical delete, for instance), so re-read the installed list
+    // instead of leaving the panel on state it may no longer describe.
+    await refreshAfterBatch();
   } finally {
     operating.value = false;
   }
@@ -1018,7 +1022,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-else-if="marketplaceViewMode === 'grid'" class="grid w-full grid-cols-1 gap-3 md:grid-cols-3">
             <article v-for="listing in sortedMarketplaceListings" :key="listing.key" class="group flex min-w-0 min-h-48 flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40">
-              <div class="flex items-start gap-3">
+              <div class="flex flex-wrap items-start gap-3">
                 <button
                   v-if="batchMode && isBatchSelectableListing(listing.status)"
                   type="button"
@@ -1063,7 +1067,7 @@ onBeforeUnmount(() => {
                     <Globe class="size-3.5" />
                   </button>
                   <span v-if="listing.latestVersionReleasedAt" class="shrink-0 text-[10px] text-muted-foreground">{{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
-                  <Badge variant="outline" class="h-5 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
+                  <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
                 </div>
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5">

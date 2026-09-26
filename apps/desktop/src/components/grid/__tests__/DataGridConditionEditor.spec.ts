@@ -379,6 +379,49 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(expandedHighlight?.style.transform).toBe("translate(0px, 0px)");
     vi.unstubAllGlobals();
   });
+
+  it("compensates the expanded highlight layer for the textarea scrollbar", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { input } = mountEditor("where", "test_item_id=12 and test_item_name=''");
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+
+    const overlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement | null;
+    const expandedHighlight = document.body.querySelector(".data-grid-condition-highlight--expanded") as HTMLElement | null;
+    expect(overlay).toBeTruthy();
+    expect(expandedHighlight).toBeTruthy();
+
+    // A vertical scrollbar takes content width away from the textarea but not
+    // from the plain-div highlight layer. Both wrap with `pre-wrap` +
+    // `overflow-wrap: anywhere`, so unless the layer gives up the same width the
+    // two break at different characters and the caret drifts off the visible text.
+    Object.defineProperties(overlay as HTMLTextAreaElement, {
+      offsetWidth: { configurable: true, value: 178 },
+      clientWidth: { configurable: true, value: 168 },
+    });
+    overlay?.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+    await nextTick();
+
+    expect(expandedHighlight?.style.getPropertyValue("--data-grid-condition-highlight-scrollbar")).toBe("10px");
+    vi.unstubAllGlobals();
+  });
 });
 
 describe("DataGridConditionEditor Chinese column matching", () => {

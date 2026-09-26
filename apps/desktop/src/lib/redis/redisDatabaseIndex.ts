@@ -1,4 +1,4 @@
-// Mirrors dbx-core `redis_database_index()` (crates/dbx-drivers/src/db/redis_driver.rs):
+// Mirrors dbx-core `redis_database_index()` (crates/dbx-driver-redis/src/lib.rs):
 // a Redis database is a numeric index. Anything else (e.g. redis-cli flags like
 // "0 --tls --insecure" pasted into the field or imported from a dirty URL) fails
 // to parse on the backend and silently falls back to db 0, so every frontend

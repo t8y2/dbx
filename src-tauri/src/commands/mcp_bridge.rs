@@ -221,14 +221,20 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
             let app = app_handle.clone();
             let st = state.clone();
             tokio::spawn(async move {
-                let mut buf = vec![0u8; 65536];
-                let n = match stream.read(&mut buf).await {
-                    Ok(n) if n > 0 => n,
-                    _ => return,
+                let request = match read_bridge_request(&mut stream).await {
+                    Some(request) => request,
+                    None => return,
                 };
-                let request = String::from_utf8_lossy(&buf[..n]);
-                let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
-                let first_line = request.lines().next().unwrap_or("");
+                let mut parts = request.splitn(2, "\r\n\r\n");
+                let head = parts.next().unwrap_or("");
+                let body = parts.next().unwrap_or("");
+                let first_line = head.lines().next().unwrap_or("");
+                if !bridge_request_is_local_client(first_line, head) {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await;
+                    return;
+                }
 
                 if first_line.starts_with("POST /open-table") {
                     handle_open_table(&app, &st, body, &mut stream).await;
@@ -286,8 +292,115 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
 fn write_port_file(data_dir: &Path, actual_port: u16) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(data_dir)?;
     let path = data_dir.join(MCP_BRIDGE_PORT_FILE);
-    std::fs::write(&path, actual_port.to_string())?;
+    // 0600: the published port is the discovery half of a local control
+    // plane; other local users must not be able to read (and talk to) it.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::io::Write::write_all(&mut file, actual_port.to_string().as_bytes())?;
     Ok(path)
+}
+
+/// Upper bound for one bridge request (headers + body). Generous for large
+/// SQL batches; the previous fixed 64 KiB single read silently truncated
+/// bigger requests — and a truncation that landed on a JSON boundary could
+/// execute cut-down SQL.
+const MAX_BRIDGE_REQUEST_BYTES: usize = 10 * 1024 * 1024;
+const BRIDGE_HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
+
+/// Reads one HTTP/1.1 request off the bridge connection: the header block
+/// first, then exactly `Content-Length` body bytes. TCP delivers large
+/// bodies across multiple segments, so a single read truncates them; a
+/// closed or short read still returns whatever arrived so routing can
+/// answer with a precise 400 instead of dropping the connection.
+async fn read_bridge_request(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 16384];
+    let mut header_end: Option<usize> = None;
+    let mut content_length: usize = 0;
+    let mut scanned = 0usize;
+    loop {
+        if let Some(end) = header_end {
+            if buf.len() >= end + content_length {
+                return Some(String::from_utf8_lossy(&buf).into_owned());
+            }
+        } else if let Some(pos) =
+            buf[scanned..].windows(BRIDGE_HEADER_TERMINATOR.len()).position(|window| window == BRIDGE_HEADER_TERMINATOR)
+        {
+            let end = scanned + pos + BRIDGE_HEADER_TERMINATOR.len();
+            header_end = Some(end);
+            content_length = parse_content_length(&String::from_utf8_lossy(&buf[..end]));
+        } else {
+            scanned = buf.len().saturating_sub(BRIDGE_HEADER_TERMINATOR.len() - 1);
+        }
+        let n = match stream.read(&mut chunk).await {
+            Ok(n) if n > 0 => n,
+            _ => {
+                return if buf.is_empty() { None } else { Some(String::from_utf8_lossy(&buf).into_owned()) };
+            }
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > MAX_BRIDGE_REQUEST_BYTES {
+            log::warn!("MCP bridge dropped an oversized request ({} bytes)", buf.len());
+            return None;
+        }
+    }
+}
+
+fn parse_content_length(header_block: &str) -> usize {
+    header_block
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim().eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0)
+}
+
+/// The bridge is a loopback-only control plane for local, non-browser
+/// clients. Browsers attach an `Origin` header to every cross-origin
+/// request, and their non-preflighted cross-site POSTs cannot carry
+/// `Content-Type: application/json` — either one marks a fire-and-forget
+/// CSRF attempt. A `Host` outside the loopback forms marks DNS rebinding.
+/// All are refused before routing; ordinary local clients (the plugin
+/// sidecars, dbx-mcp, dbx-cli) send Host + application/json and no Origin.
+fn bridge_request_is_local_client(first_line: &str, head: &str) -> bool {
+    let header_value = |name: &str| -> Option<String> {
+        head.lines().skip(1).find_map(|line| {
+            let (line_name, value) = line.split_once(':')?;
+            line_name.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_string())
+        })
+    };
+    if first_line.starts_with("POST") {
+        let is_json = header_value("content-type")
+            .map(|value| value.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json"))
+            .unwrap_or(false);
+        if !is_json {
+            return false;
+        }
+    }
+    if header_value("origin").is_some() {
+        return false;
+    }
+    match header_value("host") {
+        Some(host) => {
+            host.starts_with("127.0.0.1:")
+                || host.starts_with("localhost:")
+                || host == "127.0.0.1"
+                || host == "localhost"
+        }
+        None => false,
+    }
 }
 
 fn find_config_by_name<'a>(
@@ -300,11 +413,13 @@ fn find_config_by_name<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_database_execution_policy, ensure_connection_in_mcp_scope, ensure_mcp_connection_sql_write_allowed,
-        ensure_mcp_execute_and_show_supported, ensure_mcp_mongo_pipeline_target_allowed_by_id,
-        ensure_mcp_sql_database_switch_allowed, is_terminal_routed_exec, mongo_filter_is_effectively_unbounded,
-        mongo_pipeline_has_write_stage, plugin_connection_summaries, plugin_connection_summary, resolve_connection,
-        resolve_mongo_database, resolve_mongo_target_values, write_port_file, AppState,
+        bridge_request_is_local_client, effective_database_execution_policy, ensure_connection_in_mcp_scope,
+        ensure_mcp_connection_sql_write_allowed, ensure_mcp_execute_and_show_supported,
+        ensure_mcp_mongo_pipeline_target_allowed_by_id, ensure_mcp_sql_database_switch_allowed,
+        is_terminal_routed_exec, mongo_filter_is_effectively_unbounded, mongo_pipeline_has_write_stage,
+        parse_content_length, plugin_connection_summaries, plugin_connection_summary, read_bridge_request,
+        resolve_call_plugin_target, resolve_connection, resolve_mongo_database, resolve_mongo_target_values,
+        write_port_file, AppState,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
     use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
@@ -339,10 +454,97 @@ mod tests {
         let port_file = write_port_file(&resolved_data_dir, 49152).unwrap();
 
         assert_eq!(port_file, resolved_data_dir.join("mcp-bridge-port"));
-        assert_eq!(std::fs::read_to_string(port_file).unwrap(), "49152");
+        assert_eq!(std::fs::read_to_string(&port_file).unwrap(), "49152");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&port_file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the port file must not be world-readable");
+        }
         assert!(!default_data_dir.join("mcp-bridge-port").exists());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn call_plugin_target_accepts_the_bound_plugin_with_or_without_an_echo() {
+        assert_eq!(resolve_call_plugin_target(Some("io.dbx.ssh"), None).unwrap(), "io.dbx.ssh");
+        assert_eq!(resolve_call_plugin_target(Some("io.dbx.ssh"), Some("io.dbx.ssh")).unwrap(), "io.dbx.ssh");
+    }
+
+    #[test]
+    fn call_plugin_target_rejects_override_and_unbound_connections() {
+        assert!(resolve_call_plugin_target(Some("io.dbx.ssh"), Some("io.dbx.files")).is_err());
+        assert!(resolve_call_plugin_target(None, Some("io.dbx.ssh")).is_err());
+        assert!(resolve_call_plugin_target(Some(""), Some("io.dbx.ssh")).is_err());
+        assert_eq!(resolve_call_plugin_target(None, None).unwrap_err(), "connection is not bound to a plugin");
+    }
+
+    #[test]
+    fn content_length_parsing_tolerates_case_and_whitespace() {
+        assert_eq!(parse_content_length("POST /x HTTP/1.1\r\nContent-Length: 12\r\n\r\n"), 12);
+        assert_eq!(parse_content_length("POST /x HTTP/1.1\r\ncontent-length:  7\r\n\r\n"), 7);
+        assert_eq!(parse_content_length("POST /x HTTP/1.1\r\nContent-Length: bogus\r\n\r\n"), 0);
+        assert_eq!(parse_content_length("POST /x HTTP/1.1\r\n\r\n"), 0);
+    }
+
+    #[tokio::test]
+    async fn bridge_reads_bodies_arriving_in_multiple_segments() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let reader = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_bridge_request(&mut stream).await.unwrap()
+        });
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        use tokio::io::AsyncWriteExt;
+        let body = "x".repeat(100_000);
+        let request = format!(
+            "POST /execute-query HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let bytes = request.into_bytes();
+        // Split the request well past the header so the body cannot arrive
+        // in the same TCP segment the header rides in.
+        client.write_all(&bytes[..4096]).await.unwrap();
+        client.flush().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        client.write_all(&bytes[4096..]).await.unwrap();
+        let parsed = reader.await.unwrap();
+        assert!(parsed.ends_with(&body), "body must arrive complete, not truncated");
+    }
+
+    #[test]
+    fn bridge_rejects_browser_shaped_requests_and_keeps_local_clients() {
+        assert!(bridge_request_is_local_client(
+            "POST /call-plugin-tool HTTP/1.1",
+            "POST /call-plugin-tool HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json"
+        ));
+        assert!(bridge_request_is_local_client("GET / HTTP/1.1", "GET / HTTP/1.1\r\nHost: localhost"));
+        assert!(bridge_request_is_local_client(
+            "POST /execute-query HTTP/1.1",
+            "POST /execute-query HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json; charset=utf-8"
+        ));
+        // Browsers always attach Origin to cross-origin requests.
+        assert!(!bridge_request_is_local_client(
+            "POST /call-plugin-tool HTTP/1.1",
+            "POST /call-plugin-tool HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nOrigin: http://evil.example"
+        ));
+        // Non-preflightable content types are the classic fire-and-forget form POST.
+        assert!(!bridge_request_is_local_client(
+            "POST /call-plugin-tool HTTP/1.1",
+            "POST /call-plugin-tool HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: text/plain"
+        ));
+        assert!(!bridge_request_is_local_client(
+            "POST /call-plugin-tool HTTP/1.1",
+            "POST /call-plugin-tool HTTP/1.1\r\nHost: 127.0.0.1:7777"
+        ));
+        // DNS rebinding presents a foreign Host.
+        assert!(!bridge_request_is_local_client(
+            "POST /call-plugin-tool HTTP/1.1",
+            "POST /call-plugin-tool HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json"
+        ));
     }
 
     #[test]
@@ -1354,6 +1556,26 @@ async fn plugin_agent_mode_on(state: &Arc<AppState>, plugin_id: &str, connection
         .is_some_and(|mode| mode == "auto" || mode == "strict")
 }
 
+/// `/call-plugin-tool` may only talk to the saved connection's own plugin:
+/// the lifecycle payload (which carries the connection's credentials) is
+/// built from the config, so honoring a request-named `plugin_id` would hand
+/// connection A's secrets to plugin B's sidecar. Callers may repeat the
+/// binding, never override it.
+fn resolve_call_plugin_target(
+    config_plugin_id: Option<&str>,
+    request_plugin_id: Option<&str>,
+) -> Result<String, String> {
+    let bound = config_plugin_id
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "connection is not bound to a plugin".to_string())?;
+    if let Some(requested) = request_plugin_id {
+        if requested != bound {
+            return Err(format!("plugin_id {requested:?} does not match the connection's plugin {bound:?}"));
+        }
+    }
+    Ok(bound.to_string())
+}
+
 /// POST /call-plugin-tool: runs a plugin MCP tool on the desktop app's own
 /// plugin session — the same sidecar process the workbench talks to. The
 /// connection's workbench tab is opened only when the call will route into
@@ -1381,11 +1603,13 @@ async fn handle_call_plugin_tool(
             return;
         }
     };
-    let plugin_id = req.plugin_id.or_else(|| config.plugin_id.clone()).unwrap_or_default();
-    if plugin_id.is_empty() {
-        respond_error(stream, "400 Bad Request", "connection is not bound to a plugin").await;
-        return;
-    }
+    let plugin_id = match resolve_call_plugin_target(config.plugin_id.as_deref(), req.plugin_id.as_deref()) {
+        Ok(plugin_id) => plugin_id,
+        Err(message) => {
+            respond_error(stream, "400 Bad Request", &message).await;
+            return;
+        }
+    };
     // The workbench tab only needs to exist when the forwarded call will
     // actually route into the visible terminal: an explicit runInTerminal,
     // or no flag plus the connection's terminal MCP mode being on (asked

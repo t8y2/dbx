@@ -69,7 +69,7 @@ describe("databaseObjectCapabilities", () => {
 
   it("exposes materialized views for StarRocks only", () => {
     // StarRocks has a dedicated MV listing/classification path in
-    // crates/dbx-drivers/src/db/mysql.rs (`list_starrocks_tables` +
+    // crates/dbx-driver-mysql/src/mysql.rs (`list_starrocks_tables` +
     // `classify_starrocks_materialized_views`).
     expect(sidebarObjectKindsForDatabase("starrocks")).toContain("MATERIALIZED_VIEW");
 
@@ -109,6 +109,13 @@ describe("databaseObjectCapabilities", () => {
     expect(sidebarObjectKindsForDatabase("kingbase")).toContain("TRIGGER");
     expect(databaseObjectCapabilities("kingbase").sourceReadable).toContain("TRIGGER");
     expect(sidebarObjectKindsForDatabase("vastbase")).not.toContain("TRIGGER");
+  });
+
+  it("exposes sequences for Kingbase and Vastbase via the agent PostgreSQL catalogs", () => {
+    for (const dbType of ["kingbase", "vastbase"] as const) {
+      expect(sidebarObjectKindsForDatabase(dbType), dbType).toContain("SEQUENCE");
+      expect(databaseObjectCapabilities(dbType).sourceReadable, dbType).toContain("SEQUENCE");
+    }
   });
 
   it("only Xugu TYPE nodes can open object source", () => {

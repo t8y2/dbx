@@ -2392,6 +2392,52 @@ mod tests {
         Ok(())
     }
 
+    /// The runtime `PluginContribution` enum is the source of truth for
+    /// contribution `type` tags; the published schema's `contributions.oneOf`
+    /// must accept every one of them, or schema-validating tooling (CI,
+    /// editors) rejects manifests the host itself accepts. Adding a runtime
+    /// variant without extending the schema fails here.
+    #[test]
+    fn manifest_schema_lists_every_runtime_contribution_kind() {
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("plugins")
+            .join("manifest.schema.json");
+        let schema: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&schema_path).unwrap()).unwrap();
+        let referenced: Vec<String> = schema["properties"]["contributions"]["items"]["oneOf"]
+            .as_array()
+            .expect("contributions.items.oneOf must be an array")
+            .iter()
+            .map(|entry| {
+                entry["$ref"]
+                    .as_str()
+                    .expect("every oneOf entry must be a $ref")
+                    .trim_start_matches("#/$defs/")
+                    .to_string()
+            })
+            .collect();
+
+        // Mirrors the PluginContribution variants and their kebab-case serde
+        // tags; the schema def names append "Contribution".
+        let kinds = [
+            ("connection-provider", "connectionProviderContribution"),
+            ("workbench", "workbenchContribution"),
+            ("filesystem-provider", "filesystemProviderContribution"),
+            ("context-menu", "contextMenuContribution"),
+            ("result-view", "resultViewContribution"),
+            ("command", "commandContribution"),
+            ("menus", "menusContribution"),
+        ];
+        assert_eq!(referenced, kinds.iter().map(|(_, def)| def.to_string()).collect::<Vec<_>>());
+        for (tag, def) in kinds {
+            assert_eq!(
+                schema["$defs"][def]["properties"]["type"]["const"], tag,
+                "schema def {def} must pin the {tag:?} contribution type tag"
+            );
+        }
+    }
+
     #[test]
     fn manifest_schema_context_menu_enum_matches_runtime_targets() {
         let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

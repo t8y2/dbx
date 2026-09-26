@@ -191,7 +191,7 @@ const batchExpiryTtl = ref("");
 const batchExpiryExpireAt = shallowRef<CalendarDateTime | null>(null);
 /** Snapshot taken when the dialog opens so a background refresh cannot retarget the batch. */
 const batchExpiryKeyRaws = shallowRef<string[]>([]);
-const pendingDanger = ref<{ kind: "delete-keys"; title: string; keyRaws: string[]; loadedSearchResults: boolean } | { kind: "command"; command: string } | null>(null);
+const pendingDanger = ref<{ kind: "delete-keys"; title: string; keyRaws: string[]; loadedSearchResults: boolean } | { kind: "delete-group"; title: string; pattern: string; groupId: string; loadedCount: number } | { kind: "command"; command: string } | null>(null);
 const showDangerConfirm = ref(false);
 const commandText = ref("");
 const commandRunning = ref(false);
@@ -422,6 +422,14 @@ const dangerDetails = computed(() => {
     return t(pendingDanger.value.loadedSearchResults ? "redis.deleteLoadedSearchKeysDetails" : "redis.deleteGroupDetails", {
       target: pendingDanger.value.title,
       count: pendingDanger.value.keyRaws.length,
+    });
+  }
+  if (pendingDanger.value.kind === "delete-group") {
+    // 分组删除按前缀在服务端扫全量，未加载的子键也会一起删除，因此这里
+    // 只能把已加载数量作为参考，不能像按 key 删除那样当作删除总数。
+    return t("redis.deleteGroupSubtreeDetails", {
+      target: pendingDanger.value.title,
+      count: pendingDanger.value.loadedCount,
     });
   }
   return pendingDanger.value.command;
@@ -1680,13 +1688,15 @@ function requestBatchDelete() {
 function requestGroupDelete(node: RedisKeyTreeNode, event?: Event) {
   event?.stopPropagation();
   if (node.kind !== "group" || selectionBusy.value) return;
-  const keyRaws = collectRedisGroupKeyRaws(node);
-  if (keyRaws.length === 0) return;
+  // 一个分组是键名前缀：树里只持有已扫描到的那部分子键，按已加载行删除会
+  // 留下一部分键（#10164）。这里改为删除该前缀下的全部键。
+  const pattern = redisGroupSubtreePattern(node.pathSegments, redisKeySeparator.value);
   pendingDanger.value = {
-    kind: "delete-keys",
+    kind: "delete-group",
     title: node.pathSegments.join(redisKeySeparator.value),
-    keyRaws,
-    loadedSearchResults: false,
+    pattern,
+    groupId: node.id,
+    loadedCount: collectRedisGroupKeyRaws(node).length,
   };
   showDangerConfirm.value = true;
 }
@@ -1775,6 +1785,50 @@ function resetLoadedKeys() {
   refreshExpandedGroupIds.clear();
   hasMore.value = false;
   lastTotalKeys.value = 0;
+}
+
+async function deleteGroupSubtree(pattern: string, groupId: string) {
+  if (deletingKeys.value) return;
+
+  // Ignore a late SCAN page while an explicit mutation changes this result set.
+  invalidateScanRequests();
+  fetchAllStopRequested.value = true;
+  deletingKeys.value = true;
+  try {
+    const deletedCount = await api.redisDeleteKeysByPattern(props.connectionId, props.db, pattern);
+    // 删除作用于服务端整个前缀，本地只保留匹配该前缀之外的行；未加载的子键
+    // 也已随服务端删除一起消失，因此不需要再补扫。
+    const matches = createRedisKeyPatternMatcher(pattern);
+    const removed = flatKeys.value.filter((key) => matches(key.key_display, key.key_raw));
+    for (const key of removed) {
+      loadedKeyRaws.delete(key.key_raw);
+      ttlObservedAtByRaw.delete(key.key_raw);
+      positiveTtlKeyRaws.delete(key.key_raw);
+    }
+    replaceFlatKeyRecords(flatKeys.value.filter((key) => !matches(key.key_display, key.key_raw)));
+    if (selectedKeyRaw.value && removed.some((key) => key.key_raw === selectedKeyRaw.value)) {
+      selectedKeyRaw.value = null;
+    }
+    resetCheckedKeys();
+    // 该子树已被整段删除，旧的补扫游标/已扫尽标记对新键不再成立
+    subtreePendingGroupCursors.delete(groupId);
+    subtreeFilledGroupIds.delete(groupId);
+    rebuildTree(false);
+    connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
+      loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+      totalDelta: -deletedCount,
+    });
+    toast(t("redis.deleteGroupSubtreeSuccess", { count: deletedCount }), 3000);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    toast(message, 5000);
+    // A partial scan may already have deleted keys before the error surfaced.
+    // Reload instead of leaving a potentially stale result in the tree.
+    if (redisBrowserIsActive) await loadKeys();
+    else reloadKeysOnActivation = true;
+  } finally {
+    deletingKeys.value = false;
+  }
 }
 
 async function deleteKeyRaws(keys: string[]) {
@@ -2393,6 +2447,10 @@ async function applyDangerAction() {
 
   if (pending.kind === "delete-keys") {
     await deleteKeyRaws(pending.keyRaws);
+    pendingDanger.value = null;
+    showDangerConfirm.value = false;
+  } else if (pending.kind === "delete-group") {
+    await deleteGroupSubtree(pending.pattern, pending.groupId);
     pendingDanger.value = null;
     showDangerConfirm.value = false;
   } else {
@@ -3640,7 +3698,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
       </Pane>
     </Splitpanes>
 
-    <DangerConfirmDialog v-model:open="showDangerConfirm" :message="dangerMessage" :details="dangerDetails" :confirm-label="dangerConfirmLabel" :loading="deletingKeys" :close-on-confirm="pendingDanger?.kind !== 'delete-keys'" @confirm="applyDangerAction" />
+    <DangerConfirmDialog v-model:open="showDangerConfirm" :message="dangerMessage" :details="dangerDetails" :confirm-label="dangerConfirmLabel" :loading="deletingKeys" :close-on-confirm="pendingDanger?.kind === 'delete-keys' || pendingDanger?.kind === 'delete-group'" @confirm="applyDangerAction" />
 
     <Dialog :open="showBatchExpiryDialog" @update:open="onBatchExpiryDialogOpenChange">
       <DialogContent class="sm:max-w-[420px]">

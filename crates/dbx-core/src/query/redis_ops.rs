@@ -1075,6 +1075,66 @@ pub async fn redis_delete_keys_in_db_core(
     }
 }
 
+/// Deletes every key under a key-browser group.
+///
+/// The browser only holds the part of a group's subtree it has scanned, so a
+/// delete driven by the loaded rows silently leaves the rest behind. The group
+/// is identified by its `SCAN MATCH` pattern instead, and both the direct and
+/// the cluster path walk the whole keyspace for that pattern.
+pub async fn redis_delete_keys_by_pattern_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    pattern: &str,
+) -> Result<u64, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
+        PoolKind::Redis(redis) => match redis.as_ref() {
+            RedisConnection::Direct(con) => {
+                let mut con = con.lock().await;
+                redis_driver::select_db(&mut *con, db).await?;
+                redis_driver::delete_keys_by_pattern(
+                    &mut *con,
+                    pattern,
+                    redis_driver::DELETE_KEYS_BY_PATTERN_SCAN_COUNT,
+                )
+                .await
+            }
+            RedisConnection::Cluster(cluster) => {
+                redis_driver::ensure_cluster_db(db)?;
+                // One node's SCAN only covers its own slots, so the subtree is
+                // scanned node-by-node through the shared cluster cursor and
+                // every key keeps its slot-routed connection, like
+                // `redis_delete_keys_in_db_core`.
+                let mut cursor = 0u64;
+                let mut deleted = 0u64;
+                loop {
+                    let page = redis_driver::scan_cluster_keys_batch(
+                        cluster,
+                        cursor,
+                        pattern,
+                        redis_driver::DELETE_KEYS_BY_PATTERN_SCAN_COUNT,
+                        1,
+                        false,
+                    )
+                    .await?;
+                    for key in &page.keys {
+                        let raw = redis_driver::redis_key_raw_to_bytes(&key.key_raw)?;
+                        let mut con = redis_driver::cluster_key_connection(cluster, &raw).await?;
+                        deleted += redis_driver::delete_keys(&mut con, std::slice::from_ref(&raw)).await?;
+                    }
+                    cursor = page.cursor;
+                    if cursor == 0 {
+                        return Ok(deleted);
+                    }
+                }
+            }
+        },
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
 pub async fn redis_flush_db_core(state: &AppState, connection_id: &str, db: u32) -> Result<(), String> {
     ensure_redis_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;

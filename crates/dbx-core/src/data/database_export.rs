@@ -30,6 +30,15 @@ static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
 const EXPORT_CANCELLED_ERROR: &str = "Export cancelled";
 const EXPORT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// MySQL scripts written by the exporter are always UTF-8: values are decoded off the
+/// wire and reformatted into Rust strings before they are written, so the file encoding
+/// never follows the connection charset. Declaring that encoding in the script keeps the
+/// importing client's default out of the decoding decision -- a `latin1` `mysql` CLI (a
+/// docker entrypoint initializing a container, for example) would otherwise re-encode
+/// every non-ASCII value into mojibake (#10242). `mysqldump` writes the same statement
+/// for the same reason.
+const MYSQL_EXPORT_CHARSET_STATEMENT: &str = "SET NAMES utf8mb4;";
+
 pub fn database_export_client_session_id(export_id: &str) -> String {
     task_client_session_id("database-export", export_id)
 }
@@ -203,7 +212,7 @@ fn exports_schema_wide_objects(request: &DatabaseExportRequest) -> bool {
 }
 
 /// MySQL lists triggers and events as schema-wide objects (see
-/// `crates/dbx-drivers/src/db/mysql.rs`), which is what the export writes out. Other
+/// `crates/dbx-driver-mysql/src/mysql.rs`), which is what the export writes out. Other
 /// engines either report triggers per table (PostgreSQL) or not at all, so their export
 /// stays unchanged.
 fn exports_mysql_trigger_objects(db_type: DatabaseType) -> bool {
@@ -1639,6 +1648,101 @@ fn is_postgres_extension_member_routine(object: &crate::types::ObjectInfo, membe
     members.function_keys.contains(&(object.name.clone(), object.signature.clone().unwrap_or_default()))
 }
 
+const POSTGRES_EXPORT_SEQUENCES_SQL: &str = "SELECT c.relname, \
+      COALESCE(format_type(s.seqtypid, NULL), 'bigint'), \
+      COALESCE(s.seqstart::text, '1'), \
+      COALESCE(s.seqmin::text, '1'), \
+      COALESCE(s.seqmax::text, '9223372036854775807'), \
+      COALESCE(s.seqincrement::text, '1'), \
+      COALESCE(s.seqcycle, false), \
+      COALESCE(s.seqcache::text, '1'), \
+      t.relname, \
+      a.attname \
+     FROM pg_class c \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
+     LEFT JOIN pg_depend d ON d.classid = 'pg_class'::regclass \
+       AND d.objid = c.oid \
+       AND d.refclassid = 'pg_class'::regclass \
+       AND d.deptype IN ('a', 'i') \
+     LEFT JOIN pg_class t ON t.oid = d.refobjid \
+     LEFT JOIN pg_namespace tn ON tn.oid = t.relnamespace AND tn.nspname = n.nspname \
+     LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
+     WHERE c.relkind = 'S' AND n.nspname = $1 \
+     ORDER BY c.relname";
+
+/// PostgreSQL 9.x sibling of [`POSTGRES_EXPORT_SEQUENCES_SQL`]: the `pg_sequence`
+/// catalog only exists from PostgreSQL 10 on, so that query aborts the whole
+/// structure export with `db error` on older servers (#10079). Sequence
+/// parameters are filled in per sequence by
+/// [`postgres_export_sequence_parameters_legacy`] instead.
+const POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL: &str = "SELECT c.relname, \
+      'bigint', \
+      '1', \
+      '1', \
+      '9223372036854775807', \
+      '1', \
+      false, \
+      '1', \
+      t.relname, \
+      a.attname \
+     FROM pg_class c \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_depend d ON d.classid = 'pg_class'::regclass \
+       AND d.objid = c.oid \
+       AND d.refclassid = 'pg_class'::regclass \
+       AND d.deptype IN ('a', 'i') \
+     LEFT JOIN pg_class t ON t.oid = d.refobjid \
+     LEFT JOIN pg_namespace tn ON tn.oid = t.relnamespace AND tn.nspname = n.nspname \
+     LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
+     WHERE c.relkind = 'S' AND n.nspname = $1 \
+     ORDER BY c.relname";
+
+#[derive(Debug)]
+struct PostgresExportSequenceParameters {
+    start_value: String,
+    min_value: String,
+    max_value: String,
+    increment: String,
+    cycle: bool,
+    cache_value: String,
+    last_value: Option<String>,
+}
+
+/// Pre-10 servers store sequence parameters in the sequence relation itself
+/// (`SELECT ... FROM <sequence>`), which is also the only way to read a
+/// sequence's current value there. `last_value` is reported only once the
+/// sequence has been called, matching `pg_sequence_last_value()`'s NULL on an
+/// untouched sequence.
+async fn postgres_export_sequence_parameters_legacy(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    sequence: &str,
+) -> Result<Option<PostgresExportSequenceParameters>, tokio_postgres::Error> {
+    let qualified = format!(
+        "{}.{}",
+        quote_identifier(schema, &DatabaseType::Postgres),
+        quote_identifier(sequence, &DatabaseType::Postgres)
+    );
+    let sql = format!(
+        "SELECT start_value::text, min_value::text, max_value::text, increment_by::text, is_cycled, \
+         cache_value::text, CASE WHEN is_called THEN last_value::text END FROM {qualified}"
+    );
+    let rows = client.query(sql.as_str(), &[]).await?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    Ok(Some(PostgresExportSequenceParameters {
+        start_value: row.get(0),
+        min_value: row.get(1),
+        max_value: row.get(2),
+        increment: row.get(3),
+        cycle: row.get(4),
+        cache_value: row.get(5),
+        last_value: row.get(6),
+    }))
+}
+
 async fn list_postgres_export_sequences(
     state: &crate::connection::AppState,
     pool_key: &str,
@@ -1656,34 +1760,23 @@ async fn list_postgres_export_sequences(
         }
     };
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    let rows = client
-        .query(
-            "SELECT c.relname, \
-              COALESCE(format_type(s.seqtypid, NULL), 'bigint'), \
-              COALESCE(s.seqstart::text, '1'), \
-              COALESCE(s.seqmin::text, '1'), \
-              COALESCE(s.seqmax::text, '9223372036854775807'), \
-              COALESCE(s.seqincrement::text, '1'), \
-              COALESCE(s.seqcycle, false), \
-              COALESCE(s.seqcache::text, '1'), \
-              t.relname, \
-              a.attname \
-             FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
-             LEFT JOIN pg_depend d ON d.classid = 'pg_class'::regclass \
-               AND d.objid = c.oid \
-               AND d.refclassid = 'pg_class'::regclass \
-               AND d.deptype IN ('a', 'i') \
-             LEFT JOIN pg_class t ON t.oid = d.refobjid \
-             LEFT JOIN pg_namespace tn ON tn.oid = t.relnamespace AND tn.nspname = n.nspname \
-             LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
-             WHERE c.relkind = 'S' AND n.nspname = $1 \
-             ORDER BY c.relname",
-            &[&schema],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+    // PostgreSQL 10+ keeps sequence parameters in `pg_sequence`; older servers
+    // have neither that catalog nor `pg_sequence_last_value()`, so the compat
+    // tier lists sequences (and owners) without it and reads each sequence
+    // relation directly afterwards.
+    let (rows, legacy_parameters) = match client.query(POSTGRES_EXPORT_SEQUENCES_SQL, &[&schema]).await {
+        Ok(rows) => (rows, false),
+        Err(primary_error) => match client.query(POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, &[&schema]).await {
+            Ok(rows) => {
+                log::debug!(
+                    "[postgres][database-export:sequences-compat-used] pg_sequence catalog unavailable ({}); reading sequence parameters from each sequence relation",
+                    primary_error
+                );
+                (rows, true)
+            }
+            Err(_) => return Err(primary_error.to_string()),
+        },
+    };
 
     let selected: HashSet<&str> = selected_tables.iter().map(String::as_str).collect();
     let excluded: HashSet<&str> = excluded_tables.iter().map(String::as_str).collect();
@@ -1711,6 +1804,30 @@ async fn list_postgres_export_sequences(
         .collect::<Vec<_>>();
 
     if sequences.is_empty() {
+        return Ok(sequences);
+    }
+
+    if legacy_parameters {
+        for sequence in sequences.iter_mut() {
+            match postgres_export_sequence_parameters_legacy(&client, schema, &sequence.name).await {
+                Ok(Some(parameters)) => {
+                    sequence.start_value = parameters.start_value;
+                    sequence.min_value = parameters.min_value;
+                    sequence.max_value = parameters.max_value;
+                    sequence.increment = parameters.increment;
+                    sequence.cycle = parameters.cycle;
+                    sequence.cache_value = parameters.cache_value;
+                    sequence.last_value = parameters.last_value;
+                }
+                Ok(None) => {}
+                Err(error) => log::debug!(
+                    "[postgres][database-export:sequences-compat-read-failed] sequence={} schema={} error={}",
+                    sequence.name,
+                    schema,
+                    error
+                ),
+            }
+        }
         return Ok(sequences);
     }
 
@@ -3020,6 +3137,13 @@ async fn export_database_sql_core_inner(
     writeln!(file, "-- Generated by DBX").map_err(|e| format!("Failed to write file: {e}"))?;
     writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
 
+    // Declare the script's encoding before the first statement that can carry non-ASCII
+    // text (the database name is written by the preamble right below, and table, column
+    // and DEFAULT values follow).
+    if matches!(db_type, DatabaseType::Mysql) {
+        writeln!(file, "{MYSQL_EXPORT_CHARSET_STATEMENT}").map_err(|e| format!("Failed to write file: {e}"))?;
+    }
+
     if let Some(preamble) = create_database_preamble {
         writeln!(file, "-- Database setup").map_err(|e| format!("Failed to write file: {e}"))?;
         writeln!(file, "{preamble}").map_err(|e| format!("Failed to write file: {e}"))?;
@@ -4072,7 +4196,7 @@ mod tests {
         BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
         DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql,
         PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE,
-        DATABASE_EXPORT_ROW_LIMIT,
+        DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -6382,6 +6506,34 @@ mod tests {
             normalize_export_table_ddl(postgres_ddl, Some(DatabaseType::Postgres), DdlNormalizeOptions::default()),
             postgres_ddl
         );
+    }
+
+    #[test]
+    fn postgres_export_sequence_sql_tiers_skip_pg10_only_catalogs() {
+        // PostgreSQL 10 added `pg_sequence`; PostgreSQL 9.x rejects the whole
+        // query, which used to abort the structure export (#10079).
+        assert!(POSTGRES_EXPORT_SEQUENCES_SQL.contains("pg_sequence"));
+        assert!(!POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL.contains("pg_sequence"));
+        assert!(!POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL.contains("pg_sequence_last_value"));
+
+        // Both tiers must describe the same ten columns in the same order so
+        // the row decoding below stays identical.
+        for sql in [POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL] {
+            for fragment in [
+                "SELECT c.relname",
+                "'bigint'",
+                "t.relname",
+                "a.attname",
+                "WHERE c.relkind = 'S' AND n.nspname = $1",
+                "ORDER BY c.relname",
+            ] {
+                assert!(sql.contains(fragment), "missing {fragment} in {sql}");
+            }
+        }
+        // The compat tier substitutes literals for the pg_sequence columns.
+        for fallback in ["'1'", "'9223372036854775807'", "false"] {
+            assert!(POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL.contains(fallback));
+        }
     }
 
     fn postgres_sequence(name: &str) -> PostgresExportSequence {

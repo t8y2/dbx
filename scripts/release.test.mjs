@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -11,6 +11,9 @@ const releaseScript = join(repoRoot, "scripts/release.mjs");
 const releaseWorkflow = join(repoRoot, ".github/workflows/release.yml");
 const packagesWorkflow = join(repoRoot, ".github/workflows/mcp-release.yml");
 const vsignConfigPath = join(repoRoot, "src-tauri/tauri.vsign.conf.json");
+const appImageBundlerSetup = join(repoRoot, ".github/scripts/prepare-appimage-bundler.sh");
+const appImageGtkWrapper = join(repoRoot, ".github/scripts/linuxdeploy-plugin-gtk-wrapper.sh");
+const appImageVerifier = join(repoRoot, ".github/scripts/verify-appimage-input-methods.sh");
 
 function runRelease(args, env = {}) {
   return spawnSync(process.execPath, [releaseScript, ...args], {
@@ -167,6 +170,67 @@ test("Windows 7 release build does not use sccache", () => {
     .filter((line) => !line.trim().startsWith("#"))
     .join("\n");
   assert.doesNotMatch(win7Job, /RUSTC_WRAPPER|SCCACHE_|sccache/i);
+});
+
+test("Linux releases pin the Wayland-capable AppImage bundler before upload", () => {
+  const workflow = readFileSync(releaseWorkflow, "utf8");
+  const setup = readFileSync(appImageBundlerSetup, "utf8");
+  const wrapper = readFileSync(appImageGtkWrapper, "utf8");
+  const verifier = readFileSync(appImageVerifier, "utf8");
+  const prepareStep = workflow.indexOf("Prepare Wayland-capable AppImage bundler");
+  const buildStep = workflow.indexOf("Build Tauri app", prepareStep);
+  const verifyStep = workflow.indexOf("Verify AppImage runtime bundle", buildStep);
+
+  assert.notEqual(prepareStep, -1);
+  assert.ok(prepareStep < buildStep);
+  assert.ok(buildStep < verifyStep);
+  assert.match(workflow, /XDG_CACHE_HOME: \$\{\{ runner\.temp \}\}\/dbx-tauri-cache/);
+  assert.match(setup, /tauri_fix_commit=8e7028331ad37ac2db74d4ec20e66be5cacf2c40/);
+  assert.match(setup, /linuxdeploy_revision=07333c6/);
+  assert.match(setup, /36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62/);
+  assert.match(setup, /556ab80baa98e600aa80f0dcedfb70bca0e1ce7e9f147fb345be3fcc3e91b2b1/);
+  assert.match(wrapper, /libwayland-\*\.so\*/);
+  assert.match(wrapper, /libxkbcommon\.so\*/);
+  assert.match(verifier, /GTK AppRun hook overrides GDK_BACKEND/);
+  assert.match(verifier, /for requested_backend in wayland x11/);
+  assert.match(verifier, /host Wayland\/XKB\/XCB display stack/);
+});
+
+test("AppImage GTK wrapper removes bundled display-stack libraries", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dbx-appimage-wrapper-test-"));
+  const wrapper = join(directory, "linuxdeploy-plugin-gtk.sh");
+  const upstream = join(directory, "linuxdeploy-plugin-gtk-upstream.sh");
+  const appDir = join(directory, "DBX.AppDir");
+  const libDir = join(appDir, "usr", "lib");
+  const nestedLibDir = join(libDir, "nested");
+
+  copyFileSync(appImageGtkWrapper, wrapper);
+  writeFileSync(
+    upstream,
+    '#!/usr/bin/env bash\nif [[ "$1" == "--plugin-api-version" ]]; then printf "0\\n"; fi\n',
+  );
+  chmodSync(wrapper, 0o755);
+  chmodSync(upstream, 0o755);
+  mkdirSync(nestedLibDir, { recursive: true });
+  for (const path of [
+    join(libDir, "libwayland-client.so.0"),
+    join(libDir, "libxkbcommon.so.0"),
+    join(nestedLibDir, "libXau.so.6"),
+    join(libDir, "libsafe.so.1"),
+  ]) {
+    writeFileSync(path, "");
+  }
+
+  const apiVersion = spawnSync(wrapper, ["--plugin-api-version"], { encoding: "utf8" });
+  assert.equal(apiVersion.status, 0, apiVersion.stderr);
+  assert.equal(apiVersion.stdout.trim(), "0");
+
+  const cleanup = spawnSync(wrapper, ["--appdir", appDir], { encoding: "utf8" });
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+  assert.equal(existsSync(join(libDir, "libwayland-client.so.0")), false);
+  assert.equal(existsSync(join(libDir, "libxkbcommon.so.0")), false);
+  assert.equal(existsSync(join(nestedLibDir, "libXau.so.6")), false);
+  assert.equal(existsSync(join(libDir, "libsafe.so.1")), true);
 });
 
 test("desktop-only Cargo.lock version refresh does not count as a Node package change", () => {

@@ -2,11 +2,16 @@ use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, ContentBlock, ErrorData, Implementation, ListResourceTemplatesResult, ListResourcesResult,
+        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
+        ServerCapabilities, ServerInfo,
+    },
     schemars, tool, tool_handler, tool_router, ServerHandler,
 };
 use serde::Deserialize;
 use serde_json::json;
+use url::Url;
 use uuid::Uuid;
 
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
@@ -35,6 +40,19 @@ use dbx_core::{
     },
     storage::{McpDatabaseScope, McpGlobalPolicy},
 };
+
+const CONNECTIONS_RESOURCE_URI: &str = "dbx://connections";
+const DATABASES_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/databases";
+const TABLES_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/tables{?database,schema}";
+const TABLE_SCHEMA_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/table-schema{?database,schema,table}";
+
+#[derive(Debug, PartialEq, Eq)]
+enum DbxResourceRequest {
+    Connections,
+    Databases { connection_id: String },
+    Tables { connection_id: String, database: Option<String>, schema: Option<String> },
+    TableSchema { connection_id: String, database: Option<String>, schema: Option<String>, table: String },
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListConnectionsRequest {}
@@ -2847,9 +2865,99 @@ impl DbxMcpServer {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DbxMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
             .with_server_info(Implementation::new("dbx", env!("CARGO_PKG_VERSION")))
             .with_instructions("Use DBX connections to inspect schemas and query databases safely.")
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let tools = self.policy_filtered_tools().await;
+        let resources = tools
+            .iter()
+            .any(|tool| tool.name.as_ref() == "dbx_list_connections")
+            .then(|| {
+                Resource::new(CONNECTIONS_RESOURCE_URI, "dbx_connections")
+                    .with_title("DBX connections")
+                    .with_description("Database connections visible to the current DBX MCP scope")
+                    .with_mime_type("text/markdown")
+            })
+            .into_iter()
+            .collect();
+        Ok(ListResourcesResult { resources, meta: None, next_cursor: None })
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        let tools = self.policy_filtered_tools().await;
+        let has_tool = |name: &str| tools.iter().any(|tool| tool.name.as_ref() == name);
+        let mut resource_templates = Vec::new();
+        if has_tool("dbx_list_databases") {
+            resource_templates.push(
+                ResourceTemplate::new(DATABASES_RESOURCE_TEMPLATE, "dbx_connection_databases")
+                    .with_title("DBX connection databases")
+                    .with_description("Databases visible through a DBX connection")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        if has_tool("dbx_list_tables") {
+            resource_templates.push(
+                ResourceTemplate::new(TABLES_RESOURCE_TEMPLATE, "dbx_connection_tables")
+                    .with_title("DBX connection tables")
+                    .with_description("Tables and views visible through a DBX connection and optional database/schema")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        if has_tool("dbx_describe_table") {
+            resource_templates.push(
+                ResourceTemplate::new(TABLE_SCHEMA_RESOURCE_TEMPLATE, "dbx_table_schema")
+                    .with_title("DBX table schema")
+                    .with_description("Column definitions for a table visible through a DBX connection")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        Ok(ListResourceTemplatesResult { resource_templates, meta: None, next_cursor: None })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let uri = request.uri;
+        let result = match parse_dbx_resource_uri(&uri)? {
+            DbxResourceRequest::Connections => self.list_connections(Parameters(ListConnectionsRequest {})).await,
+            DbxResourceRequest::Databases { connection_id } => {
+                self.list_databases(Parameters(ListDatabasesRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                }))
+                .await
+            }
+            DbxResourceRequest::Tables { connection_id, database, schema } => {
+                self.list_tables(Parameters(ListTablesRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                    database,
+                    schema,
+                }))
+                .await
+            }
+            DbxResourceRequest::TableSchema { connection_id, database, schema, table } => {
+                self.describe_table(Parameters(DescribeTableRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                    table,
+                    database,
+                    schema,
+                }))
+                .await
+            }
+        };
+        resource_result_from_tool(uri, result)
     }
 
     /// Hide tools the global policy disallows from the advertised list, the
@@ -2866,6 +2974,102 @@ impl ServerHandler for DbxMcpServer {
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult { tools: self.policy_filtered_tools().await, meta: None, next_cursor: None })
     }
+}
+
+fn parse_dbx_resource_uri(uri: &str) -> Result<DbxResourceRequest, ErrorData> {
+    let parsed = Url::parse(uri).map_err(|_| ErrorData::invalid_params("Invalid DBX resource URI.", None))?;
+    if parsed.scheme() != "dbx"
+        || parsed.host_str() != Some("connections")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ErrorData::resource_not_found(format!("Unknown DBX resource: {uri}"), None));
+    }
+
+    let path = parsed.path().trim_matches('/');
+    let segments = if path.is_empty() { Vec::new() } else { path.split('/').collect::<Vec<_>>() };
+    let mut query = HashMap::new();
+    for (key, value) in parsed.query_pairs() {
+        let key = key.into_owned();
+        if query.insert(key.clone(), value.into_owned()).is_some() {
+            return Err(ErrorData::invalid_params(format!("Duplicate DBX resource parameter: {key}"), None));
+        }
+    }
+
+    match segments.as_slice() {
+        [] => {
+            reject_resource_parameters(&query, &[])?;
+            Ok(DbxResourceRequest::Connections)
+        }
+        [connection_id, "databases"] => {
+            reject_resource_parameters(&query, &[])?;
+            Ok(DbxResourceRequest::Databases {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+            })
+        }
+        [connection_id, "tables"] => {
+            reject_resource_parameters(&query, &["database", "schema"])?;
+            Ok(DbxResourceRequest::Tables {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+                database: optional_resource_parameter(&query, "database"),
+                schema: optional_resource_parameter(&query, "schema"),
+            })
+        }
+        [connection_id, "table-schema"] => {
+            reject_resource_parameters(&query, &["database", "schema", "table"])?;
+            Ok(DbxResourceRequest::TableSchema {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+                database: optional_resource_parameter(&query, "database"),
+                schema: optional_resource_parameter(&query, "schema"),
+                table: required_resource_parameter(&query, "table")?,
+            })
+        }
+        _ => Err(ErrorData::resource_not_found(format!("Unknown DBX resource: {uri}"), None)),
+    }
+}
+
+fn reject_resource_parameters(parameters: &HashMap<String, String>, allowed: &[&str]) -> Result<(), ErrorData> {
+    if let Some(name) = parameters.keys().find(|name| !allowed.contains(&name.as_str())) {
+        return Err(ErrorData::invalid_params(format!("Unknown DBX resource parameter: {name}"), None));
+    }
+    Ok(())
+}
+
+fn optional_resource_parameter(parameters: &HashMap<String, String>, name: &str) -> Option<String> {
+    parameters.get(name).map(|value| value.trim()).filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+fn required_resource_parameter(parameters: &HashMap<String, String>, name: &str) -> Result<String, ErrorData> {
+    optional_resource_parameter(parameters, name)
+        .ok_or_else(|| ErrorData::invalid_params(format!("Missing DBX resource parameter: {name}"), None))
+}
+
+fn required_resource_value(name: &str, value: &str) -> Result<String, ErrorData> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(ErrorData::invalid_params(format!("Missing DBX resource parameter: {name}"), None))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn resource_result_from_tool(uri: String, result: CallToolResult) -> Result<ReadResourceResult, ErrorData> {
+    let output = result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if result.is_error == Some(true) {
+        let message = if output.is_empty() { "DBX resource read failed.".to_string() } else { output };
+        return Err(ErrorData::invalid_params(message, Some(json!({ "uri": uri }))));
+    }
+    if output.is_empty() {
+        return Err(ErrorData::internal_error("DBX resource returned no text content.", Some(json!({ "uri": uri }))));
+    }
+    Ok(ReadResourceResult::new(vec![ResourceContents::text(output, uri).with_mime_type("text/markdown")]))
 }
 
 fn text(value: impl Into<String>) -> CallToolResult {
@@ -4013,6 +4217,34 @@ mod tests {
         ServiceExt,
     };
     use std::{collections::HashSet, sync::atomic::AtomicUsize, time::Duration};
+
+    #[test]
+    fn parses_dbx_resource_uris_and_decodes_query_values() {
+        assert_eq!(parse_dbx_resource_uri(CONNECTIONS_RESOURCE_URI).unwrap(), DbxResourceRequest::Connections);
+        assert_eq!(
+            parse_dbx_resource_uri("dbx://connections/connection-1/databases").unwrap(),
+            DbxResourceRequest::Databases { connection_id: "connection-1".to_string() }
+        );
+        assert_eq!(
+            parse_dbx_resource_uri(
+                "dbx://connections/connection-1/table-schema?database=sales%20data&schema=public&table=order%20items"
+            )
+            .unwrap(),
+            DbxResourceRequest::TableSchema {
+                connection_id: "connection-1".to_string(),
+                database: Some("sales data".to_string()),
+                schema: Some("public".to_string()),
+                table: "order items".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_dbx_resource_uris() {
+        assert!(parse_dbx_resource_uri("dbx://connections/connection-1/table-schema").is_err());
+        assert!(parse_dbx_resource_uri("dbx://connections/connection-1/tables?unknown=value").is_err());
+        assert!(parse_dbx_resource_uri("file:///tmp/connections").is_err());
+    }
 
     struct FakeTransactionIo {
         in_transaction: bool,

@@ -276,18 +276,12 @@ pub async fn uninstall_plugin(
     }
     let plugin = state.plugins.find_plugin(&plugin_id)?;
     state.remove_plugin_connection_pools(&plugin_id).await;
-    state.plugin_host.stop(&plugin_id).await;
     if let Some(plugin) = &plugin {
         stop_external_driver_pools(&state, plugin).await;
     }
-    let root_dir = state.plugins.root_dir().to_path_buf();
-    let app_version = state.plugins.app_version().to_string();
-    let uninstalled_id = plugin_id.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.uninstall(&uninstalled_id)
-    })
-    .await
-    .map_err(|error| error.to_string())??;
+    // Stops the runtime and uninstalls the store under one lifecycle update lease, so a plugin
+    // call cannot re-activate the sidecar (and re-lock its container) in between.
+    state.plugin_host.uninstall_plugin(&plugin_id).await?;
     // A reinstall must ask for AI tool access and data grants again.
     if let Err(error) = state.storage.forget_plugin_permissions(&plugin_id).await {
         log::warn!("Failed to clear permissions of uninstalled plugin {plugin_id}: {error}");

@@ -34,12 +34,18 @@ interface MqttTabUiState {
   publishPanelCollapsed?: boolean;
 }
 
+interface MqttMessagePreview extends MqttMessage {
+  previewKey: string;
+  payloadElementId: string;
+}
+
 const { initialState: restoredUiState, track: trackUiState } = useTabUiState<MqttTabUiState>({}, "MqttAdminConsole");
 
 const brokerInfo = ref<MqttBrokerInfo | null>(null);
 const savedTopics = ref<MqttSavedTopic[]>([]);
 const subscribedTopics = ref<[string, string][]>([]);
 const messages = ref<MqttMessage[]>([]);
+const collapsedMessageKeys = ref<Set<string>>(new Set());
 const noLocalSubscribe = ref(false);
 const selectedTopic = ref<string>(restoredUiState.selectedTopic ?? props.initialTopic ?? "");
 const loading = ref(true);
@@ -108,10 +114,34 @@ function messagePayloadText(msg: MqttMessage): string {
   return msg.payloadText ?? decodePayload(msg.payloadBase64, "plaintext");
 }
 
+function hashMessageValue(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function messagePreviewIdentity(msg: MqttMessage): string {
+  return [msg.receivedAtMs, msg.direction ?? "received", msg.qos, msg.retain ? 1 : 0, hashMessageValue(msg.topic), msg.payloadBase64.length, hashMessageValue(msg.payloadBase64)].join("-");
+}
+
+const messagePreviews = computed<MqttMessagePreview[]>(() => {
+  const identityOccurrences = new Map<string, number>();
+  return messages.value.map((msg) => {
+    const identity = messagePreviewIdentity(msg);
+    const occurrence = identityOccurrences.get(identity) ?? 0;
+    identityOccurrences.set(identity, occurrence + 1);
+    const previewKey = `${identity}-${occurrence}`;
+    return { ...msg, previewKey, payloadElementId: `mqtt-message-payload-${previewKey}` };
+  });
+});
+
 const filteredMessages = computed(() => {
   const query = payloadSearch.value.trim().toLowerCase();
-  if (!query) return messages.value;
-  return messages.value.filter((msg) => messagePayloadText(msg).toLowerCase().includes(query));
+  if (!query) return messagePreviews.value;
+  return messagePreviews.value.filter((msg) => messagePayloadText(msg).toLowerCase().includes(query));
 });
 
 async function refreshData() {
@@ -264,6 +294,7 @@ async function handleClearMessages() {
   try {
     await mqttClearMessages(props.connectionId);
     messages.value = [];
+    collapsedMessageKeys.value = new Set();
   } catch (e) {
     error.value = String(e);
   }
@@ -291,6 +322,17 @@ function stopPolling() {
 
 function toggleMessagesPaused() {
   messagesPaused.value = !messagesPaused.value;
+}
+
+function isMessagePayloadCollapsed(messageKey: string): boolean {
+  return collapsedMessageKeys.value.has(messageKey);
+}
+
+function toggleMessagePayload(messageKey: string) {
+  const nextCollapsedMessageKeys = new Set(collapsedMessageKeys.value);
+  if (nextCollapsedMessageKeys.has(messageKey)) nextCollapsedMessageKeys.delete(messageKey);
+  else nextCollapsedMessageKeys.add(messageKey);
+  collapsedMessageKeys.value = nextCollapsedMessageKeys;
 }
 
 function formatMessagePayload(msg: MqttMessage): string {
@@ -420,8 +462,9 @@ onUnmounted(stopPolling);
             <div v-if="messages.length === 0" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMessages") }}</div>
             <div v-else-if="filteredMessages.length === 0" data-testid="mqtt-no-matching-messages" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMatchingMessages") }}</div>
             <div
-              v-for="(msg, i) in filteredMessages"
-              :key="i"
+              v-for="msg in filteredMessages"
+              :key="msg.previewKey"
+              data-testid="mqtt-message"
               class="w-full cursor-pointer border-b px-3 py-2 text-xs"
               :class="
                 msg.direction === 'sent'
@@ -436,8 +479,26 @@ onUnmounted(stopPolling);
                 <span class="truncate font-mono font-medium text-blue-700 dark:text-blue-300">{{ msg.topic }}</span>
                 <span class="shrink-0 text-muted-foreground">QoS{{ msg.qos }}</span>
                 <span v-if="msg.retain" class="shrink-0 text-[10px] font-medium text-amber-600 dark:text-amber-400">{{ t("connection.mqttRetained") }}</span>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  data-testid="mqtt-message-payload-toggle"
+                  class="ml-auto h-5 gap-0.5 px-1.5 text-[10px] font-normal"
+                  :title="isMessagePayloadCollapsed(msg.previewKey) ? t('connection.mqttExpandPayload') : t('connection.mqttCollapsePayload')"
+                  :aria-expanded="!isMessagePayloadCollapsed(msg.previewKey)"
+                  :aria-controls="msg.payloadElementId"
+                  @click.stop="toggleMessagePayload(msg.previewKey)"
+                >
+                  <ChevronDown v-if="isMessagePayloadCollapsed(msg.previewKey)" class="h-3 w-3" />
+                  <ChevronUp v-else class="h-3 w-3" />
+                  <span>{{ isMessagePayloadCollapsed(msg.previewKey) ? t("connection.mqttExpandPayload") : t("connection.mqttCollapsePayload") }}</span>
+                  <span class="sr-only">: {{ msg.topic }}</span>
+                </Button>
               </div>
-              <div class="break-all whitespace-pre-wrap font-mono text-muted-foreground">{{ formatMessagePayload(msg) }}</div>
+              <div :id="msg.payloadElementId" data-testid="mqtt-message-payload" class="break-all whitespace-pre-wrap font-mono text-muted-foreground" :hidden="isMessagePayloadCollapsed(msg.previewKey)">
+                <template v-if="!isMessagePayloadCollapsed(msg.previewKey)">{{ formatMessagePayload(msg) }}</template>
+              </div>
               <div class="mt-0.5 text-[10px] text-muted-foreground/60">{{ new Date(msg.receivedAtMs).toLocaleTimeString() }}</div>
             </div>
           </div>

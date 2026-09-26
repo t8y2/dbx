@@ -111,6 +111,13 @@ describe("databaseObjectCapabilities", () => {
     expect(sidebarObjectKindsForDatabase("vastbase")).not.toContain("TRIGGER");
   });
 
+  it("exposes sequences for Kingbase and Vastbase via the agent PostgreSQL catalogs", () => {
+    for (const dbType of ["kingbase", "vastbase"] as const) {
+      expect(sidebarObjectKindsForDatabase(dbType), dbType).toContain("SEQUENCE");
+      expect(databaseObjectCapabilities(dbType).sourceReadable, dbType).toContain("SEQUENCE");
+    }
+  });
+
   it("only Xugu TYPE nodes can open object source", () => {
     expect(supportsTypeObjectSource("xugu")).toBe(true);
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase", undefined] as const) {

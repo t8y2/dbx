@@ -4036,6 +4036,76 @@ fn uses_mysql_style_upsert(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::OpenGauss)
 }
 
+pub(crate) fn supports_primary_key_upsert(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Postgres
+            | DatabaseType::Kingbase
+            | DatabaseType::Sqlite
+            | DatabaseType::CloudflareD1
+            | DatabaseType::DuckDb
+            | DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::OpenGauss
+    )
+}
+
+fn primary_key_upsert_clause(
+    columns: &[String],
+    pk_columns: &[String],
+    db_type: &DatabaseType,
+    quote_target_column_names: bool,
+) -> Result<String, String> {
+    if pk_columns.is_empty() {
+        return Err("Update-existing import requires target primary-key metadata".to_string());
+    }
+    if pk_columns.iter().any(|primary_key| !columns.iter().any(|column| column.eq_ignore_ascii_case(primary_key))) {
+        return Err("Update-existing import requires every target primary-key column to be mapped".to_string());
+    }
+
+    let non_pk_columns = columns
+        .iter()
+        .filter(|column| !pk_columns.iter().any(|primary_key| column.eq_ignore_ascii_case(primary_key)))
+        .collect::<Vec<_>>();
+    if non_pk_columns.is_empty() {
+        return Err("Update-existing import requires at least one mapped non-primary-key column".to_string());
+    }
+
+    if (is_postgres_transfer_dialect(db_type) && !matches!(db_type, DatabaseType::OpenGauss))
+        || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb)
+    {
+        let primary_keys = pk_columns
+            .iter()
+            .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let updates = non_pk_columns
+            .iter()
+            .map(|column| {
+                let column = transfer_column_identifier(column, db_type, quote_target_column_names);
+                format!("{column} = EXCLUDED.{column}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!("\nON CONFLICT ({primary_keys}) DO UPDATE SET {updates}"));
+    }
+
+    if uses_mysql_style_upsert(db_type) {
+        let updates = non_pk_columns
+            .iter()
+            .map(|column| {
+                let column = transfer_column_identifier(column, db_type, quote_target_column_names);
+                format!("{column} = VALUES({column})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!("\nON DUPLICATE KEY UPDATE {updates}"));
+    }
+
+    Err(format!("Update-existing import conflict policy is not supported for {}", db_type.as_str()))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_upsert_typed_for_transfer(
     columns: &[String],
@@ -4745,6 +4815,55 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
     }
 
     Ok(statements)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_primary_key_upsert_sql_batches_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    pk_columns: &[String],
+) -> Result<Vec<(String, usize)>, String> {
+    if !supports_primary_key_upsert(db_type) {
+        return Err(format!("Update-existing import conflict policy is not supported for {}", db_type.as_str()));
+    }
+
+    let clause = primary_key_upsert_clause(columns, pk_columns, db_type, true)?;
+    let clause_bytes = sql_text_bytes(&clause, db_type);
+    let adjusted_limits = SqlBatchLimits {
+        max_rows: limits.max_rows,
+        target_sql_bytes: limits.target_sql_bytes.saturating_sub(clause_bytes).max(1),
+        hard_sql_bytes: limits.hard_sql_bytes.map(|limit| limit.saturating_sub(clause_bytes).max(1)),
+    };
+    let batches = generate_insert_sql_batches_from_value_rows(
+        columns,
+        value_rows,
+        table,
+        schema,
+        db_type,
+        catalog,
+        adjusted_limits,
+        false,
+        true,
+    )?;
+
+    batches
+        .into_iter()
+        .map(|(mut sql, row_count)| {
+            sql.push_str(&clause);
+            if limits.hard_sql_bytes.is_some_and(|limit| sql_text_bytes(&sql, db_type) > limit) {
+                return Err(format!(
+                    "SQL batch with update-existing conflict handling exceeds the {} byte hard limit",
+                    limits.hard_sql_bytes.unwrap_or_default()
+                ));
+            }
+            Ok((sql, row_count))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6349,6 +6468,12 @@ pub async fn get_db_type(state: &AppState, connection_id: &str) -> Result<Databa
 fn effective_transfer_database_type(config: &ConnectionConfig) -> DatabaseType {
     if config.db_type != DatabaseType::Jdbc {
         return config.db_type;
+    }
+    // The OceanBase JDBC URL and driver class are shared by MySQL and Oracle
+    // compatibility modes, so neither is a safe mode discriminator. The
+    // connection form persists this explicit profile only for Oracle mode.
+    if config.driver_profile.as_deref().is_some_and(|profile| profile.trim().eq_ignore_ascii_case("oceanbase-oracle")) {
+        return DatabaseType::OceanbaseOracle;
     }
     if config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")) {
         return DatabaseType::Jdbc;
@@ -16200,6 +16325,68 @@ SELECT 1 FROM dual"#
         assert!(sql.starts_with("INSERT ALL\nINTO "));
         assert!(sql.ends_with("SELECT 1 FROM dual"));
         assert!(!sql.contains("),\n("));
+    }
+
+    #[test]
+    fn oceanbase_oracle_jdbc_profile_routes_create_table_through_oracle_mode() {
+        let config = jdbc_transfer_config(
+            "jdbc:oceanbase://localhost:2883/ORCL",
+            "com.oceanbase.jdbc.Driver",
+            "OceanBase-Oracle",
+        );
+        let target_db = effective_transfer_database_type(&config);
+
+        assert_eq!(target_db, DatabaseType::OceanbaseOracle);
+
+        let ddl = generate_create_table_ddl(
+            &[
+                test_column("INSUPROKEY", "VARCHAR2(36 BYTE)"),
+                test_column("PREMIUM", "NUMBER(14,2)"),
+                test_column("DETAIL", "CLOB"),
+            ],
+            "PRPDINSURANCEPLANPROM",
+            "CPRPALL",
+            "CPRPALL",
+            &target_db,
+            &DatabaseType::Oracle,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            ddl,
+            "CREATE TABLE \"CPRPALL\".\"PRPDINSURANCEPLANPROM\" (\n  \"INSUPROKEY\" VARCHAR(36 byte),\n  \"PREMIUM\" DECIMAL(14,2),\n  \"DETAIL\" CLOB\n)"
+        );
+    }
+
+    #[test]
+    fn oceanbase_jdbc_url_without_oracle_profile_stays_generic() {
+        for profile in ["", "oceanbase"] {
+            let config =
+                jdbc_transfer_config("jdbc:oceanbase://localhost:2883/test", "com.oceanbase.jdbc.Driver", profile);
+            let target_db = effective_transfer_database_type(&config);
+
+            assert_eq!(target_db, DatabaseType::Jdbc, "profile: {profile}");
+
+            let ddl = generate_create_table_ddl(
+                &[test_column("INSUPROKEY", "VARCHAR2(36 BYTE)"), test_column("PREMIUM", "NUMBER(14,2)")],
+                "PRPDINSURANCEPLANPROM",
+                "CPRPALL",
+                "CPRPALL",
+                &target_db,
+                &DatabaseType::Oracle,
+                None,
+                None,
+            );
+            assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS "), "profile {profile}: {ddl}");
+            assert!(ddl.contains("\"INSUPROKEY\" VARCHAR(36)"), "profile {profile}: {ddl}");
+            assert!(ddl.contains("\"PREMIUM\" NUMERIC"), "profile {profile}: {ddl}");
+        }
+
+        let mut mysql_mode =
+            jdbc_transfer_config("jdbc:oceanbase://localhost:2883/test", "com.oceanbase.jdbc.Driver", "oceanbase");
+        mysql_mode.db_type = DatabaseType::Mysql;
+        assert_eq!(effective_transfer_database_type(&mysql_mode), DatabaseType::Mysql);
     }
 
     #[test]

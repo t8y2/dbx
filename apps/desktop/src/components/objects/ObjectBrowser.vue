@@ -396,6 +396,10 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   comment: 260,
 });
 const objectBrowserRowsLoadGuard = createObjectBrowserRowsLoadGuard();
+// schema 列表的失效只跟随上下文（连接/库/schema 变化、卸载），不跟随对象列表加载：
+// loadObjects() 会推进 objectBrowserRowsLoadGuard 的 epoch，若两者共用一个 epoch，
+// 与对象列表并行发起的 loadSchemas 会被判定为过期而放弃写入 schema 列表 (#8665)。
+const schemaListLoadGuard = createObjectBrowserRowsLoadGuard();
 let stopColumnResize: (() => void) | null = null;
 let preserveObjectFilterScrollOnce = false;
 
@@ -2992,7 +2996,7 @@ async function saveSource() {
 }
 
 async function loadSchemas(epoch: number): Promise<boolean> {
-  if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return false;
+  if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
   if (!needsSchema.value) {
     schemas.value = [];
     selectedSchema.value = undefined;
@@ -3005,7 +3009,7 @@ async function loadSchemas(epoch: number): Promise<boolean> {
     const names = filterSchemaNamesForConnection(await api.listSchemas(connectionId, database), props.connection, database, {
       showSystemSchemas: props.connection.show_system_schemas === true,
     });
-    if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return false;
+    if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
     schemas.value = names;
     if (names.length === 0) {
       selectedSchema.value = undefined;
@@ -3016,7 +3020,7 @@ async function loadSchemas(epoch: number): Promise<boolean> {
     }
     return true;
   } finally {
-    if (objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) loadingSchemas.value = false;
+    if (schemaListLoadGuard.isEpochCurrent(epoch)) loadingSchemas.value = false;
   }
 }
 
@@ -3210,17 +3214,30 @@ function normalizeStatisticNumber(value: number | null | undefined): number | nu
 }
 
 async function reload(options?: { allowCachedObjects?: boolean; contextEpoch?: number; preserveExistingRows?: boolean }) {
-  const epoch = options?.contextEpoch ?? objectBrowserRowsLoadGuard.invalidate();
-  try {
-    if (!(await loadSchemas(epoch))) return;
-  } catch (e) {
+  const contextEpoch = options?.contextEpoch ?? schemaListLoadGuard.invalidate();
+  // 对象列表只依赖本标签页绑定的 schema，而 schema 列表在部分引擎上可能很慢
+  // （如达梦需要扫描庞大的 SYS.SYSOBJECTS，#8665）。这里让对象列表的加载与
+  // listSchemas 并行进行，避免慢速 schema 列表让标签页长时间停在“没有找到对象”
+  // 的空白态；若 schema 解析结果确实改变了目标 schema，随后按新 schema 重载。
+  const schemaBeforeSchemas = selectedSchema.value;
+  const schemasPromise = loadSchemas(contextEpoch).catch((e) => {
     // listSchemas 失败（如共享连接上 SET SCHEMA 后的二次元数据请求）时，
     // loadSchemas 不会触碰 selectedSchema，这里也不清空它：保留 props.schema
     // 或用户已选值，继续尝试加载对象列表（达梦走用户名回退），避免标签静默
     // 空白 (#8301)。对象列表若同样失败，loadObjects 自身的 catch 会展示错误。
     console.warn("[ObjectBrowser] loadSchemas failed, keeping selected schema for", props.connection.id, e);
+    return false;
+  });
+  const parallelObjectLoad = needsSchema.value && selectedSchema.value ? loadObjects({ allowCached: options?.allowCachedObjects, preserveExistingRows: options?.preserveExistingRows }) : undefined;
+  const schemasLoaded = await schemasPromise;
+  await parallelObjectLoad;
+  if (!schemaListLoadGuard.isEpochCurrent(contextEpoch)) return;
+  if (parallelObjectLoad) {
+    if (schemasLoaded && needsSchema.value && selectedSchema.value !== schemaBeforeSchemas) {
+      await loadObjects({ allowCached: true });
+    }
+    return;
   }
-  if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return;
   await loadObjects({ allowCached: options?.allowCachedObjects, preserveExistingRows: options?.preserveExistingRows });
 }
 
@@ -3316,13 +3333,15 @@ defineExpose({ focusSearch, refresh, matchesRefreshScope });
 
 onBeforeUnmount(() => {
   objectBrowserRowsLoadGuard.invalidate();
+  schemaListLoadGuard.invalidate();
   stopColumnResize?.();
 });
 
 watch(
   [() => props.connection.id, () => props.database, () => props.schema],
   async () => {
-    const contextEpoch = objectBrowserRowsLoadGuard.invalidate();
+    objectBrowserRowsLoadGuard.invalidate();
+    const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
     objectFilter.value = "all";
@@ -3341,7 +3360,7 @@ watch(
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connection.id, e);
     }
-    if (!objectBrowserRowsLoadGuard.isEpochCurrent(contextEpoch)) return;
+    if (!schemaListLoadGuard.isEpochCurrent(contextEpoch)) return;
     void reload({ allowCachedObjects: true, contextEpoch });
   },
   { immediate: true },

@@ -1365,7 +1365,7 @@ describe("sqlCompletion scoped metadata ranking", () => {
     expect(items.findIndex((item) => item.label === "ORDERS_10K")).toBeLessThan(items.findIndex((item) => item.label === "TABLE"));
   });
 
-  it("qualifies same-name PostgreSQL tables from different schemas", () => {
+  it("uses on-collision qualification by default for same-name PostgreSQL tables", () => {
     const sql = "SELECT * FROM shared";
     const items = buildSqlCompletionItems(sql, sql.length, {
       databaseType: "postgres",
@@ -1379,6 +1379,86 @@ describe("sqlCompletion scoped metadata ranking", () => {
 
     expect(items).toHaveLength(2);
     expect(items.map((item) => item.apply).sort()).toEqual(["public.shared", "reporting.shared"]);
+  });
+
+  it("never qualifies table names while keeping colliding candidates distinct", () => {
+    const sql = "SELECT * FROM shared";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [
+        { name: "shared", schema: "public", type: "table", applyName: "public.shared" },
+        { name: "shared", schema: "reporting", type: "view", applyName: "reporting.shared" },
+      ],
+      columnsByTable: new Map(),
+      tableCompletionSchemaQualification: "never",
+    }).filter((item) => item.type === "table");
+
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.apply)).toEqual(["shared", "shared"]);
+    expect(items.map((item) => item.detail).sort()).toEqual(["public.shared", "reporting.shared"]);
+  });
+
+  it("always qualifies tables and views when schema metadata is available", () => {
+    const sql = "SELECT * FROM ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [
+        { name: "Order Details", schema: "Sales Data", type: "view" },
+        { name: "scratch", type: "table" },
+      ],
+      columnsByTable: new Map(),
+      tableCompletionSchemaQualification: "always",
+    }).filter((item) => item.type === "table");
+
+    expect(items.find((item) => item.label === "Order Details")?.apply).toBe('"Sales Data"."Order Details"');
+    expect(items.find((item) => item.label === "scratch")?.apply).toBe("scratch");
+  });
+
+  it.each([
+    ["never", "customers"],
+    ["always", "sales.customers"],
+  ] as const)("applies the %s policy to foreign-key table suggestions", (tableCompletionSchemaQualification, expectedApply) => {
+    const sql = "SELECT * FROM sales.orders o JOIN cus";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [
+        { name: "orders", schema: "sales", type: "table" },
+        { name: "customers", schema: "sales", type: "table" },
+      ],
+      columnsByTable: new Map(),
+      foreignKeysByTable: new Map([["sales.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_table: "customers", ref_schema: "sales", ref_column: "id" }]]]),
+      tableCompletionSchemaQualification,
+    });
+    const customers = items.filter((item) => item.type === "table" && item.label === "customers");
+
+    expect(customers).toHaveLength(1);
+    expect(customers[0]?.apply).toBe(expectedApply);
+    expect(customers[0]?.detail).toContain("related by");
+  });
+
+  it("does not repeat an already typed quoted schema or SQL Server database/schema qualifier", () => {
+    const postgresSql = 'SELECT * FROM "Sales Data".Ord';
+    const postgresItems = buildSqlCompletionItems(postgresSql, postgresSql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [{ name: "Order Details", schema: "Sales Data", type: "table" }],
+      columnsByTable: new Map(),
+      tableCompletionSchemaQualification: "always",
+    });
+    const sqlServerSql = "SELECT * FROM Reporting.dbo.Ord";
+    const sqlServerItems = buildSqlCompletionItems(sqlServerSql, sqlServerSql.length, {
+      databaseType: "sqlserver",
+      dialect: "sqlserver",
+      tables: [{ name: "Order Details", database: "Reporting", schema: "dbo", type: "table" }],
+      columnsByTable: new Map(),
+      tableCompletionSchemaQualification: "always",
+    });
+
+    expect(postgresItems.find((item) => item.label === "Order Details")?.apply).toBe('"Order Details"');
+    expect(sqlServerItems.find((item) => item.label === "Order Details")?.apply).toBe("[Order Details]");
   });
 
   it("qualifies same-name tables for generic metadata providers", () => {

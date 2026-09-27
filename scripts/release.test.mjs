@@ -185,6 +185,10 @@ test("Linux releases pin the Wayland-capable AppImage bundler before upload", ()
   assert.ok(prepareStep < buildStep);
   assert.ok(buildStep < verifyStep);
   assert.match(workflow, /XDG_CACHE_HOME: \$\{\{ runner\.temp \}\}\/dbx-tauri-cache/);
+  assert.match(
+    workflow,
+    /LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-\*\.so\*;libxkbcommon\.so\*;libxcb-randr\.so\*;libxcb-render\.so\*;libxcb-shm\.so\*;libXau\.so\*;libXdmcp\.so\*"/,
+  );
   assert.match(setup, /tauri_fix_commit=8e7028331ad37ac2db74d4ec20e66be5cacf2c40/);
   assert.match(setup, /linuxdeploy_revision=07333c6/);
   assert.match(setup, /36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62/);

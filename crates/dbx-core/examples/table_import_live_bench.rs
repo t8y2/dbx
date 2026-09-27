@@ -406,6 +406,7 @@ fn import_request(
         date_time_format: None,
         prepared_source: None,
         retain_source: false,
+        conflict_policy: None,
         skip_duplicate_rows: false,
     }
 }

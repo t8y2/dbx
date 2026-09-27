@@ -2673,6 +2673,14 @@ export async function closePluginLocalFile(pluginId: string, handleId: string): 
   return invoke("plugin_file_close", { pluginId, handleId });
 }
 
+export async function openPluginMedia(pluginId: string, method: string, params: Record<string, unknown>): Promise<string> {
+  return invoke("plugin_media_open", { pluginId, method, params });
+}
+
+export async function closePluginMedia(pluginId: string, token: string): Promise<void> {
+  return invoke("plugin_media_close", { pluginId, token });
+}
+
 export async function getPluginUiStorage(pluginId: string, key: string): Promise<unknown> {
   return invoke("plugin_ui_storage_get", { pluginId, key });
 }
@@ -5367,6 +5375,7 @@ export async function sortTablesByFkDependency(options: SortTablesByFkOptions): 
 
 // --- Table File Import ---
 export type TableImportMode = "append" | "truncate";
+export type TableImportConflictPolicy = "error" | "skip" | "updateExisting";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
 export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql";
@@ -5443,6 +5452,7 @@ export interface TableImportRequest {
   dateTimeFormat?: string;
   preparedSource?: TableImportPreparedSource | null;
   retainSource?: boolean;
+  conflictPolicy?: TableImportConflictPolicy;
   skipDuplicateRows?: boolean;
 }
 

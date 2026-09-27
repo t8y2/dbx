@@ -58,6 +58,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "process list batch terminate", keys: under("processList", ["batchTerminate", "batchTerminateTitle", "batchTerminateConfirm", "batchTerminateRunning", "batchTerminateSummary"]) },
   { feature: "cached result fallback", keys: ["grid.cachedResultUnavailable", "grid.reexecuteQuery"] },
   { feature: "Nacos global replace", keys: ["nacos.contentReplace*", "nacos.replaceHistory.*"], locales: EXCEPT_AZ_TR, translated: true },
+  { feature: "Nacos instance health and availability (#10116)", keys: under("nacos", ["serviceInstancesAllHealthy", "serviceInstancesPartiallyHealthy", "serviceInstancesNoHealthyInstances", "serviceInstancesNoInstances", "online", "offline"]) },
   { feature: "SQLite table rebuild notice", keys: ["structureEditor.sqliteRebuildNotice"] },
   { feature: "custom types", keys: ["customType.kinds.composite", "customType.tabs.properties", "customType.members.empty", "customType.properties.empty", "customType.ddl.empty", "customType.ddl.incomplete", "contextMenu.viewDetails"], translated: true },
   { feature: "Dameng object compilation", keys: ["contextMenu.compileObjectFailedTitle", "contextMenu.compileObjectFailedMessage"], locales: EXCEPT_AZ_TR, translated: true },
@@ -72,6 +73,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },
   { feature: "PostgreSQL legacy TLS", keys: ["connection.postgresLegacyTls", "connection.postgresLegacyTlsHint"] },
   { feature: "settings search sections", keys: ["settings.syncWebDavWebDescription", "settings.performanceSection"] },
+  { feature: "SQL table completion schema qualification (#9219)", keys: ["settings.tableCompletionSchemaQualification*"], translated: true },
   { feature: "Redis batch expiration", keys: under("redis", ["batchExpiry", "batchExpiryTitle", "batchExpirySelected", "batchExpiryApply", "batchExpirySuccess", "batchExpiryPartial"]) },
   {
     feature: "plugin AI tools and data access",

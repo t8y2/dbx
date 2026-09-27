@@ -294,6 +294,7 @@ describe("TableImportDialog batch selection", () => {
     await flushAsyncUpdates();
     expect(document.body.textContent).toContain("Trim values");
     expect(document.body.textContent).not.toContain("Skip duplicate rows");
+    expect(document.body.textContent).not.toContain("Update the existing row");
   });
 
   it("offers the skip-duplicates option for dialects with conflict handling", async () => {
@@ -302,6 +303,25 @@ describe("TableImportDialog batch selection", () => {
     await flushAsyncUpdates();
     expect(document.body.textContent).toContain("Trim values");
     expect(document.body.textContent).toContain("Skip duplicate rows");
+  });
+
+  it("serializes the explicit skip policy with the legacy compatibility flag", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name\n1,a"], "rows.csv")]);
+    const policySelect = document.body.querySelector<HTMLSelectElement>('[data-testid="table-import-conflict-policy"]');
+    expect(policySelect).toBeTruthy();
+    if (policySelect) {
+      policySelect.value = "skip";
+      policySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await flushAsyncUpdates();
+
+    await startImport();
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    expect(mocks.importTableFile.mock.calls[0]![0]).toMatchObject({
+      conflictPolicy: "skip",
+      skipDuplicateRows: true,
+    });
   });
 
   it("keeps every worksheet selected by default and imports them in workbook order", async () => {

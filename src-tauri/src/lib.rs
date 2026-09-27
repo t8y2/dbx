@@ -1551,6 +1551,7 @@ pub fn run() {
     builder
         .manage(CloseBehaviorState::new())
         .manage(commands::plugin_file::PluginFileState::new())
+        .manage(commands::plugin_media::PluginMediaState::new())
         .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
         .on_page_load(|webview, payload| {
@@ -1947,6 +1948,8 @@ pub fn run() {
             commands::plugin_file::plugin_file_read,
             commands::plugin_file::plugin_file_write,
             commands::plugin_file::plugin_file_close,
+            commands::plugin_media::plugin_media_open,
+            commands::plugin_media::plugin_media_close,
             commands::plugin_storage::plugin_ui_storage_get,
             commands::plugin_storage::plugin_ui_storage_set,
             commands::plugin_storage::plugin_ui_storage_delete,

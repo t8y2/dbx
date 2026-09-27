@@ -139,7 +139,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `host.plans:read` 允许针对 DBX 自己的连接读取估算执行计划（见 [估算执行计划](#估算执行计划)）。它是只读权限：不授予普通 SQL 执行、写操作、DDL 或真实执行计划，且这是唯一存在的计划类权限。
 - `host.schema:read` 允许通过 `host.getTableMetadata` 读取已打开连接的窄化 table schema metadata；它不会授予任意 SQL、写入或隐式重连（见 [Table Schema Metadata](#table-schema-metadata)）。
 - `host.storage` 为工作台 UI 提供本插件独享的持久化键值存储（见 [持久化 UI 状态](#持久化-ui-状态)）；数据只落在插件自己的插件数据目录里。
-- `host.ai` 允许插件在 DBX 内置 AI 面板中新建带数据快照的对话，沿用宿主的模型选择、历史、追问、停止和导出功能。旧版 DBX 会在安装时因未知权限而失败，需要兼容旧宿主的插件应把 `host.ai` 作为可选能力。
+- `host.ai` 允许插件接入 DBX 全局 AI 面板：可以打开 Ask 快照对话、选择性打开使用实时插件工具的 Agent 对话，以及注册当前工作台的推荐问题。旧版 DBX 会在安装时因未知权限而失败，需要兼容旧宿主的插件应把 `host.ai` 作为可选能力，并通过 `capabilities.ai` / `capabilities.aiRecommendations` 判断运行时支持。
 - `host.clipboard:read` 允许工作台 UI 读取系统剪贴板（见 [系统剪贴板](#系统剪贴板)）。写剪贴板不需要权限；读取会把用户数据（密码、令牌）交给插件代码，因此需要门控。
 - `host.data:read` 允许 `window.dbxPlugin.queryData` 在用户授权给插件的连接上执行一条只读 SQL（见 [只读数据查询](#只读数据查询)）。每个连接都需要用户同意；它不会授予写入、DDL 或重连。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
@@ -351,8 +351,10 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | 返回 `sql` 的估算执行计划；需要 `host.plans:read`。 |
 | `getTableMetadata({ connectionId, database?, schema?, table })` | 读取已打开连接的窄化 table schema metadata；需要 `host.schema:read`。 |
 | `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` | 在用户授权给插件的连接上执行一条只读 SQL；需要 `host.data:read`。 |
-| `capabilities` | 来自 init 消息的 `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, clipboardWrite, clipboardRead }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
-| `ai.openConversation({ title, prompt, context, send? })` | 在内置 AI 面板新建插件对话；`send` 默认 `false`，为 `true` 时立即分析；需要 `host.ai`，并以 `capabilities.ai` 广播——旧宿主不带该字段，请按能力位关闭而不是用真实请求试探。 |
+| `capabilities` | 来自 init 消息的 `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, aiRecommendations, clipboardWrite, clipboardRead }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
+| `ai.openConversation({ title, prompt, context, send?, mode? })` | 在内置 AI 面板新建插件对话；`send` 默认 `false`，`mode` 默认 `ask`。`mode: "agent"` 会在 context 包含已打开插件连接时使用实时插件工具；需要 `host.ai`，并以 `capabilities.ai` 广播。 |
+| `ai.setRecommendations({ context, items })` | 覆盖当前工作台的默认推荐问题并立即刷新全局 AI 面板；每次最多 5 条，支持 `{{path.to.value}}` 占位符；需要 `host.ai` 和 `capabilities.aiRecommendations`。 |
+| `ai.clearRecommendations()` | 清空当前工作台的推荐问题；需要 `host.ai` 和 `capabilities.aiRecommendations`。 |
 | `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
 | `storage` | 本插件独享的持久化键值状态；需要 `host.storage`；见下文。 |
 | `fileTransfer` | 本地文件流式传输与系统拖放（仅桌面端）；见下文。 |
@@ -595,20 +597,83 @@ if (window.dbxPlugin.capabilities.storage) {
 
 ### 在 DBX AI 中分析插件数据
 
-在 manifest 中声明 `"permissions": ["host.ai"]`，然后从插件的分析按钮调用：
+在 manifest 中声明 `"permissions": ["host.ai"]`。插件可以直接打开全局 AI 面板，也可以为每个 Workbench 注册快捷推荐问题。两种能力都沿用 DBX 的模型选择、历史、追问、停止和导出功能。
+
+#### 声明 Workbench 的默认推荐问题
+
+在 `workbench` contribution 下增加可选的 `ai.recommendations`。`label` 显示在 DBX 全局 AI 面板，`prompt` 是点击后发送给 AI 的文本；`order` 越小越靠前。
+
+```json
+{
+  "type": "workbench",
+  "id": "com.example.files.main",
+  "label": "Files",
+  "ai": {
+    "recommendations": [
+      {
+        "id": "health",
+        "label": "检查 {{resource.name}} 健康状态",
+        "prompt": "分析 {{resource.kind}}/{{resource.name}} 的健康状态和风险",
+        "order": 10
+      }
+    ]
+  }
+}
+```
+
+占位符从当前 Workbench context 读取，支持对象属性和数组下标，例如 `{{resource.name}}`、`{{items.0.status}}`。无法解析的占位符会使该条推荐被隐藏；`__proto__`、`prototype` 和 `constructor` 等路径会被拒绝。推荐问题最多显示 5 条。
+
+#### 根据资源变化更新推荐问题
+
+插件切换页面或资源时，可以提交运行时推荐问题。运行时 `items` 会覆盖 manifest 默认值；传入空数组表示清空当前推荐。运行时 context 通常只需要提交资源字段，Host 会保留当前 Workbench 的 `connectionId`、数据库和实例标识，确保点击推荐问题后仍绑定到正确的插件连接。
+
+```js
+function updateRecommendations(resource) {
+  if (!dbxPlugin.capabilities.aiRecommendations) return;
+
+  return dbxPlugin.ai.setRecommendations({
+    context: { resource },
+    items: [
+      {
+        id: "health",
+        label: `检查 ${resource.name} 健康状态`,
+        prompt: "分析 {{resource.kind}}/{{resource.name}} 的健康状态和风险",
+        order: 10,
+      },
+      {
+        id: "events",
+        label: "查看最近事件",
+        prompt: "列出这个资源最近的重要事件并给出处理建议",
+        order: 20,
+      },
+    ],
+  });
+}
+
+await dbxPlugin.ai.clearRecommendations();
+```
+
+推荐问题显示在 DBX 全局 AI 对话窗口中，而不是插件页面内新增一个 AI 入口。用户点击后，DBX 会使用当前推荐文本创建新的 Agent 对话并立即发送；Agent 会通过当前已打开的插件连接调用插件工具获取实时数据。推荐列表本身只属于当前 Workbench 上下文，不会写入对话历史；用户点击后发送的实际问题会正常保存。
+
+#### 直接打开 Ask 或 Agent 对话
+
+`ai.openConversation` 仍适合插件按钮或其他明确动作。默认 `mode` 为 `ask`，宿主会复制插件提供的 JSON 快照；快照会随对话保存，后续资源刷新不会改变已经创建的对话。需要实时工具时显式使用 `mode: "agent"`，并在 context 中提供当前已打开插件连接的 `connectionId`：
 
 ```js
 await dbxPlugin.ai.openConversation({
   title: "Watchlist analysis",
-  prompt: "Compare the supplied quotes and explain risks and missing data.",
-  context: { snapshotId: "watchlist-1", quotes, source, dataTimestamp },
+  prompt: "Compare the current quotes and explain risks and missing data.",
+  context: {
+    connectionId,
+    resource: { kind: "watchlist", name: "primary" },
+    dataTimestamp,
+  },
+  mode: "agent",
   send: true,
 });
 ```
 
-`title` 最多 200 字符，`prompt` 最多 32000 字符，`context` 必须是纯 JSON 对象，上限 2 MiB。宿主绑定真实插件身份，并复制快照；后续行情刷新或切换数据库不会替换该会话的数据。快照作为会话数据保存，在历史恢复及导出时保留。插件应提供来源、数据时间、延迟及缺失字段，AI 不会自动拉取行情。
-
-该接口只打开内置对话，不向插件返回模型回复或 AI 配置。首版使用纯文本 Ask 通道，支持 DBX 的 HTTP 模型供应商和 Ollama；不提供数据库工具或 CLI Agent。选择未配置的模型时会保留待发送问题，用户可在 DBX 面板中选择模型后继续。
+`title` 最多 200 字符，`prompt` 最多 32000 字符，`context` 必须是纯 JSON 对象，上限 2 MiB。Agent 只能使用宿主为该插件连接公开的工具；插件不会收到模型回复或模型配置，也不能借此获得数据库执行能力。旧插件不声明推荐问题时仍可正常使用原有 AI API；旧宿主缺少新增 capability 字段时，插件应关闭对应入口并继续提供其他功能。
 
 ### 主题、布局和静态资源
 

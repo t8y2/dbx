@@ -144,6 +144,9 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
+      # The GTK plugin wrapper removes these after its own deployment pass,
+      # while linuxdeploy must also exclude them from its later dependency pass.
+      LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-*.so*;libxkbcommon.so*;libxcb-randr.so*;libxcb-render.so*;libxcb-shm.so*;libXau.so*;libXdmcp.so*"
       # Keep releases working until the shared S3 secrets are configured.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:

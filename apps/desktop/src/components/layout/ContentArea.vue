@@ -70,6 +70,7 @@ import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
+import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
 import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
 import type { DataGridColumnLayoutHandle } from "@/components/grid/dataGridColumnLayoutPopover";
 import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
@@ -1900,6 +1901,7 @@ defineExpose({
                         </button>
                       </div>
                     </div>
+                    <DataGridColumnWidthModeControl />
                     <DataGridFontFamilyControl />
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                       <div class="min-w-0 flex items-center gap-2 font-medium">
@@ -2534,6 +2536,7 @@ defineExpose({
                   </button>
                 </div>
               </div>
+              <DataGridColumnWidthModeControl />
               <DataGridFontFamilyControl />
               <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                 <div class="min-w-0 flex items-center gap-2 font-medium">

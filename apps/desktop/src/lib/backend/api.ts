@@ -1094,6 +1094,7 @@ export type {
   TransferOwnershipPolicy,
   TransferOwnershipPreview,
   TableImportMode,
+  TableImportConflictPolicy,
   TableImportStatus,
   TableImportSourceFormat,
   TableImportJsonShape,

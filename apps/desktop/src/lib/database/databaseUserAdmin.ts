@@ -4,6 +4,7 @@ import { effectiveDatabaseTypeForConnection, gaussdbConnectionMode } from "@/lib
 
 export type UserAdminDialect = "mysql" | "postgres";
 export type PrivilegeScope = "mysql" | "database" | "schema" | "table" | "role";
+export type AuthorizationModel = "mysql" | "postgres" | "starrocks";
 
 export interface DatabaseUserIdentity {
   user: string;
@@ -19,6 +20,7 @@ export interface CreatePrincipalInput extends DatabaseUserIdentity {
 export interface PrivilegeChangeInput {
   user: DatabaseUserIdentity;
   privileges: string[];
+  catalog?: string;
   database: string;
   table?: string;
   grantOption?: boolean;
@@ -38,9 +40,23 @@ export interface PrivilegeSelection {
   grantOption: boolean;
 }
 
+export interface DatabaseTablePrivilegeGrant {
+  catalog?: string;
+  database: string;
+  schema?: string;
+  table: string;
+  privilege: string;
+  grantOption: boolean;
+}
+
+export interface TableGrantParseContext {
+  database?: string;
+}
+
 export interface DatabaseUserAdminProvider {
   dialect: UserAdminDialect;
   defaultScope: PrivilegeScope;
+  authorizationModel?: AuthorizationModel;
   supportsTableGrantsOnCreate?: boolean;
   listUsersSql(): string;
   fallbackListUsersSql?: () => string;
@@ -60,6 +76,9 @@ export interface DatabaseUserAdminProvider {
   privilegesForScope?(scope: PrivilegeScope): readonly string[];
   defaultPrivilegesForScope?(scope: PrivilegeScope): string[];
   privilegeSelectionFromGrants?(input: PrivilegeSelectionInput): PrivilegeSelection;
+  tableGrantsSql?(user: DatabaseUserIdentity): string;
+  parseTableGrants?(result: QueryResult, context?: TableGrantParseContext): DatabaseTablePrivilegeGrant[];
+  tableGrantsFromShowGrants?: boolean;
 }
 
 export const MYSQL_USER_ADMIN_TYPES = new Set<DatabaseType>(["mysql", "goldendb"]);
@@ -68,10 +87,14 @@ export const POSTGRES_USER_ADMIN_TYPES = new Set<DatabaseType>(["postgres", "gau
 
 export const MYSQL_COMMON_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "EXECUTE", "SHOW VIEW", "CREATE VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "TRIGGER", "EVENT", "CREATE TEMPORARY TABLES", "LOCK TABLES"] as const;
 export const DORIS_TABLE_PRIVILEGES = ["SELECT_PRIV", "LOAD_PRIV", "ALTER_PRIV", "CREATE_PRIV", "DROP_PRIV", "SHOW_VIEW_PRIV"] as const;
+// StarRocks' v3.0+ privilege framework uses these table action names; legacy
+// *_PRIV names belong to the incompatible pre-v3.0 framework.
 export const STARROCKS_TABLE_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "EXPORT", "ALL"] as const;
 
 export const POSTGRES_DATABASE_PRIVILEGES = ["CONNECT", "CREATE", "TEMPORARY"] as const;
 export const POSTGRES_SCHEMA_PRIVILEGES = ["USAGE", "CREATE"] as const;
+// MAINTAIN is PostgreSQL 16+, so keep the picker on the cross-version set until
+// provider capabilities can be negotiated from the connected server version.
 export const POSTGRES_TABLE_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] as const;
 
 export function quoteSqlString(value: string): string {
@@ -214,15 +237,20 @@ export function starrocksPrivilegeTargetSql(database: string, table = "*"): stri
   return !db || db === "*" ? `TABLE ${tableName}` : `TABLE ${quoteMySqlIdentifier(db)}.${tableName}`;
 }
 
+function starrocksCatalogPrefix(catalog: string | undefined): string {
+  const name = catalog?.trim();
+  return name ? `SET CATALOG ${quoteMySqlIdentifier(name)};\n` : "";
+}
+
 export function starrocksGrantPrivilegesSql(input: PrivilegeChangeInput): string {
   const privileges = normalizePrivileges(input.privileges).join(", ");
   const grantOption = input.grantOption ? " WITH GRANT OPTION" : "";
-  return `GRANT ${privileges} ON ${starrocksPrivilegeTargetSql(input.database, input.table)} TO USER ${mysqlUserAccount(input.user)}${grantOption};`;
+  return `${starrocksCatalogPrefix(input.catalog)}GRANT ${privileges} ON ${starrocksPrivilegeTargetSql(input.database, input.table)} TO USER ${mysqlUserAccount(input.user)}${grantOption};`;
 }
 
 export function starrocksRevokePrivilegesSql(input: PrivilegeChangeInput): string {
   const privileges = normalizePrivileges(input.privileges).join(", ");
-  return `REVOKE ${privileges} ON ${starrocksPrivilegeTargetSql(input.database, input.table)} FROM USER ${mysqlUserAccount(input.user)};`;
+  return `${starrocksCatalogPrefix(input.catalog)}REVOKE ${privileges} ON ${starrocksPrivilegeTargetSql(input.database, input.table)} FROM USER ${mysqlUserAccount(input.user)};`;
 }
 
 export function dorisPrivilegeTargetSql(database: string, table = "*"): string {
@@ -405,6 +433,59 @@ FROM (
   GROUP BY table_schema, table_name
 ) grants
 ORDER BY sort, line;`.trim();
+}
+
+export function postgresTableGrantsSql(user: DatabaseUserIdentity): string {
+  return `
+SELECT
+  table_schema AS "schema",
+  table_name AS "table",
+  privilege_type AS "privilege",
+  is_grantable AS "grant_option"
+FROM information_schema.table_privileges
+WHERE grantee = ${quoteSqlString(user.user)}
+ORDER BY table_schema, table_name, privilege_type;`.trim();
+}
+
+export function postgresTableGrantsResult(result: QueryResult, context: TableGrantParseContext = {}): DatabaseTablePrivilegeGrant[] {
+  const schemaIndex = columnIndex(result, "schema", "table_schema");
+  const tableIndex = columnIndex(result, "table", "table_name");
+  const privilegeIndex = columnIndex(result, "privilege", "privilege_type");
+  const grantOptionIndex = columnIndex(result, "grant_option", "is_grantable");
+  const database = context.database?.trim() ?? "";
+  if (!database || schemaIndex < 0 || tableIndex < 0 || privilegeIndex < 0) return [];
+
+  return result.rows.flatMap((row) => {
+    const schema = String(row[schemaIndex] ?? "").trim();
+    const table = String(row[tableIndex] ?? "").trim();
+    const privilege = normalizePrivilegeName(String(row[privilegeIndex] ?? ""));
+    if (!isPostgresAuthorizationSchema(schema) || !table || !privilege) return [];
+    return [
+      {
+        database,
+        schema,
+        table,
+        privilege,
+        grantOption:
+          grantOptionIndex >= 0 &&
+          String(row[grantOptionIndex] ?? "")
+            .trim()
+            .toUpperCase() === "YES",
+      },
+    ];
+  });
+}
+
+export function starrocksTableGrantsResult(result: QueryResult): DatabaseTablePrivilegeGrant[] {
+  const catalogIndex = columnIndex(result, "catalog");
+  const grantsIndex = columnIndex(result, "grants");
+  if (grantsIndex < 0) return [];
+
+  return result.rows.flatMap((row) => {
+    const sql = String(row[grantsIndex] ?? "").trim();
+    const catalog = normalizeStarrocksCatalog(catalogIndex >= 0 ? String(row[catalogIndex] ?? "") : "");
+    return parseStarrocksTableGrant(sql, catalog);
+  });
 }
 
 export function gaussdbMShowGrantsSql(user: DatabaseUserIdentity): string {
@@ -654,6 +735,77 @@ function parseMySqlGrant(sql: string): ParsedMySqlGrant | null {
   };
 }
 
+function parseStarrocksTableGrant(sql: string, catalog: string | undefined): DatabaseTablePrivilegeGrant[] {
+  const match = /^\s*GRANT\s+(.+?)\s+ON\s+(.+?)\s+TO\s+(?:USER\s+)?/i.exec(sql);
+  if (!match) return [];
+
+  const privileges = match[1]
+    .split(",")
+    .map((privilege) => (normalizePrivilegeName(privilege) === "ALL PRIVILEGES" ? "ALL" : normalizePrivilegeName(privilege)))
+    .filter(Boolean);
+  if (privileges.length === 0) return [];
+
+  const rawTarget = match[2].trim();
+  let database = "";
+  let table = "";
+  const allInDatabase = /^ALL\s+TABLES\s+IN\s+DATABASE\s+(.+)$/i.exec(rawTarget);
+  if (allInDatabase) {
+    database = unquoteMySqlIdentifier(allInDatabase[1]);
+    table = "*";
+  } else if (/^ALL\s+TABLES\s+IN\s+ALL\s+DATABASES$/i.test(rawTarget)) {
+    database = "*";
+    table = "*";
+  } else {
+    const tableTarget = rawTarget.replace(/^TABLE\s+/i, "");
+    if (/^(?:DATABASE|CATALOG|VIEW|MATERIALIZED\s+VIEW|FUNCTION|RESOURCE|USER)\b/i.test(tableTarget)) return [];
+    const identifiers = splitMySqlIdentifierPath(tableTarget);
+    if (!identifiers || identifiers.length < 2 || identifiers.length > 3) return [];
+    if (identifiers.length === 3) catalog = normalizeStarrocksCatalog(identifiers.shift() ?? "") ?? catalog;
+    [database, table] = identifiers;
+  }
+  if (!database || !table) return [];
+
+  const grantOption = /\s+WITH\s+GRANT\s+OPTION\s*;?\s*$/i.test(sql);
+  return privileges.map((privilege) => ({ catalog, database, table, privilege, grantOption }));
+}
+
+function splitMySqlIdentifierPath(value: string): string[] | null {
+  const parts: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === "`") {
+      if (quoted && value[index + 1] === "`") {
+        current += "`";
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+      continue;
+    }
+    if (character === "." && !quoted) {
+      const part = current.trim();
+      if (!part) return null;
+      parts.push(part);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  if (quoted) return null;
+  const part = current.trim().replace(/;$/, "").trim();
+  if (!part) return null;
+  parts.push(part);
+  return parts;
+}
+
+export function normalizeStarrocksCatalog(value: string): string | undefined {
+  const catalog = unquoteMySqlIdentifier(value.trim());
+  if (!catalog || catalog.toUpperCase() === "NULL") return undefined;
+  return catalog.toLowerCase() === "default" ? "default_catalog" : catalog;
+}
+
 function normalizePrivilegeName(value: string): string {
   return value.trim().replace(/\s+/g, " ").toUpperCase();
 }
@@ -676,6 +828,11 @@ function postgresDefaultPrivilege(scope: PrivilegeScope | undefined): string {
   return "SELECT";
 }
 
+function isPostgresAuthorizationSchema(schema: string): boolean {
+  const normalized = schema.toLowerCase();
+  return !!schema && normalized !== "information_schema" && normalized !== "sys_catalog" && !normalized.startsWith("pg_");
+}
+
 function postgresPrivilegesForScope(scope: PrivilegeScope): readonly string[] {
   if (scope === "database") return POSTGRES_DATABASE_PRIVILEGES;
   if (scope === "schema") return POSTGRES_SCHEMA_PRIVILEGES;
@@ -690,6 +847,7 @@ function postgresRoleBypassRlsSql(alias: string): string {
 export const mysqlUserAdminProvider: DatabaseUserAdminProvider = {
   dialect: "mysql",
   defaultScope: "mysql",
+  authorizationModel: "mysql",
   supportsTableGrantsOnCreate: true,
   listUsersSql: mysqlListUsersSql,
   fallbackListUsersSql: mysqlListUsersFallbackSql,
@@ -717,6 +875,8 @@ export const nativeMysqlUserAdminProvider: DatabaseUserAdminProvider = {
 export const postgresUserAdminProvider: DatabaseUserAdminProvider = {
   dialect: "postgres",
   defaultScope: "database",
+  authorizationModel: "postgres",
+  supportsTableGrantsOnCreate: true,
   listUsersSql: postgresListRolesSql,
   parseUsers: usersFromPostgresRolesResult,
   showGrantsSql: postgresShowGrantsSql,
@@ -730,16 +890,26 @@ export const postgresUserAdminProvider: DatabaseUserAdminProvider = {
   detail: (user) => [user.host, user.plugin].filter(Boolean).join(" · ") || undefined,
   privilegesForScope: postgresPrivilegesForScope,
   defaultPrivilegesForScope: (scope) => (scope === "role" ? [] : [postgresDefaultPrivilege(scope)]),
+  tableGrantsSql: postgresTableGrantsSql,
+  parseTableGrants: postgresTableGrantsResult,
+};
+
+const postgresCompatibleUserAdminProvider: DatabaseUserAdminProvider = {
+  ...postgresUserAdminProvider,
+  authorizationModel: undefined,
+  supportsTableGrantsOnCreate: undefined,
+  tableGrantsSql: undefined,
+  parseTableGrants: undefined,
 };
 
 export const kingbaseUserAdminProvider: DatabaseUserAdminProvider = {
-  ...postgresUserAdminProvider,
+  ...postgresCompatibleUserAdminProvider,
   listUsersSql: kingbaseListRolesSql,
   showGrantsSql: kingbaseShowGrantsSql,
 };
 
 export const gaussdbMUserAdminProvider: DatabaseUserAdminProvider = {
-  ...postgresUserAdminProvider,
+  ...postgresCompatibleUserAdminProvider,
   listUsersSql: gaussdbMListRolesSql,
   showGrantsSql: gaussdbMShowGrantsSql,
 };
@@ -767,6 +937,8 @@ export const dorisUserAdminProvider: DatabaseUserAdminProvider = {
 export const starrocksUserAdminProvider: DatabaseUserAdminProvider = {
   dialect: "mysql",
   defaultScope: "table",
+  authorizationModel: "starrocks",
+  supportsTableGrantsOnCreate: true,
   listUsersSql: starrocksListUsersSql,
   parseUsers: starrocksUsersResult,
   showGrantsSql: mysqlShowGrantsSql,
@@ -780,6 +952,8 @@ export const starrocksUserAdminProvider: DatabaseUserAdminProvider = {
   detail: (user) => user.plugin,
   privilegesForScope: () => STARROCKS_TABLE_PRIVILEGES,
   defaultPrivilegesForScope: () => ["SELECT"],
+  parseTableGrants: starrocksTableGrantsResult,
+  tableGrantsFromShowGrants: true,
 };
 
 const DATABASE_USER_ADMIN_PROVIDER_BY_TYPE = new Map<DatabaseType, DatabaseUserAdminProvider>([
@@ -788,12 +962,12 @@ const DATABASE_USER_ADMIN_PROVIDER_BY_TYPE = new Map<DatabaseType, DatabaseUserA
   ["doris", dorisUserAdminProvider],
   ["kingbase", kingbaseUserAdminProvider],
   ["postgres", postgresUserAdminProvider],
-  ["gaussdb", postgresUserAdminProvider],
-  ["highgo", postgresUserAdminProvider],
-  ["kwdb", postgresUserAdminProvider],
-  ["opengauss", postgresUserAdminProvider],
-  ["questdb", postgresUserAdminProvider],
-  ["vastbase", postgresUserAdminProvider],
+  ["gaussdb", postgresCompatibleUserAdminProvider],
+  ["highgo", postgresCompatibleUserAdminProvider],
+  ["kwdb", postgresCompatibleUserAdminProvider],
+  ["opengauss", postgresCompatibleUserAdminProvider],
+  ["questdb", postgresCompatibleUserAdminProvider],
+  ["vastbase", postgresCompatibleUserAdminProvider],
   ["starrocks", starrocksUserAdminProvider],
 ]);
 

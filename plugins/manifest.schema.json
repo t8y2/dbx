@@ -312,7 +312,30 @@
         "id": { "$ref": "#/$defs/identifier" },
         "label": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
-        "icon": { "$ref": "#/$defs/assetPath" }
+        "icon": { "$ref": "#/$defs/assetPath" },
+        "ai": { "$ref": "#/$defs/workbenchAi" }
+      }
+    },
+    "workbenchAi": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "recommendations": {
+          "type": "array",
+          "maxItems": 5,
+          "items": { "$ref": "#/$defs/aiRecommendation" }
+        }
+      }
+    },
+    "aiRecommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "prompt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "prompt": { "type": "string", "minLength": 1, "maxLength": 32000 },
+        "order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }
       }
     },
     "contextMenuContribution": {

@@ -10,8 +10,11 @@ import {
   kingbaseUserAdminProvider,
   mysqlPrivilegeSelectionFromGrants,
   nativeMysqlUserAdminProvider,
+  postgresTableGrantsResult,
+  postgresTableGrantsSql,
   postgresUserAdminProvider,
   resolveDatabaseUserAdminProviderForConnection,
+  starrocksTableGrantsResult,
 } from "@/lib/database/databaseUserAdmin";
 import type { ConnectionConfig, QueryResult } from "@/types/database";
 
@@ -143,11 +146,36 @@ describe("database user admin providers", () => {
     expect(sql).not.toContain(" || ");
   });
 
-  it("keeps native GaussDB, PostgreSQL, and Kingbase providers unchanged", () => {
-    expect(resolveDatabaseUserAdminProviderForConnection(connection("gaussdb"))).toBe(postgresUserAdminProvider);
+  it("limits PostgreSQL table selection to native PostgreSQL", () => {
+    const gaussdb = resolveDatabaseUserAdminProviderForConnection(connection("gaussdb"));
+
+    expect(gaussdb).not.toBe(postgresUserAdminProvider);
+    expect(gaussdb?.supportsTableGrantsOnCreate).toBeUndefined();
     expect(resolveDatabaseUserAdminProviderForConnection(connection("postgres"))).toBe(postgresUserAdminProvider);
     expect(resolveDatabaseUserAdminProviderForConnection(connection("kingbase"))).toBe(kingbaseUserAdminProvider);
-    expect(getDatabaseUserAdminProvider("gaussdb")).toBe(postgresUserAdminProvider);
+    expect(postgresUserAdminProvider.supportsTableGrantsOnCreate).toBe(true);
+    expect(getDatabaseUserAdminProvider("gaussdb")?.supportsTableGrantsOnCreate).toBeUndefined();
+  });
+
+  it("loads direct PostgreSQL table grants with database and schema identity", () => {
+    const sql = postgresTableGrantsSql({ user: "role'o", host: "LOGIN" });
+    const grants = postgresTableGrantsResult(
+      result(
+        ["schema", "table", "privilege", "grant_option"],
+        [
+          ["sales", "orders", "SELECT", "NO"],
+          ['odd"schema', 'daily"rollup', "UPDATE", "YES"],
+        ],
+      ),
+      { database: "app-db" },
+    );
+
+    expect(sql).toContain("FROM information_schema.table_privileges");
+    expect(sql).toContain("WHERE grantee = 'role''o'");
+    expect(grants).toEqual([
+      { database: "app-db", schema: "sales", table: "orders", privilege: "SELECT", grantOption: false },
+      { database: "app-db", schema: 'odd"schema', table: 'daily"rollup', privilege: "UPDATE", grantOption: true },
+    ]);
   });
 
   it("uses Doris 2.x user and privilege syntax", () => {
@@ -188,10 +216,31 @@ describe("database user admin providers", () => {
     expect(postgresProvider?.privilegeSelectionFromGrants).toBeUndefined();
     expect(dorisProvider?.privilegeSelectionFromGrants).toBeUndefined();
     expect(starrocksProvider?.privilegeSelectionFromGrants).toBeUndefined();
+    expect(postgresProvider?.parseTableGrants).toBe(postgresTableGrantsResult);
+    expect(starrocksProvider?.parseTableGrants).toBe(starrocksTableGrantsResult);
     expect(mysqlProvider?.defaultPrivilegesForScope?.("mysql")).toEqual(["SELECT"]);
     expect(postgresProvider?.defaultPrivilegesForScope?.("database")).toEqual(["CONNECT"]);
     expect(dorisProvider?.defaultPrivilegesForScope?.("table")).toEqual(["SELECT_PRIV"]);
     expect(starrocksProvider?.defaultPrivilegesForScope?.("table")).toEqual(["SELECT"]);
+  });
+
+  it("parses StarRocks table grants with catalog and escaped identifiers", () => {
+    const grants = starrocksTableGrantsResult(
+      result(
+        ["UserIdentity", "Catalog", "Grants"],
+        [
+          ["'reader'@'%'", "default", "GRANT SELECT ON ALL TABLES IN DATABASE `sales.db` TO USER 'reader'@'%'"],
+          ["'reader'@'%'", "ice`berg", "GRANT INSERT, UPDATE ON TABLE `sales.db`.`daily``rollup` TO USER 'reader'@'%' WITH GRANT OPTION"],
+          ["'reader'@'%'", null, "GRANT analyst TO USER 'reader'@'%'"],
+        ],
+      ),
+    );
+
+    expect(grants).toEqual([
+      { catalog: "default_catalog", database: "sales.db", table: "*", privilege: "SELECT", grantOption: false },
+      { catalog: "ice`berg", database: "sales.db", table: "daily`rollup", privilege: "INSERT", grantOption: true },
+      { catalog: "ice`berg", database: "sales.db", table: "daily`rollup", privilege: "UPDATE", grantOption: true },
+    ]);
   });
 
   it("uses sys_catalog for Kingbase role metadata", () => {

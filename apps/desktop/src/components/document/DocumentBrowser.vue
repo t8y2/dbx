@@ -14,6 +14,7 @@ import DataGrid from "@/components/grid/DataGrid.vue";
 import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
+import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Switch } from "@/components/ui/switch";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -2833,6 +2834,7 @@ defineExpose({ focusSearch });
               </button>
             </div>
           </div>
+          <DataGridColumnWidthModeControl />
           <DataGridFontFamilyControl />
           <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
             <div class="min-w-0 flex items-center gap-2 font-medium">

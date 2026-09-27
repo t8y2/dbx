@@ -29,7 +29,8 @@ use crate::sql::SqlParsingOptions;
 use crate::sql_file_import::{SqlFileStreamDecoder, StreamingSqlFileSplitter};
 use crate::transfer::{
     escape_value_typed, execute_on_pool, generate_insert_typed_from_value_rows, get_columns_for_transfer,
-    normalize_integer_literal, normalize_thousands_numeric_literal, qualified_table, quote_identifier, SqlBatchLimits,
+    normalize_integer_literal, normalize_thousands_numeric_literal, qualified_table, quote_identifier,
+    supports_primary_key_upsert, SqlBatchLimits,
 };
 
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
@@ -245,6 +246,15 @@ pub struct TableImportPreviewRequest {
     pub preview_limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableImportConflictPolicy {
+    #[default]
+    Error,
+    Skip,
+    UpdateExisting,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableImportRequest {
@@ -271,8 +281,81 @@ pub struct TableImportRequest {
     pub prepared_source: Option<TableImportPreparedSource>,
     #[serde(default)]
     pub retain_source: bool,
+    /// Explicit conflict behavior for new callers. When omitted, the legacy
+    /// `skip_duplicate_rows` flag remains authoritative for compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_policy: Option<TableImportConflictPolicy>,
     #[serde(default)]
     pub skip_duplicate_rows: bool,
+}
+
+impl TableImportRequest {
+    fn effective_conflict_policy(&self) -> TableImportConflictPolicy {
+        self.conflict_policy.unwrap_or(if self.skip_duplicate_rows {
+            TableImportConflictPolicy::Skip
+        } else {
+            TableImportConflictPolicy::Error
+        })
+    }
+}
+
+fn validate_update_existing_target(
+    conflict_policy: TableImportConflictPolicy,
+    db_type: &DatabaseType,
+    create_table: bool,
+) -> Result<(), String> {
+    if conflict_policy != TableImportConflictPolicy::UpdateExisting {
+        return Ok(());
+    }
+    if create_table {
+        return Err("Update-existing import requires an existing target table".to_string());
+    }
+    if !supports_primary_key_upsert(db_type) {
+        return Err(format!("Update-existing import conflict policy is not supported for {}", db_type.as_str()));
+    }
+    Ok(())
+}
+
+fn update_existing_primary_key_columns(
+    conflict_policy: TableImportConflictPolicy,
+    mappings: &[TableImportColumnMapping],
+    target_columns: &[crate::db::ColumnInfo],
+) -> Result<Vec<String>, String> {
+    if conflict_policy != TableImportConflictPolicy::UpdateExisting {
+        return Ok(Vec::new());
+    }
+
+    let primary_key_columns = target_columns.iter().filter(|column| column.is_primary_key).collect::<Vec<_>>();
+    if primary_key_columns.is_empty() {
+        return Err("Update-existing import requires target primary-key metadata".to_string());
+    }
+
+    let mut mapped_primary_keys = Vec::with_capacity(primary_key_columns.len());
+    let mut missing_primary_keys = Vec::new();
+    for primary_key in primary_key_columns {
+        if let Some(mapping) =
+            mappings.iter().find(|mapping| mapping.target_column.eq_ignore_ascii_case(&primary_key.name))
+        {
+            mapped_primary_keys.push(mapping.target_column.clone());
+        } else {
+            missing_primary_keys.push(primary_key.name.clone());
+        }
+    }
+    if !missing_primary_keys.is_empty() {
+        return Err(format!(
+            "Update-existing import requires every primary-key column to be mapped; missing: {}",
+            missing_primary_keys.join(", ")
+        ));
+    }
+
+    let has_mapped_non_primary_key = mappings.iter().any(|mapping| {
+        !mapped_primary_keys.iter().any(|primary_key| primary_key.eq_ignore_ascii_case(&mapping.target_column))
+    });
+    if !has_mapped_non_primary_key {
+        return Err("Update-existing import requires at least one mapped non-primary-key column".to_string());
+    }
+
+    Ok(mapped_primary_keys)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2382,6 +2465,14 @@ pub fn xlsx_cell_label(cell: &Data) -> String {
     xlsx_cell_label_with_temporal_kind(cell, None)
 }
 
+fn xlsx_cell_is_empty(cell: &Data) -> bool {
+    matches!(cell, Data::Empty)
+}
+
+fn xlsx_cell_ref_is_empty(cell: &DataRef<'_>) -> bool {
+    matches!(cell, DataRef::Empty)
+}
+
 fn xlsx_cell_ref_value_with_temporal_kind(
     cell: &DataRef<'_>,
     temporal_kind: Option<XlsxTemporalKind>,
@@ -2727,6 +2818,20 @@ struct XlsxPreviewRawCell {
     inline_value: String,
     has_value: bool,
     has_inline_value: bool,
+}
+
+impl XlsxPreviewRawCell {
+    /// Whether the worksheet recorded a value for this cell.
+    ///
+    /// Excel and LibreOffice write style-only cells (`<c r="A3" s="4"/>`, no
+    /// `<v>`/`<is>` child) for rows a user inserted and left blank. Such a row
+    /// carries no data and must not be imported as an all-NULL row (#8604),
+    /// while any cell with a value element keeps the row - including explicit
+    /// empty strings (`<is><t></t></is>`), matching the `.xls` parser and dbx's
+    /// own empty-string options.
+    fn has_content(&self) -> bool {
+        self.has_inline_value || self.has_value
+    }
 }
 
 fn xlsx_dimension_bounds(reference: &str) -> Option<((usize, usize), (usize, usize))> {
@@ -3256,7 +3361,12 @@ fn parse_xlsx_preview_file_with_options(
     if last_preview_row < first_preview_row {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
+    // Rows made of style-only cells (blank rows inserted by a spreadsheet app) carry no
+    // data and are skipped here as well so the preview matches what the import writes (#8604).
+    let rows_with_content =
+        raw_cells.iter().filter(|(_, cell)| cell.has_content()).map(|((row, _), _)| *row).collect::<HashSet<_>>();
     let rows = (first_preview_row..=last_preview_row)
+        .filter(|absolute_row| rows_with_content.contains(absolute_row))
         .map(|absolute_row| {
             (0..columns.len())
                 .map(|index| {
@@ -3384,6 +3494,7 @@ fn parse_xlsx_file_with_options_and_text_columns(
             xlsx_cell_ref_value_with_temporal_kind,
             xlsx_cell_ref_text_value,
             xlsx_cell_ref_is_numeric,
+            xlsx_cell_ref_is_empty,
         );
     }
 
@@ -3412,6 +3523,7 @@ fn parse_xlsx_file_with_options_and_text_columns(
         xlsx_cell_value_with_temporal_kind,
         xlsx_cell_text_value,
         xlsx_cell_is_numeric,
+        xlsx_cell_is_empty,
     )
 }
 
@@ -3482,6 +3594,7 @@ struct XlsxStreamRowsState {
     rows_seen: usize,
     current_row: Option<usize>,
     current_values: Vec<serde_json::Value>,
+    current_row_has_content: bool,
     batch_size: usize,
 }
 
@@ -3507,6 +3620,7 @@ impl XlsxStreamRowsState {
             rows_seen: 0,
             current_row: None,
             current_values: Vec::new(),
+            current_row_has_content: false,
             batch_size,
         }
     }
@@ -3555,6 +3669,7 @@ impl XlsxStreamRowsState {
         absolute_row: usize,
         absolute_column: usize,
         value: serde_json::Value,
+        has_content: bool,
         progress: u64,
     ) -> Result<(), String> {
         self.initialize_range(absolute_row, absolute_column);
@@ -3562,6 +3677,7 @@ impl XlsxStreamRowsState {
             self.flush_current_row(progress)?;
             self.current_row = Some(absolute_row);
         }
+        self.current_row_has_content |= has_content;
         let column_offset = absolute_column.checked_sub(self.start_column).ok_or_else(|| {
             format!("Excel row {absolute_row} contains a cell before the detected import range start column")
         })?;
@@ -3580,13 +3696,15 @@ impl XlsxStreamRowsState {
             return Ok(());
         };
         let values = std::mem::take(&mut self.current_values);
-        self.flush_row(absolute_row, values, progress)
+        let has_content = std::mem::take(&mut self.current_row_has_content);
+        self.flush_row(absolute_row, values, has_content, progress)
     }
 
     fn flush_row(
         &mut self,
         absolute_row: usize,
         mut values: Vec<serde_json::Value>,
+        has_content: bool,
         progress: u64,
     ) -> Result<(), String> {
         if self.row_range.title_row == Some(absolute_row) {
@@ -3605,6 +3723,12 @@ impl XlsxStreamRowsState {
         if absolute_row < self.row_range.data_start_row
             || self.row_range.last_data_row.is_some_and(|last| absolute_row > last)
         {
+            return Ok(());
+        }
+        // A row whose cells are all blank (Excel keeps style-only cells behind
+        // when a blank row is inserted) is not a data row: importing it would
+        // insert an all-NULL row and fail on NOT NULL columns (#8604).
+        if !has_content {
             return Ok(());
         }
         if self.columns.is_empty() {
@@ -3797,7 +3921,7 @@ fn stream_xlsx_rows_to_channel_with_control(
                     .unwrap_or_else(|| (current_row.max(1), current_column.saturating_add(1).max(1)));
                 current_row = position.0;
                 current_column = position.1;
-                rows.push_cell(position.0, position.1, serde_json::Value::Null, progress)?;
+                rows.push_cell(position.0, position.1, serde_json::Value::Null, false, progress)?;
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"c") => {
                 let position = xml_attr_value(&reader, &element, b"r")
@@ -3852,7 +3976,7 @@ fn stream_xlsx_rows_to_channel_with_control(
                         format_as_text,
                         empty_string_as_null,
                     )?;
-                    rows.push_cell(row, column, value, progress)?;
+                    rows.push_cell(row, column, value, current_cell.has_content(), progress)?;
                     current_cell = XlsxPreviewRawCell::default();
                 }
                 inline_phonetic_depth = 0;
@@ -3954,7 +4078,8 @@ async fn validate_xlsx_worksheet_for_import(
     columns.ok_or_else(|| "Excel stream ended before providing a header".to_string())
 }
 
-fn parse_xlsx_range<T, Label, Value, TextValue, IsNumeric>(
+#[allow(clippy::too_many_arguments)]
+fn parse_xlsx_range<T, Label, Value, TextValue, IsNumeric, IsEmpty>(
     range: &Range<T>,
     options: &TableImportParseOptions,
     preview_limit: usize,
@@ -3965,6 +4090,7 @@ fn parse_xlsx_range<T, Label, Value, TextValue, IsNumeric>(
     cell_value: Value,
     cell_text_value: TextValue,
     is_numeric: IsNumeric,
+    is_empty: IsEmpty,
 ) -> Result<ParsedImportFile, String>
 where
     T: CellType,
@@ -3972,6 +4098,7 @@ where
     Value: Fn(&T, Option<XlsxTemporalKind>, bool) -> serde_json::Value,
     TextValue: Fn(&T, Option<&XlsxCellStyle>) -> Option<String>,
     IsNumeric: Fn(&T) -> bool,
+    IsEmpty: Fn(&T) -> bool,
 {
     let (range_start_row, range_start_column) =
         range.start().map(|(row, column)| (row as usize, column as usize)).unwrap_or_default();
@@ -3998,6 +4125,11 @@ where
         }
         if row_range.last_data_row.is_some_and(|last| row_number > last) {
             break;
+        }
+        // Style-only cells (blank rows inserted by a spreadsheet app) are not data, so the
+        // row must not be materialized as an all-NULL row (#8604).
+        if source_row.iter().all(&is_empty) {
+            continue;
         }
         if columns.is_empty() {
             columns = (0..source_row.len()).map(|index| format!("column_{}", index + 1)).collect();
@@ -4298,7 +4430,8 @@ fn build_import_insert_batches_with_plan(
     schema: &str,
     db_type: &DatabaseType,
     kingbase_oracle_mode: bool,
-    skip_duplicate_rows: bool,
+    conflict_policy: TableImportConflictPolicy,
+    primary_key_columns: &[String],
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
@@ -4306,16 +4439,33 @@ fn build_import_insert_batches_with_plan(
         return Ok(Vec::new());
     }
     let value_rows = import_value_rows_sql(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
-    let batches = crate::data::transfer::generate_insert_typed_sql_batches_from_value_rows_with_options(
-        &plan.target_columns,
-        &value_rows,
-        table,
-        schema,
-        db_type,
-        None,
-        SqlBatchLimits::for_database(db_type, rows.len()).with_hard_sql_bytes(hard_sql_bytes),
-        skip_duplicate_rows,
-    )?;
+    let limits = SqlBatchLimits::for_database(db_type, rows.len()).with_hard_sql_bytes(hard_sql_bytes);
+    let batches = match conflict_policy {
+        TableImportConflictPolicy::Error | TableImportConflictPolicy::Skip => {
+            crate::data::transfer::generate_insert_typed_sql_batches_from_value_rows_with_options(
+                &plan.target_columns,
+                &value_rows,
+                table,
+                schema,
+                db_type,
+                None,
+                limits,
+                conflict_policy == TableImportConflictPolicy::Skip,
+            )?
+        }
+        TableImportConflictPolicy::UpdateExisting => {
+            crate::data::transfer::generate_primary_key_upsert_sql_batches_from_value_rows(
+                &plan.target_columns,
+                &value_rows,
+                table,
+                schema,
+                db_type,
+                None,
+                limits,
+                primary_key_columns,
+            )?
+        }
+    };
     Ok(batches.into_iter().map(|(sql, row_count)| ImportSqlBatch { sql, row_count }).collect())
 }
 
@@ -4380,7 +4530,8 @@ fn build_import_execution_batches(
     schema: &str,
     db_type: &DatabaseType,
     kingbase_oracle_mode: bool,
-    skip_duplicate_rows: bool,
+    conflict_policy: TableImportConflictPolicy,
+    primary_key_columns: &[String],
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
@@ -4392,12 +4543,13 @@ fn build_import_execution_batches(
             schema,
             db_type,
             kingbase_oracle_mode,
-            skip_duplicate_rows,
+            conflict_policy,
+            primary_key_columns,
             date_time_format,
             hard_sql_bytes,
         );
     }
-    if *db_type == DatabaseType::CloudflareD1 {
+    if *db_type == DatabaseType::CloudflareD1 && conflict_policy != TableImportConflictPolicy::UpdateExisting {
         return crate::db::cloudflare_d1::build_import_insert_batches(
             rows,
             columns,
@@ -4416,7 +4568,8 @@ fn build_import_execution_batches(
         schema,
         db_type,
         kingbase_oracle_mode,
-        skip_duplicate_rows,
+        conflict_policy,
+        primary_key_columns,
         date_time_format,
         hard_sql_bytes,
     )
@@ -4615,7 +4768,8 @@ fn build_import_insert_batches_with_format(
             schema,
             db_type,
             kingbase_oracle_mode,
-            false,
+            TableImportConflictPolicy::Error,
+            &[],
             date_time_format,
             None,
         )?);
@@ -5454,6 +5608,18 @@ fn import_batch_execution_policy(
     }
 }
 
+fn completed_import_rows(
+    conflict_policy: TableImportConflictPolicy,
+    submitted_rows: usize,
+    affected_rows: u64,
+) -> usize {
+    if conflict_policy == TableImportConflictPolicy::Skip {
+        affected_rows as usize
+    } else {
+        submitted_rows
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_import_transaction(
     state: &AppState,
@@ -5590,14 +5756,15 @@ async fn execute_import_rows_batch(
     postgres_copy_accumulator: &mut Option<PostgresCopyAccumulator>,
     sqlite_append_transaction: &mut Option<SqliteAppendTransaction>,
     kingbase_oracle_mode: bool,
-    skip_duplicate_rows: bool,
+    conflict_policy: TableImportConflictPolicy,
+    primary_key_columns: &[String],
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
     db_write_ms: &mut u128,
     statement_count: &mut usize,
 ) -> Result<usize, ImportRowsBatchError> {
     let execution_policy = import_batch_execution_policy(mode, pending_truncate, db_type);
-    if !skip_duplicate_rows {
+    if conflict_policy == TableImportConflictPolicy::Error {
         if let Some((import_plan, bulk_plan)) = sqlserver_bulk_plans_for_rows(db_type, plan, sqlserver_bulk_plan, rows)
         {
             return execute_sqlserver_bulk_rows_batch(
@@ -5618,7 +5785,7 @@ async fn execute_import_rows_batch(
     }
     // COPY is used only for plain scalar PostgreSQL rows and ordinary tables. Any unsupported
     // value or table feature falls through to the portable INSERT generator below.
-    if !skip_duplicate_rows
+    if conflict_policy == TableImportConflictPolicy::Error
         && execution_policy.allow_postgres_copy
         && *db_type == DatabaseType::Postgres
         && !rows
@@ -5662,7 +5829,8 @@ async fn execute_import_rows_batch(
         schema,
         db_type,
         kingbase_oracle_mode,
-        skip_duplicate_rows,
+        conflict_policy,
+        primary_key_columns,
         date_time_format,
         hard_sql_bytes,
     )
@@ -5725,22 +5893,19 @@ async fn execute_import_rows_batch(
         )
         .await
         .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
-        return Ok(if skip_duplicate_rows {
-            rows_imported.saturating_add(result.affected_rows as usize)
-        } else {
-            rows_imported.saturating_add(rows.len())
-        });
+        return Ok(rows_imported.saturating_add(completed_import_rows(
+            conflict_policy,
+            rows.len(),
+            result.affected_rows,
+        )));
     }
     for batch in batches {
         ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
         let result = execute_import_statement(state, pool_key, &batch.sql, db_write_ms, statement_count)
             .await
             .map_err(|error| ImportRowsBatchError::with_rows_imported(rows_imported, error))?;
-        rows_imported = if skip_duplicate_rows {
-            rows_imported.saturating_add(result.affected_rows as usize)
-        } else {
-            rows_imported.saturating_add(batch.row_count)
-        };
+        rows_imported =
+            rows_imported.saturating_add(completed_import_rows(conflict_policy, batch.row_count, result.affected_rows));
     }
     Ok(rows_imported)
 }
@@ -6545,6 +6710,10 @@ where
     let mut statement_count = 0usize;
     let batch_size = if request.batch_size == 0 { DEFAULT_BATCH_SIZE } else { request.batch_size };
     let kingbase_oracle_mode = kingbase_oracle_compatibility_mode(state, pool_key, db_type).await;
+    let conflict_policy = request.effective_conflict_policy();
+    if let Err(error) = validate_update_existing_target(conflict_policy, db_type, request.create_table) {
+        return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error));
+    }
     let source_format = match effective_source_format(&request.file_path, request.source_format) {
         Ok(format) => format,
         Err(error) => {
@@ -6701,6 +6870,43 @@ where
         create_table_sample = Some(parsed);
     }
 
+    let target_columns = match get_columns_for_transfer(
+        state,
+        pool_key,
+        &request.connection_id,
+        &request.database,
+        &request.schema,
+        &request.table,
+        None,
+    )
+    .await
+    {
+        Ok(columns) => columns,
+        Err(error) if conflict_policy == TableImportConflictPolicy::UpdateExisting => {
+            return Err(emit_import_error(
+                &mut progress_callback,
+                request,
+                0,
+                0,
+                started_at,
+                format!("Update-existing import could not load target primary-key metadata: {error}"),
+            ));
+        }
+        Err(_) => Vec::new(),
+    };
+    let primary_key_columns =
+        match update_existing_primary_key_columns(conflict_policy, &request.mappings, &target_columns) {
+            Ok(columns) => columns,
+            Err(error) => {
+                return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error));
+            }
+        };
+    let mut target_column_types =
+        target_columns.iter().map(|column| (column.name.clone(), column.data_type.clone())).collect::<Vec<_>>();
+    if target_column_types.is_empty() {
+        target_column_types = created_column_types.clone().unwrap_or_default();
+    }
+
     if source_format.is_delimited() {
         let parsed = if let Some(parsed) = create_table_sample.clone().or_else(|| prepared_source.clone()) {
             parsed
@@ -6724,23 +6930,6 @@ where
 
         let total_bytes = tokio::fs::metadata(&request.file_path).await.map(|metadata| metadata.len()).unwrap_or(0);
 
-        let mut target_column_types = get_columns_for_transfer(
-            state,
-            pool_key,
-            &request.connection_id,
-            &request.database,
-            &request.schema,
-            &request.table,
-            None,
-        )
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|column| (column.name, column.data_type))
-        .collect::<Vec<_>>();
-        if target_column_types.is_empty() {
-            target_column_types = created_column_types.clone().unwrap_or_default();
-        }
         let (resolved_encoding, _) =
             validated_text_encoding.ok_or_else(|| "Delimited import encoding was not validated".to_string())?;
         let mut streaming_options = import_parse_options.clone();
@@ -6900,7 +7089,8 @@ where
                         &mut postgres_copy_accumulator,
                         &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
-                        request.skip_duplicate_rows,
+                        conflict_policy,
+                        &primary_key_columns,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
                         &mut db_write_ms,
@@ -7092,23 +7282,6 @@ where
         let effective_batch_size = effective_import_batch_size(db_type, batch_size);
         let expected_columns =
             create_table_sample.as_ref().or(prepared_source.as_ref()).map(|source| source.columns.clone());
-        let mut target_column_types = get_columns_for_transfer(
-            state,
-            pool_key,
-            &request.connection_id,
-            &request.database,
-            &request.schema,
-            &request.table,
-            None,
-        )
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|column| (column.name, column.data_type))
-        .collect::<Vec<_>>();
-        if target_column_types.is_empty() {
-            target_column_types = created_column_types.clone().unwrap_or_default();
-        }
         let text_source_columns = textual_source_columns_for_import(&request.mappings, &target_column_types);
         // No truncate, INSERT, or COPY may run until the selected worksheet parses to EOF.
         let mut last_xlsx_read_bytes = 0u64;
@@ -7403,7 +7576,8 @@ where
                         &mut postgres_copy_accumulator,
                         &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
-                        request.skip_duplicate_rows,
+                        conflict_policy,
+                        &primary_key_columns,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
                         &mut db_write_ms,
@@ -7587,23 +7761,6 @@ where
         started_at,
         None,
     ));
-    let mut target_column_types = get_columns_for_transfer(
-        state,
-        pool_key,
-        &request.connection_id,
-        &request.database,
-        &request.schema,
-        &request.table,
-        None,
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|column| (column.name, column.data_type))
-    .collect::<Vec<_>>();
-    if target_column_types.is_empty() {
-        target_column_types = created_column_types.clone().unwrap_or_default();
-    }
     let text_source_columns = textual_source_columns_for_import(&request.mappings, &target_column_types);
     let effective_batch_size = effective_import_batch_size(db_type, batch_size);
     let mut row_source = match ImportRowSource::open(
@@ -7752,7 +7909,8 @@ where
             &mut postgres_copy_accumulator,
             &mut sqlite_append_transaction,
             kingbase_oracle_mode,
-            request.skip_duplicate_rows,
+            conflict_policy,
+            &primary_key_columns,
             request.date_time_format.as_deref(),
             import_sql_hard_limit,
             &mut db_write_ms,
@@ -7916,6 +8074,82 @@ mod tests {
     }
 
     #[test]
+    fn table_import_conflict_policy_preserves_legacy_skip_requests() {
+        let request_json = serde_json::json!({
+            "importId": "import-1",
+            "connectionId": "connection-1",
+            "database": "db",
+            "schema": "public",
+            "table": "users",
+            "filePath": "users.csv",
+            "mappings": [],
+            "mode": "append",
+            "batchSize": 500
+        });
+
+        let default_request: TableImportRequest = serde_json::from_value(request_json.clone()).unwrap();
+        assert_eq!(default_request.effective_conflict_policy(), TableImportConflictPolicy::Error);
+
+        let mut legacy_skip_json = request_json.clone();
+        legacy_skip_json["skipDuplicateRows"] = serde_json::json!(true);
+        let legacy_skip: TableImportRequest = serde_json::from_value(legacy_skip_json).unwrap();
+        assert_eq!(legacy_skip.effective_conflict_policy(), TableImportConflictPolicy::Skip);
+
+        let mut explicit_json = request_json;
+        explicit_json["skipDuplicateRows"] = serde_json::json!(true);
+        explicit_json["conflictPolicy"] = serde_json::json!("updateExisting");
+        let explicit: TableImportRequest = serde_json::from_value(explicit_json).unwrap();
+        assert_eq!(explicit.effective_conflict_policy(), TableImportConflictPolicy::UpdateExisting);
+    }
+
+    #[test]
+    fn update_existing_progress_counts_source_rows_not_database_affected_rows() {
+        assert_eq!(completed_import_rows(TableImportConflictPolicy::Error, 3, 3), 3);
+        assert_eq!(completed_import_rows(TableImportConflictPolicy::Skip, 3, 1), 1);
+        // MySQL reports two affected rows for a changed row handled by ON DUPLICATE KEY UPDATE.
+        assert_eq!(completed_import_rows(TableImportConflictPolicy::UpdateExisting, 3, 6), 3);
+    }
+
+    #[test]
+    fn update_existing_requires_supported_dialect_and_complete_primary_key_mapping() {
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "tenant".to_string(),
+                target_column: "tenant_id".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "name".to_string(),
+                target_data_type: None,
+            },
+        ];
+        let target_columns = vec![
+            crate::db::ColumnInfo { name: "tenant_id".to_string(), is_primary_key: true, ..Default::default() },
+            crate::db::ColumnInfo { name: "id".to_string(), is_primary_key: true, ..Default::default() },
+            crate::db::ColumnInfo { name: "name".to_string(), ..Default::default() },
+        ];
+
+        let missing_key =
+            update_existing_primary_key_columns(TableImportConflictPolicy::UpdateExisting, &mappings, &target_columns)
+                .unwrap_err();
+        assert!(missing_key.contains("id"));
+
+        let missing_metadata = update_existing_primary_key_columns(
+            TableImportConflictPolicy::UpdateExisting,
+            &mappings,
+            &[crate::db::ColumnInfo { name: "name".to_string(), ..Default::default() }],
+        )
+        .unwrap_err();
+        assert!(missing_metadata.contains("primary-key metadata"));
+
+        let unsupported =
+            validate_update_existing_target(TableImportConflictPolicy::UpdateExisting, &DatabaseType::Oracle, false)
+                .unwrap_err();
+        assert!(unsupported.contains("not supported for oracle"));
+    }
+
+    #[test]
     fn compiled_import_plan_reuses_source_indexes_and_target_types() {
         let columns = vec!["name".to_string(), "id".to_string()];
         let mappings = vec![
@@ -7998,6 +8232,7 @@ mod tests {
                 effective_encoding: Some(TableImportTextEncoding::Utf8),
             }),
             skip_duplicate_rows: false,
+            conflict_policy: None,
             retain_source: false,
         };
 
@@ -8500,6 +8735,73 @@ mod tests {
     #[test]
     fn xlsx_defaults_explicit_empty_strings_to_null() {
         assert_xlsx_empty_string_option(TableImportParseOptions::default(), vec![serde_json::Value::Null; 5]);
+    }
+
+    /// Excel/LibreOffice keep style-only cells behind when a user inserts a row and leaves it
+    /// blank. Such a row has no data and must not be imported as an all-NULL row - it used to
+    /// fail on NOT NULL target columns (#8604) - and the preview must agree with the import.
+    #[test]
+    fn xlsx_style_only_blank_rows_are_skipped_by_preview_parse_and_streaming() {
+        let blank_rows = [
+            r#"<c r="A3" s="0"/><c r="B3" s="0"/>"#,
+            r#"<c r="A3" s="0"></c><c r="B3" s="0"></c>"#,
+            r#"<c r="A3"/><c r="B3"/>"#,
+        ];
+        for blank_row in blank_rows {
+            let path = std::env::temp_dir().join(format!("dbx-table-import-blank-rows-{}.xlsx", uuid::Uuid::new_v4()));
+            let sheet_xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:B4"/>
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>id</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>other</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2"><v>1</v></c>
+      <c r="B2" t="inlineStr"><is><t>a</t></is></c>
+    </row>
+    <row r="3">{blank_row}</row>
+    <row r="4">
+      <c r="A4"><v>2</v></c>
+      <c r="B4" t="inlineStr"><is><t>b</t></is></c>
+    </row>
+  </sheetData>
+</worksheet>"#
+            );
+            std::fs::write(&path, build_preview_test_xlsx(&sheet_xml, None)).unwrap();
+            let options = TableImportParseOptions::default();
+            let expected_rows = vec![
+                vec![serde_json::json!(1), serde_json::json!("a")],
+                vec![serde_json::json!(2), serde_json::json!("b")],
+            ];
+
+            let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+            let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+            stream_xlsx_rows_to_channel(&path.to_string_lossy(), &options, 500, None, HashSet::new(), false, sender)
+                .unwrap();
+            let mut streamed_columns = Vec::new();
+            let mut streamed_rows = Vec::new();
+            while let Some(message) = receiver.blocking_recv() {
+                match message.unwrap() {
+                    XlsxStreamMessage::Header(columns) => streamed_columns = columns,
+                    XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                    _ => {}
+                }
+            }
+
+            assert_eq!(parsed.columns, vec!["id", "other"], "{blank_row}");
+            assert_eq!(parsed.rows, expected_rows, "{blank_row}");
+            assert_eq!(parsed.total_rows, 2, "{blank_row}");
+            assert_eq!(preview.columns, parsed.columns, "{blank_row}");
+            assert_eq!(preview.rows, parsed.rows, "{blank_row}");
+            assert_eq!(preview.total_rows, 2, "{blank_row}");
+            assert_eq!(streamed_columns, parsed.columns, "{blank_row}");
+            assert_eq!(streamed_rows, parsed.rows, "{blank_row}");
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]
@@ -9645,6 +9947,7 @@ mod tests {
             date_time_format: None,
             prepared_source: None,
             skip_duplicate_rows: false,
+            conflict_policy: None,
             retain_source: false,
         };
         let started_at = Instant::now();
@@ -10056,6 +10359,7 @@ mod tests {
             date_time_format: None,
             prepared_source: None,
             skip_duplicate_rows: false,
+            conflict_policy: None,
             retain_source: false,
         };
 
@@ -10146,6 +10450,7 @@ mod tests {
             date_time_format: None,
             prepared_source: None,
             skip_duplicate_rows: false,
+            conflict_policy: None,
             retain_source: false,
         };
 
@@ -10227,6 +10532,7 @@ mod tests {
             date_time_format: None,
             prepared_source: None,
             skip_duplicate_rows: false,
+            conflict_policy: None,
             retain_source: false,
         };
 
@@ -11311,6 +11617,99 @@ mod tests {
     }
 
     #[test]
+    fn import_conflict_policy_keeps_default_and_skip_sql_unchanged() {
+        let plan = CompiledImportPlan {
+            mapped_source_indexes: vec![0, 1],
+            target_columns: vec!["id".to_string(), "name".to_string()],
+            column_types: vec![Some("integer".to_string()), Some("text".to_string())],
+        };
+        let rows = vec![vec![serde_json::json!(1), serde_json::json!("Ada")]];
+
+        let default_batches = build_import_insert_batches_with_plan(
+            &rows,
+            &plan,
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            false,
+            TableImportConflictPolicy::Error,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(default_batches[0].sql, "INSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES\n(1, 'Ada')");
+
+        let skip_batches = build_import_insert_batches_with_plan(
+            &rows,
+            &plan,
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            false,
+            TableImportConflictPolicy::Skip,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            skip_batches[0].sql,
+            "INSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES\n(1, 'Ada')\nON CONFLICT DO NOTHING"
+        );
+    }
+
+    #[test]
+    fn update_existing_sql_uses_composite_primary_key_and_only_updates_non_keys() {
+        let plan = CompiledImportPlan {
+            mapped_source_indexes: vec![0, 1, 2, 3],
+            target_columns: vec!["tenant_id".to_string(), "id".to_string(), "name".to_string(), "status".to_string()],
+            column_types: vec![None, None, None, None],
+        };
+        let rows = vec![vec![
+            serde_json::json!(7),
+            serde_json::json!(42),
+            serde_json::json!("Ada"),
+            serde_json::json!("active"),
+        ]];
+
+        let postgres = build_import_insert_batches_with_plan(
+            &rows,
+            &plan,
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            false,
+            TableImportConflictPolicy::UpdateExisting,
+            &["tenant_id".to_string(), "id".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(postgres[0].sql.contains("ON CONFLICT (\"tenant_id\", \"id\") DO UPDATE SET"));
+        assert!(postgres[0].sql.contains("\"name\" = EXCLUDED.\"name\""));
+        assert!(postgres[0].sql.contains("\"status\" = EXCLUDED.\"status\""));
+        assert!(!postgres[0].sql.contains("\"id\" = EXCLUDED.\"id\""));
+        assert_eq!(postgres[0].row_count, 1);
+
+        let mysql = build_import_insert_batches_with_plan(
+            &rows,
+            &plan,
+            "users",
+            "",
+            &DatabaseType::Mysql,
+            false,
+            TableImportConflictPolicy::UpdateExisting,
+            &["tenant_id".to_string(), "id".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(mysql[0].sql.contains("ON DUPLICATE KEY UPDATE `name` = VALUES(`name`), `status` = VALUES(`status`)"));
+        assert!(!mysql[0].sql.contains("`id` = VALUES(`id`)"));
+    }
+
+    #[test]
     fn iris_import_uses_single_row_values_statements() {
         let mappings = vec![TableImportColumnMapping {
             source_column: "id".to_string(),
@@ -11582,7 +11981,8 @@ mod tests {
             "dbo",
             &DatabaseType::SqlServer,
             false,
-            false,
+            TableImportConflictPolicy::Error,
+            &[],
             None,
             None,
         )
@@ -11908,7 +12308,8 @@ mod tests {
             &mut sqlite_append_transaction,
             &mut postgres_copy_accumulator,
             false,
-            false,
+            TableImportConflictPolicy::Error,
+            &[],
             None,
             None,
             &mut db_write_ms,
@@ -12126,7 +12527,8 @@ mod tests {
                 &mut self.postgres_copy_accumulator,
                 &mut self.transaction,
                 false,
-                false,
+                TableImportConflictPolicy::Error,
+                &[],
                 None,
                 None,
                 &mut self.db_write_ms,
@@ -12252,6 +12654,7 @@ mod tests {
             date_time_format: None,
             prepared_source: None,
             skip_duplicate_rows: false,
+            conflict_policy: None,
             retain_source: false,
         };
 
@@ -12275,6 +12678,97 @@ mod tests {
                 vec![serde_json::json!(1), serde_json::json!("Ada")],
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
                 vec![serde_json::json!(3), serde_json::json!("Linus")]
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_update_existing_import_counts_updated_rows_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-update-existing";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(
+            &sqlite,
+            "CREATE TABLE items (tenant_id INTEGER, id INTEGER, name TEXT, PRIMARY KEY (tenant_id, id))",
+        )
+        .await
+        .unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "INSERT INTO items (tenant_id, id, name) VALUES (1, 1, 'Old')")
+            .await
+            .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite update-existing test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+        let data_path = dir.path().join("rows.csv");
+        std::fs::write(&data_path, b"tenant_id,id,name\n1,1,Updated\n1,2,Inserted\n").unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-update-existing".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: data_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Csv),
+            parse_options: TableImportParseOptions::default(),
+            mappings: ["tenant_id", "id", "name"]
+                .into_iter()
+                .map(|column| TableImportColumnMapping {
+                    source_column: column.to_string(),
+                    target_column: column.to_string(),
+                    target_data_type: None,
+                })
+                .collect(),
+            mode: TableImportMode::Append,
+            create_table: false,
+            batch_size: 2,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: false,
+            conflict_policy: Some(TableImportConflictPolicy::UpdateExisting),
+            skip_duplicate_rows: false,
+        };
+
+        let summary = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.rows_imported, 2);
+        let rows =
+            crate::db::sqlite::execute_query(&sqlite, "SELECT tenant_id, id, name FROM items ORDER BY tenant_id, id")
+                .await
+                .unwrap()
+                .rows;
+        assert_eq!(
+            rows,
+            vec![
+                vec![serde_json::json!(1), serde_json::json!(1), serde_json::json!("Updated")],
+                vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!("Inserted")],
             ]
         );
     }

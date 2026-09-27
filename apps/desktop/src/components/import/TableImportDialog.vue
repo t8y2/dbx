@@ -140,7 +140,7 @@ const titleRow = ref(1);
 const dataStartRow = ref(2);
 const lastDataRow = ref(0);
 const trimValues = ref(false);
-const skipDuplicateRows = ref(false);
+const conflictPolicy = ref<api.TableImportConflictPolicy>("error");
 const emptyStringAsNull = ref(defaultTableImportEmptyStringAsNull(sourceFormat.value));
 const selectedSheet = ref("");
 const jsonShape = ref<api.TableImportJsonShape>("auto");
@@ -176,10 +176,10 @@ const wizardSteps: Array<{ value: TableImportWizardStep; labelKey: string }> = [
 
 const selectedConnection = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined));
 const structureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(selectedConnection.value));
-// Mirrors the dialect list in skip-generator dispatch (transfer.rs): only these
-// engines turn the skip-duplicates option into conflict-handling INSERTs.
-const SKIP_DUPLICATE_ROWS_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "kingbase", "opengauss", "sqlite", "cloudflare-d1", "duckdb", "mysql", "doris", "starrocks"]);
-const supportsSkipDuplicateRows = computed(() => structureDatabaseType.value !== undefined && SKIP_DUPLICATE_ROWS_DATABASE_TYPES.has(structureDatabaseType.value));
+// Mirrors the conflict SQL dispatch in transfer.rs. Other dialects must keep
+// ordinary INSERT/error behavior instead of approximating an upsert.
+const IMPORT_CONFLICT_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "kingbase", "opengauss", "sqlite", "cloudflare-d1", "duckdb", "mysql", "doris", "starrocks"]);
+const supportsImportConflictPolicy = computed(() => structureDatabaseType.value !== undefined && IMPORT_CONFLICT_DATABASE_TYPES.has(structureDatabaseType.value));
 const targetSchema = computed(() => metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema));
 const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(structureDatabaseType.value), Object.values(columnDataTypes.value)));
 const hasExistingTarget = computed(() => !!props.prefillTable || loadingExistingTables.value || existingTableNames.value.length > 0);
@@ -202,6 +202,20 @@ const mappedColumns = computed<api.TableImportColumnMapping[]>(() => {
 });
 const mappedCount = computed(() => mappedColumns.value.length);
 const mappingValidation = computed(() => validateImportMappings(mappedColumns.value));
+const primaryKeyColumns = computed(() => targetColumns.value.filter((column) => column.is_primary_key));
+const updateExistingUnavailableReason = computed(() => {
+  if (targetMode.value !== "existing") return t("tableImport.updateExistingRequiresExistingTable");
+  if (!supportsImportConflictPolicy.value) return t("tableImport.updateExistingUnsupportedDialect");
+  if (!existingTargetMetadataReady.value || primaryKeyColumns.value.length === 0) return t("tableImport.updateExistingRequiresPrimaryKey");
+  const mappedTargets = mappedColumns.value.map((mapping) => mapping.targetColumn.toLowerCase());
+  const missingKeys = primaryKeyColumns.value.filter((column) => !mappedTargets.includes(column.name.toLowerCase()));
+  if (missingKeys.length > 0) return t("tableImport.updateExistingRequiresMappedPrimaryKey", { columns: missingKeys.map((column) => column.name).join(", ") });
+  const primaryKeyNames = primaryKeyColumns.value.map((column) => column.name.toLowerCase());
+  if (!mappedTargets.some((column) => !primaryKeyNames.includes(column))) return t("tableImport.updateExistingRequiresMappedValue");
+  return "";
+});
+const canUpdateExistingRows = computed(() => updateExistingUnavailableReason.value === "");
+const conflictPolicyError = computed(() => (conflictPolicy.value === "updateExisting" ? updateExistingUnavailableReason.value : ""));
 const requiredUnmappedColumns = computed(() =>
   requiredImportTargetColumns(
     targetColumns.value,
@@ -215,7 +229,7 @@ const batchTargetNamesValid = computed(() => {
   return tableNames.length > 0 && tableNames.every(Boolean) && new Set(tableNames).size === tableNames.length;
 });
 const canImport = computed(() => {
-  if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value) return false;
+  if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value || conflictPolicyError.value) return false;
   if (!isBatchImport.value) return !!preview.value && !!targetTableName.value && mappingValidation.value.valid;
   if (!batchTargetNamesValid.value) return false;
   return selectedBatchTasks.value.every((task) => {
@@ -231,7 +245,7 @@ const canGoNext = computed(() => {
     if (wizardStep.value === "mapping") return canImport.value;
   }
   if (wizardStep.value === "options") return !!preview.value && !!targetTableName.value && existingTargetMetadataReady.value;
-  if (wizardStep.value === "mapping") return existingTargetMetadataReady.value && mappingValidation.value.valid;
+  if (wizardStep.value === "mapping") return existingTargetMetadataReady.value && mappingValidation.value.valid && !conflictPolicyError.value;
   return false;
 });
 const rawProgressPercent = computed(() => tableImportProgressPercent(progress.value));
@@ -384,7 +398,7 @@ function resetState() {
   dataStartRow.value = 2;
   lastDataRow.value = 0;
   trimValues.value = false;
-  skipDuplicateRows.value = false;
+  conflictPolicy.value = "error";
   emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
   selectedSheet.value = "";
   jsonShape.value = "auto";
@@ -851,7 +865,7 @@ function canOpenStep(step: TableImportWizardStep) {
     if (step === "review") return canImport.value;
   }
   if (step === "mapping") return !!preview.value && existingTargetMetadataReady.value;
-  if (step === "review") return !!preview.value && existingTargetMetadataReady.value && mappingValidation.value.valid;
+  if (step === "review") return !!preview.value && existingTargetMetadataReady.value && mappingValidation.value.valid && !conflictPolicyError.value;
   return false;
 }
 
@@ -941,7 +955,8 @@ async function startImport() {
         mode: targetMode.value === "create" ? "append" : importMode.value,
         createTable: targetMode.value === "create",
         batchSize: Math.max(1, Number(batchSize.value) || 500),
-        skipDuplicateRows: supportsSkipDuplicateRows.value && skipDuplicateRows.value,
+        conflictPolicy: conflictPolicy.value,
+        skipDuplicateRows: conflictPolicy.value === "skip",
         dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
         preparedSource: preparedImportSource(currentPreview),
       },
@@ -1031,7 +1046,8 @@ async function startBatchImport() {
           mode: "append",
           createTable: true,
           batchSize: Math.max(1, Number(batchSize.value) || 500),
-          skipDuplicateRows: supportsSkipDuplicateRows.value && skipDuplicateRows.value,
+          conflictPolicy: conflictPolicy.value,
+          skipDuplicateRows: conflictPolicy.value === "skip",
           dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
           preparedSource: preparedImportSource(task.preview),
           retainSource: true,
@@ -1198,13 +1214,17 @@ watch(targetMode, (mode) => {
     loadedTargetTableName.value = "";
     loadingTarget.value = false;
     importMode.value = "append";
+    conflictPolicy.value = "error";
     applyAutoMapping();
     applySuggestedColumnDataTypes();
     void loadDataTypeOptions();
   }
 });
 watch(selectedExistingTable, () => {
-  if (targetMode.value === "existing") void loadTargetColumns();
+  if (targetMode.value === "existing") {
+    conflictPolicy.value = "error";
+    void loadTargetColumns();
+  }
 });
 
 watch(rawProgressPercent, (percent) => {
@@ -1422,10 +1442,6 @@ watch(rawProgressPercent, (percent) => {
               <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
               {{ t("tableImport.emptyStringAsNull") }}
             </label>
-            <label v-if="supportsSkipDuplicateRows" class="flex items-center gap-2 text-xs">
-              <input v-model="skipDuplicateRows" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
-              {{ t("tableImport.skipDuplicateRows") }}
-            </label>
           </div>
 
           <div v-else-if="sourceFormat === 'sql'" class="grid grid-cols-5 gap-3 rounded-md border p-3">
@@ -1488,6 +1504,20 @@ watch(rawProgressPercent, (percent) => {
               <Label class="text-xs">{{ t("tableImport.lastDataRow") }}</Label>
               <Input v-model.number="lastDataRow" type="number" min="0" class="h-8 text-xs" />
             </div>
+          </div>
+
+          <div v-if="supportsImportConflictPolicy" class="space-y-1.5 rounded-md border p-3">
+            <Label for="table-import-conflict-policy" class="text-xs">{{ t("tableImport.conflictPolicy") }}</Label>
+            <select id="table-import-conflict-policy" v-model="conflictPolicy" data-testid="table-import-conflict-policy" class="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs">
+              <option value="error">{{ t("tableImport.conflictError") }}</option>
+              <option value="skip">{{ t("tableImport.skipDuplicateRows") }}</option>
+              <option v-if="targetMode === 'existing'" value="updateExisting" :disabled="!canUpdateExistingRows">
+                {{ t("tableImport.updateExistingRows") }}
+              </option>
+            </select>
+            <p v-if="targetMode === 'existing' && !canUpdateExistingRows" class="text-[11px] text-muted-foreground">
+              {{ updateExistingUnavailableReason }}
+            </p>
           </div>
 
           <div class="flex items-center gap-2">
@@ -1596,6 +1626,9 @@ watch(rawProgressPercent, (percent) => {
 
           <div v-if="mappingValidation.errors.length" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {{ mappingValidation.errors.join("; ") }}
+          </div>
+          <div v-else-if="conflictPolicyError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {{ conflictPolicyError }}
           </div>
           <div v-else-if="requiredUnmappedColumns.length" class="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
             <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />

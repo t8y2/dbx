@@ -322,6 +322,24 @@ test("a frontend-only workbench opens without a connection or sidecar", async (t
   assert.match(rpc.error.message, /no backend/);
   assert.equal((await request("frames/close", { id: f.id })).status, 200);
 });
+test("host AI methods enforce permission and keep recommendation state per frame", async (t) => {
+  const denied = await fixture(t, true);
+  const deniedFrame = (await denied.request("workbenches/open", { contributionId: "example.main" })).value.frame;
+  const deniedDocument = (await denied.request("frame-document", { frameId: deniedFrame.id })).value;
+  const deniedCall = (method, params) => denied.request("bridge", { frameId: deniedFrame.id, channel: deniedDocument.channel, method, params });
+  assert.equal((await deniedCall("host.ai.setRecommendations", { context: {}, items: [] })).status, 400);
+
+  const allowed = await fixture(t, true, { pluginManifest: { ...manifest, permissions: ["host.ai"] } });
+  const frame = (await allowed.request("workbenches/open", { contributionId: "example.main" })).value.frame;
+  const document = (await allowed.request("frame-document", { frameId: frame.id })).value;
+  const call = (method, params) => allowed.request("bridge", { frameId: frame.id, channel: document.channel, method, params });
+  assert.equal((await call("host.ai.openConversation", { title: "Inspect", prompt: "Check", context: {}, send: true })).value, null);
+  assert.equal((await call("host.ai.setRecommendations", { context: { resource: { name: "orders" } }, items: [{ id: "health", label: "Inspect {{resource.name}}", prompt: "Check {{resource.name}}" }] })).value, null);
+  assert.equal((await call("host.ai.setRecommendations", { context: {}, items: [{ id: "bad", label: "Inspect {{resource..name}}", prompt: "Check" }] })).status, 400);
+  assert.deepEqual((await call("host.getContext", {})).value, {});
+  assert.equal((await call("host.ai.clearRecommendations", {})).value, null);
+  assert.equal((await call("host.ai.setRecommendations", { context: {}, items: Array.from({ length: 6 }, (_, index) => ({ id: `item-${index}`, label: "Item", prompt: "Prompt" })) })).status, 400);
+});
 test("srcdoc workbench documents inline local Vite scripts and styles", async (t) => {
   const { root, request } = await fixture(t, true);
   await mkdir(join(root, "ui/assets"));

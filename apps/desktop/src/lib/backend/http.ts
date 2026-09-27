@@ -5372,6 +5372,14 @@ export async function closePluginLocalFile(_pluginId: string, _handleId: string)
   throw new Error("Plugin local file access is not available in the web backend");
 }
 
+export async function openPluginMedia(_pluginId: string, _method: string, _params: Record<string, unknown>): Promise<string> {
+  throw new Error("Plugin media URLs are not available in the web backend");
+}
+
+export async function closePluginMedia(_pluginId: string, _token: string): Promise<void> {
+  throw new Error("Plugin media URLs are not available in the web backend");
+}
+
 // Plugin UI storage goes through the Rust plugin-data tree on native hosts;
 // the web workbench host keeps its localStorage fallback in the component, so
 // these only exist to satisfy the shared backend surface.

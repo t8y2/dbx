@@ -28,6 +28,7 @@ const connections: ConnectionConfig[] = [
   { id: "pg-source", name: "PostgreSQL Source", db_type: "postgres", host: "localhost", port: 5432, username: "test", password: "" },
   { id: "h2-local-id", name: "Local H2", db_type: "h2", driver_profile: "h2-v3", host: "", port: 0, username: "sa", password: "", database: "mem:transfer-test" },
   { id: "h2-jdbc-id", name: "JDBC H2", db_type: "jdbc", connection_string: "jdbc:h2:mem:transfer-test", host: "", port: 0, username: "sa", password: "" },
+  { id: "yashandb-id", name: "YashanDB", db_type: "yashandb", host: "localhost", port: 1688, username: "test", password: "" },
   { id: "redis-id", name: "Redis", db_type: "redis", host: "localhost", port: 6379, username: "", password: "" },
   { id: "unknown-jdbc-id", name: "Unknown JDBC", db_type: "jdbc", host: "localhost", port: 0, username: "", password: "" },
 ];
@@ -83,6 +84,7 @@ describe("data transfer connection choices", () => {
       const picker = container.querySelector(`[data-side="${side}"]`)!;
       expect(picker.querySelector('[data-picker-connection="h2-local-id"]')?.textContent).toContain("Local H2");
       expect(picker.querySelector('[data-picker-connection="h2-jdbc-id"]')?.textContent).toContain("JDBC H2");
+      expect(picker.querySelector('[data-picker-connection="yashandb-id"]')?.textContent).toContain("YashanDB");
       expect(picker.querySelector('[data-picker-connection="redis-id"]')).toBeNull();
       expect(picker.querySelector('[data-picker-connection="unknown-jdbc-id"]')).toBeNull();
     }
@@ -94,7 +96,7 @@ describe("data transfer connection choices", () => {
     expect(selection.source).toBe(source);
   });
 
-  it.each(["h2-local-id", "h2-jdbc-id"])("resolves the prefilled %s to its connection name", async (source) => {
+  it.each(["h2-local-id", "h2-jdbc-id", "yashandb-id"])("resolves the prefilled %s to its connection name", async (source) => {
     const { container } = await mountTransferPickers(source);
     const trigger = container.querySelector('[data-side="source"] button');
     expect(trigger?.textContent).toContain(connections.find((connection) => connection.id === source)!.name);

@@ -29,7 +29,8 @@ use crate::sql::SqlParsingOptions;
 use crate::sql_file_import::{SqlFileStreamDecoder, StreamingSqlFileSplitter};
 use crate::transfer::{
     escape_value_typed, execute_on_pool, generate_insert_typed_from_value_rows, get_columns_for_transfer,
-    normalize_integer_literal, normalize_thousands_numeric_literal, qualified_table, quote_identifier, SqlBatchLimits,
+    normalize_integer_literal, normalize_thousands_numeric_literal, qualified_table, quote_identifier,
+    transfer_key_columns, ImportConflictHandling, SqlBatchLimits,
 };
 
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
@@ -118,11 +119,15 @@ pub struct TableImportColumnMapping {
     pub target_data_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TableImportMode {
     Append,
     Truncate,
+    /// 追加或更新：命中主键约束时更新其余列，否则插入（依赖目标表主键）。
+    Upsert,
+    /// 不更新追加：命中唯一约束的行跳过，其余插入。
+    SkipExisting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4291,6 +4296,7 @@ pub fn build_import_insert_batch_from_rows(
         schema,
         db_type,
         None,
+        ImportConflictHandling::None,
     )
 }
 
@@ -4304,6 +4310,7 @@ fn build_import_insert_batch_from_rows_with_format(
     schema: &str,
     db_type: &DatabaseType,
     date_time_format: Option<&str>,
+    conflict_handling: ImportConflictHandling,
 ) -> Result<Option<ImportSqlBatch>, String> {
     if rows.is_empty() {
         return Ok(None);
@@ -4317,6 +4324,7 @@ fn build_import_insert_batch_from_rows_with_format(
             table,
             schema,
             rows.len(),
+            conflict_handling,
         );
     }
     let plan = compile_import_plan(columns, mappings, target_column_types)?;
@@ -4347,7 +4355,7 @@ fn build_import_insert_batches_with_plan(
     schema: &str,
     db_type: &DatabaseType,
     kingbase_oracle_mode: bool,
-    skip_duplicate_rows: bool,
+    conflict_handling: ImportConflictHandling,
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
@@ -4355,7 +4363,7 @@ fn build_import_insert_batches_with_plan(
         return Ok(Vec::new());
     }
     let value_rows = import_value_rows_sql(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
-    let batches = crate::data::transfer::generate_insert_typed_sql_batches_from_value_rows_with_options(
+    let batches = crate::data::transfer::generate_conflict_handling_sql_batches_from_value_rows(
         &plan.target_columns,
         &value_rows,
         table,
@@ -4363,7 +4371,7 @@ fn build_import_insert_batches_with_plan(
         db_type,
         None,
         SqlBatchLimits::for_database(db_type, rows.len()).with_hard_sql_bytes(hard_sql_bytes),
-        skip_duplicate_rows,
+        conflict_handling,
     )?;
     Ok(batches.into_iter().map(|(sql, row_count)| ImportSqlBatch { sql, row_count }).collect())
 }
@@ -4429,23 +4437,10 @@ fn build_import_execution_batches(
     schema: &str,
     db_type: &DatabaseType,
     kingbase_oracle_mode: bool,
-    skip_duplicate_rows: bool,
+    conflict_handling: ImportConflictHandling,
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
-    if let Some(plan) = plan {
-        return build_import_insert_batches_with_plan(
-            rows,
-            plan,
-            table,
-            schema,
-            db_type,
-            kingbase_oracle_mode,
-            skip_duplicate_rows,
-            date_time_format,
-            hard_sql_bytes,
-        );
-    }
     if *db_type == DatabaseType::CloudflareD1 {
         return crate::db::cloudflare_d1::build_import_insert_batches(
             rows,
@@ -4455,6 +4450,20 @@ fn build_import_execution_batches(
             table,
             schema,
             rows.len().max(1),
+            conflict_handling,
+        );
+    }
+    if let Some(plan) = plan {
+        return build_import_insert_batches_with_plan(
+            rows,
+            plan,
+            table,
+            schema,
+            db_type,
+            kingbase_oracle_mode,
+            conflict_handling,
+            date_time_format,
+            hard_sql_bytes,
         );
     }
     let plan = compile_import_plan(columns, mappings, target_column_types)?;
@@ -4465,7 +4474,7 @@ fn build_import_execution_batches(
         schema,
         db_type,
         kingbase_oracle_mode,
-        skip_duplicate_rows,
+        conflict_handling,
         date_time_format,
         hard_sql_bytes,
     )
@@ -4651,6 +4660,7 @@ fn build_import_insert_batches_with_format(
             table,
             schema,
             effective_import_batch_size(db_type, batch_size),
+            ImportConflictHandling::None,
         );
     }
     let plan = compile_import_plan(&data.columns, mappings, target_column_types)?;
@@ -4664,7 +4674,7 @@ fn build_import_insert_batches_with_format(
             schema,
             db_type,
             kingbase_oracle_mode,
-            false,
+            ImportConflictHandling::None,
             date_time_format,
             None,
         )?);
@@ -5469,7 +5479,9 @@ fn sqlite_append_transaction_for_import(
     mode: &TableImportMode,
     db_type: &DatabaseType,
 ) -> Option<SqliteAppendTransaction> {
-    (matches!(mode, TableImportMode::Append) && *db_type == DatabaseType::Sqlite).then(SqliteAppendTransaction::new)
+    (matches!(mode, TableImportMode::Append | TableImportMode::Upsert | TableImportMode::SkipExisting)
+        && *db_type == DatabaseType::Sqlite)
+        .then(SqliteAppendTransaction::new)
 }
 
 fn supports_transactional_import_truncate(db_type: &DatabaseType) -> bool {
@@ -5639,14 +5651,16 @@ async fn execute_import_rows_batch(
     postgres_copy_accumulator: &mut Option<PostgresCopyAccumulator>,
     sqlite_append_transaction: &mut Option<SqliteAppendTransaction>,
     kingbase_oracle_mode: bool,
-    skip_duplicate_rows: bool,
+    conflict_handling: ImportConflictHandling,
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
     db_write_ms: &mut u128,
     statement_count: &mut usize,
 ) -> Result<usize, ImportRowsBatchError> {
     let execution_policy = import_batch_execution_policy(mode, pending_truncate, db_type);
-    if !skip_duplicate_rows {
+    // Bulk/COPY fast paths can only express plain inserts, so they are limited
+    // to the no-conflict handling case.
+    if !conflict_handling.handles_conflicts() {
         if let Some((import_plan, bulk_plan)) = sqlserver_bulk_plans_for_rows(db_type, plan, sqlserver_bulk_plan, rows)
         {
             return execute_sqlserver_bulk_rows_batch(
@@ -5667,7 +5681,7 @@ async fn execute_import_rows_batch(
     }
     // COPY is used only for plain scalar PostgreSQL rows and ordinary tables. Any unsupported
     // value or table feature falls through to the portable INSERT generator below.
-    if !skip_duplicate_rows
+    if !conflict_handling.handles_conflicts()
         && execution_policy.allow_postgres_copy
         && *db_type == DatabaseType::Postgres
         && !rows
@@ -5711,7 +5725,7 @@ async fn execute_import_rows_batch(
         schema,
         db_type,
         kingbase_oracle_mode,
-        skip_duplicate_rows,
+        conflict_handling.clone(),
         date_time_format,
         hard_sql_bytes,
     )
@@ -5774,7 +5788,10 @@ async fn execute_import_rows_batch(
         )
         .await
         .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
-        return Ok(if skip_duplicate_rows {
+        // Conflict-handling statements may affect fewer rows than submitted
+        // (skipped or updated rows), so trust the driver's affected count.
+        let conflict_aware = conflict_handling.handles_conflicts();
+        return Ok(if conflict_aware {
             rows_imported.saturating_add(result.affected_rows as usize)
         } else {
             rows_imported.saturating_add(rows.len())
@@ -5785,7 +5802,7 @@ async fn execute_import_rows_batch(
         let result = execute_import_statement(state, pool_key, &batch.sql, db_write_ms, statement_count)
             .await
             .map_err(|error| ImportRowsBatchError::with_rows_imported(rows_imported, error))?;
-        rows_imported = if skip_duplicate_rows {
+        rows_imported = if conflict_handling.handles_conflicts() {
             rows_imported.saturating_add(result.affected_rows as usize)
         } else {
             rows_imported.saturating_add(batch.row_count)
@@ -6578,6 +6595,46 @@ async fn execute_sqlserver_bulk_rows_batch(
 
 /// Core import logic. Returns (rows_imported, total_rows).
 /// `progress_callback` is invoked for progress updates.
+/// Resolves the conflict target for upsert imports from the target table's
+/// primary key metadata (unique-key columns for Doris/StarRocks). Every key
+/// column must also be mapped, otherwise the INSERT could never hit the
+/// constraint and the upsert would silently degrade to plain inserts.
+async fn resolve_import_upsert_key_columns(
+    state: &AppState,
+    pool_key: &str,
+    request: &TableImportRequest,
+    db_type: &DatabaseType,
+) -> Result<Vec<String>, String> {
+    let columns = get_columns_for_transfer(
+        state,
+        pool_key,
+        &request.connection_id,
+        &request.database,
+        &request.schema,
+        &request.table,
+        None,
+    )
+    .await
+    .map_err(|error| format!("Failed to resolve primary key columns for upsert import: {error}"))?;
+    let key_columns = transfer_key_columns(&columns, db_type);
+    if key_columns.is_empty() {
+        return Err(format!(
+            "Table {} has no primary key; upsert import requires one",
+            qualified_table(&request.table, &request.schema, db_type, None)
+        ));
+    }
+    let mapped_targets = request.mappings.iter().map(|mapping| mapping.target_column.as_str()).collect::<Vec<_>>();
+    let missing = key_columns
+        .iter()
+        .filter(|key| !mapped_targets.iter().any(|target| target.eq_ignore_ascii_case(key)))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let missing = missing.iter().map(|column| column.as_str()).collect::<Vec<_>>();
+        return Err(format!("Upsert import requires the primary key columns to be mapped: {}", missing.join(", ")));
+    }
+    Ok(key_columns)
+}
+
 pub async fn import_table_file_core<F>(
     state: &AppState,
     request: &TableImportRequest,
@@ -6698,6 +6755,16 @@ where
                 "Cannot truncate a table that is being created by the import",
             ));
         }
+        if matches!(request.mode, TableImportMode::Upsert) {
+            return Err(emit_import_error(
+                &mut progress_callback,
+                request,
+                0,
+                0,
+                started_at,
+                "Cannot upsert into a table that is being created by the import",
+            ));
+        }
         let required_sample_rows = if prepared_source_total_exact {
             prepared_source
                 .as_ref()
@@ -6749,6 +6816,21 @@ where
             Some(plan.columns.iter().map(|column| (column.name.clone(), column.data_type.clone())).collect());
         create_table_sample = Some(parsed);
     }
+
+    let conflict_handling = match &request.mode {
+        TableImportMode::Upsert => {
+            let key_columns = match resolve_import_upsert_key_columns(state, pool_key, request, db_type).await {
+                Ok(key_columns) => key_columns,
+                Err(error) => {
+                    return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error));
+                }
+            };
+            ImportConflictHandling::Upsert { key_columns }
+        }
+        TableImportMode::SkipExisting => ImportConflictHandling::SkipExisting,
+        _ if request.skip_duplicate_rows => ImportConflictHandling::SkipExisting,
+        _ => ImportConflictHandling::None,
+    };
 
     if source_format.is_delimited() {
         let parsed = if let Some(parsed) = create_table_sample.clone().or_else(|| prepared_source.clone()) {
@@ -6949,7 +7031,7 @@ where
                         &mut postgres_copy_accumulator,
                         &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
-                        request.skip_duplicate_rows,
+                        conflict_handling.clone(),
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
                         &mut db_write_ms,
@@ -7452,7 +7534,7 @@ where
                         &mut postgres_copy_accumulator,
                         &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
-                        request.skip_duplicate_rows,
+                        conflict_handling.clone(),
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
                         &mut db_write_ms,
@@ -7801,7 +7883,7 @@ where
             &mut postgres_copy_accumulator,
             &mut sqlite_append_transaction,
             kingbase_oracle_mode,
-            request.skip_duplicate_rows,
+            conflict_handling.clone(),
             request.date_time_format.as_deref(),
             import_sql_hard_limit,
             &mut db_write_ms,
@@ -11698,7 +11780,7 @@ mod tests {
             "dbo",
             &DatabaseType::SqlServer,
             false,
-            false,
+            ImportConflictHandling::None,
             None,
             None,
         )
@@ -12024,7 +12106,7 @@ mod tests {
             &mut sqlite_append_transaction,
             &mut postgres_copy_accumulator,
             false,
-            false,
+            ImportConflictHandling::None,
             None,
             None,
             &mut db_write_ms,
@@ -12193,6 +12275,16 @@ mod tests {
 
     impl SqliteAppendTestContext {
         async fn new(test_name: &str, max_rows: usize) -> Self {
+            Self::with_schema(
+                test_name,
+                max_rows,
+                "CREATE TABLE items (id INTEGER PRIMARY KEY)",
+                sqlite_append_test_plan(),
+            )
+            .await
+        }
+
+        async fn with_schema(test_name: &str, max_rows: usize, ddl: &str, plan: CompiledImportPlan) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
             let state = AppState::new(storage);
@@ -12200,7 +12292,7 @@ mod tests {
             let database_path = dir.path().join("target.db");
             let sqlite =
                 crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
-            crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER PRIMARY KEY)").await.unwrap();
+            crate::db::sqlite::execute_query(&sqlite, ddl).await.unwrap();
             state
                 .update_connection_pools(|connections| {
                     connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
@@ -12211,7 +12303,7 @@ mod tests {
                 state,
                 sqlite,
                 pool_key,
-                plan: sqlite_append_test_plan(),
+                plan,
                 postgres_copy_accumulator: None,
                 transaction: Some(SqliteAppendTransaction::with_limits(max_rows, usize::MAX)),
                 db_write_ms: 0,
@@ -12221,6 +12313,15 @@ mod tests {
 
         async fn append(&mut self, ids: &[i64]) -> Result<usize, ImportRowsBatchError> {
             let rows = ids.iter().map(|id| vec![serde_json::json!(id)]).collect::<Vec<_>>();
+            self.execute(rows, &TableImportMode::Append, ImportConflictHandling::None).await
+        }
+
+        async fn execute(
+            &mut self,
+            rows: Vec<Vec<serde_json::Value>>,
+            mode: &TableImportMode,
+            conflict_handling: ImportConflictHandling,
+        ) -> Result<usize, ImportRowsBatchError> {
             execute_import_rows_batch(
                 &self.state,
                 &self.pool_key,
@@ -12237,12 +12338,12 @@ mod tests {
                 "items",
                 "",
                 &DatabaseType::Sqlite,
-                &TableImportMode::Append,
+                mode,
                 false,
                 &mut self.postgres_copy_accumulator,
                 &mut self.transaction,
                 false,
-                false,
+                conflict_handling,
                 None,
                 None,
                 &mut self.db_write_ms,
@@ -12254,6 +12355,138 @@ mod tests {
         async fn ids(&self) -> Vec<Vec<serde_json::Value>> {
             crate::db::sqlite::execute_query(&self.sqlite, "SELECT id FROM items ORDER BY id").await.unwrap().rows
         }
+
+        async fn stored_rows(&self) -> Vec<(i64, String)> {
+            crate::db::sqlite::execute_query(&self.sqlite, "SELECT id, name FROM items ORDER BY id")
+                .await
+                .unwrap()
+                .rows
+                .into_iter()
+                .map(|row| (row[0].as_i64().unwrap(), row[1].as_str().unwrap().to_string()))
+                .collect()
+        }
+    }
+
+    fn sqlite_upsert_test_plan() -> CompiledImportPlan {
+        CompiledImportPlan {
+            mapped_source_indexes: vec![0, 1],
+            target_columns: vec!["id".to_string(), "name".to_string()],
+            column_types: vec![Some("integer".to_string()), Some("text".to_string())],
+        }
+    }
+
+    #[test]
+    fn table_import_mode_deserializes_conflict_variants() {
+        let upsert: TableImportMode = serde_json::from_str("\"upsert\"").unwrap();
+        assert_eq!(upsert, TableImportMode::Upsert);
+        let skip_existing: TableImportMode = serde_json::from_str("\"skipExisting\"").unwrap();
+        assert_eq!(skip_existing, TableImportMode::SkipExisting);
+        assert_eq!(serde_json::to_string(&TableImportMode::Upsert).unwrap(), "\"upsert\"");
+        assert_eq!(serde_json::to_string(&TableImportMode::SkipExisting).unwrap(), "\"skipExisting\"");
+    }
+
+    #[tokio::test]
+    async fn sqlite_upsert_import_updates_conflicting_rows_and_appends_new_ones() {
+        // A commit window of 1 flushes every batch so the rows land immediately.
+        let mut context = SqliteAppendTestContext::with_schema(
+            "sqlite-import-upsert",
+            1,
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)",
+            sqlite_upsert_test_plan(),
+        )
+        .await;
+        let inserted = context
+            .execute(
+                vec![
+                    vec![serde_json::json!(1), serde_json::json!("a")],
+                    vec![serde_json::json!(2), serde_json::json!("b")],
+                ],
+                &TableImportMode::Append,
+                ImportConflictHandling::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(inserted, 2);
+
+        let upserted = context
+            .execute(
+                vec![
+                    vec![serde_json::json!(2), serde_json::json!("B2")],
+                    vec![serde_json::json!(3), serde_json::json!("c")],
+                ],
+                &TableImportMode::Upsert,
+                ImportConflictHandling::Upsert { key_columns: vec!["id".to_string()] },
+            )
+            .await
+            .unwrap();
+        // The SQLite append window reports submitted rows, like plain append does.
+        assert_eq!(upserted, 2);
+        assert_eq!(context.stored_rows().await, vec![(1, "a".into()), (2, "B2".into()), (3, "c".into())]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_skip_existing_import_preserves_conflicting_rows() {
+        let mut context = SqliteAppendTestContext::with_schema(
+            "sqlite-import-skip-existing",
+            1,
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)",
+            sqlite_upsert_test_plan(),
+        )
+        .await;
+        context
+            .execute(
+                vec![
+                    vec![serde_json::json!(1), serde_json::json!("a")],
+                    vec![serde_json::json!(2), serde_json::json!("b")],
+                ],
+                &TableImportMode::Append,
+                ImportConflictHandling::None,
+            )
+            .await
+            .unwrap();
+
+        let imported = context
+            .execute(
+                vec![
+                    vec![serde_json::json!(2), serde_json::json!("ignored")],
+                    vec![serde_json::json!(3), serde_json::json!("c")],
+                ],
+                &TableImportMode::SkipExisting,
+                ImportConflictHandling::SkipExisting,
+            )
+            .await
+            .unwrap();
+        assert_eq!(imported, 2);
+        assert_eq!(context.stored_rows().await, vec![(1, "a".into()), (2, "b".into()), (3, "c".into())]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_plain_append_still_rejects_duplicate_primary_keys() {
+        let mut context = SqliteAppendTestContext::with_schema(
+            "sqlite-import-append-duplicate",
+            1,
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)",
+            sqlite_upsert_test_plan(),
+        )
+        .await;
+        context
+            .execute(
+                vec![vec![serde_json::json!(1), serde_json::json!("a")]],
+                &TableImportMode::Append,
+                ImportConflictHandling::None,
+            )
+            .await
+            .unwrap();
+
+        let error = context
+            .execute(
+                vec![vec![serde_json::json!(1), serde_json::json!("again")]],
+                &TableImportMode::Append,
+                ImportConflictHandling::None,
+            )
+            .await;
+        assert!(error.is_err());
+        assert_eq!(context.stored_rows().await, vec![(1, "a".into())]);
     }
 
     #[tokio::test]
@@ -12694,6 +12927,7 @@ mod tests {
             "APP",
             &DatabaseType::Oracle,
             Some("YYYY/M/D HH:mm:ss"),
+            ImportConflictHandling::None,
         )
         .unwrap()
         .unwrap();

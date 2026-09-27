@@ -1802,7 +1802,7 @@ fn validate_preexisting_target_columns(
     Ok(())
 }
 
-fn transfer_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType) -> Vec<String> {
+pub(crate) fn transfer_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType) -> Vec<String> {
     let uses_unique_key_model = matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks);
     columns
         .iter()
@@ -4036,32 +4036,28 @@ fn uses_mysql_style_upsert(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::OpenGauss)
 }
 
+/// Assembles the upsert statement from pre-escaped value rows. Shared by the
+/// transfer upsert writer and the table-import upsert mode so both emit the
+/// same dialect-specific conflict clauses. Dialects without conflict support
+/// fall back to a plain INSERT.
 #[allow(clippy::too_many_arguments)]
-fn generate_upsert_typed_for_transfer(
+fn assemble_upsert_sql_from_value_rows(
     columns: &[String],
-    column_types: &[Option<String>],
-    rows: &[Vec<serde_json::Value>],
+    value_rows: &[String],
     table: &str,
     schema: &str,
     db_type: &DatabaseType,
-    pk_columns: &[String],
     catalog: Option<&str>,
+    pk_columns: &[String],
     overrides_postgres_system_values: bool,
-    mysql_spatial_markers: bool,
     quote_target_column_names: bool,
 ) -> String {
-    if rows.is_empty() || pk_columns.is_empty() {
-        return String::new();
-    }
-
     let full_table = qualified_table(table, schema, db_type, catalog);
     let col_list = columns
         .iter()
         .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
         .collect::<Vec<_>>()
         .join(", ");
-
-    let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
 
     let mut non_pk_columns = Vec::with_capacity(columns.len().saturating_sub(pk_columns.len()));
     for c in columns {
@@ -4176,57 +4172,6 @@ fn generate_upsert_typed_for_transfer(
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals});"));
             sql
         }
-        DatabaseType::Oracle => {
-            let mut using_rows = Vec::with_capacity(rows.len());
-            for row in rows {
-                let mut vals = Vec::with_capacity(row.len().min(columns.len()));
-                for (index, (v, c)) in row.iter().zip(columns.iter()).enumerate() {
-                    vals.push(format!(
-                        "{} AS {}",
-                        escape_value_typed(v, db_type, column_types.get(index).and_then(|value| value.as_deref())),
-                        transfer_column_identifier(c, db_type, quote_target_column_names)
-                    ));
-                }
-                using_rows.push(format!("SELECT {} FROM dual", vals.join(", ")));
-            }
-
-            let on_clause = pk_columns
-                .iter()
-                .map(|c| {
-                    let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
-                    format!("t.{qc} = s.{qc}")
-                })
-                .collect::<Vec<_>>()
-                .join(" AND ");
-
-            let mut sql =
-                format!("MERGE INTO {full_table} t USING ({}) s ON ({on_clause})", using_rows.join(" UNION ALL "));
-
-            if !non_pk_columns.is_empty() {
-                let update_set = non_pk_columns
-                    .iter()
-                    .map(|c| {
-                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
-                        format!("t.{qc} = s.{qc}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                sql.push_str(&format!("\nWHEN MATCHED THEN UPDATE SET {update_set}"));
-            }
-
-            let insert_cols = columns
-                .iter()
-                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let insert_vals = columns
-                .iter()
-                .map(|column| format!("s.{}", transfer_column_identifier(column, db_type, quote_target_column_names)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"));
-            sql
-        }
         _ => {
             let template = InsertSqlTemplate::new_with_column_quoting(
                 columns,
@@ -4237,9 +4182,102 @@ fn generate_upsert_typed_for_transfer(
                 false,
                 quote_target_column_names,
             );
-            template.build(&value_rows_sql(rows, column_types, db_type, mysql_spatial_markers))
+            template.build(value_rows)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_upsert_typed_for_transfer(
+    columns: &[String],
+    column_types: &[Option<String>],
+    rows: &[Vec<serde_json::Value>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    pk_columns: &[String],
+    catalog: Option<&str>,
+    overrides_postgres_system_values: bool,
+    mysql_spatial_markers: bool,
+    quote_target_column_names: bool,
+) -> String {
+    if rows.is_empty() || pk_columns.is_empty() {
+        return String::new();
+    }
+
+    // Oracle builds its MERGE ... USING (SELECT ... FROM dual) arm from the raw
+    // rows and types, so it cannot consume the pre-escaped value rows.
+    if matches!(db_type, DatabaseType::Oracle) {
+        let mut using_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut vals = Vec::with_capacity(row.len().min(columns.len()));
+            for (index, (v, c)) in row.iter().zip(columns.iter()).enumerate() {
+                vals.push(format!(
+                    "{} AS {}",
+                    escape_value_typed(v, db_type, column_types.get(index).and_then(|value| value.as_deref())),
+                    transfer_column_identifier(c, db_type, quote_target_column_names)
+                ));
+            }
+            using_rows.push(format!("SELECT {} FROM dual", vals.join(", ")));
+        }
+
+        let full_table = qualified_table(table, schema, db_type, catalog);
+        let on_clause = pk_columns
+            .iter()
+            .map(|c| {
+                let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
+                format!("t.{qc} = s.{qc}")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+
+        let mut sql =
+            format!("MERGE INTO {full_table} t USING ({}) s ON ({on_clause})", using_rows.join(" UNION ALL "));
+
+        let mut non_pk_columns = Vec::with_capacity(columns.len().saturating_sub(pk_columns.len()));
+        for c in columns {
+            if !pk_columns.contains(c) {
+                non_pk_columns.push(c);
+            }
+        }
+        if !non_pk_columns.is_empty() {
+            let update_set = non_pk_columns
+                .iter()
+                .map(|c| {
+                    let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
+                    format!("t.{qc} = s.{qc}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!("\nWHEN MATCHED THEN UPDATE SET {update_set}"));
+        }
+
+        let insert_cols = columns
+            .iter()
+            .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let insert_vals = columns
+            .iter()
+            .map(|column| format!("s.{}", transfer_column_identifier(column, db_type, quote_target_column_names)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"));
+        return sql;
+    }
+
+    let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
+    assemble_upsert_sql_from_value_rows(
+        columns,
+        &value_rows,
+        table,
+        schema,
+        db_type,
+        catalog,
+        pk_columns,
+        overrides_postgres_system_values,
+        quote_target_column_names,
+    )
 }
 
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
@@ -4628,6 +4666,25 @@ pub(crate) fn generate_insert_typed_sql_batches(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Conflict handling applied to generated import INSERT batches. `None` keeps
+/// the plain INSERT writer (and the bulk/COPY fast paths); the other variants
+/// disable those fast paths and append dialect-specific conflict clauses.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum ImportConflictHandling {
+    #[default]
+    None,
+    /// 不更新追加: skip rows that violate any unique constraint.
+    SkipExisting,
+    /// 追加或更新: on primary-key conflict update the non-key columns.
+    Upsert { key_columns: Vec<String> },
+}
+
+impl ImportConflictHandling {
+    pub(crate) fn handles_conflicts(&self) -> bool {
+        !matches!(self, ImportConflictHandling::None)
+    }
+}
+
 pub(crate) fn generate_insert_typed_sql_batches_from_value_rows(
     columns: &[String],
     value_rows: &[String],
@@ -4653,7 +4710,28 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
     limits: SqlBatchLimits,
     skip_duplicate_rows: bool,
 ) -> Result<Vec<(String, usize)>, String> {
-    if !skip_duplicate_rows {
+    let handling =
+        if skip_duplicate_rows { ImportConflictHandling::SkipExisting } else { ImportConflictHandling::None };
+    generate_conflict_handling_sql_batches_from_value_rows(
+        columns, value_rows, table, schema, db_type, catalog, limits, handling,
+    )
+}
+
+/// Generates INSERT batches with optional conflict handling. Sizing follows the
+/// plain INSERT template; the appended conflict clause is small enough that the
+/// same slack the skip-duplicates path already accepts applies here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_conflict_handling_sql_batches_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    handling: ImportConflictHandling,
+) -> Result<Vec<(String, usize)>, String> {
+    if !handling.handles_conflicts() {
         return generate_insert_sql_batches_from_value_rows(
             columns, value_rows, table, schema, db_type, catalog, limits, false, true,
         );
@@ -4710,30 +4788,44 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
 
         let value_rows_batch = &value_rows[start..end];
 
-        let mut sql = if matches!(
-            db_type,
-            DatabaseType::Postgres
-                | DatabaseType::Kingbase
-                | DatabaseType::Sqlite
-                | DatabaseType::CloudflareD1
-                | DatabaseType::DuckDb
-                | DatabaseType::Mysql
-                | DatabaseType::Doris
-                | DatabaseType::StarRocks
-                | DatabaseType::OpenGauss
-        ) {
-            generate_insert_ignore_duplicates_from_value_rows(
+        let mut sql = match &handling {
+            ImportConflictHandling::SkipExisting
+                if matches!(
+                    db_type,
+                    DatabaseType::Postgres
+                        | DatabaseType::Kingbase
+                        | DatabaseType::Sqlite
+                        | DatabaseType::CloudflareD1
+                        | DatabaseType::DuckDb
+                        | DatabaseType::Mysql
+                        | DatabaseType::Doris
+                        | DatabaseType::StarRocks
+                        | DatabaseType::OpenGauss
+                ) =>
+            {
+                generate_insert_ignore_duplicates_from_value_rows(
+                    columns,
+                    value_rows_batch,
+                    table,
+                    schema,
+                    db_type,
+                    catalog,
+                    false,
+                    true,
+                )
+            }
+            ImportConflictHandling::Upsert { key_columns } => assemble_upsert_sql_from_value_rows(
                 columns,
                 value_rows_batch,
                 table,
                 schema,
                 db_type,
                 catalog,
+                key_columns,
                 false,
                 true,
-            )
-        } else {
-            template.build(value_rows_batch)
+            ),
+            _ => template.build(value_rows_batch),
         };
 
         if sql.is_empty() {
@@ -16523,6 +16615,123 @@ SELECT 1 FROM dual"#
         .unwrap();
 
         assert_eq!(statements, vec!["INSERT INTO \"public\".\"users\" (\"name\") VALUES\n('Ada')"]);
+    }
+
+    #[test]
+    fn import_upsert_batches_use_dialect_conflict_clauses() {
+        let columns = vec![String::from("id"), String::from("name")];
+        let value_rows = vec![String::from("(42, 'Ada')"), String::from("(43, 'Grace')")];
+        let keys = vec![String::from("id")];
+        let postgres_style_suffix = "ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\"";
+
+        let cases: Vec<(DatabaseType, &str)> = vec![
+            (DatabaseType::Postgres, postgres_style_suffix),
+            (DatabaseType::Kingbase, postgres_style_suffix),
+            (DatabaseType::Sqlite, postgres_style_suffix),
+            (DatabaseType::DuckDb, postgres_style_suffix),
+            (DatabaseType::CloudflareD1, postgres_style_suffix),
+            (DatabaseType::Mysql, "ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)"),
+            (DatabaseType::OpenGauss, "ON DUPLICATE KEY UPDATE \"name\" = VALUES(\"name\")"),
+            (DatabaseType::Doris, "ON DUPLICATE KEY UPDATE"),
+            (DatabaseType::StarRocks, "ON DUPLICATE KEY UPDATE"),
+        ];
+        for (db_type, expected_suffix) in cases {
+            let batches = generate_conflict_handling_sql_batches_from_value_rows(
+                &columns,
+                &value_rows,
+                "users",
+                "public",
+                &db_type,
+                None,
+                SqlBatchLimits::for_database(&db_type, value_rows.len()),
+                ImportConflictHandling::Upsert { key_columns: keys.clone() },
+            )
+            .unwrap();
+            assert_eq!(batches.len(), 1, "{db_type:?}");
+            assert_eq!(batches[0].1, 2, "{db_type:?}");
+            assert!(batches[0].0.contains(expected_suffix), "{db_type:?}: {}", batches[0].0);
+        }
+    }
+
+    #[test]
+    fn import_upsert_with_key_only_columns_does_nothing_on_conflict() {
+        let batches = generate_conflict_handling_sql_batches_from_value_rows(
+            &[String::from("id")],
+            &[String::from("(42)")],
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            None,
+            SqlBatchLimits::for_database(&DatabaseType::Postgres, 1),
+            ImportConflictHandling::Upsert { key_columns: vec![String::from("id")] },
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches[0].0,
+            "INSERT INTO \"public\".\"users\" (\"id\") VALUES\n(42)\nON CONFLICT (\"id\") DO NOTHING"
+        );
+    }
+
+    #[test]
+    fn import_upsert_falls_back_to_plain_insert_without_conflict_support() {
+        let batches = generate_conflict_handling_sql_batches_from_value_rows(
+            &[String::from("id")],
+            &[String::from("(42)")],
+            "users",
+            "public",
+            &DatabaseType::Oracle,
+            None,
+            SqlBatchLimits::for_database(&DatabaseType::Oracle, 1),
+            ImportConflictHandling::Upsert { key_columns: vec![String::from("id")] },
+        )
+        .unwrap();
+
+        assert_eq!(batches[0].0, "INSERT INTO \"public\".\"users\" (\"id\") VALUES\n(42)");
+    }
+
+    #[test]
+    fn import_skip_existing_batches_append_conflict_nothing() {
+        let columns = vec![String::from("id")];
+        let value_rows = vec![String::from("(42)")];
+
+        for db_type in [
+            DatabaseType::Postgres,
+            DatabaseType::Kingbase,
+            DatabaseType::Sqlite,
+            DatabaseType::CloudflareD1,
+            DatabaseType::DuckDb,
+        ] {
+            let batches = generate_conflict_handling_sql_batches_from_value_rows(
+                &columns,
+                &value_rows,
+                "users",
+                "public",
+                &db_type,
+                None,
+                SqlBatchLimits::for_database(&db_type, 1),
+                ImportConflictHandling::SkipExisting,
+            )
+            .unwrap();
+            assert!(batches[0].0.ends_with("ON CONFLICT DO NOTHING"), "{db_type:?}: {}", batches[0].0);
+        }
+
+        // openGauss has no ON CONFLICT support; the skip arm reuses the
+        // MySQL-style no-op update (see uses_mysql_style_upsert).
+        for db_type in [DatabaseType::Mysql, DatabaseType::Doris, DatabaseType::StarRocks, DatabaseType::OpenGauss] {
+            let batches = generate_conflict_handling_sql_batches_from_value_rows(
+                &columns,
+                &value_rows,
+                "users",
+                "public",
+                &db_type,
+                None,
+                SqlBatchLimits::for_database(&db_type, 1),
+                ImportConflictHandling::SkipExisting,
+            )
+            .unwrap();
+            assert!(batches[0].0.contains("ON DUPLICATE KEY UPDATE"), "{db_type:?}: {}", batches[0].0);
+        }
     }
 
     #[test]

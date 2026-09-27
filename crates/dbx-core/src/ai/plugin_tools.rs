@@ -701,15 +701,62 @@ fn tool_description(plugin_name: &str, tool: &RawPluginTool, connections: &[Open
 }
 
 /// A short, stable, name-safe prefix per plugin (`io.dbx.ssh` → `ssh`).
-/// Plugins that reduce to the same prefix are told apart by a counter, in
-/// plugin-id order so the assignment is deterministic. Shared with the
-/// external `dbx` MCP server.
+///
+/// The prefix starts at the id's last segment and **extends leftward only
+/// when two installed plugins reduce to the same candidate** (`a.files` →
+/// `a_files`, `b.files` → `b_files`), so ordinary ids stay short while
+/// same-named plugins remain distinguishable by their own id — not by an
+/// install-order counter that would silently reassign names when plugins are
+/// uninstalled. Sanitization can still collapse two distinct ids to the same
+/// prefix (`a.b-c` vs `a.b_c`); those fall to a counter suffix, assigned in
+/// plugin-id order so the result is deterministic for a given installed set.
 pub fn plugin_prefixes<'a>(plugin_ids: impl Iterator<Item = &'a str>) -> HashMap<String, String> {
-    let mut used = HashSet::new();
+    let mut ids = plugin_ids.into_iter().map(str::to_string).collect::<Vec<_>>();
+    ids.sort();
+
+    // Sanitized segments in original id order, without empties.
+    let segments_of = |id: &str| -> Vec<String> {
+        let mut segments: Vec<String> =
+            id.split('.').map(sanitize_identifier).filter(|segment| !segment.is_empty()).collect();
+        if segments.is_empty() {
+            segments.push("plugin".to_string());
+        }
+        segments
+    };
+    let segment_lists: Vec<Vec<String>> = ids.iter().map(|id| segments_of(id)).collect();
+    // The prefix is the id's LAST `depth` segments in natural order, so the
+    // extension reads like the id itself (`a.files` → `a_files`).
+    let joined = |index: usize, depth: usize| -> String {
+        let list = &segment_lists[index];
+        let start = list.len().saturating_sub(depth);
+        list[start..].join("_")
+    };
+
+    // Extend colliding plugins leftward until every prefix is unique. Full
+    // ids are unique, so the loop terminates; sanitization can still collapse
+    // distinct ids at full depth, which the counter fallback below resolves.
+    let mut depths = vec![1usize; ids.len()];
+    for _ in 0..ids.iter().map(|id| id.split('.').count()).max().unwrap_or(1) {
+        let candidates: Vec<String> = (0..ids.len()).map(|index| joined(index, depths[index])).collect();
+        let mut extended = false;
+        for index in 0..ids.len() {
+            let collides = candidates.iter().enumerate().any(|(other, candidate)| {
+                other != index && candidate == &candidates[index] && depths[index] < segment_lists[index].len()
+            });
+            if collides {
+                depths[index] += 1;
+                extended = true;
+            }
+        }
+        if !extended {
+            break;
+        }
+    }
+
     let mut prefixes = HashMap::new();
-    for plugin_id in plugin_ids {
-        let last_segment = plugin_id.rsplit('.').next().unwrap_or(plugin_id);
-        let mut base = sanitize_identifier(last_segment);
+    let mut used = HashSet::new();
+    for (index, plugin_id) in ids.iter().enumerate() {
+        let mut base = joined(index, depths[index]);
         base.truncate(PLUGIN_PREFIX_MAX_CHARS);
         let base = base.trim_end_matches('_').to_string();
         let base = if base.is_empty() { "plugin".to_string() } else { base };
@@ -719,7 +766,7 @@ pub fn plugin_prefixes<'a>(plugin_ids: impl Iterator<Item = &'a str>) -> HashMap
             candidate = format!("{base}{counter}");
             counter += 1;
         }
-        prefixes.insert(plugin_id.to_string(), candidate);
+        prefixes.insert(plugin_id.clone(), candidate);
     }
     prefixes
 }
@@ -1179,9 +1226,20 @@ mod tests {
         }
 
         let prefixes = plugin_prefixes(["a.files", "b.files", "io.dbx.9lives"].into_iter());
-        assert_eq!(prefixes["a.files"], "files");
-        assert_eq!(prefixes["b.files"], "files2");
+        assert_eq!(prefixes["a.files"], "a_files");
+        assert_eq!(prefixes["b.files"], "b_files");
         assert_eq!(prefixes["io.dbx.9lives"], "t9lives");
+
+        // Distinct last segments keep the short form.
+        let prefixes = plugin_prefixes(["io.dbx.ssh", "io.dbx.files"].into_iter());
+        assert_eq!(prefixes["io.dbx.ssh"], "ssh");
+        assert_eq!(prefixes["io.dbx.files"], "files");
+
+        // Sanitization collapses `a.b-c` and `a.b_c` even at full depth;
+        // the counter is the deterministic last resort.
+        let prefixes = plugin_prefixes(["a.b-c", "a.b_c"].into_iter());
+        assert_eq!(prefixes["a.b-c"], "a_b_c");
+        assert_eq!(prefixes["a.b_c"], "a_b_c2");
     }
 
     #[test]

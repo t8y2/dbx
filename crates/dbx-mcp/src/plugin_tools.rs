@@ -284,7 +284,9 @@ mod tests {
 
     #[test]
     fn catalog_is_plugin_agnostic_and_disambiguates_prefix_clashes() {
-        // Any plugin id works; the prefix is derived from its last segment.
+        // Any plugin id works; the prefix is the id's last segment, extended
+        // leftward only when two plugins share it — the distinguishing part
+        // of the id stays in the name instead of an install-order counter.
         let providers = vec![
             provider("a.files", "Files A", json!({ "tools": [{ "name": "list", "description": "List" }] })),
             provider("b.files", "Files B", json!({ "tools": [{ "name": "list", "description": "List" }] })),
@@ -292,7 +294,7 @@ mod tests {
         ];
         let entries = build_catalog(&providers);
         let names = entries.iter().map(|entry| entry.exposed_name.as_str()).collect::<Vec<_>>();
-        assert_eq!(names, ["dbx_files__list", "dbx_files2__list", "dbx_kubernetes__apply"]);
+        assert_eq!(names, ["dbx_a_files__list", "dbx_b_files__list", "dbx_kubernetes__apply"]);
     }
 
     #[test]

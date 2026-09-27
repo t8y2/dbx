@@ -15,6 +15,9 @@ const steps = computed<Array<{ id: StepId; title: string; description: string }>
 
 const currentStep = ref<StepId>("overrides");
 const currentIndex = computed(() => steps.value.findIndex((step) => step.id === currentStep.value));
+// Every step is directly reachable from the nav above and all policy edits save as they are made,
+// so the last step has nothing to advance to and nothing to confirm.
+const isLastStep = computed(() => currentIndex.value === steps.value.length - 1);
 
 function scrollableAncestor(target: EventTarget | null): HTMLElement | null {
   let element = target instanceof HTMLElement ? target.parentElement : null;
@@ -86,7 +89,12 @@ function nextStep(event: Event) {
     <footer class="flex items-center justify-between gap-3 border-t pt-3">
       <button type="button" class="rounded-md border bg-background px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50" :disabled="currentIndex === 0" @click="previousStep($event)">{{ t("settings.mcpAuthPreviousStep") }}</button>
       <p class="text-center text-xs text-muted-foreground">{{ t("settings.mcpAuthStepProgress", { current: currentIndex + 1, total: steps.length }) }}</p>
-      <button type="button" class="rounded-md border bg-background px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50" :disabled="currentIndex === steps.length - 1" @click="nextStep($event)">{{ t("settings.mcpAuthNextStep") }}</button>
+      <!-- Kept in the layout (visibility: hidden) so the progress label holds the same offset in
+           every step: a fixed-width spacer could not match a label whose width varies per locale.
+           `invisible` also drops the button from the tab order and the accessibility tree. -->
+      <button type="button" class="rounded-md border bg-background px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50" :class="{ invisible: isLastStep }" :disabled="isLastStep" @click="nextStep($event)">
+        {{ t("settings.mcpAuthNextStep") }}
+      </button>
     </footer>
   </section>
 </template>

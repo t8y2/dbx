@@ -79,7 +79,7 @@ function toggleSelectAll() {
       {{ emptyText || t("tableMultiSelect.noTables") }}
     </div>
     <div v-else class="max-h-40 overflow-auto rounded border">
-      <button v-for="table in filteredTables" :key="table" type="button" :disabled="disabled" class="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted/50 disabled:opacity-50" @click="toggle(table)">
+      <button v-for="table in filteredTables" :key="table" type="button" :data-table-name="table" :disabled="disabled" class="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted/50 disabled:opacity-50" @click="toggle(table)">
         <CheckSquare v-if="selectedSet.has(table)" class="h-3.5 w-3.5 shrink-0 text-primary" />
         <Square v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />
         <span class="truncate">{{ table }}</span>

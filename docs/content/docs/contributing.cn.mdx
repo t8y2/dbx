@@ -242,8 +242,9 @@ rg "要查找的文字" apps/desktop/src crates src-tauri packages
 ```text
 docs/content/docs/example.mdx
 docs/content/docs/example.cn.mdx
-docs/content/docs/example.tr.mdx
 ```
+
+当前文档站语言以 `docs/lib/i18n.ts`、`docs/scripts/languages.mjs` 为准（现为 `en` / `cn`）。
 
 启动文档站：
 
@@ -264,7 +265,6 @@ pnpm dev
 ```text
 docs/content/docs/meta.json
 docs/content/docs/meta.cn.json
-docs/content/docs/meta.tr.json
 ```
 
 提交前先运行快速内容检查，再执行完整文档构建：

@@ -71,10 +71,11 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "updateNotificationsEnabled"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
+    "keepExplicitTransactionInAutoCommit",
     "executeAllOnBlankLine",
     "showExecutionTargetPicker",
     "showStatementRunButtons",
@@ -82,11 +83,14 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showCurrentStatementFrame",
     "showInsertValueHints",
     "autoAliasTables",
+    "tableCompletionSchemaQualification",
     "insertSpaceAfterCompletion",
+    "sqlServerSpaceConfirmsCompletion",
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
     "completionTriggerMode",
     "wordWrap",
+    "showWhitespace",
     "vimModeEnabled",
     "autoCloseBrackets",
     "sqlSemanticDiagnosticsMode",
@@ -99,7 +103,9 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "generateSqlIncludeDatabaseName",
     "generateSqlQuoteIdentifiers",
     "formatSqlOnSqlFileSave",
+    "ddlOpenMode",
     "showTableDdlHoverPreview",
+    "tableHoverLookupMode",
     "sqlVariableSubstitutionEnabled",
     "sqlVariableSyntaxOverrides",
   ],
@@ -118,6 +124,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sidebarBrowseObjectsOnDatabaseActivation",
     "openTabsRestoreMode",
     "disconnectTabHandlingMode",
+    "deleteConnectionTabHandlingMode",
+    "rememberConnectionDatabaseOnDelete",
     "dataTabReuseMode",
     "openDataTabsNextToActive",
     "clickTableNavigationTarget",
@@ -133,6 +141,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   data: [
     "showColumnCommentsInHeader",
     "showColumnTypesInHeader",
+    "showColumnHeaderTooltips",
+    "showResultSourceDatabase",
     "dataGridShowTransposeFieldMetadata",
     "colorizeDataGridCellTypes",
     "dataGridTypeColorSchemes",
@@ -143,6 +153,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridFilterEditorView",
     "dataGridKeepFilterEditorExpanded",
     "dataGridTextFilterPanelHeight",
+    "dataGridToolbarLayout",
     "defaultAutoKeepResults",
     "multiStatementDefaultView",
     "dataGridAutoTransposeSingleRow",
@@ -152,6 +163,9 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridShowWhitespace",
     "pageSize",
     "tableOpenPageSize",
+    "tableOpenSortMode",
+    "tableDatabaseSortDirection",
+    "tableLocalSortDirection",
     "queryResultMaxRowsEnabled",
     "queryResultMaxRows",
     "externalSqlEditorMaxMb",
@@ -160,6 +174,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "autoCalculateTotalRows",
     "tableColumnTemplateFields",
     "redisKeyTemplates",
+    "redisDatabaseDisplayLimit",
     "exportBatchSize",
     "csvQuoteMode",
     "exportRowLimitEnabled",
@@ -171,7 +186,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   ],
   shortcuts: ["shortcuts", "sqlShortcuts"],
   snippets: ["snippets"],
-  other: ["updateDownloadSource"],
+  other: ["updateDownloadSource", "updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins"],
 };
 
 const KEY_TO_CATEGORY = new Map<string, SettingsTransferCategoryId>();
@@ -249,12 +264,15 @@ const EXPECTED_JSON_KINDS = new Map<string, string>(EDITOR_SETTINGS_DRAFT_KEYS.m
  */
 const PASS_THROUGH_BOOLEAN_KEYS = [
   "wordWrap",
+  "showWhitespace",
   "showExecutionTargetPicker",
   "autoAliasTables",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
+  "showColumnHeaderTooltips",
+  "showResultSourceDatabase",
   "colorizeDataGridCellTypes",
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",
@@ -267,6 +285,12 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "sidebarAllowHorizontalScroll",
   "sidebarShowTooltips",
   "updateNotificationsEnabled",
+  "autoDownloadUpdates",
+  "autoUpdateApp",
+  "autoUpdateDrivers",
+  "autoUpdateJdbc",
+  "autoUpdateMcp",
+  "autoUpdatePlugins",
 ] as const satisfies readonly EditorSettingsDraftKey[];
 
 const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
@@ -352,7 +376,17 @@ function isSqlSnippetItem(value: unknown): boolean {
 function isSqlShortcutActionItem(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
   if (!isNonEmptyTrimmedString(value.id) || !isNonEmptyTrimmedString(value.label) || typeof value.shortcut !== "string" || typeof value.sql !== "string") return false;
-  return value.enabled === undefined || typeof value.enabled === "boolean";
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") return false;
+  if (value.kind !== undefined && value.kind !== "template" && value.kind !== "select-limit") return false;
+  if (value.limit !== undefined && (typeof value.limit !== "number" || !Number.isFinite(value.limit))) return false;
+  if (value.databaseTypes !== undefined) {
+    if (!Array.isArray(value.databaseTypes) || !value.databaseTypes.every((item) => typeof item === "string" && item.trim().length > 0)) return false;
+  }
+  if (value.sqlByDatabaseType !== undefined) {
+    if (!isPlainObject(value.sqlByDatabaseType)) return false;
+    if (!Object.values(value.sqlByDatabaseType).every((sql) => typeof sql === "string")) return false;
+  }
+  return true;
 }
 
 const SHORTCUT_ACTION_IDS = new Set<string>(SHORTCUT_DEFINITIONS.map((definition) => definition.id));

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { copyToClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { createShikiSqlHighlighter, type SqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -46,6 +46,26 @@ const displaySql = computed(() => {
 });
 
 const hasSql = computed(() => props.sql.trim().length > 0);
+
+const contentRef = ref<HTMLPreElement | null>(null);
+
+function selectPreviewContent() {
+  const el = contentRef.value;
+  if (!el) return false;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+  return true;
+}
+
+function onContentKeydown(event: KeyboardEvent) {
+  if (!isPlainClipboardShortcut(event, "a")) return;
+  // Claim the shortcut before it reaches the surrounding data grid, then select
+  // the preview text instead of the grid cells.
+  if (selectPreviewContent()) event.preventDefault();
+}
 
 async function initHighlighter() {
   if (highlighter) return;
@@ -193,10 +213,10 @@ onMounted(() => {
       </div>
 
       <!-- Shiki highlighted SQL -->
-      <pre v-else-if="highlightedHtml" data-native-clipboard class="m-0 p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words select-text" v-html="highlightedHtml"></pre>
+      <pre v-else-if="highlightedHtml" ref="contentRef" data-native-clipboard tabindex="0" class="m-0 p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words select-text outline-none" v-html="highlightedHtml" @keydown="onContentKeydown"></pre>
 
       <!-- Plain text fallback -->
-      <pre v-else data-native-clipboard class="p-3 text-xs font-mono whitespace-pre-wrap select-text">{{ displaySql }}</pre>
+      <pre v-else ref="contentRef" data-native-clipboard tabindex="0" class="p-3 text-xs font-mono whitespace-pre-wrap select-text outline-none" @keydown="onContentKeydown">{{ displaySql }}</pre>
     </div>
   </div>
 </template>

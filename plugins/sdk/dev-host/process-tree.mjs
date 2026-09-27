@@ -5,11 +5,25 @@ import { setTimeout as delay } from "node:timers/promises";
 export async function stopProcessTree(child) {
   if (!child?.pid) return;
   if (process.platform === "win32") {
-    await new Promise((resolve) => {
-      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-      killer.once("error", resolve);
-      killer.once("close", resolve);
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    let onExit;
+    const exited = new Promise((resolve) => {
+      onExit = resolve;
+      child.once("exit", onExit);
     });
+    try {
+      await new Promise((resolve, reject) => {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+        killer.once("error", reject);
+        killer.once("close", (code) => {
+          if (code === 0 || child.exitCode !== null || child.signalCode !== null) resolve();
+          else reject(new Error(`taskkill failed with exit code ${code}`));
+        });
+      });
+      await exited;
+    } finally {
+      child.removeListener("exit", onExit);
+    }
     return;
   }
   const signal = (value) => {

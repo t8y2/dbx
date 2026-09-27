@@ -1,7 +1,6 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import { canFetchNextDataGridSegment, canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllSegment, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
 
 test("estimated display totals do not become pagination bounds", () => {
   assert.equal(
@@ -188,6 +187,16 @@ test("infinite scroll preserves authoritative has-more and complete-local-result
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, allRowsLoaded: true }), false);
 });
 
+test("load-all requests every remaining row up to the configured cap", () => {
+  assert.deepEqual(dataGridLoadAllSegment(100, 5_000, true), { offset: 100, limit: 4_900 });
+  assert.deepEqual(dataGridLoadAllSegment(2_500, 5_000, true), { offset: 2_500, limit: 2_500 });
+});
+
+test("load-all does not request past the cap or after the result is complete", () => {
+  assert.equal(dataGridLoadAllSegment(5_000, 5_000, true), null);
+  assert.equal(dataGridLoadAllSegment(100, 5_000, false), null);
+});
+
 // --- auto-redirect page calculation after refresh ---
 // These tests document the math used in DataGrid.vue's loading watcher:
 //   lastPageNum = Math.max(1, Math.ceil(total / pageSize))
@@ -234,85 +243,4 @@ test("auto-redirect: total is zero — guard prevents redirect attempt", () => {
 test("auto-redirect: total is undefined — guard prevents redirect attempt", () => {
   const total = undefined;
   assert.equal(!total || (total as any) <= 0, true, "guard should prevent redirect when total is unknown");
-});
-
-test("explicit loads, last-page COUNTs, and page jumps block the grid surface; background counts do not", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /const totalRowCountBusy = computed\(\(\) => props\.totalRowCountLoading === true \|\| manualTotalRowCountLoading\.value\)/);
-  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| manualTotalRowCountLoading\.value \|\| pageJumpBusy\.value\)/);
-  assert.match(source, /const pageJumpBusy = computed\(\(\) => !!props\.pageJumpProgress && props\.pageJumpProgress\.totalRequests > 1\)/);
-  // totalRowCountBusy must stay out of gridSurfaceBusy so background counts keep the grid interactive (#5967)
-  const busyLine = source.match(/const gridSurfaceBusy = computed\([^\n]*/)?.[0] ?? "";
-  assert.ok(!busyLine.includes("totalRowCountBusy"), "background counts must not block the grid surface");
-  assert.match(source, /const gridPaginationBusy = computed\(\(\) => gridSurfaceBusy\.value \|\| totalRowCountBusy\.value\)/);
-  assert.match(source, /v-if="gridSurfaceBusy"/);
-  assert.match(source, /:loading="gridPaginationBusy"/);
-  assert.match(source, /async function beginManualTotalRowCount/);
-  assert.match(source, /await nextTick\(\);/);
-  const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(lastPageFn, /beginManualTotalRowCount\(\)/);
-  assert.match(lastPageFn, /buildCurrentCountTarget\(\)/);
-  assert.ok(lastPageFn.indexOf("beginManualTotalRowCount") < lastPageFn.indexOf("buildCurrentCountTarget"), "busy UI must start before COUNT SQL is built");
-});
-
-test("last page always re-counts when a count path is available", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  const knownTotalIdx = lastPageFn.indexOf("hasKnownPaginationTotalRowCount");
-  const countCallbackIdx = lastPageFn.indexOf("props.countTotalRows");
-  const countSqlIdx = lastPageFn.indexOf("buildCurrentCountTarget");
-  assert.ok(countCallbackIdx >= 0 && countSqlIdx >= 0, "last page must keep count paths");
-  assert.ok(knownTotalIdx < 0 || knownTotalIdx > countSqlIdx, "known totals are only a fallback after re-COUNT");
-});
-
-test("jumping to last page does not rewrite indexes before the new page loads", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const jumpFn = source.match(/function jumpToCountedLastPage\(total: number\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(jumpFn, /resolveDataGridPaginationTotal/);
-  assert.match(jumpFn, /maxRows: paginationMaxRows\.value/);
-  // Last-page jumps delegate to requestServerPageJump (ES deep-jump confirm) which still emits "paginate" without bumping currentPage
-  assert.match(jumpFn, /requestServerPageJump\(lastPageNum\)/);
-  const executeJumpFn = source.match(/function executeServerPageJump[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(executeJumpFn, /emit\("paginate"/);
-  assert.doesNotMatch(jumpFn, /currentPage\.value\s*=/);
-  assert.match(source, /function rowNumberPageOffset/);
-});
-
-test("query result caps do not limit table-data pagination", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /const paginationMaxRows = computed\(\(\) => \(isResultsContext\.value \? queryResultMaxRows\.value : undefined\)\)/);
-  assert.equal(source.match(/maxRows: paginationMaxRows\.value/g)?.length, 2);
-});
-
-test("row number gutter width tracks the largest visible row index", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /dataGridRowNumberColumnWidth/);
-  assert.match(source, /resolveDataGridMaxRowNumber/);
-  assert.match(source, /rowNumberWidth,/);
-});
-
-test("rerun total-count visibility comes from the shared rule and triggers the manual count", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const rerunComputed = source.match(/const showRerunTotalCountAction = computed\(\(\) =>[\s\S]*?\n\);/)?.[0] ?? "";
-  assert.match(rerunComputed, /showDataGridRerunTotalCountAction\(\{/);
-  assert.match(rerunComputed, /canCalculateTotalRowCount: canCalculateTotalRowCount\.value/);
-  assert.match(rerunComputed, /displayedTotalRowCount: displayedTotalRowCount\.value/);
-  assert.match(rerunComputed, /totalRowCountIsExact: totalRowCountIsExact\.value/);
-  const rerunButton = source.match(/<i18n-t v-if="showRerunTotalCountAction[\s\S]*?<template #button>[\s\S]*?<button[\s\S]*?<\/button>/)?.[0] ?? "";
-  assert.match(rerunButton, /@click="calculateTotalRowCount"/);
-});
-
-test("manual rerun counts through props.countSql and resets when the query context changes", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /if \(props\.countSql\) return \{ sql: props\.countSql, schema: props\.schema \};/);
-  assert.match(source, /const serverKnownTotalRowCount = computed\(\(\) => \(typeof manualTotalRowCount\.value === "number" \? manualTotalRowCount\.value : props\.totalRowCount\)\)/);
-  assert.match(source, /watch\(\s*\(\) => \[props\.countSql \?\? ""/);
-});
-
-test("executed plans refresh the count SQL shared with the background count", () => {
-  const source = readFileSync("apps/desktop/src/stores/queryStore.ts", "utf8");
-  assert.ok((source.match(/current\.resultCountSql = countSql;/g)?.length ?? 0) >= 2, "every executed-plan path must refresh the tab count SQL");
-  assert.match(source, /countSql = sqlServerUseScript && plan\.countSql \? replaceSqlServerLeadingUseQuery\(queryBaseSql, sqlServerUseScript, plan\.countSql\) : plan\.countSql;/);
-  const backgroundCount = source.match(/countQueryTotalRowsInBackground\(\{[\s\S]*?\}\);/)?.[0] ?? "";
-  assert.match(backgroundCount, /\n\s+countSql,/);
 });

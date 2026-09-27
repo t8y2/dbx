@@ -54,6 +54,32 @@ export function sqlServerUseDatabaseFromStatement(statement: string): string | u
   return match[3];
 }
 
+/**
+ * 方言里 `USE <db>` 会把会话切到另一个库，DBX 的标签库名应当跟着走（#9941）。
+ *
+ * 只列出已经确认过这一语义的方言：MySQL 及其 wire-protocol 家族。SQL Server 由
+ * `sqlServerUseDatabaseFromStatement` 单独处理（它还接受 `[db]` 括号标识符）。
+ */
+const USE_DATABASE_SWITCH_DIALECTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "gbase"]);
+
+export function switchesDatabaseWithUseStatement(databaseType: DatabaseType | null | undefined): boolean {
+  return !!databaseType && USE_DATABASE_SWITCH_DIALECTS.has(databaseType);
+}
+
+/**
+ * 解析单条语句里「成功切换当前库」的 `USE <db>`，返回目标库名（反引号、双引号或裸
+ * 标识符）。不是 USE 语句、或该方言的 USE 不改库时返回 undefined。
+ */
+export function useDatabaseFromStatement(statement: string, databaseType?: DatabaseType): string | undefined {
+  if (databaseType === "sqlserver") return sqlServerUseDatabaseFromStatement(statement);
+  if (!switchesDatabaseWithUseStatement(databaseType)) return undefined;
+  const match = /^USE\s+(?:`((?:[^`]|``)*)`|"((?:[^"]|"")*)"|([\p{L}_$][\p{L}\p{N}_$]*))\s*;?\s*$/iu.exec(sqlStatementWithoutLeadingComments(statement));
+  if (!match) return undefined;
+  if (match[1] !== undefined) return match[1].replaceAll("``", "`");
+  if (match[2] !== undefined) return match[2].replaceAll('""', '"');
+  return match[3];
+}
+
 export function sqlServerUseDatabaseBeforeCursor(sql: string, cursor: number): string | undefined {
   const position = Math.max(0, Math.min(cursor, sql.length));
   let database: string | undefined;

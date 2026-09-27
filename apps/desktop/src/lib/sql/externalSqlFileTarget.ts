@@ -1,4 +1,6 @@
 import { normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
+import { supportsSqlFileExecution } from "@/lib/database/databaseFeatureSupport";
+import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 export const EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY = "dbx-external-sql-file-targets-v1";
 export const MAX_EXTERNAL_SQL_FILE_TARGETS = 200;
@@ -10,8 +12,24 @@ export interface ExternalSqlFileTarget {
   schema?: string;
 }
 
+type ExternalSqlFileTargetTab = Pick<QueryTab, "id" | "connectionId" | "database" | "catalog" | "schema" | "mode">;
+type ExternalSqlFileTargetConnection = Pick<ConnectionConfig, "db_type">;
+type ExternalSqlFileConnectionLookup = (connectionId: string) => ExternalSqlFileTargetConnection | undefined;
+
 export function unassociatedExternalSqlFileTarget(): ExternalSqlFileTarget {
   return { connectionId: "", database: "", catalog: undefined, schema: undefined };
+}
+
+export function activeTabExternalSqlFileTarget(tabs: readonly ExternalSqlFileTargetTab[], activeTabId: string | null | undefined, getConnection: ExternalSqlFileConnectionLookup): ExternalSqlFileTarget {
+  const activeTab = activeTabId ? tabs.find((tab) => tab.id === activeTabId) : undefined;
+  const connection = activeTab?.connectionId ? getConnection(activeTab.connectionId) : undefined;
+  if (!activeTab || activeTab.mode === "plugin-workbench" || activeTab.mode === "plugin-filesystem" || !connection || !supportsSqlFileExecution(connection.db_type)) return unassociatedExternalSqlFileTarget();
+  return {
+    connectionId: activeTab.connectionId,
+    database: activeTab.database,
+    catalog: activeTab.catalog,
+    schema: activeTab.schema,
+  };
 }
 
 interface StoredExternalSqlFileTarget extends ExternalSqlFileTarget {
@@ -83,4 +101,8 @@ export function resolveExternalSqlFileTarget(path: string, connectionExists: (co
   const saved = loadExternalSqlFileTargets().find((item) => item.path === normalizedPath);
   if (!saved || !connectionExists(saved.connectionId)) return fallback;
   return { connectionId: saved.connectionId, database: saved.database, catalog: saved.catalog, schema: saved.schema };
+}
+
+export function resolveExternalSqlFileTargetForActiveTab(path: string, tabs: readonly ExternalSqlFileTargetTab[], activeTabId: string | null | undefined, getConnection: ExternalSqlFileConnectionLookup): ExternalSqlFileTarget {
+  return resolveExternalSqlFileTarget(path, (connectionId) => !!getConnection(connectionId), activeTabExternalSqlFileTarget(tabs, activeTabId, getConnection));
 }

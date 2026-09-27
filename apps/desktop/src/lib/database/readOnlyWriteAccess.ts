@@ -1,6 +1,7 @@
 import { getActivePinia } from "pinia";
 import { useReadOnlyUnlockStore, type WriteUnlockDurationSecs } from "@/stores/readOnlyUnlockStore";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
+import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
 import { classifySqlRisk, isSqlRiskMutation } from "@/lib/sql/sqlRisk";
 import type { DatabaseType } from "@/types/database";
 
@@ -39,7 +40,7 @@ export function sqlLooksLikeMutation(sql: string | undefined, databaseType?: Dat
   if (databaseType === "redis") {
     return sql.split("\n").some((line) => {
       const command = line.trim();
-      return command.length > 0 && classifyRedisCommandSafety(command) !== "allowed";
+      return command.length > 0 && !isRedisCommentLine(command) && classifyRedisCommandSafety(command) !== "allowed";
     });
   }
   return isSqlRiskMutation(classifySqlRisk(sql, { dialect: databaseType }).risk);

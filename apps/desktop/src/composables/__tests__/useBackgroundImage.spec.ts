@@ -86,6 +86,45 @@ describe("useBackgroundImage", () => {
     }
   });
 
+  it("keeps an opaque companion for inverted text while the surfaces turn translucent", async () => {
+    const theme = useTheme();
+    const originalMode = theme.themeMode.value;
+    const originalPalette = theme.themePalette.value;
+    const originalColors = { ...theme.customUiColors.value };
+    theme.setThemeMode("light");
+    theme.setCustomUiColors({ ...originalColors, background: "#123456" });
+    theme.setThemePalette("custom");
+    const createObjectURL = vi.fn(() => "blob:bg-solid");
+    Object.defineProperty(URL, "createObjectURL", { value: createObjectURL, configurable: true, writable: true });
+    readBackgroundImageMock.mockResolvedValue("aGVsbG8=");
+    try {
+      const settings = settingsWith({ filePath: "/data/background-image.png", opacity: 0.3 });
+      const bg = useBackgroundImage(settings);
+      await vi.waitFor(() => expect(bg.active.value).toBe(true));
+      await vi.waitFor(() => {
+        // The surface itself goes translucent so the wallpaper shows through...
+        expect(document.documentElement.style.getPropertyValue("--background")).toBe("rgb(18 52 86 / 0.3)");
+        // ...but the color used as text on `bg-foreground` widgets stays opaque,
+        // otherwise tooltip/toast glyphs wash out (#8678).
+        expect(document.documentElement.style.getPropertyValue("--background-solid")).toBe("rgb(18 52 86)");
+      });
+      // No other surface grows a companion: only the inverted-text vars do.
+      expect(document.documentElement.style.getPropertyValue("--sidebar-solid")).toBe("");
+
+      settings.editorSettings.backgroundImage = { ...defaultBackgroundImageSettings() };
+      await vi.waitFor(() => expect(bg.active.value).toBe(false));
+      await vi.waitFor(() => {
+        expect(document.documentElement.style.getPropertyValue("--background-solid")).toBe("");
+      });
+      // Inactive: the custom palette's own inline value is restored untouched.
+      expect(document.documentElement.style.getPropertyValue("--background")).toBe("rgb(18 52 86)");
+    } finally {
+      theme.setCustomUiColors(originalColors);
+      theme.setThemeMode(originalMode);
+      theme.setThemePalette(originalPalette);
+    }
+  });
+
   it("re-emits custom palette inline surface colors when the wallpaper is inactive", async () => {
     const theme = useTheme();
     const originalMode = theme.themeMode.value;

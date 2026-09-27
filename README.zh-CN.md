@@ -1,14 +1,15 @@
 <div align="center">
-  <p style="font-size: 18px; white-space: nowrap;"><strong>25 MB 驾驭 90+ 种数据库。桌面端、Docker、CLI、内置 AI 助手与 MCP Server。</strong></p>
+  <p style="font-size: 18px; white-space: nowrap;"><strong>25 MB 驾驭 100+ 种数据库。桌面端、Docker、CLI、内置 AI 助手与 MCP Server。</strong></p>
 
   <p>
-    <img src="https://dl.dbxio.com/assets/readme-hero-20260820.png" alt="DBX 截图" width="820" />
+    <img src="https://dl.dbxio.com/assets/readme-hero-20260925.png" alt="DBX 截图" width="820" />
   </p>
 
   <p>
     <a href="https://github.com/t8y2/dbx/releases"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fshieldcn.dev%2Fgithub%2Fdownloads%2Ft8y2%2Fdbx%2Fshields.json&amp;style=for-the-badge" /></a>
     <a href="https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322"><img src="https://img.shields.io/badge/QQ_群-1087880322-EB1923?style=for-the-badge&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGhlaWdodD0iODYiIHdpZHRoPSI4NiIgdmlld0JveD0iMCAwIDEyMCAxNDUiPjxwYXRoIGZpbGw9IiNmYWFiMDciIGQ9Ik02MC41MDMgMTQyLjIzN2MtMTIuNTMzIDAtMjQuMDM4LTQuMTk1LTMxLjQ0NS0xMC40Ni0zLjc2MiAxLjEyNC04LjU3NCAyLjkzMi0xMS42MSA1LjE3NS0yLjYgMS45MTgtMi4yNzUgMy44NzQtMS44MDcgNC42NjMgMi4wNTYgMy40NyAzNS4yNzMgMi4yMTYgNDQuODYyIDEuMTM2em0wIDBjMTIuNTM1IDAgMjQuMDM5LTQuMTk1IDMxLjQ0Ny0xMC40NiAzLjc2IDEuMTI0IDguNTczIDIuOTMyIDExLjYxIDUuMTc1IDIuNTk4IDEuOTE4IDIuMjc0IDMuODc0IDEuODA1IDQuNjYzLTIuMDU2IDMuNDctMzUuMjcyIDIuMjE2LTQ0Ljg2MiAxLjEzNnptMCAwIi8+PHBhdGggZD0iTTYwLjU3NiA2Ny4xMTljMjAuNjk4LS4xNCAzNy4yODYtNC4xNDcgNDIuOTA3LTUuNjgzIDEuMzQtLjM2NyAyLjA1Ni0xLjAyNCAyLjA1Ni0xLjAyNC4wMDUtLjE4OS4wODUtMy4zNy4wODUtNS4wMUMxMDUuNjI0IDI3Ljc2OCA5Mi41OC4wMDEgNjAuNSAwIDI4LjQyLjAwMSAxNS4zNzUgMjcuNzY5IDE1LjM3NSA1NS40MDFjMCAxLjY0Mi4wOCA0LjgyMi4wODYgNS4wMSAwIDAgLjU4My42MTUgMS42NS45MTMgNS4xOSAxLjQ0NCAyMi4wOSA1LjY1IDQzLjMxMiA1Ljc5NXptNTYuMjQ1IDIzLjAyYy0xLjI4My00LjEyOS0zLjAzNC04Ljk0NC00LjgwOC0xMy41NjggMCAwLTEuMDItLjEyNi0xLjUzNy4wMjMtMTUuOTEzIDQuNjIzLTM1LjIwMiA3LjU3LTQ5LjkgNy4zOTJoLS4xNTNjLTE0LjYxNi4xNzUtMzMuNzc0LTIuNzM3LTQ5LjYzNC03LjMxNS0uNjA2LS4xNzUtMS44MDItLjEtMS44MDItLjEtMS43NzQgNC42MjQtMy41MjUgOS40NC00LjgwOCAxMy41NjgtNi4xMTkgMTkuNjktNC4xMzYgMjcuODM4LTIuNjI3IDI4LjAyIDMuMjM5LjM5MiAxMi42MDYtMTQuODIxIDEyLjYwNi0xNC44MjEgMCAxNS40NTkgMTMuOTU3IDM5LjE5NSA0NS45MTggMzkuNDEzaC44NDhjMzEuOTYtLjIxOCA0NS45MTctMjMuOTU0IDQ0LjkxNy0zOS40MTMgMCAwIDkuMzY4IDE1LjIxMyAxMi42MDcgMTQuODIyIDEuNTA4LS4xODMgMy40OTEtOC4zMzItMi42MjctMjguMDIxIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTQ5LjA4NSA0MC44MjRjLTQuMzUyLjE5Ny04LjA3LTQuNzYtOC4zMDQtMTEuMDYzLS4yMzYtNi4zMDUgMy4wOTgtMTEuNTc2IDcuNDUtMTEuNzczIDQuMzQ3LS4xOTUgOC4wNjQgNC43NiA4LjMgMTEuMDY1LjIzOCA2LjMwNi0zLjA5NyAxMS41NzctNy40NDYgMTEuNzcxbTMxLjEzMy0xMS4wNjNjLS4yMzMgNi4zMDItMy45NTEgMTEuMjYtOC4zMDMgMTEuMDYzLTQuMzUtLjE5NS03LjY4NC01LjQ2NS03LjQ0Ni0xMS43Ny4yMzYtNi4zMDUgMy45NTItMTEuMjYgOC4zLTExLjA2NiA0LjM1Mi4xOTcgNy42ODYgNS40NjggNy40NDkgMTEuNzczIi8+PHBhdGggZmlsbD0iI2ZhYWIwNyIgZD0iTTg3Ljk1MiA0OS43MjVDODYuNzkgNDcuMTUgNzUuMDc3IDQ0LjI4IDYwLjU3OCA0NC4yOGgtLjE1NmMtMTQuNSAwLTI2LjIxMiAyLjg3LTI3LjM3NSA1LjQ0NmEuODYzLjg2MyAwIDAwLS4wODUuMzY3Ljg4Ljg4IDAgMDAuMTYuNDk2Yy45OCAxLjQyNyAxMy45ODUgOC40ODcgMjcuMyA4LjQ4N2guMTU2YzEzLjMxNCAwIDI2LjMxOS03LjA1OCAyNy4yOTktOC40ODdhLjg3My44NzMgMCAwMC4xNi0uNDk4Ljg1Ni44NTYgMCAwMC0uMDg1LS4zNjUiLz48cGF0aCBkPSJNNTQuNDM0IDI5Ljg1NGMuMTk5IDIuNDktMS4xNjcgNC43MDItMy4wNDYgNC45NDMtMS44ODMuMjQyLTMuNTY4LTEuNTgtMy43NjgtNC4wNy0uMTk3LTIuNDkyIDEuMTY3LTQuNzA0IDMuMDQzLTQuOTQ0IDEuODg2LS4yNDQgMy41NzQgMS41OCAzLjc3MSA0LjA3bTExLjk1Ni44MzNjLjM4NS0uNjg5IDMuMDA0LTQuMzEyIDguNDI3LTIuOTkzIDEuNDI1LjM0NyAyLjA4NC44NTcgMi4yMjMgMS4wNTcuMjA1LjI5Ni4yNjIuNzE4LjA1MyAxLjI4Ni0uNDEyIDEuMTI2LTEuMjYzIDEuMDk1LTEuNzM0Ljg3NS0uMzA1LS4xNDItNC4wODItMi42Ni03LjU2MiAxLjA5Ny0uMjQuMjU3LS42NjguMzQ2LTEuMDczLjA0LS40MDctLjMwOC0uNTc0LS45My0uMzM0LTEuMzYyIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTYwLjU3NiA4My4wOGgtLjE1M2MtOS45OTYuMTItMjIuMTE2LTEuMjA0LTMzLjg1NC0zLjUxOC0xLjAwNCA1LjgxOC0xLjYxIDEzLjEzMi0xLjA5IDIxLjg1MyAxLjMxNiAyMi4wNDMgMTQuNDA3IDM1LjkgMzQuNjE0IDM2LjFoLjgyYzIwLjIwOC0uMiAzMy4yOTgtMTQuMDU3IDM0LjYxNi0zNi4xLjUyLTguNzIzLS4wODctMTYuMDM1LTEuMDkyLTIxLjg1NC0xMS43MzkgMi4zMTUtMjMuODYyIDMuNjQtMzMuODYgMy41MTgiLz48cGF0aCBmaWxsPSIjZWIxOTIzIiBkPSJNMzIuMTAyIDgxLjIzNXYyMS42OTNzOS45MzcgMi4wMDQgMTkuODkzLjYxNlY4My41MzVjLTYuMzA3LS4zNTctMTMuMTA5LTEuMTUyLTE5Ljg5My0yLjMiLz48cGF0aCBmaWxsPSIjZWIxOTIzIiBkPSJNMTA1LjUzOSA2MC40MTJzLTE5LjMzIDYuMTAyLTQ0Ljk2MyA2LjI3NWgtLjE1M2MtMjUuNTkxLS4xNzItNDQuODk2LTYuMjU1LTQ0Ljk2Mi02LjI3NUw4Ljk4NyA3Ni41N2MxNi4xOTMgNC44ODIgMzYuMjYxIDguMDI4IDUxLjQzNiA3Ljg0NWguMTUzYzE1LjE3NS4xODMgMzUuMjQyLTIuOTYzIDUxLjQzNy03Ljg0NXptMCAwIi8+PC9zdmc+" alt="加入 QQ 群" /></a>
-    <a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信交流群-点击加入-07C160?style=for-the-badge&logo=wechat&logoColor=white" alt="加入微信交流群" /></a>
+    <a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-点击加入-07C160?style=for-the-badge&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iIzA3YzE2MCIgZD0iTTguNjkxIDIuMTg4QzMuODkxIDIuMTg4IDAgNS40NzYgMCA5LjUzYzAgMi4yMTIgMS4xNyA0LjIwMyAzLjAwMiA1LjU1YS41OS41OSAwIDAgMSAuMjEzLjY2NWwtLjM5IDEuNDhjLS4wMTkuMDctLjA0OC4xNDEtLjA0OC4yMTNjMCAuMTYzLjEzLjI5NS4yOS4yOTVhLjMzLjMzIDAgMCAwIC4xNjctLjA1NGwxLjkwMy0xLjExNGEuODYuODYgMCAwIDEgLjcxNy0uMDk4YTEwLjIgMTAuMiAwIDAgMCAyLjgzNy40MDNjLjI3NiAwIC41NDMtLjAyNy44MTEtLjA1Yy0uODU3LTIuNTc4LjE1Ny00Ljk3MiAxLjkzMi02LjQ0NmMxLjcwMy0xLjQxNSAzLjg4Mi0xLjk4IDUuODUzLTEuODM4Yy0uNTc2LTMuNTgzLTQuMTk2LTYuMzQ4LTguNTk2LTYuMzQ4TTUuNzg1IDUuOTkxYy42NDIgMCAxLjE2Mi41MjkgMS4xNjIgMS4xOGExLjE3IDEuMTcgMCAwIDEtMS4xNjIgMS4xNzhBMS4xNyAxLjE3IDAgMCAxIDQuNjIzIDcuMTdjMC0uNjUxLjUyLTEuMTggMS4xNjItMS4xOHptNS44MTMgMGMuNjQyIDAgMS4xNjIuNTI5IDEuMTYyIDEuMThhMS4xNyAxLjE3IDAgMCAxLTEuMTYyIDEuMTc4YTEuMTcgMS4xNyAwIDAgMS0xLjE2Mi0xLjE3OGMwLS42NTEuNTItMS4xOCAxLjE2Mi0xLjE4bTUuMzQgMi44NjdjLTEuNzk3LS4wNTItMy43NDYuNTEyLTUuMjggMS43ODZjLTEuNzIgMS40MjgtMi42ODcgMy43Mi0xLjc4IDYuMjJjLjk0MiAyLjQ1MyAzLjY2NiA0LjIyOSA2Ljg4NCA0LjIyOWMuODI2IDAgMS42MjItLjEyIDIuMzYxLS4zMzZhLjcyLjcyIDAgMCAxIC41OTguMDgybDEuNTg0LjkyNmEuMy4zIDAgMCAwIC4xNC4wNDdjLjEzNCAwIC4yNC0uMTExLjI0LS4yNDdjMC0uMDYtLjAyMy0uMTItLjAzOC0uMTc3bC0uMzI3LTEuMjMzYS42LjYgMCAwIDEtLjAyMy0uMTU2YS40OS40OSAwIDAgMSAuMjAxLS4zOThDMjMuMDI0IDE4LjQ4IDI0IDE2LjgyIDI0IDE0Ljk4YzAtMy4yMS0yLjkzMS01LjgzNy02LjY1Ni02LjA4OFY4Ljg5Yy0uMTM1LS4wMS0uMjctLjAyNy0uNDA3LS4wM3ptLTIuNTMgMy4yNzRjLjUzNSAwIC45NjkuNDQuOTY5Ljk4MmEuOTc2Ljk3NiAwIDAgMS0uOTY5Ljk4M2EuOTc2Ljk3NiAwIDAgMS0uOTY5LS45ODNjMC0uNTQyLjQzNC0uOTgyLjk3LS45ODJ6bTQuODQ0IDBjLjUzNSAwIC45NjkuNDQuOTY5Ljk4MmEuOTc2Ljk3NiAwIDAgMS0uOTY5Ljk4M2EuOTc2Ljk3NiAwIDAgMS0uOTY5LS45ODNjMC0uNTQyLjQzNC0uOTgyLjk2OS0uOTgyIi8%2BPC9zdmc%2B" alt="加入微信群" /></a>
+    <a href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=30cvb14f-a9b1-4b12-adb6-2ff6d476a227" target="_blank"><img src="https://img.shields.io/badge/飞书群-点击加入-3370FF?style=for-the-badge&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjE2NCAyMDQgNzYyIDYxNyI%2BPHBhdGggZmlsbD0iIzAwRDZCOSIgZD0iTTU1OS45MTUgNTMwLjQ1M2MtNDYuNTA3LTExMS43ODYtMTk0LjU2LTI0OC40NjktMjYyLjgwNi0zMDIuODI2aDMzMy43ODJjNDcuMTQ2IDE2LjI5OCA4Ny42MTYgMTM0LjY3NyAxMDEuOTczIDE5MS44MDgtMzUuNDk5IDMxLjIxLTExOS43ODcgOTcuMTA5LTE3Mi45NSAxMTEuMDE4eiIvPjxwYXRoIGZpbGw9IiMxMzNDOUEiIGQ9Ik02MzIuMDIxIDQ1Mi45OTJjLTQ1LjE4NCA2MC40OC0xMzMuNTQ2IDEyMS45NjMtMTcyLjA1MyAxNDUuMTNsLTIuODggMjQuMjc4IDIzNS45NDcgNjMuNjM3YzMyLjIxMy0yNS45NjIgMTAzLjA2MS04Ny4yOTYgMTI4Ljk2LTEyNC45MjggNC4zOTQtNi4zNzggNjguOTkyLTEzNS45MTQgNzkuNDAyLTE1MS41NTItMTguMjQtMTEuMzA2LTQyLjU2LTE4LjI2MS0xMDQuMjc3LTIxLjczOC04Mi41Ni00LjMzMS0xMTYuNDM3IDIwLjg2NC0xNjUuMDk5IDY1LjE3M3oiLz48cGF0aCBmaWxsPSIjMzM3MEZGIiBkPSJNMTg3Ljg4MyA3MTIuOTE3VjM5My41MTVDMzk3LjU2OCA1OTkuODA4IDU1OC4zMTUgNjQyLjY4OCA2NDEuMDQ1IDY1My43NmMxMjQuNDU5IDUuNDE5IDE1NC42NjctNzMuMDQ1IDE4MS4xNDItOTMuMDk5LTk3LjAyNCAxNTMuMTc0LTIyNC42NCAyMzUuNzM0LTM4NC43NDcgMjM1LjczNC0xMjguMTA3IDAtMjE5Ljc1NS01NS42NTktMjQ5LjU1Ny04My40Nzh6Ii8%2BPC9zdmc%2B" alt="加入飞书群" /></a>
     <a href="https://discord.gg/W7NyVDRt6a"><img src="https://dcbadge.limes.pink/api/server/W7NyVDRt6a" alt="加入 Discord" /></a>
   </p>
   <p>
@@ -102,13 +103,13 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
-        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">
+        <img src="docs/public/sponsors/aicodemirror-card.png" alt="AICodeMirror" width="175" />
       </a>
     </td>
     <td>
-      UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
-      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
+      感谢 AICodeMirror 赞助了本项目！AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级高并发、极速开票、7×24 专属技术支持。Claude Code / Codex / Gemini 官方渠道低至 3.8 / 0.2 / 0.9 折，充值更有折上折！AICodeMirror 为 DBX 用户提供了特别福利，通过此链接注册的用户，可享受首充 8 折，企业客户最高可享 7.5 折！
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">访问 AICodeMirror</a>
     </td>
   </tr>
   <tr>
@@ -120,6 +121,17 @@
     <td>
       HuaLongAI（华龙算力）是面向重度 AI 开发者的模型 API 中转服务商，主营 Codex 与 Claude 系列模型，100% 官方源直供、不掺假；计费透明，Token 级账单可逐笔核验，支持企业合同与发票。
       <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">访问 HuaLongAI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
+        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      </a>
+    </td>
+    <td>
+      UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
     </td>
   </tr>
   <tr>
@@ -196,11 +208,21 @@
       <p>macOS、Windows、Linux 原生应用。通过 Docker 自托管供团队访问。Web 版本适配纯浏览器环境。同样的功能，同样的连接配置。</p>
     </td>
   </tr>
+  <tr>
+    <td>
+      <h3>📨 不止数据库</h3>
+      <p>消息队列与中间件同样是一等公民：Kafka、RocketMQ、RabbitMQ、Pulsar、MQTT 控制台，外加 Nacos、Consul、ZooKeeper、etcd。在数据库旁边直接查看主题与消息，无需再开一个工具。</p>
+    </td>
+    <td>
+      <h3>🧩 插件生态</h3>
+      <p>从内置商店安装经过签名校验的沙箱插件扩展 DBX——S3、Kubernetes、LDAP 等。也可以用 Go / TypeScript SDK 开发自己的插件。</p>
+    </td>
+  </tr>
 </table>
 
 ## 功能特性
 
-### 90+ 种数据库，一个工具搞定
+### 100+ 种数据库，一个工具搞定
 
 MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Meilisearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingbaseES、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB、Dolt 等数据库都能直接连接。Agent 配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Cloud Spanner、Kylin、SunDB、JDBCX 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、Consul KV、IRIS 等。全部装进约 25 MB 的应用里，不内嵌 Chromium。
 
@@ -241,6 +263,18 @@ CodeMirror 6 语法高亮、元数据感知自动补全、`Cmd+Enter` 执行、�
 
 - **Redis** — 模式匹配搜索、批量键操作、命令执行器、TTL 编辑，全数据类型支持（String、Hash、List、Set、ZSet、Stream）
 - **MongoDB** — 文档增删改查、分页浏览，支持 Atlas 和副本集 URL 直连
+
+### 消息队列与中间件控制台
+
+- **Kafka / RocketMQ / RabbitMQ / Pulsar** — 主题、消费组、消息浏览 / 查询 / 追踪、Broker 监控、权限与策略
+- **MQTT** — 主题树导航、订阅与发布
+- **Nacos / Consul / ZooKeeper / etcd** — 服务发现、KV / 配置浏览、健康状态与 ACL
+
+### 插件系统
+
+- **为扩展而生** — 新的连接类型与工具以插件形式接入：S3 浏览、Kubernetes、LDAP 等，内置商店一键安装
+- **签名与沙箱** — 插件包安装前签名校验，插件 UI 运行在沙箱中并拥有独立 sidecar 进程
+- **开发你的插件** — Go / TypeScript SDK，`npx @dbx-app/plugin-cli` 一行起步，通过 [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) 发布到商店
 
 ### 安全与连接
 
@@ -299,9 +333,12 @@ DBX 也提供独立 CLI 包，适合终端、脚本和 Codex 工作流：
 npm install -g @dbx-app/cli
 # 或通过 Homebrew
 brew tap t8y2/tap && brew install dbx-cli
+dbx agent setup
 dbx connections list --json
 dbx query local "select 1" --json
 ```
+
+CLI 已内置官方 DBX Agent Skill；`dbx agent setup` 会离线安装或更新到 `~/.agents/skills/dbx`，让支持 Shell 的 AI Agent 知道如何安全调用 DBX CLI。
 
 详见 [MCP Server 说明](packages/mcp-server/README.md) 和 [CLI 说明](packages/cli/README.md)。
 
@@ -349,10 +386,15 @@ flatpak install flatpark com.dbxio.dbx
 
 ## 自托管 (Docker)
 
+关闭桌面应用或浏览器后继续定时备份，参见[后台数据库备份](docs/background-database-backups.md)，其中包含 Windows、macOS、Linux 自启动及容器备份卷的配置说明。
+
 DBX 提供 Web 版本，可通过 Docker 部署。示例使用 `latest` 标签以拉取当前发布版本。
 
 ```bash
-docker run -d --pull=always --name dbx -p 4224:4224 -v dbx-data:/app/data t8y2/dbx:latest
+# 默认将密钥保存在持久化的 /app/data 数据卷中。
+docker run -d --pull=always --name dbx -p 4224:4224 \
+  -v dbx-data:/app/data \
+  t8y2/dbx:latest
 ```
 
 这里使用跨平台的 `dbx-data` 命名卷。中国大陆用户可选用 CNB 镜像
@@ -380,7 +422,20 @@ services:
 
 volumes:
   dbx-data:
+
 ```
+
+连接、插件、AI 和 Tunnel 凭据写入 `dbx.db` 前会加密。桌面端使用本机凭据存储（macOS Keychain、Windows Credential Manager 或 Linux Secret Service）。Web/Docker 与直接运行 `dbx-web` 默认使用同一套数据目录托管密钥：`${DBX_DATA_DIR}/.dbx/secret.key`。只有在开始迁移或第一次写入敏感字段时才创建密钥；普通 Docker 部署只需持久化 `/app/data`，并且必须将 `.dbx/secret.key` 与 `dbx.db` 一起备份。该密钥不能防护整个数据卷被复制或泄露。
+
+生产环境可以使用 Docker/Kubernetes Secret 覆盖托管策略：设置 `DBX_SECRET_KEY_FILE`，或由密钥管理系统提供 `DBX_SECRET_KEY`。显式密钥优先，已有密文使用期间不能轮换。密钥不可用时，业务 API 保持阻塞，浏览器显示数据安全升级页面。直接运行二进制时设置 `DBX_DATA_DIR=/var/lib/dbx`，即可使用 `/var/lib/dbx/.dbx/secret.key`。
+
+升级包含历史明文凭据的版本时，桌面端和 Web 会在进入主界面前显示 **数据安全升级向导**。点击 **开始迁移** 后，软件会创建权限受限的备份，迁移旧数据库和 JSON 凭据，并验证密文可读取。失败时保留原始数据和备份，根据向导提示修复后点击 **重试**。成功页面会显示备份路径。确认连接可用后，可点击 **删除迁移备份**，二次确认后删除迁移备份目录和本次迁移生成的旧 JSON `.bak` 文件；其他备份不会删除。没有历史数据的新用户检查后直接进入主界面。
+
+本机 CLI 和独立 MCP 可以复用同一设备已有的平台凭据存储，也可以读取显式配置的 `DBX_SECRET_KEY_FILE` 或 `DBX_SECRET_KEY`。它们不会在启动检查时创建密钥，也不会自动迁移历史数据。遇到 `DATA_MIGRATION_REQUIRED` 时，请先使用桌面端或 Web 打开同一数据目录，完成升级向导。没有平台凭据存储的无界面主机应配置持久化密钥。
+
+跨设备导出使用独立的同步口令，导出包不包含本地存储密钥。直接复制 `dbx.db` 不能作为跨平台同步方式，因为本机平台密钥不会随数据库移动。请使用加密导出/导入，让目标设备使用自己的本地密钥保存凭据。
+
+完整的设计、迁移状态、实现模块、排障和测试说明请参阅：[DBX 数据安全升级与迁移](docs/data-security-migration.zh-CN.md)。
 
 如需通过 nginx 等反向代理发布到 `/dbx` 这类子路径下，设置运行时上下文路径，并将同一前缀代理到容器：
 
@@ -506,7 +561,8 @@ make package
 
 <a href="https://discord.gg/W7NyVDRt6a" target="_blank"><img src="https://img.shields.io/badge/Discord-加入-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
 <a href="https://qm.qq.com/q/1087880322" target="_blank"><img src="https://img.shields.io/badge/QQ%20群-1087880322-EB1923?logo=tencentqq&logoColor=white" alt="QQ 群" /></a>
-<a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信交流群-点击加入-07C160?logo=wechat&logoColor=white" alt="微信交流群" /></a>
+<a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-点击加入-07C160?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iIzA3YzE2MCIgZD0iTTguNjkxIDIuMTg4QzMuODkxIDIuMTg4IDAgNS40NzYgMCA5LjUzYzAgMi4yMTIgMS4xNyA0LjIwMyAzLjAwMiA1LjU1YS41OS41OSAwIDAgMSAuMjEzLjY2NWwtLjM5IDEuNDhjLS4wMTkuMDctLjA0OC4xNDEtLjA0OC4yMTNjMCAuMTYzLjEzLjI5NS4yOS4yOTVhLjMzLjMzIDAgMCAwIC4xNjctLjA1NGwxLjkwMy0xLjExNGEuODYuODYgMCAwIDEgLjcxNy0uMDk4YTEwLjIgMTAuMiAwIDAgMCAyLjgzNy40MDNjLjI3NiAwIC41NDMtLjAyNy44MTEtLjA1Yy0uODU3LTIuNTc4LjE1Ny00Ljk3MiAxLjkzMi02LjQ0NmMxLjcwMy0xLjQxNSAzLjg4Mi0xLjk4IDUuODUzLTEuODM4Yy0uNTc2LTMuNTgzLTQuMTk2LTYuMzQ4LTguNTk2LTYuMzQ4TTUuNzg1IDUuOTkxYy42NDIgMCAxLjE2Mi41MjkgMS4xNjIgMS4xOGExLjE3IDEuMTcgMCAwIDEtMS4xNjIgMS4xNzhBMS4xNyAxLjE3IDAgMCAxIDQuNjIzIDcuMTdjMC0uNjUxLjUyLTEuMTggMS4xNjItMS4xOHptNS44MTMgMGMuNjQyIDAgMS4xNjIuNTI5IDEuMTYyIDEuMThhMS4xNyAxLjE3IDAgMCAxLTEuMTYyIDEuMTc4YTEuMTcgMS4xNyAwIDAgMS0xLjE2Mi0xLjE3OGMwLS42NTEuNTItMS4xOCAxLjE2Mi0xLjE4bTUuMzQgMi44NjdjLTEuNzk3LS4wNTItMy43NDYuNTEyLTUuMjggMS43ODZjLTEuNzIgMS40MjgtMi42ODcgMy43Mi0xLjc4IDYuMjJjLjk0MiAyLjQ1MyAzLjY2NiA0LjIyOSA2Ljg4NCA0LjIyOWMuODI2IDAgMS42MjItLjEyIDIuMzYxLS4zMzZhLjcyLjcyIDAgMCAxIC41OTguMDgybDEuNTg0LjkyNmEuMy4zIDAgMCAwIC4xNC4wNDdjLjEzNCAwIC4yNC0uMTExLjI0LS4yNDdjMC0uMDYtLjAyMy0uMTItLjAzOC0uMTc3bC0uMzI3LTEuMjMzYS42LjYgMCAwIDEtLjAyMy0uMTU2YS40OS40OSAwIDAgMSAuMjAxLS4zOThDMjMuMDI0IDE4LjQ4IDI0IDE2LjgyIDI0IDE0Ljk4YzAtMy4yMS0yLjkzMS01LjgzNy02LjY1Ni02LjA4OFY4Ljg5Yy0uMTM1LS4wMS0uMjctLjAyNy0uNDA3LS4wM3ptLTIuNTMgMy4yNzRjLjUzNSAwIC45NjkuNDQuOTY5Ljk4MmEuOTc2Ljk3NiAwIDAgMS0uOTY5Ljk4M2EuOTc2Ljk3NiAwIDAgMS0uOTY5LS45ODNjMC0uNTQyLjQzNC0uOTgyLjk3LS45ODJ6bTQuODQ0IDBjLjUzNSAwIC45NjkuNDQuOTY5Ljk4MmEuOTc2Ljk3NiAwIDAgMS0uOTY5Ljk4M2EuOTc2Ljk3NiAwIDAgMS0uOTY5LS45ODNjMC0uNTQyLjQzNC0uOTgyLjk2OS0uOTgyIi8%2BPC9zdmc%2B" alt="微信群" /></a><a href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=30cvb14f-a9b1-4b12-adb6-2ff6d476a227" target="_blank"><img src="https://img.shields.io/badge/飞书群-点击加入-3370FF?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjE2NCAyMDQgNzYyIDYxNyI%2BPHBhdGggZmlsbD0iIzAwRDZCOSIgZD0iTTU1OS45MTUgNTMwLjQ1M2MtNDYuNTA3LTExMS43ODYtMTk0LjU2LTI0OC40NjktMjYyLjgwNi0zMDIuODI2aDMzMy43ODJjNDcuMTQ2IDE2LjI5OCA4Ny42MTYgMTM0LjY3NyAxMDEuOTczIDE5MS44MDgtMzUuNDk5IDMxLjIxLTExOS43ODcgOTcuMTA5LTE3Mi45NSAxMTEuMDE4eiIvPjxwYXRoIGZpbGw9IiMxMzNDOUEiIGQ9Ik02MzIuMDIxIDQ1Mi45OTJjLTQ1LjE4NCA2MC40OC0xMzMuNTQ2IDEyMS45NjMtMTcyLjA1MyAxNDUuMTNsLTIuODggMjQuMjc4IDIzNS45NDcgNjMuNjM3YzMyLjIxMy0yNS45NjIgMTAzLjA2MS04Ny4yOTYgMTI4Ljk2LTEyNC45MjggNC4zOTQtNi4zNzggNjguOTkyLTEzNS45MTQgNzkuNDAyLTE1MS41NTItMTguMjQtMTEuMzA2LTQyLjU2LTE4LjI2MS0xMDQuMjc3LTIxLjczOC04Mi41Ni00LjMzMS0xMTYuNDM3IDIwLjg2NC0xNjUuMDk5IDY1LjE3M3oiLz48cGF0aCBmaWxsPSIjMzM3MEZGIiBkPSJNMTg3Ljg4MyA3MTIuOTE3VjM5My41MTVDMzk3LjU2OCA1OTkuODA4IDU1OC4zMTUgNjQyLjY4OCA2NDEuMDQ1IDY1My43NmMxMjQuNDU5IDUuNDE5IDE1NC42NjctNzMuMDQ1IDE4MS4xNDItOTMuMDk5LTk3LjAyNCAxNTMuMTc0LTIyNC42NCAyMzUuNzM0LTM4NC43NDcgMjM1LjczNC0xMjguMTA3IDAtMjE5Ljc1NS01NS42NTktMjQ5LjU1Ny04My40Nzh6Ii8%2BPC9zdmc%2B" alt="飞书群" /></a>
+
 [![LINUX DO](https://img.shields.io/badge/LINUX%20DO-社区-blue)](https://linux.do)
 [![1Panel](https://img.shields.io/badge/1Panel-合作伙伴-005EEB?logo=1panel&logoColor=white)](https://1panel.cn)
 
@@ -537,12 +593,12 @@ DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础�
 
 <details>
 <summary><strong>DBX 和 DBeaver / TablePlus / Beekeeper Studio 有什么区别？</strong></summary>
-DBX 仅 25 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 90+ 数据库、桌面端、Docker 和 Web。
+DBX 仅 25 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 100+ 数据库、桌面端、Docker 和 Web。
 </details>
 
 <details>
 <summary><strong>支持哪些数据库？</strong></summary>
-MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Meilisearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingbaseES、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等。Agent 配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Cloud Spanner、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、Consul KV、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Pulsar、Kafka、RocketMQ）。
+MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Meilisearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingbaseES、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等。Agent 配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Cloud Spanner、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、Consul KV、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Kafka、RocketMQ、RabbitMQ、Pulsar、MQTT）。
 </details>
 
 <details>

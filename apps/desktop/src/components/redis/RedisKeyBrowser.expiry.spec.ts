@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   redisCheckJsonModule: vi.fn(),
   redisDeleteKey: vi.fn(),
   redisDeleteKeys: vi.fn(),
+  redisDeleteKeysByPattern: vi.fn(),
   redisExecuteCommand: vi.fn(),
   saveHistory: vi.fn(),
   canBuildRedisFuzzyTree: vi.fn((loadedKeyCount: number) => loadedKeyCount <= 200_000),
@@ -65,6 +66,7 @@ vi.mock("@/lib/backend/api", () => ({
   redisCheckJsonModule: mocks.redisCheckJsonModule,
   redisDeleteKey: mocks.redisDeleteKey,
   redisDeleteKeys: mocks.redisDeleteKeys,
+  redisDeleteKeysByPattern: mocks.redisDeleteKeysByPattern,
   redisExecuteCommand: mocks.redisExecuteCommand,
   saveHistory: mocks.saveHistory,
 }));
@@ -500,6 +502,7 @@ function resetApiMocks() {
   mocks.redisCheckJsonModule.mockResolvedValue(true);
   mocks.redisDeleteKey.mockResolvedValue(undefined);
   mocks.redisDeleteKeys.mockResolvedValue(0);
+  mocks.redisDeleteKeysByPattern.mockResolvedValue(0);
   mocks.redisExecuteCommand.mockResolvedValue({ value: "OK" });
   mocks.saveHistory.mockResolvedValue(undefined);
   mocks.listRedisCompletionCommandDocs.mockResolvedValue(completionCommands);
@@ -523,6 +526,8 @@ function mountBrowser(withDeleteDetails = false) {
     en: {
       redis: {
         deleteGroupDetails: withDeleteDetails ? "{target}\n{count} keys" : "redis.deleteGroupDetails",
+        deleteGroupSubtreeDetails: "{target}\nall {count}",
+        deleteGroupSubtreeSuccess: "deleted {count}",
         keys: "{count} keys",
         batchExpirySelected: "redis.batchExpirySelected",
         batchExpirySuccess: "applied {count}",
@@ -633,6 +638,11 @@ function groupRow(label: string): HTMLElement {
   const row = labelElement?.closest<HTMLElement>(".group");
   expect(row, label).toBeDefined();
   return row!;
+}
+
+function groupRowOrUndefined(label: string): HTMLElement | undefined {
+  const labelElement = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).find((element) => element.textContent === label);
+  return labelElement?.closest<HTMLElement>(".group") ?? undefined;
 }
 
 function redisCheckboxes(): HTMLElement[] {
@@ -1578,6 +1588,37 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(document.body.textContent).not.toContain("session:current");
   });
 
+  it("deletes every key under a group prefix instead of only the loaded rows (#10164)", async () => {
+    const loaded = [
+      { key_display: "MCP:AAA:1", key_raw: btoa("MCP:AAA:1"), key_type: "string", ttl: -1 },
+      { key_display: "MCP:AAA:2", key_raw: btoa("MCP:AAA:2"), key_type: "string", ttl: -1 },
+      { key_display: "OTHER:key1", key_raw: btoa("OTHER:key1"), key_type: "string", ttl: -1 },
+    ];
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: loaded, total_keys: 3002 });
+    mocks.redisDeleteKeysByPattern.mockResolvedValue(3001);
+    mountBrowser();
+    await settle();
+
+    const groupDelete = groupRow("MCP").querySelector<HTMLButtonElement>('button[title="redis.deleteGroup"]');
+    expect(groupDelete, "group delete button").not.toBeNull();
+    groupDelete!.click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
+    expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("MCP");
+    requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
+    await settle();
+
+    // 整个前缀在服务端删除（未加载的子键也在内），不再按已加载行逐个删
+    expect(mocks.redisDeleteKeysByPattern).toHaveBeenCalledWith("connection", 0, "MCP:*");
+    expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
+    // 整个 MCP 分组消失，前缀之外的分组保留
+    expect(groupRowOrUndefined("MCP")).toBeUndefined();
+    expect(groupRow("OTHER")).toBeDefined();
+    expect(mocks.updateRedisDbKeyStats).toHaveBeenCalledWith("connection", 0, { loaded: 1, totalDelta: -3001 });
+    expect(mocks.toast).toHaveBeenCalledWith("deleted 3001", 3000);
+  });
+
   it("preserves the cursor and finds a sparse fuzzy match after a bounded continuation", async () => {
     mocks.redisScanPageSize = 1_000;
     mountBrowser();
@@ -2107,6 +2148,66 @@ describe("RedisKeyBrowser KeepAlive scan budget (issue #7779)", () => {
 });
 
 describe("RedisKeyBrowser interrupted Fetch All", () => {
+  it("keeps the complete snapshot when a group is opened during preparation", async () => {
+    const initial = { key_display: "group:first", key_raw: btoa("group:first"), key_type: "string", ttl: -1 };
+    const buffered = { key_display: "group:second", key_raw: btoa("group:second"), key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [initial], total_keys: 2 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    const buildStarted = deferred<void>();
+    const releaseBuild = deferred<void>();
+    const buildSnapshot = mocks.buildRedisKeySnapshotCooperatively.getMockImplementation()!;
+    mocks.buildRedisKeySnapshotCooperatively.mockImplementationOnce(async (...args) => {
+      buildStarted.resolve();
+      await releaseBuild.promise;
+      return buildSnapshot(...args);
+    });
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fetchAllKeys");
+    await buildStarted.promise;
+    groupRow("group").click();
+    releaseBuild.resolve();
+    await settle();
+    await vi.waitFor(() => expect(document.body.textContent).not.toContain("redis.stopFetchAll"));
+    await submitKeySearch("group:second");
+
+    expect(document.querySelector(`[data-redis-leaf="${buffered.key_raw}"]`)).not.toBeNull();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain("redis.fetchAllKeys");
+  });
+
+  it("filters a completed Fetch All snapshot while editing a key search", async () => {
+    const unrelated = { key_display: "session:unrelated", key_raw: "c2Vzc2lvbjp1bnJlbGF0ZWQ=", key_type: "string", ttl: -1 };
+    const target = { key_display: "prod:login_fail_count", key_raw: "cHJvZDpsb2dpbl9mYWlsX2NvdW50", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [unrelated], total_keys: 2 } : { cursor: 0, keys: [target], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+
+    clickButtonWithText("redis.fetchAllKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(document.body.textContent).not.toContain("redis.stopFetchAll"));
+    const scanCalls = mocks.redisScanKeysBatch.mock.calls.length;
+
+    await setInput("[data-redis-search-input]", "prod:login_fail_count");
+
+    expect(document.body.textContent).toContain(target.key_display);
+    expect(document.body.textContent).not.toContain(unrelated.key_display);
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+    const input = requiredElement<HTMLInputElement>("[data-redis-search-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+    expect(document.body.textContent).toContain(target.key_display);
+    requiredElement<HTMLButtonElement>("[data-redis-select-all]").click();
+    await settle();
+    expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain("1");
+    expect(document.querySelector("[data-redis-select-all]")).toBeNull();
+
+    await setInput("[data-redis-search-input]", "");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+    expect(mocks.scrollerItems[mocks.scrollerItems.length - 1]).toHaveLength(2);
+  });
+
   it("publishes Fetch All rows through one stable Array facade and explicitly refreshes its viewport", async () => {
     const initial = { key_display: "initial", key_raw: "aW5pdGlhbA==", key_type: "string", ttl: -1 };
     const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };

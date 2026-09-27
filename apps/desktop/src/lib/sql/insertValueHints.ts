@@ -14,9 +14,23 @@ export interface InsertValuesClause {
   database?: string;
   /** Explicit column list, or null when `INSERT INTO t VALUES` has no column list. */
   columns: string[] | null;
-  /** For each VALUES row or SELECT projection list, start offsets of top-level expressions. */
-  rows: number[][];
+  /** For each VALUES row or SELECT projection list, the top-level source expressions. */
+  rows: InsertValueSource[][];
   span: SqlSemanticSpan;
+}
+
+/** One source expression of an INSERT, positioned for its inlay hint. */
+export interface InsertValueSource {
+  /** Document offset where the inlay widget is inserted (before the value expression). */
+  from: number;
+  /**
+   * Explicit alias of a SELECT projection item (`expr AS alias`, `expr alias`), unquoted.
+   *
+   * The positional hint maps a source expression to its target column; when the projection
+   * already names that same column itself, the hint would only duplicate the alias the user
+   * typed, so `buildInsertValueHints` drops it.
+   */
+  alias?: string;
 }
 
 export interface ParseInsertValueHintsOptions {
@@ -115,11 +129,11 @@ function parseColumnList(tokens: readonly SqlSemanticToken[], openIndex: number)
   return { columns, nextIndex: index };
 }
 
-function valueStartsInRow(tokens: readonly SqlSemanticToken[], openIndex: number): { starts: number[]; nextIndex: number } | null {
+function valueStartsInRow(tokens: readonly SqlSemanticToken[], openIndex: number): { starts: InsertValueSource[]; nextIndex: number } | null {
   const open = tokens[openIndex];
   if (!open || open.text !== "(") return null;
   const contentDepth = open.depth + 1;
-  const starts: number[] = [];
+  const starts: InsertValueSource[] = [];
   let expectValue = true;
   let index = openIndex + 1;
 
@@ -130,7 +144,7 @@ function valueStartsInRow(tokens: readonly SqlSemanticToken[], openIndex: number
       return { starts, nextIndex: index + 1 };
     }
     if (expectValue && item.depth === contentDepth) {
-      starts.push(item.span.start);
+      starts.push({ from: item.span.start });
       expectValue = false;
     }
     if (item.text === "," && item.depth === contentDepth) {
@@ -141,8 +155,8 @@ function valueStartsInRow(tokens: readonly SqlSemanticToken[], openIndex: number
   return { starts, nextIndex: index };
 }
 
-function parseValuesRows(tokens: readonly SqlSemanticToken[], valuesIndex: number): number[][] {
-  const rows: number[][] = [];
+function parseValuesRows(tokens: readonly SqlSemanticToken[], valuesIndex: number): InsertValueSource[][] {
+  const rows: InsertValueSource[][] = [];
   let index = valuesIndex + 1;
   while (index < tokens.length) {
     const item = tokens[index];
@@ -205,7 +219,7 @@ function isWildcardProjection(tokens: readonly SqlSemanticToken[], from: number,
   return topLevel.length % 2 === 1 && topLevel.every((item, index) => (index % 2 === 0 ? (index === topLevel.length - 1 ? item.text === "*" : tokenIsIdentifier(item)) : item.text === "."));
 }
 
-function selectProjectionStarts(tokens: readonly SqlSemanticToken[], selectIndex: number): number[] {
+function selectProjectionStarts(tokens: readonly SqlSemanticToken[], selectIndex: number): InsertValueSource[] {
   const select = tokens[selectIndex];
   if (!select) return [];
   const depth = select.depth;
@@ -239,7 +253,7 @@ function selectProjectionStarts(tokens: readonly SqlSemanticToken[], selectIndex
     if (tokens[index]?.depth === depth && tokens[index]?.normalized === "with" && tokens[index + 1]?.depth === depth && tokens[index + 1]?.normalized === "ties") index += 2;
   }
 
-  const starts: number[] = [];
+  const starts: InsertValueSource[] = [];
   let expressionStart = index;
   for (; index < tokens.length; index += 1) {
     const item = tokens[index];
@@ -247,13 +261,35 @@ function selectProjectionStarts(tokens: readonly SqlSemanticToken[], selectIndex
     if (isSelectClauseBoundary(item, depth)) break;
     if (item.text !== "," || item.depth !== depth) continue;
     if (index <= expressionStart || isWildcardProjection(tokens, expressionStart, index, depth)) return [];
-    starts.push(tokens[expressionStart]!.span.start);
+    starts.push(selectProjectionSource(tokens, expressionStart, index, depth));
     expressionStart = index + 1;
   }
 
   if (index <= expressionStart || isWildcardProjection(tokens, expressionStart, index, depth)) return [];
-  starts.push(tokens[expressionStart]!.span.start);
+  starts.push(selectProjectionSource(tokens, expressionStart, index, depth));
   return starts;
+}
+
+/**
+ * Projection source expression start, plus the alias that ends the projection when it has one.
+ * Only the *trailing name* of a projection is an alias, so the token in front of it decides:
+ * `AS` or another identifier (`x total`, `f(x) total`) introduces an alias, while a dotted name
+ * (`t.col`), an operator (`x::text`) or an open expression does not.
+ */
+function selectProjectionSource(tokens: readonly SqlSemanticToken[], from: number, to: number, depth: number): InsertValueSource {
+  const source: InsertValueSource = { from: tokens[from]!.span.start };
+  const alias = selectProjectionAlias(tokens, to, depth);
+  if (alias !== undefined) source.alias = alias;
+  return source;
+}
+
+function selectProjectionAlias(tokens: readonly SqlSemanticToken[], to: number, depth: number): string | undefined {
+  const last = tokens[to - 1];
+  if (!tokenIsIdentifier(last) || last.depth !== depth) return undefined;
+  const previous = tokens[to - 2];
+  if (!previous) return undefined;
+  const introducesAlias = previous.kind === "word" || previous.kind === "quoted_identifier" || previous.text === ")";
+  return introducesAlias ? unquoteSqlSemanticIdentifier(last) : undefined;
 }
 
 function parseInsertClause(tokens: readonly SqlSemanticToken[], span: SqlSemanticSpan): InsertValuesClause | null {
@@ -316,7 +352,7 @@ function shiftClause(clause: InsertValuesClause, offset: number): InsertValuesCl
   return {
     ...clause,
     span: { start: clause.span.start + offset, end: clause.span.end + offset },
-    rows: clause.rows.map((row) => row.map((from) => from + offset)),
+    rows: clause.rows.map((row) => row.map((source) => ({ ...source, from: source.from + offset }))),
   };
 }
 
@@ -450,13 +486,14 @@ function stepLexState(sql: string, index: number, state: LexState, dialectId: st
     }
     return index + 1;
   }
-  if (ch === "(") {
+  // Match tokenizeSqlSemantic: fullwidth （） update nesting the same as ASCII ().
+  if (ch === "(" || ch === "\uFF08") {
     state.depth += 1;
-    return index + 1;
+    return index + ch.length;
   }
-  if (ch === ")") {
+  if (ch === ")" || ch === "\uFF09") {
     state.depth = Math.max(0, state.depth - 1);
-    return index + 1;
+    return index + ch.length;
   }
   return index + 1;
 }
@@ -650,14 +687,52 @@ export function parseInsertValuesClausesInRanges(sql: string, ranges: readonly T
   return clauses;
 }
 
+/**
+ * Split one statement group into its individual INSERT statements.
+ *
+ * Semicolons are optional in several dialects (T-SQL in particular), so a single top-level group
+ * can hold more than one INSERT statement -- `BEGIN TRANSACTION ... INSERT ... INSERT ... COMMIT`
+ * typed in one query window is the everyday case. `parseInsertClause` only ever reads the first
+ * INSERT of the token list it is handed, so passing it the whole group left every later INSERT
+ * without its VALUES/SELECT-to-column mapping (#9966). Splitting at each INSERT keyword keeps the
+ * per-statement parse working for semicolon-less scripts; scripts that do terminate their
+ * statements with `;` still yield one group (and therefore one segment) per statement.
+ *
+ * An `insert` word is only a statement start when the next token is `into`: MySQL/MariaDB also
+ * expose the INSERT(str, pos, len, newstr) string function, and splitting at that call would
+ * truncate its host statement mid-expression (parseInsertClause requires INTO anyway).
+ */
+function splitInsertStatements(tokens: readonly SqlSemanticToken[]): Array<{ span: SqlSemanticSpan; tokens: SqlSemanticToken[] }> {
+  const starts: number[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const item = tokens[index];
+    const next = tokens[index + 1];
+    if (item?.kind === "word" && item.normalized === "insert" && next?.kind === "word" && next.normalized === "into") {
+      starts.push(index);
+    }
+  }
+  const statements: Array<{ span: SqlSemanticSpan; tokens: SqlSemanticToken[] }> = [];
+  for (let position = 0; position < starts.length; position += 1) {
+    const from = starts[position]!;
+    const to = position + 1 < starts.length ? starts[position + 1]! : tokens.length;
+    const statementTokens = tokens.slice(from, to);
+    const first = statementTokens[0]!;
+    const last = statementTokens[statementTokens.length - 1]!;
+    statements.push({ span: { start: first.span.start, end: last.span.end }, tokens: statementTokens });
+  }
+  return statements;
+}
+
 /** Parse all INSERT ... VALUES/SELECT clauses in `sql` (multi-statement aware). Prefer ranged parsing for editors. */
 export function parseInsertValuesClauses(sql: string, dialectId = "mysql"): InsertValuesClause[] {
   if (!sql.trim()) return [];
   const allTokens = tokenizeSqlSemantic(sql, dialectId);
   const clauses: InsertValuesClause[] = [];
-  for (const { span, tokens } of statementTokenGroups(sql, allTokens)) {
-    const clause = parseInsertClause(tokens, span);
-    if (clause) clauses.push(clause);
+  for (const { tokens } of statementTokenGroups(sql, allTokens)) {
+    for (const statement of splitInsertStatements(tokens)) {
+      const clause = parseInsertClause(statement.tokens, statement.span);
+      if (clause) clauses.push(clause);
+    }
   }
   return clauses;
 }
@@ -671,14 +746,21 @@ export function buildInsertValueHints(clauses: readonly InsertValuesClause[], op
     for (const row of clause.rows) {
       const count = Math.min(row.length, columns.length);
       for (let index = 0; index < count; index += 1) {
-        const from = row[index];
+        const source = row[index];
         const column = columns[index];
-        if (from === undefined || !column) continue;
-        hints.push({ from, column });
+        if (source === undefined || !column) continue;
+        // A projection that already ends with the target column name states the mapping by
+        // itself; repeating it as an inlay pill only duplicates the alias the user typed.
+        if (source.alias !== undefined && sameSqlIdentifier(source.alias, column)) continue;
+        hints.push({ from: source.from, column });
       }
     }
   }
   return hints;
+}
+
+function sameSqlIdentifier(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
 }
 
 /** Parse SQL and return insert-value inlay hints. */

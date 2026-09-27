@@ -49,3 +49,10 @@
     animation: none;
   }
 }
+
+/* 隔离编辑器区域与结果集区域的重排作用域，防止大文档重测联动穿透导致卡顿 */
+.sql-editor-groups,
+[data-shared-result-surface] {
+  contain: layout style;
+}
+

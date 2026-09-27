@@ -201,6 +201,9 @@ class PostgresLikeAgentTest {
         String sql = String.join("\n", MetadataSqlFake.statements);
         assertTrue(sql.contains("LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0"), sql);
         assertTrue(sql.contains("pg_catalog.pg_get_indexdef(ix.indexrelid, k.n, true)"), sql);
+        // #9988: a bare COALESCE(name, text) resolves to `name`, so PostgreSQL truncated a
+        // long expression key part to 63 bytes and the rebuilt CREATE INDEX was invalid.
+        assertTrue(sql.contains("COALESCE(a.attname::text, pg_catalog.pg_get_indexdef(ix.indexrelid, k.n, true)) AS column_text"), sql);
         assertTrue(sql.contains("ix.indisunique AND ix.indisvalid"), sql);
         assertTrue(sql.contains("ix.indoption[(k.n - 1)::int]"), sql);
         assertTrue(sql.contains("array_length(ix.indoption, 1) AS nkeyatts"), sql);

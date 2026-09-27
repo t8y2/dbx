@@ -7,6 +7,9 @@ import {
   FIELD_QUERY_OPERATORS,
   PIPELINE_STAGES,
   PUSH_MODIFIERS,
+  BULK_WRITE_OPERATION_FIELDS,
+  BULK_WRITE_OPERATIONS,
+  METHOD_OPTION_KEYS,
   STAGE_OPTION_KEYS,
   TOP_LEVEL_QUERY_OPERATORS,
   UPDATE_OPERATORS,
@@ -46,7 +49,10 @@ export type MongoCompletionMode =
   | "expression"
   | "accumulator"
   | "stage"
-  | "stageOption";
+  | "stageOption"
+  | "methodOption"
+  | "bulkWriteOperation"
+  | "bulkWriteField";
 
 export interface MongoCompletionField {
   name: string;
@@ -74,6 +80,10 @@ export interface MongoCompletionContext {
   collection?: string;
   /** Enclosing aggregation stage (`$lookup`, `$group`, …), when inside one. */
   stage?: string;
+  /** Collection method whose options object the cursor sits in. */
+  method?: string;
+  /** bulkWrite operation (`updateOne`, `deleteMany`, …) whose body the cursor sits in. */
+  bulkWriteOperation?: string;
 }
 
 export interface MongoCompletionInput {
@@ -87,11 +97,14 @@ const COLLECTION_METHODS = [
   { label: "aggregate", detail: "Run an aggregation pipeline", apply: "aggregate([])" },
   { label: "countDocuments", detail: "Count matching documents", apply: "countDocuments({})" },
   { label: "count", detail: "Count matching documents (legacy helper)", apply: "count({})" },
+  { label: "estimatedDocumentCount", detail: "Estimate the document count from collection metadata", apply: "estimatedDocumentCount()" },
   { label: "distinct", detail: "List the distinct values of a field", apply: 'distinct("${field}")' },
   { label: "insertOne", detail: "Insert one document", apply: "insertOne({})" },
   { label: "insertMany", detail: "Insert multiple documents", apply: "insertMany([{}])" },
   { label: "updateOne", detail: "Update one matching document", apply: "updateOne({}, { $set: {} })" },
   { label: "updateMany", detail: "Update all matching documents", apply: "updateMany({}, { $set: {} })" },
+  { label: "replaceOne", detail: "Replace one matching document", apply: "replaceOne({}, {})" },
+  { label: "bulkWrite", detail: "Run several writes in one batch", apply: "bulkWrite([\n  { insertOne: { document: {} } }\n])" },
   { label: "deleteOne", detail: "Delete one matching document", apply: "deleteOne({})" },
   { label: "deleteMany", detail: "Delete all matching documents", apply: "deleteMany({})" },
   { label: "findOneAndUpdate", detail: "Atomically update and return a document", apply: "findOneAndUpdate({}, { $set: {} })" },
@@ -105,6 +118,7 @@ const COLLECTION_METHODS = [
   { label: "createIndex", detail: "Create an index", apply: "createIndex({ ${field}: 1 })" },
   { label: "dropIndex", detail: "Drop one index", apply: 'dropIndex("${indexName}")' },
   { label: "dropIndexes", detail: "Drop collection indexes", apply: "dropIndexes()" },
+  { label: "renameCollection", detail: "Rename the collection", apply: 'renameCollection("${newName}")' },
   { label: "drop", detail: "Drop the collection", apply: "drop()" },
 ] as const;
 
@@ -113,11 +127,14 @@ const COLLECTION_METHOD_BOOST: Record<(typeof COLLECTION_METHODS)[number]["label
   findOne: 230,
   aggregate: 220,
   countDocuments: 210,
+  estimatedDocumentCount: 205,
   distinct: 200,
   insertOne: 180,
   insertMany: 170,
   updateOne: 160,
   updateMany: 150,
+  replaceOne: 145,
+  bulkWrite: 135,
   deleteOne: 140,
   deleteMany: 130,
   findOneAndUpdate: 120,
@@ -130,6 +147,7 @@ const COLLECTION_METHOD_BOOST: Record<(typeof COLLECTION_METHODS)[number]["label
   dataSize: 75,
   storageSize: 70,
   totalIndexSize: 65,
+  renameCollection: 55,
   dropIndex: 50,
   dropIndexes: 45,
   drop: 30,
@@ -139,12 +157,18 @@ const COLLECTION_METHOD_BOOST: Record<(typeof COLLECTION_METHODS)[number]["label
 const DATABASE_METHODS = [
   { label: "getCollection", detail: "Reference a collection by name", apply: 'getCollection("${}")' },
   { label: "version", detail: "Show the MongoDB server version", apply: "version()" },
+  { label: "getSiblingDB", detail: "Run the next command against another database", apply: 'getSiblingDB("${database}")' },
+  { label: "stats", detail: "Show database statistics", apply: "stats()" },
+  { label: "serverStatus", detail: "Show server status", apply: "serverStatus()" },
+  { label: "createCollection", detail: "Create a collection", apply: 'createCollection("${name}")' },
+  { label: "dropDatabase", detail: "Drop the current database", apply: "dropDatabase()" },
 ] as const;
 
 const CURSOR_METHODS = [
   { label: "sort", detail: "Sort cursor results", apply: "sort({ ${field}: 1 })" },
   { label: "limit", detail: "Limit cursor results", apply: "limit(100)" },
   { label: "skip", detail: "Skip cursor results", apply: "skip(0)" },
+  { label: "explain", detail: "Show the query plan instead of the results", apply: 'explain("executionStats")' },
 ] as const;
 
 /**
@@ -159,6 +183,8 @@ const ROOT_SNIPPETS = [
   { label: "db.getCollection", detail: "Reference a collection by name", apply: 'db.getCollection("${}")' },
   { label: "use", detail: "Switch the active database", apply: "use ${database}" },
   { label: "db.version", detail: "Show the MongoDB server version", apply: "db.version()" },
+  { label: "db.stats", detail: "Show database statistics", apply: "db.stats()" },
+  { label: "db.serverStatus", detail: "Show server status", apply: "db.serverStatus()" },
 ] as const;
 
 const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number> = {
@@ -167,25 +193,29 @@ const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number
   "db.getCollection": 330,
   use: 320,
   "db.version": 310,
+  "db.stats": 305,
+  "db.serverStatus": 300,
 };
 
 /** Role of each positional argument, by collection helper. Drives cursor classification. */
-type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options";
+type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options";
 
 const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
-  find: ["filter", "projection", "options"],
+  find: ["filter", "projection"],
   findOne: ["filter", "projection", "options"],
-  countDocuments: ["filter", "options"],
-  count: ["filter", "options"],
-  deleteOne: ["filter", "options"],
-  deleteMany: ["filter", "options"],
+  countDocuments: ["filter"],
+  count: ["filter"],
+  deleteOne: ["filter"],
+  deleteMany: ["filter"],
   findOneAndDelete: ["filter", "options"],
   updateOne: ["filter", "update", "options"],
   updateMany: ["filter", "update", "options"],
+  replaceOne: ["filter", "replacement", "options"],
+  bulkWrite: ["operations", "options"],
   findOneAndUpdate: ["filter", "update", "options"],
   findOneAndReplace: ["filter", "replacement", "options"],
-  insertOne: ["document", "options"],
-  insertMany: ["documents", "options"],
+  insertOne: ["document"],
+  insertMany: ["documents"],
   aggregate: ["pipeline", "options"],
   createIndex: ["keys", "options"],
   distinct: ["fieldName", "filter"],
@@ -227,9 +257,9 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const beforeCursor = text.slice(0, safeCursor);
   const collection = extractActiveCollection(text, safeCursor);
-  const { prefix, from } = readPropertyPrefix(text, safeCursor);
+  const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
   const replaceClosingQuote = closingQuoteAtCursor(prefix, text, safeCursor);
-  const at = (mode: MongoCompletionMode, stage?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage });
+  const at = (mode: MongoCompletionMode, stage?: string, method?: string, bulkWriteOperation?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage, method, bulkWriteOperation });
 
   if (isInsideMongoComment(text, safeCursor)) return { mode: "none", prefix: "", from: safeCursor };
 
@@ -274,7 +304,10 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   if (!scan) return at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
-  return { ...at(classified.mode, classified.stage), collection: classified.collection ?? collection };
+  return {
+    ...at(classified.mode, classified.stage, classified.method, classified.bulkWriteOperation),
+    collection: classified.collection ?? collection,
+  };
 }
 
 export function buildMongoCompletionItems(text: string, cursor: number, input: MongoCompletionInput = {}): MongoCompletionItem[] {
@@ -351,6 +384,15 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
     case "stageOption":
       items = specItems(STAGE_OPTION_KEYS[context.stage ?? ""] ?? [], prefix, `${context.stage} option`, 100);
       break;
+    case "methodOption":
+      items = specItems(METHOD_OPTION_KEYS[context.method ?? ""] ?? [], prefix, `${context.method}() option`, 100);
+      break;
+    case "bulkWriteOperation":
+      items = specItems(BULK_WRITE_OPERATIONS, prefix, "bulkWrite operation", 100);
+      break;
+    case "bulkWriteField":
+      items = specItems(BULK_WRITE_OPERATION_FIELDS[context.bulkWriteOperation ?? ""] ?? [], prefix, `${context.bulkWriteOperation} field`, 100);
+      break;
     default:
       items = [];
   }
@@ -377,6 +419,106 @@ export function shouldAutoOpenMongoCompletion(text: string, cursor: number): boo
   }
   if (/[\w_$-]/.test(previousChar)) return true;
   return false;
+}
+
+/* ------------------------------------------------------------------ *
+ * Standalone document inputs
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which bare document an input holds, and therefore how its keys read: the
+ * document browser's filter bar is a query document, its sort bar a key map.
+ */
+export type MongoDocumentQueryKind = "filter" | "sortKeys";
+
+/**
+ * Completion for an input holding one bare document rather than a shell
+ * command — the document browser's filter and sort bars.
+ *
+ * There is no `db.coll.find(…)` here to locate the cursor within, so the text is
+ * scanned as if it *were* that call's argument list: `{ na` lands in the query
+ * document's root object exactly as it would inside `find({ na`. Everything the
+ * shell path reaches by walking the `db.…` chain (collection names, helper
+ * methods, cursor methods) is unreachable by construction, which is what we
+ * want — none of it could be pasted into a filter bar.
+ */
+export function getMongoDocumentQueryCompletionContext(text: string, cursor: number, kind: MongoDocumentQueryKind): MongoCompletionContext {
+  const safeCursor = Math.max(0, Math.min(cursor, text.length));
+  const nothing: MongoCompletionContext = { mode: "none", prefix: "", from: safeCursor };
+  if (isInsideMongoComment(text, safeCursor)) return nothing;
+
+  // Scanning from 0 treats the input as the argument list itself. A `}` that
+  // closes more than the text opened returns null — the cursor has left the
+  // document, e.g. it trails a finished `{ a: 1 }`.
+  const scan = scanMongoCallArguments(text, 0, safeCursor);
+  if (!scan) return nothing;
+
+  const mode = kind === "filter" ? classifyFilter(scan, 0) : classifyKeyMap(scan, 0);
+  if (mode === "none") return nothing;
+
+  const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
+  return { mode, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor) };
+}
+
+/** Text to splice into a plain input for a chosen completion, and where to leave the selection. */
+export interface MongoPlainCompletionInsertion {
+  text: string;
+  /** Start of the selection within `text`, relative to its first character. */
+  selectionStart: number;
+  /** End of that selection; equal to the start when the placeholder was empty. */
+  selectionEnd: number;
+}
+
+/**
+ * Renders an item's `apply` string for a plain `<input>`/`<textarea>`.
+ *
+ * Most operator completions are authored as CodeMirror snippets (`$in: [${}]`,
+ * `$regex: "${pattern}"`), and CodeMirror expands the `${…}` markers itself.
+ * Nothing does that outside the editor, so strip the markers and hand back the
+ * span of the first placeholder: an empty one becomes the caret position, a
+ * named one is selected so its default can be typed straight over.
+ *
+ * Key completions carry their own `: ` because they are only offered in key
+ * position. Pass `followingText` — whatever the input holds after the replaced
+ * range — so re-picking the key of an existing `{ "name": 1 }` entry replaces
+ * the key instead of leaving `{ "other": : 1 }` behind.
+ */
+export function plainMongoCompletionInsertion(apply: string, followingText = ""): MongoPlainCompletionInsertion {
+  let text = "";
+  let selection: { start: number; end: number } | null = null;
+  let rest = apply;
+
+  for (;;) {
+    const match = /\$\{([^{}]*)\}/.exec(rest);
+    if (!match) break;
+    const placeholder = match[1] ?? "";
+    text += rest.slice(0, match.index);
+    if (!selection) selection = { start: text.length, end: text.length + placeholder.length };
+    text += placeholder;
+    rest = rest.slice(match.index + match[0].length);
+  }
+  text += rest;
+
+  // Only a plain key completion may fold its separator away. A snippet's colon
+  // introduces the placeholder that follows it (`$gt: ${}`), so it is never the
+  // same colon as one already in the text.
+  if (!selection && text.endsWith(": ") && /^\s*:/.test(followingText)) text = text.slice(0, -2);
+
+  return { text, selectionStart: Math.min(selection?.start ?? text.length, text.length), selectionEnd: Math.min(selection?.end ?? text.length, text.length) };
+}
+
+/**
+ * Whether typing the character before the cursor should pop the menu open on its
+ * own. Mirrors `shouldAutoOpenMongoCompletion` minus the `db.` chain, and
+ * confirms the position has something to say so a space or a closing brace does
+ * not reopen an empty menu.
+ */
+export function shouldAutoOpenMongoDocumentQueryCompletion(text: string, cursor: number, kind: MongoDocumentQueryKind): boolean {
+  const previousChar = text[cursor - 1];
+  if (!previousChar) return false;
+  const context = getMongoDocumentQueryCompletionContext(text, cursor, kind);
+  if (context.mode === "none") return false;
+  return context.prefix.length > 0 || /[{[,:]\s*$/.test(text.slice(0, cursor));
 }
 
 /**
@@ -427,6 +569,8 @@ interface MongoCursorClass {
   mode: MongoCompletionMode;
   stage?: string;
   collection?: string;
+  method?: string;
+  bulkWriteOperation?: string;
 }
 
 /**
@@ -527,8 +671,10 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
       return { mode: scan.stack.length === 0 ? "fieldPath" : "none" };
     case "pipeline":
       return classifyPipeline(scan);
+    case "operations":
+      return classifyBulkWriteOperations(scan);
     case "options":
-      return { mode: "none" };
+      return classifyMethodOptions(method, scan);
     default:
       return { mode: "none" };
   }
@@ -596,6 +742,65 @@ function classifyKeyMap(scan: MongoCallScan, rootIndex: number): MongoCompletion
   if (!inner || scan.inValue) return "none";
   if (inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return "none";
   return "field";
+}
+
+/** Option keys whose value is a field-to-value map, so the cursor completes field names there. */
+const FIELD_MAP_OPTION_KEYS = new Set(["sort", "projection"]);
+
+function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursorClass {
+  const inner = innermost(scan);
+  const depth = innerDepth(scan, 0);
+  if (!inner || depth < 0) return { mode: "none" };
+
+  // `{ sort: { … } }` and `{ projection: { … } }` are field maps one level in.
+  if (depth === 1 && inner.kind === "object" && FIELD_MAP_OPTION_KEYS.has(inner.key ?? "")) {
+    return { mode: scan.inValue ? "none" : "field", method };
+  }
+  if (depth !== 0 || scan.inValue) return { mode: "none" };
+  return { mode: inner.kind === "object" ? "methodOption" : "none", method };
+}
+
+/**
+ * `bulkWrite([{ <operation>: { <field>: … } }])`, which nests one level deeper than the other
+ * arguments: the array holds operation wrappers, each wrapper holds exactly one operation whose
+ * body carries the fields, and those fields are ordinary filters, updates and documents.
+ */
+function classifyBulkWriteOperations(scan: MongoCallScan): MongoCursorClass {
+  const arrayIndex = scan.stack.findIndex((container) => container.kind === "array");
+  if (arrayIndex !== 0) return { mode: "none" };
+
+  const wrapper = scan.stack[arrayIndex + 1];
+  if (!wrapper || wrapper.kind !== "object") return { mode: "none" };
+
+  // `[{ … }]` — naming the operation.
+  if (scan.stack.length - 1 === arrayIndex + 1) {
+    return { mode: scan.inValue ? "none" : "bulkWriteOperation" };
+  }
+
+  const operation = scan.stack[arrayIndex + 2]?.key ?? "";
+  const fields = BULK_WRITE_OPERATION_FIELDS[operation];
+  if (!fields) return { mode: "none" };
+
+  // `[{ updateOne: { … } }]` — naming a field of the operation.
+  if (scan.stack.length - 1 === arrayIndex + 2) {
+    return { mode: scan.inValue ? "value" : "bulkWriteField", bulkWriteOperation: operation };
+  }
+
+  // Inside a field's value, where the shapes are the ordinary ones.
+  const fieldIndex = arrayIndex + 3;
+  switch (scan.stack[fieldIndex]?.key ?? "") {
+    case "filter":
+      return { mode: classifyFilter(scan, fieldIndex), bulkWriteOperation: operation };
+    case "arrayFilters":
+      return { mode: classifyFilter(scan, fieldIndex + 1), bulkWriteOperation: operation };
+    case "update":
+      return { mode: classifyUpdate(scan, fieldIndex), bulkWriteOperation: operation };
+    case "document":
+    case "replacement":
+      return { mode: classifyDocument(scan, fieldIndex), bulkWriteOperation: operation };
+    default:
+      return { mode: "none" };
+  }
 }
 
 function classifyPipeline(scan: MongoCallScan): MongoCursorClass {
@@ -888,11 +1093,47 @@ function finalizeQuotedMongoCompletionItems(context: MongoCompletionContext, ite
  * Text helpers
  * ------------------------------------------------------------------ */
 
-function readPropertyPrefix(text: string, cursor: number): { prefix: string; from: number } {
-  let from = cursor;
-  while (from > 0 && /[\w_$.-]/.test(text[from - 1] ?? "")) from--;
-  if (text[from - 1] === '"' || text[from - 1] === "'") from--;
-  return { prefix: text.slice(from, cursor), from };
+const MONGO_PROPERTY_PREFIX_CHARACTER = /[$.\p{ID_Continue}-]/u;
+
+export function readMongoPropertyPrefix(text: string, cursor: number): { prefix: string; from: number } {
+  const safeCursor = Math.max(0, Math.min(cursor, text.length));
+  const quoteStart = findOpenMongoQuoteStart(text, safeCursor);
+  if (quoteStart !== null) return { prefix: text.slice(quoteStart, safeCursor), from: quoteStart };
+
+  let from = safeCursor;
+  while (from > 0) {
+    let candidateFrom = from - 1;
+    const trailingUnit = text.charCodeAt(candidateFrom);
+    if (trailingUnit >= 0xdc00 && trailingUnit <= 0xdfff && candidateFrom > 0) {
+      const leadingUnit = text.charCodeAt(candidateFrom - 1);
+      if (leadingUnit >= 0xd800 && leadingUnit <= 0xdbff) candidateFrom--;
+    }
+    const candidate = text.slice(candidateFrom, from);
+    if (!MONGO_PROPERTY_PREFIX_CHARACTER.test(candidate)) break;
+    from = candidateFrom;
+  }
+  return { prefix: text.slice(from, safeCursor), from };
+}
+
+function findOpenMongoQuoteStart(text: string, cursor: number): number | null {
+  for (let index = 0; index < cursor; index++) {
+    const char = text[index];
+    if ((char === "/" && (text[index + 1] === "/" || text[index + 1] === "*")) || (char === "-" && text[index + 1] === "-")) {
+      const skipped = skipMongoStringOrComment(text, index, cursor);
+      if (skipped >= cursor) return null;
+      index = skipped - 1;
+      continue;
+    }
+    if (char !== '"' && char !== "'") continue;
+
+    const quoteStart = index;
+    for (index++; index < cursor; index++) {
+      if (text[index] === "\\") index++;
+      else if (text[index] === char) break;
+    }
+    if (index >= cursor) return quoteStart;
+  }
+  return null;
 }
 
 function closingQuoteAtCursor(prefix: string, text: string, cursor: number): '"' | "'" | undefined {
@@ -1094,9 +1335,23 @@ function describeMongoValueType(value: unknown): string {
   return mongoExtendedJsonValueType(value) ?? (typeof value === "object" ? "object" : typeof value);
 }
 
+/**
+ * Keys that may be written bare. Anything else has to carry quotes: a nested
+ * path (`customer.name`) is the common case, but a hyphen or a leading digit
+ * does it too. `inferMongoCompletionFields` emits a path per nesting level, so
+ * a collection of nested documents offers mostly non-bare keys.
+ */
+const BARE_MONGO_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+/**
+ * Renders a field name in key position. An unquoted prefix keeps the key bare
+ * only while the name allows it — `{ customer.name: 1 }` parses neither as a
+ * shell document nor as the JSON the document browser's query bars are read
+ * as, so a path is quoted even though the user typed no quote.
+ */
 function quoteMongoFieldName(field: string, prefix: string): string {
-  if (prefix.startsWith('"')) return `"${escapeDoubleQuoted(field)}"`;
   if (prefix.startsWith("'")) return `'${escapeSingleQuoted(field)}'`;
+  if (prefix.startsWith('"') || !BARE_MONGO_KEY.test(field)) return `"${escapeDoubleQuoted(field)}"`;
   return field;
 }
 

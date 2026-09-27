@@ -1,9 +1,9 @@
 import type { DatabaseType } from "@/types/database";
-import type { OracleDatabaseLink } from "@/lib/database/oracleDatabaseLinks";
+import { supportsOracleDatabaseLinks, type OracleDatabaseLink } from "@/lib/database/oracleDatabaseLinks";
 import { isSqlCompletionSuppressedContext } from "@/lib/sql/sqlCompletion";
 
 export function oracleDatabaseLinkCompletionContext(sql: string, cursor: number, databaseType?: DatabaseType) {
-  if (databaseType !== "oracle" || isSqlCompletionSuppressedContext(sql, cursor, { databaseType })) return null;
+  if (!supportsOracleDatabaseLinks(databaseType) || isSqlCompletionSuppressedContext(sql, cursor, { databaseType })) return null;
   const before = sql.slice(0, cursor);
   const match = /(?:[A-Za-z0-9_$#]|"(?:[^"]|"")+"|\))@([A-Za-z0-9_$#.]*)$/.exec(before);
   if (!match) return null;

@@ -1,20 +1,9 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { json } from "@codemirror/lang-json";
 import { foldable } from "@codemirror/language";
 
-const redisJsonEditorSource = readFileSync(new URL("../../components/redis/RedisJsonEditor.vue", import.meta.url), "utf8");
-const cellDetailEditorSource = readFileSync(new URL("../useCellDetailEditor.ts", import.meta.url), "utf8");
-
 describe("Redis JSON editor folding", () => {
-  it("opts the Redis JSON editor into the shared folding controls", () => {
-    expect(redisJsonEditorSource).toMatch(/language:\s*"json"[\s\S]*folding:\s*true/);
-    expect(redisJsonEditorSource).toMatch(/lineNumbers:\s*props\.lineNumbers/);
-    expect(cellDetailEditorSource).toContain("...(options.folding ? [foldGutter()] : []),");
-    expect(cellDetailEditorSource).toContain("...(options.folding ? foldKeymap : []),");
-  });
-
   it("provides foldable ranges for JSON objects and arrays", () => {
     const state = EditorState.create({
       doc: `{

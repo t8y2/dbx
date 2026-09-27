@@ -58,9 +58,21 @@ const editorFocused = ref(false);
 const conditionUndoStack = ref<string[]>([]);
 const conditionRedoStack = ref<string[]>([]);
 let conditionLastValue = modelValue.value;
+// Chromium groups a continuous typing run into a single native undo step, but
+// this editor replaces native undo with its own stack, so without grouping the
+// user needs one Ctrl+Z per character. Keystrokes within this window keep the
+// run's opening value on top of the stack; apply/blur/programmatic edits close
+// the run so the next keystroke starts a fresh undo step.
+const CONDITION_TYPING_UNDO_GROUP_MS = 700;
+let conditionUndoGroupOpen = false;
+let conditionUndoGroupAt = 0;
 let collapseTimer: ReturnType<typeof setTimeout> | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let expandAfterComposition = false;
+
+function closeConditionUndoGroup() {
+  conditionUndoGroupOpen = false;
+}
 
 const editor = useDataGridConditionEditor({
   kind: props.kind,
@@ -84,8 +96,18 @@ const highlightTokens = computed(() => tokenizeDataGridCondition(modelValue.valu
 const collapsedHighlightScrollLeft = ref(0);
 const expandedHighlightScrollLeft = ref(0);
 const expandedHighlightScrollTop = ref(0);
+// The highlight layer is a plain div and never gives up content width to a
+// scrollbar, while the transparent-text textarea above it does. Both wrap with
+// `white-space: pre-wrap` + `overflow-wrap: anywhere`, so an uncompensated
+// scrollbar makes the two layers break at different characters and the visible
+// text drifts away from the caret. Compensate with the measured width instead
+// of assuming one.
+const expandedHighlightScrollbarWidth = ref(0);
 const collapsedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translateX(${-collapsedHighlightScrollLeft.value}px)` }));
-const expandedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translate(${-expandedHighlightScrollLeft.value}px, ${-expandedHighlightScrollTop.value}px)` }));
+const expandedHighlightStyle = computed<CSSProperties>(() => ({
+  transform: `translate(${-expandedHighlightScrollLeft.value}px, ${-expandedHighlightScrollTop.value}px)`,
+  "--data-grid-condition-highlight-scrollbar": `${expandedHighlightScrollbarWidth.value}px`,
+}));
 
 function highlightTokenClass(type: DataGridConditionTokenType): string | undefined {
   if (type === "plain") return undefined;
@@ -177,6 +199,21 @@ function fitExpandedHeightToOverlay() {
   }
 }
 
+function syncExpandedHighlightScrollbar() {
+  const overlay = overlayRef.value;
+  if (!overlay) return;
+  const scrollbar = Math.max(0, overlay.offsetWidth - overlay.clientWidth);
+  if (scrollbar !== expandedHighlightScrollbarWidth.value) expandedHighlightScrollbarWidth.value = scrollbar;
+}
+
+function syncExpandedLayout() {
+  syncExpandedHighlightScrollbar();
+  // Re-fit once the compensation has been applied: the highlight layer now
+  // wraps exactly like the textarea, so the pane can size itself to the real
+  // content height instead of leaving a scrollbar that only the textarea sees.
+  void nextTick(fitExpandedHeightToOverlay);
+}
+
 function measureExpandedRect(input: HTMLTextAreaElement) {
   const inputRect = input.getBoundingClientRect();
   const control = controlRef.value;
@@ -238,7 +275,7 @@ function resizeEditor(forceExpand = false) {
       const nextRect = measureExpandedRect(input);
       expandedRect.value = nextRect;
       expandedHeight.value = measureExpandedHeight(input, nextRect);
-      void nextTick(fitExpandedHeightToOverlay);
+      void nextTick(syncExpandedLayout);
     }
     expanded.value = nextExpanded;
     updateSuggestionPosition();
@@ -246,8 +283,7 @@ function resizeEditor(forceExpand = false) {
       void nextTick(() => {
         const overlay = overlayRef.value;
         if (!overlay || composing.value) return;
-        const start = selectionStart.value;
-        const end = selectionEnd.value;
+        const { start, end } = selectionToRestore(input.value);
         overlay.setSelectionRange(start, end);
         overlay.focus({ preventScroll: true });
         overlay.setSelectionRange(start, end);
@@ -258,8 +294,7 @@ function resizeEditor(forceExpand = false) {
     }
     if (!nextExpanded && overlayFocused && !composing.value) {
       void nextTick(() => {
-        const start = selectionStart.value;
-        const end = selectionEnd.value;
+        const { start, end } = selectionToRestore(input.value);
         input.focus({ preventScroll: true });
         input.setSelectionRange(start, end);
         selectionStart.value = start;
@@ -356,6 +391,16 @@ function syncSelection(target: HTMLTextAreaElement) {
   selectionEnd.value = target.selectionEnd;
 }
 
+// A range captured before the text shrank (for example select-all followed by a
+// replacement) is longer than the value that is actually there. Clamping it
+// would select the whole condition, so the next keystroke would drop the input;
+// leave the caret at the end of the shorter text instead.
+function selectionToRestore(currentValue: string) {
+  const valueLength = currentValue.length;
+  if (selectionStart.value > valueLength || selectionEnd.value > valueLength) return { start: valueLength, end: valueLength };
+  return { start: selectionStart.value, end: selectionEnd.value };
+}
+
 function onFocus(event: FocusEvent) {
   editorFocused.value = true;
   syncSelection(event.currentTarget as HTMLTextAreaElement);
@@ -375,7 +420,11 @@ function scheduleCollapse() {
   if (collapseTimer) clearTimeout(collapseTimer);
   collapseTimer = setTimeout(() => {
     const active = document.activeElement;
+    // Expanding/collapsing swaps focus between the two textareas, which fires a
+    // blur on the element being left; only a real exit from the editor ends the
+    // typing run.
     if (active === inputRef.value || active === overlayRef.value) return;
+    closeConditionUndoGroup();
     editorFocused.value = false;
     editor.dismiss();
     expanded.value = false;
@@ -399,6 +448,7 @@ function isConditionRedoShortcut(event: KeyboardEvent) {
 }
 
 function applyConditionHistoryValue(value: string) {
+  closeConditionUndoGroup();
   conditionLastValue = value;
   modelValue.value = value;
   void nextTick(() => {
@@ -427,12 +477,14 @@ function handleConditionUndoRedo(event: KeyboardEvent) {
 }
 
 async function applyCondition() {
+  closeConditionUndoGroup();
   editor.dismiss();
   const applied = props.apply ? await props.apply(modelValue.value) : emit("apply", modelValue.value);
   if (applied !== false && modelValue.value.trim()) editor.rememberHistory();
 }
 
 async function clearCondition() {
+  closeConditionUndoGroup();
   modelValue.value = "";
   editor.dismiss();
   expanded.value = false;
@@ -443,6 +495,7 @@ async function clearCondition() {
 function onKeydown(event: KeyboardEvent) {
   if (handleConditionUndoRedo(event)) return;
   if (completeQuote(event)) return;
+  if (event.key === "Enter" || event.key === "Tab") closeConditionUndoGroup();
   const action = editor.handleKeydown(event);
   if (action === "apply") void applyCondition();
   if (action === "accept") focusAfterAccept();
@@ -472,6 +525,7 @@ function openHistory() {
 }
 
 function acceptSuggestion(index: number) {
+  closeConditionUndoGroup();
   editor.accept(index);
   focusAfterAccept();
 }
@@ -530,8 +584,14 @@ function hideHistoryPreview() {
 
 watch(modelValue, (value) => {
   if (value !== conditionLastValue) {
-    conditionUndoStack.value.push(conditionLastValue);
-    conditionRedoStack.value = [];
+    const now = Date.now();
+    const continuesTypingRun = conditionUndoGroupOpen && now - conditionUndoGroupAt <= CONDITION_TYPING_UNDO_GROUP_MS;
+    if (!continuesTypingRun) {
+      conditionUndoStack.value.push(conditionLastValue);
+      conditionRedoStack.value = [];
+    }
+    conditionUndoGroupOpen = true;
+    conditionUndoGroupAt = now;
     conditionLastValue = value;
   }
   resizeEditor();
@@ -702,7 +762,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
     <Teleport to="body">
       <div v-if="historyPreview" class="pointer-events-none fixed z-[140] rounded-md bg-foreground shadow-xl" :style="previewStyle">
         <span class="absolute h-3 w-3 rotate-45 bg-foreground" :class="historyPreview.side === 'left' ? '-left-1.5' : '-right-1.5'" :style="previewArrowStyle" />
-        <div class="max-h-[min(320px,calc(100vh-16px))] overflow-auto rounded-md px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-background">{{ historyPreview.value }}</div>
+        <div class="max-h-[min(320px,calc(100vh-16px))] overflow-auto rounded-md px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-background-solid">{{ historyPreview.value }}</div>
       </div>
     </Teleport>
   </div>
@@ -923,7 +983,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   min-width: 0;
   height: auto;
   margin-right: calc(-1 * var(--data-grid-expanded-scrollbar-offset));
-  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem calc(var(--data-grid-condition-prefix-indent) + 0.125rem);
+  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem + var(--data-grid-condition-highlight-scrollbar, 0px)) 0.0625rem calc(var(--data-grid-condition-prefix-indent) + 0.125rem);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

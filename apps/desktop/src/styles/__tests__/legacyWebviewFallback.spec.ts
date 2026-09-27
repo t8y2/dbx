@@ -18,15 +18,22 @@ const activeConnectionFilterSource = readFileSync(new URL("../../components/side
 const scheduledDatabaseBackupSource = readFileSync(new URL("../../components/backup/ScheduledDatabaseBackupSettings.vue", import.meta.url), "utf8");
 const databaseBackupConfigFieldsSource = readFileSync(new URL("../../components/backup/DatabaseBackupConfigFields.vue", import.meta.url), "utf8");
 const driverStoreDialogSource = readFileSync(new URL("../../components/config/DriverStoreDialog.vue", import.meta.url), "utf8");
+const driverStoreAgentRowSource = readFileSync(new URL("../../components/config/DriverStoreAgentRow.vue", import.meta.url), "utf8");
 const tunnelProfileManagerSource = readFileSync(new URL("../../components/connection/TunnelProfileManager.vue", import.meta.url), "utf8");
 const changelogPanelSource = readFileSync(new URL("../../components/settings/ChangelogPanel.vue", import.meta.url), "utf8");
 const editorSettingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const switchSource = readFileSync(new URL("../../components/ui/switch/Switch.vue", import.meta.url), "utf8");
 const aiAssistantSource = readFileSync(new URL("../../components/editor/AiAssistant.vue", import.meta.url), "utf8");
+const dataGridSource = readFileSync(new URL("../../components/grid/DataGrid.vue", import.meta.url), "utf8");
+const dataGridTableInfoPanelsSource = readFileSync(new URL("../../components/grid/DataGridTableInfoPanels.vue", import.meta.url), "utf8");
+const tableStructureEditorSource = readFileSync(new URL("../../components/structure/TableStructureEditor.vue", import.meta.url), "utf8");
 const desktopIndexSource = readFileSync(new URL("../../../index.html", import.meta.url), "utf8");
 const connectionDialogLegacyCss = readFileSync(new URL("../../../public/connection-dialog-legacy.css", import.meta.url), "utf8");
 const legacyWebViewSource = readFileSync(new URL("../../lib/ui/legacyWebView.ts", import.meta.url), "utf8");
 const mainSource = readFileSync(new URL("../../main.ts", import.meta.url), "utf8");
+const tabPresentationSource = readFileSync(new URL("../../lib/tabs/tabPresentation.ts", import.meta.url), "utf8");
+const editorGroupTabBarSource = readFileSync(new URL("../../components/layout/EditorGroupTabBar.vue", import.meta.url), "utf8");
+const appTabBarCssSource = readFileSync(new URL("../../components/layout/appTabBar.css", import.meta.url), "utf8");
 
 describe("legacy WebView CSS fallbacks", () => {
   it("keeps globals.css balanced and free of min-width media wrappers", () => {
@@ -132,7 +139,7 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps the code snapshot dialog layout on the global legacy dialog fallbacks", () => {
-    expect(codeSnapshotDialogSource).toContain('class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]"');
+    expect(codeSnapshotDialogSource).toContain('class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]"');
     expect(codeSnapshotDialogSource).not.toContain("dbx-legacy-webview");
     expect(codeSnapshotDialogSource).not.toContain("@media");
     expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[860px]"]');
@@ -146,13 +153,14 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps the DDL dialog layout on the global legacy dialog fallbacks", () => {
-    expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog sm:max-w-190"');
+    expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog flex min-h-0 flex-col overflow-hidden sm:max-w-190"');
     // The dialog content element is rendered through reka-ui's portal Teleport and
     // never carries this component's scoped data-v attribute, so per-dialog rules
     // (scoped or unscoped) are avoided; the global width table covers the dialog.
     expect(ddlViewDialogSource).not.toContain("dbx-legacy-webview");
     expect(ddlViewDialogSource).not.toContain("@media");
     expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-190"]');
+    expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog');
   });
 
   it("keeps the global dialog fallback block outside media queries", () => {
@@ -202,6 +210,12 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(rule).toContain("var(--dbx-viewport-height)");
   });
 
+  it("allows the DDL viewer to resize beyond the default legacy dialog width", () => {
+    const ruleStart = globalsCss.indexOf('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog');
+    expect(ruleStart).toBeGreaterThan(-1);
+    expect(globalsCss.slice(ruleStart, globalsCss.indexOf("}", ruleStart))).toContain("max-width: calc(100vw - 32px) !important;");
+  });
+
   it("uses an explicit tooltip copy-button hover color in legacy WebViews", () => {
     expect(dataGridColumnHeaderSource).toContain("data-column-header-copy-name");
     expect(dataGridColumnHeaderSource).toContain("html.dbx-legacy-webview [data-column-header-copy-name]:hover");
@@ -222,6 +236,95 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(activeConnectionSources).toContain("showActiveConnectionsOnly");
     expect(connectionTreeSource).toContain("text-primary bg-primary/10 border-primary/30");
     expect(activeConnectionFilterSource).toContain("text-primary bg-primary/10 border-primary/30");
+  });
+
+  it("keeps foreground alpha utilities readable in legacy WebViews", () => {
+    // Tailwind v4 emits bg-foreground/10 as a full-color declaration with the
+    // real tint behind `@supports (color: color-mix(...))`. WebKit without
+    // color-mix() keeps the full-color one, so the update dialog tab badge
+    // rendered as a solid near-black pill on macOS 12 (Safari < 16.2).
+    expect(updateDialogSource).toContain('class="rounded-full bg-foreground/10 px-1.5 text-[11px]"');
+    expect(globalsCss).toContain("html.dbx-legacy-webview .bg-foreground\\/10");
+    expect(globalsCss).toContain("background-color: rgba(var(--dbx-foreground-rgb), 0.06) !important;");
+    expect(globalsCss).toContain("background-color: rgba(var(--dbx-foreground-rgb), 0.1) !important;");
+    expect(globalsCss).toContain("html.dbx-legacy-webview .hover\\:bg-foreground\\/10:hover");
+    expect(globalsCss).toContain("html.dbx-legacy-webview .hover\\:bg-foreground\\/15:hover");
+    expect(globalsCss).toContain("border-color: rgba(var(--dbx-foreground-rgb), 0.2) !important;");
+    expect(globalsCss).toContain("border-color: rgba(var(--dbx-foreground-rgb), 0.8) !important;");
+  });
+
+  it("orders foreground dark-mode fallbacks after hover fallbacks", () => {
+    // hover and dark overrides tie on specificity: the later dark rule has to
+    // win over the hover rule, and dark:hover has to win over both.
+    const hover = globalsCss.indexOf("html.dbx-legacy-webview .hover\\:bg-foreground\\/15:hover");
+    const dark = globalsCss.indexOf("html.dbx-legacy-webview.dark .dark\\:bg-foreground\\/20");
+    const darkHover = globalsCss.indexOf("html.dbx-legacy-webview.dark .dark\\:hover\\:bg-foreground\\/25:hover");
+
+    expect(hover).toBeGreaterThan(-1);
+    expect(dark).toBeGreaterThan(hover);
+    expect(darkHover).toBeGreaterThan(dark);
+  });
+
+  it("pairs every foreground theme color with a legacy rgb token", () => {
+    // A theme redefining --foreground without --dbx-foreground-rgb would tint
+    // legacy alpha utilities with the default theme's foreground instead.
+    const foregroundDefs = globalsCss.match(/--foreground: rgb\(\d+ \d+ \d+\);/g) ?? [];
+    expect(foregroundDefs.length).toBeGreaterThan(0);
+    const lines = globalsCss.split("\n");
+    let paired = 0;
+    for (const [index, line] of lines.entries()) {
+      if (/^\s*--foreground: rgb\(\d+ \d+ \d+\);$/.test(line)) {
+        expect(lines[index + 1]).toMatch(/^\s*--dbx-foreground-rgb: \d+, \d+, \d+;$/);
+        paired += 1;
+      }
+    }
+    expect(paired).toBe(foregroundDefs.length);
+  });
+
+  it("keeps warning and destructive alpha utilities readable in legacy WebViews", () => {
+    // The shortcut cross-scope conflict badge (border-warning/30 bg-warning/10
+    // text-warning) rendered as a solid amber pill with invisible text on
+    // macOS 12 WebKit; the destructive alert badges degrade the same way.
+    expect(editorSettingsDialogSource).toContain("border-warning/30 bg-warning/10");
+    expect(globalsCss).toContain("--dbx-warning-rgb: 217, 119, 6;");
+    expect(globalsCss).toContain("html.dbx-legacy-webview .bg-warning\\/10");
+    expect(globalsCss).toContain("background-color: rgba(var(--dbx-warning-rgb), 0.1) !important;");
+    expect(globalsCss).toContain("background-color: rgba(var(--dbx-warning-rgb), 0.05) !important;");
+    expect(globalsCss).toContain("border-color: rgba(var(--dbx-warning-rgb), 0.3) !important;");
+    expect(globalsCss).toContain("border-color: rgba(var(--dbx-warning-rgb), 0.15) !important;");
+    expect(globalsCss).toContain("html.dbx-legacy-webview .bg-destructive\\/10");
+    expect(globalsCss).toContain("background-color: rgba(var(--destructive-rgb), 0.1) !important;");
+    expect(globalsCss).toContain("background-color: rgba(var(--destructive-rgb), 0.05) !important;");
+    expect(globalsCss).toContain("border-color: rgba(var(--destructive-rgb), 0.3) !important;");
+    expect(globalsCss).toContain("html.dbx-legacy-webview .focus-visible\\:bg-destructive\\/10:focus-visible");
+  });
+
+  it("pairs every warning theme color with a legacy rgb token", () => {
+    const warningDefs = globalsCss.match(/--warning: rgb\(\d+ \d+ \d+\);/g) ?? [];
+    expect(warningDefs.length).toBeGreaterThan(0);
+    const lines = globalsCss.split("\n");
+    let paired = 0;
+    for (const [index, line] of lines.entries()) {
+      if (/^\s*--warning: rgb\(\d+ \d+ \d+\);$/.test(line)) {
+        expect(lines[index + 1]).toMatch(/^\s*--dbx-warning-rgb: \d+, \d+, \d+;$/);
+        paired += 1;
+      }
+    }
+    expect(paired).toBe(warningDefs.length);
+  });
+
+  it("keeps the active app tab painted in legacy WebViews", () => {
+    // The active pill background is an inline custom property holding a
+    // color-mix() value; on WebKit without color-mix() it invalidates at
+    // computed-value time and the active tab renders with no background.
+    expect(tabPresentationSource).toContain("appTabActiveBackground");
+    // The legacy branch must not lean on var() inside the inline custom
+    // property: old WebKit fails to substitute that, so it resolves the token.
+    expect(tabPresentationSource).toContain('getPropertyValue("--dbx-foreground-rgb")');
+    expect(tabPresentationSource).toContain('return "color-mix(in srgb, var(--foreground) 18%, var(--background))";');
+    expect(editorGroupTabBarSource).toContain("appTabActiveBackground()");
+    expect(appTabBarCssSource).toContain("var(--app-tab-hover-background, rgba(var(--dbx-foreground-rgb), 0.08))");
+    expect(appTabBarCssSource).toContain('html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[data-active-tab="true"]');
   });
 
   it("keeps legacy tab triggers connected to the configured corner style", () => {
@@ -292,6 +395,52 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(aiAssistantSource).toContain("background: rgba(212, 212, 216, 0.45);");
   });
 
+  it("keeps structure and table-info scrollbars visible without OKLab color mixing", () => {
+    const sources = [dataGridSource, dataGridTableInfoPanelsSource, tableStructureEditorSource];
+    const thumbRules = sources.flatMap((source) => [...source.matchAll(/[^{}]+::-webkit-scrollbar-thumb(?:\)|)\s*\{[^{}]+\}/g)].map((match) => match[0])).filter((rule) => rule.includes("color-mix(in oklab, var(--foreground) 30%, transparent)"));
+    const hoverRules = sources.flatMap((source) => [...source.matchAll(/[^{}]+::-webkit-scrollbar-thumb:hover(?:\)|)\s*\{[^{}]+\}/g)].map((match) => match[0])).filter((rule) => rule.includes("color-mix(in oklab, var(--foreground) 48%, transparent)"));
+
+    expect(thumbRules).toHaveLength(6);
+    expect(hoverRules).toHaveLength(6);
+    for (const rule of thumbRules) {
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeGreaterThan(-1);
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeLessThan(rule.indexOf("background: color-mix(in oklab, var(--foreground) 30%, transparent);"));
+    }
+    for (const rule of hoverRules) {
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeGreaterThan(-1);
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeLessThan(rule.indexOf("background: color-mix(in oklab, var(--foreground) 48%, transparent);"));
+    }
+
+    const horizontalThumbStart = tableStructureEditorSource.indexOf(".structure-horizontal-scrollbar__thumb {");
+    const horizontalHoverStart = tableStructureEditorSource.indexOf(".structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,", horizontalThumbStart);
+    const horizontalThumb = tableStructureEditorSource.slice(horizontalThumbStart, horizontalHoverStart);
+    const horizontalHover = tableStructureEditorSource.slice(horizontalHoverStart, tableStructureEditorSource.indexOf("/* Editable values", horizontalHoverStart));
+    expect(horizontalThumb.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeGreaterThan(-1);
+    expect(horizontalThumb.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeLessThan(horizontalThumb.indexOf("background: color-mix(in oklab, var(--foreground) 30%, transparent);"));
+    expect(horizontalHover.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeGreaterThan(-1);
+    expect(horizontalHover.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeLessThan(horizontalHover.indexOf("background: color-mix(in oklab, var(--foreground) 48%, transparent);"));
+
+    expect(dataGridSource).toMatch(/html\.dbx-legacy-webview\.dark \.ddl-code::-webkit-scrollbar-thumb\s*\{\s*background: rgba\(212, 212, 216, 0\.3\);/);
+    expect(dataGridSource).toMatch(/html\.dbx-legacy-webview\.dark \.ddl-code::-webkit-scrollbar-thumb:hover\s*\{\s*background: rgba\(212, 212, 216, 0\.48\);/);
+    expect(dataGridTableInfoPanelsSource).toMatch(/html\.dbx-legacy-webview\.dark \.table-info-scroller::-webkit-scrollbar-thumb\s*\{\s*background: rgba\(212, 212, 216, 0\.3\);/);
+    expect(dataGridTableInfoPanelsSource).toMatch(/html\.dbx-legacy-webview\.dark \.table-info-scroller::-webkit-scrollbar-thumb:hover\s*\{\s*background: rgba\(212, 212, 216, 0\.48\);/);
+    const structureLegacyThumbStart = tableStructureEditorSource.indexOf("html.dbx-legacy-webview.dark .structure-ddl-editor .cm-scroller::-webkit-scrollbar-thumb,");
+    const structureLegacyHoverStart = tableStructureEditorSource.indexOf("html.dbx-legacy-webview.dark .structure-ddl-editor .cm-scroller::-webkit-scrollbar-thumb:hover,", structureLegacyThumbStart);
+    const structureLegacyThumb = tableStructureEditorSource.slice(structureLegacyThumbStart, structureLegacyHoverStart);
+    const structureLegacyHover = tableStructureEditorSource.slice(structureLegacyHoverStart);
+    expect(structureLegacyThumbStart).toBeGreaterThan(-1);
+    expect(structureLegacyHoverStart).toBeGreaterThan(structureLegacyThumbStart);
+    expect(structureLegacyThumb).toContain("html.dbx-legacy-webview.dark .structure-card-scroller::-webkit-scrollbar-thumb,");
+    expect(structureLegacyThumb).toContain("html.dbx-legacy-webview.dark .structure-table-scroller::-webkit-scrollbar-thumb,");
+    expect(structureLegacyThumb).toContain("html.dbx-legacy-webview.dark .structure-horizontal-scrollbar__thumb");
+    expect(structureLegacyThumb).toContain("background: rgba(212, 212, 216, 0.3);");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-card-scroller::-webkit-scrollbar-thumb:hover,");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-table-scroller::-webkit-scrollbar-thumb:hover,");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-horizontal-scrollbar--dragging .structure-horizontal-scrollbar__thumb");
+    expect(structureLegacyHover).toContain("background: rgba(212, 212, 216, 0.48);");
+  });
+
   it("keeps selected tiles readable in WebViews without color-mix support", () => {
     const fallbackStart = globalsCss.indexOf("@supports not (background-color: color-mix(in srgb, black 10%, transparent))");
     const choiceFallback = globalsCss.indexOf(".dbx-choice-selected", fallbackStart);
@@ -343,8 +492,9 @@ describe("legacy WebView CSS fallbacks", () => {
     const fallbackEnd = driverStoreDialogSource.indexOf("@media (max-width: 900px)", fallbackStart);
     const fallback = driverStoreDialogSource.slice(fallbackStart, fallbackEnd);
 
-    expect(driverStoreDialogSource.match(/driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground/g)?.length).toBe(3);
-    expect(driverStoreDialogSource.match(/variant="ghost"\n\s+class="driver-store-local-import-button/g)?.length).toBe(3);
+    expect(driverStoreAgentRowSource.match(/driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground/g)?.length).toBe(1);
+    expect(driverStoreAgentRowSource.match(/variant="ghost"\n\s+class="driver-store-local-import-button/g)?.length).toBe(1);
+    expect(driverStoreDialogSource).toContain("<DriverStoreAgentRow");
     expect(fallback).toContain(".driver-store-local-import-button");
     expect(fallback).toContain("width: 2rem !important;");
     expect(fallback).toContain("height: 2rem !important;");

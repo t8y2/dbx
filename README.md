@@ -1,14 +1,15 @@
 <div align="center">
-  <p style="font-size: 18px; white-space: nowrap;"><strong>90+ databases in 25 MB. Desktop, Docker, CLI, built-in AI assistant, and MCP Server.</strong></p>
+  <p style="font-size: 18px; white-space: nowrap;"><strong>100+ databases in 25 MB. Desktop, Docker, CLI, built-in AI assistant, and MCP Server.</strong></p>
 
   <p>
-    <img src="https://dl.dbxio.com/assets/readme-hero-20260820.png" alt="DBX screenshot" width="820" />
+    <img src="https://dl.dbxio.com/assets/readme-hero-20260925.png" alt="DBX screenshot" width="820" />
   </p>
 
   <p>
     <a href="https://github.com/t8y2/dbx/releases"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fshieldcn.dev%2Fgithub%2Fdownloads%2Ft8y2%2Fdbx%2Fshields.json&amp;style=for-the-badge" /></a>
     <a href="https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322"><img src="https://img.shields.io/badge/QQ_群-1087880322-EB1923?style=for-the-badge&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGhlaWdodD0iODYiIHdpZHRoPSI4NiIgdmlld0JveD0iMCAwIDEyMCAxNDUiPjxwYXRoIGZpbGw9IiNmYWFiMDciIGQ9Ik02MC41MDMgMTQyLjIzN2MtMTIuNTMzIDAtMjQuMDM4LTQuMTk1LTMxLjQ0NS0xMC40Ni0zLjc2MiAxLjEyNC04LjU3NCAyLjkzMi0xMS42MSA1LjE3NS0yLjYgMS45MTgtMi4yNzUgMy44NzQtMS44MDcgNC42NjMgMi4wNTYgMy40NyAzNS4yNzMgMi4yMTYgNDQuODYyIDEuMTM2em0wIDBjMTIuNTM1IDAgMjQuMDM5LTQuMTk1IDMxLjQ0Ny0xMC40NiAzLjc2IDEuMTI0IDguNTczIDIuOTMyIDExLjYxIDUuMTc1IDIuNTk4IDEuOTE4IDIuMjc0IDMuODc0IDEuODA1IDQuNjYzLTIuMDU2IDMuNDctMzUuMjcyIDIuMjE2LTQ0Ljg2MiAxLjEzNnptMCAwIi8+PHBhdGggZD0iTTYwLjU3NiA2Ny4xMTljMjAuNjk4LS4xNCAzNy4yODYtNC4xNDcgNDIuOTA3LTUuNjgzIDEuMzQtLjM2NyAyLjA1Ni0xLjAyNCAyLjA1Ni0xLjAyNC4wMDUtLjE4OS4wODUtMy4zNy4wODUtNS4wMUMxMDUuNjI0IDI3Ljc2OCA5Mi41OC4wMDEgNjAuNSAwIDI4LjQyLjAwMSAxNS4zNzUgMjcuNzY5IDE1LjM3NSA1NS40MDFjMCAxLjY0Mi4wOCA0LjgyMi4wODYgNS4wMSAwIDAgLjU4My42MTUgMS42NS45MTMgNS4xOSAxLjQ0NCAyMi4wOSA1LjY1IDQzLjMxMiA1Ljc5NXptNTYuMjQ1IDIzLjAyYy0xLjI4My00LjEyOS0zLjAzNC04Ljk0NC00LjgwOC0xMy41NjggMCAwLTEuMDItLjEyNi0xLjUzNy4wMjMtMTUuOTEzIDQuNjIzLTM1LjIwMiA3LjU3LTQ5LjkgNy4zOTJoLS4xNTNjLTE0LjYxNi4xNzUtMzMuNzc0LTIuNzM3LTQ5LjYzNC03LjMxNS0uNjA2LS4xNzUtMS44MDItLjEtMS44MDItLjEtMS43NzQgNC42MjQtMy41MjUgOS40NC00LjgwOCAxMy41NjgtNi4xMTkgMTkuNjktNC4xMzYgMjcuODM4LTIuNjI3IDI4LjAyIDMuMjM5LjM5MiAxMi42MDYtMTQuODIxIDEyLjYwNi0xNC44MjEgMCAxNS40NTkgMTMuOTU3IDM5LjE5NSA0NS45MTggMzkuNDEzaC44NDhjMzEuOTYtLjIxOCA0NS45MTctMjMuOTU0IDQ1LjkxNy0zOS40MTMgMCAwIDkuMzY4IDE1LjIxMyAxMi42MDcgMTQuODIyIDEuNTA4LS4xODMgMy40OTEtOC4zMzItMi42MjctMjguMDIxIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTQ5LjA4NSA0MC44MjRjLTQuMzUyLjE5Ny04LjA3LTQuNzYtOC4zMDQtMTEuMDYzLS4yMzYtNi4zMDUgMy4wOTgtMTEuNTc2IDcuNDUtMTEuNzczIDQuMzQ3LS4xOTUgOC4wNjQgNC43NiA4LjMgMTEuMDY1LjIzOCA2LjMwNi0zLjA5NyAxMS41NzctNy40NDYgMTEuNzcxbTMxLjEzMy0xMS4wNjNjLS4yMzMgNi4zMDItMy45NTEgMTEuMjYtOC4zMDMgMTEuMDYzLTQuMzUtLjE5NS03LjY4NC01LjQ2NS03LjQ0Ni0xMS43Ny4yMzYtNi4zMDUgMy45NTItMTEuMjYgOC4zLTExLjA2NiA0LjM1Mi4xOTcgNy42ODYgNS40NjggNy40NDkgMTEuNzczIi8+PHBhdGggZmlsbD0iI2ZhYWIwNyIgZD0iTTg3Ljk1MiA0OS43MjVDODYuNzkgNDcuMTUgNzUuMDc3IDQ0LjI4IDYwLjU3OCA0NC4yOGgtLjE1NmMtMTQuNSAwLTI2LjIxMiAyLjg3LTI3LjM3NSA1LjQ0NmEuODYzLjg2MyAwIDAwLS4wODUuMzY3Ljg4Ljg4IDAgMDAuMTYuNDk2Yy45OCAxLjQyNyAxMy45ODUgOC40ODcgMjcuMyA4LjQ4N2guMTU2YzEzLjMxNCAwIDI2LjMxOS03LjA1OCAyNy4yOTktOC40ODdhLjg3My44NzMgMCAwMC4xNi0uNDk4Ljg1Ni44NTYgMCAwMC0uMDg1LS4zNjUiLz48cGF0aCBkPSJNNTQuNDM0IDI5Ljg1NGMuMTk5IDIuNDktMS4xNjcgNC43MDItMy4wNDYgNC45NDMtMS44ODMuMjQyLTMuNTY4LTEuNTgtMy43NjgtNC4wNy0uMTk3LTIuNDkyIDEuMTY3LTQuNzA0IDMuMDQzLTQuOTQ0IDEuODg2LS4yNDQgMy41NzQgMS41OCAzLjc3MSA0LjA3bTExLjk1Ni44MzNjLjM4NS0uNjg5IDMuMDA0LTQuMzEyIDguNDI3LTIuOTkzIDEuNDI1LjM0NyAyLjA4NC44NTcgMi4yMjMgMS4wNTcuMjA1LjI5Ni4yNjIuNzE4LjA1MyAxLjI4Ni0uNDEyIDEuMTI2LTEuMjYzIDEuMDk1LTEuNzM0Ljg3NS0uMzA1LS4xNDItNC4wODItMi42Ni03LjU2MiAxLjA5Ny0uMjQuMjU3LS42NjguMzQ2LTEuMDczLjA0LS40MDctLjMwOC0uNTc0LS45My0uMzM0LTEuMzYyIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTYwLjU3NiA4My4wOGgtLjE1M2MtOS45OTYuMTItMjIuMTE2LTEuMjA0LTMzLjg1NC0zLjUxOC0xLjAwNCA1LjgxOC0xLjYxIDEzLjEzMi0xLjA5IDIxLjg1MyAxLjMxNiAyMi4wNDMgMTQuNDA3IDM1LjkgMzQuNjE0IDM2LjFoLjgyYzIwLjIwOC0uMiAzMy4yOTgtMTQuMDU3IDM0LjYxNi0zNi4xLjUyLTguNzIzLS4wODctMTYuMDM1LTEuMDkyLTIxLjg1NC0xMS43MzkgMi4zMTUtMjMuODYyIDMuNjQtMzMuODYgMy41MTgiLz48cGF0aCBmaWxsPSIjZWIxOTIzIiBkPSJNMzIuMTAyIDgxLjIzNXYyMS42OTNzOS45MzcgMi4wMDQgMTkuODkzLjYxNlY4My41MzVjLTYuMzA3LS4zNTctMTMuMTA5LTEuMTUyLTE5Ljg5My0yLjMiLz48cGF0aCBmaWxsPSIjZWIxOTIzIiBkPSJNMTA1LjUzOSA2MC40MTJzLTE5LjMzIDYuMTAyLTQ0Ljk2MyA2LjI3NWgtLjE1M2MtMjUuNTkxLS4xNzItNDQuODk2LTYuMjU1LTQ0Ljk2Mi02LjI3NUw4Ljk4NyA3Ni41N2MxNi4xOTMgNC44ODIgMzYuMjYxIDguMDI4IDUxLjQzNiA3Ljg0NWguMTUzYzE1LjE3NS4xODMgMzUuMjQyLTIuOTYzIDUxLjQzNy03Ljg0NXptMCAwIi8+PC9zdmc+" alt="Join QQ Group" /></a>
-    <a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-Join-07C160?style=for-the-badge&logo=wechat&logoColor=white" alt="Join WeChat Group" /></a>
+    <a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-Join-07C160?style=for-the-badge&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iIzA3YzE2MCIgZD0iTTguNjkxIDIuMTg4QzMuODkxIDIuMTg4IDAgNS40NzYgMCA5LjUzYzAgMi4yMTIgMS4xNyA0LjIwMyAzLjAwMiA1LjU1YS41OS41OSAwIDAgMSAuMjEzLjY2NWwtLjM5IDEuNDhjLS4wMTkuMDctLjA0OC4xNDEtLjA0OC4yMTNjMCAuMTYzLjEzLjI5NS4yOS4yOTVhLjMzLjMzIDAgMCAwIC4xNjctLjA1NGwxLjkwMy0xLjExNGEuODYuODYgMCAwIDEgLjcxNy0uMDk4YTEwLjIgMTAuMiAwIDAgMCAyLjgzNy40MDNjLjI3NiAwIC41NDMtLjAyNy44MTEtLjA1Yy0uODU3LTIuNTc4LjE1Ny00Ljk3MiAxLjkzMi02LjQ0NmMxLjcwMy0xLjQxNSAzLjg4Mi0xLjk4IDUuODUzLTEuODM4Yy0uNTc2LTMuNTgzLTQuMTk2LTYuMzQ4LTguNTk2LTYuMzQ4TTUuNzg1IDUuOTkxYy42NDIgMCAxLjE2Mi41MjkgMS4xNjIgMS4xOGExLjE3IDEuMTcgMCAwIDEtMS4xNjIgMS4xNzhBMS4xNyAxLjE3IDAgMCAxIDQuNjIzIDcuMTdjMC0uNjUxLjUyLTEuMTggMS4xNjItMS4xOHptNS44MTMgMGMuNjQyIDAgMS4xNjIuNTI5IDEuMTYyIDEuMThhMS4xNyAxLjE3IDAgMCAxLTEuMTYyIDEuMTc4YTEuMTcgMS4xNyAwIDAgMS0xLjE2Mi0xLjE3OGMwLS42NTEuNTItMS4xOCAxLjE2Mi0xLjE4bTUuMzQgMi44NjdjLTEuNzk3LS4wNTItMy43NDYuNTEyLTUuMjggMS43ODZjLTEuNzIgMS40MjgtMi42ODcgMy43Mi0xLjc4IDYuMjJjLjk0MiAyLjQ1MyAzLjY2NiA0LjIyOSA2Ljg4NCA0LjIyOWMuODI2IDAgMS42MjItLjEyIDIuMzYxLS4zMzZhLjcyLjcyIDAgMCAxIC41OTguMDgybDEuNTg0LjkyNmEuMy4zIDAgMCAwIC4xNC4wNDdjLjEzNCAwIC4yNC0uMTExLjI0LS4yNDdjMC0uMDYtLjAyMy0uMTItLjAzOC0uMTc3bC0uMzI3LTEuMjMzYS42LjYgMCAwIDEtLjAyMy0uMTU2YS40OS40OSAwIDAgMSAuMjAxLS4zOThDMjMuMDI0IDE4LjQ4IDI0IDE2LjgyIDI0IDE0Ljk4YzAtMy4yMS0yLjkzMS01LjgzNy02LjY1Ni02LjA4OFY4Ljg5Yy0uMTM1LS4wMS0uMjctLjAyNy0uNDA3LS4wM3ptLTIuNTMgMy4yNzRjLjUzNSAwIC45NjkuNDQuOTY5Ljk4MmEuOTc2Ljk3NiAwIDAgMS0uOTY5Ljk4M2EuOTc2Ljk3NiAwIDAgMS0uOTY5LS45ODNjMC0uNTQyLjQzNC0uOTgyLjk3LS45ODJ6bTQuODQ0IDBjLjUzNSAwIC45NjkuNDQuOTY5Ljk4MmEuOTc2Ljk3NiAwIDAgMS0uOTY5Ljk4M2EuOTc2Ljk3NiAwIDAgMS0uOTY5LS45ODNjMC0uNTQyLjQzNC0uOTgyLjk2OS0uOTgyIi8%2BPC9zdmc%2B" alt="Join WeChat Group" /></a>
+    <a href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=30cvb14f-a9b1-4b12-adb6-2ff6d476a227" target="_blank"><img src="https://img.shields.io/badge/飞书群-Join-3370FF?style=for-the-badge&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjE2NCAyMDQgNzYyIDYxNyI%2BPHBhdGggZmlsbD0iIzAwRDZCOSIgZD0iTTU1OS45MTUgNTMwLjQ1M2MtNDYuNTA3LTExMS43ODYtMTk0LjU2LTI0OC40NjktMjYyLjgwNi0zMDIuODI2aDMzMy43ODJjNDcuMTQ2IDE2LjI5OCA4Ny42MTYgMTM0LjY3NyAxMDEuOTczIDE5MS44MDgtMzUuNDk5IDMxLjIxLTExOS43ODcgOTcuMTA5LTE3Mi45NSAxMTEuMDE4eiIvPjxwYXRoIGZpbGw9IiMxMzNDOUEiIGQ9Ik02MzIuMDIxIDQ1Mi45OTJjLTQ1LjE4NCA2MC40OC0xMzMuNTQ2IDEyMS45NjMtMTcyLjA1MyAxNDUuMTNsLTIuODggMjQuMjc4IDIzNS45NDcgNjMuNjM3YzMyLjIxMy0yNS45NjIgMTAzLjA2MS04Ny4yOTYgMTI4Ljk2LTEyNC45MjggNC4zOTQtNi4zNzggNjguOTkyLTEzNS45MTQgNzkuNDAyLTE1MS41NTItMTguMjQtMTEuMzA2LTQyLjU2LTE4LjI2MS0xMDQuMjc3LTIxLjczOC04Mi41Ni00LjMzMS0xMTYuNDM3IDIwLjg2NC0xNjUuMDk5IDY1LjE3M3oiLz48cGF0aCBmaWxsPSIjMzM3MEZGIiBkPSJNMTg3Ljg4MyA3MTIuOTE3VjM5My41MTVDMzk3LjU2OCA1OTkuODA4IDU1OC4zMTUgNjQyLjY4OCA2NDEuMDQ1IDY1My43NmMxMjQuNDU5IDUuNDE5IDE1NC42NjctNzMuMDQ1IDE4MS4xNDItOTMuMDk5LTk3LjAyNCAxNTMuMTc0LTIyNC42NCAyMzUuNzM0LTM4NC43NDcgMjM1LjczNC0xMjguMTA3IDAtMjE5Ljc1NS01NS42NTktMjQ5LjU1Ny04My40Nzh6Ii8%2BPC9zdmc%2B" alt="Join Feishu Group" /></a>
     <a href="https://discord.gg/W7NyVDRt6a"><img src="https://dcbadge.limes.pink/api/server/W7NyVDRt6a" alt="Join Discord" /></a>
 	  </p>
   <p>
@@ -102,13 +103,13 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
-        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">
+        <img src="docs/public/sponsors/aicodemirror-card.png" alt="AICodeMirror" width="175" />
       </a>
     </td>
     <td>
-      UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
-      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
+      Special thanks to AICodeMirror for sponsoring this project! AICodeMirror provides a high-stability official relay service for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 7×24 dedicated support. Official-channel pricing for Claude Code / Codex / Gemini is as low as 38% / 2% / 9% of list price, with extra discounts on top-ups! AICodeMirror offers a special benefit for DBX users: register through this link to enjoy 20% off your first top-up, and enterprise customers up to 25% off.
+      <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">Visit AICodeMirror</a>
     </td>
   </tr>
   <tr>
@@ -120,6 +121,17 @@
     <td>
       HuaLongAI is a model API relay built for heavy AI developers, offering 100% official-source Codex and Claude models with transparent token-level billing, enterprise contracts, and invoicing.
       <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">Visit HuaLongAI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
+        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      </a>
+    </td>
+    <td>
+      UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
     </td>
   </tr>
   <tr>
@@ -196,13 +208,23 @@
       <p>Native app on macOS, Windows, and Linux. Self-host via Docker for team access. Web version for browser-only environments. Same feature set. Same connections.</p>
     </td>
   </tr>
+  <tr>
+    <td>
+      <h3>📨 Not just databases</h3>
+      <p>Message queues and middleware get first-class consoles: Kafka, RocketMQ, RabbitMQ, Pulsar, and MQTT, plus Nacos, Consul, ZooKeeper, and etcd. Inspect topics and messages next to your databases — no extra tool.</p>
+    </td>
+    <td>
+      <h3>🧩 Plugin ecosystem</h3>
+      <p>Extend DBX with signed, sandboxed plugins from the built-in store — S3, Kubernetes, LDAP, and more. Build your own with the Go / TypeScript SDK.</p>
+    </td>
+  </tr>
 </table>
 
 ## Features
 
-### 90+ Databases, One Tool
+### 100+ Databases, One Tool
 
-MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingbaseES, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, Dolt, and more. Agent-based profiles extend DBX to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Cloud Spanner, Kylin, SunDB, JDBCX, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and more. Message queue admin is also available for Pulsar, Kafka, and RocketMQ. All in a single ~25 MB app. No bundled Chromium.
+MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingbaseES, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, Dolt, and more. Agent-based profiles extend DBX to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Cloud Spanner, Kylin, SunDB, JDBCX, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and more. All in a single ~25 MB app. No bundled Chromium.
 
 ### Query Editor
 
@@ -241,6 +263,18 @@ Virtual-scrolled table that handles large result sets. Inline editing, SQL previ
 
 - **Redis** — key pattern search, batch key operations, command runner, TTL editing, and all data types (String, Hash, List, Set, ZSet, Stream)
 - **MongoDB** — document CRUD with pagination, Atlas & replica set URL connection
+
+### Message Queue & Middleware Consoles
+
+- **Kafka / RocketMQ / RabbitMQ / Pulsar** — topics, consumer groups, message browsing, query and trace, broker monitoring, permissions and policies
+- **MQTT** — topic tree navigation, subscribe, and publish
+- **Nacos / Consul / ZooKeeper / etcd** — service discovery, KV / config browsing, health, and ACL
+
+### Plugin System
+
+- **Extensible by design** — new connection types and tools arrive as plugins: S3 browsing, Kubernetes, LDAP, and more from the built-in store
+- **Signed & sandboxed** — every plugin package is signature-verified before install; plugin UI runs sandboxed with its own sidecar process
+- **Build your own** — Go / TypeScript SDKs with `npx @dbx-app/plugin-cli` scaffolding; publish to the Marketplace via [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store)
 
 ### Safety & Connectivity
 
@@ -301,9 +335,12 @@ DBX also provides a dedicated CLI package for terminal, script, and Codex workfl
 npm install -g @dbx-app/cli
 # or via Homebrew
 brew tap t8y2/tap && brew install dbx-cli
+dbx agent setup
 dbx connections list --json
 dbx query local "select 1" --json
 ```
+
+The CLI includes the official DBX Agent Skill. `dbx agent setup` installs or updates it offline under `~/.agents/skills/dbx`, so shell-capable AI agents know how to use DBX CLI safely.
 
 See the [MCP server README](packages/mcp-server/README.md) and [CLI README](packages/cli/README.md) for details.
 
@@ -341,11 +378,18 @@ Updates then arrive through the regular `flatpak update`. See the [DBX page on F
 
 ## Self-Hosted (Docker)
 
+For scheduled backups after closing the desktop app or browser, see
+[Background Database Backups](docs/background-database-backups.md), including
+Windows/macOS/Linux startup and persistent container backup volumes.
+
 DBX provides a web version that can be deployed via Docker. The examples use
 the `latest` tag to pull the current release.
 
 ```bash
-docker run -d --pull=always --name dbx -p 4224:4224 -v dbx-data:/app/data t8y2/dbx:latest
+# The default keeps the key in the persistent /app/data volume.
+docker run -d --pull=always --name dbx -p 4224:4224 \
+  -v dbx-data:/app/data \
+  t8y2/dbx:latest
 ```
 
 This uses the cross-platform `dbx-data` named volume. Users in China can use
@@ -374,9 +418,57 @@ services:
 
 volumes:
   dbx-data:
+
 ```
 
 Open `http://localhost:4224` in your browser. Multi-arch images (amd64 / arm64) are available.
+
+Connection, plugin, AI, and tunnel credentials are encrypted before they are
+written to `dbx.db`. Desktop builds use the local platform credential store
+(macOS Keychain, Windows Credential Manager, or Linux Secret Service).
+Web/Docker and directly running `dbx-web` use the same managed data-directory
+key by default: `${DBX_DATA_DIR}/.dbx/secret.key`. The key is created only when
+migration starts or the first sensitive value is written, and must be backed up
+together with `dbx.db`. Persisting `/app/data` is therefore sufficient for a
+normal Docker deployment. This key protects the database contents, but cannot
+protect the whole data volume if the volume itself is copied or exposed.
+
+For production deployments, replace the managed key with a Docker/Kubernetes
+Secret by setting `DBX_SECRET_KEY_FILE`, or provide `DBX_SECRET_KEY` through a
+secret manager. Explicit keys take precedence and must never be rotated while
+encrypted data is in use. Without a usable key, business APIs remain blocked
+and the browser displays the data security upgrade screen.
+
+When running the binary directly, set `DBX_DATA_DIR=/var/lib/dbx` to use
+`/var/lib/dbx/.dbx/secret.key` with the same lifecycle and backup rules.
+
+When upgrading from a release that stored credentials in plain text, Desktop
+and Web display a **Data Security Upgrade** wizard before opening the main
+application. Choose **Start upgrade** to create a restricted backup, migrate
+legacy database/JSON credentials, and verify that encrypted values can be
+read. Failures retain the original data and backup; fix the issue shown in
+the wizard and choose **Retry**. The backup path is shown after success.
+Once you have verified your connections, **Delete migration backups** asks
+for confirmation and removes the migration backup directory and the legacy
+JSON `.bak` files created by that migration. Unrelated backup files are kept.
+Users with no legacy data proceed directly after the initial check.
+
+Local CLI and standalone MCP can reuse the existing platform credential
+store on the same device, or read an explicitly configured
+`DBX_SECRET_KEY_FILE`/`DBX_SECRET_KEY`. They do not create keys during the
+startup check or automatically migrate legacy data. A
+`DATA_MIGRATION_REQUIRED` error means that you must first open the same data
+directory in Desktop or Web and complete its upgrade wizard. For headless
+hosts without a platform credential store, configure the persistent key.
+
+Cross-device exports use a separate sync passphrase and never contain the
+local storage key. A direct `dbx.db` copy is not a cross-platform sync method:
+platform keys do not move with the database. Use encrypted export/import so
+the target device stores credentials using its own local key.
+
+For the complete design, migration state machine, implementation map,
+troubleshooting, and test plan, see
+[DBX Data Security Upgrade and Migration](docs/data-security-migration.md).
 
 To publish DBX under a reverse-proxy context path such as `/dbx`, set the
 runtime base path and proxy the same prefix to the container:
@@ -520,7 +612,8 @@ DBX is free and open source, but ongoing maintenance, database compatibility tes
 
 <a href="https://discord.gg/W7NyVDRt6a" target="_blank"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
 <a href="https://qm.qq.com/q/1087880322" target="_blank"><img src="https://img.shields.io/badge/QQ%20群-1087880322-EB1923?logo=tencentqq&logoColor=white" alt="QQ Group" /></a>
-<a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-Join-07C160?logo=wechat&logoColor=white" alt="WeChat Group" /></a>
+<a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-Join-07C160?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iIzA3YzE2MCIgZD0iTTguNjkxIDIuMTg4QzMuODkxIDIuMTg4IDAgNS40NzYgMCA5LjUzYzAgMi4yMTIgMS4xNyA0LjIwMyAzLjAwMiA1LjU1YS41OS41OSAwIDAgMSAuMjEzLjY2NWwtLjM5IDEuNDhjLS4wMTkuMDctLjA0OC4xNDEtLjA0OC4yMTNjMCAuMTYzLjEzLjI5NS4yOS4yOTVhLjMzLjMzIDAgMCAwIC4xNjctLjA1NGwxLjkwMy0xLjExNGEuODYuODYgMCAwIDEgLjcxNy0uMDk4YTEwLjIgMTAuMiAwIDAgMCAyLjgzNy40MDNjLjI3NiAwIC41NDMtLjAyNy44MTEtLjA1Yy0uODU3LTIuNTc4LjE1Ny00Ljk3MiAxLjkzMi02LjQ0NmMxLjcwMy0xLjQxNSAzLjg4Mi0xLjk4IDUuODUzLTEuODM4Yy0uNTc2LTMuNTgzLTQuMTk2LTYuMzQ4LTguNTk2LTYuMzQ4TTUuNzg1IDUuOTkxYy42NDIgMCAxLjE2Mi41MjkgMS4xNjIgMS4xOGExLjE3IDEuMTcgMCAwIDEtMS4xNjIgMS4xNzhBMS4xNyAxLjE3IDAgMCAxIDQuNjIzIDcuMTdjMC0uNjUxLjUyLTEuMTggMS4xNjItMS4xOHptNS44MTMgMGMuNjQyIDAgMS4xNjIuNTI5IDEuMTYyIDEuMThhMS4xNyAxLjE3IDAgMCAxLTEuMTYyIDEuMTc4YTEuMTcgMS4xNyAwIDAgMS0xLjE2Mi0xLjE3OGMwLS42NTEuNTItMS4xOCAxLjE2Mi0xLjE4bTUuMzQgMi44NjdjLTEuNzk3LS4wNTItMy43NDYuNTEyLTUuMjggMS43ODZjLTEuNzIgMS40MjgtMi42ODcgMy43Mi0xLjc4IDYuMjJjLjk0MiAyLjQ1MyAzLjY2NiA0LjIyOSA2Ljg4NCA0LjIyOWMuODI2IDAgMS42MjItLjEyIDIuMzYxLS4zMzZhLjcyLjcyIDAgMCAxIC41OTguMDgybDEuNTg0LjkyNmEuMy4zIDAgMCAwIC4xNC4wNDdjLjEzNCAwIC4yNC0uMTExLjI0LS4yNDdjMC0uMDYtLjAyMy0uMTItLjAzOC0uMTc3bC0uMzI3LTEuMjMzYS42LjYgMCAwIDEtLjAyMy0uMTU2YS40OS40OSAwIDAgMSAuMjAxLS4zOThDMjMuMDI0IDE4LjQ4IDI0IDE2LjgyIDI0IDE0Ljk4YzAtMy4yMS0yLjkzMS01LjgzNy02LjY1Ni02LjA4OFY4Ljg5Yy0uMTM1LS4wMS0uMjctLjAyNy0uNDA3LS4wM3ptLTIuNTMgMy4yNzRjLjUzNSAwIC45NjkuNDQuOTY5Ljk4MmEuOTc2Ljk3NiAwIDAgMS0uOTY5Ljk4M2EuOTc2Ljk3NiAwIDAgMS0uOTY5LS45ODNjMC0uNTQyLjQzNC0uOTgyLjk3LS45ODJ6bTQuODQ0IDBjLjUzNSAwIC45NjkuNDQuOTY5Ljk4MmEuOTc2Ljk3NiAwIDAgMS0uOTY5Ljk4M2EuOTc2Ljk3NiAwIDAgMS0uOTY5LS45ODNjMC0uNTQyLjQzNC0uOTgyLjk2OS0uOTgyIi8%2BPC9zdmc%2B" alt="WeChat Group" /></a><a href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=30cvb14f-a9b1-4b12-adb6-2ff6d476a227" target="_blank"><img src="https://img.shields.io/badge/飞书群-Join-3370FF?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjE2NCAyMDQgNzYyIDYxNyI%2BPHBhdGggZmlsbD0iIzAwRDZCOSIgZD0iTTU1OS45MTUgNTMwLjQ1M2MtNDYuNTA3LTExMS43ODYtMTk0LjU2LTI0OC40NjktMjYyLjgwNi0zMDIuODI2aDMzMy43ODJjNDcuMTQ2IDE2LjI5OCA4Ny42MTYgMTM0LjY3NyAxMDEuOTczIDE5MS44MDgtMzUuNDk5IDMxLjIxLTExOS43ODcgOTcuMTA5LTE3Mi45NSAxMTEuMDE4eiIvPjxwYXRoIGZpbGw9IiMxMzNDOUEiIGQ9Ik02MzIuMDIxIDQ1Mi45OTJjLTQ1LjE4NCA2MC40OC0xMzMuNTQ2IDEyMS45NjMtMTcyLjA1MyAxNDUuMTNsLTIuODggMjQuMjc4IDIzNS45NDcgNjMuNjM3YzMyLjIxMy0yNS45NjIgMTAzLjA2MS04Ny4yOTYgMTI4Ljk2LTEyNC45MjggNC4zOTQtNi4zNzggNjguOTkyLTEzNS45MTQgNzkuNDAyLTE1MS41NTItMTguMjQtMTEuMzA2LTQyLjU2LTE4LjI2MS0xMDQuMjc3LTIxLjczOC04Mi41Ni00LjMzMS0xMTYuNDM3IDIwLjg2NC0xNjUuMDk5IDY1LjE3M3oiLz48cGF0aCBmaWxsPSIjMzM3MEZGIiBkPSJNMTg3Ljg4MyA3MTIuOTE3VjM5My41MTVDMzk3LjU2OCA1OTkuODA4IDU1OC4zMTUgNjQyLjY4OCA2NDEuMDQ1IDY1My43NmMxMjQuNDU5IDUuNDE5IDE1NC42NjctNzMuMDQ1IDE4MS4xNDItOTMuMDk5LTk3LjAyNCAxNTMuMTc0LTIyNC42NCAyMzUuNzM0LTM4NC43NDcgMjM1LjczNC0xMjguMTA3IDAtMjE5Ljc1NS01NS42NTktMjQ5LjU1Ny04My40Nzh6Ii8%2BPC9zdmc%2B" alt="Feishu Group" /></a>
+
 [![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-blue)](https://linux.do)
 [![1Panel](https://img.shields.io/badge/1Panel-Partner-005EEB?logo=1panel&logoColor=white)](https://1panel.cn)
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
-import { buildCancelQuerySql, clampInterval, createProcessListLoadCoordinator, mapProcessRows, processListExecutionError, processListSessionCount, supportsProcessList } from "@/lib/database/mysqlProcessList";
+import { buildCancelQuerySql, buildTerminateSessionSql, clampInterval, createProcessListLoadCoordinator, mapProcessRows, processListExecutionError, processListSessionCount, supportsProcessList } from "@/lib/database/mysqlProcessList";
 
 function result(columns: string[], rows: (string | number | boolean | null)[][]): QueryResult {
   return { columns, rows, affected_rows: 0, execution_time_ms: 0 };
@@ -45,6 +45,19 @@ describe("buildCancelQuerySql", () => {
     expect(() => buildCancelQuerySql(0)).toThrow();
     expect(() => buildCancelQuerySql(-1)).toThrow();
     expect(() => buildCancelQuerySql(Number.NaN)).toThrow();
+  });
+});
+
+describe("buildTerminateSessionSql", () => {
+  it("builds KILL for a valid id so an idle session is really disconnected", () => {
+    expect(buildTerminateSessionSql(8213)).toBe("KILL 8213");
+  });
+
+  it("rejects non-integer or nonpositive ids", () => {
+    expect(() => buildTerminateSessionSql(1.5)).toThrow();
+    expect(() => buildTerminateSessionSql(0)).toThrow();
+    expect(() => buildTerminateSessionSql(-1)).toThrow();
+    expect(() => buildTerminateSessionSql(Number.NaN)).toThrow();
   });
 });
 

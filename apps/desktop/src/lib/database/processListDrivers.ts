@@ -1,16 +1,22 @@
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { buildCancelQuerySql as buildMysqlCancelQuerySql, mapProcessRows as mapMysqlProcessRows, PROCESS_LIST_SQL as MYSQL_PROCESS_LIST_SQL, supportsProcessList as supportsMysqlProcessList } from "./mysqlProcessList";
+import { buildCancelQuerySql as buildMysqlCancelQuerySql, buildTerminateSessionSql as buildMysqlTerminateSessionSql, mapProcessRows as mapMysqlProcessRows, PROCESS_LIST_SQL as MYSQL_PROCESS_LIST_SQL, supportsProcessList as supportsMysqlProcessList } from "./mysqlProcessList";
 import {
   buildKingbaseCancelQuerySql,
   buildKingbasePgCancelQuerySql,
+  buildKingbasePgTerminateSessionSql,
+  buildKingbaseTerminateSessionSql,
   buildPgCancelQuerySql,
+  buildPgTerminateSessionSql,
   isKingbaseOwnSessionCatalogCompatibilityError,
   isKingbaseProcessListCatalogCompatibilityError,
   isKingbaseCancelCatalogCompatibilityError,
+  isKingbaseTerminateCatalogCompatibilityError,
   isPgProcessListCompatibilityError,
   kingbaseCancelQueryResultError,
   kingbasePgCancelQueryResultError,
+  kingbasePgTerminateSessionResultError,
+  kingbaseTerminateSessionResultError,
   KINGBASE_OWN_SESSION_SQL,
   KINGBASE_PG_OWN_SESSION_SQL,
   KINGBASE_PG_PROCESS_LIST_SQL,
@@ -19,6 +25,7 @@ import {
   OPENGAUSS_OWN_SESSION_SQL,
   OPENGAUSS_PROCESS_LIST_SQL,
   pgCancelQueryResultError,
+  pgTerminateSessionResultError,
   PG_OWN_SESSION_SQL,
   PG_PROCESS_LIST_LEGACY_SQL,
   PG_PROCESS_LIST_SQL,
@@ -79,6 +86,19 @@ export interface ProcessListDriver {
   cancelQueryResultError?(results: QueryResult[]): string | null;
   /** Validate the success value returned by the compatibility cancellation statement. */
   fallbackCancelQueryResultError?(results: QueryResult[]): string | null;
+  /**
+   * Build the validated statement that disconnects the session. Engines that omit it
+   * only offer query cancellation, because they cannot close a session over the wire.
+   */
+  buildTerminateSessionSql?(id: number): string;
+  /** Build the compatibility statement used when the primary terminate function is unavailable. */
+  buildFallbackTerminateSessionSql?(id: number): string;
+  /** Restrict terminate fallback attempts to known compatibility failures. */
+  shouldUseFallbackTerminateSessionSql?(error: unknown): boolean;
+  /** Validate any engine-specific success value returned by the terminate statement. */
+  terminateSessionResultError?(results: QueryResult[]): string | null;
+  /** Validate the success value returned by the compatibility terminate statement. */
+  fallbackTerminateSessionResultError?(results: QueryResult[]): string | null;
 }
 
 const MYSQL_COLUMNS: ProcessColumn[] = [
@@ -114,6 +134,7 @@ const MYSQL_DRIVER: ProcessListDriver = {
   // Typed structs carry no index signature; they are plain string-keyed objects at runtime.
   mapRows: (result) => mapMysqlProcessRows(result) as unknown as ProcessRow[],
   buildCancelQuerySql: buildMysqlCancelQuerySql,
+  buildTerminateSessionSql: buildMysqlTerminateSessionSql,
 };
 
 const POSTGRES_DRIVER: ProcessListDriver = {
@@ -127,6 +148,8 @@ const POSTGRES_DRIVER: ProcessListDriver = {
   mapRows: (result) => mapPgProcessRows(result) as unknown as ProcessRow[],
   buildCancelQuerySql: buildPgCancelQuerySql,
   cancelQueryResultError: pgCancelQueryResultError,
+  buildTerminateSessionSql: buildPgTerminateSessionSql,
+  terminateSessionResultError: pgTerminateSessionResultError,
 };
 
 const OPENGAUSS_DRIVER: ProcessListDriver = {
@@ -138,6 +161,8 @@ const OPENGAUSS_DRIVER: ProcessListDriver = {
   mapRows: (result) => mapPgProcessRows(result) as unknown as ProcessRow[],
   buildCancelQuerySql: buildPgCancelQuerySql,
   cancelQueryResultError: pgCancelQueryResultError,
+  buildTerminateSessionSql: buildPgTerminateSessionSql,
+  terminateSessionResultError: pgTerminateSessionResultError,
 };
 
 const KINGBASE_DRIVER: ProcessListDriver = {
@@ -156,6 +181,11 @@ const KINGBASE_DRIVER: ProcessListDriver = {
   shouldUseFallbackCancelQuerySql: isKingbaseCancelCatalogCompatibilityError,
   cancelQueryResultError: kingbaseCancelQueryResultError,
   fallbackCancelQueryResultError: kingbasePgCancelQueryResultError,
+  buildTerminateSessionSql: buildKingbaseTerminateSessionSql,
+  buildFallbackTerminateSessionSql: buildKingbasePgTerminateSessionSql,
+  shouldUseFallbackTerminateSessionSql: isKingbaseTerminateCatalogCompatibilityError,
+  terminateSessionResultError: kingbaseTerminateSessionResultError,
+  fallbackTerminateSessionResultError: kingbasePgTerminateSessionResultError,
 };
 
 /** Resolve the process-list driver for a connection, or null if unsupported. */

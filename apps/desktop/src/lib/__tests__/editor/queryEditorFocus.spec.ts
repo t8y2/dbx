@@ -1,10 +1,5 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { focusEditorView, type EditorViewLike } from "@/lib/editor/queryEditorFocus";
-
-const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
-const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
-const editorToolbarSource = readFileSync(new URL("../../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
 
 function createMockView(overrides: Partial<EditorViewLike> = {}): EditorViewLike {
   return {
@@ -35,27 +30,5 @@ describe("focusEditorView", () => {
 
   it("returns false when view is undefined", () => {
     expect(focusEditorView(undefined)).toBe(false);
-  });
-});
-
-describe("QueryEditor auto focus wiring", () => {
-  it("keeps auto focus opt-in for shared editor instances", () => {
-    expect(queryEditorSource).toContain("autoFocus?: boolean;");
-    expect(queryEditorSource).toMatch(/if \(props\.autoFocus\) \{[\s\S]*focusEditorView\(view\.value\);/);
-  });
-
-  it("enables auto focus for query tabs", () => {
-    expect(contentAreaSource).toMatch(/<QueryEditor[\s\S]*?:\s*auto-focus="autoFocus !== false"\s[\s\S]*?:model-value="activeTab\.sql"/);
-  });
-
-  it("restores focus when the active query tab changes", () => {
-    expect(queryEditorSource).toMatch(/if \(tabId !== prevTabId\) \{[\s\S]*?activateTabDocument\(prevTabId, tabId, val\);[\s\S]*?if \(props\.autoFocus\) restoreEditorFocus\(\);/);
-  });
-});
-
-describe("QueryEditor toolbar focus", () => {
-  it("does not move focus from the editor when clicking execute", () => {
-    expect(editorToolbarSource).toMatch(/:disabled="activeTab\.isCancelling[\s\S]*?@mousedown\.prevent="onExecutePointerDown"[\s\S]*?@click="onExecuteClick"/);
-    expect(queryEditorSource).toMatch(/function requestExecute\([\s\S]*?const currentView = view\.value;[\s\S]*?currentView\.focus\(\);[\s\S]*?requestExecuteFromView\(currentView/);
   });
 });

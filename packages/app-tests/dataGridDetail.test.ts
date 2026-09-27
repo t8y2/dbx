@@ -227,7 +227,7 @@ test("dataGridRowDetailJson and dataGridRowDetailTsv format copy payloads", () =
   assert.equal(dataGridRowDetailTsv(detail), "1\tAda\t");
 });
 
-test("data grid detail copy renders textual MySQL VARBINARY while preserving non-text bytes", () => {
+test("data grid detail copy renders textual and GBK-decodable MySQL VARBINARY as text", () => {
   const rowDetail = buildDataGridRowDetail({
     rowIndex: 0,
     rowId: 1,
@@ -245,8 +245,9 @@ test("data grid detail copy renders textual MySQL VARBINARY while preserving non
     displayValue: (value) => String(value),
   });
 
-  assert.equal(dataGridRowDetailJson(rowDetail, undefined, "mysql"), '{\n  "name": "abc",\n  "payload": "0xdeadbeef"\n}');
-  assert.equal(dataGridRowDetailTsv(rowDetail, "mysql"), "abc\t0xdeadbeef");
+  // 0xdeadbeef 恰好全部组成合法 GBK 序列：MySQL 连接按 GBK 解码复制（与网格显示一致），见 binaryCellDownload.test.ts。
+  assert.equal(dataGridRowDetailJson(rowDetail, undefined, "mysql"), '{\n  "name": "abc",\n  "payload": "蕲撅"\n}');
+  assert.equal(dataGridRowDetailTsv(rowDetail, "mysql"), "abc\t蕲撅");
   assert.equal(dataGridColumnDetailJson(columnDetail!, "mysql"), '[\n  {\n    "row": 1,\n    "value": "abc"\n  }\n]');
   assert.equal(dataGridColumnDetailTsv(columnDetail!, "mysql"), "abc");
   // 非 MySQL binary 及非文本 VARBINARY 不应被误转成字符串或 replacement character。

@@ -96,7 +96,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             return connection;
         } catch (SQLException error) {
             logConnectionEvent("mssql-jdbc failed", params, error);
-            if (isSqlServer2000Unsupported(error)) {
+            if (shouldFallbackToJtds(error)) {
                 logConnectionEvent("switching to jTDS 1.3.1 fallback", params, null);
                 try {
                     super.loadDriver(jtdsDriverParams());
@@ -203,7 +203,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             .replace('\n', ' ');
     }
 
-    static boolean isSqlServer2000Unsupported(Throwable error) {
+    static boolean shouldFallbackToJtds(Throwable error) {
         Throwable current = error;
         while (current != null) {
             String message = current.getMessage();
@@ -211,20 +211,37 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
                 String normalized = message.toLowerCase(Locale.ROOT);
                 // mssql-jdbc rejects SQL Server 2000 (major version 8) during
                 // prelogin with "SQL Server version 8 is not supported by
-                // this driver." — the version word breaks a plain
-                // "sql server 8" substring match, so accept both shapes.
-                boolean version8Rejection = (normalized.contains("sql server 8") || normalized.contains("sql server version 8"))
-                    && (normalized.contains("not support") || normalized.contains("不支持"));
-                // Other driver wordings name the supported floor instead.
-                boolean floor2005Rejection = normalized.contains("sql server 2005 or later");
-                if (version8Rejection || floor2005Rejection) {
+                // this driver." Localized messages can translate the version
+                // and unsupported phrases, so accept those equivalent shapes.
+                boolean version8Rejection = (normalized.contains("sql server 8")
+                    || normalized.contains("sql server version 8")
+                    || normalized.contains("sql server 版本 8"))
+                    && (normalized.contains("not support")
+                        || normalized.contains("不支持")
+                        || normalized.contains("不支援"));
+                // Other driver wordings name the supported floor instead. The
+                // localized mssql-jdbc resource keeps "SQL Server 2005" in
+                // English while translating the "or later" suffix.
+                boolean floor2005Rejection = normalized.contains("sql server 2005 or later")
+                    || (normalized.contains("sql server 2005") && normalized.contains("更高版本"));
+                // Some SQL Server 2000 installations close the TDS 7.4
+                // prelogin socket before mssql-jdbc can report the server
+                // version. In legacy mode, retry that handshake once with
+                // jTDS, which speaks the older protocol.
+                boolean preloginRejection = normalized.contains("connection reset")
+                    || normalized.contains("connection was reset")
+                    || normalized.contains("forcibly closed")
+                    || normalized.contains("意外的登录前响应")
+                    || (normalized.contains("unexpected")
+                        && (normalized.contains("prelogin") || normalized.contains("pre-login")));
+                if (version8Rejection || floor2005Rejection || preloginRejection) {
                     return true;
                 }
             }
             if (current instanceof SQLException) {
                 SQLException next = ((SQLException) current).getNextException();
                 if (next != null && next != current.getCause()) {
-                    if (isSqlServer2000Unsupported(next)) {
+                    if (shouldFallbackToJtds(next)) {
                         return true;
                     }
                 }
@@ -506,10 +523,17 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             + "ORDER BY c.colid";
     }
 
+    // sysobjects.xtype codes for the object kinds the object browser and the
+    // tree both ask object source for: P = stored procedure, FN = scalar
+    // function, V = view, TR = trigger. Views were missing, so "view DDL" on a
+    // SQL Server legacy connection failed with "Unsupported object type: VIEW"
+    // instead of returning the definition stored in syscomments (#10162).
     private static String sqlServer2000ObjectXtype(String objectType) {
         return switch (objectType) {
             case "PROCEDURE" -> "P";
             case "FUNCTION" -> "FN";
+            case "VIEW" -> "V";
+            case "TRIGGER" -> "TR";
             default -> null;
         };
     }

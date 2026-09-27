@@ -129,8 +129,16 @@ jobs:
             exit 1
           fi
 
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        with:
+          tool: cargo-nextest@0.9.137
+
       - name: Test Rust CLI
-        run: cargo test --locked --manifest-path plugins/sdk/cli/Cargo.toml
+        run: cargo nextest run --locked --manifest-path plugins/sdk/cli/Cargo.toml --no-fail-fast
+
+      - name: Test Rust CLI docs
+        run: cargo test --doc --locked --manifest-path plugins/sdk/cli/Cargo.toml
 
       - name: Prepare and test plugin development runtime
         run: |
@@ -163,6 +171,85 @@ jobs:
             git tag "${TAG}" HEAD
             git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
           fi
+
+  refresh-lockfile:
+    name: Refresh pnpm lockfile
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Sync plugin-cli lockfile specifiers
+        id: sync
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+
+          const version = process.env.VERSION;
+          const manifest = JSON.parse(fs.readFileSync("packages/plugin-cli/package.json", "utf8"));
+          if (manifest.version !== version) {
+            console.log(`main pins plugin-cli ${manifest.version}; release ${version} does not need a lockfile sync.`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "changed=false\n");
+            process.exit(0);
+          }
+
+          const expected = Object.keys(manifest.optionalDependencies ?? {});
+          const lockPath = "pnpm-lock.yaml";
+          const lines = fs.readFileSync(lockPath, "utf8").split("\n");
+          let inImporter = false;
+          let specifiers = 0;
+          let changed = 0;
+          for (let i = 0; i < lines.length; i += 1) {
+            const line = lines[i];
+            if (/^ {2}\S/.test(line)) {
+              inImporter = line === "  packages/plugin-cli:";
+              continue;
+            }
+            if (!inImporter) continue;
+            const match = line.match(/^( {8}specifier: )(.+)$/);
+            if (!match) continue;
+            specifiers += 1;
+            if (match[2] !== version) {
+              lines[i] = match[1] + version;
+              changed += 1;
+            }
+          }
+          if (specifiers !== expected.length) {
+            throw new Error(`pnpm-lock.yaml has ${specifiers} plugin-cli specifiers; manifest declares ${expected.length}.`);
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed > 0}\n`);
+          if (changed > 0) {
+            fs.writeFileSync(lockPath, lines.join("\n"));
+            console.log(`Updated ${changed} plugin-cli specifiers to ${version}.`);
+          } else {
+            console.log("plugin-cli lockfile specifiers already match; nothing to do.");
+          }
+          NODE
+
+      - name: Commit refreshed lockfile
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pnpm-lock.yaml
+          git commit -m "chore(plugin-cli): refresh pnpm lockfile for ${VERSION}"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "::notice::Refreshed pnpm-lock.yaml plugin-cli specifiers to ${VERSION}."
+              exit 0
+            fi
+            echo "Push attempt ${attempt} rejected; rebasing onto origin/main."
+            git pull --rebase origin main
+          done
+          echo "::error::Unable to push the lockfile refresh after 3 attempts."
+          exit 1
 
   publish-platforms:
     name: Publish ${{ matrix.package-name }}

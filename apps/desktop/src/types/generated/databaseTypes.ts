@@ -16,6 +16,7 @@ export const DATABASE_TYPES = [
   "elasticsearch",
   "easysearch",
   "meilisearch",
+  "solr",
   "hbase",
   "qdrant",
   "chromadb",
@@ -81,6 +82,7 @@ export const DATABASE_TYPES = [
   "jdbc",
   "spark",
   "plugin",
+  "salesforce",
 ] as const;
 
 export type DatabaseType = (typeof DATABASE_TYPES)[number] | "plugin";

@@ -203,6 +203,15 @@ export function useDataGridCellDetailEdit(options: UseDataGridCellDetailEditOpti
     options.warnFormattedJsonEdit(detail, true);
   }
 
+  // 与 formatValueEditorJson 相同的草稿格式化，但不弹「正在编辑格式化后的 JSON」
+  // 提示：用户是在单元格详情面板里主动点「格式化 JSON」展开草稿（issue #9832）。
+  function formatDetailJsonDraft() {
+    const detail = options.activeDetail.value;
+    if (!detail || !canFormatCellDetailJson(detailEditValue.value, detail.type)) return;
+    detailEditValue.value = formatJsonText(detailEditValue.value) ?? detailEditValue.value;
+    syncEditorFromDetailEdit();
+  }
+
   function compactDetailJson() {
     const detail = options.activeDetail.value;
     if (!detail || !canFormatCellDetailJson(detailEditValue.value, detail.type)) return;
@@ -250,6 +259,7 @@ export function useDataGridCellDetailEdit(options: UseDataGridCellDetailEditOpti
     restoreDetailOriginalValue,
     setValueEditorNull,
     formatValueEditorJson,
+    formatDetailJsonDraft,
     compactDetailJson,
     openDetailJsonCompare,
     setDetailNull,

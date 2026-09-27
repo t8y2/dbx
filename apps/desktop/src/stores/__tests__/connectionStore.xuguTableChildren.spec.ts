@@ -115,6 +115,24 @@ describe("connectionStore Xugu table child metadata", () => {
     expect(childTypes).toEqual(["group-columns", "group-fkeys", "group-triggers", "group-indexes"]);
   });
 
+  it("loads OceanBase Oracle partitions and subpartitions through the metadata tree", async () => {
+    const partition = { name: "P1", position: 1, value: "100", partition_type: "RANGE", partition_key: '"ID"' };
+    const subpartition = { name: "P1_E", position: 1, value: "'east'", partition_type: "LIST", partition_key: '"REGION"' };
+    const { api, config, store, tableId } = await setup("oceanbase-oracle", {
+      listPartitions: vi.fn().mockResolvedValue([partition]),
+      listSubpartitions: vi.fn().mockResolvedValue([subpartition]),
+    });
+    const partitions = findNode(store.treeNodes, `${tableId}:__table-partitions`)!;
+    const subpartitions = findNode(store.treeNodes, `${tableId}:__table-subpartitions`)!;
+    expect(partitions).toBeDefined();
+    expect(subpartitions).toBeDefined();
+    await store.loadTreeNodeChildren(partitions);
+    await store.loadTreeNodeChildren(subpartitions);
+    expect(api.listPartitions).toHaveBeenCalledWith(config.id, "SHOP_DEMO", "SYSDBA", "SHOP_ORDERS", undefined);
+    expect(partitions.children?.[0]).toMatchObject({ label: "P1 (RANGE: 100)", meta: partition });
+    expect(subpartitions.children?.[0]).toMatchObject({ label: "P1_E (LIST: 'east')", meta: subpartition });
+  });
+
   it("routes Xugu child groups to their dedicated metadata calls, including empty results", async () => {
     const listConstraints = vi.fn().mockResolvedValue([
       {

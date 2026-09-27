@@ -43,6 +43,7 @@ export const contentSurfaceEventNames = [
   "structureEditorClose",
   "previewStatement",
   "focusStatement",
+  "focusErrorOffset",
   "openSettings",
   "openConnectionSettings",
   "toggleZenMode",

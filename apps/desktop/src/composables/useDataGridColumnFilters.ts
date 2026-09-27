@@ -1,8 +1,8 @@
-import { computed, onUnmounted, watch, type ComputedRef, type Ref } from "vue";
+import { computed, onUnmounted, ref, watch, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
 import { buildColumnValueFilterCondition, buildColumnValuesFilterCondition, parseFilterValue, removeColumnValueFilterCondition, replaceColumnValueFilterCondition, appendColumnValueFilterCondition } from "@/lib/dataGrid/dataGridColumnFilter";
 import { buildDataGridColumnDistinctValuesSql } from "@/lib/dataGrid/dataGridSql";
-import { buildDataGridLocalFilterOptions, dataGridLocalFilterKey, dataGridLocalFilterLabel, rowMatchesDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
+import { buildDataGridLocalFilterOptions, sortDataGridLocalFilterOptions, type DataGridLocalFilterSort, dataGridLocalFilterKey, dataGridLocalFilterLabel, rowMatchesDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import type { DataGridCachedServerColumnFilter } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
@@ -72,6 +72,17 @@ const SERVER_COLUMN_FILTER_DEBOUNCE_MS = 300;
 
 export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOptions) {
   const { state } = options;
+  const localFilterSort = ref<DataGridLocalFilterSort>({ field: "value", direction: "asc" });
+
+  function toggleLocalFilterSort(field: DataGridLocalFilterSort["field"]) {
+    if (state.localFilterDraft.value?.mode !== "local") return;
+    const current = localFilterSort.value;
+    localFilterSort.value = {
+      field,
+      direction: current.field === field ? (current.direction === "asc" ? "desc" : "asc") : field === "count" ? "desc" : "asc",
+    };
+  }
+
   let serverFilterRequestId = 0;
   let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 
@@ -138,7 +149,13 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
   const localFilterOptions = computed(() => {
     if (state.localFilterDraft.value?.mode === "server") return state.serverFilterOptions.value;
     const query = state.localFilterSearch.value.trim().toLowerCase();
-    return localFilterAllOptions.value.filter((option) => !query || option.label.toLowerCase().includes(query)).slice(0, 500);
+    const matchingOptions = localFilterAllOptions.value.filter((option) => !query || option.label.toLowerCase().includes(query));
+    // Sort before limiting so frequent values outside the default first 500 remain discoverable.
+    // buildDataGridLocalFilterOptions already returns value-ascending options, so the default
+    // sort state skips the re-sort instead of re-running it on every search keystroke.
+    const sort = localFilterSort.value;
+    const sorted = sort.field === "value" && sort.direction === "asc" ? matchingOptions : sortDataGridLocalFilterOptions(matchingOptions, sort);
+    return sorted.slice(0, 500);
   });
   const localFilterTypedValue = computed(() => state.localFilterSearch.value.trim());
   const localFilterDraftIsAllSelected = computed(() => {
@@ -172,6 +189,7 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
 
   function openLocalFilter(columnIndex: number, requestedMode: DataGridLocalFilterMode = "local") {
     options.onOpen?.();
+    localFilterSort.value = { field: "value", direction: "asc" };
     state.localFilterSearch.value = "";
     const mode = requestedMode === "server" && options.canUseServerColumnFilter.value ? "server" : "local";
     const allKeys = mode === "server" ? [] : buildLocalFilterOptions(columnIndex).map((option) => option.key);
@@ -426,6 +444,8 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
     rowMatchesLocalColumnFilters,
     localFilterAllOptions,
     localFilterOptions,
+    localFilterSort,
+    toggleLocalFilterSort,
     localFilterTypedValue,
     canApplyTypedLocalFilterValue,
     openLocalFilter,

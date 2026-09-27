@@ -12,9 +12,9 @@ use std::{
 };
 
 use dbx_core::table_import::{
-    TableImportColumnMapping, TableImportMode, TableImportParseOptions, TableImportPhase, TableImportPreview,
-    TableImportProgress, TableImportRequest, TableImportSourceFormat, TableImportStatus, TableImportSummary,
-    TableImportTextEncoding,
+    TableImportColumnMapping, TableImportConflictPolicy, TableImportMode, TableImportParseOptions, TableImportPhase,
+    TableImportPreview, TableImportProgress, TableImportRequest, TableImportSourceFormat, TableImportStatus,
+    TableImportSummary, TableImportTextEncoding,
 };
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
@@ -368,6 +368,8 @@ impl PreparedImportPlan {
             date_time_format: self.date_time_format.clone(),
             prepared_source: None,
             retain_source: true,
+            conflict_policy: Some(TableImportConflictPolicy::Error),
+            skip_duplicate_rows: false,
         }
     }
 }
@@ -1631,6 +1633,8 @@ async fn build_governed_delimited_snapshot(
     request.mappings = mappings;
     request.mode = TableImportMode::Append;
     request.create_table = true;
+    request.conflict_policy = Some(TableImportConflictPolicy::Error);
+    request.skip_duplicate_rows = false;
     request.prepared_source = None;
     Ok(request)
 }
@@ -1797,6 +1801,8 @@ async fn build_governed_xlsx_snapshot(
     request.mappings = mappings;
     request.mode = TableImportMode::Append;
     request.create_table = true;
+    request.conflict_policy = Some(TableImportConflictPolicy::Error);
+    request.skip_duplicate_rows = false;
     request.prepared_source = None;
     Ok(request)
 }
@@ -3017,6 +3023,8 @@ mod tests {
             date_time_format: None,
             prepared_source: None,
             retain_source: true,
+            conflict_policy: Some(TableImportConflictPolicy::Error),
+            skip_duplicate_rows: false,
         };
 
         let governed = build_governed_import_snapshot(
@@ -3029,6 +3037,8 @@ mod tests {
         .await
         .unwrap();
         assert!(governed.create_table);
+        assert_eq!(governed.conflict_policy, Some(TableImportConflictPolicy::Error));
+        assert!(!governed.skip_duplicate_rows);
         assert!(governed.mappings.iter().all(|mapping| mapping.target_data_type.as_deref() == Some("TEXT")));
         let mut reader = csv::Reader::from_path(output).unwrap();
         let headers = reader.headers().unwrap().clone();
@@ -3078,6 +3088,8 @@ mod tests {
             date_time_format: None,
             prepared_source: None,
             retain_source: true,
+            conflict_policy: Some(TableImportConflictPolicy::Error),
+            skip_duplicate_rows: false,
         };
         build_governed_import_snapshot(
             request.clone(),
@@ -3135,6 +3147,8 @@ mod tests {
             date_time_format: None,
             prepared_source: None,
             retain_source: true,
+            conflict_policy: Some(TableImportConflictPolicy::Error),
+            skip_duplicate_rows: false,
         };
         request.mappings.push(TableImportColumnMapping {
             source_column: "id".to_string(),
@@ -3271,7 +3285,7 @@ mod tests {
         assert_eq!(source_columns[0].canonical_source_name, "商家备注__1");
         assert_eq!(source_columns[1].raw_source_name, "商家备注");
         assert_eq!(source_columns[1].canonical_source_name, "商家备注__2");
-        assert_eq!(preview.source_row_numbers, vec![3, 4, 5]);
+        assert_eq!(preview.source_row_numbers, vec![3, 5]);
         let mappings = validate_mappings(
             &[
                 McpImportColumnMapping {
@@ -3307,6 +3321,8 @@ mod tests {
             date_time_format: None,
             prepared_source: None,
             retain_source: true,
+            conflict_policy: Some(TableImportConflictPolicy::Error),
+            skip_duplicate_rows: false,
         };
         build_governed_import_snapshot(
             request.clone(),

@@ -13,7 +13,7 @@ Database Export creates reviewable SQL scripts for small backups, migrations, te
 | --- | --- |
 | Table structure | `CREATE TABLE`, columns, primary keys, indexes, constraints, and other DDL visible through the driver |
 | Table data | Rows read in batches and written as `INSERT` statements without loading the entire table first |
-| Database objects | Views, sequences, extensions, procedures, and functions where the engine exposes readable definitions |
+| Database objects | Views, sequences, extensions, procedures, functions, triggers, and events where the engine exposes readable definitions |
 | Database creation | Optional MySQL `CREATE DATABASE IF NOT EXISTS` and `USE` preamble |
 | Import helpers | Engine-specific setup and cleanup for foreign-key checks, identity writes, routine delimiters, and similar requirements |
 

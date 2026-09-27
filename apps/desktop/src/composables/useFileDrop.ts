@@ -10,7 +10,7 @@ import * as api from "@/lib/backend/api";
 import type { ConnectionConfig, ExternalSqlFileVersion } from "@/types/database";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { externalSqlEditorMaxBytes, externalSqlFileOpenErrorMessage, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
-import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { activeTabExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab } from "@/lib/sql/externalSqlFileTarget";
 
 function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path);
@@ -30,13 +30,11 @@ export function useFileDrop() {
 
   async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion) {
     if (path) {
-      const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+      const target = resolveExternalSqlFileTargetForActiveTab(path, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId));
       queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog, target.schema);
     } else {
-      const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-      const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
-      const database = connection?.database || "";
-      const tabId = queryStore.createTab(connectionId, database, name, "query");
+      const target = activeTabExternalSqlFileTarget(queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId));
+      const tabId = queryStore.createTab(target.connectionId, target.database, name, "query", target.schema, undefined, target.catalog);
       queryStore.updateSql(tabId, content);
     }
     toast(t("welcome.fileOpened", { name }));

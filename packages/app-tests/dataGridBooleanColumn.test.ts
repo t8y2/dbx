@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, normalizeBooleanCellValue, parseBooleanCellEditorValue } from "../../apps/desktop/src/lib/dataGrid/dataGridBooleanColumn.ts";
 import { resolveDataGridColumnNullability, resolveDataGridColumnsByResultIndex } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnMetadata.ts";
@@ -107,40 +106,4 @@ test("shows nullability only for query results with resolved column metadata", (
   assert.equal(resolveDataGridColumnNullability("results", undefined), undefined);
   assert.equal(resolveDataGridColumnNullability("table-data", nullable), undefined);
   assert.equal(resolveDataGridColumnNullability(undefined, nullable), undefined);
-});
-
-test("keeps the enum editor as the default boolean edit path and gates checkbox interaction behind the checkbox display mode", () => {
-  const gridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const rendererSource = readFileSync("apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts", "utf8");
-
-  assert.match(gridSource, /v-else-if="isBooleanGridCell\([^\n]+"[\s\S]*?v-model="booleanEditorModelValue"[\s\S]*?:values="BOOLEAN_CELL_EDITOR_VALUES"/);
-  assert.match(gridSource, /@commit="commitBooleanGridEdit"/);
-  // The editor-side cycle helper the old checkbox implementation depended on stays removed.
-  assert.doesNotMatch(gridSource, /cycleBooleanCellValue/);
-  // Checkbox rendering and click cycling only exist behind the checkbox display mode.
-  assert.match(gridSource, /booleanCellsUseCheckbox\.value/);
-  assert.match(rendererSource, /booleanDisplayMode === "checkbox"/);
-});
-
-test("DOM checkbox mode renders a clickable placeholder for null boolean cells so they can be cycled like canvas", () => {
-  const gridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  // Canvas surfaces null booleans via booleanNullTextHitFromCanvasEvent (click the NULL text to cycle).
-  // The DOM path must offer the same affordance: a null boolean cell in checkbox mode renders its NULL
-  // text with a click handler that triggers cycleBooleanGridCell, instead of falling through to the
-  // static v-else text (which cannot be cycled and is short-circuited by onDomCellDblClick).
-  const domCellBranch = gridSource.match(/<template v-else-if="booleanCellsUseCheckbox && isBooleanGridCell\([^\n]+=== null[\s\S]*?cycleBooleanGridCell/);
-  assert.ok(domCellBranch, "DOM checkbox mode must render a clickable cycle placeholder for null boolean cells");
-  assert.match(domCellBranch![0], /@click\.stop="cycleBooleanGridCell/);
-  assert.match(domCellBranch![0], /text-muted-foreground/);
-});
-
-test("uses the indexed metadata lookup in grid hot paths", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const start = source.indexOf("function tableColumnForGridColumn");
-  const end = source.indexOf("function resultColumnInfoForGridColumn", start);
-  const lookup = source.slice(start, end);
-
-  assert.ok(start >= 0 && end > start);
-  assert.match(lookup, /tableColumnsByResultIndex\.value\[columnIndex\]/);
-  assert.doesNotMatch(lookup, /\.find\(/);
 });

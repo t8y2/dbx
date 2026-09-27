@@ -18,6 +18,7 @@ export interface TableDataCopyColumnOptions {
   columns: string[];
   postgresOverridingSystemValue: boolean;
   sqlserverIdentityInsert: boolean;
+  damengIdentityInsert: boolean;
 }
 
 export interface TablePasteFeedback {
@@ -88,6 +89,7 @@ export function tableDataCopyColumnOptions(databaseType: DatabaseType | undefine
     columns: writableColumns.map((column) => column.name),
     postgresOverridingSystemValue: databaseType === "postgres" && writableColumns.some(isIdentityColumn),
     sqlserverIdentityInsert: databaseType === "sqlserver" && writableColumns.some(isIdentityColumn),
+    damengIdentityInsert: databaseType === "dameng" && writableColumns.some(isIdentityColumn),
   };
 }
 

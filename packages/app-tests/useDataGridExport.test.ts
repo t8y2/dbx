@@ -4,6 +4,7 @@ import { beforeEach, test, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 import type { DataGridTableMeta } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridExtractorOptions } from "../../apps/desktop/src/lib/dataGrid/dataGridCopyExtractor.ts";
 import type { DatabaseType, QueryResult } from "../../apps/desktop/src/types/database.ts";
 
 const apiMock = vi.hoisted(() => ({
@@ -109,6 +110,7 @@ function buildExportHarness(
     sourceColumns?: Array<string | undefined>;
     databaseType?: DatabaseType;
     context?: "results" | "table-data";
+    extractorOptions?: DataGridExtractorOptions;
   } = {},
 ) {
   const exportColumns = options.columns ?? ["id", "name"];
@@ -166,6 +168,7 @@ function buildExportHarness(
     connectionId: computed(() => "conn-1"),
     database: computed(() => "db"),
     context: computed(() => options.context ?? "results"),
+    extractorOptions: computed(() => options.extractorOptions),
     sourceColumns: computed(() => options.sourceColumns),
     columnTypes: computed(() => options.columnTypes),
     allColumnTypes: computed(() => options.allColumnTypes),
@@ -403,7 +406,7 @@ test("full query result CSV export streams through the backend without loading a
 });
 
 test("MongoDB full query result CSV export uses the full-result fallback", async () => {
-  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ databaseType: "mongodb" });
+  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ databaseType: "mongodb", columns: ["_id", "name"] });
   fullExportResult.mockResolvedValueOnce({
     columns: ["_id", "name"],
     rows: [["1", "Ada"]],
@@ -629,6 +632,112 @@ test("table data SQL export keeps source column names", async () => {
 
     assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].columns, ["id", "name"]);
     assert.match((await download.content()) ?? "", /`id`, `name`/);
+  } finally {
+    download.restore();
+  }
+});
+
+function sqlExclusionOptions(): DataGridExtractorOptions {
+  return {
+    ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+    sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+  };
+}
+
+test("table data SQL export passes primary key exclusion to the backend", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/users.sql");
+  const { composable } = buildExportHarness({
+    context: "table-data",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+        { name: "name", data_type: "text", is_nullable: true },
+      ],
+    },
+    extractorOptions: sqlExclusionOptions(),
+  });
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].excludePrimaryKeys, true);
+});
+
+test("query result SQL export passes primary key exclusion and keys to the backend", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
+  const { composable } = buildExportHarness({
+    context: "results",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+        { name: "name", data_type: "text", is_nullable: true },
+      ],
+    },
+    extractorOptions: sqlExclusionOptions(),
+  });
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].excludePrimaryKeys, true);
+  assert.deepEqual(apiMock.startQueryResultExport.mock.calls[0][0].primaryKeys, ["id"]);
+});
+
+test("table data SQL export keeps manually-assigned primary keys", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/users-manual-pk.sql");
+  const { composable } = buildExportHarness({
+    context: "table-data",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["user_code"],
+      columns: [{ name: "user_code", data_type: "varchar", is_nullable: false, is_primary_key: true }],
+    },
+    extractorOptions: sqlExclusionOptions(),
+  });
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].excludePrimaryKeys, undefined);
+});
+
+test("local SQL export asks the backend to drop primary key columns", async () => {
+  const download = installTextDownloadCapture();
+  const completeLocalResult: QueryResult = {
+    columns: ["id", "name"],
+    column_types: ["int4", "text"],
+    rows: [[1, "Ada"]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    truncated: false,
+    has_more: false,
+  };
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce('INSERT INTO "users" ("name") VALUES (\'Ada\');');
+
+  try {
+    const { composable } = buildExportHarness({
+      columns: completeLocalResult.columns,
+      rows: completeLocalResult.rows,
+      completeLocalResult,
+      tableMeta: {
+        tableName: "users",
+        primaryKeys: ["id"],
+        columns: [
+          { name: "id", data_type: "int4", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+          { name: "name", data_type: "text", is_nullable: true },
+        ],
+      },
+      extractorOptions: sqlExclusionOptions(),
+    });
+
+    await composable.exportSql();
+
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].excludeColumns, ["id"]);
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].columns, ["id", "name"]);
   } finally {
     download.restore();
   }

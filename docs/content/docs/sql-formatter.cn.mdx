@@ -26,6 +26,10 @@ DBX 当前对以下方言使用专用格式化语法：
 
 MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本页的 SQL 方言映射。
 
+## 默认风格
+
+默认排版规则：能放下的语句保持一行，放不下的按子句逐行展开，子句的后续元素与第一个元素对齐；条件的逻辑操作符放在续行行首；`CREATE TABLE` 的列定义按列对齐。下面的设置用于调整这些规则，**恢复默认值**会回到该风格。
+
 ## 配置格式化选项
 
 前往 **设置 → SQL 格式化**。表单模式提供以下选项：
@@ -36,9 +40,11 @@ MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本�
 | 缩进样式 | `standard`、`tabularLeft`、`tabularRight` |
 | 缩进字符 | 空格或 Tab |
 | Tab 宽度 | `2` 或 `4` |
-| 逻辑操作符换行 | 操作符之前或之后 |
+| 逻辑操作符换行 | `before`、`after`，或 `none` 保持在同一行 |
+| FROM 子句排版 | `sameLine` 让首个表留在 `FROM` 行，`newLine` 让它换到下一行 |
 | 表达式宽度 | `50`、`80` 或 `120` |
 | 查询间空行 | `0`、`1` 或 `2` |
+| 保留空行 | 保留语句之间的空行 |
 | 紧凑操作符 | 减少操作符周围的空格 |
 | 分号前换行 | 把语句结尾分号放到新行 |
 | 参数类型 | 识别位置参数、编号参数、命名参数、引号参数或自定义正则参数 |
@@ -62,8 +68,10 @@ JSON 模式适合精确编辑、复制或迁移格式化器配置。当前配置
     "useTabs": false,
     "tabWidth": 2,
     "logicalOperatorNewline": "before",
-    "expressionWidth": 50,
+    "fromClauseLayout": "sameLine",
+    "expressionWidth": 120,
     "linesBetweenQueries": 1,
+    "preserveEmptyLines": false,
     "denseOperators": false,
     "newlineBeforeSemicolon": false,
     "paramTypes": null

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, provide, ref, useAttrs, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, provide, ref, useAttrs, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
@@ -9,12 +9,14 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import { hasQueryOutput } from "@/lib/query/queryOutput";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { Button } from "@/components/ui/button";
 import EditorGroup from "./EditorGroup.vue";
 import QueryResultSurface from "./QueryResultSurface.vue";
 import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEvents";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, StatementRange } from "./querySurfaces";
 import type { QueryTab } from "@/types/database";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 defineOptions({ inheritAttrs: false });
 
@@ -34,7 +36,7 @@ const emit = defineEmits<
   ContentAreaSurfaceEmits & {
     "locate-tab": [tab: QueryTab];
     "toggle-zen-mode": [];
-    "start-resize": [event: MouseEvent];
+    "start-resize": [event: PointerEvent];
     "toggle-collapse": [];
     "detach-tab": [tab: QueryTab];
   }
@@ -66,10 +68,10 @@ defineExpose({
     // A data-mode cell-detail dialog is portaled to body too but belongs to
     // the group's grid — indistinguishable in the DOM, hence the gate.
     if (element?.closest("[data-shared-result-surface]") || (showSharedResult.value && element?.closest("[data-cell-detail-editor-root]"))) {
-      return resultSurfaceRef.value?.focusSearch() ?? false;
+      return resultSurfaceRef.value?.focusSearch(element) ?? false;
     }
     const group = groupForElement(element) ?? activeEditorGroup();
-    return group?.focusSearch() ?? false;
+    return group?.focusSearch(element) ?? false;
   },
   openGoToColumn: () => activeEditorGroup()?.openGoToColumn() ?? false,
   refreshData: (target: Element | null = null) => {
@@ -106,14 +108,18 @@ defineExpose({
     const group = groupForElement(commandTargetElement(null));
     return group?.applyTableStructureChanges() ?? activeEditorGroup()?.applyTableStructureChanges() ?? Promise.resolve(false);
   },
-  insertRedisCommand: (command: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.insertRedisCommand(command) ?? Promise.resolve(false),
-  executeRedisCommand: (command: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.executeRedisCommand(command) ?? Promise.resolve(false),
+  // Redis's logical DB is part of the target, so a visible tab on another DB
+  // must be refused even when it shares the same connection.
+  insertRedisCommand: (command: string, target: AiConversationBinding) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.insertRedisCommand(command, target) ?? Promise.resolve(false),
+  executeRedisCommand: (command: string, target: AiConversationBinding) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.executeRedisCommand(command, target) ?? Promise.resolve(false),
+  isRedisConsoleReady: (target: AiConversationBinding) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.isRedisConsoleReady(target) ?? false,
 });
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const isVerticalTabLayout = computed(() => settingsStore.editorSettings.tabPlacement === "left" || settingsStore.editorSettings.tabPlacement === "right");
+const verticalTabsWithSuppressedContent = computed(() => props.contentSuppressed && isVerticalTabLayout.value);
 const globalTabBarPortal = inject(GROUP_TAB_BAR_PORTAL, null);
 const workspaceTabBarPortal = createGroupTabBarPortal(isVerticalTabLayout);
 // A special page owns navigation while active. Otherwise side tabs stay
@@ -197,6 +203,28 @@ function paneEnterClass(groupId: string): string | undefined {
   }
   return queryStore.orientation === "horizontal" ? "workspace-pane-enter workspace-pane-enter--from-top" : "workspace-pane-enter workspace-pane-enter--from-left";
 }
+let splitterDragging = false;
+const splitterEndEvents = ["mouseup", "touchend", "touchcancel", "pointerup", "pointercancel"] as const;
+function onWorkspaceSplitterStart(event: MouseEvent | TouchEvent) {
+  const splitter = event.target instanceof Element ? event.target.closest(".splitpanes__splitter") : null;
+  if (!splitter?.parentElement?.matches(".sql-editor-workspace-split, .sql-editor-groups") || splitterDragging) return;
+  splitterDragging = true;
+  beginPanelResize();
+  for (const eventName of splitterEndEvents) document.addEventListener(eventName, onWorkspaceSplitterEnd, true);
+  window.addEventListener("blur", onWorkspaceSplitterEnd);
+}
+
+function onWorkspaceSplitterEnd() {
+  if (!splitterDragging) return;
+  splitterDragging = false;
+  for (const eventName of splitterEndEvents) document.removeEventListener(eventName, onWorkspaceSplitterEnd, true);
+  window.removeEventListener("blur", onWorkspaceSplitterEnd);
+  endPanelResize();
+}
+
+onBeforeUnmount(onWorkspaceSplitterEnd);
+watch(() => props.contentSuppressed, onWorkspaceSplitterEnd);
+
 function onSharedResultResized(payload: { panes: { size: number }[] }) {
   const resultPane = payload.panes[1];
   if (resultPane?.size != null && resultPane.size >= SHARED_RESULT_PANE_MIN_SIZE && resultPane.size <= SHARED_RESULT_PANE_MAX_SIZE) {
@@ -254,19 +282,25 @@ function handleFocusStatement(tabId: string, range: StatementRange | null): bool
   }
   return false;
 }
+function handleFocusErrorOffset(tabId: string, offset: number): boolean {
+  for (const group of groupRefs.values()) {
+    if (group.focusErrorPosition(tabId, offset)) {
+      return true;
+    }
+  }
+  return false;
+}
 </script>
 
 <template>
-  <!-- contentSuppressed (plugin workbench tab active): the App.vue wrapper is
-       flex-none with indefinite height, so h-full/flex-1 here would collapse
-       the workspace to 0 and clip the group tab strips (overflow-hidden).
-       Size to content instead — same contract as EditorGroup's suppressed
-       h-auto; normal mode keeps h-full/flex-1 to fill the column. -->
-  <div class="sql-editor-workspace relative flex min-h-0 min-w-0 overflow-hidden" :class="[contentSuppressed ? 'h-auto' : 'h-full flex-1', workspaceClass, settingsStore.editorSettings.tabPlacement === 'right' ? 'flex-row-reverse' : 'flex-row']">
+  <div
+    class="sql-editor-workspace relative flex min-h-0 min-w-0 overflow-hidden"
+    :class="[verticalTabsWithSuppressedContent ? 'h-full flex-none' : contentSuppressed ? 'h-auto' : 'h-full flex-1', workspaceClass, settingsStore.editorSettings.tabPlacement === 'right' ? 'flex-row-reverse' : 'flex-row']"
+  >
     <div v-show="isVerticalTabLayout && showTabNavigation !== false" data-workspace-tab-navigation class="flex min-h-0 shrink-0 flex-col overflow-hidden" :style="tabNavigationStyle">
       <div v-for="group in queryStore.groups" :key="group.id" :ref="(element) => setTabBarTarget(group.id, element)" :data-workspace-tab-target="group.id" class="flex min-h-0 min-w-0 flex-1" @pointerdown.capture="queryStore.focusGroup(group.id)" @focusin="queryStore.focusGroup(group.id)" />
     </div>
-    <div data-workspace-content class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+    <div data-workspace-content class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" :class="{ hidden: verticalTabsWithSuppressedContent }">
       <!-- Suppressed mode: a plugin workbench tab owns the layout. Render the
            groups' tab strips directly (no Splitpanes, no shared result pane) so
            App.vue's always-mounted plugin layer can fill the remaining column
@@ -295,7 +329,7 @@ function handleFocusStatement(tabId: string, range: StatementRange | null): bool
           @detach-tab="emit('detach-tab', $event)"
         />
       </template>
-      <Splitpanes v-else horizontal class="sql-editor-workspace-split flex-1 min-h-0" :class="{ 'result-pane-collapsed': resultPaneTargetSize === 0 }" @resized="onSharedResultResized">
+      <Splitpanes v-else horizontal class="sql-editor-workspace-split flex-1 min-h-0" :class="{ 'result-pane-collapsed': resultPaneTargetSize === 0 }" @mousedown.capture="onWorkspaceSplitterStart" @touchstart.capture="onWorkspaceSplitterStart" @resized="onSharedResultResized">
         <Pane class="min-h-0 min-w-0" :size="editorPaneSize" :min-size="100 - SHARED_RESULT_PANE_MAX_SIZE">
           <Splitpanes
             :horizontal="queryStore.orientation === 'horizontal'"
@@ -347,6 +381,11 @@ function handleFocusStatement(tabId: string, range: StatementRange | null): bool
               @focus-statement="
                 (tabId: string, range: { from: number; to: number } | null) => {
                   handleFocusStatement(tabId, range);
+                }
+              "
+              @focus-error-offset="
+                (tabId: string, offset: number) => {
+                  handleFocusErrorOffset(tabId, offset);
                 }
               "
             />

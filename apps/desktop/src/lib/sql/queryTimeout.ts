@@ -56,9 +56,8 @@ export function frontendQueryTimeoutSecsForSql(sql: string, databaseType: Databa
   // the timeout for row-returning PostgreSQL statements.
   if (databaseType === "postgres" && postgresQueryMayReturnRows(sql, databaseType)) return 0;
 
-  const baseTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
   const statementCount = Math.max(splitSqlStatementRanges(sql, databaseType, parameterOptions ?? sqlStatementParameterOptionsForCompatibility(databaseType)).length, 1);
-  return baseTimeoutSecs * statementCount;
+  return queryTimeoutSecs * statementCount;
 }
 
 export function frontendQueryTimeoutDelayMs(timeoutSecs: number): number | undefined {

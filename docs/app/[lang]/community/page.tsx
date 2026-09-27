@@ -22,6 +22,27 @@ const channels = [
     ),
   },
   {
+    id: "feishu",
+    color: "#3370FF",
+    href: "https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=30cvb14f-a9b1-4b12-adb6-2ff6d476a227",
+    icon: (
+      <svg width={24} height={24} viewBox="164 204 762 617">
+        <path
+          fill="#00D6B9"
+          d="M559.915 530.453c-46.507-111.786-194.56-248.469-262.806-302.826h333.782c47.146 16.298 87.616 134.677 101.973 191.808-35.499 31.21-119.787 97.109-172.95 111.018z"
+        />
+        <path
+          fill="#133C9A"
+          d="M632.021 452.992c-45.184 60.48-133.546 121.963-172.053 145.13l-2.88 24.278 235.947 63.637c32.213-25.962 103.061-87.296 128.96-124.928 4.394-6.378 68.992-135.914 79.402-151.552-18.24-11.306-42.56-18.261-104.277-21.738-82.56-4.331-116.437 20.864-165.099 65.173z"
+        />
+        <path
+          fill="#3370FF"
+          d="M187.883 712.917V393.515C397.568 599.808 558.315 642.688 641.045 653.76c124.459 5.419 154.667-73.045 181.142-93.099-97.024 153.174-224.64 235.734-384.747 235.734-128.107 0-219.755-55.659-249.557-83.478z"
+        />
+      </svg>
+    ),
+  },
+  {
     id: "discord",
     color: "#5865F2",
     href: "https://discord.gg/W7NyVDRt6a",
@@ -50,6 +71,7 @@ const i18n = {
     discord: { name: "Discord", desc: "Real-time chat, Q&A, and feature discussions." },
     qq: { name: "QQ Group", desc: "Group number: 1087880322" },
     wechat: { name: "WeChat Group", desc: "Join via Tencent Docs invite link." },
+    feishu: { name: "Feishu Group", desc: "Join via invite link." },
     github: { name: "GitHub Discussions", desc: "Bug reports, feature requests, and long-form discussions." },
   },
   cn: {
@@ -58,6 +80,7 @@ const i18n = {
     discord: { name: "Discord", desc: "实时聊天、问答和功能讨论。" },
     qq: { name: "QQ 群", desc: "群号：1087880322" },
     wechat: { name: "微信群", desc: "通过腾讯文档链接加入。" },
+    feishu: { name: "飞书群", desc: "点击邀请链接加入。" },
     github: { name: "GitHub Discussions", desc: "Bug 反馈、功能建议和深度讨论。" },
   },
 };
@@ -81,7 +104,7 @@ export default async function CommunityPage({ params }: { params: Promise<{ lang
   const t = i18n[l];
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={l} active="community" />
 
       <div className="max-w-[860px] mx-auto px-6 pt-32 pb-4 max-[760px]:px-[18px] max-[760px]:pt-28">

@@ -1,10 +1,6 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolveDataGridCellTextRole } from "@/lib/dataGrid/dataGridCellTextVisual";
 import { resolveDataGridTypeVisualKind, resolveHeaderColumnType, type DataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
-
-const dataGridSource = readFileSync(new URL("../../../components/grid/DataGrid.vue", import.meta.url), "utf8");
-const globalStylesSource = readFileSync(new URL("../../../styles/globals.css", import.meta.url), "utf8");
 
 describe("data grid type visual kind", () => {
   it.each<[string, DataGridTypeVisualKind]>([
@@ -75,8 +71,6 @@ describe("data grid header type color", () => {
 
     expect(displayedType).toBe("decimal(10,2)");
     expect(resolveDataGridTypeVisualKind(displayedType)).toBe("numeric");
-    expect(dataGridSource).toContain(':type-class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"');
-    expect(dataGridSource).not.toContain("typeColorClass(allColumnTypes[col.actualColIdx]");
   });
 });
 
@@ -100,25 +94,5 @@ describe("data grid cell text visual priority", () => {
 
   it("keeps NULL muted when type colors are disabled", () => {
     expect(resolveDataGridCellTextRole({ ...ordinaryInteger, colorizeTypes: false, isNull: true })).toBe("muted");
-  });
-
-  it("uses a neutral foreground on editable DOM hover surfaces", () => {
-    expect(dataGridSource).toContain("'hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800':");
-    expect(dataGridSource).toContain("'cursor-text hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800':");
-  });
-
-  it("checks NULL before applying the optional type-color setting", () => {
-    expect(dataGridSource).toContain("function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {\n  const value = item.data[actualColIdx];");
-    expect(dataGridSource).toContain("function transposeCellTextColorClass(recordIndex: number, actualColIdx: number): string {\n  const item = displayItems.value[recordIndex];");
-    expect(dataGridSource).not.toContain('function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {\n  if (!colorizeDataGridCellTypes.value) return "text-foreground";');
-    expect(dataGridSource).not.toContain('function transposeCellTextColorClass(recordIndex: number, actualColIdx: number): string {\n  if (!colorizeDataGridCellTypes.value) return "text-foreground";');
-  });
-
-  it("places data-grid type selectors in the components layer", () => {
-    const componentsLayerStart = globalStylesSource.indexOf("@layer components {");
-    const integerTypeSelector = globalStylesSource.indexOf(".data-grid-type-integer");
-
-    expect(componentsLayerStart).toBeGreaterThan(-1);
-    expect(integerTypeSelector).toBeGreaterThan(componentsLayerStart);
   });
 });

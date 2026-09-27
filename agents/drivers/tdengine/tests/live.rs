@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -220,5 +221,85 @@ fn tdengine_websocket_live_compatibility() {
         "execute_batch",
         json!({"agentSessionId": session_id, "statements": [format!("DROP DATABASE IF EXISTS {database}")]}),
     );
+    agent.shutdown();
+}
+
+/// `SHOW <db>.TABLES` has no `ORDER BY`, so TDengine may answer two identical
+/// statements with different row orders. A table list must still be identical
+/// whichever page size the caller asks for: paging used to skip and repeat rows,
+/// which hid tables (including freshly created normal tables) from the sidebar.
+#[test]
+fn tdengine_websocket_live_paged_table_list_matches_the_full_list() {
+    let Some(connect_params) = integration_params() else {
+        return;
+    };
+    let database = format!("dbx_rust_page_{}", std::process::id());
+    let session_id = "tdengine-live-page";
+    let page_size = 100usize;
+    let mut agent = AgentProcess::spawn();
+
+    let mut open_params = connect_params.clone();
+    open_params["agentSessionId"] = json!(session_id);
+    assert_eq!(agent.call("open_session", open_params), json!({"ok": true}));
+
+    let mut statements = vec![
+        format!("CREATE DATABASE IF NOT EXISTS {database}"),
+        format!("CREATE STABLE IF NOT EXISTS {database}.st_paged (ts TIMESTAMP, v INT) TAGS (gid INT)"),
+    ];
+    // Enough child tables that the sidebar's paging walks several pages.
+    for index in 0..300 {
+        statements.push(format!(
+            "CREATE TABLE IF NOT EXISTS {database}.c_{index:04} USING {database}.st_paged TAGS ({index})"
+        ));
+    }
+    statements.push(format!("CREATE TABLE IF NOT EXISTS {database}.normal_tbl (ts TIMESTAMP, v INT)"));
+    agent.call("execute_batch", json!({"agentSessionId": session_id, "statements": statements}));
+
+    fn page(agent: &mut AgentProcess, session_id: &str, database: &str, limit: usize, offset: usize) -> Value {
+        agent.call(
+            "list_tables",
+            json!({
+                "agentSessionId": session_id,
+                "schema": database,
+                "filter": "",
+                "limit": limit,
+                "offset": offset,
+                "object_types": []
+            }),
+        )
+    }
+    fn names(tables: &Value) -> HashSet<(String, String)> {
+        tables
+            .as_array()
+            .expect("table list")
+            .iter()
+            .map(|table| {
+                (table["name"].as_str().unwrap_or_default().to_string(), table["table_type"].as_str().unwrap_or_default().to_string())
+            })
+            .collect()
+    }
+
+    let full = names(&page(&mut agent, session_id, &database, 0, 0));
+    assert!(full.contains(&("normal_tbl".to_string(), "TABLE".to_string())));
+
+    let mut seen = HashSet::new();
+    let mut offset = 0usize;
+    loop {
+        let tables = page(&mut agent, session_id, &database, page_size, offset);
+        let count = tables.as_array().expect("table page").len();
+        if count == 0 {
+            break;
+        }
+        for table in names(&tables) {
+            assert!(seen.insert(table.clone()), "table {table:?} was returned twice while paging at offset {offset}");
+        }
+        if count < page_size {
+            break;
+        }
+        offset += page_size;
+    }
+    assert_eq!(seen, full, "paging dropped or invented tables");
+
+    agent.call("execute_batch", json!({"agentSessionId": session_id, "statements": [format!("DROP DATABASE IF EXISTS {database}")]}));
     agent.shutdown();
 }

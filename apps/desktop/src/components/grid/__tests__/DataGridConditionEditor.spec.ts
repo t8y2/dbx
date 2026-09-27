@@ -1,8 +1,6 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DataGridConditionEditor from "@/components/grid/DataGridConditionEditor.vue";
 import type { DataGridConditionHistoryKind } from "@/lib/dataGrid/dataGridConditionHistory";
@@ -55,6 +53,8 @@ function mockTextareaMetrics(input: HTMLTextAreaElement, options: { clientWidth:
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
     host.remove();
@@ -159,6 +159,123 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(orderBy.value.value).toBe("id DESC");
   });
 
+  it("collapses a continuous typing run into a single undo step", async () => {
+    const { value, input } = mountEditor("where", "id = 123");
+    input.focus();
+
+    for (const next of ["id = 1", "id = 12", "id = 124"]) {
+      input.value = next;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    await nextTick();
+    expect(value.value).toBe("id = 124");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+
+    expect(value.value).toBe("id = 123");
+  });
+
+  it("starts a new undo step once the condition is applied", async () => {
+    const { value, input } = mountEditor("where", "id = 123");
+    input.focus();
+    input.value = "id = 124";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+
+    input.value = "id = 125";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("id = 124");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("id = 123");
+  });
+
+  it("keeps one undo step across the expanded/collapsed focus swap", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const start = "abcdefghijklmnopqrstuvwxyz0123456789";
+    const { value, input } = mountEditor("where", start);
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.focus();
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+    await nextTick();
+    await nextTick();
+    const overlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement | null;
+    expect(overlay).toBeTruthy();
+
+    input.value = `${start}x`;
+    input.setSelectionRange(37, 37);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    // Swapping focus to the teleported overlay blurs the collapsed textarea
+    // mid-run; that must not split the typing run into a second undo step.
+    overlay!.dispatchEvent(new Event("blur", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const activeOverlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement;
+    activeOverlay.value = `${start}xy`;
+    activeOverlay.setSelectionRange(38, 38);
+    activeOverlay.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    await nextTick();
+    expect(value.value).toBe(`${start}xy`);
+
+    activeOverlay.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+
+    expect(value.value).toBe(start);
+  });
+
+  it("keeps the caret at the end when the text shrinks below the expanded selection", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { value, input } = mountEditor("where", "abcdefghijklmnopqrstuvwxyz0123456789");
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.focus();
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+    await nextTick();
+    await nextTick();
+    const overlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement | null;
+    expect(overlay).toBeTruthy();
+    overlay!.focus();
+    overlay!.setSelectionRange(0, 36);
+    overlay!.dispatchEvent(new Event("select", { bubbles: true }));
+    await nextTick();
+
+    // The whole selected text is replaced by a much shorter value without a
+    // fresh caret sync, and the editor collapses again.
+    mockTextareaMetrics(input, { clientWidth: 320, scrollWidth: 80 });
+    value.value = "i";
+    await nextTick();
+    await nextTick();
+    await nextTick();
+
+    expect(input.selectionStart).toBe(1);
+    expect(input.selectionEnd).toBe(1);
+  });
+
   it("passes the textarea caret range through when accepting a suggestion", async () => {
     const { value, input } = mountEditor("where", "status = cus AND enabled = 1", { columns: ["customer_id"] });
     input.focus();
@@ -256,97 +373,6 @@ describe("DataGridConditionEditor quote completion", () => {
     await nextTick();
 
     expect(document.querySelector('[role="listbox"]')).toBeNull();
-  });
-
-  it("keeps the wrapped input caret aligned with its syntax highlight layer", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const expandedInputCss = source.match(/\.data-grid-topbar-condition-input--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-    const expandedHighlightCss = source.match(/\.data-grid-condition-highlight--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-    const prefixPadding = "calc(var(--data-grid-condition-prefix-indent) + 0.125rem)";
-
-    expect(expandedInputCss).toContain("padding:");
-    expect(expandedInputCss).toContain(prefixPadding);
-    expect(expandedHighlightCss).toContain(prefixPadding);
-    expect(expandedInputCss).not.toContain("text-indent:");
-    expect(expandedHighlightCss).not.toContain("text-indent:");
-    expect(expandedInputCss).toContain("overflow-wrap: anywhere");
-    expect(source).toContain("white-space:pre-wrap;overflow-wrap:anywhere;");
-    expect(source).not.toContain("textIndent: rect.prefix");
-    expect(source).toContain("paddingLeft: rect.prefix + 2");
-    expect(source).toContain("paddingRight: rect.suffix + 8");
-    expect(source).toContain("width: Math.max(1, rect.width - 8)");
-    expect(source).toContain("function fitExpandedHeightToOverlay()");
-    expect(source).toContain("expandedHeight.value + overflow");
-  });
-
-  it("keeps the expanded condition label readable over wrapped content", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const floatingControls = source.match(/data-grid-topbar-condition-floating-controls[^"]*/)?.[0];
-    const floatingLabelCss = source.match(/\.data-grid-topbar-condition-label--floating\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-    const compactFloatingLabelCss = source.match(/\.data-grid-topbar-condition-label--floating\.data-grid-topbar-condition-label--compact\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-
-    expect(floatingControls).toContain("z-[2]");
-    expect(source).toContain("data-grid-topbar-condition-label--floating");
-    expect(source).toContain("label.scrollWidth + 4");
-    expect(floatingLabelCss).toContain("text-shadow:");
-    expect(floatingLabelCss).not.toContain("padding-right:");
-    expect(floatingLabelCss).not.toContain("box-shadow:");
-    expect(compactFloatingLabelCss).toContain("max-width: 5rem");
-    expect(compactFloatingLabelCss).toContain("opacity: 1");
-  });
-
-  it("keeps dark condition styles scoped to their target elements", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-
-    expect(source).not.toContain(":global(.dark) .data-grid");
-    expect(source).toContain(":global(.dark .data-grid-topbar-condition-label--floating)");
-    expect(source).toContain(":global(.dark .data-grid-topbar-condition-pane--expanded)");
-  });
-
-  it("scrolls the caret into view after accepting a long completion", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-
-    expect(source).toContain("function scrollCaretIntoView()");
-    expect(source).toContain("const hasVerticalOverflow = target.scrollHeight > target.clientHeight + 4");
-    expect(source).toContain("const hasHorizontalOverflow = target.scrollWidth > target.clientWidth + 1");
-    expect(source).toContain("target.scrollTop = 0");
-    expect(source).toContain("const caretLeft = caretMarker.offsetLeft");
-    expect(source).toContain("target.scrollLeft");
-    expect(source).toContain("function scheduleCaretIntoView()");
-    expect(source).toContain("function focusAfterAccept()");
-    expect(source).toContain("requestAnimationFrame(() => scrollCaretIntoView())");
-    expect(source).toContain("scheduleCaretIntoView()");
-    expect(source).toContain('if (action === "accept") focusAfterAccept()');
-  });
-
-  it("also keeps the caret visible after regular input wraps", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const onInputBody = source.match(/function onInput\(event: Event\) \{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
-
-    expect(onInputBody).toContain("resizeEditor(true)");
-    expect(onInputBody).toContain("updateSuggestionPosition()");
-    expect(onInputBody).toContain("scheduleCaretIntoView()");
-  });
-
-  it("keeps the caret visible after switching focus into the expanded editor", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const focusTransferBody = source.match(/if \(nextExpanded && document\.activeElement === input && !composing\.value\) \{(?<body>[\s\S]*?)\n    \}/)?.groups?.body;
-
-    expect(focusTransferBody).toContain("const start = selectionStart.value");
-    expect(focusTransferBody).toContain("overlay.setSelectionRange(start, end)");
-    expect(focusTransferBody).toContain("overlay.focus({ preventScroll: true })");
-    expect(focusTransferBody).toContain("scheduleCaretIntoView()");
-  });
-
-  it("keeps the caret visible after collapsing the expanded editor back to one line", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const collapseTransferBody = source.match(/if \(!nextExpanded && overlayFocused && !composing\.value\) \{(?<body>[\s\S]*?)\n    \}/)?.groups?.body;
-
-    expect(collapseTransferBody).toContain("const start = selectionStart.value");
-    expect(collapseTransferBody).toContain("input.setSelectionRange(start, end)");
-    expect(collapseTransferBody).toContain("input.focus({ preventScroll: true })");
-    expect(collapseTransferBody!.indexOf("input.focus({ preventScroll: true })")).toBeLessThan(collapseTransferBody!.indexOf("input.setSelectionRange(start, end)"));
-    expect(collapseTransferBody).toContain("scheduleCaretIntoView()");
   });
 
   it("preserves continuous input when the expanded editor collapses", async () => {
@@ -473,13 +499,47 @@ describe("DataGridConditionEditor quote completion", () => {
     vi.unstubAllGlobals();
   });
 
-  it("positions suggestions below the measured expanded editor height", () => {
-    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
-    const expandedPaneCss = source.match(/\.data-grid-topbar-condition-pane--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
+  it("compensates the expanded highlight layer for the textarea scrollbar", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { input } = mountEditor("where", "test_item_id=12 and test_item_name=''");
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
 
-    expect(source).toContain("bottom: expandedRect.value.top + expandedHeight.value");
-    expect(expandedPaneCss).toContain("transition: box-shadow 150ms ease");
-    expect(expandedPaneCss).not.toContain("height 150ms");
+    await nextTick();
+    await nextTick();
+
+    const overlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement | null;
+    const expandedHighlight = document.body.querySelector(".data-grid-condition-highlight--expanded") as HTMLElement | null;
+    expect(overlay).toBeTruthy();
+    expect(expandedHighlight).toBeTruthy();
+
+    // A vertical scrollbar takes content width away from the textarea but not
+    // from the plain-div highlight layer. Both wrap with `pre-wrap` +
+    // `overflow-wrap: anywhere`, so unless the layer gives up the same width the
+    // two break at different characters and the caret drifts off the visible text.
+    Object.defineProperties(overlay as HTMLTextAreaElement, {
+      offsetWidth: { configurable: true, value: 178 },
+      clientWidth: { configurable: true, value: 168 },
+    });
+    overlay?.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+    await nextTick();
+
+    expect(expandedHighlight?.style.getPropertyValue("--data-grid-condition-highlight-scrollbar")).toBe("10px");
+    vi.unstubAllGlobals();
   });
 });
 

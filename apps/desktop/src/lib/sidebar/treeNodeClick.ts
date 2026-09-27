@@ -2,8 +2,8 @@ import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/t
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
-export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "open-saved-sql" | "open-object-browser" | "open-object-browser-and-expand" | "toggle" | "none";
-export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-database-browser" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-extension-details" | "open-saved-sql" | "toggle" | "none";
+export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "open-event-trigger-details" | "open-saved-sql" | "open-object-browser" | "open-object-browser-and-expand" | "toggle" | "none";
+export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-database-browser" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-extension-details" | "open-event-trigger-details" | "open-saved-sql" | "toggle" | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
@@ -137,6 +137,7 @@ export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activa
     return canExpand ? "open-object-browser-and-expand" : "open-object-browser";
   }
   if (type === "extension") return "open-extension-details";
+  if (type === "event-trigger") return "open-event-trigger-details";
   if (savedSqlNodeTypes.has(type)) return "open-saved-sql";
   if (dataNodeTypes.has(type)) return "open-data";
   // PostgreSQL-family custom types: open read-only details (toggle when expandable).
@@ -169,6 +170,7 @@ export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBr
     }
     if (canOpenObjectBrowser && type === "object-browser") return "open-object-browser";
     if (type === "extension") return "open-extension-details";
+    if (type === "event-trigger") return "open-event-trigger-details";
     if (dataNodeTypes.has(type)) return "open-data";
     if (type === "type" && customTypeCapabilities(dbType).details) return canExpand ? "toggle" : "none";
     if (sourceNodeTypes.has(type) && canOpenTreeNodeSource(type, dbType)) return "open-source";

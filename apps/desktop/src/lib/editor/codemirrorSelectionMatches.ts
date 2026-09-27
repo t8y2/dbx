@@ -1,10 +1,11 @@
-import type { EditorState, Extension } from "@codemirror/state";
-import { highlightSelectionMatches, SearchCursor } from "@codemirror/search";
-import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+import { Annotation, type EditorState, type Extension, type Range } from "@codemirror/state";
+import { SearchCursor } from "@codemirror/search";
+import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 
 const MIN_SELECTION_MATCH_LENGTH = 2;
 const MAX_SELECTION_MATCH_LENGTH = 200;
 const MAX_SCROLLBAR_MATCHES = 1200;
+const MAX_SELECTION_MATCH_HIGHLIGHTS = 500;
 export const SELECTION_MATCH_SCAN_CHUNK_LENGTH = 64 * 1024;
 export const SELECTION_MATCH_UPDATE_DELAY_MS = 120;
 
@@ -165,12 +166,110 @@ class SelectionMatchScrollbar {
 
 const selectionMatchScrollbar = ViewPlugin.fromClass(SelectionMatchScrollbar);
 
+interface SelectionMatchHighlightSpec {
+  query: string;
+  selectionFrom: number;
+  selectionTo: number;
+}
+
+const selectionMatchDecoration = Decoration.mark({ class: "cm-selectionMatch" });
+
+/** Re-reads the pending decoration set without asking for another rescan. */
+const flushSelectionMatchHighlights = Annotation.define<boolean>();
+
+/**
+ * Same query rules as `@codemirror/search`'s `highlightSelectionMatches` with
+ * the options this app used (no whole-word filter, no word-around-cursor), so
+ * only the timing of the visible highlight set changes.
+ */
+function selectionMatchHighlightSpec(state: EditorState): SelectionMatchHighlightSpec | null {
+  const selection = state.selection;
+  if (selection.ranges.length > 1) return null;
+
+  const range = selection.main;
+  if (range.empty) return null;
+  const length = range.to - range.from;
+  if (length < MIN_SELECTION_MATCH_LENGTH || length > MAX_SELECTION_MATCH_LENGTH) return null;
+
+  const query = state.sliceDoc(range.from, range.to);
+  return query ? { query, selectionFrom: range.from, selectionTo: range.to } : null;
+}
+
+function buildSelectionMatchHighlights(view: EditorView, spec: SelectionMatchHighlightSpec): DecorationSet {
+  const decorations: Range<Decoration>[] = [];
+
+  for (const visible of view.visibleRanges) {
+    const cursor = new SearchCursor(view.state.doc, spec.query, visible.from, visible.to);
+    for (let match = cursor.next(); !match.done; match = cursor.next()) {
+      const { from, to } = match.value;
+      // The selected occurrence keeps the editor's own selection background.
+      if (from >= spec.selectionTo || to <= spec.selectionFrom) decorations.push(selectionMatchDecoration.range(from, to));
+      if (decorations.length > MAX_SELECTION_MATCH_HIGHLIGHTS) return Decoration.none;
+    }
+  }
+
+  return Decoration.set(decorations);
+}
+
+class DeferredSelectionMatchHighlighter {
+  decorations: DecorationSet;
+  private readonly win: Window;
+  private updateTimer: number | null = null;
+
+  constructor(private readonly view: EditorView) {
+    this.win = view.dom.ownerDocument.defaultView ?? window;
+    const spec = selectionMatchHighlightSpec(view.state);
+    this.decorations = spec ? buildSelectionMatchHighlights(view, spec) : Decoration.none;
+  }
+
+  update(update: ViewUpdate) {
+    if (update.transactions.some((transaction) => transaction.annotation(flushSelectionMatchHighlights))) {
+      const spec = selectionMatchHighlightSpec(update.state);
+      this.decorations = spec ? buildSelectionMatchHighlights(update.view, spec) : Decoration.none;
+      return;
+    }
+
+    // Clearing is cheap, so a selection that no longer has a highlightable
+    // query never keeps stale ranges on screen.
+    if (!selectionMatchHighlightSpec(update.state)) {
+      this.cancelScheduledUpdate();
+      if (this.decorations.size) this.decorations = Decoration.none;
+      return;
+    }
+
+    if (update.docChanged) this.decorations = this.decorations.map(update.changes);
+    if (update.docChanged || update.selectionSet || update.viewportChanged || update.geometryChanged) this.scheduleUpdate();
+  }
+
+  destroy() {
+    this.cancelScheduledUpdate();
+  }
+
+  private cancelScheduledUpdate() {
+    if (this.updateTimer === null) return;
+    this.win.clearTimeout(this.updateTimer);
+    this.updateTimer = null;
+  }
+
+  private scheduleUpdate() {
+    this.cancelScheduledUpdate();
+    // Rebuilding these marks re-lays out every decorated line, which on WebKit
+    // costs more than the drag frame itself. Wait for the selection to settle,
+    // then flush with one transaction so the decorations get picked up.
+    this.updateTimer = this.win.setTimeout(() => {
+      this.updateTimer = null;
+      this.view.dispatch({ annotations: flushSelectionMatchHighlights.of(true) });
+    }, SELECTION_MATCH_UPDATE_DELAY_MS);
+  }
+}
+
+const selectionMatchHighlighter = ViewPlugin.fromClass(DeferredSelectionMatchHighlighter, {
+  decorations: (plugin) => plugin.decorations,
+});
+
 export function selectionMatchOccurrences(): Extension {
   return [
-    highlightSelectionMatches({
-      minSelectionLength: MIN_SELECTION_MATCH_LENGTH,
-      maxMatches: 500,
-    }),
+    selectionMatchHighlighter,
     selectionMatchScrollbar,
     EditorView.theme({
       "&": {

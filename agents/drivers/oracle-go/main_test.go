@@ -629,6 +629,189 @@ func TestGetTableDDLAppendsIndexesTriggersAndComments(t *testing.T) {
 	}
 }
 
+func TestBuildViewDDLAppendsComments(t *testing.T) {
+	const schema = "HR"
+	const view = "ACTIVE_ORDERS"
+	const viewText = `SELECT "ID", "STATUS" FROM "HR"."ORDERS" WHERE "STATUS" = 'OPEN'`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_VIEWS",
+			args:          []driver.Value{schema, view},
+			rows:          [][]driver.Value{{viewText}},
+		},
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, view},
+			rows:          [][]driver.Value{{"Open orders view"}},
+		},
+		{
+			queryContains: "FROM ALL_COL_COMMENTS",
+			args:          []driver.Value{schema, view},
+			columns:       []string{"COLUMN_NAME", "COMMENTS"},
+			rows:          [][]driver.Value{{"STATUS", "Order status"}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.buildViewDDL(schema, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		`CREATE OR REPLACE VIEW "HR"."ACTIVE_ORDERS" AS`,
+		viewText,
+		`COMMENT ON TABLE "HR"."ACTIVE_ORDERS" IS 'Open orders view';`,
+		`COMMENT ON COLUMN "HR"."ACTIVE_ORDERS"."STATUS" IS 'Order status';`,
+	} {
+		if !strings.Contains(got, fragment) {
+			t.Fatalf("buildViewDDL() missing %q:\n%s", fragment, got)
+		}
+	}
+	if !strings.Contains(got, viewText+";\n\nCOMMENT ON TABLE") {
+		t.Fatalf("view DDL should be terminated before comment DDL:\n%s", got)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestBuildViewDDLCommentBoundaries(t *testing.T) {
+	const query = `SELECT 1 AS "ID" FROM DUAL`
+	for _, test := range []struct {
+		name             string
+		source           string
+		terminated       string
+		noComments       bool
+		tableError       bool
+		columnError      bool
+		columnOnly       bool
+		tableOnly        bool
+		metadataFallback bool
+	}{
+		{name: "plain", source: query, terminated: query + ";"},
+		{name: "line comment", source: query + " -- trailing", terminated: query + " -- trailing\n;"},
+		{name: "semicolon in comment", source: query + " -- trailing;", terminated: query + " -- trailing;\n;"},
+		{name: "slash in comment", source: query + " -- trailing /", terminated: query + " -- trailing /\n;"},
+		{name: "existing terminator", source: query + ";", terminated: query + ";"},
+		{name: "slash delimiter", source: query + "\n/", terminated: query + "\n/"},
+		{name: "terminated before line comment", source: query + "; -- trailing;", terminated: query + "; -- trailing;"},
+		{name: "terminated before block comment", source: query + "; /* trailing; */", terminated: query + "; /* trailing; */"},
+		{name: "block comment", source: query + " /* trailing; */", terminated: query + " /* trailing; */;"},
+		{name: "quoted comment markers", source: `SELECT '--;', q'[owner's --;]' AS "--ID" FROM DUAL -- tail`, terminated: `SELECT '--;', q'[owner's --;]' AS "--ID" FROM DUAL -- tail` + "\n;"},
+		{name: "full create", source: `CREATE VIEW "HR"."ACTIVE_ORDERS" AS ` + query + " -- tail", terminated: `CREATE VIEW "HR"."ACTIVE_ORDERS" AS ` + query + " -- tail\n;"},
+		{name: "metadata fallback", source: `CREATE VIEW "HR"."ACTIVE_ORDERS" AS ` + query + " -- tail;", terminated: `CREATE VIEW "HR"."ACTIVE_ORDERS" AS ` + query + " -- tail;\n;", metadataFallback: true},
+		{name: "column only", source: query + " -- tail;", terminated: query + " -- tail;\n;", columnOnly: true},
+		{name: "table only", source: query + " -- tail;", terminated: query + " -- tail;\n;", tableOnly: true},
+		{name: "no comments", source: query, noComments: true},
+		{name: "no comments with trailing comment", source: query + " -- tail;\n", noComments: true},
+		{name: "table lookup failure", source: query + " -- tail", tableError: true},
+		{name: "column lookup failure", source: query + " -- tail", columnError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tableStep := oracleViewSourceQueryStep{queryContains: "FROM ALL_TAB_COMMENTS", args: []driver.Value{"HR", "ACTIVE_ORDERS"}}
+			columnStep := oracleViewSourceQueryStep{queryContains: "FROM ALL_COL_COMMENTS", args: []driver.Value{"HR", "ACTIVE_ORDERS"}, columns: []string{"COLUMN_NAME", "COMMENTS"}}
+			if !test.noComments {
+				if !test.columnOnly {
+					tableStep.rows = [][]driver.Value{{"View's comment"}}
+				}
+				if !test.tableOnly {
+					columnStep.rows = [][]driver.Value{{"ID", "Column's comment"}}
+				}
+			}
+			if test.tableError {
+				tableStep.err = errors.New("dictionary denied")
+			}
+			if test.columnError {
+				columnStep.err = errors.New("dictionary denied")
+			}
+			steps := []oracleViewSourceQueryStep{
+				{queryContains: "FROM ALL_VIEWS", args: []driver.Value{"HR", "ACTIVE_ORDERS"}, rows: [][]driver.Value{{test.source}}},
+			}
+			if test.metadataFallback {
+				steps[0].err = errors.New("view text unavailable")
+				steps = append(steps, oracleViewSourceQueryStep{
+					queryContains: "DBMS_METADATA.GET_DDL('VIEW'", args: []driver.Value{"ACTIVE_ORDERS", "HR"}, rows: [][]driver.Value{{test.source}},
+				})
+			}
+			steps = append(steps, tableStep)
+			if !test.tableError {
+				steps = append(steps, columnStep)
+			}
+			database, scripted := openOracleViewSourceTestDB(t, steps)
+			server := newServer()
+			server.db = database
+			got, err := server.buildViewDDL("HR", "ACTIVE_ORDERS")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := test.terminated
+			if test.noComments || test.tableError || test.columnError {
+				want = strings.TrimSpace(test.source)
+			} else {
+				if !test.columnOnly {
+					want += "\n\nCOMMENT ON TABLE \"HR\".\"ACTIVE_ORDERS\" IS 'View''s comment';"
+				}
+				if !test.tableOnly {
+					want += "\n\nCOMMENT ON COLUMN \"HR\".\"ACTIVE_ORDERS\".\"ID\" IS 'Column''s comment';"
+				}
+			}
+			if !strings.HasPrefix(want, "CREATE ") {
+				want = "CREATE OR REPLACE VIEW \"HR\".\"ACTIVE_ORDERS\" AS\n" + want
+			}
+			if got != want {
+				t.Fatalf("buildViewDDL() = %q, want %q", got, want)
+			}
+			if scripted.next != len(scripted.steps) {
+				t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+			}
+		})
+	}
+}
+
+func TestGetTableDDLForViewAppendsComments(t *testing.T) {
+	const schema = "HR"
+	const view = "ACTIVE_ORDERS"
+	const viewText = `SELECT 1 AS "ID" FROM DUAL`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_VIEWS",
+			args:          []driver.Value{schema, view},
+			rows:          [][]driver.Value{{viewText}},
+		},
+		{
+			queryContains: "FROM ALL_TAB_COMMENTS",
+			args:          []driver.Value{schema, view},
+			rows:          [][]driver.Value{{"Active orders"}},
+		},
+		{
+			queryContains: "FROM ALL_COL_COMMENTS",
+			args:          []driver.Value{schema, view},
+			columns:       []string{"COLUMN_NAME", "COMMENTS"},
+			rows:          [][]driver.Value{{"ID", "Row id"}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.getTableDDL(schema, view, "VIEW")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `CREATE OR REPLACE VIEW "HR"."ACTIVE_ORDERS" AS`) {
+		t.Fatalf("expected view create DDL, got:\n%s", got)
+	}
+	if !strings.Contains(got, `COMMENT ON TABLE "HR"."ACTIVE_ORDERS" IS 'Active orders';`) {
+		t.Fatalf("expected view table comment, got:\n%s", got)
+	}
+	if !strings.Contains(got, `COMMENT ON COLUMN "HR"."ACTIVE_ORDERS"."ID" IS 'Row id';`) {
+		t.Fatalf("expected view column comment, got:\n%s", got)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
 func TestGetPortableTableDDLDisablesAndRestoresSegmentAttributes(t *testing.T) {
 	const schema = "HR"
 	const table = "ORDERS"
@@ -3911,4 +4094,254 @@ func (r *oracleManualTxRows) Next(dest []driver.Value) error {
 	copy(dest, r.values[r.next])
 	r.next++
 	return nil
+}
+
+func TestOracleOpaqueObjectTypeDetection(t *testing.T) {
+	cases := []struct {
+		name   string
+		column oracleColumnMeta
+		want   bool
+	}{
+		{"object type", oracleColumnMeta{Name: "G", DataType: "GEOM_T", DataTypeOwner: "DBX_TEST"}, true},
+		{"collection type", oracleColumnMeta{Name: "V", DataType: "DBX9180_VARRAY", DataTypeOwner: "DBX_TEST"}, true},
+		{"anydata", oracleColumnMeta{Name: "V", DataType: "ANYDATA", DataTypeOwner: "SYS"}, true},
+		{"number", oracleColumnMeta{Name: "ID", DataType: "NUMBER"}, false},
+		{"varchar2", oracleColumnMeta{Name: "NOTE", DataType: "VARCHAR2"}, false},
+		{"clob", oracleColumnMeta{Name: "PAYLOAD", DataType: "CLOB"}, false},
+		{"xmltype", oracleColumnMeta{Name: "DOC", DataType: "XMLTYPE", DataTypeOwner: "SYS"}, false},
+		{"sdo geometry", oracleColumnMeta{Name: "SHAPE", DataType: "SDO_GEOMETRY", DataTypeOwner: "MDSYS"}, false},
+		{"sde geometry", oracleColumnMeta{Name: "SHAPE", DataType: "ST_GEOMETRY", DataTypeOwner: "SDE"}, false},
+	}
+	for _, testCase := range cases {
+		if got := isOracleOpaqueObjectType(testCase.column); got != testCase.want {
+			t.Fatalf("%s: isOracleOpaqueObjectType() = %v, want %v", testCase.name, got, testCase.want)
+		}
+	}
+}
+
+func TestRewriteOracleOpaqueObjectSelectStar(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT * FROM TEST_UDT`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "G", DataType: "GEOM_T", DataTypeOwner: "DBX_TEST"},
+				{Name: "NOTE", DataType: "VARCHAR2"},
+			}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT "ID", CASE WHEN "G" IS NULL THEN NULL ELSE '<GEOM_T>' END AS "G", "NOTE" FROM TEST_UDT`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleOpaqueObjectExplicitColumn(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.G AS shape, t.ID FROM TEST_UDT t`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "G", DataType: "GEOM_T", DataTypeOwner: "DBX_TEST"},
+			}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT CASE WHEN t."G" IS NULL THEN NULL ELSE '<GEOM_T>' END AS shape, t.ID FROM TEST_UDT t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleKeepsBuiltinColumnsUntouched(t *testing.T) {
+	input := `SELECT ID, NOTE FROM TEST_PLAIN`
+	sqlText, err := rewriteOracleSelectSQL(
+		input,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "NOTE", DataType: "VARCHAR2"},
+				{Name: "PAYLOAD", DataType: "CLOB"},
+			}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sqlText != input {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, input)
+	}
+}
+
+func TestOracleSQLLocksRowsDetection(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"for update", "SELECT * FROM T FOR UPDATE", true},
+		{"for update skip locked", "SELECT * FROM T FOR UPDATE SKIP LOCKED", true},
+		{"for update of column", "SELECT ID FROM T FOR UPDATE OF ID NOWAIT", true},
+		{"lowercase", "select id from t for update", true},
+		{"plain select", "SELECT * FROM T", false},
+		{"string literal", "SELECT 'FOR UPDATE' FROM T", false},
+		{"comment", "SELECT * FROM T -- FOR UPDATE", false},
+		{"subquery for update", "SELECT * FROM (SELECT ID FROM T FOR UPDATE) X", false},
+		{"column named update", "SELECT FOR_UPDATE FROM T", false},
+	}
+	for _, testCase := range cases {
+		if got := oracleSQLLocksRows(testCase.sql); got != testCase.want {
+			t.Fatalf("%s: oracleSQLLocksRows(%q) = %v, want %v", testCase.name, testCase.sql, got, testCase.want)
+		}
+	}
+}
+
+func TestRewriteOracleOpaqueObjectInDeferredProjection(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT * FROM TEST_UDT_LOB`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "DOC", DataType: "CLOB"},
+				{Name: "G", DataType: "GEOM_T", DataTypeOwner: "DBX_TEST"},
+			}, nil
+		},
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sqlText, `CASE WHEN "G" IS NULL THEN NULL ELSE '<GEOM_T>' END AS "G"`) {
+		t.Fatalf("deferred rewrite did not substitute the opaque column: %s", sqlText)
+	}
+	if !strings.Contains(sqlText, `"DOC"`) {
+		t.Fatalf("deferred rewrite dropped the LOB column: %s", sqlText)
+	}
+}
+
+func TestParseSingleOracleTableRefReadsDatabaseLinkAndAlias(t *testing.T) {
+	cases := []struct {
+		name string
+		from string
+		want oracleTableRef
+		ok   bool
+	}{
+		{
+			name: "unqualified link with alias",
+			from: `T_UDT@DBX_LOOP t`,
+			want: oracleTableRef{Table: "T_UDT", Alias: "T", AliasText: "t"},
+			ok:   true,
+		},
+		{
+			name: "schema qualified link with alias",
+			from: `DBX_TEST.T_UDT@DBX_LOOP t`,
+			want: oracleTableRef{Schema: "DBX_TEST", Table: "T_UDT", Alias: "T", AliasText: "t"},
+			ok:   true,
+		},
+		{
+			name: "remote link marker",
+			from: `DBX_TEST.T_UDT@!DBX_LOOP x`,
+			want: oracleTableRef{Schema: "DBX_TEST", Table: "T_UDT", Alias: "X", AliasText: "x"},
+			ok:   true,
+		},
+		{
+			name: "quoted link followed by a clause",
+			from: `DBX_TEST.T_UDT@"Loop Link" WHERE ID > 0`,
+			want: oracleTableRef{Schema: "DBX_TEST", Table: "T_UDT"},
+			ok:   true,
+		},
+		{
+			name: "link without alias",
+			from: `DBX_TEST.T_UDT@DBX_LOOP`,
+			want: oracleTableRef{Schema: "DBX_TEST", Table: "T_UDT"},
+			ok:   true,
+		},
+		{
+			name: "local table is unchanged",
+			from: `DBX_TEST.T_UDT t`,
+			want: oracleTableRef{Schema: "DBX_TEST", Table: "T_UDT", Alias: "T", AliasText: "t"},
+			ok:   true,
+		},
+		{
+			name: "link followed by another table is not a single reference",
+			from: `DBX_TEST.T_UDT@DBX_LOOP, DBX_TEST.OTHER`,
+			ok:   false,
+		},
+		{
+			name: "link followed by a join is not a single reference",
+			from: `DBX_TEST.T_UDT@DBX_LOOP JOIN DBX_TEST.OTHER ON 1 = 1`,
+			ok:   false,
+		},
+		{
+			name: "connect string link keeps the previous shape",
+			from: `DBX_TEST.T_UDT@'XE'`,
+			want: oracleTableRef{Schema: "DBX_TEST", Table: "T_UDT"},
+			ok:   true,
+		},
+	}
+	for _, testCase := range cases {
+		got, ok := parseSingleOracleTableRef(testCase.from)
+		if ok != testCase.ok {
+			t.Fatalf("%s: parseSingleOracleTableRef(%q) ok = %v, want %v", testCase.name, testCase.from, ok, testCase.ok)
+		}
+		if !testCase.ok {
+			continue
+		}
+		if got != testCase.want {
+			t.Fatalf("%s: parseSingleOracleTableRef(%q) = %+v, want %+v", testCase.name, testCase.from, got, testCase.want)
+		}
+	}
+}
+
+func TestRewriteOracleOpaqueObjectProjectionKeepsLinkedAlias(t *testing.T) {
+	var gotSchema, gotTable string
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.*, ROWIDTOCHAR(t.ROWID) AS "__DBX_PK_0" FROM DBX_TEST.T_UDT@DBX_LOOP t`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			gotSchema, gotTable = schema, table
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "G", DataType: "GEOM_T", DataTypeOwner: "DBX_TEST"},
+			}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSchema != "DBX_TEST" || gotTable != "T_UDT" {
+		t.Fatalf("column metadata loaded for (%q, %q), want (DBX_TEST, T_UDT)", gotSchema, gotTable)
+	}
+	want := `SELECT t."ID", CASE WHEN t."G" IS NULL THEN NULL ELSE '<GEOM_T>' END AS "G", ROWIDTOCHAR(t.ROWID) AS "__DBX_PK_0" FROM DBX_TEST.T_UDT@DBX_LOOP t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleOpaqueObjectExplicitColumnKeepsLinkedAlias(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.ID, t.G FROM T_UDT@DBX_LOOP t`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "G", DataType: "GEOM_T", DataTypeOwner: "DBX_TEST"},
+			}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t.ID, CASE WHEN t."G" IS NULL THEN NULL ELSE '<GEOM_T>' END AS "G" FROM T_UDT@DBX_LOOP t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
 }

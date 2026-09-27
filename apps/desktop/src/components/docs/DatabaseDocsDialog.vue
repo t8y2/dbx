@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Download, Network } from "@lucide/vue";
+import { Download, FileText, Network } from "@lucide/vue";
+import DataDictionaryDialog from "@/components/docs/DataDictionaryDialog.vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import DocsApp from "@/docs/DocsApp.vue";
@@ -77,6 +78,7 @@ const canOpenDiagram = computed(() => (props.prefillConnectionId ?? "") !== "" &
 
 const exporting = ref(false);
 const exportError = ref<string | null>(null);
+const showDataDictionary = ref(false);
 
 async function load(): Promise<void> {
   const connectionId = props.prefillConnectionId;
@@ -208,7 +210,7 @@ watch(
   <Dialog v-model:open="open">
     <DialogContent class="w-[94vw] max-w-[94vw] sm:max-w-[94vw] md:max-w-[94vw] lg:max-w-[94vw] xl:max-w-[94vw] h-[86vh] max-h-[86vh] gap-0 p-0 overflow-hidden flex flex-col">
       <DialogHeader class="px-4 py-3 border-b pr-12">
-        <DialogTitle class="flex items-center gap-2">
+        <DialogTitle class="flex flex-wrap items-center gap-2">
           <span>{{ t("docs.title") }}</span>
           <span v-if="statusLabel" class="text-xs font-normal" :class="status.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'">
             {{ statusLabel }}
@@ -217,6 +219,10 @@ watch(
           <Button v-if="canOpenDiagram" variant="outline" size="sm" class="ml-auto" @click="openDiagram()">
             <Network class="w-4 h-4" />
             {{ t("docs.openDiagram") }}
+          </Button>
+          <Button v-if="snapshot" variant="outline" size="sm" @click="showDataDictionary = true">
+            <FileText class="w-4 h-4" />
+            {{ t("dataDictionary.title") }}
           </Button>
           <Button v-if="snapshot" variant="outline" size="sm" :disabled="exporting" @click="exportHtml()">
             <Download class="w-4 h-4" />
@@ -232,4 +238,5 @@ watch(
       </div>
     </DialogContent>
   </Dialog>
+  <DataDictionaryDialog v-if="showDataDictionary && snapshot" v-model:open="showDataDictionary" :prefill-connection-id="prefillConnectionId" :prefill-database="prefillDatabase" :prefill-schema="prefillSchema" :snapshot="snapshot" />
 </template>

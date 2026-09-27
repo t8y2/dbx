@@ -75,23 +75,31 @@ export function resolveMetadataColumnName(databaseType: string, sourceName: stri
   if (sourceNameQuoted === undefined) {
     const exact = metadataColumns.find((column) => column === sourceName);
     if (exact || POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType) || ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) return exact;
-    const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
-    return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+    return uniqueCaseInsensitiveColumn(metadataColumns, sourceName);
   }
 
+  // Dialect folding is only an assumption about what the server stored: Dameng
+  // keeps the case an unquoted identifier was created with (issue #10233), so
+  // the folded spelling can miss even though the column exists. Fall back to a
+  // case-only match when it is unambiguous -- never when the folded name itself
+  // resolves, so quoted or equally-spelled columns keep their exact identity.
   if (POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
     const folded = sourceName.toLowerCase();
-    return metadataColumns.find((column) => column === folded);
+    return metadataColumns.find((column) => column === folded) ?? uniqueCaseInsensitiveColumn(metadataColumns, folded);
   }
   if (ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
     const folded = sourceName.toUpperCase();
-    return metadataColumns.find((column) => column === folded);
+    return metadataColumns.find((column) => column === folded) ?? uniqueCaseInsensitiveColumn(metadataColumns, folded);
   }
 
   const exact = metadataColumns.find((column) => column === sourceName);
   if (exact) return exact;
-  const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
-  return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+  return uniqueCaseInsensitiveColumn(metadataColumns, sourceName);
+}
+
+function uniqueCaseInsensitiveColumn(metadataColumns: readonly string[], name: string): string | undefined {
+  const matches = metadataColumns.filter((column) => column.toLowerCase() === name.toLowerCase());
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export interface ResolvedSourceColumnRef {
@@ -338,7 +346,10 @@ export function analyzeSelectStructureForDisplay(sql: string): EditableQueryInfo
   const hasWindowClause = findTopLevelKeyword(normalized, "OVER", "SELECT".length) >= 0 || findTopLevelKeyword(normalized, "WINDOW", fromIndex + "FROM".length) >= 0;
   const hasRightJoinClause = hasTopLevelRightJoin(fromBody);
 
-  const selectStar = sources.length === 1 && isSelectStar(selectBody, source.alias);
+  // A bare `*` in a multi-source query expands in source/projection order.
+  // Keep it as a display-only star so joined result columns can still resolve
+  // to their physical metadata without making the query editable.
+  const selectStar = isSelectStar(selectBody, source.alias);
   const columns = selectStar ? [] : parseSelectColumns(selectBody, sources);
   if (!selectStar && columns.length === 0) return null;
   if (sources.length > 1 && columns.some((column) => column.star && !column.sourceKey)) return null;
@@ -745,7 +756,28 @@ function readIdentifier(text: string, start: number): { value: string; quoted: b
     return null;
   }
   const match = text.slice(pos).match(/^[\p{ID_Start}_][\p{ID_Continue}$]*/u);
-  return match ? { value: match[0], quoted: false, end: pos + match[0].length } : null;
+  if (match) return { value: match[0], quoted: false, end: pos + match[0].length };
+  // MySQL/MariaDB also allow an unquoted identifier to begin with a digit as long as it is not a
+  // pure number, so `select * from 01_tablename` maps back to a base table while `123` / `1e3`
+  // stay literals (#9992).
+  const digitMatch = text.slice(pos).match(/^[0-9][\p{ID_Continue}$]*/u);
+  if (digitMatch && !isNumberShapedToken(digitMatch[0])) {
+    return { value: digitMatch[0], quoted: false, end: pos + digitMatch[0].length };
+  }
+  return null;
+}
+
+/**
+ * Mirrors `sqlNavigation.isNumberShapedToken`: a digit-leading token is only an identifier when
+ * it is not a number (`123`, `1e3`, `0x1f`, `0b101`). See #9992.
+ */
+function isNumberShapedToken(value: string): boolean {
+  if (!/^[0-9]/.test(value)) return false;
+  const rest = value.slice(1).toLowerCase();
+  if (rest === "") return true;
+  if (rest.startsWith("x")) return /^x[0-9a-f]+$/.test(rest);
+  if (rest.startsWith("b")) return /^b[01]+$/.test(rest);
+  return /^[0-9e]+$/.test(rest);
 }
 
 function skipWhitespace(text: string, pos: number): number {
@@ -861,13 +893,32 @@ export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: stri
   return primaryKeys.every((pk) => colSet.has(pk));
 }
 
-function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[]): EditableQueryColumn[] | undefined {
-  // Preserve projection order before searching by label: folded duplicate names are not unique.
-  if (analysis.columns.length === resultColumns.length && analysis.columns.every((column, index) => column.resultName.toLowerCase() === resultColumns[index]!.toLowerCase())) return analysis.columns;
+const SYNTHETIC_RESULT_ROW_NUMBER_LABELS = new Set(["__dbx_row_num", "dbx_rn"]);
 
+function isOracleFamilyDatabase(databaseType?: DatabaseType | string): boolean {
+  return !!databaseType && ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType);
+}
+
+function isTrailingPaginationResultLabel(label: string, analysisResultNames: Set<string>): boolean {
+  const normalized = label.toLowerCase();
+  if (SYNTHETIC_RESULT_ROW_NUMBER_LABELS.has(normalized)) return true;
+  return normalized === "rownum" && !analysisResultNames.has("rownum");
+}
+
+function resultPrefixLengthForEditMatching(analysis: EditableQueryInfo, resultColumns: string[]): number {
+  const analysisNames = new Set(analysis.columns.map((column) => column.resultName.toLowerCase()));
+  let end = resultColumns.length;
+  while (end > analysis.columns.length) {
+    if (!isTrailingPaginationResultLabel(resultColumns[end - 1]!, analysisNames)) break;
+    end -= 1;
+  }
+  return end;
+}
+
+function matchResultPrefixByLabel(analysis: EditableQueryInfo, prefix: string[]): EditableQueryColumn[] | undefined {
   const matches: EditableQueryColumn[] = [];
   let searchFrom = 0;
-  for (const resultColumn of resultColumns) {
+  for (const resultColumn of prefix) {
     let matchIndex = analysis.columns.findIndex((column, index) => index >= searchFrom && column.resultName === resultColumn);
     if (matchIndex < 0) {
       const normalized = resultColumn.toLowerCase();
@@ -881,17 +932,40 @@ function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: strin
   return matches;
 }
 
-export function allEditableColumnsWriteable(analysis: EditableQueryInfo, resultColumns: string[], sourceKey?: string): boolean {
+function isRownumLabelSubstitution(resultLabel: string, column: EditableQueryColumn): boolean {
+  if (resultLabel.toLowerCase() !== "rownum") return false;
+  return column.resultName.toLowerCase() !== "rownum" && column.sourceName?.toLowerCase() !== "rownum";
+}
+
+function padMatchedColumnsToResultLength(matches: Array<EditableQueryColumn | undefined>, resultColumnCount: number): Array<EditableQueryColumn | undefined> {
+  if (matches.length === resultColumnCount) return matches;
+  return [...matches, ...Array.from({ length: resultColumnCount - matches.length }, () => undefined)];
+}
+
+function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[], databaseType?: DatabaseType | string): Array<EditableQueryColumn | undefined> | undefined {
+  const prefixLength = resultPrefixLengthForEditMatching(analysis, resultColumns);
+  const prefix = resultColumns.slice(0, prefixLength);
+  const labeled = matchResultPrefixByLabel(analysis, prefix);
+  if (labeled) return padMatchedColumnsToResultLength(labeled, resultColumns.length);
+
+  if (prefix.length !== analysis.columns.length || !isOracleFamilyDatabase(databaseType)) return undefined;
+
+  const ordinal = analysis.columns.map((column, index) => (isRownumLabelSubstitution(prefix[index]!, column) ? undefined : column));
+  return padMatchedColumnsToResultLength(ordinal, resultColumns.length);
+}
+
+export function allEditableColumnsWriteable(analysis: EditableQueryInfo, resultColumns: string[], sourceKey?: string, databaseType?: DatabaseType | string): boolean {
   if (analysis.selectStar) return true;
-  const matchedColumns = matchColumnsForResult(analysis, resultColumns);
-  return !!matchedColumns && matchedColumns.every((source) => !sourceKey || !source.sourceName || source.sourceKey === sourceKey);
+  const matchedColumns = matchColumnsForResult(analysis, resultColumns, databaseType);
+  return !!matchedColumns && matchedColumns.every((source) => !source || !sourceKey || !source.sourceName || source.sourceKey === sourceKey);
 }
 
 export function sourceColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[], sourceKey?: string, databaseType?: DatabaseType, primaryKeys?: readonly string[]): Array<string | undefined> | undefined {
   if (analysis.selectStar) return undefined;
-  const matchedColumns = matchColumnsForResult(analysis, resultColumns);
+  const matchedColumns = matchColumnsForResult(analysis, resultColumns, databaseType);
   if (!matchedColumns) return undefined;
   return matchedColumns.map((column) => {
+    if (!column) return undefined;
     if (sourceKey && column.sourceKey !== sourceKey) return undefined;
     if (databaseType === "oracle" && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) {
       return primaryKeys?.length === 1 && primaryKeys[0] === DBX_ROWID_COLUMN ? DBX_ROWID_COLUMN : undefined;

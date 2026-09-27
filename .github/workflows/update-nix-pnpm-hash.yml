@@ -41,7 +41,7 @@ jobs:
           fi
 
           cat "$build_log"
-          expected_hash=$(sed -n 's/.*got: \(sha256-[A-Za-z0-9+/=]*\).*/\1/p' "$build_log" | tail -1)
+          expected_hash=$(sed -n -e 's/.*got:[[:space:]]*\(sha256-[A-Za-z0-9+/=]*\).*/\1/p' -e 's/.*use[[:space:]]"\(sha256-[A-Za-z0-9+/=]*\)".*/\1/p' "$build_log" | tail -1)
           if [ -z "$expected_hash" ]; then
             echo "Nix build failed without reporting a replacement fixed-output hash."
             exit 1

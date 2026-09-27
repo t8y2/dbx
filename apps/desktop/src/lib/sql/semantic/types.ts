@@ -51,6 +51,35 @@ export interface SqlSemanticProjection {
   aliasSpan?: SqlSemanticSpan;
 }
 
+/**
+ * Traceable origin of a CTE output column that is a plain column reference
+ * (`col` or `q.col`) in the CTE body. Expression/alias outputs carry no origin.
+ */
+export interface SqlSemanticCteColumnOrigin {
+  /** Qualifier chain before the column, e.g. `t` for `t.id`; empty for a bare `id`. */
+  qualifierParts: string[];
+  /** Referenced column name inside the CTE body. */
+  column: string;
+}
+
+/** A named column produced by a CTE (`WITH c(a,b)` list item or SELECT projection). */
+export interface SqlSemanticCteOutputColumn {
+  /** Output column name as seen by the outer query. */
+  name: string;
+  /** Editor span to select when navigating to this output column inside the CTE body. */
+  jumpSpan: SqlSemanticSpan;
+  /** Present only when the body projection is a traceable plain column reference. */
+  origin?: SqlSemanticCteColumnOrigin;
+}
+
+/** A star projection (`*` or `q.*`) inside a CTE body. */
+export interface SqlSemanticCteStar {
+  /** Span of the `*` token itself (navigation target). */
+  starSpan: SqlSemanticSpan;
+  /** Qualifier chain for `q.*`; empty for a bare `*`. */
+  qualifierParts: string[];
+}
+
 export interface SqlSemanticRowSource {
   id: string;
   kind: SqlSemanticRowSourceKind;
@@ -64,6 +93,20 @@ export interface SqlSemanticRowSource {
   columnAliases?: string[];
   metadataTarget?: SqlSemanticMetadataTarget;
   unresolved?: boolean;
+  /** CTE name token span — only populated on `cte:` definition row sources. */
+  nameSpan?: SqlSemanticSpan;
+  /** CTE body parentheses span — only populated on `cte:` definition row sources. */
+  bodySpan?: SqlSemanticSpan;
+  /**
+   * Named output columns with in-body navigation/trace metadata. Populated on `cte:` definitions,
+   * and — reusing the same shape — on derived tables (`kind: "subquery"`) directly inside a CTE
+   * body, so lineage can continue through `FROM (SELECT ...) x` to the tables inside it.
+   */
+  cteOutputs?: SqlSemanticCteOutputColumn[];
+  /** Star projections of the body (CTE definitions and enriched derived tables). */
+  cteStars?: SqlSemanticCteStar[];
+  /** Row sources visible inside the body (physical tables + upstream CTEs) — same two owners. */
+  bodySources?: SqlSemanticRowSource[];
 }
 
 export interface SqlSemanticClauseSpans {

@@ -480,6 +480,17 @@ pub async fn redis_delete_keys(
 }
 
 #[tauri::command]
+pub async fn redis_delete_keys_by_pattern(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    pattern: String,
+) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "Delete keys").await?;
+    dbx_core::redis_ops::redis_delete_keys_by_pattern_in_db_core(&state, &connection_id, db, &pattern).await
+}
+
+#[tauri::command]
 pub async fn redis_flush_db(state: State<'_, Arc<AppState>>, connection_id: String, db: u32) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "FLUSHDB").await?;
     dbx_core::redis_ops::redis_flush_db_core(&state, &connection_id, db).await

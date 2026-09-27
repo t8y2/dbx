@@ -148,9 +148,11 @@ interface CurrentStatementFrameModule {
 /**
  * Draw one continuous green rectangle around the current executable
  * statement. `resolve` decides visibility and returns the statement range;
- * returning null hides the frame.
+ * returning null hides the frame. `options.shouldRefresh` forces a repaint on
+ * updates that change statement boundaries without touching the document
+ * (e.g. a debounced boundary rebuild landing after a typing pause).
  */
-export function currentStatementFrameLayer(viewModule: CurrentStatementFrameModule, resolve: StatementFrameResolver): Extension {
+export function currentStatementFrameLayer(viewModule: CurrentStatementFrameModule, resolve: StatementFrameResolver, options?: { shouldRefresh?: (update: ViewUpdate) => boolean }): Extension {
   let lastRequest: StatementFrameRequest | null | undefined;
 
   const sameRequest = (left: StatementFrameRequest | null | undefined, right: StatementFrameRequest | null): boolean => left === right || (!!left && !!right && left.from === right.from && left.to === right.to);
@@ -170,6 +172,10 @@ export function currentStatementFrameLayer(viewModule: CurrentStatementFrameModu
     },
     update(update) {
       if (update.docChanged || update.viewportChanged || update.geometryChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
+        lastRequest = undefined;
+        return true;
+      }
+      if (options?.shouldRefresh?.(update)) {
         lastRequest = undefined;
         return true;
       }

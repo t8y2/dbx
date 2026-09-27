@@ -71,6 +71,28 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void readsBlobValuesAsHexInsteadOfVendorObjectNames() {
+        Db2Agent agent = new Db2Agent();
+        ResultSet resultSet = proxy(ResultSet.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getBytes".equals(method.getName())) {
+                    return new byte[] {(byte) 0x89, 0x50, 0x4e};
+                }
+                if ("wasNull".equals(method.getName())) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+
+        assertEquals("0x89504e", agent.resultValue(resultSet, 1, Types.BLOB));
+        assertEquals("0x89504e", agent.resultValue(resultSet, 1, Types.BINARY));
+        assertEquals("0x89504e", agent.resultValue(resultSet, 1, Types.VARBINARY));
+        assertEquals("0x89504e", agent.resultValue(resultSet, 1, Types.LONGVARBINARY));
+    }
+
+    @Test
     void listsAllCatalogSchemasWithoutOwnerTypeFiltering() {
         Db2Agent agent = new Db2Agent();
         AtomicReference<String> executedSql = new AtomicReference<>();

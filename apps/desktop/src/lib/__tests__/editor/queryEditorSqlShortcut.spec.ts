@@ -47,7 +47,7 @@ describe("createQueryEditorSqlShortcutDomHandler", () => {
 
   it("runs the action and prevents default when there is a selection", () => {
     const runAction = vi.fn(() => true);
-    const handler = createQueryEditorSqlShortcutDomHandler(() => [action("a", "Shift+U")], runAction, "MacIntel");
+    const handler = createQueryEditorSqlShortcutDomHandler(() => [action("a", "Shift+U")], runAction, undefined, "MacIntel");
     const event = keydownEvent({ key: "U", shiftKey: true });
 
     expect(handler(event as unknown as KeyboardEvent, view)).toBe(true);
@@ -58,7 +58,7 @@ describe("createQueryEditorSqlShortcutDomHandler", () => {
 
   it("does not intercept when there is no selection", () => {
     const runAction = vi.fn(() => false);
-    const handler = createQueryEditorSqlShortcutDomHandler(() => [action("a", "Shift+U")], runAction, "MacIntel");
+    const handler = createQueryEditorSqlShortcutDomHandler(() => [action("a", "Shift+U")], runAction, undefined, "MacIntel");
     const event = keydownEvent({ key: "U", shiftKey: true });
 
     expect(handler(event as unknown as KeyboardEvent, view)).toBe(false);
@@ -69,8 +69,36 @@ describe("createQueryEditorSqlShortcutDomHandler", () => {
 
   it("ignores non character-producing shortcuts", () => {
     const runAction = vi.fn(() => true);
-    const handler = createQueryEditorSqlShortcutDomHandler(() => [action("a", "Mod+Shift+9")], runAction, "MacIntel");
+    const handler = createQueryEditorSqlShortcutDomHandler(() => [action("a", "Mod+Shift+9")], runAction, undefined, "MacIntel");
     const event = keydownEvent({ key: "9", metaKey: true, shiftKey: true });
+
+    expect(handler(event as unknown as KeyboardEvent, view)).toBe(false);
+    expect(runAction).not.toHaveBeenCalled();
+  });
+
+  it("resolves the action for the active database type", () => {
+    const runAction = vi.fn(() => true);
+    const handler = createQueryEditorSqlShortcutDomHandler(
+      () => [action("mysql", "Shift+U", { databaseTypes: ["mysql"] }), action("sqlserver", "Shift+U", { databaseTypes: ["sqlserver"] })],
+      runAction,
+      () => "sqlserver",
+      "MacIntel",
+    );
+    const event = keydownEvent({ key: "U", shiftKey: true });
+
+    expect(handler(event as unknown as KeyboardEvent, view)).toBe(true);
+    expect(runAction).toHaveBeenCalledWith(expect.objectContaining({ id: "sqlserver" }), view, event);
+  });
+
+  it("does not run a scoped action on an unrelated database", () => {
+    const runAction = vi.fn(() => true);
+    const handler = createQueryEditorSqlShortcutDomHandler(
+      () => [action("mysql", "Shift+U", { databaseTypes: ["mysql"] })],
+      runAction,
+      () => "postgres",
+      "MacIntel",
+    );
+    const event = keydownEvent({ key: "U", shiftKey: true });
 
     expect(handler(event as unknown as KeyboardEvent, view)).toBe(false);
     expect(runAction).not.toHaveBeenCalled();

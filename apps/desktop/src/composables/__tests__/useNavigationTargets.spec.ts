@@ -8,11 +8,13 @@ const mocks = vi.hoisted(() => ({
   activeTabId: "",
   buildTableSelectSql: vi.fn(),
   databaseType: "postgres" as string,
+  tableOpenSortMode: "none" as "none" | "database" | "local",
   ensureConnected: vi.fn(),
   executeTabSql: vi.fn(),
   getColumns: vi.fn(),
   invalidateCompletionTableCache: vi.fn(),
   listIndexes: vi.fn(),
+  setErrorResult: vi.fn(),
   setTableMeta: vi.fn(),
   updateSql: vi.fn(),
 }));
@@ -75,16 +77,17 @@ vi.mock("@/stores/queryStore", () => ({
     }),
     updateSql: mocks.updateSql,
     executeTabSql: mocks.executeTabSql,
-    setErrorResult: vi.fn(),
+    setErrorResult: mocks.setErrorResult,
     invalidateTableStructure: vi.fn(),
   }),
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: "same-table" } }),
+  useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: "same-table", tableOpenSortMode: mocks.tableOpenSortMode, tableDatabaseSortDirection: "desc", tableLocalSortDirection: "asc" } }),
 }));
 
-vi.mock("@/lib/table/tableSelectSql", () => ({
+vi.mock("@/lib/table/tableSelectSql", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/table/tableSelectSql")>()),
   buildTableSelectSql: mocks.buildTableSelectSql,
 }));
 
@@ -104,11 +107,39 @@ describe("useNavigationTargets openTableTarget", () => {
     vi.clearAllMocks();
     mocks.tabs.length = 0;
     mocks.databaseType = "postgres";
+    mocks.tableOpenSortMode = "none";
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.buildTableSelectSql.mockImplementation(async ({ tableName }: { tableName: string }) => `SELECT * FROM ${tableName}`);
     mocks.executeTabSql.mockResolvedValue(undefined);
     mocks.getColumns.mockResolvedValue([column("id")]);
     mocks.listIndexes.mockResolvedValue([]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "xugu", "neo4j"])("keeps %s synthetic row identifiers out of default database ordering", async (databaseType) => {
+    mocks.databaseType = databaseType;
+    mocks.tableOpenSortMode = "database";
+    mocks.getColumns.mockResolvedValue([{ ...column("name"), is_primary_key: false }]);
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" });
+
+    expect(mocks.executeTabSql).toHaveBeenCalled();
+    expect(mocks.buildTableSelectSql).toHaveBeenCalled();
+    for (const [options] of mocks.buildTableSelectSql.mock.calls) {
+      expect(options.orderBy).toBeUndefined();
+    }
+    expect(mocks.tabs[0]?.orderByInput).toBeUndefined();
+  });
+
+  it.each(["oracle", "oceanbase-oracle"])("uses the %s physical primary index for default ordering", async (databaseType) => {
+    mocks.databaseType = databaseType;
+    mocks.tableOpenSortMode = "database";
+    mocks.getColumns.mockResolvedValue([{ ...column("id"), is_primary_key: false }]);
+    mocks.listIndexes.mockResolvedValue([{ name: "users_pk", columns: ["id"], is_unique: true, is_primary: true }]);
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" });
+
+    expect(mocks.setErrorResult).not.toHaveBeenCalled();
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"id" DESC' }));
   });
 
   it("loads stable row identity before the first PostgreSQL table query", async () => {
@@ -162,11 +193,22 @@ describe("useNavigationTargets openTableTarget", () => {
   });
 
   it("keeps row identity pending when shared metadata loading fails", async () => {
-    mocks.getColumns.mockRejectedValueOnce(new Error("metadata unavailable"));
+    mocks.getColumns.mockRejectedValue(new Error("metadata unavailable"));
 
     await useNavigationTargets(dialogs).openLineageTarget({ connectionId: "connection-1", database: "app", schema: "public", tableName: "users" });
 
     expect(mocks.tabs[0]?.tableMeta?.columns).toEqual([]);
+    expect(mocks.tabs[0]?.tableMetaPending).toBe(true);
+  });
+
+  it.each(["none", "database", "local"] as const)("opens the table when metadata preload fails in %s sort mode", async (mode) => {
+    mocks.databaseType = "sqlite";
+    mocks.tableOpenSortMode = mode;
+    mocks.getColumns.mockRejectedValue(new Error("metadata unavailable"));
+
+    await useNavigationTargets(dialogs).openLineageTarget({ connectionId: "connection-1", database: "app", tableName: "users" });
+
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
     expect(mocks.tabs[0]?.tableMetaPending).toBe(true);
   });
 

@@ -319,9 +319,37 @@ test("omits synthetic connection management entries when the connection itself m
           database: "",
         },
         {
+          id: "conn:1:__dameng_users",
+          label: "tree.damengUsers",
+          type: "dameng-users",
+          connectionId: "conn:1",
+          database: "",
+        },
+        {
+          id: "conn:1:__dameng_roles",
+          label: "tree.damengRoles",
+          type: "dameng-roles",
+          connectionId: "conn:1",
+          database: "",
+        },
+        {
           id: "conn:1:__dameng_jobs",
           label: "tree.damengJobAdmin",
           type: "dameng-job-admin",
+          connectionId: "conn:1",
+          database: "",
+        },
+        {
+          id: "conn:1:__xugu_tablespaces",
+          label: "tree.xuguTablespaces",
+          type: "group-tablespaces",
+          connectionId: "conn:1",
+          database: "",
+        },
+        {
+          id: "conn:1:__oracle_db_links",
+          label: "tree.databaseLinks",
+          type: "oracle-db-links",
           connectionId: "conn:1",
           database: "",
         },
@@ -354,6 +382,14 @@ test("keeps a disconnected connection search result collapsed when it only has s
           connectionId: "conn:1",
           database: "",
         },
+        {
+          id: "conn:1:__oracle_db_links",
+          label: "tree.databaseLinks",
+          type: "oracle-db-links",
+          connectionId: "conn:1",
+          database: "",
+          children: [],
+        },
       ],
     },
   ];
@@ -362,6 +398,79 @@ test("keeps a disconnected connection search result collapsed when it only has s
 
   assert.deepEqual(filtered[0]?.children, []);
   assert.equal(filtered[0]?.isExpanded, false);
+});
+
+test("keeps utility groups searchable through their real object children", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1",
+      label: "prod",
+      type: "connection",
+      connectionId: "conn:1",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn:1:__oracle_db_links",
+          label: "tree.databaseLinks",
+          type: "oracle-db-links",
+          connectionId: "conn:1",
+          database: "",
+          children: [
+            {
+              id: "conn:1:__oracle_db_links:reporting",
+              label: "REPORTING.LOCALDOMAIN",
+              type: "oracle-db-link",
+              connectionId: "conn:1",
+              database: "",
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "reporting", new Set());
+
+  assert.equal(filtered[0]?.type, "connection");
+  assert.deepEqual(
+    filtered[0]?.children?.map((child) => child.type),
+    ["oracle-db-links"],
+  );
+  assert.equal(filtered[0]?.children?.[0]?.children?.[0]?.label, "REPORTING.LOCALDOMAIN");
+});
+
+test("drops utility groups whose children do not match the query", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1",
+      label: "prod",
+      type: "connection",
+      connectionId: "conn:1",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn:1:__xugu_tablespaces",
+          label: "tree.xuguTablespaces",
+          type: "group-tablespaces",
+          connectionId: "conn:1",
+          database: "",
+          children: [
+            {
+              id: "conn:1:__xugu_tablespaces:system",
+              label: "SYSTEM",
+              type: "tablespace",
+              connectionId: "conn:1",
+              database: "",
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "reporting", new Set());
+
+  assert.deepEqual(filtered, []);
 });
 
 test("does not return synthetic connection management entries as direct text matches", () => {

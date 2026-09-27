@@ -116,6 +116,8 @@ export interface AiChatSelectionState {
   active?: AiActiveModelSelection;
   effortPreferences: AiModelEffortPreference[];
   defaultMode?: AiAssistantMode;
+  /** Whether new AI conversations start with the action picker on `auto` (#9118). */
+  defaultAutoRouting?: boolean;
   /** Whether opening the AI panel restores the most recently updated conversation. */
   restoreLastConversation?: boolean;
   /** Prompt template ids auto-applied when the AI panel opens, keyed by connection db_type. */

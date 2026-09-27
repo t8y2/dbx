@@ -29,6 +29,13 @@ export function editablePrimaryKeys(databaseType: DatabaseType | undefined, colu
   return primaryKeys;
 }
 
+/** Physical primary keys only; unlike editable row identifiers, never fall back to unique indexes or synthetic keys. */
+export function physicalTablePrimaryKeys(columns: readonly Pick<ColumnInfo, "name" | "is_primary_key">[], indexes: readonly Pick<IndexInfo, "columns" | "is_primary">[] = []): string[] {
+  const columnPrimaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
+  if (columnPrimaryKeys.length > 0) return columnPrimaryKeys;
+  return indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? [];
+}
+
 export function editableRowIdentifierColumns(databaseType: DatabaseType | undefined, columns: ColumnInfo[], indexes?: IndexInfo[], tableType?: string): string[] {
   const primaryKeys = editablePrimaryKeys(databaseType, columns, tableType);
   const oracleRowIdFallback = getDatabaseCapability(databaseType).syntheticKey === "oracle-rowid" && primaryKeys.length === 1 && primaryKeys[0]?.toUpperCase() === DBX_ROWID_COLUMN;
@@ -135,4 +142,50 @@ export function isClickHouseExistingRowReadonlyColumn(databaseType: DatabaseType
   if (primaryKeys.some((key) => key.toLowerCase() === column.toLowerCase())) return true;
   const columnInfo = columns.find((info) => info.name.toLowerCase() === column.toLowerCase());
   return /\bpartition_key\b/i.test(columnInfo?.extra ?? "");
+}
+
+/**
+ * Describe flags the Salesforce driver packs into `ColumnInfo.extra`
+ * (see `parse_describe_columns` in crates/dbx-drivers/src/db/salesforce_driver.rs).
+ * `relationshipName` / `referenceTo` also live there but are consumed by SOQL
+ * completion instead (`soqlFieldFromColumnInfo`).
+ */
+export interface SalesforceColumnFlags {
+  updateable?: boolean;
+  createable?: boolean;
+  custom?: boolean;
+  label?: string;
+}
+
+export function parseSalesforceColumnExtra(extra?: string | null): SalesforceColumnFlags | null {
+  if (!extra) return null;
+  try {
+    const parsed: unknown = JSON.parse(extra);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as SalesforceColumnFlags) : null;
+  } catch {
+    return null;
+  }
+}
+
+function findColumnInfoByName(columns: ColumnInfo[], column: string): ColumnInfo | undefined {
+  return columns.find((info) => info.name.toLowerCase() === column.toLowerCase());
+}
+
+/**
+ * Existing Salesforce rows: the record `Id` is the identity and never a write
+ * target, and describe reports `updateable: false` for formula, rollup summary,
+ * auto-number and system fields (CreatedDate, CreatedById, LastModifiedDate…).
+ * Missing/unparseable metadata fails open — Salesforce enforces the real rules
+ * server-side and returns a per-record error we surface on the row.
+ */
+export function isSalesforceExistingRowReadonlyColumn(databaseType: DatabaseType | undefined, column: string, primaryKeys: readonly string[], columns: ColumnInfo[] = []): boolean {
+  if (databaseType !== "salesforce") return false;
+  if (primaryKeys.some((key) => key.toLowerCase() === column.toLowerCase())) return true;
+  return parseSalesforceColumnExtra(findColumnInfoByName(columns, column)?.extra)?.updateable === false;
+}
+
+/** New Salesforce rows: fields describe reports as `createable: false` (Id, CreatedDate, …) cannot be set on insert. */
+export function isSalesforceNewRowReadonlyColumn(databaseType: DatabaseType | undefined, column: string, columns: ColumnInfo[] = []): boolean {
+  if (databaseType !== "salesforce") return false;
+  return parseSalesforceColumnExtra(findColumnInfoByName(columns, column)?.extra)?.createable === false;
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -8,13 +8,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
 import { AlertTriangle, ArrowLeft, ArrowRight, FileUp, Loader2, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { TABLE_IMPORT_ENCODING_OPTIONS } from "@/lib/table/tableImport";
-import { importPreviewInput, importSourceDisplayName, importTextDelimiterForName, uploadedImportSourceFromPreview, type UploadedImportSource } from "@/lib/import/importSource";
+import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview, type UploadedImportSource } from "@/lib/import/importSource";
 import { useToast } from "@/composables/useToast";
+import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
@@ -42,6 +44,7 @@ const hasHeader = ref(true);
 const trim = ref(false);
 const emptyAsNull = ref(true);
 const typeMode = ref<api.MongoImportTypeMode>("auto");
+const columnTypeOverrides = ref<Record<string, api.MongoImportInferredType>>({});
 const recognizeObjectIdHex = ref(false);
 const skipErrorRows = ref(false);
 const batchSize = ref(500);
@@ -66,8 +69,18 @@ const fileLabel = computed(() => sourceName.value || t("tableImport.noFileSelect
 const encodingOptions = TABLE_IMPORT_ENCODING_OPTIONS;
 const targetLabel = computed(() => `${props.database}.${props.collection}`);
 
-const parseOptions = computed(
-  (): api.MongoImportParseOptions => ({
+const columnTypeOptions: api.MongoImportInferredType[] = ["string", "boolean", "integer", "decimal", "date", "objectId", "object", "array", "mixed"];
+const columnTypeItems = computed<LightDropdownItem[]>(() =>
+  columnTypeOptions.map((value) => ({
+    value,
+    label: t(`mongo.import.inferredType.${value}`),
+  })),
+);
+const showColumnTypeEditors = computed(() => format.value === "csv" && typeMode.value !== "extendedJson");
+
+const parseOptions = computed((): api.MongoImportParseOptions => {
+  const overrides = columnTypeOverrides.value;
+  return {
     encoding: encoding.value,
     delimiter: delimiter.value,
     hasHeader: hasHeader.value,
@@ -76,15 +89,9 @@ const parseOptions = computed(
     typeMode: typeMode.value,
     recognizeObjectIdHex: recognizeObjectIdHex.value,
     skipErrorRows: skipErrorRows.value,
-  }),
-);
-
-function formatFromName(name: string): api.MongoImportFormat {
-  const lower = name.toLowerCase();
-  if (lower.endsWith(".ndjson") || lower.endsWith(".jsonl")) return "ndjson";
-  if (lower.endsWith(".json")) return "json";
-  return "csv";
-}
+    columnTypes: Object.keys(overrides).length ? { ...overrides } : null,
+  };
+});
 
 function releasePreviewSource() {
   const sourceRef = uploadedSource?.sourceRef;
@@ -97,9 +104,7 @@ function assignSource(source: string | File) {
   releasePreviewSource();
   selectedSource.value = source;
   sourceName.value = importSourceDisplayName(source);
-  format.value = formatFromName(sourceName.value);
-  typeMode.value = format.value === "csv" ? "auto" : "extendedJson";
-  delimiter.value = importTextDelimiterForName(sourceName.value);
+  columnTypeOverrides.value = {};
   wizardStep.value = "source";
   queuePreview();
 }
@@ -112,7 +117,7 @@ async function selectFile() {
   const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
   const selected = await openDialog({
     multiple: false,
-    filters: [{ name: t("mongo.import.fileFilter"), extensions: ["csv", "json", "ndjson", "jsonl", "tsv"] }],
+    filters: [{ name: t("mongo.import.fileFilter"), extensions: ["bson", "gz", "csv", "json", "ndjson", "jsonl", "tsv"] }],
   });
   if (!selected || Array.isArray(selected)) return;
   assignSource(selected);
@@ -128,17 +133,22 @@ function handleFileInputChange(event: Event) {
 function queuePreview() {
   if (!selectedSource.value) return;
   if (previewReloadTimer) clearTimeout(previewReloadTimer);
+  const requestId = ++previewRequestId;
+  loadingPreview.value = true;
   previewReloadTimer = setTimeout(() => {
-    void loadPreview();
+    previewReloadTimer = null;
+    void loadPreview(requestId);
   }, 200);
 }
 
-async function loadPreview() {
+async function loadPreview(requestId: number) {
   const source = selectedSource.value;
   if (!source) return;
-  const requestId = ++previewRequestId;
-  loadingPreview.value = true;
-  previewError.value = "";
+  const keepExistingPreview = !!preview.value;
+  if (!keepExistingPreview) {
+    loadingPreview.value = true;
+    previewError.value = "";
+  }
   try {
     const input = importPreviewInput(uploadedSource, source);
     const next = await api.previewMongodbImportFile(input.fileOrPath, {
@@ -147,8 +157,12 @@ async function loadPreview() {
       previewLimit: previewLimit.value,
       sourceRef: input.sourceRef,
     });
-    if (requestId !== previewRequestId) return;
+    if (requestId !== previewRequestId) {
+      if (next.sourceRef && next.sourceRef !== uploadedSource?.sourceRef) void api.releaseMongodbImportSource(next.sourceRef);
+      return;
+    }
     preview.value = next;
+    previewError.value = "";
     uploadedSource = uploadedImportSourceFromPreview(next) ?? uploadedSource;
   } catch (error) {
     if (requestId !== previewRequestId) return;
@@ -159,9 +173,21 @@ async function loadPreview() {
   }
 }
 
-watch([format, encoding, delimiter, hasHeader, trim, emptyAsNull, typeMode, recognizeObjectIdHex, previewLimit], () => {
-  if (selectedSource.value) queuePreview();
-});
+watch(
+  [format, hasHeader, typeMode],
+  () => {
+    if (Object.keys(columnTypeOverrides.value).length) columnTypeOverrides.value = {};
+  },
+  { flush: "sync" },
+);
+
+watch(
+  [format, encoding, delimiter, hasHeader, trim, emptyAsNull, typeMode, recognizeObjectIdHex, previewLimit, columnTypeOverrides],
+  () => {
+    if (selectedSource.value) queuePreview();
+  },
+  { flush: "sync" },
+);
 
 watch(open, (value) => {
   if (value) return;
@@ -174,10 +200,15 @@ watch(open, (value) => {
 });
 
 function reset() {
+  previewRequestId += 1;
+  if (previewReloadTimer) clearTimeout(previewReloadTimer);
+  previewReloadTimer = null;
+  loadingPreview.value = false;
   releasePreviewSource();
   selectedSource.value = null;
   sourceName.value = "";
   previewError.value = "";
+  columnTypeOverrides.value = {};
   wizardStep.value = "source";
   running.value = false;
   cancelling.value = false;
@@ -187,8 +218,12 @@ function reset() {
   importId.value = "";
 }
 
+onBeforeUnmount(() => {
+  if (!running.value) reset();
+});
+
 function canConfirm() {
-  return !!preview.value && !loadingPreview.value && !previewError.value && !effectivelyReadOnly.value && (!preview.value.errors.length || skipErrorRows.value);
+  return !!preview.value && preview.value.format === format.value && !loadingPreview.value && !previewError.value && !effectivelyReadOnly.value && (!preview.value.errors.length || skipErrorRows.value);
 }
 
 async function startImport() {
@@ -244,7 +279,7 @@ async function startImport() {
     running.value = false;
     open.value = false;
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = translateBackendError(t, error);
     running.value = false;
   } finally {
     cancelling.value = false;
@@ -263,7 +298,7 @@ function formatPreviewCell(value: unknown) {
 }
 
 function setFormat(value: unknown) {
-  if (value === "csv" || value === "json" || value === "ndjson") format.value = value;
+  if (value === "csv" || value === "json" || value === "ndjson" || value === "bson") format.value = value;
 }
 
 function setEncoding(value: unknown) {
@@ -272,6 +307,23 @@ function setEncoding(value: unknown) {
 
 function setTypeMode(value: unknown) {
   if (value === "string" || value === "auto" || value === "extendedJson") typeMode.value = value;
+}
+
+function isImportInferredType(value: unknown): value is api.MongoImportInferredType {
+  return columnTypeOptions.includes(value as api.MongoImportInferredType);
+}
+
+function columnType(column: api.MongoImportColumn): api.MongoImportInferredType {
+  return columnTypeOverrides.value[column.name] ?? column.inferredType;
+}
+
+function setColumnType(name: string, value: unknown) {
+  if (!isImportInferredType(value)) return;
+  const inferred = preview.value?.columns.find((column) => column.name === name)?.inferredType;
+  const next = { ...columnTypeOverrides.value };
+  if (value === inferred) delete next[name];
+  else next[name] = value;
+  columnTypeOverrides.value = next;
 }
 
 function requestClose() {
@@ -302,7 +354,7 @@ function requestClose() {
       </DialogHeader>
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1 text-sm">
         <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-          <input ref="fileInput" type="file" class="hidden" accept=".csv,.json,.ndjson,.jsonl,.tsv" @change="handleFileInputChange" />
+          <input ref="fileInput" type="file" class="hidden" accept=".bson,.bson.gz,.csv,.json,.ndjson,.jsonl,.tsv" @change="handleFileInputChange" />
           <div class="flex h-10 min-w-0 items-center gap-2 rounded-md border bg-muted/20 px-3">
             <span class="shrink-0 text-xs text-muted-foreground">{{ t("mongo.import.target") }}</span>
             <span class="min-w-0 truncate text-sm font-medium">{{ targetLabel }}</span>
@@ -319,16 +371,17 @@ function requestClose() {
           <div class="grid grid-cols-3 gap-3 rounded-md border p-3">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.sourceFormat") }}</Label>
-              <Select :model-value="format" @update:model-value="setFormat">
+              <Select :model-value="format" :aria-label="t('tableImport.sourceFormat')" @update:model-value="setFormat">
                 <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="csv">CSV</SelectItem>
                   <SelectItem value="json">JSON</SelectItem>
                   <SelectItem value="ndjson">NDJSON</SelectItem>
+                  <SelectItem value="bson">BSON dump</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            <div class="space-y-1.5">
+            <div v-if="format !== 'bson'" class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
               <Select :model-value="encoding" @update:model-value="setEncoding">
                 <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
@@ -339,11 +392,11 @@ function requestClose() {
             </div>
             <div v-if="format === 'csv'" class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.delimiter") }}</Label>
-              <Input v-model="delimiter" class="h-8 text-xs font-mono" />
+              <Input v-model="delimiter" class="h-8 text-xs font-mono" :aria-label="t('tableImport.delimiter')" />
             </div>
-            <div class="space-y-1.5">
+            <div v-if="format !== 'bson'" class="space-y-1.5">
               <Label class="text-xs">{{ t("mongo.import.typeMode") }}</Label>
-              <Select :model-value="typeMode" @update:model-value="setTypeMode">
+              <Select :model-value="typeMode" :aria-label="t('mongo.import.typeMode')" @update:model-value="setTypeMode">
                 <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="string">{{ t("mongo.import.typeString") }}</SelectItem>
@@ -364,29 +417,41 @@ function requestClose() {
             </div>
           </div>
 
-          <div class="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border p-3">
-            <label class="flex items-center gap-2 text-xs"><input v-model="hasHeader" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("tableImport.hasHeader") }}</label>
+          <div v-if="format !== 'bson'" class="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border p-3">
+            <label class="flex items-center gap-2 text-xs"><input v-model="hasHeader" type="checkbox" class="h-3.5 w-3.5 accent-primary" :aria-label="t('tableImport.hasHeader')" /> {{ t("tableImport.hasHeader") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="trim" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("tableImport.trimValues") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="emptyAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.emptyAsNull") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="recognizeObjectIdHex" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.recognizeObjectIdHex") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="skipErrorRows" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.skipErrorRows") }}</label>
           </div>
+          <label v-else class="flex items-center gap-2 text-xs"><input v-model="skipErrorRows" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.skipErrorRows") }}</label>
 
-          <div v-if="loadingPreview" class="flex items-center gap-2 text-xs text-muted-foreground">
+          <div v-if="loadingPreview && !preview" class="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 class="h-3.5 w-3.5 animate-spin" />
             {{ t("mongo.import.previewing") }}
           </div>
-          <div v-else-if="previewError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{{ previewError }}</div>
-          <div v-else-if="preview" class="space-y-2">
+          <div v-if="previewError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{{ previewError }}</div>
+          <div v-if="preview" class="space-y-2">
             <div class="text-xs text-muted-foreground">{{ t("mongo.import.estimatedRows", { count: preview.estimatedRows ?? 0 }) }}</div>
             <div class="max-h-56 overflow-auto rounded-md border">
               <table class="w-full text-xs">
                 <thead>
                   <tr>
                     <th class="border-b px-2 py-1 text-left">#</th>
-                    <th v-for="column in preview.columns" :key="column.name" class="border-b px-2 py-1 text-left">
-                      {{ column.name }}
-                      <span class="text-muted-foreground">({{ column.inferredType }})</span>
+                    <th v-for="column in preview.columns" :key="column.name" class="border-b px-2 py-1 text-left align-top">
+                      <div class="font-medium">{{ column.name }}</div>
+                      <LightDropdown
+                        v-if="showColumnTypeEditors"
+                        :model-value="columnType(column)"
+                        :items="columnTypeItems"
+                        :aria-label="t('mongo.import.columnType', { name: column.name })"
+                        :disabled="running"
+                        trigger-class="mt-1 inline-flex h-6 w-full min-w-[6.5rem] max-w-[8.5rem] items-center justify-between gap-1 rounded-md border bg-background px-1.5 text-[11px] font-normal hover:bg-muted/30 disabled:cursor-not-allowed disabled:opacity-50"
+                        content-class="pointer-events-auto !z-[80] ring-1 ring-foreground/10"
+                        check-position="right"
+                        @update:model-value="(value) => setColumnType(column.name, value)"
+                      />
+                      <span v-else-if="format !== 'csv' && format !== 'bson'" class="text-muted-foreground">({{ column.inferredType }})</span>
                     </th>
                   </tr>
                 </thead>

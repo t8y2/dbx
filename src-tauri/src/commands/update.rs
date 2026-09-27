@@ -499,7 +499,9 @@ pub async fn download_update(
     }
     let cancellation = state.begin_download()?;
     let result = async {
-        update_cache::discard(&update_cache::root(&app)?)?;
+        let cache_root = update_cache::root(&app)?;
+        update_cache::discard(&cache_root)?;
+        update_cache::ensure_writable(&cache_root)?;
         let (ready, manifest, signature, notes) = if portable_mode {
             let (archive, signature) =
                 download_portable_update_inner(&app, &source, &version, &attempt_id, &cancellation).await?;

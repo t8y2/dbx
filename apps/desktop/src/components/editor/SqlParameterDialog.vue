@@ -150,7 +150,7 @@ async function copyResolvedSql() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[86vh] border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]">
+    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <Braces class="h-5 w-5 text-primary" />

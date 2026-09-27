@@ -3,12 +3,21 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { acquireUpdateBarrier, assertUpdateSafe } from "../updatePreparation";
 import { openDetachedTabWindow } from "../detachedTabWindow";
-const mocks = vi.hoisted(() => ({ getByLabel: vi.fn(), created: vi.fn(), callbacks: new Map<string, (event?: unknown) => unknown>(), show: vi.fn(), focus: vi.fn(), destroy: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  getByLabel: vi.fn(),
+  created: vi.fn(),
+  callbacks: new Map<string, (event?: unknown) => unknown>(),
+  show: vi.fn(),
+  focus: vi.fn(),
+  destroy: vi.fn(),
+  setAlwaysOnTop: vi.fn(),
+}));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@/lib/app/windowContext", () => ({ detachedWindowLabel: (id: string) => `detached-${id}`, detachedWindowUrl: () => "http://localhost/" }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   WebviewWindow: class {
     static getByLabel = mocks.getByLabel;
+    label = "detached-test";
     constructor() {
       mocks.created();
     }
@@ -19,6 +28,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     show = mocks.show;
     setFocus = mocks.focus;
     destroy = mocks.destroy;
+    setAlwaysOnTop = mocks.setAlwaysOnTop;
   },
 }));
 afterEach(() => {
@@ -45,7 +55,7 @@ describe("detached window update exclusion", () => {
     const operation = openDetachedTabWindow("one", "SQL");
     await vi.waitFor(() => expect(mocks.getByLabel).toHaveBeenCalled());
     expect(assertUpdateSafe).toThrow("window operation");
-    resolve({ show: async () => {}, setFocus: async () => {} });
+    resolve({ show: async () => {}, setFocus: async () => {}, setAlwaysOnTop: async () => {} });
     expect(await operation).toEqual({ opened: true });
     expect(assertUpdateSafe).not.toThrow();
   });

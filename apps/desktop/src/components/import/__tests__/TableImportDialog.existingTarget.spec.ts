@@ -3,6 +3,7 @@
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
+import type { TableImportProgress, TableImportRequest, TableImportSummary } from "@/lib/backend/api";
 
 const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn().mockResolvedValue(undefined),
@@ -11,8 +12,8 @@ const mocks = vi.hoisted(() => ({
     { name: "archived_target", table_type: "TABLE" },
   ]),
   getColumns: vi.fn().mockResolvedValue([
-    { name: "id", data_type: "INTEGER", nullable: false },
-    { name: "name", data_type: "TEXT", nullable: true },
+    { name: "id", data_type: "INTEGER", nullable: false, is_primary_key: true },
+    { name: "name", data_type: "TEXT", nullable: true, is_primary_key: false },
   ]),
   listDataTypes: vi.fn().mockResolvedValue(["INTEGER", "TEXT"]),
   previewTableImportFile: vi.fn().mockResolvedValue({
@@ -26,6 +27,7 @@ const mocks = vi.hoisted(() => ({
     sourceFingerprint: "rows-xlsx",
     sheets: ["Data"],
   }),
+  importTableFile: vi.fn<(request: TableImportRequest, onProgress: (progress: TableImportProgress) => void) => Promise<TableImportSummary>>(),
   releaseTableImportSource: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -52,7 +54,7 @@ vi.mock("@/lib/backend/api", () => ({
   listDataTypes: mocks.listDataTypes,
   previewTableImportFile: mocks.previewTableImportFile,
   releaseTableImportSource: mocks.releaseTableImportSource,
-  importTableFile: vi.fn(),
+  importTableFile: mocks.importTableFile,
   cancelTableImport: vi.fn(),
 }));
 
@@ -208,7 +210,12 @@ async function selectWorkbook() {
     value: [new File(["test workbook"], "rows.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })],
   });
   fileInput?.dispatchEvent(new Event("change", { bubbles: true }));
-  await vi.waitFor(() => expect(mocks.previewTableImportFile).toHaveBeenCalled());
+  await flushAsyncUpdates();
+  if (!mocks.previewTableImportFile.mock.calls.length) {
+    buttonContaining("Load Preview")?.click();
+  }
+  await vi.waitFor(() => expect(mocks.previewTableImportFile).toHaveBeenCalled(), { timeout: 3000 });
+  await flushAsyncUpdates();
 }
 
 async function selectExistingTarget(tableName: string) {
@@ -232,11 +239,15 @@ beforeEach(() => {
     { name: "archived_target", table_type: "TABLE" },
   ]);
   mocks.getColumns.mockReset().mockResolvedValue([
-    { name: "id", data_type: "INTEGER", nullable: false },
-    { name: "name", data_type: "TEXT", nullable: true },
+    { name: "id", data_type: "INTEGER", nullable: false, is_primary_key: true },
+    { name: "name", data_type: "TEXT", nullable: true, is_primary_key: false },
   ]);
   mocks.listDataTypes.mockClear();
   mocks.previewTableImportFile.mockClear();
+  mocks.importTableFile.mockReset().mockImplementation(async (request, onProgress) => {
+    onProgress({ importId: request.importId, status: "done", rowsImported: 1, totalRows: 1, elapsedMs: 1 });
+    return { importId: request.importId, rowsImported: 1, totalRows: 1, elapsedMs: 1 };
+  });
   mocks.releaseTableImportSource.mockClear();
 });
 
@@ -345,5 +356,61 @@ describe("TableImportDialog existing targets", () => {
 
     expect(mocks.listTables).not.toHaveBeenCalled();
     expect(mocks.getColumns).toHaveBeenCalledWith("connection-1", "main", "main", "existing_target");
+  });
+
+  it("offers update only with primary-key metadata and serializes the explicit policy", async () => {
+    i18n.global.locale.value = "en";
+    await mountDialog({ schema: "main" });
+    await selectWorkbook();
+    buttonContaining("Existing table")?.click();
+    await flushAsyncUpdates();
+    await selectExistingTarget("existing_target");
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+
+    const policySelect = document.body.querySelector<HTMLSelectElement>('[data-testid="table-import-conflict-policy"]');
+    expect(policySelect).toBeTruthy();
+    const updateOption = policySelect?.querySelector<HTMLOptionElement>('option[value="updateExisting"]');
+    await vi.waitFor(() => expect(updateOption?.disabled, document.body.textContent || "").toBe(false));
+    if (policySelect) {
+      policySelect.value = "updateExisting";
+      policySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await flushAsyncUpdates();
+
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Start Import")?.click();
+    await flushAsyncUpdates();
+
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    expect(mocks.importTableFile.mock.calls[0]![0]).toMatchObject({
+      conflictPolicy: "updateExisting",
+      skipDuplicateRows: false,
+      mappings: [
+        { sourceColumn: "id", targetColumn: "id" },
+        { sourceColumn: "name", targetColumn: "name" },
+      ],
+    });
+  });
+
+  it("disables update when target primary-key metadata is absent", async () => {
+    mocks.getColumns.mockResolvedValueOnce([
+      { name: "id", data_type: "INTEGER", nullable: false, is_primary_key: false },
+      { name: "name", data_type: "TEXT", nullable: true, is_primary_key: false },
+    ]);
+    i18n.global.locale.value = "en";
+    await mountDialog({ schema: "main" });
+    await selectWorkbook();
+    buttonContaining("Existing table")?.click();
+    await flushAsyncUpdates();
+    await selectExistingTarget("existing_target");
+    await vi.waitFor(() => expect(mocks.getColumns).toHaveBeenCalled());
+    await flushAsyncUpdates();
+
+    const updateOption = document.body.querySelector<HTMLOptionElement>('option[value="updateExisting"]');
+    expect(updateOption?.disabled).toBe(true);
+    expect(document.body.textContent).toContain("requires primary-key metadata");
   });
 });

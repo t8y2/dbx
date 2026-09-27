@@ -17,11 +17,17 @@ import { contributorsFromActivity } from "@/lib/contributors";
 import { getAppVersion } from "@/lib/appVersion";
 import { fetchLatestReleaseInfo } from "@/lib/latestRelease";
 import { buildMetadata, getHtmlLang } from "@/lib/metadata";
-import { buildSoftwareApplicationStructuredData } from "@/lib/structuredData";
+import { buildSoftwareApplicationStructuredData, serializeStructuredData } from "@/lib/structuredData";
 import { ArrowRight, Bot, Database, FileCode, GitCompare, Network, Search, Shield, Table, Terminal, Zap } from "lucide-react";
 import { resolveLang, type DocsLang } from "@/lib/i18n";
 
 function formatStars(count: number) {
+  // 五位数起按整千四舍五入：19,754 → "20k+"。上万后一位小数没有意义，
+  // 卡片上显示 "19.8k+" 不如 "20k+" 直观。
+  if (count >= 10000) {
+    return `${Math.round(count / 1000)}k+`;
+  }
+
   if (count >= 1000) {
     return `${(Math.floor(count / 100) / 10).toFixed(1)}k+`;
   }
@@ -33,14 +39,14 @@ function metrics(starLabel: string) {
   return {
     en: [
       { value: "~25 MB", label: "desktop installer" },
-      { value: "90+", label: "database engines" },
-      { value: "2 modes", label: "desktop and Docker" },
+      { value: "100+", label: "database engines" },
+      { value: "3 modes", label: "desktop, Docker and CLI" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
       { value: "~25 MB", label: "桌面安装包" },
-      { value: "90+", label: "数据库引擎" },
-      { value: "2 种模式", label: "桌面与 Docker" },
+      { value: "100+", label: "数据库引擎" },
+      { value: "3 种模式", label: "桌面、Docker 与 CLI" },
       { value: starLabel, label: "GitHub Star，完全开源" },
     ],
   };
@@ -123,91 +129,115 @@ const capabilities = {
 const testimonials = {
   en: [
     {
-      name: "@cyano",
-      role: "PostgreSQL and Redis workflows",
-      avatar: "/avatars/cyano.jpg",
-      quote: "DBX keeps query work, schema checks, and Redis inspection in one small app. It feels focused instead of overloaded.",
-    },
-    {
       name: "eryajf",
       role: "Database management",
       avatar: "/avatars/eryajf.jpg",
       quote: "Try it once and you can feel it: DBX is the database management client that ends the competition.",
     },
     {
-      name: "@vbvb",
-      role: "Daily reporting",
-      avatar: "/avatars/vbvb.png",
-      quote: "The data grid and export flow are the parts I reach for every day. Filters, previews, and edits stay close to the data.",
+      name: "Better Stack",
+      role: "YouTube review · Sep 2026",
+      avatar: "/avatars/betterstack.png",
+      quote: "DBX is almost the perfect free database client.",
     },
     {
-      name: "@ar414",
-      role: "Self-hosted tooling",
-      avatar: "/avatars/ar414.jpg",
-      quote: "Desktop mode is light enough for local work, and Docker mode makes it easy to give the team browser access.",
+      name: "Hysen Labs",
+      role: "Editorial review · Aug 2026",
+      avatar: "/avatars/hysenlabs.png",
+      quote: "Adopt dbx if you need a lightweight, cross-platform client that covers many databases.",
     },
     {
-      name: "@ryan",
-      role: "Multi-database projects",
-      avatar: "/avatars/ryan.jpg",
-      quote: "I can jump between SQLite, MySQL, MongoDB, and DuckDB without changing tools or waiting on a heavy runtime.",
+      name: "HelloGitHub",
+      role: "Featured in issue #122 · rated 10.0",
+      avatar: "/avatars/hellogithub.png",
+      quote: "A lightweight, cross-platform, offline-capable database desktop client that supports over 40 databases.",
     },
     {
-      name: "@acane",
-      role: "Schema review",
-      avatar: "/avatars/acane.png",
-      quote: "Schema browsing, ER diagrams, and diff tools make reviews faster because the important context is already connected.",
+      name: "Xiaoz",
+      role: "xiaoz.org blog · May 2026",
+      avatar: "/avatars/xiaoz.jpg",
+      quote: "If you are tired of Navicat's expensive licensing and DBeaver's heaviness, try DBX, a powerful open-source tool under 20MB.",
     },
     {
-      name: "@ydwang",
-      role: "Agent workflows",
-      avatar: "/avatars/ydwang.png",
-      quote: "The MCP server is a practical touch. It lets coding agents inspect database context without inventing another bridge.",
+      name: "Niaoge (@NFTCPS)",
+      role: "X post · Aug 2026 · translated",
+      avatar: "/avatars/nftcps.jpg",
+      quote: "An open-source tool that's only 20MB, yet it packs in 80+ databases — MySQL, PostgreSQL, Redis, MongoDB, Oracle, ClickHouse, and Dameng all connect.",
     },
     {
-      name: "@guangguang",
-      role: "Schema navigation",
-      avatar: "/avatars/guangguang.jpg",
-      quote: "Sidebar search and grouped objects make large schemas manageable. I can find what I need without scrolling through hundreds of tables.",
+      name: "Hardy",
+      role: "Juejin post · Sep 2026 · translated",
+      avatar: "/avatars/hardy.jpg",
+      quote: "DBX's real value may not be rebuilding DBeaver, but rethinking what a database tool should look like in the AI era.",
     },
     {
-      name: "@xuyuan",
-      role: "SQL editing",
-      avatar: "/avatars/xuyuan.jpg",
-      quote: "Code completion in the SQL editor picks up column names and table aliases automatically. It saves a lot of tab-switching to check schema.",
+      name: "Programmer Xiaofan",
+      role: "cnblogs · Jun 2026 · translated",
+      avatar: "/avatars/xiezhr.png",
+      quote: "It genuinely works, and it feels smooth in daily use. This AI-powered database management tool is really worth a try.",
     },
     {
-      name: "@itkui",
-      role: "Data export",
-      avatar: "/avatars/itkui.jpg",
-      quote: "Export options cover CSV, Excel, and SQL inserts. For daily data pulls, the workflow is quick and doesn't need extra scripting.",
+      name: "Chimin",
+      role: "Medium · May 2026",
+      avatar: "/avatars/chimin.jpg",
+      quote: "The 15 MB figure isn't hype. Tauri 2 doesn't embed Chromium; it directly calls the system's WebView — this alone saves over 100 MB compared to Electron.",
     },
     {
-      name: "@mebiuw",
-      role: "Secure connections",
-      avatar: "/avatars/mebiuw.jpg",
-      quote: "SSH tunnel setup is straightforward — fill in the fields and connect. No need to manage port forwarding manually in a terminal.",
+      name: "Trendshift",
+      role: "GitHub Trending #2 · Aug 2026",
+      avatar: "/avatars/trendshift.png",
+      quote: "Reached #2 on GitHub Trending, with Repository of the Day, Week, and Month badges on Trendshift.",
     },
     {
-      name: "@patrickz",
-      role: "Database design",
-      avatar: "/avatars/patrickz.jpg",
-      quote: "ER diagrams give a clear picture of table relationships. Useful during design reviews when the team needs a shared visual reference.",
+      name: "Hysen Labs",
+      role: "Editorial review · Aug 2026",
+      avatar: "/avatars/hysenlabs.png",
+      quote: "The editor's metadata-aware autocomplete is a differentiator, and the built-in MCP server is a unique advantage.",
     },
     {
-      name: "@yanxuecan",
-      role: "AI-assisted queries",
-      avatar: "/avatars/yanxuecan.jpg",
-      quote: "The AI assistant helps draft queries from natural language. It handles routine JOINs and aggregations well enough to speed things up.",
+      name: "Niaoge (@NFTCPS)",
+      role: "X post · Aug 2026 · translated",
+      avatar: "/avatars/nftcps.jpg",
+      quote: "An AI SQL assistant that writes, explains, optimizes, and fixes SQL, plus native MCP Server support — Cursor and Claude Code can query your database directly.",
+    },
+    {
+      name: "東方幽静響",
+      role: "Zhihu · Jun 2026 · translated",
+      avatar: "/avatars/zhihu_dongfang.jpg",
+      quote: "A 15MB package that packs in 40+ databases, AI assistance, and full database management — that alone is a cool thing.",
+    },
+    {
+      name: "Java陈序员",
+      role: "Zhihu · Jun 2026 · translated",
+      avatar: "/avatars/zhihu_chenxuyuan.jpg",
+      quote: "A lightweight yet all-in-one database management tool, supporting dozens of databases with built-in AI.",
+    },
+    {
+      name: "GoLang学习记",
+      role: "Tencent Cloud community · Jun 2026 · translated",
+      avatar: "/avatars/golangxuexiji.jpg",
+      quote: "It doesn't have every DBeaver feature, but everything it has is done well. The AI assistant isn't a gimmick — it's genuinely useful.",
+    },
+    {
+      name: "Xiaoz",
+      role: "xiaoz.org blog · May 2026",
+      avatar: "/avatars/xiaoz.jpg",
+      quote: "Is Navicat too expensive or DBeaver too heavy? Xiaoz has finally found it: DBX.",
+    },
+    {
+      name: "GoLang学习记",
+      role: "Tencent Cloud community · Jun 2026 · translated",
+      avatar: "/avatars/golangxuexiji.jpg",
+      quote: "So fast you forget it's a database tool. Like air — present, but never in the way.",
+    },
+    {
+      name: "linux.do community",
+      role: "linux.do · Jul 2026 · translated",
+      avatar: "/avatars/linuxdo.png",
+      quote: "Free and open source, zero setup — download and run. It may not match DBeaver feature-for-feature, but it's simple and smooth.",
     },
   ],
   cn: [
-    {
-      name: "不剪发的Tony老师",
-      role: "PostgreSQL 与 Redis 工作流",
-      avatar: "/avatars/dongxuyang85.jpg",
-      quote: "DBX 把查询、结构检查和 Redis 查看放在一个轻量工具里，日常数据库工作不会被复杂界面打断。",
-    },
     {
       name: "二丫讲梵",
       role: "数据库管理",
@@ -215,70 +245,106 @@ const testimonials = {
       quote: "只需体验一次你就能感受到，DBX是一个杀死数据库管理客户端比赛的软件",
     },
     {
-      name: "Husky明夋",
-      role: "报表与数据核对",
-      avatar: "/avatars/husky.jpg",
-      quote: "数据表格、过滤、预览和导出都离数据很近，用起来像是为高频操作专门整理过。",
+      name: "鸟哥 | 蓝鸟会",
+      role: "X（Twitter）· 2026-08",
+      avatar: "/avatars/nftcps.jpg",
+      quote: "发现个开源工具 DBX，整个才 20MB，却塞进了 80 多种数据库，MySQL、PostgreSQL、Redis、MongoDB、Oracle、ClickHouse、达梦全都能连。",
     },
     {
-      name: "孙志岗",
-      role: "团队自托管工具",
-      avatar: "/avatars/sunzhigang.jpg",
-      quote: "本地桌面版足够轻，自托管 Web 版又方便团队共用，同一个项目覆盖了两种场景。",
+      name: "程序员晓凡",
+      role: "博客园 · 2026-06",
+      avatar: "/avatars/xiezhr.png",
+      quote: "它是真能用，而且用起来还特顺手。dbx这搭载AI功能的数据库管理工具，真的值得试试。",
     },
     {
-      name: "zhufeng",
-      role: "多数据库项目",
-      avatar: "/avatars/zhufeng.jpg",
-      quote: "SQLite、MySQL、MongoDB、DuckDB 来回切换不用换工具，也不用拖着很重的运行时。",
+      name: "xiaoz",
+      role: "xiaoz 博客 · 2026-05",
+      avatar: "/avatars/xiaoz.jpg",
+      quote: "如果你受够了Navicat的昂贵授权和DBeaver的笨重，不妨试试DBX这款不到20MB的开源利器。",
     },
     {
-      name: "樱桃小财主",
-      role: "结构审查",
-      avatar: "/avatars/yingtao.jpg",
-      quote: "结构浏览、ER 图和 Schema 对比放在一起，做 review 时上下文更完整。",
+      name: "架构师部落",
+      role: "腾讯云开发者社区 · 2026-06",
+      avatar: "/avatars/jianzhishi.jpg",
+      quote: "无论是初学数据库的新手，还是常年和数据打交道的后端、运维工程师，都值得收入工具箱。",
     },
     {
-      name: "momo",
-      role: "Agent 数据库上下文",
-      avatar: "/avatars/momo.jpg",
-      quote: "MCP Server 很实用，能让编码 Agent 读取数据库上下文，不需要再额外搭桥。",
+      name: "前端Hardy",
+      role: "掘金 · 2026-09",
+      avatar: "/avatars/hardy.jpg",
+      quote: "而这可能才是 DBX 真正的价值：不是再造一个 DBeaver，而是重新思考 AI 时代「数据库工具到底应该长什么样」。",
     },
     {
-      name: "逛逛GitHub",
-      role: "结构导航",
-      avatar: "/avatars/guangguang.jpg",
-      quote: "侧边栏搜索和分组浏览让大型 Schema 也不会迷路，不用在几百张表里翻来翻去。",
+      name: "HelloGitHub",
+      role: "第 122 期收录 · 社区评分 10.0",
+      avatar: "/avatars/hellogithub.png",
+      quote: "轻量级、跨平台、可离线使用的数据库桌面客户端，支持 MySQL、PostgreSQL、SQLite、Redis、MongoDB 等 40+ 种数据库。",
     },
     {
-      name: "序员先生",
-      role: "SQL 编辑",
-      avatar: "/avatars/xuyuan.jpg",
-      quote: "SQL 编辑器的补全能自动识别列名和别名，不用反复切到结构面板去确认字段。",
+      name: "X-CMD",
+      role: "软件收录 · 2026",
+      avatar: "/avatars/xcmd.png",
+      quote: "把「数据库客户端」重新定义为「统一 + AI + MCP」，而不是又一个 GUI 包装器。",
     },
     {
-      name: "IT老魁",
-      role: "数据导出",
-      avatar: "/avatars/itkui.jpg",
-      quote: "导出支持 CSV、Excel 和 INSERT 语句，日常取数据很快，不用再额外写脚本。",
+      name: "東方幽静響",
+      role: "知乎 · 2026-06",
+      avatar: "/avatars/zhihu_dongfang.jpg",
+      quote: "15MB 的体积，却塞进了 40+ 种数据库的支持、AI 辅助和完整的数据库管理功能，这本身就是一件很酷的事情。",
     },
     {
-      name: "MebiuW",
-      role: "安全连接",
-      avatar: "/avatars/mebiuw.jpg",
-      quote: "SSH 隧道设置很直接，填好参数就能连，不用在终端里手动转发端口。",
+      name: "Java陈序员",
+      role: "知乎 · 2026-06",
+      avatar: "/avatars/zhihu_chenxuyuan.jpg",
+      quote: "今天，给大家分享一款轻量又全能的数据库管理工具，支持数十种数据库，还内置 AI 能力！",
     },
     {
-      name: "Patrick Zhang",
-      role: "数据库设计",
-      avatar: "/avatars/patrickz.jpg",
-      quote: "ER 图把表关系展示得很清楚，团队做设计评审时有个共同的可视化参考。",
+      name: "GoLang学习记",
+      role: "腾讯云开发者社区 · 2026-06",
+      avatar: "/avatars/golangxuexiji.jpg",
+      quote: "它没有 DBeaver 的所有功能。但它有的功能，都做得很好。AI 助手不是噱头，是真的有用。",
     },
     {
-      name: "闫学灿",
-      role: "AI 辅助查询",
-      avatar: "/avatars/yanxuecan.jpg",
-      quote: "AI 助手能从自然语言生成查询，常规的 JOIN 和聚合写得不错，省了不少手敲时间。",
+      name: "OSCHINA 开源中国",
+      role: "开源项目收录 · 国内精选",
+      avatar: "/avatars/oschina.png",
+      quote: "一个开源数据库工作台，把日常数据库工作里的高频动作放在同一个界面里。",
+    },
+    {
+      name: "linux.do 社区",
+      role: "linux.do · 2026-04",
+      avatar: "/avatars/linuxdo.png",
+      quote: "使用了一段时间感觉真的很好用，功能齐全，几乎支持所有数据库，可以丢掉其它数据库软件了。",
+    },
+    {
+      name: "xiaoz",
+      role: "xiaoz 博客 · 2026-05",
+      avatar: "/avatars/xiaoz.jpg",
+      quote: "Navicat 太贵、DBeaver 太重？免费、轻量还支持多种数据库的客户端，这次终于被 xiaoz 找到了。",
+    },
+    {
+      name: "鸟哥 | 蓝鸟会",
+      role: "X（Twitter）· 2026-08",
+      avatar: "/avatars/nftcps.jpg",
+      quote: "自带 AI SQL 助手，写不出来的 SQL 让它生成、解释、优化、修 bug；原生支持 MCP Server，Cursor、Claude Code 能直接连你的库查数据。",
+    },
+    {
+      name: "架构师部落",
+      role: "腾讯云开发者社区 · 2026-06",
+      avatar: "/avatars/jianzhishi.jpg",
+      quote: "轻量化优势拉满，低配电脑、办公本也能流畅运行。DBX 用 15MB 的小巧身躯，包揽了数据库管理的全流程需求。",
+    },
+    {
+      name: "GoLang学习记",
+      role: "腾讯云开发者社区 · 2026-06",
+      avatar: "/avatars/golangxuexiji.jpg",
+      quote: "快到让你忘记它是一个数据库管理工具。就像空气一样，存在但不打扰。",
+    },
+    {
+      name: "linux.do 社区",
+      role: "linux.do · 2026-07",
+      avatar: "/avatars/linuxdo.png",
+      quote: "开源免费，不需要折腾环境，下载就能用，虽然功能没有 DBeaver 那么多，但是简单顺手。",
     },
   ],
 };
@@ -292,7 +358,7 @@ const localizedTestimonials = testimonials;
 
 const i18nText = {
   en: {
-    heroTitle: "25 MB to manage 90+ databases!",
+    heroTitle: "25 MB to manage 100+ databases!",
     heroSubtitle: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
     download: "Download DBX",
     downloadName: "Download DBX",
@@ -301,11 +367,11 @@ const i18nText = {
     docsStartDesc: "Install DBX, create your first connection, and learn the main workflow.",
     workflowsTitle: "Core workflows",
     workflowsDesc: "The docs are organized around what you actually do in a database client.",
-    supportTitle: "Supports 90+ databases",
+    supportTitle: "Supports 100+ databases",
     supportDesc: "Connect SQL, NoSQL, vector, time-series, and embedded databases, message queues, and compatible engines in one place.",
     supportLink: "View all",
     testimonialsTitle: "What DBX is good at",
-    testimonialsDesc: "A closer look at the everyday database workflows DBX is built to make smoother.",
+    testimonialsDesc: "Reviews and coverage from real community sources — HelloGitHub, X, blogs, and YouTube.",
     capabilitiesTitle: "Built for real database work",
     contributorsTitle: "Built by the community",
     contributorsDesc: "DBX is fully open-source. Every feature, fix, and driver starts with a contributor.",
@@ -329,13 +395,15 @@ const i18nText = {
     onepanelSponsorAction: "Visit",
     hualongSponsorDesc: "HuaLongAI is a model API relay built for heavy AI developers, offering 100% official-source Codex and Claude models with transparent token-level billing, enterprise contracts, and invoicing.",
     hualongSponsorAction: "Visit",
+    aicodemirrorSponsorDesc: "AICodeMirror is a high-stability relay service for Claude Code / Codex / Gemini CLI with enterprise-grade concurrency, fast invoicing, and 7×24 dedicated support; sign up through this link for ¥8 in new-user credit and 20% off your first top-up, up to 25% off for enterprise.",
+    aicodemirrorSponsorAction: "Visit",
     footerTitle: "Ready to try DBX?",
     footerDesc: "Use the desktop app for local work, or deploy the Docker version for browser-based access.",
     release: "Latest release",
     docker: "Docker setup",
   },
   cn: {
-    heroTitle: "25MB，管理90+种数据库！",
+    heroTitle: "25MB，管理100+种数据库！",
     heroSubtitle: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
     download: "下载 DBX",
     downloadName: "下载 DBX",
@@ -344,11 +412,11 @@ const i18nText = {
     docsStartDesc: "安装 DBX、创建第一个连接，并了解主要工作流。",
     workflowsTitle: "核心工作流",
     workflowsDesc: "文档围绕数据库客户端里的真实任务组织，而不是堆功能清单。",
-    supportTitle: "支持90+种数据库",
+    supportTitle: "支持100+种数据库",
     supportDesc: "统一连接和管理 SQL、NoSQL、向量、时序、嵌入式数据库、消息队列及兼容引擎。",
     supportLink: "查看全部",
     testimonialsTitle: "DBX 适合什么样的工作",
-    testimonialsDesc: "从连接管理、数据浏览到 AI 辅助，DBX 围绕高频数据库工作流打磨体验。",
+    testimonialsDesc: "以下评价与收录均来自 HelloGitHub、X、知乎、博客园、掘金、linux.do 等真实社区来源。",
     capabilitiesTitle: "面向真实数据库工作的能力",
     contributorsTitle: "社区共建",
     contributorsDesc: "DBX 因每一位贡献者而生长",
@@ -372,6 +440,8 @@ const i18nText = {
     onepanelSponsorAction: "访问",
     hualongSponsorDesc: "HuaLongAI（华龙算力）是面向重度 AI 开发者的模型 API 中转服务商，主营 Codex 与 Claude 系列模型，100% 官方源直供、不掺假；计费透明，Token 级账单可逐笔核验，支持企业合同与发票。",
     hualongSponsorAction: "访问",
+    aicodemirrorSponsorDesc: "AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级高并发、极速开票与 7×24 专属技术支持；通过此链接注册可享新人 ¥8 免费额度与首充 8 折，企业客户最高可享 7.5 折。",
+    aicodemirrorSponsorAction: "访问",
     footerTitle: "准备试试 DBX？",
     footerDesc: "本地工作使用桌面版，需要浏览器访问时部署 Docker 版。",
     release: "最新版本",
@@ -381,12 +451,12 @@ const i18nText = {
 
 const landingMeta = {
   en: {
-    title: "DBX - 25 MB to manage 90+ databases!",
-    description: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
+    title: "DBX - 25 MB to manage 100+ databases!",
+    description: "Manage MySQL, PostgreSQL, SQLite, Redis and 100+ data systems with DBX, a free open-source database client. Desktop, Docker self-hosting, optional AI and MCP.",
   },
   cn: {
-    title: "DBX - 25MB，管理90+种数据库！",
-    description: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
+    title: "DBX - 25MB，管理100+种数据库！",
+    description: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 100+ 种数据系统，提供 SQL 编辑、可选 AI 助手、MCP 和 Docker 自托管，覆盖 Windows、macOS 与 Linux。",
   },
 };
 
@@ -445,12 +515,12 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       action: t.jalapenoSponsorAction,
     },
     {
-      name: "AstraFlow",
-      href: "https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx",
-      logo: "/sponsors/astraflow-card.png",
-      logoClass: "w-full max-w-[100px] object-contain",
-      description: t.astraflowSponsorDesc,
-      action: t.astraflowSponsorAction,
+      name: "AICodeMirror",
+      href: "https://www.aicodemirror.ai/register?invitecode=9A50BU",
+      logo: "/sponsors/aicodemirror-card.png",
+      logoClass: "w-full max-w-[120px] object-contain",
+      description: t.aicodemirrorSponsorDesc,
+      action: t.aicodemirrorSponsorAction,
     },
     {
       name: "HuaLongAI",
@@ -459,6 +529,14 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       logoClass: "w-full max-w-[120px] object-contain",
       description: t.hualongSponsorDesc,
       action: t.hualongSponsorAction,
+    },
+    {
+      name: "AstraFlow",
+      href: "https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx",
+      logo: "/sponsors/astraflow-card.png",
+      logoClass: "w-full max-w-[100px] object-contain",
+      description: t.astraflowSponsorDesc,
+      action: t.astraflowSponsorAction,
     },
     {
       name: "Atlas Cloud",
@@ -498,7 +576,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
 
   return (
     <main className="landing" lang={getHtmlLang(l)}>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(softwareStructuredData) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeStructuredData(softwareStructuredData) }} />
       {/* 漫游星空背景层：铺满整个深色着陆页，克制不抢焦点 */}
       <Starfield />
       {/* Nav */}
@@ -586,8 +664,16 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           <p className="mt-2 max-w-[650px] text-landing-muted text-sm leading-[1.65] justify-self-end text-right max-[760px]:max-w-none max-[760px]:text-left">{t.testimonialsDesc}</p>
         </div>
         <div className="landing-testimonial-wall relative grid gap-3.5 -mx-7 py-1 max-[760px]:-mx-[18px] max-[760px]:mt-[18px]">
-          <InfiniteMovingCards items={testimonialItems.slice(0, 6)} speed="slow" />
-          <InfiniteMovingCards items={testimonialItems.slice(6)} direction="right" speed="slow" />
+          {/* 跑马灯每行至少 4 张卡（1416px）才能盖住 1236px 容器，避免循环接缝 */}
+          {(() => {
+            const half = Math.ceil(testimonialItems.length / 2);
+            return (
+              <>
+                <InfiniteMovingCards items={testimonialItems.slice(0, half)} speed="slow" />
+                <InfiniteMovingCards items={testimonialItems.slice(half)} direction="right" speed="slow" />
+              </>
+            );
+          })()}
         </div>
       </RevealSection>
 
@@ -613,7 +699,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
 
       {/* Sponsor */}
       <RevealSection className="max-w-[1180px] mx-auto px-7 mt-10 max-[760px]:px-[18px]">
-        <p className="m-0 text-xs font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.sponsorsLabel}</p>
+        <p className="m-0 text-center text-[15px] font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.sponsorsLabel}</p>
         <div className="landing-sponsor-grid mt-3 grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
           {sponsorItems.map((sponsor) => (
             <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="landing-sponsor-card flex min-h-[154px] items-center gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 transition-colors hover:border-landing-blue max-[560px]:block">
@@ -633,7 +719,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
             </Link>
           ))}
         </div>
-        <p className="m-0 mt-9 text-xs font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.partnersLabel}</p>
+        <p className="m-0 mt-9 text-center text-[15px] font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.partnersLabel}</p>
         <div className="landing-sponsor-grid mt-3 grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
           {partnerItems.map((sponsor) => (
             <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="landing-sponsor-card flex min-h-[154px] items-center gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 transition-colors hover:border-landing-blue max-[560px]:block">

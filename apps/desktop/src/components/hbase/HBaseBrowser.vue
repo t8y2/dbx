@@ -16,6 +16,7 @@ import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { encodeHBaseTextInput, hbaseCellInput } from "@/lib/hbase/hbaseValues";
 import { loadHBaseRowLimit, normalizeHBaseRowLimit, saveHBaseRowLimit } from "@/lib/hbase/hbaseBrowserPreferences";
+import { formatQueryDuration } from "@/lib/format/duration";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useQueryStore } from "@/stores/queryStore";
@@ -438,7 +439,7 @@ function errorMessage(value: unknown): string {
 
     <div v-if="hasTable" class="flex h-7 shrink-0 items-center gap-2 border-b px-3 text-[11px] text-muted-foreground">
       <span>{{ t("hbase.loadedRows", { count: rows.length }) }}</span>
-      <span>{{ elapsedMs }} ms</span>
+      <span>{{ formatQueryDuration(elapsedMs) }}</span>
       <span v-if="truncated" class="text-amber-600 dark:text-amber-400">{{ t("hbase.resultTruncated") }}</span>
     </div>
 

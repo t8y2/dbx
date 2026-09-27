@@ -3,6 +3,7 @@ package com.dbx.agent.sqlserverlegacy;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.IndexInfo;
+import com.dbx.agent.ObjectSource;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -11,6 +12,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.net.SocketException;
 import java.security.Security;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -26,28 +28,60 @@ import java.util.Map;
 
 class SqlServerLegacyAgentTest {
     @Test
-    void onlySqlServer8UnsupportedErrorsTriggerTheOldDriverFallback() {
-        // Real mssql-jdbc prelogin rejection for SQL Server 2000
-        // (R_unsupportedServerVersion, English-only resources).
-        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+    void sqlServer2000PreloginFailuresTriggerTheOldDriverFallback() {
+        // Real mssql-jdbc prelogin rejection for SQL Server 2000.
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("SQL Server version 8 is not supported by this driver.")
         ));
         // Older driver wordings name the supported floor instead
         // (mssql-jdbc R_notSQLServer family).
-        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("This version of the driver can be used only with SQL Server 2005 or later.")
         ));
-        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("该驱动程序只能与 SQL Server 2005 或更高版本一起使用。")
+        ));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("该驱动程序不支持 SQL Server 8 版")
         ));
-        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("The driver does not support SQL Server 8")
         ));
-        Assertions.assertFalse(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("Connection failed", new SocketException("Connection reset"))
+        ));
+        SQLException chained = new SQLException("Connection failed");
+        chained.setNextException(new SQLException("驱动程序收到意外的登录前响应。"));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(chained));
+        Assertions.assertFalse(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("TLS handshake failed")
         ));
-        Assertions.assertFalse(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertFalse(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("Login failed for user 'sa'")
+        ));
+    }
+
+    @Test
+    void traditionalChineseSqlServer8RejectionsTriggerTheOldDriverFallback() {
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("此驅動程式不支援 SQL Server 版本 8。")
+        ));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("此驅動程式不支援 SQL Server 8 版。")
+        ));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("此驅動程式不支援 SQL Server 版本 8.0。")
+        ));
+
+        SQLException chained = new SQLException("連線失敗");
+        chained.setNextException(new SQLException("此驅動程式不支援 SQL Server 版本 8。"));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(chained));
+
+        Assertions.assertFalse(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("登入失敗：SQL Server 版本 8 的使用者 'sa' 無法登入。")
+        ));
+        Assertions.assertFalse(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("TLS 交握失敗：此驅動程式不支援 TLSv1。")
         ));
     }
 
@@ -115,6 +149,48 @@ class SqlServerLegacyAgentTest {
                 + "ORDER BY c.colid",
             SqlServerLegacyAgent.sqlServer2000ObjectSourceSql()
         );
+    }
+
+    /**
+     * The object browser asks for object source with the object's kind, so a
+     * view must map to sysobjects.xtype 'V' (and a trigger to 'TR') instead of
+     * being rejected as an unsupported object type (#10162).
+     */
+    @Test
+    void sqlServer2000ObjectSourceResolvesViewsAndTriggers() {
+        List<String> boundXtypes = new java.util.ArrayList<>();
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(boundXtypes));
+        setSqlServer2000Mode(agent, true);
+
+        ObjectSource view = agent.getObjectSource("dbo", "V_ORDERS", "VIEW");
+        ObjectSource trigger = agent.getObjectSource("dbo", "TR_ORDERS", "TRIGGER");
+        ObjectSource procedure = agent.getObjectSource("dbo", "P_ORDERS", "PROCEDURE");
+
+        Assertions.assertEquals(List.of("V", "TR", "P"), boundXtypes);
+        Assertions.assertEquals("CREATE VIEW dbo.V_ORDERS AS SELECT 1", view.getSource());
+        Assertions.assertEquals("VIEW", view.getObject_type());
+        Assertions.assertEquals("dbo", view.getSchema());
+        // Legacy catalogs stay read-only in the editor.
+        Assertions.assertFalse(view.isEditable());
+        Assertions.assertEquals("CREATE VIEW dbo.V_ORDERS AS SELECT 1", trigger.getSource());
+        Assertions.assertEquals("CREATE VIEW dbo.V_ORDERS AS SELECT 1", procedure.getSource());
+    }
+
+    @Test
+    void sqlServer2000ObjectSourceStillRejectsKindsWithoutAnXtype() {
+        List<String> boundXtypes = new java.util.ArrayList<>();
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(boundXtypes));
+        setSqlServer2000Mode(agent, true);
+
+        IllegalArgumentException error = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> agent.getObjectSource("dbo", "PKG_ORDERS", "PACKAGE")
+        );
+
+        Assertions.assertEquals("Unsupported object type: PACKAGE", error.getMessage());
+        Assertions.assertTrue(boundXtypes.isEmpty());
     }
 
     @Test
@@ -481,6 +557,42 @@ class SqlServerLegacyAgentTest {
             }
             if ("close".equals(name) || "isClosed".equals(name)) {
                 return "isClosed".equals(name) ? Boolean.FALSE : null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    /**
+     * Connection whose object-source query returns the ordered syscomments
+     * chunks and records the xtype the agent bound, so tests can assert the
+     * sysobjects.xtype mapping without a live legacy server.
+     */
+    private static Connection objectSourceConnection(List<String> boundXtypes) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    String name = statementMethod.getName();
+                    if ("setString".equals(name) && statementArgs != null && Integer.valueOf(3).equals(statementArgs[0])) {
+                        boundXtypes.add((String) statementArgs[1]);
+                        return null;
+                    }
+                    if ("executeQuery".equals(name)) {
+                        return metadataResultSet(
+                            Arrays.asList(
+                                Arrays.asList("CREATE VIEW dbo.V_ORDERS AS "),
+                                Arrays.asList("SELECT 1")
+                            ),
+                            Map.of("SOURCE_TEXT", 0)
+                        );
+                    }
+                    if ("close".equals(name)) {
+                        return null;
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("close".equals(method.getName()) || "isClosed".equals(method.getName())) {
+                return "isClosed".equals(method.getName()) ? Boolean.FALSE : null;
             }
             return defaultValue(method.getReturnType());
         });

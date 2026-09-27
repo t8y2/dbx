@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { ExplainPlanNode } from "@/lib/diagram/explainPlan";
+import { formatExplainPlanDetails } from "@/lib/diagram/explainPlan";
 
 const props = defineProps<{
   node: ExplainPlanNode;
@@ -20,7 +21,7 @@ interface ExplainPlanDetailEntry {
 }
 
 const detailEntries = computed<ExplainPlanDetailEntry[]>(() =>
-  props.node.details
+  formatExplainPlanDetails(props.node, t("explain.estimatedTime"))
     .map((detail): ExplainPlanDetailEntry => {
       const separatorIndex = detail.indexOf(":");
       if (separatorIndex === -1) return { value: detail.trim() };

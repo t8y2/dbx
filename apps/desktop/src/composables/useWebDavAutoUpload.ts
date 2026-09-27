@@ -1,7 +1,7 @@
 import { onMounted, onUnmounted } from "vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { appendDebugLog } from "@/lib/backend/debugLog";
-import { webdavSyncUpload } from "@/lib/backend/api";
+import { webdavSyncSecretsStatus, webdavSyncUpload } from "@/lib/backend/api";
 import { readWebDavAutoUploadConfig, WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS } from "@/lib/webdav/webdavAutoUploadConfig";
 
 export function useWebDavAutoUpload() {
@@ -32,7 +32,8 @@ export function useWebDavAutoUpload() {
 
     uploading = true;
     try {
-      const summary = await webdavSyncUpload(config.webDavConfig, settingsStore.editorSettings);
+      const secretsStatus = await webdavSyncSecretsStatus();
+      const summary = await webdavSyncUpload(config.webDavConfig, settingsStore.editorSettings, undefined, secretsStatus.enabled && secretsStatus.hasSavedPassphrase);
       appendDebugLog("info", "[DBX][webdav:auto-upload:success]", {
         bytes: summary.bytes,
         remotePath: summary.remotePath,

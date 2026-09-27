@@ -1,6 +1,6 @@
 import type { ColumnInfo, DatabaseType, IndexInfo, QueryTab } from "@/types/database";
 import * as api from "@/lib/backend/api";
-import { editableRowIdentifierColumns } from "@/lib/table/tableEditing";
+import { editableRowIdentifierColumns, physicalTablePrimaryKeys } from "@/lib/table/tableEditing";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadCacheStatus, type MetadataLoadTraceLogger } from "./metadataLoadCoordinator";
 import { metadataScopeKey, metadataScopeParts, type MetadataScopeInput } from "./metadataLoadScope";
 import { metadataCacheInvalidationMatcher, MetadataResultCache, type MetadataCacheInvalidation } from "./metadataResultCache";
@@ -17,6 +17,7 @@ export interface TableMetadata {
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   primaryKeys: string[];
+  rowIdentityResolved?: boolean;
   cachedAt: number;
 }
 
@@ -274,6 +275,7 @@ export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: 
     database: metadata.database,
     columns: metadata.columns,
     primaryKeys: metadata.primaryKeys,
+    physicalPrimaryKeys: physicalTablePrimaryKeys(metadata.columns, metadata.indexes),
   };
 }
 
@@ -331,11 +333,16 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
         // discovery independently unless an agent-backed PostgreSQL-family
         // relation must first report its visible schema for the index lookup.
         const resolveReportedSchema = (request.databaseType === "vastbase" || request.databaseType === "kingbase") && !request.schema;
-        const indexesPromise = resolveReportedSchema ? undefined : loadTableIndexes(request).catch((): IndexInfo[] => []);
+        let rowIdentityResolved = true;
+        const indexFailure = (): IndexInfo[] => {
+          rowIdentityResolved = false;
+          return [];
+        };
+        const indexesPromise = resolveReportedSchema ? undefined : loadTableIndexes(request).catch(indexFailure);
         const columnsResult = await columnsPromise;
         const columns = columnsResult.columns;
         const resolvedSchema = resolveReportedSchema ? columns.find((column) => column.resolved_schema)?.resolved_schema : request.schema;
-        const indexes = columns.length > 0 ? await (indexesPromise ?? loadTableIndexes({ ...request, schema: resolvedSchema }).catch((): IndexInfo[] => [])) : [];
+        const indexes = columns.length > 0 ? await (indexesPromise ?? loadTableIndexes({ ...request, schema: resolvedSchema }).catch(indexFailure)) : [];
         const primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, request.tableType);
         return {
           schema: resolvedSchema || undefined,
@@ -346,6 +353,7 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
           columns,
           indexes,
           primaryKeys,
+          rowIdentityResolved: rowIdentityResolved && columns.length > 0,
           cachedAt: columnsResult.cachedAt,
         };
       },
@@ -353,7 +361,7 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
     );
 
     // 必须在 unregister 前比较：最后一个在途加载注销时会顺带清掉代数记录
-    if (invalidationStampAtStart === (tableMetadataInvalidationStamps.get(scopeKey) ?? 0)) {
+    if (metadata.rowIdentityResolved && invalidationStampAtStart === (tableMetadataInvalidationStamps.get(scopeKey) ?? 0)) {
       tableMetadataCache.set(scope, metadata, { cachedAt: metadata.cachedAt });
     }
   } finally {

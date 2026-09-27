@@ -1,6 +1,7 @@
 package com.dbx.agent;
 
 import com.google.gson.JsonArray;
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
@@ -34,6 +35,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CommonJavaCompatibilityTest {
+    @Test
+    void emitsOptionalServerAuditTimeWithoutLeakingCursorBookkeeping() {
+        Gson gson = new Gson();
+        QueryPageResult page = new QueryPageResult();
+        assertFalse(gson.toJsonTree(page).getAsJsonObject().has("server_execute_time_us"));
+        page.setServer_execute_time_us(370L);
+        page.setCursor_rows_read(500);
+        assertEquals(370L, gson.toJsonTree(page).getAsJsonObject().get("server_execute_time_us").getAsLong());
+        assertFalse(gson.toJsonTree(page).getAsJsonObject().has("cursor_rows_read"));
+    }
+
     @Test
     void definesSharedAgentProtocolContract() {
         assertEquals("handshake", AgentProtocol.METHOD_HANDSHAKE);
@@ -148,6 +160,42 @@ class CommonJavaCompatibilityTest {
         )).getAsJsonObject().getAsJsonObject("result");
 
         assertEquals("Example JDBC", result.getAsJsonObject("databaseInfo").get("driverName").getAsString());
+    }
+
+    @Test
+    void jsonRpcServerDispatchesInteractiveTransactionMethods() {
+        List<String> calls = new ArrayList<>();
+        MinimalAgent agent = new MinimalAgent() {
+            @Override
+            public Map<String, Object> beginManualTransaction(String schema) {
+                calls.add("begin:" + schema);
+                return Collections.singletonMap("ok", (Object) true);
+            }
+
+            @Override
+            public Map<String, Object> commitManualTransaction() {
+                calls.add("commit");
+                return Collections.singletonMap("ok", (Object) true);
+            }
+
+            @Override
+            public Map<String, Object> rollbackManualTransaction() {
+                calls.add("rollback");
+                return Collections.singletonMap("ok", (Object) true);
+            }
+        };
+        JsonRpcServer server = new JsonRpcServer(agent);
+
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"begin_manual_transaction\",\"params\":{\"schema\":\"APP\"}}"
+        )).getAsJsonObject().has("result"));
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"commit_manual_transaction\",\"params\":{}}"
+        )).getAsJsonObject().has("result"));
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"rollback_manual_transaction\",\"params\":{}}"
+        )).getAsJsonObject().has("result"));
+        assertEquals(List.of("begin:APP", "commit", "rollback"), calls);
     }
 
     @Test

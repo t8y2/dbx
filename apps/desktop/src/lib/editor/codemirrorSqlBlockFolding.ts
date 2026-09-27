@@ -15,7 +15,8 @@ interface FoldRange {
 
 // `@codemirror/lang-sql`'s grammar is deliberately shallow (see its `foldNodeProp`, which only
 // covers the flat `Statement` and `BlockComment` nodes). This service adds structure-aware folds
-// for procedural blocks and query expressions without replacing CodeMirror's native folds.
+// for procedural blocks and parenthesized query expressions without replacing CodeMirror's native
+// folds.
 //
 // Scoped to `BEGIN...END` and `CASE...END` (issue #6574) -- `BEGIN TRY`/`END TRY` and
 // `BEGIN CATCH`/`END CATCH` fall out of this for free, since `BEGIN` is matched regardless of a
@@ -94,16 +95,6 @@ function queryScopeEnd(state: EditorState, scope: SyntaxNode): number {
   return end;
 }
 
-function isQueryParens(state: EditorState, node: SyntaxNode): boolean {
-  for (let child = node.firstChild; child; child = child.nextSibling) {
-    if (child.name === "(" || child.name === "LineComment" || child.name === "BlockComment") continue;
-    if (child.name !== "Keyword") return false;
-    const keyword = state.sliceDoc(child.from, child.to).toUpperCase();
-    return keyword === "SELECT" || keyword === "WITH";
-  }
-  return false;
-}
-
 interface QueryScopeTokens {
   scope: SyntaxNode;
   tokens: Array<{ from: number; keyword: "SELECT" | "UNION" }>;
@@ -131,7 +122,10 @@ function addQueryStructureFoldRanges(state: EditorState, tree: Tree, ranges: Map
   const scopes = new Map<string, QueryScopeTokens>();
   tree.iterate({
     enter(node) {
-      if (node.name === "Parens" && isQueryParens(state, node.node)) {
+      // Fold any multiline parenthesized expression, including large `IN (...)`
+      // value lists. The opening line remains visible so the surrounding SQL
+      // structure is still readable while the contents can be collapsed.
+      if (node.name === "Parens") {
         addMultilineFoldRange(state, ranges, node.from, queryScopeEnd(state, node.node));
       }
       if (node.name !== "Keyword") return;

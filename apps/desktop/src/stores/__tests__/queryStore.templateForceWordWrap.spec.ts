@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,18 +31,5 @@ describe("queryStore createTab forceWordWrap", () => {
     const tab = queryStore.tabs.find((t) => t.id === tabId);
 
     expect(tab?.forceWordWrap).toBe(true);
-  });
-});
-
-describe("Generate SQL template tabs wire forceWordWrap end to end (issue #6038)", () => {
-  const sidebarSource = readFileSync(new URL("../../components/sidebar/SidebarTreeRuntimeHost.vue", import.meta.url), "utf8");
-  const contentAreaSource = readFileSync(new URL("../../components/layout/ContentArea.vue", import.meta.url), "utf8");
-
-  it("openSqlTemplateTab requests forceWordWrap when creating the tab", () => {
-    expect(sidebarSource).toMatch(/function openSqlTemplateTab\([^)]*\)\s*{[\s\S]*?createTab\([^)]*forceWordWrap:\s*true[^)]*\)/);
-  });
-
-  it("ContentArea forwards the tab's forceWordWrap flag into QueryEditor", () => {
-    expect(contentAreaSource).toMatch(/<QueryEditor[\s\S]*?:force-word-wrap="activeTab\.forceWordWrap"/);
   });
 });

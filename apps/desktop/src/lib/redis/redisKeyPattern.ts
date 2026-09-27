@@ -1,14 +1,131 @@
+// Full glob metacharacter set — escaped when a value must match literally
+// (group subtree patterns, non-fuzzy text).
 const REDIS_GLOB_SPECIAL_CHARS = /[\\*?[\]]/g;
-const REDIS_GLOB_SPECIAL_CHARS_FUZZY = /[\\*?[\]]/g;
+// In fuzzy mode the user's `*` / `?` are intentional wildcards ("search keys
+// containing this text"), so only `[` / `]` / `\` are escaped to avoid
+// accidental character-class / escape ambiguity. The outer `*…*` wrap added
+// by `redisKeySearchPattern` keeps the substring-contains contract, so inputs
+// like `prod:*` or `2026*` match the same keys a SCAN with that glob would.
+// (#9012: previously `*` was escaped too, so `prod:*` became a literal-`*`
+// substring match and found nothing.)
+const REDIS_GLOB_LITERAL_CHARS_FUZZY = /[\\[\]]/g;
 
 export function escapeRedisGlobText(value: string, fuzzy = false): string {
-  return value.replace(fuzzy ? REDIS_GLOB_SPECIAL_CHARS_FUZZY : REDIS_GLOB_SPECIAL_CHARS, "\\$&");
+  return value.replace(fuzzy ? REDIS_GLOB_LITERAL_CHARS_FUZZY : REDIS_GLOB_SPECIAL_CHARS, "\\$&");
 }
 
 export function redisKeySearchPattern(value: string, fuzzy: boolean): string {
   const pattern = value.trim();
   if (!pattern) return "*";
   return fuzzy ? `*${escapeRedisGlobText(pattern, fuzzy)}*` : pattern;
+}
+
+type RedisGlobToken = { kind: "literal"; value: number } | { kind: "star" } | { kind: "any" } | { kind: "class"; negate: boolean; chars: Set<number>; ranges: Array<[number, number]> };
+
+const redisPatternEncoder = new TextEncoder();
+const REDIS_NON_ASCII = /[\u0080-\uffff]/;
+
+function parseRedisGlobClass(pattern: Uint8Array, start: number): { token: RedisGlobToken; next: number } {
+  let index = start + 1;
+  let negate = false;
+  if (pattern[index] === 94) {
+    negate = true;
+    index++;
+  }
+  const chars = new Set<number>();
+  const ranges: Array<[number, number]> = [];
+  while (index < pattern.length) {
+    if (pattern[index] === 93) {
+      return { token: { kind: "class", negate, chars, ranges }, next: index + 1 };
+    }
+    const value = pattern[index]!;
+    if (value === 92 && index + 1 < pattern.length) {
+      chars.add(pattern[index + 1]!);
+      index += 2;
+    } else if (index + 2 < pattern.length && pattern[index + 1] === 45) {
+      const startByte = (value << 24) >> 24;
+      const endByte = (pattern[index + 2]! << 24) >> 24;
+      ranges.push([Math.min(startByte, endByte), Math.max(startByte, endByte)]);
+      index += 3;
+    } else {
+      chars.add(value);
+      index++;
+    }
+  }
+  return { token: { kind: "class", negate, chars, ranges }, next: index };
+}
+
+function redisGlobTokens(patternText: string): RedisGlobToken[] {
+  const pattern = redisPatternEncoder.encode(patternText);
+  const tokens: RedisGlobToken[] = [];
+  for (let index = 0; index < pattern.length; index++) {
+    const value = pattern[index]!;
+    if (value === 92 && index + 1 < pattern.length) {
+      tokens.push({ kind: "literal", value: pattern[++index]! });
+    } else if (value === 42) {
+      if (tokens[tokens.length - 1]?.kind !== "star") tokens.push({ kind: "star" });
+    } else if (value === 63) {
+      tokens.push({ kind: "any" });
+    } else if (value === 91) {
+      const parsed = parseRedisGlobClass(pattern, index);
+      tokens.push(parsed.token);
+      index = parsed.next - 1;
+    } else {
+      tokens.push({ kind: "literal", value });
+    }
+  }
+  return tokens;
+}
+
+function redisGlobClassMatches(token: Extract<RedisGlobToken, { kind: "class" }>, value: number): boolean {
+  const signedValue = (value << 24) >> 24;
+  const matches = token.chars.has(value) || token.ranges.some(([start, end]) => start <= signedValue && signedValue <= end);
+  return token.negate ? !matches : matches;
+}
+
+export function createRedisKeyPatternMatcher(pattern: string): (value: string, keyRaw?: string) => boolean {
+  const tokens = redisGlobTokens(pattern);
+  return (value, keyRaw) => {
+    let bytes: string | Uint8Array;
+    if (keyRaw && value.includes("\\")) {
+      try {
+        bytes = atob(keyRaw);
+      } catch {
+        return false;
+      }
+    } else {
+      bytes = REDIS_NON_ASCII.test(value) ? redisPatternEncoder.encode(value) : value;
+    }
+    let valueIndex = 0;
+    let tokenIndex = 0;
+    let starTokenIndex = -1;
+    let starValueIndex = -1;
+
+    while (valueIndex < bytes.length) {
+      const token = tokens[tokenIndex];
+      const byte = typeof bytes === "string" ? bytes.charCodeAt(valueIndex) : bytes[valueIndex]!;
+      const matches = token?.kind === "literal" ? token.value === byte : token?.kind === "any" ? true : token?.kind === "class" ? redisGlobClassMatches(token, byte) : false;
+      if (matches) {
+        tokenIndex++;
+        valueIndex++;
+      } else if (token?.kind === "star") {
+        starTokenIndex = tokenIndex++;
+        starValueIndex = valueIndex;
+      } else if (starTokenIndex >= 0) {
+        tokenIndex = starTokenIndex + 1;
+        valueIndex = ++starValueIndex;
+      } else {
+        return false;
+      }
+    }
+
+    while (tokens[tokenIndex]?.kind === "star") tokenIndex++;
+    return tokenIndex === tokens.length;
+  };
+}
+
+export function redisKeyMatchesPattern(value: string, pattern: string): boolean {
+  return createRedisKeyPatternMatcher(pattern)(value);
 }
 
 /**

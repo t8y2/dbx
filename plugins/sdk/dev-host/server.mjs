@@ -1,7 +1,7 @@
 import http from "node:http";
 import { randomUUID, randomBytes } from "node:crypto";
-import { readFile, realpath, watch } from "node:fs/promises";
-import { resolve, relative, isAbsolute, sep } from "node:path";
+import { readFile, realpath, watch, mkdir, writeFile, rename } from "node:fs/promises";
+import { resolve, relative, isAbsolute, sep, join } from "node:path";
 import semver from "semver";
 import { Sidecar, protocolName } from "./sidecar.mjs";
 import { ConnectionStore, lifecyclePayload, providerFor, summary, validateRecord } from "./connections.mjs";
@@ -11,7 +11,13 @@ import { Diagnostics } from "./diagnostics.mjs";
 import { AutoReload } from "./auto-reload.mjs";
 
 const BRIDGE_LIMIT = 2 * 1024 * 1024,
-  UI_BINARY_LIMIT = 8 * 1024 * 1024;
+  UI_BINARY_LIMIT = 8 * 1024 * 1024,
+  STORAGE_VALUE_LIMIT = 256 * 1024,
+  STORAGE_TOTAL_LIMIT = 1024 * 1024;
+function hasControlChars(value) {
+  for (let i = 0; i < value.length; i++) if (value.charCodeAt(i) < 0x20) return true;
+  return false;
+}
 function jsonSize(value) {
   return Buffer.byteLength(JSON.stringify(value) ?? "null");
 }
@@ -20,6 +26,37 @@ function requirePermission(manifest, permission) {
 }
 function ensureSucceeded(result) {
   if (result?.success === false) throw new Error(result.message || "Plugin connection operation failed");
+}
+const AI_RECOMMENDATION_PLACEHOLDER_PATH = /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.(?:[A-Za-z_$][A-Za-z0-9_$]*|[0-9]+))*$/;
+const AI_RECOMMENDATION_FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
+function isValidAiRecommendationTemplate(value) {
+  let offset = 0;
+  for (;;) {
+    const open = value.indexOf("{{", offset);
+    const close = value.indexOf("}}", offset);
+    const next = open < 0 ? close : close < 0 ? open : Math.min(open, close);
+    if (next < 0) return true;
+    if (value.startsWith("}}", next)) return false;
+    const end = value.indexOf("}}", next + 2);
+    if (end < 0) return false;
+    const path = value.slice(next + 2, end).trim();
+    if (!AI_RECOMMENDATION_PLACEHOLDER_PATH.test(path) || path.split(".").some((segment) => AI_RECOMMENDATION_FORBIDDEN_SEGMENTS.has(segment))) return false;
+    offset = end + 2;
+  }
+}
+function requireAiRecommendationUpdate(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("AI recommendation update must be an object");
+  if (!value.context || typeof value.context !== "object" || Array.isArray(value.context)) throw new Error("AI recommendation context must be an object");
+  if (!Array.isArray(value.items) || value.items.length > 5) throw new Error("AI recommendation items must contain at most 5 entries");
+  for (const [index, item] of value.items.entries()) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`AI recommendation ${index} must be an object`);
+    if (typeof item.id !== "string" || !item.id.trim()) throw new Error(`AI recommendation ${index} requires id`);
+    if (typeof item.label !== "string" || !item.label.trim() || item.label.length > 200) throw new Error(`AI recommendation ${index} label is invalid`);
+    if (typeof item.prompt !== "string" || !item.prompt.trim() || item.prompt.length > 32000) throw new Error(`AI recommendation ${index} prompt is invalid`);
+    if (!isValidAiRecommendationTemplate(item.label) || !isValidAiRecommendationTemplate(item.prompt)) throw new Error(`AI recommendation ${index} contains an invalid placeholder`);
+    if (item.order !== undefined && (typeof item.order !== "number" || !Number.isFinite(item.order))) throw new Error(`AI recommendation ${index} order is invalid`);
+  }
+  return structuredClone({ context: value.context, items: value.items });
 }
 function pageId(value = "legacy") {
   if (typeof value !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(value)) throw new Error("Invalid page ID");
@@ -40,11 +77,16 @@ function localDocumentAssetPath(url, entry) {
 export async function createMockHost(options) {
   const diagnostics = options.diagnostics || new Diagnostics();
   const project = resolve(options.project),
-    manifest = JSON.parse(await readFile(resolve(project, "manifest.json"), "utf8"));
-  for (const contribution of manifest.contributions || [])
-    for (const field of contribution.fields || []) {
-      if (field.type === "password" || ["password", "secret"].includes(field.binding)) diagnostics.secretKeys.add(field.key);
-    }
+    manifestPath = resolve(project, "manifest.json");
+  let manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const refreshSecretKeys = () => {
+    diagnostics.secretKeys.clear();
+    for (const contribution of manifest.contributions || [])
+      for (const field of contribution.fields || []) {
+        if (field.type === "password" || ["password", "secret"].includes(field.binding)) diagnostics.secretKeys.add(field.key);
+      }
+  };
+  refreshSecretKeys();
   if (manifest.manifest_version !== undefined && manifest.manifest_version !== 1) throw new Error("Unsupported manifest version");
   // DBX uses Rust semver requirements, whose comparator separators include commas.
   if (manifest.engines?.host_api && !semver.satisfies("1.0.0", manifest.engines.host_api.replaceAll(",", " "))) throw new Error("Plugin does not support Host API 1.0.0");
@@ -62,7 +104,7 @@ export async function createMockHost(options) {
     throw new Error("Development data directory must be outside the UI resource root");
   }
   if (backendEntry && !options.backend) throw new Error("Backend executable is required");
-  const sidecar = new Sidecar({ executable: backendEntry ? resolve(project, options.backend) : undefined, args: options.backendArgs || [], cwd: project, manifest, transport });
+  const sidecar = new Sidecar({ executable: backendEntry ? resolve(project, options.backend) : undefined, args: options.backendArgs || [], cwd: project, manifest, manifestPath, transport });
   const connected = new Set(),
     frames = new Map(),
     sessions = new Map(),
@@ -79,7 +121,45 @@ export async function createMockHost(options) {
     lifecycleQueue = task.catch(() => {});
     return task;
   };
-  let autoReload = false;
+  // Developer preferences such as auto-reload outlive a dev host restart;
+  // persist them next to the connection store with the same atomic pattern.
+  const settingsDirectory = resolve(options.dataDir),
+    settingsFile = join(settingsDirectory, "settings.json");
+  const readSettings = async () => {
+    try {
+      const parsed = JSON.parse(await readFile(settingsFile, "utf8"));
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+  const writeSettings = async (settings) => {
+    await mkdir(settingsDirectory, { recursive: true, mode: 0o700 });
+    const temporary = join(settingsDirectory, `.settings-${randomUUID()}.tmp`);
+    await writeFile(temporary, JSON.stringify({ version: 1, ...settings }, null, 2), { mode: 0o600, flag: "wx" });
+    await rename(temporary, settingsFile);
+  };
+  let autoReload = (await readSettings()).autoReload === true;
+  // `host.storage` entries mirror the native host's plugin-data store: a JSON
+  // map in the dev data dir, atomically replaced on every write. Serialized on
+  // the same queue so two frames cannot lose each other's updates.
+  const uiStorageFile = join(settingsDirectory, "ui-storage.json");
+  const readUiStorage = async () => {
+    try {
+      const parsed = JSON.parse(await readFile(uiStorageFile, "utf8"));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+  const writeUiStorage = async (entries) => {
+    const encoded = JSON.stringify(entries);
+    if (Buffer.byteLength(encoded) > STORAGE_TOTAL_LIMIT) throw new Error(`Plugin UI storage exceeds ${STORAGE_TOTAL_LIMIT} bytes`);
+    await mkdir(settingsDirectory, { recursive: true, mode: 0o700 });
+    const temporary = join(settingsDirectory, `.ui-storage-${randomUUID()}.tmp`);
+    await writeFile(temporary, encoded, { mode: 0o600, flag: "wx" });
+    await rename(temporary, uiStorageFile);
+  };
   const backendReload = new AutoReload(async () => {
     try {
       await serialize(async () => {
@@ -89,6 +169,7 @@ export async function createMockHost(options) {
       broadcast("auto-reload-error", {});
     }
   });
+  backendReload.enable(autoReload);
   const broadcast = (type, payload) => {
     const message = `data: ${JSON.stringify({ type, ...payload })}\n\n`;
     for (const stream of streams) {
@@ -153,7 +234,7 @@ export async function createMockHost(options) {
       existing.name = name;
       return expose(existing);
     }
-    const frame = { id: randomUUID(), channel: randomUUID(), session: session.id, page: session.page, connectionId, contributionId: contribution.id, context, name };
+    const frame = { id: randomUUID(), channel: randomUUID(), session: session.id, page: session.page, connectionId, contributionId: contribution.id, context, name, aiRecommendations: [] };
     frames.set(frame.id, frame);
     return expose(frame);
   }
@@ -191,6 +272,22 @@ export async function createMockHost(options) {
     switch (input.method) {
       case "host.getContext":
         return structuredClone(frame.context);
+      case "host.ai.openConversation":
+        requirePermission(manifest, "host.ai");
+        if (!p || typeof p.title !== "string" || !p.title.trim() || p.title.length > 200) throw new Error("AI conversation title is invalid");
+        if (typeof p.prompt !== "string" || !p.prompt.trim() || p.prompt.length > 32000) throw new Error("AI conversation prompt is invalid");
+        if (!p.context || typeof p.context !== "object" || Array.isArray(p.context) || jsonSize(p.context) > BRIDGE_LIMIT) throw new Error("AI conversation context is invalid");
+        if (p.send !== undefined && typeof p.send !== "boolean") throw new Error("AI conversation send is invalid");
+        if (p.mode !== undefined && p.mode !== "ask" && p.mode !== "agent") throw new Error("AI conversation mode is invalid");
+        return null;
+      case "host.ai.setRecommendations":
+        requirePermission(manifest, "host.ai");
+        frame.aiRecommendations = requireAiRecommendationUpdate(p);
+        return null;
+      case "host.ai.clearRecommendations":
+        requirePermission(manifest, "host.ai");
+        frame.aiRecommendations = [];
+        return null;
       case "backend.invoke": {
         if (p.timeoutMs !== undefined && (typeof p.timeoutMs !== "number" || !Number.isFinite(p.timeoutMs))) throw new Error("Invalid request timeout");
         const timeout = p.timeoutMs === undefined ? 30000 : Math.min(120000, Math.max(1, Math.round(p.timeoutMs)));
@@ -216,6 +313,30 @@ export async function createMockHost(options) {
       case "host.openWorkbench": {
         requirePermission(manifest, "host.workbench");
         return { mockHostOpenFrame: await serialize(() => openFrame(session, p.context?.connectionId || frame.connectionId, p.contributionId, p.context)) };
+      }
+      case "host.reopenConnection": {
+        if (typeof p.connectionId !== "string" || !p.connectionId) throw new Error("connectionId is invalid");
+        return { ok: true, mockReopenConnection: p.connectionId };
+      }
+      case "host.storageGet":
+      case "host.storageSet":
+      case "host.storageDelete": {
+        requirePermission(manifest, "host.storage");
+        if (typeof p.key !== "string" || !p.key || p.key.length > 256 || hasControlChars(p.key)) throw new Error("storage key is invalid");
+        return serialize(async () => {
+          const entries = await readUiStorage();
+          if (input.method === "host.storageGet") return entries[p.key] === undefined ? null : structuredClone(entries[p.key]);
+          if (input.method === "host.storageDelete") {
+            delete entries[p.key];
+            await writeUiStorage(entries);
+            return null;
+          }
+          const value = p.value === undefined ? null : p.value;
+          if (Buffer.byteLength(JSON.stringify(value)) > STORAGE_VALUE_LIMIT) throw new Error(`storage value exceeds ${STORAGE_VALUE_LIMIT} bytes`);
+          entries[p.key] = value;
+          await writeUiStorage(entries);
+          return null;
+        });
       }
       default:
         throw new Error(`Unsupported mock host method: ${input.method}`);
@@ -245,6 +366,11 @@ export async function createMockHost(options) {
           if (typeof p.enabled !== "boolean") throw new Error("Invalid automatic reload setting");
           autoReload = p.enabled;
           backendReload.enable(autoReload);
+          try {
+            await writeSettings({ autoReload });
+          } catch (error) {
+            diagnostics.record("error", "build", "自动重载设置保存失败", { reason: String(error.message || error) });
+          }
           broadcast("auto-reload", { enabled: autoReload });
           diagnostics.record("info", "build", autoReload ? "自动重载已启用" : "自动重载已关闭");
           return { enabled: autoReload };
@@ -497,6 +623,33 @@ export async function createMockHost(options) {
         }
       }
     })();
+  // manifest.json lives at the project root, outside the backend watch tree,
+  // yet edits (version bumps, field changes) must reach this running host —
+  // the sidecar identity check compares against this in-memory copy.
+  let manifestDebounce;
+  void (async () => {
+    try {
+      for await (const event of watch(project, { signal: watchStop.signal })) {
+        if (String(event.filename || "").replaceAll("\\", "/") !== "manifest.json") continue;
+        clearTimeout(manifestDebounce);
+        manifestDebounce = setTimeout(async () => {
+          try {
+            const fresh = JSON.parse(await readFile(manifestPath, "utf8"));
+            if (typeof fresh?.id !== "string" || typeof fresh?.version !== "string") throw new Error("Invalid manifest identity");
+            if (fresh.manifest_version !== undefined && fresh.manifest_version !== 1) throw new Error("Unsupported manifest version");
+            manifest = fresh;
+            sidecar.manifest = fresh;
+            refreshSecretKeys();
+            diagnostics.record("info", "build", "manifest.json 已重新加载", { version: fresh.version });
+          } catch (error) {
+            diagnostics.record("error", "build", "manifest.json 重新加载失败", { reason: String(error.message || error) });
+          }
+        }, 200);
+      }
+    } catch (error) {
+      if (error.name !== "AbortError") diagnostics.record("error", "build", "manifest 监听已停止");
+    }
+  })();
   let debounce;
   void (async () => {
     try {

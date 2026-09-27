@@ -1,0 +1,19 @@
+[package]
+name = "dbx-driver-redis"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+dbx-driver-support = { path = "../dbx-driver-support" }
+dbx-types = { path = "../dbx-types", default-features = false }
+base64 = "0.22"
+redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+tokio = { version = "1", features = ["full"] }

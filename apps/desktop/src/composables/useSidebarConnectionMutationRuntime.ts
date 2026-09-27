@@ -116,7 +116,9 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       await connectionStore.removeConnections(connectionIds);
       options.releaseActiveNodeReference(targets.map((target) => target.id));
       for (const connectionId of connectionIds) {
-        connectionStore.disconnect(connectionId).catch((error) => {
+        // 页签已由 removeConnections 按「删除连接」策略处理，这里只清会话，
+        // 避免再套用「断开连接」策略把刚保留的 SQL 页签关掉。
+        connectionStore.disconnect(connectionId, { skipTabHandling: true }).catch((error) => {
           // Removal has already succeeded; disconnect cleanup must not turn it into a failed delete.
           console.warn("[DBX][connection:delete:disconnect-failed]", { connectionId, error });
         });
@@ -412,7 +414,8 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       const connectionIds = await connectionStore.deleteConnectionGroups(groupIds, deleteConnectionsWithGroup.value);
       options.releaseActiveNodeReference(groupIds);
       for (const connectionId of connectionIds) {
-        connectionStore.disconnect(connectionId).catch((error) => {
+        // 页签已由 deleteConnectionGroups 按「删除连接」策略处理，这里只清会话。
+        connectionStore.disconnect(connectionId, { skipTabHandling: true }).catch((error) => {
           console.warn("[DBX][connection-group:delete:disconnect-failed]", { connectionId, error });
         });
       }

@@ -156,6 +156,66 @@ test("buildDiagramRelationships unique FK exports as 1:1 in Mermaid/DBML", () =>
   assert.match(buildDiagramDbml(profileTables, relationships), /Ref: profiles\.user_id - users\.id/);
 });
 
+test("buildDiagramDbml emits table and column notes with dbml-core escaping", () => {
+  const commented: DiagramTable[] = [
+    {
+      name: "users",
+      comment: "应用's 用户\n表",
+      columns: [
+        { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: "主键ID" },
+        { name: "path", data_type: "varchar(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: "it's a\\path" },
+      ],
+      foreignKeys: [],
+    },
+  ];
+
+  const dbml = buildDiagramDbml(commented, []);
+
+  // Plain note: single quotes, no escaping needed; note is the last bracket entry.
+  assert.ok(dbml.includes("  id bigint [pk, not null, note: '主键ID']"));
+  // Quotes/newlines/backslashes: backslashes doubled, ' escaped as \', triple-quoted.
+  assert.ok(dbml.includes(String.raw`  path varchar(255) [note: '''it\'s a\\path''']`));
+  assert.ok(dbml.includes(String.raw`  Note: '''应用\'s 用户`) && dbml.includes("\n表'''\n}"));
+});
+
+test("buildDiagramMermaid appends quoted column comments and %% table comment lines", () => {
+  const commented: DiagramTable[] = [
+    {
+      name: "users",
+      comment: "应用\n用户 表",
+      columns: [
+        { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: "主键ID" },
+        { name: "path", data_type: "varchar(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: "it's a\\path" },
+        { name: "nickname", data_type: "varchar(64)", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: '昵称 "外号"' },
+      ],
+      foreignKeys: [],
+    },
+  ];
+
+  const mermaid = buildDiagramMermaid(commented, []);
+
+  // Table comment rides on its own %% line right above the entity block; newlines collapse.
+  assert.ok(mermaid.includes("  %% users: 应用 用户 表\n  users {"));
+  // Column comments are double-quoted, follow the name/keys, and stay single-line.
+  assert.ok(mermaid.includes('    bigint id PK "主键ID"'));
+  assert.ok(mermaid.includes(String.raw`    varchar255 path "it's a\path"`));
+  // Mermaid comments cannot contain double quotes, so they are swapped for single ones.
+  assert.ok(mermaid.includes("    varchar64 nickname \"昵称 '外号'\""));
+});
+
+test("blank comments keep dbml and mermaid output byte-identical", () => {
+  const blanked = tables.map((table) => ({
+    ...table,
+    comment: "   ",
+    columns: table.columns.map((column) => ({ ...column, comment: "" })),
+  }));
+  assert.equal(buildDiagramDbml(blanked, []), buildDiagramDbml(tables, []));
+  assert.equal(buildDiagramMermaid(blanked, []), buildDiagramMermaid(tables, []));
+  const nulled = tables.map((table) => ({ ...table, comment: null, columns: table.columns.map((column) => ({ ...column, comment: null })) }));
+  assert.equal(buildDiagramDbml(nulled, []), buildDiagramDbml(tables, []));
+  assert.equal(buildDiagramMermaid(nulled, []), buildDiagramMermaid(tables, []));
+});
+
 test("diagramExportDialogFilter returns expected extensions", () => {
   assert.deepEqual(diagramExportDialogFilter("svg").extensions, ["svg"]);
   assert.deepEqual(diagramExportDialogFilter("png").extensions, ["png"]);

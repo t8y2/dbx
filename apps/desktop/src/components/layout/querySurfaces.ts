@@ -3,6 +3,7 @@ import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import type { SqlExecutionOverride, SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 export interface StatementRange {
   from: number;
@@ -25,10 +26,20 @@ export interface QueryEditorSurfaceHandle {
   acceptQueryEditorExecutionViewport(requestId: number): boolean;
   pasteClipboardAsSqlInCondition(): Promise<boolean>;
   applyTableStructureChanges(): Promise<boolean>;
-  insertRedisCommand(command: string): Promise<boolean>;
-  executeRedisCommand(command: string): Promise<boolean>;
+  /** A Redis logical database is part of the execution target. */
+  insertRedisCommand(command: string, target: AiConversationBinding): Promise<boolean>;
+  executeRedisCommand(command: string, target: AiConversationBinding): Promise<boolean>;
+  /**
+   * Whether this surface's Redis console is mounted, on screen, and pointed at
+   * `target`. Side-effect free — the AI panel polls it before routing a
+   * command, because the console is a lazily-loaded component rendered only for
+   * the active tab, and retrying the *command* to detect readiness could run it
+   * twice.
+   */
+  isRedisConsoleReady(target: AiConversationBinding): boolean;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
+  focusErrorPosition(offset: number): boolean;
 }
 
 export interface QueryResultSurfaceHandle {
@@ -38,6 +49,7 @@ export interface QueryResultSurfaceHandle {
   handleModRTarget(target: Element): boolean;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
+  focusErrorPosition(offset: number): boolean;
 }
 
 export interface ContentAreaSurfaceProps {
@@ -79,7 +91,7 @@ export interface ContentAreaSurfaceEmits {
   editorStateFlushed: [tabId: string];
   formatError: [tabId: string];
   reload: [tabId: string, sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
-  paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string];
+  paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean];
   sort: [tabId: string, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
   executeSql: [tabId: string, sql: string];
   clickTable: [tabId: string, target: SqlObjectNavigationTarget];
@@ -93,10 +105,11 @@ export interface ContentAreaSurfaceEmits {
   objectBrowserSearchChange: [tabId: string, query: string];
   objectBrowserFilterChange: [tabId: string, filter: ObjectBrowserFilter];
   addObjectTableToAi: [tabId: string, tables: Array<{ name: string; schema?: string }>];
-  structureEditorSaved: [tabId: string, commentChanged: boolean];
+  structureEditorSaved: [tabId: string, commentChanged: boolean, createdTableName?: string];
   structureEditorClose: [tabId: string];
   previewStatement: [tabId: string, range: StatementRange | null];
   focusStatement: [tabId: string, range: StatementRange | null];
+  focusErrorOffset: [tabId: string, offset: number];
   openSettings: [initialTab?: string, initialSection?: string];
   openConnectionSettings: [connectionId: string, initialTab: "advanced"];
   toggleZenMode: [];

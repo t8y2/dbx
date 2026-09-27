@@ -1,4 +1,5 @@
 import { nextTick, onUnmounted, ref, watch, type Ref, type WatchSource } from "vue";
+import { deferUntilPanelResizeEnd } from "@/lib/app/panelResizeState";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 
 /**
@@ -33,6 +34,10 @@ export function useToolbarOverflow(rootRef: Ref<HTMLElement | null>, revalidateS
     if (!element) {
       return;
     }
+    // clientWidth/scrollWidth reads force a document-wide synchronous relayout
+    // on every resize notification; skip them during divider drags and take a
+    // single measurement when the drag ends.
+    if (deferUntilPanelResizeEnd(measure)) return;
     const next = resolveNextEditorToolbarTier({
       tier: tier.value,
       availableWidth: element.clientWidth,

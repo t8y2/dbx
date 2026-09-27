@@ -262,6 +262,28 @@ test("source watching is opt-in and automatic restarts preserve saved connection
   await new Promise((resolve) => setTimeout(resolve, 650));
   assert.equal(builds, 1);
 });
+
+test("auto-reload preference persists across dev host restarts", async (t) => {
+  let second;
+  t.after(() => second?.close());
+  const first = await fixture(t);
+  assert.equal((await first.request("auto-reload", { enabled: true })).value.enabled, true);
+  await first.host.close();
+  second = await createMockHost({
+    project: first.root,
+    uiRoot: "ui",
+    backend: process.execPath,
+    diagnostics: new Diagnostics(() => {}),
+    backendArgs: [fileURLToPath(new URL("./echo-sidecar.mjs", import.meta.url))],
+    dataDir: join(first.root, "data"),
+    shellHtml: join(first.root, "ui/index.html"),
+    port: 0,
+    backendWatch: first.root,
+    buildBackend: async () => {},
+  });
+  const bootstrap = await (await fetch(`${second.origin}/api/bootstrap`)).json();
+  assert.equal(bootstrap.autoReload, true);
+});
 test("agent diagnostics is read-only, bounded and does not log its own polling", async (t) => {
   const { host } = await fixture(t, true);
   const url = `${host.origin}/api/diagnostics`,
@@ -299,6 +321,24 @@ test("a frontend-only workbench opens without a connection or sidecar", async (t
   assert.equal(rpc.status, 400);
   assert.match(rpc.error.message, /no backend/);
   assert.equal((await request("frames/close", { id: f.id })).status, 200);
+});
+test("host AI methods enforce permission and keep recommendation state per frame", async (t) => {
+  const denied = await fixture(t, true);
+  const deniedFrame = (await denied.request("workbenches/open", { contributionId: "example.main" })).value.frame;
+  const deniedDocument = (await denied.request("frame-document", { frameId: deniedFrame.id })).value;
+  const deniedCall = (method, params) => denied.request("bridge", { frameId: deniedFrame.id, channel: deniedDocument.channel, method, params });
+  assert.equal((await deniedCall("host.ai.setRecommendations", { context: {}, items: [] })).status, 400);
+
+  const allowed = await fixture(t, true, { pluginManifest: { ...manifest, permissions: ["host.ai"] } });
+  const frame = (await allowed.request("workbenches/open", { contributionId: "example.main" })).value.frame;
+  const document = (await allowed.request("frame-document", { frameId: frame.id })).value;
+  const call = (method, params) => allowed.request("bridge", { frameId: frame.id, channel: document.channel, method, params });
+  assert.equal((await call("host.ai.openConversation", { title: "Inspect", prompt: "Check", context: {}, send: true })).value, null);
+  assert.equal((await call("host.ai.setRecommendations", { context: { resource: { name: "orders" } }, items: [{ id: "health", label: "Inspect {{resource.name}}", prompt: "Check {{resource.name}}" }] })).value, null);
+  assert.equal((await call("host.ai.setRecommendations", { context: {}, items: [{ id: "bad", label: "Inspect {{resource..name}}", prompt: "Check" }] })).status, 400);
+  assert.deepEqual((await call("host.getContext", {})).value, {});
+  assert.equal((await call("host.ai.clearRecommendations", {})).value, null);
+  assert.equal((await call("host.ai.setRecommendations", { context: {}, items: Array.from({ length: 6 }, (_, index) => ({ id: `item-${index}`, label: "Item", prompt: "Prompt" })) })).status, 400);
 });
 test("srcdoc workbench documents inline local Vite scripts and styles", async (t) => {
   const { root, request } = await fixture(t, true);
@@ -348,6 +388,38 @@ test("save, reload, iframe isolation, generic RPC and close lifecycle", async (t
   const failedBuild = await request("backend/restart");
   assert.equal(failedBuild.status, 400);
   assert.equal(host.sidecar.state, "stopped");
+});
+test("host.storage persists per-plugin entries behind the declared permission", async (t) => {
+  const { request } = await fixture(t);
+  const saved = await request("connections/save", { providerId: "example.connection", values });
+  const frame = (await request("connections/connect", { id: saved.value.id })).value.frame;
+  const document = (await request("frame-document", { frameId: frame.id })).value;
+  const call = (method, params) => request("bridge", { frameId: frame.id, channel: document.channel, method, params });
+
+  assert.equal((await call("host.storageGet", { key: "theme" })).status, 400, "permission must gate storage");
+
+  const { request: allowedRequest, root: allowedRoot } = await fixture(t, false, {
+    pluginManifest: { ...manifest, permissions: [...manifest.permissions, "host.storage"] },
+  });
+  const allowedSave = await allowedRequest("connections/save", { providerId: "example.connection", values });
+  const allowedFrame = (await allowedRequest("connections/connect", { id: allowedSave.value.id })).value.frame;
+  const allowedDocument = (await allowedRequest("frame-document", { frameId: allowedFrame.id })).value;
+  const storage = (method, params) => allowedRequest("bridge", { frameId: allowedFrame.id, channel: allowedDocument.channel, method, params });
+
+  assert.equal((await storage("host.storageGet", { key: "theme" })).value, null);
+  assert.equal((await storage("host.storageSet", { key: "theme", value: { mode: "dark", tabs: [1, 2] } })).status, 200);
+  assert.deepEqual((await storage("host.storageGet", { key: "theme" })).value, { mode: "dark", tabs: [1, 2] });
+  assert.equal((await storage("host.storageSet", { key: "theme", value: undefined })).status, 200);
+  assert.equal((await storage("host.storageGet", { key: "theme" })).value, null, "undefined normalizes to null");
+  assert.equal((await storage("host.storageSet", { key: "blob", value: "x".repeat(256 * 1024 + 1) })).status, 400, "oversized values are rejected");
+  assert.equal((await storage("host.storageGet", { key: "" })).status, 400, "empty keys are rejected");
+  assert.equal((await storage("host.storageSet", { key: "last", value: "keep" })).status, 200);
+  assert.equal((await storage("host.storageDelete", { key: "last" })).status, 200);
+  assert.equal((await storage("host.storageGet", { key: "last" })).value, null);
+
+  const persisted = JSON.parse(await readFile(join(allowedRoot, "data/ui-storage.json"), "utf8"));
+  assert.deepEqual(persisted, { theme: null });
+  if (process.platform !== "win32") assert.equal((await stat(join(allowedRoot, "data/ui-storage.json"))).mode & 0o777, 0o600);
 });
 test("loopback endpoint rejects cross-origin, forged Host, CSRF and unowned frames", async (t) => {
   const { host, request, headers } = await fixture(t);

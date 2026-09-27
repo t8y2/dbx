@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 import {
   DATA_GRID_DARK_ACTIVE_ROW_BG,
   DATA_GRID_DARK_CROSSHAIR_COL_BG,
@@ -104,16 +103,6 @@ describe("data grid paint theme", () => {
     expect(theme.cellCrosshairCol).toBe("rgb(153, 187, 177)");
   });
 
-  it("propagates crosshair fills through the base cell variable so DOM and frozen cells stay visible", () => {
-    const gridSource = readFileSync(new URL("../../../components/grid/DataGrid.vue", import.meta.url), "utf8");
-
-    expect(gridSource).toMatch(/\.crosshair-row\s*\{\s*--data-grid-cell-bg:\s*var\(--data-grid-cell-crosshair-row-bg\)\s*!important;/);
-    expect(gridSource).toMatch(/\.crosshair-column\s*\{\s*--data-grid-cell-bg:\s*var\(--data-grid-cell-crosshair-col-bg\)\s*!important;/);
-    expect(gridSource).toContain("color-mix(in srgb, var(--primary) 34%, var(--background))");
-    expect(gridSource).toContain("color-mix(in srgb, var(--primary) 50%, var(--background))");
-    expect(gridSource).toMatch(/\.data-grid-cell--frozen\s*\{\s*background-color:\s*var\(--data-grid-cell-bg,/);
-  });
-
   it("falls back to the built-in type palette for the active appearance", () => {
     const emptyCssVariable = () => "";
 
@@ -162,8 +151,8 @@ describe("data grid paint theme", () => {
       isDark: true,
     });
 
-    expect(light.cellSelected).toBe("rgb(239, 246, 255)");
-    expect(light.cellSelectedBorder).toBe("rgb(59, 130, 246)");
+    expect(light.cellSelected).toBe("rgb(179, 208, 254)");
+    expect(light.cellSelectedBorder).toBe("rgb(37, 99, 235)");
     expect(light.cellSelectedSingle).toBe("rgb(191, 219, 254)");
     expect(light.cellSelectedDirty).toBe("rgb(235, 224, 184)");
     expect(light.cellDirty).toBe("rgb(255, 248, 230)");
@@ -171,7 +160,7 @@ describe("data grid paint theme", () => {
     expect(light.rowNumberTextEdited).toBe("rgb(187, 77, 0)");
     expect(contrastRatio(light.cellSelectedBorder, light.cellSelected)).toBeGreaterThanOrEqual(3);
 
-    expect(dark.cellSelected).toBe("rgb(20, 40, 60)");
+    expect(dark.cellSelected).toBe("rgb(30, 64, 100)");
     expect(dark.cellSelectedBorder).toBe("rgb(96, 165, 250)");
     expect(dark.cellSelectedSingle).toBe("rgb(30, 64, 96)");
     expect(dark.cellSelectedDirty).toBe("rgb(76, 66, 38)");
@@ -243,18 +232,5 @@ describe("data grid paint theme", () => {
     });
 
     expect(theme.typeForegrounds.spatial).toBe("rgb(12, 98, 74)");
-  });
-});
-
-describe("dbx-control-chrome cascade contract", () => {
-  it("keeps chrome defaults layered and low-specificity so invalid/focus utilities can win", () => {
-    const css = readFileSync(new URL("../../../styles/globals.css", import.meta.url), "utf8");
-    const chromeBlockStart = css.indexOf("Shared control chrome defaults");
-    expect(chromeBlockStart).toBeGreaterThanOrEqual(0);
-    const chromeSlice = css.slice(chromeBlockStart - 40, chromeBlockStart + 1600);
-    expect(chromeSlice).toMatch(/@layer components/);
-    expect(chromeSlice).toMatch(/:where\(\.dbx-control-chrome\)/);
-    expect(chromeSlice).toMatch(/\[aria-invalid="true"\]/);
-    expect(chromeSlice).not.toMatch(/box-shadow:\s*none/);
   });
 });

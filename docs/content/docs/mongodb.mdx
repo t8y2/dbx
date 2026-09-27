@@ -68,6 +68,10 @@ The grid expands common fields into columns and supports:
 
 Collections with very different document shapes are better handled in the full-document view so hidden fields are not overlooked.
 
+### Query Result Editing
+
+A query tab result grid is editable when a single `find` or `findOne` runs without a projection and returns `_id`. There you can edit fields and delete rows, review the pending `updateOne` and `deleteOne` statements before saving, and the grid reloads after a deletion. Inserting rows is not available; use `insertOne` or the document browser instead. Aggregations, projected queries, and multi-command scripts stay read-only because their rows cannot be mapped back to single documents.
+
 ## JSON Document Editing
 
 Document details can switch between a field tree and full JSON source:
@@ -101,26 +105,39 @@ Dropping a bucket removes its files and chunks. Verify the bucket name and backu
 
 ## Import and Export
 
-Collection documents have a dedicated CSV/JSON import and CSV/NDJSON export workflow. This is separate from relational Table Import: each CSV row becomes a document, nested values stay nested, and Extended JSON types such as `$oid` and `$date` can be preserved.
+Collection documents have dedicated CSV/JSON/NDJSON and BSON import/export workflows. This is separate from relational Table Import: each CSV row becomes a document, nested values stay nested, and BSON dumps preserve native BSON types.
 
 ### Import data
 
 1. Right-click a collection and choose **Import data**.
-2. Select a `.csv`, `.json`, or `.ndjson` file. Desktop reads the local path; Web uploads it to a temporary server file.
-3. Review encoding, delimiter, header, empty-value, and type settings against the preview.
+2. Choose the format explicitly, then select a `.csv`, `.json`, `.ndjson`/`.jsonl`, `.bson`, or `.bson.gz` file. Desktop reads the local path; Web uploads it to a temporary server file. Changing the file does not override the selected format.
+3. Review the preview. Text formats expose encoding and type settings; CSV supports per-column type overrides. BSON imports do not apply CSV text conversions.
 4. Confirm append-only insert. Duplicate `_id` values stop the import. Batches that already committed are not rolled back.
 
 CSV follows MongoDB Compass: a header row, nested fields as dotted paths (`address.city`), array indices (`tags[0]`, `matrix[0][1]`), ObjectId as 24-character hex, dates as ISO-8601, and empty cells as null. Import samples the first 1000 rows to infer column types; `_id` hex is restored as ObjectId, and `recognizeObjectIdHex` extends this to other columns. JSON/NDJSON use Extended JSON (`$oid`, `$date`). All strings keeps every cell as text.
 
-Type fidelity: `Double` exports and reimports as `Decimal128` (lossless for decimal text). Non-`_id` ObjectId fields round-trip as String unless `recognizeObjectIdHex` is on. Small `Int64` may narrow to `Int32`; ISO-date-looking strings become `DateTime`. Extended JSON types (`$binary`, `$regularExpression`, `$timestamp`, `$minKey`, `$maxKey`, `$code`) round-trip through JSON-text cells. Empty array `[]` and empty object `{}` round-trip correctly.
+CSV type fidelity: `Double` exports and reimports as `Decimal128` (lossless for decimal text). Non-`_id` ObjectId fields round-trip as String unless `recognizeObjectIdHex` is on. Small `Int64` may narrow to `Int32`; ISO-date-looking strings become `DateTime`. Extended JSON types (`$binary`, `$regularExpression`, `$timestamp`, `$minKey`, `$maxKey`, `$code`) round-trip through JSON-text cells. Empty array `[]` and empty object `{}` round-trip correctly.
 
-First-release limits: append only (no truncate or upsert), no per-field type override, CSV export discovers fields from the first 10000 documents (later fields are silently dropped; use NDJSON for variable schemas), no JSON-array export format, no Excel/GridFS/BSON binary import, and no automatic retry of failed batches.
+Collection-import limits: append only (no truncate or upsert), CSV export discovers fields from the first 10000 documents (later fields are silently dropped; use NDJSON or BSON for variable schemas), no JSON-array export format, no Excel/GridFS import, and no automatic retry of failed batches. Collection-level BSON import restores documents only, not the companion metadata or indexes.
 
 ### Export data
 
-- Right-click a collection and choose **Export data**, then CSV or NDJSON. This opens the save-file dialog immediately, the same as table export.
+- Right-click a collection and choose **Export data**, then CSV, NDJSON, BSON, or gzip BSON. This opens the save-file dialog immediately, the same as table export.
 - CSV writes nested objects as dotted columns (`address.city`) and arrays as indexed columns (`tags[0]`, `tags[1]`). NDJSON writes one canonical Extended JSON document per line.
-- Collections with more than 256 distinct fields should use NDJSON.
+- Collections with more than 256 distinct fields should use NDJSON or BSON.
+
+### Database backups
+
+Right-click a database and choose **Back up database** or **Restore database**. Database backups include selected collections, collection options, indexes and views. Both the native driver and the `mongodb-legacy` Agent are supported; the Agent path needs a current Agent build (find-cursor support) so BSON types survive the transfer.
+
+- Desktop supports the official dump directory layout and MongoDB archive format, optionally gzip-compressed. Web exports archive files and restores either archives or uploaded directories.
+- A dump directory contains `<database>/<collection>.bson` and `.metadata.json`, or their `.gz` variants. MongoDB archive is a separate stream format, not ZIP or tar.
+- Choose the format and gzip option explicitly. For directory restore, **Read backup** reads the catalog and metadata; selected data files are uploaded only after confirming the source database, target database and collections.
+- Restore reads and writes data in one pass. Optional `objcheck` validates each BSON document in that same pass and defaults off. Framing, gzip and archive checksum checks remain enabled.
+- Restore appends by default. **Drop selected target collections before restoring** deletes and recreates only those collections. Existing `_id` values can cause `E11000`; failures or cancellation do not roll back earlier writes.
+- Web uploads use the shared `DBX_MAX_UPLOAD_MB` server setting. Desktop reads local files without an HTTP upload.
+
+These formats interoperate with `mongodump`/`mongorestore` for supported collections. Oplog replay, point-in-time guarantees, UUID preservation, internal databases, time-series collections and encrypted collections are outside this workflow; use the official tools for those cases.
 
 Copy the current document, selected documents, or field values as plain JSON or Extended JSON from the grid when you only need the visible selection.
 

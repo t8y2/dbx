@@ -28,8 +28,20 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 public class H2Agent extends AbstractJdbcAgent {
+    private static final String QUOTED_IDENTIFIER = "\"(?:\"\"|[^\"])*\"";
+    private static final String QUALIFIED_IDENTIFIER = QUOTED_IDENTIFIER + "\\." + QUOTED_IDENTIFIER;
+    private static final Pattern CREATE_SEQUENCE = Pattern.compile("^CREATE SEQUENCE (" + QUALIFIED_IDENTIFIER + ")\\s");
+    private static final Pattern SEQUENCE_REFERENCE = Pattern.compile(
+        "'(?:''|[^'])*'|" + QUOTED_IDENTIFIER + "|--[^\\r\\n]*|/\\*.*?\\*/|\\b(?:NEXT|CURRENT)\\s+VALUE\\s+FOR\\s+(" + QUALIFIED_IDENTIFIER + ")",
+        Pattern.DOTALL
+    );
+    private static final Pattern CREATE_INDEX = Pattern.compile(
+        "^CREATE (?:UNIQUE(?: NULLS (?:DISTINCT|NOT DISTINCT|ALL DISTINCT))? )?(?:HASH |SPATIAL )?INDEX .*",
+        Pattern.DOTALL
+    );
     private String databaseName = "";
     private H2DriverLoader.LoadedDriver loadedDriver;
     private H2DriverVersion driverVersion = H2DriverVersion.V3;
@@ -47,38 +59,53 @@ public class H2Agent extends AbstractJdbcAgent {
 
     @Override
     protected void loadDriver(ConnectParams params) throws Exception {
+        // Selection and physical opens must not race a first connection's file lock.
+        synchronized (H2FileConnections.class) {
+            selectDriver(params);
+        }
+    }
+
+    private void selectDriver(ConnectParams params) throws Exception {
         H2DriverVersion selected = H2DriverVersion.select(params);
         if (selected == H2DriverVersion.CUSTOM) {
-            H2DriverLoader.LoadedDriver external = H2DriverLoader.loadExternal(
+            loadedDriver = H2DriverLoader.loadExternal(
                 params.getJdbc_driver_paths(),
                 params.getJdbc_driver_class()
             );
-            if (loadedDriver == null || !loadedDriver.identity().equals(external.identity())) {
-                replaceLoadedDriver(external);
-            } else {
-                external.classLoader().close();
-            }
-        } else if (loadedDriver == null || loadedDriver.version() != selected) {
-            replaceLoadedDriver(H2DriverLoader.load(selected));
+        } else {
+            loadedDriver = H2DriverLoader.load(selected);
         }
         driverVersion = selected;
     }
 
-    private void replaceLoadedDriver(H2DriverLoader.LoadedDriver replacement) throws Exception {
-        H2DriverLoader.LoadedDriver previous = loadedDriver;
-        if (previous != null) {
-            try {
-                previous.classLoader().close();
-            } catch (Exception error) {
-                replacement.classLoader().close();
-                throw error;
-            }
-        }
-        loadedDriver = replacement;
-    }
-
     @Override
     protected Connection openConnection(ConnectParams params) throws Exception {
+        String url = buildJdbcUrl(params);
+        if (H2FileFormatDetector.localDatabaseBasePath(url) != null) {
+            synchronized (H2FileConnections.class) {
+                selectDriver(params);
+                H2DriverLoader.LoadedDriver active = H2FileConnections.find(url);
+                if (active != null && !active.identity().equals(loadedDriver.identity())) {
+                    throw new SQLException("This H2 file is already open with a different driver; use the same H2 driver profile or disconnect it first");
+                }
+                Connection opened = connectWithDriver(params);
+                try {
+                    H2FileConnections.register(url, opened, loadedDriver);
+                } catch (Exception error) {
+                    try {
+                        opened.close();
+                    } catch (Exception closeError) {
+                        error.addSuppressed(closeError);
+                    }
+                    throw error;
+                }
+                return opened;
+            }
+        }
+        return connectWithDriver(params);
+    }
+
+    private Connection connectWithDriver(ConnectParams params) throws Exception {
         if (loadedDriver == null) {
             throw new IllegalStateException("H2 JDBC driver was not loaded");
         }
@@ -219,7 +246,7 @@ public class H2Agent extends AbstractJdbcAgent {
             String effectiveSchema = resolveSchema(schema);
             List<ObjectInfo> result = new ArrayList<>();
             for (TableInfo table : listTables(schema)) {
-                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
             }
 
             String sql = isVersion2OrLater()
@@ -323,6 +350,55 @@ public class H2Agent extends AbstractJdbcAgent {
     }
 
     @Override
+    public String getTableDdl(String schema, String table) {
+        return unchecked(() -> {
+            String tableRef = JdbcIdentifiers.INSTANCE.doubleQuote(resolveSchema(schema)) + "."
+                + JdbcIdentifiers.INSTANCE.doubleQuote(table);
+            List<String> statements = new ArrayList<>();
+            List<String> sequences = new ArrayList<>();
+            // Let H2 preserve identity/computed columns, constraints and index ordering.
+            // Exclude database-wide settings, users, schemas, grants and triggers.
+            try (var stmt = requireConnected().createStatement();
+                 ResultSet rs = stmt.executeQuery("SCRIPT NODATA NOPASSWORDS NOSETTINGS TABLE " + tableRef)) {
+                while (rs.next()) {
+                    String sql = rs.getString(1).trim();
+                    if (sql.startsWith("CREATE SEQUENCE ")) {
+                        sequences.add(sql);
+                    } else if (sql.startsWith("CREATE MEMORY TABLE ") || sql.startsWith("CREATE CACHED TABLE ")
+                        || sql.startsWith("CREATE TABLE ") || sql.startsWith("ALTER TABLE ")
+                        || CREATE_INDEX.matcher(sql).matches()) {
+                        statements.add(sql);
+                    }
+                }
+            }
+            if (statements.isEmpty()) {
+                throw new IllegalStateException("H2 returned no table DDL for " + tableRef);
+            }
+            // SCRIPT TABLE can include every sequence in the schema. Keep only real
+            // references, skipping quoted strings, identifiers and comments as tokens.
+            Set<String> referenced = new HashSet<>();
+            for (String statement : statements) {
+                var references = SEQUENCE_REFERENCE.matcher(statement);
+                while (references.find()) {
+                    if (references.group(1) != null) {
+                        referenced.add(references.group(1));
+                    }
+                }
+            }
+            List<String> ddl = new ArrayList<>();
+            for (String sequence : sequences) {
+                var declaration = CREATE_SEQUENCE.matcher(sequence);
+                if (declaration.find() && referenced.contains(declaration.group(1))) {
+                    // Several selected tables may share one explicit sequence.
+                    ddl.add("CREATE SEQUENCE IF NOT EXISTS " + sequence.substring("CREATE SEQUENCE ".length()));
+                }
+            }
+            ddl.addAll(statements);
+            return String.join("\n", ddl);
+        });
+    }
+
+    @Override
     public List<ColumnInfo> getColumns(String schema, String table) {
         return unchecked(() -> {
             String effectiveSchema = resolveSchema(schema);
@@ -349,7 +425,10 @@ public class H2Agent extends AbstractJdbcAgent {
 
             List<ColumnInfo> result = new ArrayList<>();
             String typeColumn = isVersion2OrLater() ? "DATA_TYPE" : "TYPE_NAME";
-            String columnSql = "SELECT COLUMN_NAME, " + typeColumn + " AS DBX_DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
+            String extraColumns = isVersion2OrLater()
+                ? "IS_GENERATED, IS_IDENTITY, IDENTITY_GENERATION, "
+                : "IS_COMPUTED, SEQUENCE_NAME, ";
+            String columnSql = "SELECT COLUMN_NAME, " + typeColumn + " AS DBX_DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, " + extraColumns
                 + "NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH, REMARKS "
                 + "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION";
             try (var stmt = requireConnected().prepareStatement(columnSql)) {
@@ -358,14 +437,26 @@ public class H2Agent extends AbstractJdbcAgent {
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String columnName = rs.getString("COLUMN_NAME");
+                        String extra = null;
+                        if (isVersion2OrLater()) {
+                            if ("ALWAYS".equals(rs.getString("IS_GENERATED"))) {
+                                extra = "computed";
+                            } else if ("YES".equals(rs.getString("IS_IDENTITY"))) {
+                                extra = "generated " + rs.getString("IDENTITY_GENERATION").toLowerCase(Locale.ROOT) + " as identity";
+                            }
+                        } else if (rs.getBoolean("IS_COMPUTED")) {
+                            extra = "computed";
+                        } else if (rs.getString("SEQUENCE_NAME") != null) {
+                            extra = "identity";
+                        }
                         result.add(new ColumnInfo(
                             columnName,
                             rs.getString("DBX_DATA_TYPE"),
                             "YES".equals(rs.getString("IS_NULLABLE")),
                             rs.getString("COLUMN_DEFAULT"),
                             primaryKeys.contains(columnName),
+                            extra,
                             rs.getString("REMARKS"),
-                            null,
                             intOrNull(rs, "NUMERIC_PRECISION"),
                             intOrNull(rs, "NUMERIC_SCALE"),
                             intOrNull(rs, "CHARACTER_MAXIMUM_LENGTH")
@@ -587,10 +678,7 @@ public class H2Agent extends AbstractJdbcAgent {
     }
 
     private static String resolveSchema(String schema) {
-        if ("PUBLIC".equalsIgnoreCase(schema) || "INFORMATION_SCHEMA".equalsIgnoreCase(schema)) {
-            return schema.toUpperCase(Locale.ROOT);
-        }
-        return "PUBLIC";
+        return schema == null || schema.isBlank() ? "PUBLIC" : schema;
     }
 
     private static Integer intOrNull(ResultSet rs, String column) throws Exception {

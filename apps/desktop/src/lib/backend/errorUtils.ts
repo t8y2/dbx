@@ -4,6 +4,19 @@
 
 export type BackendErrorParam = string | number | boolean;
 
+/**
+ * Driver-reported SQL error position, relative to the statement text that was
+ * actually sent to the database. `line`/`column` are 1-based and counted in
+ * Unicode scalar values; `offset` is the 0-based scalar-value index.
+ *
+ * Currently only populated by the native PostgreSQL driver.
+ */
+export interface SqlErrorPosition {
+  line: number;
+  column: number;
+  offset: number;
+}
+
 export interface BackendError {
   version: 1;
   code: string;
@@ -20,27 +33,96 @@ export interface BackendError {
   detail?: string;
   diagnostics?: Record<string, unknown>;
   helpUrl?: string;
+  errorPosition?: SqlErrorPosition;
 }
 
 export const MANUAL_TRANSACTION_SESSION_EXPIRED_CODE = "DBX-TXN-1001";
 
 const MAX_FALLBACK_CHARS = 64 * 1024;
 const MAX_ERROR_PARSE_DEPTH = 16;
+// The Agent transport appends its structured payload behind this marker. It is
+// not always the last thing in the message: callers append human-readable
+// fallback context after it, so the payload has to be stripped wherever it sits.
 const AGENT_RPC_ERROR_DATA_MARKER = "\nDBX_AGENT_ERROR_DATA:";
+// Rust-side transport suffix carrying a driver cursor position. It is stripped
+// before a structured envelope is built, but metadata/catalog errors can surface
+// as raw strings, so strip it here so it never reaches the UI.
+const SQL_ERROR_POSITION_MARKER_PATTERN = /\nDBX_SQL_ERROR_POSITION:\d+/g;
 
-export function sanitizeBackendErrorMessage(message: string): string {
-  const markerIndex = message.lastIndexOf(AGENT_RPC_ERROR_DATA_MARKER);
-  if (markerIndex < 0) return message;
-
-  const rawData = message.slice(markerIndex + AGENT_RPC_ERROR_DATA_MARKER.length).trim();
+function isInternalAgentErrorData(source: string): boolean {
   try {
-    const data: unknown = JSON.parse(rawData);
-    if (!data || typeof data !== "object" || Array.isArray(data)) return message;
+    const data: unknown = JSON.parse(source);
+    return Boolean(data) && typeof data === "object" && !Array.isArray(data);
   } catch {
-    return message;
+    return false;
+  }
+}
+
+/**
+ * Exclusive end offset of the JSON object literal starting at `start`, or
+ * `null` when no complete object follows.
+ */
+function jsonObjectEnd(source: string, start: number): number | null {
+  if (source[start] !== "{") return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Removes every internal Agent payload, wherever the marker appears. Trailing
+ * text that follows a payload is kept: callers use it to append fallback
+ * context such as the alternate Oracle descriptor failure.
+ */
+function stripAgentErrorMessageData(message: string): string {
+  let stripped = "";
+  let cursor = 0;
+  let droppedToEnd = false;
+
+  while (cursor < message.length) {
+    const markerIndex = message.indexOf(AGENT_RPC_ERROR_DATA_MARKER, cursor);
+    if (markerIndex < 0) break;
+
+    const dataStart = markerIndex + AGENT_RPC_ERROR_DATA_MARKER.length;
+    const leadingWhitespace = message.slice(dataStart).search(/\S/);
+    const objectStart = leadingWhitespace < 0 ? -1 : dataStart + leadingWhitespace;
+    const objectEnd = objectStart < 0 ? null : jsonObjectEnd(message, objectStart);
+    if (objectEnd === null || !isInternalAgentErrorData(message.slice(objectStart, objectEnd))) {
+      // Not internal data (for example a database message that mentions the
+      // marker): keep the text as-is and continue looking behind it.
+      stripped += message.slice(cursor, dataStart);
+      cursor = dataStart;
+      continue;
+    }
+
+    stripped += message.slice(cursor, markerIndex);
+    cursor = objectEnd;
+    droppedToEnd = message.slice(objectEnd).trim().length === 0;
   }
 
-  return message.slice(0, markerIndex).trimEnd();
+  const result = stripped + message.slice(cursor);
+  return droppedToEnd ? result.trimEnd() : result;
+}
+
+export function sanitizeBackendErrorMessage(message: string): string {
+  return stripAgentErrorMessageData(message.replace(SQL_ERROR_POSITION_MARKER_PATTERN, ""));
 }
 
 function isBackendError(value: unknown): value is BackendError {
@@ -79,7 +161,27 @@ function isBackendError(value: unknown): value is BackendError {
     }
   }
   if (candidate.detail !== undefined && typeof candidate.detail !== "string") return false;
+  // Optional driver-reported position. Malformed values are rejected so a
+  // corrupted envelope never drives a wrong editor jump, while a missing field
+  // stays valid (all non-PostgreSQL errors and older backends).
+  if (candidate.errorPosition !== undefined) {
+    if (!isValidErrorPosition(candidate.errorPosition)) return false;
+  }
   return Object.values(candidate.messageParams).every((param) => typeof param === "string" || typeof param === "boolean" || (typeof param === "number" && Number.isFinite(param)));
+}
+
+function isValidErrorPosition(value: unknown): value is SqlErrorPosition {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const { line, column, offset } = value as Record<string, unknown>;
+  return isPositiveInt(line) && isPositiveInt(column) && isNonNegativeInt(offset);
+}
+
+function isPositiveInt(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+function isNonNegativeInt(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 export function normalizeBackendError(error: unknown): BackendError | null {
@@ -143,6 +245,12 @@ function normalizeBackendErrorAtDepth(error: unknown, seen: WeakSet<object>, dep
 
 export const GENERIC_TRANSPORT_FAILURE_MESSAGE = "Backend request failed";
 
+/**
+ * Marks a backend message the UI could not classify, so it is carried as raw text inside a
+ * structured envelope. Callers may still match that text against the known-message catalog.
+ */
+export const LEGACY_BACKEND_ERROR_CODE = "DBX-LEGACY-0001";
+
 export class BackendErrorException extends Error {
   readonly backendError: BackendError;
 
@@ -154,7 +262,7 @@ export class BackendErrorException extends Error {
     this.name = "BackendErrorException";
     this.backendError = backendError ?? {
       version: 1,
-      code: "DBX-LEGACY-0001",
+      code: LEGACY_BACKEND_ERROR_CODE,
       messageKey: "backendErrors.legacy",
       messageParams: {},
       source: "legacyBackend",
@@ -238,9 +346,11 @@ export function formatError(e: unknown): string {
     }
   }
 
-  // Fallback: attempt to stringify
+  // Fallback: prefer bounded nested text (message/reason/detail, .error/.backendError)
+  // over raw string coercion so object-shaped failures never degrade to "[object Object]".
+  const fallback = boundedFallbackText(e);
   try {
-    return sanitizeBackendErrorMessage(String(e));
+    return sanitizeBackendErrorMessage(fallback ?? String(e));
   } catch {
     return "Unknown error occurred";
   }

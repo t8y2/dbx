@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, Ban, Copy, Loader2, RefreshCcw, Search } from "@lucide/vue";
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, Ban, Copy, Loader2, PlugZap, RefreshCcw, Search } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -13,6 +13,7 @@ import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { clampInterval, createProcessListLoadCoordinator, DEFAULT_REFRESH_SECONDS, processListExecutionError, processListSessionCount } from "@/lib/database/mysqlProcessList";
 import { resolveProcessListDriverForConnection, type ProcessRow } from "@/lib/database/processListDrivers";
+import { processListSelectionAfterClick } from "@/lib/database/processListSelection";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
@@ -53,12 +54,21 @@ let timer: ReturnType<typeof setInterval> | undefined;
 
 const cancelTarget = ref<ProcessRow | null>(null);
 const canceling = ref(false);
+const terminateTarget = ref<ProcessRow | null>(null);
+const terminating = ref(false);
 const batchSupported = computed(() => driver.value?.supportsBatchCancel === true);
+// Engines without a terminate statement only expose query cancellation.
+const terminateSupported = computed(() => typeof driver.value?.buildTerminateSessionSql === "function");
+// Multi-selection serves batch cancel and/or batch terminate; either enables the checkboxes.
+const selectionSupported = computed(() => batchSupported.value || terminateSupported.value);
 const selectedIds = ref(new Set<number>());
+// Anchor row for Shift+click range selection, in the current display order.
+const selectionAnchorId = ref<number | null>(null);
 const batchTargets = ref<ProcessRow[] | null>(null);
-const batchResult = ref<{ succeeded: number; failures: { id: number; message: string }[] } | null>(null);
+const batchTerminateTargets = ref<ProcessRow[] | null>(null);
+const batchResult = ref<{ kind: "cancel" | "terminate"; succeeded: number; failures: { id: number; message: string }[] } | null>(null);
 const refreshing = ref(false);
-const actionsLocked = computed(() => canceling.value || cancelTarget.value !== null || batchTargets.value !== null);
+const actionsLocked = computed(() => canceling.value || cancelTarget.value !== null || terminating.value || terminateTarget.value !== null || batchTargets.value !== null || batchTerminateTargets.value !== null);
 let connectionGeneration = 0;
 let disposed = false;
 const fallbackListSql = ref<string | null>(null);
@@ -108,21 +118,31 @@ watch(
   (visible) => {
     const available = new Set(visible.map((row) => row.id));
     selectedIds.value = new Set([...selectedIds.value].filter((id) => available.has(id)));
+    if (selectionAnchorId.value !== null && !available.has(selectionAnchorId.value)) selectionAnchorId.value = null;
   },
   { flush: "sync" },
 );
 
-function toggleSelection(id: number, checked: boolean) {
+function clearSelection() {
+  selectedIds.value = new Set();
+  selectionAnchorId.value = null;
+}
+
+/** Row checkbox click: a plain click toggles one row, Shift+click extends from the anchor. */
+function toggleSelection(id: number, event: MouseEvent) {
   if (actionsLocked.value || refreshing.value) return;
-  const next = new Set(selectedIds.value);
-  if (checked && selectableRows.value.some((row) => row.id === id)) next.add(id);
-  else next.delete(id);
-  selectedIds.value = next;
+  // The browser toggles the clicked checkbox before this handler runs, so the
+  // next state comes from the selection; both agree because the click is never
+  // cancelled (cancelling it would leave the DOM checkbox out of sync).
+  const next = processListSelectionAfterClick(selectableRows.value, { selected: selectedIds.value, anchorId: selectionAnchorId.value }, id, event);
+  selectedIds.value = next.selected;
+  selectionAnchorId.value = next.anchorId;
 }
 
 function toggleAll(checked: boolean) {
   if (actionsLocked.value || refreshing.value) return;
   selectedIds.value = new Set(checked ? selectableRows.value.map((row) => row.id) : []);
+  selectionAnchorId.value = null;
 }
 
 function requestBatchCancel() {
@@ -148,7 +168,7 @@ async function confirmBatchCancel() {
       sql: statements.map((statement) => statement.sql).join(";\n"),
       source: t("production.sourceAdmin"),
       execute: async () => {
-        const summary = { succeeded: 0, failures: [] as { id: number; message: string }[] };
+        const summary = { kind: "cancel" as const, succeeded: 0, failures: [] as { id: number; message: string }[] };
         for (const statement of statements) {
           // A closed tab or changed connection must not dispatch remaining work.
           if (!isCurrent()) break;
@@ -168,11 +188,84 @@ async function confirmBatchCancel() {
     if (result === undefined || !isCurrent()) return;
     batchResult.value = result;
     batchTargets.value = null;
-    selectedIds.value = new Set();
+    clearSelection();
   } catch (error: unknown) {
     if (isCurrent()) toast(t("processList.killFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
   } finally {
     canceling.value = false;
+    if (!disposed && (executed || !isCurrent())) void load({ silent: true });
+  }
+}
+
+function requestBatchTerminate() {
+  if (!terminateSupported.value || actionsLocked.value || refreshing.value || ownSessionId.value === null) return;
+  const targets = selectableRows.value.filter((row) => selectedIds.value.has(row.id));
+  if (targets.length) batchTerminateTargets.value = targets.map((row) => ({ ...row }));
+}
+
+/**
+ * Close the selected sessions one by one. Each statement runs on its own so a
+ * failure on one session (permissions, an id that already exited) is reported in
+ * the summary instead of aborting the remaining terminations, mirroring batch
+ * cancel. The `terminating` mutex is shared with the single-row terminate action.
+ */
+async function confirmBatchTerminate() {
+  const targets = batchTerminateTargets.value;
+  const activeDriver = driver.value;
+  const buildTerminateSql = activeDriver?.buildTerminateSessionSql;
+  if (!targets?.length || !activeDriver || !buildTerminateSql || terminating.value) return;
+  const connection = { ...props.connection };
+  const generation = connectionGeneration;
+  const isCurrent = () => !disposed && generation === connectionGeneration;
+  terminating.value = true;
+  let executed = false;
+  try {
+    const statements = targets.map((row) => ({ id: row.id, sql: buildTerminateSql.call(activeDriver, row.id) }));
+    const executeTerminateSql = async (sql: string) => {
+      const results = await api.executeMulti(connection.id, "", sql, undefined, undefined, { maxRows: 1 });
+      const executionError = processListExecutionError(results);
+      if (executionError) throw new Error(executionError);
+      return results;
+    };
+    const result = await executeWithProductionSqlGuard({
+      connection,
+      database: "",
+      sql: statements.map((statement) => statement.sql).join(";\n"),
+      source: t("production.sourceAdmin"),
+      execute: async () => {
+        const summary = { kind: "terminate" as const, succeeded: 0, failures: [] as { id: number; message: string }[] };
+        for (const statement of statements) {
+          // A closed tab or changed connection must not dispatch remaining work.
+          if (!isCurrent()) break;
+          executed = true;
+          try {
+            let usedFallbackTerminateSql = false;
+            let results;
+            try {
+              results = await executeTerminateSql(statement.sql);
+            } catch (error) {
+              if (!activeDriver.buildFallbackTerminateSessionSql || !activeDriver.shouldUseFallbackTerminateSessionSql?.(error)) throw error;
+              usedFallbackTerminateSql = true;
+              results = await executeTerminateSql(activeDriver.buildFallbackTerminateSessionSql(statement.id));
+            }
+            const terminateResultError = usedFallbackTerminateSql ? activeDriver.fallbackTerminateSessionResultError?.(results) : activeDriver.terminateSessionResultError?.(results);
+            if (terminateResultError) throw new Error(terminateResultError);
+            summary.succeeded++;
+          } catch (error: unknown) {
+            summary.failures.push({ id: statement.id, message: error instanceof Error ? error.message : String(error) });
+          }
+        }
+        return summary;
+      },
+    });
+    if (result === undefined || !isCurrent()) return;
+    batchResult.value = result;
+    batchTerminateTargets.value = null;
+    clearSelection();
+  } catch (error: unknown) {
+    if (isCurrent()) toast(t("processList.terminateFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    terminating.value = false;
     if (!disposed && (executed || !isCurrent())) void load({ silent: true });
   }
 }
@@ -294,6 +387,62 @@ async function confirmCancel() {
   }
 }
 
+function requestTerminate(row: ProcessRow) {
+  if (isOwnSession(row) || actionsLocked.value || refreshing.value || !terminateSupported.value) return;
+  terminateTarget.value = row;
+}
+
+/**
+ * Close the session itself. `KILL QUERY` / `pg_cancel_backend` leave an idle session
+ * connected, so an idle row could never be removed from the list before this action.
+ */
+async function confirmTerminate() {
+  const target = terminateTarget.value;
+  const activeDriver = driver.value;
+  const buildTerminateSql = activeDriver?.buildTerminateSessionSql;
+  if (!target || !activeDriver || !buildTerminateSql || terminating.value) return;
+  const connection = { ...props.connection };
+  const generation = connectionGeneration;
+  const isCurrent = () => !disposed && generation === connectionGeneration;
+  terminating.value = true;
+  try {
+    const terminateSql = buildTerminateSql.call(activeDriver, target.id);
+    let usedFallbackTerminateSql = false;
+    const executeTerminateSql = async (sql: string) => {
+      if (!isCurrent()) return undefined;
+      const results = await api.executeMulti(connection.id, "", sql, undefined, undefined, { maxRows: 1 });
+      const executionError = processListExecutionError(results);
+      if (executionError) throw new Error(executionError);
+      return results;
+    };
+    const result = await executeWithProductionSqlGuard({
+      connection,
+      database: "",
+      sql: terminateSql,
+      source: t("production.sourceAdmin"),
+      execute: async () => {
+        try {
+          return await executeTerminateSql(terminateSql);
+        } catch (error) {
+          if (!activeDriver.buildFallbackTerminateSessionSql || !activeDriver.shouldUseFallbackTerminateSessionSql?.(error)) throw error;
+          usedFallbackTerminateSql = true;
+          return executeTerminateSql(activeDriver.buildFallbackTerminateSessionSql(target.id));
+        }
+      },
+    });
+    if (result === undefined || !isCurrent()) return;
+    const terminateResultError = usedFallbackTerminateSql ? activeDriver.fallbackTerminateSessionResultError?.(result) : activeDriver.terminateSessionResultError?.(result);
+    if (terminateResultError) throw new Error(terminateResultError);
+    toast(t("processList.terminateSuccess", { id: target.id }), 2500);
+    terminateTarget.value = null;
+  } catch (error: any) {
+    if (isCurrent()) toast(t("processList.terminateFailed", { message: error?.message || String(error) }), 5000);
+  } finally {
+    terminating.value = false;
+    if (terminateTarget.value === null) void load({ silent: true });
+  }
+}
+
 function stopTimer() {
   if (timer) {
     clearInterval(timer);
@@ -327,8 +476,9 @@ watch(
   () => props.connection.id,
   () => {
     connectionGeneration++;
-    selectedIds.value = new Set();
+    clearSelection();
     batchTargets.value = null;
+    batchTerminateTargets.value = null;
     batchResult.value = null;
     cancelTarget.value = null;
     fallbackListSql.value = null;
@@ -373,6 +523,19 @@ onBeforeUnmount(() => {
           <Ban v-else class="h-3.5 w-3.5" />
           {{ t("processList.batchCancel", { count: selectedIds.size }) }}
         </Button>
+        <Button
+          v-if="terminateSupported"
+          variant="destructive"
+          size="sm"
+          class="h-7 gap-1.5 px-2 text-xs"
+          :disabled="actionsLocked || refreshing || selectedIds.size === 0 || ownSessionId === null"
+          :title="ownSessionId === null ? t('processList.batchNeedsSession') : undefined"
+          @click="requestBatchTerminate"
+        >
+          <Loader2 v-if="terminating && batchTerminateTargets" class="h-3.5 w-3.5 animate-spin" />
+          <PlugZap v-else class="h-3.5 w-3.5" />
+          {{ t("processList.batchTerminate", { count: selectedIds.size }) }}
+        </Button>
         <div class="flex h-7 items-center gap-1.5 rounded-md border bg-background px-2">
           <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <input v-model="search" :disabled="actionsLocked" class="h-full w-40 min-w-0 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('processList.filter')" />
@@ -393,7 +556,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-if="batchSupported && ownSessionId === null && !refreshing" class="border-b px-3 py-2 text-xs text-muted-foreground">{{ t("processList.batchNeedsSession") }}</div>
+    <div v-if="selectionSupported && ownSessionId === null && !refreshing" class="border-b px-3 py-2 text-xs text-muted-foreground">{{ t("processList.batchNeedsSession") }}</div>
 
     <div v-if="loadError" class="border-b bg-destructive/10 px-3 py-2 text-xs text-destructive">{{ loadError }}</div>
 
@@ -401,7 +564,7 @@ onBeforeUnmount(() => {
       <table class="w-full border-collapse text-xs">
         <thead class="sticky top-0 z-10 bg-muted/40 backdrop-blur">
           <tr>
-            <th v-if="batchSupported" class="w-8 border-b px-3 py-2">
+            <th v-if="selectionSupported" class="w-8 border-b px-3 py-2">
               <input
                 type="checkbox"
                 class="h-3.5 w-3.5 accent-primary"
@@ -420,19 +583,19 @@ onBeforeUnmount(() => {
                 <ArrowDown v-else-if="sortKey === column.key && sortDir === 'desc'" class="h-3 w-3" />
               </span>
             </th>
-            <th class="w-16 whitespace-nowrap border-b px-3 py-2 text-right font-medium">{{ t("processList.colActions") }}</th>
+            <th class="w-40 whitespace-nowrap border-b px-3 py-2 text-right font-medium">{{ t("processList.colActions") }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="row in filteredRows" :key="row.id" class="border-b hover:bg-accent/40" :class="{ 'bg-primary/5': isOwnSession(row) }">
-            <td v-if="batchSupported" class="px-3 py-1.5">
+            <td v-if="selectionSupported" class="px-3 py-1.5">
               <input
                 type="checkbox"
                 class="h-3.5 w-3.5 accent-primary"
                 :checked="selectedIds.has(row.id)"
                 :disabled="actionsLocked || refreshing || ownSessionId === null || isOwnSession(row) || !Number.isInteger(row.id) || row.id <= 0"
                 :aria-label="t('processList.selectSession', { id: row.id })"
-                @change="toggleSelection(row.id, ($event.target as HTMLInputElement).checked)"
+                @click="toggleSelection(row.id, $event as MouseEvent)"
               />
             </td>
             <td
@@ -450,21 +613,35 @@ onBeforeUnmount(() => {
               <template v-else>{{ row[column.key] === null || row[column.key] === undefined ? "—" : row[column.key] }}</template>
             </td>
             <td class="px-3 py-1.5 text-right">
-              <Button
-                variant="ghost"
-                size="sm"
-                class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                :disabled="isOwnSession(row) || actionsLocked || refreshing"
-                :title="isOwnSession(row) ? t('processList.cannotKillSelf') : t('processList.kill')"
-                @click="requestCancel(row)"
-              >
-                <Ban class="h-3.5 w-3.5" />
-                {{ t("processList.kill") }}
-              </Button>
+              <span class="inline-flex items-center justify-end gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                  :disabled="isOwnSession(row) || actionsLocked || refreshing"
+                  :title="isOwnSession(row) ? t('processList.cannotKillSelf') : t('processList.kill')"
+                  @click="requestCancel(row)"
+                >
+                  <Ban class="h-3.5 w-3.5" />
+                  {{ t("processList.kill") }}
+                </Button>
+                <Button
+                  v-if="terminateSupported"
+                  variant="ghost"
+                  size="sm"
+                  class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                  :disabled="isOwnSession(row) || actionsLocked || refreshing"
+                  :title="isOwnSession(row) ? t('processList.cannotTerminateSelf') : t('processList.terminate')"
+                  @click="requestTerminate(row)"
+                >
+                  <PlugZap class="h-3.5 w-3.5" />
+                  {{ t("processList.terminate") }}
+                </Button>
+              </span>
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
-            <td :colspan="columns.length + 1 + (batchSupported ? 1 : 0)" class="px-3 py-10 text-center text-muted-foreground">
+            <td :colspan="columns.length + 1 + (selectionSupported ? 1 : 0)" class="px-3 py-10 text-center text-muted-foreground">
               {{ search ? t("grid.noSearchResults") : t("processList.empty") }}
             </td>
           </tr>
@@ -495,6 +672,34 @@ onBeforeUnmount(() => {
           <Button variant="destructive" :disabled="canceling" @click="confirmCancel">
             <Loader2 v-if="canceling" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
             {{ t("processList.kill") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog
+      :open="terminateTarget !== null"
+      @update:open="
+        (open) => {
+          if (!open && !terminating) terminateTarget = null;
+        }
+      "
+    >
+      <DialogContent class="max-w-sm" :show-close-button="!terminating">
+        <DialogHeader>
+          <DialogTitle class="flex items-center gap-2">
+            <AlertTriangle class="h-4 w-4 text-destructive" />
+            {{ t("processList.terminateTitle") }}
+          </DialogTitle>
+        </DialogHeader>
+        <p v-if="terminateTarget" class="text-sm text-muted-foreground">
+          {{ t("processList.terminateConfirm", { id: terminateTarget.id, user: terminateTarget.user }) }}
+        </p>
+        <DialogFooter>
+          <Button variant="outline" :disabled="terminating" @click="terminateTarget = null">{{ t("dangerDialog.cancel") }}</Button>
+          <Button variant="destructive" :disabled="terminating" @click="confirmTerminate">
+            <Loader2 v-if="terminating" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            {{ t("processList.terminate") }}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -538,6 +743,43 @@ onBeforeUnmount(() => {
     </Dialog>
 
     <Dialog
+      :open="batchTerminateTargets !== null"
+      @update:open="
+        (open) => {
+          if (!open && !terminating) batchTerminateTargets = null;
+        }
+      "
+    >
+      <DialogContent
+        class="max-w-md"
+        :show-close-button="!terminating"
+        @interact-outside="
+          (event) => {
+            if (terminating) event.preventDefault();
+          }
+        "
+        @escape-key-down="
+          (event) => {
+            if (terminating) event.preventDefault();
+          }
+        "
+      >
+        <DialogHeader>
+          <DialogTitle>{{ t("processList.batchTerminateTitle") }}</DialogTitle>
+        </DialogHeader>
+        <p class="text-sm text-muted-foreground">{{ t("processList.batchTerminateConfirm", { count: batchTerminateTargets?.length ?? 0 }) }}</p>
+        <p class="max-h-40 overflow-auto break-words font-mono text-xs">{{ batchTerminateTargets?.map((row) => row.id).join(", ") }}</p>
+        <DialogFooter>
+          <Button variant="outline" :disabled="terminating" @click="batchTerminateTargets = null">{{ t("dangerDialog.cancel") }}</Button>
+          <Button variant="destructive" :disabled="terminating" @click="confirmBatchTerminate">
+            <Loader2 v-if="terminating" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            {{ t(terminating ? "processList.batchTerminateRunning" : "processList.terminate") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog
       :open="batchResult !== null"
       @update:open="
         (open) => {
@@ -547,9 +789,9 @@ onBeforeUnmount(() => {
     >
       <DialogContent class="max-w-lg">
         <DialogHeader>
-          <DialogTitle>{{ t("processList.batchTitle") }}</DialogTitle>
+          <DialogTitle>{{ t(batchResult?.kind === "terminate" ? "processList.batchTerminateTitle" : "processList.batchTitle") }}</DialogTitle>
         </DialogHeader>
-        <p v-if="batchResult" class="text-sm">{{ t("processList.batchSummary", { succeeded: batchResult.succeeded, failed: batchResult.failures.length }) }}</p>
+        <p v-if="batchResult" class="text-sm">{{ t(batchResult.kind === "terminate" ? "processList.batchTerminateSummary" : "processList.batchSummary", { succeeded: batchResult.succeeded, failed: batchResult.failures.length }) }}</p>
         <ul v-if="batchResult?.failures.length" class="max-h-60 space-y-2 overflow-auto text-xs text-destructive">
           <li v-for="failure in batchResult.failures" :key="failure.id" class="break-words">{{ failure.id }}: {{ failure.message }}</li>
         </ul>

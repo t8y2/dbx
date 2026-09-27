@@ -26,3 +26,16 @@ export function isActiveResultLoading(state: QueryResultLoadingStateLike): boole
 export function queryExecutionLabelKey(state: Pick<QueryExecutionStateLike, "isCancelling">): "common.loading" | "common.stopping" {
   return state.isCancelling ? "common.stopping" : "common.loading";
 }
+
+/**
+ * Whether the stop action should be visible for a running execution.
+ *
+ * Unlike `canCancelQueryExecution` this stays true while a cancel request is in
+ * flight, so the control keeps its place and only switches to the cancelling
+ * state instead of disappearing. Executions without an id (for example the
+ * metadata/preparation window of a data-tab reload) have nothing to cancel, so
+ * the caller must not offer the action there.
+ */
+export function shouldShowCancelAction(state: QueryExecutionStateLike): boolean {
+  return state.isExecuting && !!state.executionId;
+}

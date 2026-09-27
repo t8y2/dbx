@@ -1,10 +1,40 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile, chmod } from "node:fs/promises";
+import { mkdir, writeFile, chmod, readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createMockHost } from "./server.mjs";
 import { Diagnostics } from "./diagnostics.mjs";
 import { stopProcessTree } from "./process-tree.mjs";
+
+// A go.work `go` directive must not be older than any workspace module's own
+// directive, or go rejects the build outright ("requires go >= X, but go.work
+// lists go Y"). Derive the directive from the listed modules' go.mod files and
+// fall back to the historical base version when nothing is parseable.
+const GO_WORK_BASE_VERSION = "1.22";
+
+function compareGoVersions(left, right) {
+  const a = left.split(".").map(Number);
+  const b = right.split(".").map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const delta = (a[i] || 0) - (b[i] || 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+export async function resolveGoWorkVersion(directories) {
+  let version = GO_WORK_BASE_VERSION;
+  for (const directory of directories) {
+    try {
+      const goMod = await readFile(resolve(directory, "go.mod"), "utf8");
+      const match = goMod.match(/^go\s+(\d+(?:\.\d+){1,2})/m);
+      if (match && compareGoVersions(match[1], version) > 0) version = match[1];
+    } catch {
+      // No readable go.mod here; another workspace module decides the floor.
+    }
+  }
+  return version;
+}
 
 export async function startDevelopment(options) {
   const diagnostics = options.diagnostics || new Diagnostics();
@@ -24,7 +54,8 @@ export async function startDevelopment(options) {
     const env = { ...process.env };
     if (spec.goWorkspace) {
       const work = resolve(dataDir, "go.work");
-      await writeFile(work, `go 1.22\n\nuse (\n${spec.goWorkspace.map((p) => "\t" + JSON.stringify(p)).join("\n")}\n)\n`, { mode: 0o600 });
+      const goVersion = await resolveGoWorkVersion(spec.goWorkspace);
+      await writeFile(work, `go ${goVersion}\n\nuse (\n${spec.goWorkspace.map((p) => "\t" + JSON.stringify(p)).join("\n")}\n)\n`, { mode: 0o600 });
       env.GOWORK = work;
     }
     let command = spec.command === "node" ? process.execPath : spec.command;

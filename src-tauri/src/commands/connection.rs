@@ -220,7 +220,6 @@ mod tests {
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
-    use dbx_core::storage::Storage;
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
@@ -243,6 +242,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -414,7 +414,7 @@ mod tests {
     async fn saving_memory_sqlite_attachments_keeps_the_live_pool_intact() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-sqlite-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = sqlite_config(std::path::Path::new(":memory:"), "");
         let pool = dbx_core::db::sqlite::connect_path(":memory:").await.unwrap();
@@ -436,7 +436,7 @@ mod tests {
             name: "analytics".to_string(),
             path: dir.join("analytics.sqlite").to_string_lossy().to_string(),
         });
-        let error = save_connection_configs(&state, &[invalid]).await.unwrap_err();
+        let error = save_connection_configs(&state, &[invalid], Vec::new()).await.unwrap_err();
 
         assert!(error.contains("in-memory main database"), "{error}");
         assert!(state.pool_handle(&initial.id).await.is_some());
@@ -578,7 +578,7 @@ mod tests {
     async fn persist_mongo_legacy_driver_profile_updates_only_the_target_connection() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-mongo-profile-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let mongo = mongodb_config();
         let mut other = mongodb_config();
@@ -647,7 +647,7 @@ mod tests {
     async fn save_connection_configs_updates_runtime_cache_and_drops_mq_adapter() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
@@ -659,7 +659,7 @@ mod tests {
         let first = state.mq_registry.get_or_build(&initial).await.unwrap().adapter;
 
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        save_connection_configs(&state, std::slice::from_ref(&updated)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&updated), Vec::new()).await.unwrap();
 
         let cached_admin_url = state
             .configs
@@ -684,7 +684,7 @@ mod tests {
     async fn load_connection_configs_syncs_runtime_cache_and_drops_stale_pool() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
@@ -719,7 +719,7 @@ mod tests {
     async fn save_connection_configs_removes_deleted_runtime_config_and_mq_adapter() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let kept = mongodb_config();
         let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
@@ -730,7 +730,7 @@ mod tests {
         }
         let stale = state.mq_registry.get_or_build(&removed).await.unwrap().adapter;
 
-        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept), Vec::new()).await.unwrap();
 
         let configs = state.configs.read().await;
         assert!(configs.contains_key(&kept.id));
@@ -766,7 +766,7 @@ mod tests {
     async fn save_connection_configs_retains_one_time_runtime_config_and_its_pool() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let persisted = mongodb_config();
         let preview = duckdb_preview_config();
@@ -791,14 +791,14 @@ mod tests {
     async fn save_connection_configs_keeps_session_credential_of_one_time_config() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let persisted = mongodb_config();
         let preview = duckdb_preview_config();
         state.configs.write().await.insert(preview.id.clone(), preview.clone());
         state.session_credentials.set("", &preview.id, "secret").expect("session credential fixture");
 
-        save_connection_configs(&state, std::slice::from_ref(&persisted)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&persisted), Vec::new()).await.unwrap();
 
         // If the config is retained the credential must be retained with it, or the
         // next query re-prompts for a password that was already entered.
@@ -812,7 +812,7 @@ mod tests {
     async fn save_connection_configs_removes_deleted_connection_pools() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let kept = mongodb_config();
         let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
@@ -827,7 +827,7 @@ mod tests {
             })
             .await;
 
-        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept), Vec::new()).await.unwrap();
 
         assert!(state.pool_handle(&removed.id).await.is_none());
 
@@ -838,7 +838,7 @@ mod tests {
     async fn sync_connection_configs_ignores_password_only_changes() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
 
         let mut initial = mongodb_config();
@@ -871,7 +871,7 @@ mod tests {
     async fn sync_connection_configs_preserves_nacos_session_password_for_scope_updates() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-nacos-scope-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = nacos_config("nacos-a");
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
@@ -904,14 +904,22 @@ mod tests {
 }
 
 #[tauri::command]
-pub async fn save_connections(state: State<'_, Arc<AppState>>, configs: Vec<ConnectionConfig>) -> Result<(), String> {
+pub async fn save_connections(
+    state: State<'_, Arc<AppState>>,
+    configs: Vec<ConnectionConfig>,
+    removed_ids: Option<Vec<String>>,
+) -> Result<(), String> {
     let configs: Vec<ConnectionConfig> = configs.into_iter().map(|config| config.canonicalized()).collect();
-    save_connection_configs(state.inner(), &configs).await
+    save_connection_configs(state.inner(), &configs, removed_ids.unwrap_or_default()).await
 }
 
-async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig]) -> Result<(), String> {
+async fn save_connection_configs(
+    state: &AppState,
+    configs: &[ConnectionConfig],
+    removed_ids: Vec<String>,
+) -> Result<(), String> {
     for config in configs {
-        if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_ssh_worker_requested(config) {
+        if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_remote_worker_requested(config) {
             db::sqlite::validate_persistent_attachments(
                 &config.host,
                 &config.password,
@@ -919,8 +927,15 @@ async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig])
             )?;
         }
     }
+    if !removed_ids.is_empty() {
+        state.storage.delete_connections(&removed_ids).await?;
+    }
     state.storage.save_connections(configs).await?;
-    let sync = sync_connection_configs(state, configs).await;
+    // Saving upserts, so the request only covers this window's connections. Sync
+    // against the whole persisted list to keep connections saved by another
+    // window/process alive in the runtime cache as well.
+    let persisted = state.storage.load_connections().await?;
+    let sync = sync_connection_configs(state, &persisted).await;
     remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(state, &sync.mq_adapter_ids_to_drop).await;
@@ -1035,6 +1050,28 @@ pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Opti
     state.storage.load_sidebar_layout().await
 }
 
+#[tauri::command]
+pub async fn save_table_vgroups(
+    state: State<'_, Arc<AppState>>,
+    scope_key: String,
+    layout: serde_json::Value,
+) -> Result<(), String> {
+    state.storage.save_table_vgroups(&scope_key, &layout).await
+}
+
+#[tauri::command]
+pub async fn load_table_vgroups(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    state.storage.load_table_vgroups().await
+}
+
+#[tauri::command]
+pub async fn delete_table_vgroups_for_connection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<(), String> {
+    state.storage.delete_table_vgroups_for_connection(&connection_id).await
+}
+
 fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqlite::SqliteExtensionSpec> {
     db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
         .into_iter()
@@ -1057,12 +1094,14 @@ async fn connect_sqlite_from_config_with_state(
     connection_id: &str,
     config: &ConnectionConfig,
 ) -> Result<db::sqlite::SqliteHandle, String> {
-    if db::sqlite_worker::sqlite_ssh_worker_requested(config) {
+    if db::sqlite_worker::sqlite_remote_worker_requested(config) {
         let state =
             state.ok_or_else(|| "Remote SQLite over SSH is only available in the DBX Desktop app".to_string())?;
         let transport_layers = state.resolved_transport_layers(config).await?;
         let worker = db::sqlite_worker::connect_sqlite_worker(
             &state.tunnels,
+            &state.proxy_tunnels,
+            &state.http_tunnels,
             &state.agent_manager,
             state.storage.data_dir(),
             connection_id,
@@ -1146,8 +1185,13 @@ async fn test_connection_with_info_inner(
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
-    let (host, port) = state.connection_host_port(connection_id, &config).await?;
-    let probe_result = probe_connection_endpoint(&config, &host, port).await;
+    let endpoint = state.plugin_connection_endpoint(connection_id, &config).await?;
+    let (host, port) = (endpoint.host.clone(), endpoint.port);
+    let runtime_proxy = endpoint.proxy;
+    // SOCKS-routed plugin tests dial through the route themselves; probing the
+    // logical endpoint (possibly empty host/port) would mislead.
+    let probe_result =
+        if runtime_proxy.is_some() { Ok(()) } else { probe_connection_endpoint(&config, &host, port).await };
     let url = connection_url_for_endpoint(&config, &host, port);
     let target = redacted_connection_url_for_endpoint(&config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
@@ -1155,7 +1199,7 @@ async fn test_connection_with_info_inner(
     let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&config, &host, port);
     log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
     if config.db_type == DatabaseType::Plugin {
-        let result = state.plugin_host.test_connection(&config, &host, port).await;
+        let result = state.plugin_host.test_connection(&config, &host, port, runtime_proxy).await;
         if has_transport_layers {
             state.reset_connection_transport_for_config(&tunnel_id, &config).await;
         }
@@ -1417,6 +1461,17 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::Salesforce => {
+                let client = db::salesforce_driver::SfClient::from_config(
+                    &url,
+                    Some(&config.password),
+                    config.external_config.as_ref(),
+                    connect_timeout,
+                )?;
+                db::salesforce_driver::SfClient::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Easysearch => {
                 let mut client = db::easysearch_driver::EasysearchClient::from_config(
                     &url,
@@ -1431,6 +1486,23 @@ async fn test_connection_with_info_inner(
                     Some(config.client_key_path.as_str()),
                 )?;
                 db::easysearch_driver::test_connection(&mut client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
+            DatabaseType::Solr => {
+                let mut client = db::solr_driver::SolrClient::from_config(
+                    &url,
+                    Some(&config.username),
+                    Some(&config.password),
+                    config.ssl,
+                    config.url_params.as_deref(),
+                    config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(config.ca_cert_path.as_str()),
+                    Some(config.client_cert_path.as_str()),
+                    Some(config.client_key_path.as_str()),
+                )?;
+                db::solr_driver::test_connection(&mut client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
             }
@@ -1671,7 +1743,7 @@ pub async fn connect_db(
     client_attempt: Option<u64>,
 ) -> Result<String, String> {
     let config = config.canonicalized();
-    if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_ssh_worker_requested(&config) {
+    if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_remote_worker_requested(&config) {
         db::sqlite::validate_persistent_attachments(
             &config.host,
             &config.password,
@@ -1687,11 +1759,22 @@ pub async fn connect_db(
     let mut connected_config = config.clone();
     let mut connected_db_config = db_config.clone();
 
-    state.remove_connection_pools_detached(&id).await;
+    // Plugin 连接的 connection/connect 是幂等 upsert：连接路径（首连、重推、
+    // 重连）只替换池条目，完全跳过旧池拆除——close 会向 sidecar 发
+    // connection/disconnect，其语义是"删注册表 + 杀掉该连接全部会话"，会把
+    // 同连接其他 tab 的活跃终端一起杀死。用户显式断开仍走 disconnect_db 的
+    // 完整关闭路径（会发 disconnect）。其他类型维持 detached 关闭不变。
+    if db_config.db_type == DatabaseType::Plugin {
+        state.drop_connection_pools_without_close(&id).await;
+    } else {
+        state.remove_connection_pools_detached(&id).await;
+    }
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
 
-    let (host, port) = state.connection_host_port(&id, &db_config).await?;
+    let endpoint = state.plugin_connection_endpoint(&id, &db_config).await?;
+    let (host, port) = (endpoint.host, endpoint.port);
+    let runtime_proxy = endpoint.proxy;
     if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
         state.reset_connection_transport_for_config(&id, &db_config).await;
         return Err(err);
@@ -1867,6 +1950,16 @@ pub async fn connect_db(
             db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Elasticsearch(client)
         }
+        DatabaseType::Salesforce => {
+            let client = db::salesforce_driver::SfClient::from_config(
+                &url,
+                Some(&db_config.password),
+                db_config.external_config.as_ref(),
+                connect_timeout,
+            )?;
+            db::salesforce_driver::SfClient::test_connection(&client, connect_timeout).await?;
+            PoolKind::Salesforce(client)
+        }
         DatabaseType::Easysearch => {
             let mut client = db::easysearch_driver::EasysearchClient::from_config(
                 &url,
@@ -1882,6 +1975,22 @@ pub async fn connect_db(
             )?;
             db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Easysearch(client)
+        }
+        DatabaseType::Solr => {
+            let mut client = db::solr_driver::SolrClient::from_config(
+                &url,
+                Some(&db_config.username),
+                Some(&db_config.password),
+                db_config.ssl,
+                db_config.url_params.as_deref(),
+                db_config.external_config.as_ref(),
+                connect_timeout,
+                Some(db_config.ca_cert_path.as_str()),
+                Some(db_config.client_cert_path.as_str()),
+                Some(db_config.client_key_path.as_str()),
+            )?;
+            db::solr_driver::test_connection(&mut client, connect_timeout).await?;
+            PoolKind::Solr(client)
         }
         DatabaseType::Meilisearch => {
             let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
@@ -2051,9 +2160,9 @@ pub async fn connect_db(
         DatabaseType::Mqtt => {
             return Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string());
         }
-        DatabaseType::Plugin => {
-            PoolKind::PluginConnection(state.plugin_host.connect_connection(&db_config, &host, port).await?)
-        }
+        DatabaseType::Plugin => PoolKind::PluginConnection(
+            state.plugin_host.connect_connection(&db_config, &host, port, runtime_proxy).await?,
+        ),
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 
@@ -2084,7 +2193,7 @@ pub async fn connection_final_proxy_port(
         return Err("Connection has no configured transport layers".to_string());
     }
     if runtime_config.db_type == DatabaseType::Sqlite
-        && !db::sqlite_worker::sqlite_ssh_worker_requested(&runtime_config)
+        && !db::sqlite_worker::sqlite_remote_worker_requested(&runtime_config)
     {
         db::sqlite::validate_persistent_attachments(
             &runtime_config.host,
@@ -2195,6 +2304,27 @@ pub async fn refresh_connections(state: State<'_, Arc<AppState>>) -> Result<(), 
 #[tauri::command]
 pub async fn check_connection_health(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
     state.check_connection_health(&connection_id).await
+}
+
+/// Warm the driver and connection pool for a connection a tab is opening, so the
+/// first Run does not pay pool creation, tunnel setup, or external-driver (JDBC
+/// agent) startup while the user waits. Never removes an existing pool.
+#[tauri::command]
+pub async fn prewarm_connection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+    catalog: Option<String>,
+    client_session_id: Option<String>,
+) -> Result<(), String> {
+    state
+        .prewarm_connection_pool(
+            &connection_id,
+            database.as_deref().filter(|value| !value.is_empty()),
+            catalog.as_deref().filter(|value| !value.is_empty()),
+            client_session_id.as_deref().filter(|value| !value.is_empty()),
+        )
+        .await
 }
 
 #[tauri::command]

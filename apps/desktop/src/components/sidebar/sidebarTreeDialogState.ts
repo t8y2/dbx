@@ -1,10 +1,11 @@
 import { ref, shallowRef } from "vue";
-import type { TreeNode } from "@/types/database";
+import type { DatabaseType, TreeNode } from "@/types/database";
 import type { PasteTableMode } from "@/lib/table/tableClipboard";
 import { fallbackCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
 import type { AuthorizationPlan, AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
 import type { MongoCreateIndexForm, MongoIndexRow } from "@/lib/sidebar/mongoCollectionMutation";
+import type { TableVGroupScope } from "@/lib/table/tableVGroup";
 
 export type DuplicateStructureSource = TreeNode & { connectionId: string; database: string };
 type ConnectionDeleteTarget = TreeNode & { connectionId: string };
@@ -20,6 +21,15 @@ export const sidebarFormTarget = shallowRef<TreeNode | null>(null);
 export const connectionDeleteTargetSnapshot = ref<ConnectionDeleteTarget[]>([]);
 export const connectionGroupDeleteTargetSnapshot = ref<ConnectionGroupDeleteTarget[]>([]);
 export const deleteConnectionsWithGroup = ref(false);
+export const showTableVGroupDialog = ref(false);
+export const tableVGroupName = ref("");
+/** Scope snapshot + creation payload for the table vgroup naming dialog. */
+export const tableVGroupDialogScope = shallowRef<TreeNode | null>(null);
+export const tableVGroupDialogParentGroupId = ref<string | null>(null);
+export const tableVGroupDialogTableNames = ref<string[]>([]);
+export const showTableVGroupDeleteConfirm = ref(false);
+/** Scope + group snapshot for the table vgroup delete confirmation. */
+export const tableVGroupDeleteTarget = shallowRef<{ scope: TableVGroupScope; groupId: string; name: string } | null>(null);
 export const showDeleteConfirm = ref(false);
 export const showDropTableConfirm = ref(false);
 export const showDropTableChildObjectConfirm = ref(false);
@@ -29,6 +39,7 @@ export const showBatchTruncateConfirm = ref(false);
 export const showStructurePreviewDialog = ref(false);
 export const showStructureDocCopyDialog = ref(false);
 export const structurePreviewSql = ref("");
+export const structurePreviewDdlStorageType = ref<DatabaseType | undefined>(undefined);
 export const structurePreviewTitle = ref("");
 export const structurePreviewDefaultFileName = ref("structure.sql");
 export const structurePreviewError = ref("");
@@ -122,6 +133,11 @@ export const dropMongoIndexLoading = ref(false);
 export const showDropAllMongoIndexesConfirm = ref(false);
 export const dropAllMongoIndexesLoading = ref(false);
 export const showCreateMongoIndexDialog = ref(false);
+export const showCreateMeilisearchIndexDialog = ref(false);
+export const meilisearchCreateIndexUid = ref("");
+export const meilisearchCreateIndexPrimaryKey = ref("");
+export const meilisearchCreateIndexError = ref("");
+export const meilisearchCreateIndexLoading = ref(false);
 
 function emptyMongoCreateIndexForm(): MongoCreateIndexForm {
   return {
@@ -184,6 +200,9 @@ export const editDatabaseCharset = ref("utf8mb4");
 export const editDatabaseCollation = ref("utf8mb4_unicode_ci");
 export const editDatabaseCommentText = ref("");
 export const showEditSchemaCommentDialog = ref(false);
+export const showCompileErrorDialog = ref(false);
+export const compileErrorTitle = ref("");
+export const compileErrorMessage = ref("");
 export const schemaCommentText = ref("");
 export const schemaCommentLoading = ref(false);
 export const schemaCommentPreviewSql = ref("");
@@ -220,6 +239,7 @@ const openFlags = [
   showDropMongoIndexConfirm,
   showDropAllMongoIndexesConfirm,
   showCreateMongoIndexDialog,
+  showCreateMeilisearchIndexDialog,
   showMongoIndexManagerDialog,
   showClearElasticsearchIndexConfirm,
   showFlushRedisDbConfirm,
@@ -228,12 +248,17 @@ const openFlags = [
   showDropSchemaConfirm,
   showEditDatabasePropertiesDialog,
   showEditSchemaCommentDialog,
+  showCompileErrorDialog,
   showDeleteGroupConfirm,
   showMoveToNewGroupDialog,
+  showTableVGroupDialog,
+  showTableVGroupDeleteConfirm,
 ];
 
 export function resetSidebarTreeDialogState() {
   for (const flag of openFlags) flag.value = false;
+  compileErrorTitle.value = "";
+  compileErrorMessage.value = "";
   createDatabaseUsers.value = [];
   createDatabaseSelectedUsers.value = [];
   createDatabaseUsersLoading.value = false;
@@ -249,6 +274,10 @@ export function resetSidebarTreeDialogState() {
   cloneMongoCollectionError.value = "";
   cloneMongoCollectionLoading.value = false;
   resetMongoCreateIndexForm();
+  meilisearchCreateIndexUid.value = "";
+  meilisearchCreateIndexPrimaryKey.value = "";
+  meilisearchCreateIndexError.value = "";
+  meilisearchCreateIndexLoading.value = false;
   resetMongoIndexManager();
   vacuumTableExecuting.value = false;
   sidebarTreeDialogOwner.value = null;
@@ -259,4 +288,7 @@ export function resetSidebarTreeDialogState() {
   connectionDeleteTargetSnapshot.value = [];
   connectionGroupDeleteTargetSnapshot.value = [];
   deleteConnectionsWithGroup.value = false;
+  tableVGroupDialogScope.value = null;
+  tableVGroupDialogParentGroupId.value = null;
+  tableVGroupDialogTableNames.value = [];
 }

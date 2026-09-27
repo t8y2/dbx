@@ -1,3 +1,26 @@
+import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
+import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
+import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
+import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+
+export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
+  return post("/api/database-backups", command);
+}
+
+export async function databaseBackupBackground(enabled?: boolean): Promise<DatabaseBackupBackgroundStatus> {
+  if (enabled !== undefined) throw new Error("The server manages background backups");
+  return { enabled: true, platform: "server" };
+}
+
+export async function downloadDatabaseBackupFile(runId: string, index: number): Promise<void> {
+  const anchor = document.createElement("a");
+  anchor.href = apiUrl(`/api/database-backups/${encodeURIComponent(runId)}/files/${index}`);
+  anchor.click();
+}
+
+export function prepareDatabaseBackupRestore(runId: string, index: number): Promise<SqlFilePreview> {
+  return post(`/api/database-backups/${encodeURIComponent(runId)}/files/${index}/restore`, {});
+}
 import type {
   ConnectionConfig,
   ConnectionTestResult,
@@ -29,6 +52,7 @@ import type {
   PartitionInfo,
   SubpartitionInfo,
   ExtensionInfo,
+  EventTriggerInfo,
   FunctionInfo,
   SequenceInfo,
   RuleInfo,
@@ -42,6 +66,7 @@ import type {
   JdbcMavenBundleInfo,
   JdbcPluginStatus,
   SidebarLayout,
+  TableVGroupLayout,
   SavedSqlFile,
   SavedSqlFolder,
   SavedSqlLibrary,
@@ -51,14 +76,16 @@ import type {
 } from "@/types/database";
 import type { DetachedTabHandoff } from "@/lib/app/detachedTabHandoff";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
+import type { MongoBulkWriteResult } from "@/lib/mongo/mongoShellCommand";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
-import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
+import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchCreateIndexInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
 import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSqlPlan, SelectedSchemaDiffInput, GenerateSchemaSyncPlanOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
 import type { AiChatSelectionState, AiEffortCapability } from "@/types/ai";
+import type { SalesforceCurrentUser, SalesforceOAuthAuthorizeParams, SalesforceOAuthDevicePollResult, SalesforceOAuthDeviceStartResult, SalesforceOAuthRefreshResult, SalesforceOAuthToken } from "@/types/salesforce";
 import type {
   AgentDriverInfo,
   AiCompletionRequest,
@@ -69,6 +96,7 @@ import type {
   DriverStoreUsage,
   DriverRuntimeSummary,
   UpgradeAllAgentDriversResult,
+  AgentOfflineImportResult,
   AgentUpdateBlocker,
   AgentOfflineExportPreview,
   AgentOfflineExportResult,
@@ -155,17 +183,30 @@ import type {
   QuerySqlBuildResult,
   BuildExplainSqlOptions,
   ExplainSqlBuildResult,
+  PluginPlanCapabilities,
+  PluginPlanRequest,
+  PluginPlanResult,
   DroppedFilePreviewSqlOptions,
   MongoGridFsFileInfo,
   AppSupportInfo,
   PromptTemplate,
   SshPromptResolution,
   MeilisearchIndexOverview,
+  MeilisearchIndexSettings,
   ElasticsearchIndexMetadataKind,
   ElasticsearchDeleteByQueryResult,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
+import type { PluginTableMetadata, PluginTableMetadataRequest } from "@/types/pluginSchemaMetadata";
+import type { PluginDataGrant, PluginDataQueryRequest, PluginDataQueryResult } from "@/types/pluginData";
+import type { PluginToolPreview } from "@/types/pluginAiTools";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import type { MigrationPreflight, MigrationReport } from "./migration";
+export type { MigrationPreflight, MigrationReport } from "./migration";
+export const migrationStatus = (): Promise<MigrationPreflight> => get("/api/migration/status");
+export const migrationStart = (): Promise<MigrationReport> => post("/api/migration/start", {});
+export const migrationRetry = (): Promise<MigrationReport> => post("/api/migration/retry", {});
+export const migrationCleanupBackups = (): Promise<void> => post("/api/migration/cleanup-backups", {});
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
   DataGridColumnDistinctValuesSqlOptions,
@@ -181,7 +222,7 @@ import type {
 } from "@/lib/dataGrid/dataGridSql";
 import type { DmlChangePreviewSqlOptions, DmlChangePreviewSqlResult } from "@/lib/sql/dmlChangePreview";
 import type { DataGridExtractRequest, DataGridExtractResult } from "@/lib/dataGrid/dataGridCopyExtractor";
-import type { BuildTableOwnerChangeSqlOptions, BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
+import type { BuildCreatePartitionedTableSqlOptions, BuildTableOwnerChangeSqlOptions, BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TablePartitionSqlOptions, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput } from "@/lib/table/objectSourceEditor";
@@ -200,7 +241,7 @@ import type {
   TableAdminSqlOptions,
   VacuumTableSqlOptions,
 } from "@/lib/database/dbAdminSql";
-import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
+import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions } from "@/lib/export/databaseExport";
 import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import { apiUrl, apiWebSocketUrl } from "@/lib/common/webPath";
@@ -275,6 +316,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
+import { uuid } from "@/lib/common/utils";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -294,6 +336,8 @@ const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   driver_store_dir: null,
   plugin_store_dir: null,
   agent_store_dir: null,
+  custom_ai_skill_root_enabled: false,
+  custom_ai_skill_root: null,
   sidebar_table_page_size: 1000,
 };
 
@@ -304,6 +348,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) throw await backendResponseError(res);
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -422,6 +467,39 @@ export async function testConnectionWithInfo(config: ConnectionConfig): Promise<
   return normalizeConnectionTestResult(await response.json(), config);
 }
 
+// ---------------------------------------------------------------------------
+// Salesforce OAuth (browser redirect + device-code flows)
+// ---------------------------------------------------------------------------
+// Web mode only supports the device-code flow end-to-end; the browser-redirect
+// flow is gated by the desktop shell (it binds a localhost callback server).
+// The HTTP endpoints mirror the Tauri commands one-for-one so `api.ts` can
+// forward both transports through the same surface.
+
+export async function salesforceOauthBrowserAuthorize(params: SalesforceOAuthAuthorizeParams): Promise<SalesforceOAuthToken> {
+  return post("/api/connection/salesforce-oauth-browser-authorize", { params });
+}
+
+export async function salesforceOauthDeviceStart(params: SalesforceOAuthAuthorizeParams): Promise<SalesforceOAuthDeviceStartResult> {
+  return post("/api/connection/salesforce-oauth-device-start", { params });
+}
+
+export async function salesforceOauthDevicePoll(params: SalesforceOAuthAuthorizeParams, deviceCode: string, intervalSecs: number): Promise<SalesforceOAuthDevicePollResult> {
+  return post("/api/connection/salesforce-oauth-device-poll", { params, deviceCode, intervalSecs });
+}
+
+export async function salesforceOauthRefresh(params: SalesforceOAuthAuthorizeParams, refreshToken: string): Promise<SalesforceOAuthRefreshResult> {
+  return post("/api/connection/salesforce-oauth-refresh", { params, refreshToken });
+}
+
+export async function salesforceOauthPasswordLogin(params: SalesforceOAuthAuthorizeParams, username: string, password: string): Promise<SalesforceOAuthToken> {
+  return post("/api/connection/salesforce-oauth-password-login", { params, username, password });
+}
+
+/** Identity of the user an established Salesforce connection is authenticated as (cached backend-side). */
+export async function salesforceCurrentUser(connectionId: string): Promise<SalesforceCurrentUser> {
+  return get(`/api/salesforce/current-user?${qs({ connection_id: connectionId })}`);
+}
+
 export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
   return post("/api/connection/connect", { config, clientAttempt });
 }
@@ -476,6 +554,10 @@ export async function checkConnectionHealth(connectionId: string): Promise<void>
   return post("/api/connection/check-health", { connectionId });
 }
 
+export async function prewarmConnection(connectionId: string, database?: string, catalog?: string, clientSessionId?: string): Promise<void> {
+  return post("/api/connection/prewarm", { connectionId, database, catalog, clientSessionId });
+}
+
 export async function connectionIdentifierQuote(connectionId: string, database?: string): Promise<string | undefined> {
   const quote = await post<string | null>("/api/connection/identifier-quote", {
     connectionId,
@@ -488,7 +570,12 @@ export async function closeDatabaseConnection(connectionId: string, database: st
   return post("/api/connection/close-database", { connectionId, database });
 }
 
-export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
+export async function saveConnections(configs: ConnectionConfig[], removedIds: string[] = []): Promise<void> {
+  // Saving upserts; ids this client deleted are sent explicitly so that a
+  // stale local list can never drop connections another client created.
+  if (removedIds.length) {
+    return post("/api/connection/save", { configs, removedIds });
+  }
   return post("/api/connection/save", { configs });
 }
 
@@ -861,7 +948,7 @@ export async function invalidateAgentRegistryCache(): Promise<void> {
   await post("/api/agents/invalidate-registry-cache", {});
 }
 
-export async function importAgentsFromZip(fileOrPath: string | File, operationId?: string): Promise<number> {
+export async function importAgentsFromZip(fileOrPath: string | File, operationId?: string): Promise<AgentOfflineImportResult> {
   if (typeof fileOrPath === "string") {
     throw new Error("Offline package import in web mode requires a File object, not a file path");
   }
@@ -873,8 +960,8 @@ export async function importAgentsFromZip(fileOrPath: string | File, operationId
     body: formData,
   });
   if (!res.ok) throw await backendResponseError(res);
-  const result: { count: number } = await res.json();
-  return result.count;
+  const result: AgentOfflineImportResult = await res.json();
+  return { count: result.count, jreCount: result.jreCount ?? 0, failures: result.failures ?? [] };
 }
 
 export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPreview> {
@@ -883,6 +970,14 @@ export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPre
 
 export async function exportAgentsOffline(_path: string, _driverKeys: string[]): Promise<AgentOfflineExportResult> {
   throw new Error("Offline Agent package export is only available in the desktop app.");
+}
+
+export async function listUserSkills(_settings: UserSkillRootSettings): Promise<UserSkillsListResult> {
+  throw new Error("AI skills are only available in the desktop app.");
+}
+
+export async function readUserSkills(_ids: string[], _settings: UserSkillRootSettings): Promise<UserSkillsReadResult> {
+  throw new Error("AI skills are only available in the desktop app.");
 }
 
 export async function importAgentDriver(dbType: string, pathOrFile: string | File): Promise<void> {
@@ -1115,6 +1210,10 @@ export async function getColumns(connectionId: string, database: string, schema:
   return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog, client_session_id: clientSessionId })}`);
 }
 
+export async function getPluginTableMetadata(request: PluginTableMetadataRequest): Promise<PluginTableMetadata> {
+  return post("/api/plugin/table-metadata", request);
+}
+
 export async function getSqlServerColumnMetadata(connectionId: string, database: string, schema: string, table: string): Promise<SqlServerColumnMetadata[]> {
   return get(`/api/schema/sqlserver/column-metadata?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
@@ -1168,6 +1267,10 @@ export interface TablePartitionStatus {
 
 export async function getTablePartitionStatus(connectionId: string, database: string, schema: string, table: string): Promise<TablePartitionStatus> {
   return get(`/api/schema/table-partition-status?${qs({ connection_id: connectionId, database, schema, table })}`);
+}
+
+export async function getTablePartitioning(connectionId: string, database: string, schema: string, table: string): Promise<import("@/types/database").PgTablePartitioning> {
+  return get(`/api/schema/table-partitioning?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
 export async function listInvalidIndexes(connectionId: string, database: string, schema: string, table: string): Promise<string[]> {
@@ -1238,6 +1341,10 @@ export async function listAvailableExtensions(connectionId: string, database: st
   return get(`/api/schema/available-extensions?${qs({ connection_id: connectionId, database })}`);
 }
 
+export async function listEventTriggers(connectionId: string, database: string): Promise<EventTriggerInfo[]> {
+  return get(`/api/schema/event-triggers?${qs({ connection_id: connectionId, database })}`);
+}
+
 export async function listDialectDataTypes(dialectName: string): Promise<string[]> {
   return get(`/api/dialect/data-types?${qs({ dialect_name: dialectName })}`);
 }
@@ -1248,6 +1355,11 @@ export async function listDialectDataTypes(dialectName: string): Promise<string[
 
 export async function collectDocsSnapshot(connectionId: string, database: string, schemas: string[], tables: string[], projectName?: string): Promise<SchemaSnapshot> {
   return post("/api/docs/snapshot", { connectionId, database, schemas, tables, projectName });
+}
+
+// HTTP snapshot transport is request/response; its progress remains indeterminate.
+export async function collectDocsSnapshotForExport(connectionId: string, database: string, schemas: string[], tables: string[], _onProgress: (progress: import("./tauri").DocsCollectProgress) => void): Promise<SchemaSnapshot> {
+  return post("/api/docs/snapshot", { connectionId, database, schemas, tables, projectName: database, maxConcurrentTables: 2 });
 }
 
 export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
@@ -1358,6 +1470,10 @@ export async function executeMulti(
     useTransaction?: boolean;
     continueOnError?: boolean;
     executionMode?: "simple";
+    /** MySQL auto-commit tabs: keep a transaction the user opened explicitly
+     *  (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
+     *  ROLLBACK instead of rolling it back when the batch ends. */
+    preserveExplicitTransaction?: boolean;
   },
 ): Promise<QueryResult[]> {
   return postQueryWithDiagnostics(
@@ -1406,10 +1522,11 @@ export async function executeMultiWithProgress(
     useTransaction?: boolean;
     continueOnError?: boolean;
     executionMode?: "simple";
+    preserveExplicitTransaction?: boolean;
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
-  const executionId = options?.executionId ?? crypto.randomUUID();
+  const executionId = options?.executionId ?? uuid();
   const { executionId: _executionId, ...executeOptions } = options ?? {};
   const results = await executeMulti(connectionId, database, sql, schema, executionId, executeOptions);
   const total = results.length;
@@ -1449,13 +1566,14 @@ export async function closeClientConnectionSession(connectionId: string, databas
   });
 }
 
-export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number): Promise<QueryResult> {
+export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number, useTransaction?: boolean): Promise<QueryResult> {
   return post("/api/query/execute-batch", {
     connectionId,
     database,
     statements,
     schema,
     timeoutSecs,
+    useTransaction,
   });
 }
 
@@ -1559,6 +1677,35 @@ export async function getExplainInfo(connectionId: string, database: string | un
     sql,
     mode,
   });
+}
+
+/** Plugin Host API: what the host and this connection can plan. Never connects. */
+export async function getPluginPlanCapabilities(connectionId: string): Promise<PluginPlanCapabilities> {
+  return post<PluginPlanCapabilities>("/api/query/plugin-plan-capabilities", { connectionId });
+}
+
+/**
+ * Plugin Host API: acquires the estimated plan for caller-supplied SQL. The
+ * backend generates and owns the EXPLAIN statement; the request cannot carry one.
+ */
+export async function getPluginEstimatedPlan(request: PluginPlanRequest): Promise<PluginPlanResult> {
+  return post<PluginPlanResult>("/api/query/plugin-estimated-plan", request);
+}
+
+/**
+ * Plugin Host API (`host.data:read`): one read-only statement on a connection
+ * the user granted to `pluginId`. The backend enforces permission, grant, and gate.
+ */
+export async function queryPluginData(pluginId: string, request: PluginDataQueryRequest): Promise<PluginDataQueryResult> {
+  return post<PluginDataQueryResult>("/api/plugin/data/query", { pluginId, request });
+}
+
+export async function getPluginDataGrants(pluginId: string): Promise<PluginDataGrant[]> {
+  return post<PluginDataGrant[]>("/api/plugin/data/grants", { pluginId });
+}
+
+export async function setPluginDataGrant(pluginId: string, connectionId: string, granted: boolean): Promise<PluginDataGrant[]> {
+  return post<PluginDataGrant[]>("/api/plugin/data/grant", { pluginId, connectionId, granted });
 }
 
 export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlOptions): Promise<string | undefined> {
@@ -1690,6 +1837,14 @@ export async function buildTableOwnerChangeSql(options: BuildTableOwnerChangeSql
   return post("/api/query/build-table-owner-change-sql", { options });
 }
 
+export async function buildTablePartitionOperationSql(options: TablePartitionSqlOptions): Promise<TableStructureChangeSql> {
+  return post("/api/query/build-table-partition-operation-sql", { options });
+}
+
+export async function buildCreatePartitionedTableSql(options: BuildCreatePartitionedTableSqlOptions): Promise<TableStructureChangeSql> {
+  return post("/api/query/build-create-partitioned-table-sql", { options: options.options, partitioning: options.partitioning });
+}
+
 export async function previewSqliteTableStructureChange(connectionId: string, database: string, options: BuildTableStructureChangeSqlOptions): Promise<SqliteTableStructureChangePreview> {
   return post("/api/query/preview-sqlite-table-structure-change", {
     connectionId,
@@ -1778,7 +1933,7 @@ export async function buildExportInsertStatements(options: BuildExportInsertStat
   return post("/api/query/build-export-insert-statements", { options });
 }
 
-export async function buildExportSqlInsert(options: BuildExportInsertStatementsOptions): Promise<string> {
+export async function buildExportSqlInsert(options: BuildExportSqlInsertOptions): Promise<string> {
   return post("/api/query/build-export-sql-insert", { options });
 }
 
@@ -1852,6 +2007,25 @@ export async function aiStream(sessionId: string, request: AiCompletionRequest, 
 
 export async function aiCancelStream(sessionId: string): Promise<boolean> {
   return post("/api/ai/cancel-stream", { sessionId });
+}
+
+/** Answers a pending plugin tool approval of the agent run `sessionId`; false when nothing was waiting. */
+export async function resolveAiToolApproval(sessionId: string, approvalId: string, approved: boolean): Promise<boolean> {
+  return post("/api/ai/tool-approval", { sessionId, approvalId, approved });
+}
+
+/** Plugin ids whose MCP tools the built-in AI agent may call. */
+export async function getAiPluginToolPlugins(): Promise<string[]> {
+  return get("/api/ai/plugin-tools/plugins");
+}
+
+export async function setAiPluginToolPluginEnabled(pluginId: string, enabled: boolean): Promise<string[]> {
+  return post("/api/ai/plugin-tools/plugins", { pluginId, enabled });
+}
+
+/** Tools the built-in AI would get from a plugin (may start its sidecar). */
+export async function previewPluginAiTools(pluginId: string): Promise<PluginToolPreview> {
+  return post("/api/ai/plugin-tools/preview", { pluginId });
 }
 
 export async function aiTestConnection(config: AiConfig): Promise<AiTestConnectionResult> {
@@ -2048,6 +2222,22 @@ export async function loadWebMcpHttpStatus(): Promise<import("@/lib/backend/taur
   return get("/api/app-settings/mcp-http-status");
 }
 
+export async function saveWebMcpHttpSettings(settings: import("@/lib/backend/tauri").WebMcpHttpSettings): Promise<import("@/lib/backend/tauri").WebMcpHttpStatus> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-http"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "X-DBX-MCP-Settings": "1" },
+    body: JSON.stringify(settings),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
+export async function rotateWebMcpToken(): Promise<import("@/lib/backend/tauri").WebMcpHttpStatus> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-http/rotate-token"), { method: "POST", headers: { "X-DBX-MCP-Settings": "1" } });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
 export async function loadMaxAgentTurns(): Promise<number> {
   return get("/api/app-settings/max-agent-turns");
 }
@@ -2070,6 +2260,32 @@ export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ maxAgentTurns }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+}
+
+export async function loadHistoryRetentionLimit(): Promise<number> {
+  return get("/api/app-settings/history-retention-limit");
+}
+
+export async function saveHistoryRetentionLimit(limit: number): Promise<void> {
+  const res = await fetch(apiUrl("/api/app-settings/history-retention-limit"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+}
+
+export async function loadMcpHistoryRetentionLimit(): Promise<number> {
+  return get("/api/app-settings/mcp-history-retention-limit");
+}
+
+export async function saveMcpHistoryRetentionLimit(limit: number): Promise<void> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-history-retention-limit"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
   });
   if (!res.ok) throw await backendResponseError(res);
 }
@@ -2246,10 +2462,11 @@ export interface WebDavSyncSecretsStatus {
   hasSavedPassphrase: boolean;
 }
 
-export type SnippetProvider = "github" | "gitee";
+export type SnippetProvider = "github" | "gitee" | "gitlab";
 
 export interface SnippetSyncConfig {
   provider: SnippetProvider;
+  instanceUrl?: string;
   token?: string;
   snippetId?: string;
   replaceLegacySnippet?: boolean;
@@ -2311,16 +2528,17 @@ export async function forgetWebdavSyncSecretsPassphrase(): Promise<void> {
   return post("/api/cloud-sync/webdav/forget-sync-secrets-passphrase", {});
 }
 
-export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string): Promise<WebDavSyncSummary> {
+export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false): Promise<WebDavSyncSummary> {
   return post("/api/cloud-sync/webdav/upload", {
     config,
     editorSettings,
     secretsPassphrase,
+    includeSecrets,
   });
 }
 
-export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string): Promise<WebDavDownloadResult> {
-  return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase });
+export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true): Promise<WebDavDownloadResult> {
+  return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase, restoreSecrets });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {
@@ -2339,12 +2557,12 @@ export async function forgetSnippetSavedToken(config: SnippetSyncConfig): Promis
   await post("/api/cloud-sync/snippet/forget-token", { config });
 }
 
-export async function snippetSyncSettings(provider: SnippetProvider): Promise<SnippetSyncSettings> {
-  return post("/api/cloud-sync/snippet/settings", { provider });
+export async function snippetSyncSettings(provider: SnippetProvider, instanceUrl?: string): Promise<SnippetSyncSettings> {
+  return post("/api/cloud-sync/snippet/settings", { provider, instanceUrl });
 }
 
-export async function saveSnippetSyncId(provider: SnippetProvider, snippetId?: string): Promise<void> {
-  await post("/api/cloud-sync/snippet/save-id", { provider, snippetId });
+export async function saveSnippetSyncId(provider: SnippetProvider, snippetId?: string, instanceUrl?: string): Promise<void> {
+  await post("/api/cloud-sync/snippet/save-id", { provider, snippetId, instanceUrl });
 }
 
 export async function retrySnippetLegacyCleanup(config: SnippetSyncConfig): Promise<SnippetSyncSettings> {
@@ -2451,6 +2669,10 @@ export async function previewSqlFile(fileOrPath: string | File): Promise<SqlFile
   return res.json();
 }
 
+export async function releaseSqlFilePreview(cleanupToken: string): Promise<void> {
+  return post("/api/sql-file/preview/release", { cleanupToken });
+}
+
 export async function executeSqlFile(request: SqlFileRequest): Promise<void> {
   return post("/api/sql-file/execute", { request });
 }
@@ -2488,6 +2710,10 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
 }
 
 export async function pendingOpenAiConfigLinks(): Promise<string[]> {
+  return [];
+}
+
+export async function pendingOpenPluginInstallLinks(): Promise<string[]> {
   return [];
 }
 
@@ -2534,11 +2760,52 @@ export async function deleteSqlFileInFolder(_rootPath: string, _filePath: string
   throw new Error("Managing SQL files in folders is only available in the desktop app");
 }
 
+export interface GlobalSearchRequest {
+  roots: string[];
+  query: string;
+  extensions?: string[];
+  caseSensitive?: boolean;
+  useRegex?: boolean;
+  wholeWord?: boolean;
+  limit?: number;
+}
+
+export interface GlobalSearchMatch {
+  path: string;
+  fileName: string;
+  line: number;
+  column: number;
+  matchText: string;
+  lineText: string;
+}
+
+export async function globalSearch(_request: GlobalSearchRequest): Promise<GlobalSearchMatch[]> {
+  throw new Error("Global content search is only available in the desktop app");
+}
+
+export interface GlobalSearchSettings {
+  roots: string[];
+  extensions: string[];
+}
+
+export async function loadGlobalSearchSettings(): Promise<GlobalSearchSettings | null> {
+  try {
+    const raw = globalThis.localStorage?.getItem("dbx-global-search-settings-disk");
+    return raw ? (JSON.parse(raw) as GlobalSearchSettings) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveGlobalSearchSettings(settings: GlobalSearchSettings): Promise<void> {
+  globalThis.localStorage?.setItem("dbx-global-search-settings-disk", JSON.stringify(settings));
+}
+
 // ---------------------------------------------------------------------------
 // Data Transfer
 // ---------------------------------------------------------------------------
 
-export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {
+export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
   // 1. POST to start the transfer
   const res = await fetch(apiUrl("/api/transfer/start"), {
     method: "POST",
@@ -2546,6 +2813,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
     body: JSON.stringify({ request }),
   });
   if (!res.ok) throw await backendResponseError(res);
+  onStarted?.();
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
@@ -2667,6 +2935,143 @@ export async function cancelTableImport(importId: string): Promise<boolean> {
 export async function releaseTableImportSource(sourceRef: string): Promise<boolean> {
   const result = await post<{ released: boolean }>("/api/import/source/release", { sourceRef });
   return result.released;
+}
+
+export function inspectMongodbDatabaseDump(connectionId: string, database: string): Promise<MongoDumpCatalog> {
+  return post("/api/mongo/dump/catalog", { connectionId, database });
+}
+async function checkMongoUploadSize(files: File[]) {
+  const limit = await get<number>("/api/mongo/dump/upload-limit");
+  const size = files.reduce((total, file) => total + file.size, 0);
+  if (size > limit) throw new Error(`MongoDB upload: ${(size / 1024 ** 3).toFixed(2)} GiB exceeds ${(limit / 1024 ** 3).toFixed(2)} GiB (DBX_MAX_UPLOAD_MB)`);
+}
+
+function uploadMongoForm(url: string, form: FormData, options?: MongoSourceReadOptions): Promise<MongoRestoreSourcePreview> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    const cleanup = () => options?.signal?.removeEventListener("abort", abort);
+    if (options?.signal?.aborted) {
+      reject(new DOMException("Cancelled", "AbortError"));
+      return;
+    }
+    xhr.open("POST", apiUrl(url));
+    xhr.upload.onprogress = (event) => options?.onUploadProgress?.(event.loaded, event.lengthComputable ? event.total : 0);
+    xhr.onload = async () => {
+      cleanup();
+      try {
+        if (xhr.status < 200 || xhr.status >= 300) throw await backendResponseError(new Response(xhr.responseText, { status: xhr.status }));
+        resolve(JSON.parse(xhr.responseText));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error("MongoDB upload connection failed"));
+    };
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException("Cancelled", "AbortError"));
+    };
+    options?.signal?.addEventListener("abort", abort, { once: true });
+    xhr.send(form);
+  });
+}
+
+export async function prepareMongodbRestoreSource(source: MongoDumpSourceInput, format: MongoDumpFormat, gzip: boolean, options?: MongoSourceReadOptions): Promise<MongoRestoreSourcePreview> {
+  if (typeof source === "string") throw new Error("Web restores require uploaded files");
+  const files = Array.isArray(source) ? source : [source];
+  const form = new FormData();
+  form.append("format", format);
+  form.append("gzip", String(gzip));
+  if (format === "directory") {
+    form.append("manifest", JSON.stringify(files.map((file) => ({ path: file.webkitRelativePath || file.name, sizeBytes: file.size }))));
+    for (const file of files) if (/\.metadata\.json(?:\.gz)?$/.test(file.name)) form.append("file", file, file.webkitRelativePath || file.name);
+  } else {
+    await checkMongoUploadSize(files);
+    for (const file of files) form.append("file", file, file.name);
+    return uploadMongoForm("/api/mongo/dump/source", form, options);
+  }
+  const response = await fetch(apiUrl("/api/mongo/dump/source"), { method: "POST", body: form, signal: options?.signal });
+  if (!response.ok) throw await backendResponseError(response);
+  return response.json();
+}
+export async function releaseMongodbRestoreSource(sourceRef: string): Promise<boolean> {
+  return (await post<{ released: boolean }>("/api/mongo/dump/source/release", { sourceRef })).released;
+}
+async function runMongodbDatabaseTask(mode: "export" | "restore", request: MongoDatabaseDumpRequest | MongoDatabaseRestoreRequest, onProgress: (progress: MongoDatabaseDumpProgress) => void): Promise<MongoDatabaseDumpProgress> {
+  await post(`/api/mongo/dump/${mode}`, { request });
+  return new Promise((resolve, reject) => {
+    const events = new EventSource(apiUrl(`/api/mongo/dump/progress/${request.taskId}`));
+    events.onmessage = (event) => {
+      const progress: MongoDatabaseDumpProgress = JSON.parse(event.data);
+      onProgress(progress);
+      if (progress.status === "running") return;
+      events.close();
+      if (progress.status !== "done") {
+        reject(new Error(progress.errorMessage || "MongoDB database task failed"));
+        return;
+      }
+      if (mode === "export") {
+        const anchor = document.createElement("a");
+        anchor.href = apiUrl(`/api/mongo/export/download/${request.taskId}`);
+        anchor.click();
+      }
+      resolve(progress);
+    };
+    events.onerror = () => {
+      events.close();
+      reject(new Error("MongoDB database progress connection failed"));
+    };
+  });
+}
+export function dumpMongodbDatabase(request: MongoDatabaseDumpRequest, onProgress: (progress: MongoDatabaseDumpProgress) => void) {
+  return runMongodbDatabaseTask("export", request, onProgress);
+}
+export async function restoreMongodbDatabase(request: MongoDatabaseRestoreRequest, onProgress: (progress: MongoDatabaseDumpProgress) => void, upload?: MongoRestoreUpload) {
+  let acquired: string | undefined;
+  try {
+    if (upload) {
+      await checkMongoUploadSize(upload.files);
+      const form = new FormData();
+      form.append("format", "directory");
+      form.append("gzip", String(upload.gzip));
+      form.append("request", JSON.stringify(request));
+      for (const file of upload.files) form.append("file", file, file.webkitRelativePath || file.name);
+      const started = Date.now();
+      const preview = await uploadMongoForm("/api/mongo/dump/source/upload", form, {
+        signal: upload.signal,
+        onUploadProgress: (loaded, total) =>
+          onProgress({
+            taskId: request.taskId,
+            status: "running",
+            phase: "uploading",
+            collection: null,
+            collectionsDone: 0,
+            collectionsTotal: request.collections?.length ?? 0,
+            documentsRead: 0,
+            documentsWritten: 0,
+            documentsFailed: 0,
+            indexesCreated: 0,
+            elapsedMs: Date.now() - started,
+            errorMessage: null,
+            filePath: null,
+            bytesProcessed: loaded,
+            bytesTotal: total,
+          }),
+      });
+      acquired = preview.sourceRef;
+      if (upload.signal?.aborted) throw new DOMException("Cancelled", "AbortError");
+      request = { ...request, sourceRef: acquired };
+    }
+    return await runMongodbDatabaseTask("restore", request, onProgress);
+  } finally {
+    if (acquired) void releaseMongodbRestoreSource(acquired).catch(() => {});
+  }
+}
+export async function cancelMongodbDatabaseDump(taskId: string): Promise<boolean> {
+  return (await post<{ cancelled: boolean }>("/api/mongo/dump/cancel", { taskId })).cancelled;
 }
 
 export async function previewMongodbImportFile(fileOrPath: string | File | MongoImportPreviewRequest, options: Partial<MongoImportPreviewRequest> = {}): Promise<MongoImportPreview> {
@@ -3066,6 +3471,11 @@ export async function exportQueryResultMarkdown(filePath: string, columns: strin
   downloadTextFile(filePath, "export.md", result.content, "text/markdown;charset=utf-8");
 }
 
+export async function exportQueryResultHtml(filePath: string, title: string | undefined, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+  const result = await post<{ content: string }>("/api/export/query-result-html", { title, columns, rows });
+  downloadTextFile(filePath, "export.html", result.content, "text/html;charset=utf-8");
+}
+
 // ---------------------------------------------------------------------------
 // Redis
 // ---------------------------------------------------------------------------
@@ -3283,6 +3693,10 @@ export async function redisSetKeysExpireAt(connectionId: string, db: number, key
 
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
   return post("/api/redis/delete-keys", { connectionId, db, keyRaws });
+}
+
+export async function redisDeleteKeysByPattern(connectionId: string, db: number, pattern: string): Promise<number> {
+  return post("/api/redis/delete-keys-by-pattern", { connectionId, db, pattern });
 }
 
 export async function redisFlushDb(connectionId: string, db: number): Promise<void> {
@@ -4300,7 +4714,7 @@ export async function elasticsearchCountDocuments(connectionId: string, index: s
   });
 }
 
-export async function elasticsearchGetIndexMetadata(connectionId: string, index: string, kind: ElasticsearchIndexMetadataKind): Promise<Record<string, any>> {
+export async function elasticsearchGetIndexMetadata(connectionId: string, index: string, kind: ElasticsearchIndexMetadataKind): Promise<Record<string, unknown>> {
   return post("/api/document-store/elasticsearch/index-metadata", {
     connectionId,
     index,
@@ -4525,6 +4939,43 @@ export async function documentUpdateDocument(connectionId: string, database: str
   });
 }
 
+export async function mongoExplainFind(connectionId: string, database: string, collection: string, options: { skip: number; limit: number; filter?: string; projection?: string; sort?: string; collation?: string; verbosity?: string }, executionId?: string): Promise<unknown> {
+  return post("/api/mongo/explain-find", {
+    connectionId,
+    database,
+    collection,
+    skip: options.skip,
+    limit: options.limit,
+    filter: options.filter,
+    projection: options.projection,
+    sort: options.sort,
+    collation: options.collation,
+    verbosity: options.verbosity,
+    executionId,
+  });
+}
+
+export async function mongoBulkWrite(connectionId: string, database: string, collection: string, operationsJson: string, optionsJson?: string): Promise<MongoBulkWriteResult> {
+  return post("/api/mongo/bulk-write", {
+    connectionId,
+    database,
+    collection,
+    operationsJson,
+    optionsJson,
+  });
+}
+
+export async function mongoReplaceDocument(connectionId: string, database: string, collection: string, filterJson: string, replacementJson: string, optionsJson?: string): Promise<{ affected_rows: number }> {
+  return post("/api/mongo/replace-document", {
+    connectionId,
+    database,
+    collection,
+    filterJson,
+    replacementJson,
+    optionsJson,
+  });
+}
+
 export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean, optionsJson?: string): Promise<{ affected_rows: number }> {
   return post("/api/mongo/update-documents", {
     connectionId,
@@ -4603,14 +5054,14 @@ export async function meilisearchGetDocument(connectionId: string, index: string
   });
 }
 
-export async function meilisearchGetIndexSettings(connectionId: string, index: string): Promise<Record<string, any>> {
+export async function meilisearchGetIndexSettings(connectionId: string, index: string): Promise<MeilisearchIndexSettings> {
   return post("/api/document-store/meilisearch/settings/get", {
     connectionId,
     index,
   });
 }
 
-export async function meilisearchUpdateIndexSettings(connectionId: string, index: string, settings: Record<string, any>): Promise<void> {
+export async function meilisearchUpdateIndexSettings(connectionId: string, index: string, settings: Record<string, unknown>): Promise<void> {
   return post("/api/document-store/meilisearch/settings/update", {
     connectionId,
     index,
@@ -4618,7 +5069,7 @@ export async function meilisearchUpdateIndexSettings(connectionId: string, index
   });
 }
 
-export async function meilisearchGetIndexStats(connectionId: string, index: string): Promise<{ numberOfDocuments: number; isIndexing: boolean; fieldDistribution: Record<string, number> } & Record<string, any>> {
+export async function meilisearchGetIndexStats(connectionId: string, index: string): Promise<{ numberOfDocuments: number; isIndexing: boolean; fieldDistribution: Record<string, number> } & Record<string, unknown>> {
   return post("/api/document-store/meilisearch/stats", {
     connectionId,
     index,
@@ -4630,6 +5081,10 @@ export async function meilisearchGetIndexOverview(connectionId: string, index: s
     connectionId,
     index,
   });
+}
+
+export async function meilisearchCreateIndex(connectionId: string, input: MeilisearchCreateIndexInput): Promise<void> {
+  return post("/api/document-store/meilisearch/index/create", { connectionId, input });
 }
 
 export async function meilisearchDeleteIndex(connectionId: string, index: string): Promise<void> {
@@ -4756,6 +5211,14 @@ export async function clearHistory(): Promise<void> {
   return del("/api/history");
 }
 
+export async function clearHistoryBySource(source: string): Promise<void> {
+  return del(`/api/history?source=${encodeURIComponent(source)}`);
+}
+
+export async function cleanupMcpHistoryRetention(): Promise<number> {
+  return post("/api/app-settings/mcp-history-retention-cleanup", {});
+}
+
 export async function clearRedisHistory(): Promise<void> {
   const entries = await loadRedisHistory(1000, 0);
   await Promise.all(entries.map((e) => deleteHistoryEntry(e.id)));
@@ -4785,7 +5248,9 @@ export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/c
 export async function checkMcpServerStatus(): Promise<import("@/lib/backend/tauri").McpServerStatus> {
   return {
     installed: false,
+    installation_source: null,
     npm_available: false,
+    npm_installed: false,
     node_path: null,
     node_version: null,
     current_version: null,
@@ -4806,8 +5271,16 @@ export async function installMcpServer(): Promise<string> {
   throw new Error("MCP Server installation is only available in the desktop app.");
 }
 
+export async function installNativeMcpServer(): Promise<string> {
+  throw new Error("Native MCP Server installation is only available in the desktop app.");
+}
+
 export async function uninstallMcpServer(): Promise<string> {
   throw new Error("MCP Server uninstallation is only available in the desktop app.");
+}
+
+export async function uninstallNpmMcpServer(): Promise<string> {
+  throw new Error("MCP Server npm fallback removal is only available in the desktop app.");
 }
 
 export async function getSystemProxyUrl(): Promise<string | null> {
@@ -4859,9 +5332,66 @@ export async function loadSidebarLayout(): Promise<SidebarLayout | null> {
   return get("/api/layout/sidebar");
 }
 
+export async function saveTableVGroups(scopeKey: string, layout: TableVGroupLayout): Promise<void> {
+  return post("/api/layout/table-vgroups", { scopeKey, layout });
+}
+
+export async function loadTableVGroups(): Promise<Record<string, TableVGroupLayout>> {
+  return get("/api/layout/table-vgroups");
+}
+
+export async function deleteTableVGroupsForConnection(connectionId: string): Promise<void> {
+  return del(`/api/layout/table-vgroups/connection/${encodeURIComponent(connectionId)}`);
+}
+
 export async function refreshConnections(): Promise<void> {
   // Web mode doesn't maintain persistent connection pools - no-op
 }
 
 export * from "@/lib/backend/mq-http";
 export * from "@/lib/backend/mqtt-http";
+
+// ---------------------------------------------------------------------------
+// Plugin local file streaming (native dialogs / OS drops are Tauri-only)
+// ---------------------------------------------------------------------------
+
+import type { PluginLocalFileChunk, PluginLocalFileHandle, PluginLocalFileWriteResult } from "./tauri";
+
+export async function openPluginLocalFile(_pluginId: string, _path: string, _write: boolean): Promise<PluginLocalFileHandle> {
+  throw new Error("Plugin local file access is not available in the web backend");
+}
+
+export async function readPluginLocalFileChunk(_pluginId: string, _handleId: string, _offset: number, _length?: number): Promise<PluginLocalFileChunk> {
+  throw new Error("Plugin local file access is not available in the web backend");
+}
+
+export async function writePluginLocalFileChunk(_pluginId: string, _handleId: string, _offset: number, _dataBase64: string): Promise<PluginLocalFileWriteResult> {
+  throw new Error("Plugin local file access is not available in the web backend");
+}
+
+export async function closePluginLocalFile(_pluginId: string, _handleId: string): Promise<void> {
+  throw new Error("Plugin local file access is not available in the web backend");
+}
+
+export async function openPluginMedia(_pluginId: string, _method: string, _params: Record<string, unknown>): Promise<string> {
+  throw new Error("Plugin media URLs are not available in the web backend");
+}
+
+export async function closePluginMedia(_pluginId: string, _token: string): Promise<void> {
+  throw new Error("Plugin media URLs are not available in the web backend");
+}
+
+// Plugin UI storage goes through the Rust plugin-data tree on native hosts;
+// the web workbench host keeps its localStorage fallback in the component, so
+// these only exist to satisfy the shared backend surface.
+export async function getPluginUiStorage(_pluginId: string, _key: string): Promise<unknown> {
+  throw new Error("Plugin UI storage is not available in the web backend");
+}
+
+export async function setPluginUiStorage(_pluginId: string, _key: string, _value: unknown): Promise<void> {
+  throw new Error("Plugin UI storage is not available in the web backend");
+}
+
+export async function deletePluginUiStorage(_pluginId: string, _key: string): Promise<void> {
+  throw new Error("Plugin UI storage is not available in the web backend");
+}

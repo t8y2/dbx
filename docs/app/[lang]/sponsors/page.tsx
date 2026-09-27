@@ -30,6 +30,8 @@ const i18n = {
     onepanelSponsorAction: "Visit",
     hualongSponsorDesc: "HuaLongAI is a model API relay built for heavy AI developers, offering 100% official-source Codex and Claude models with transparent token-level billing, enterprise contracts, and invoicing.",
     hualongSponsorAction: "Visit",
+    aicodemirrorSponsorDesc: "AICodeMirror is a high-stability relay service for Claude Code / Codex / Gemini CLI with enterprise-grade concurrency, fast invoicing, and 7×24 dedicated support; sign up through this link for ¥8 in new-user credit and 20% off your first top-up, up to 25% off for enterprise.",
+    aicodemirrorSponsorAction: "Visit",
     becomeTitle: "Sponsorship inquiries",
     becomeDesc: "If you would like to support DBX with funding, infrastructure, developer tools, or services, tell us about the idea and how to reach you.",
   },
@@ -56,6 +58,8 @@ const i18n = {
     onepanelSponsorAction: "访问",
     hualongSponsorDesc: "HuaLongAI（华龙算力）是面向重度 AI 开发者的模型 API 中转服务商，主营 Codex 与 Claude 系列模型，100% 官方源直供、不掺假；计费透明，Token 级账单可逐笔核验，支持企业合同与发票。",
     hualongSponsorAction: "访问",
+    aicodemirrorSponsorDesc: "AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级高并发、极速开票与 7×24 专属技术支持；通过此链接注册可享新人 ¥8 免费额度与首充 8 折，企业客户最高可享 7.5 折。",
+    aicodemirrorSponsorAction: "访问",
     becomeTitle: "赞助合作",
     becomeDesc: "如果你愿意通过资金、基础设施、开发工具或服务资源支持 DBX，请留下联系方式和合作说明。",
   },
@@ -104,12 +108,12 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
       action: t.jalapenoSponsorAction,
     },
     {
-      name: "AstraFlow",
-      href: "https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx",
-      logo: "/sponsors/astraflow-card.png",
-      logoClass: "w-full max-w-[136px] object-contain",
-      description: t.astraflowSponsorDesc,
-      action: t.astraflowSponsorAction,
+      name: "AICodeMirror",
+      href: "https://www.aicodemirror.ai/register?invitecode=9A50BU",
+      logo: "/sponsors/aicodemirror-card.png",
+      logoClass: "w-full max-w-[160px] object-contain",
+      description: t.aicodemirrorSponsorDesc,
+      action: t.aicodemirrorSponsorAction,
     },
     {
       name: "HuaLongAI",
@@ -118,6 +122,14 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
       logoClass: "w-full max-w-[160px] object-contain",
       description: t.hualongSponsorDesc,
       action: t.hualongSponsorAction,
+    },
+    {
+      name: "AstraFlow",
+      href: "https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx",
+      logo: "/sponsors/astraflow-card.png",
+      logoClass: "w-full max-w-[136px] object-contain",
+      description: t.astraflowSponsorDesc,
+      action: t.astraflowSponsorAction,
     },
     {
       name: "Atlas Cloud",
@@ -156,12 +168,13 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
   ];
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={locale} active="sponsors" />
 
       <section className="max-w-[1180px] mx-auto px-6 pt-32 pb-24">
-        <h1 className="text-4xl font-[820] tracking-tight">{t.title}</h1>
-        <p className="mt-3 max-w-[700px] text-landing-muted text-lg leading-relaxed">{t.desc}</p>
+        {/* 视觉隐藏：页面不再展示大标题，但保留语义 landmark 与 SEO */}
+        <h1 className="sr-only">{t.title}</h1>
+        <p className="mx-auto max-w-[700px] text-center text-landing-muted text-lg leading-relaxed">{t.desc}</p>
 
         <h2 className="mt-10 text-2xl font-[760]">{t.sponsorsTitle}</h2>
         <div className="mt-5 grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">

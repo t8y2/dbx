@@ -20,6 +20,7 @@ import {
   gaussdbIdentifierQuoteStyle,
   gaussdbTargetServerType,
   inferJdbcDialect,
+  jdbcConnectionUsesDriverRowOffset,
   metadataSchemaForConnection,
   objectListSchemaForConnection,
   setGaussdbConnectionMode,
@@ -156,6 +157,7 @@ describe("jdbc dialect inference", () => {
     expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.opengauss.Driver" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.postgresql.Driver" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "kyuubi" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8s" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8a" })).toBe(false);
@@ -325,6 +327,29 @@ describe("jdbc dialect inference", () => {
 
   it("prefers explicit Kyuubi identity over Apache Hive product metadata", () => {
     expect(inferJdbcDialect({ db_type: "jdbc", driver_label: "Kyuubi JDBC", database_info: { productName: "Apache Hive" } })).toBe("mysql");
+  });
+});
+
+describe("JDBC driver row offset", () => {
+  it("lets the driver skip rows for dialects without SQL offset pagination", () => {
+    // Unknown vendor dialects stay on the generic JDBC dialect, which emits a
+    // bare SELECT, so the page offset can only be applied by the driver (#9015).
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:sybase:Tds:db.example.com:5000/app" }, "jdbc")).toBe(true);
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:hsqldb:hsql://127.0.0.1:9001/probe" }, "jdbc")).toBe(true);
+  });
+
+  it("keeps the Caché/IRIS ResultSet offset behavior", () => {
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:Cache://localhost:1972/USER" }, "iris")).toBe(true);
+  });
+
+  it("leaves SQL-paginated dialects and driver-capped JDBC drivers alone", () => {
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:mysql://localhost:3306/app" }, "mysql")).toBe(false);
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:oracle:thin:@localhost:1521:XE" }, "oracle")).toBe(false);
+    // YashanDB keeps the generic dialect, but its agent applies
+    // Statement.setMaxRows, which would cap the result set before the skipped rows.
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:yasdb://localhost:1688/app" }, "jdbc")).toBe(false);
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "postgres" }, "postgres")).toBe(false);
+    expect(jdbcConnectionUsesDriverRowOffset(undefined, "jdbc")).toBe(false);
   });
 });
 

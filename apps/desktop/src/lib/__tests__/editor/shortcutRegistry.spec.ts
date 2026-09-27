@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   closeOtherTabsDefaultShortcut,
+  countShortcutConflictPairs,
   DEFAULT_SHORTCUT_SETTINGS,
-  SHORTCUT_DEFINITIONS,
+  findCrossScopeShortcutConflicts,
   findShortcutConflict,
   formatShortcut,
+  gotoLineDefaultShortcut,
+  isReservedShortcut,
+  MACOS_RESERVED_SHORTCUTS,
   normalizeModifierOnlyShortcut,
   normalizeShortcutSettings,
+  resolveCapturedShortcutEdit,
   selectionOccurrenceDefaultShortcut,
+  SHORTCUT_DEFINITIONS,
   shortcutToCodeMirrorKey,
   toggleAiPanelDefaultShortcut,
   type ShortcutActionId,
@@ -361,5 +367,240 @@ describe("shortcutRegistry editor actions", () => {
 
   it("converts multi-stroke shortcuts for CodeMirror keymaps", () => {
     expect(shortcutToCodeMirrorKey("Ctrl+K Ctrl+C")).toBe("Ctrl-k Ctrl-c");
+  });
+
+  it("reserves only the macOS Hide combinations that the app menu owns", () => {
+    expect(MACOS_RESERVED_SHORTCUTS).toEqual(new Set(["Mod+H", "Alt+Mod+H"]));
+    // Meta+H and Mod+H are the same key on macOS; Shift+Mod+H is NOT reserved
+    // because no menu key equivalent uses the shifted form.
+    expect(isReservedShortcut("Mod+H", "MacIntel")).toBe(true);
+    expect(isReservedShortcut("Meta+H", "MacIntel")).toBe(true);
+    expect(isReservedShortcut("Cmd+H", "MacIntel")).toBe(true);
+    expect(isReservedShortcut("Alt+Mod+H", "MacIntel")).toBe(true);
+    // eventToShortcut 记录的 ⌥⌘H 顺序是 Mod+Alt+H（修饰键顺序不同），比较必须不敏感于顺序。
+    expect(isReservedShortcut("Mod+Alt+H", "MacIntel")).toBe(true);
+    expect(isReservedShortcut("Meta+Alt+H", "MacIntel")).toBe(true);
+    // 反例：Ctrl+H / Control+H 是同一物理组合（CodeMirror 的 deleteCharBackward），
+    // 不是 DBX 应用菜单的 accelerator，绝不能误判为保留键。
+    expect(isReservedShortcut("Ctrl+H", "MacIntel")).toBe(false);
+    expect(isReservedShortcut("Control+H", "MacIntel")).toBe(false);
+    expect(isReservedShortcut("Shift+Mod+H", "MacIntel")).toBe(false);
+    expect(isReservedShortcut("Mod+R", "MacIntel")).toBe(false);
+    // On Windows/Linux Mod expands to Ctrl, so Ctrl+H stays a legitimate replace alias.
+    expect(isReservedShortcut("Mod+H", "Win32")).toBe(false);
+    expect(isReservedShortcut("Mod+H", "Linux x86_64")).toBe(false);
+  });
+
+  it("repairs a mac-synced reserved replace/find shortcut to the platform default", () => {
+    // 云同步把 Windows 上的 Ctrl+H 当作 replace 显式配置带到 macOS，此处应修复
+    // 为该动作在 macOS 上的平台默认值 Mod+R（而不是清空），确保 ⌘H 不被劫持。
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ replace: "Meta+H" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ replace: "Alt+Mod+H" }, "MacIntel").replace).toBe("Mod+R");
+    // eventToShortcut 记录的 ⌥⌘H 是 Mod+Alt+H，两个顺序都必须修复到平台默认值。
+    expect(normalizeShortcutSettings({ replace: "Mod+Alt+H" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ find: "Mod+H" }, "MacIntel").find).toBe("Mod+F");
+    // ⌃H 不是保留键：手工编辑或同步进来的 ⌃H 绑定原样保留，绝不修复。
+    expect(normalizeShortcutSettings({ replace: "Ctrl+H" }, "MacIntel").replace).toBe("Ctrl+H");
+    // 未保留的 Shift+Mod+H 原样保留，其他动作的默认值不受影响。
+    expect(normalizeShortcutSettings({ replace: "Shift+Mod+H" }, "MacIntel").replace).toBe("Shift+Mod+H");
+    expect(normalizeShortcutSettings({ replace: "Mod+R" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "MacIntel").find).toBe("Mod+F");
+    // Windows/Linux 上 Mod+H = Ctrl+H 必须原样保留（正常的替换键）。
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "Win32").replace).toBe("Mod+H");
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "Linux x86_64").replace).toBe("Mod+H");
+  });
+
+  it("clears a reserved-key repair when the platform default is already occupied by an explicit config", () => {
+    // find 的平台默认值是 Mod+F。若用户把 formatSql 显式配置为 Mod+F、而 find 又被
+    // 云同步/旧配置带入 macOS 保留键 ⌘H，修复会把 find 还原成 Mod+F，恰好抢占
+    // formatSql——QueryEditor.vue 的 keymap 里 find 绑定注册在 formatSql 之前，
+    // 先匹配先执行，formatSql 就永远不可达了。用户显式配置必须赢，因此被占用的
+    // 修复动作只能清空（"" = 未绑定），而不是把默认值强加回去。
+    const findOccupied = normalizeShortcutSettings({ find: "Mod+H", formatSql: "Mod+F" }, "MacIntel");
+    expect(findOccupied.find).toBe("");
+    expect(findOccupied.formatSql).toBe("Mod+F");
+    // 同理由 replace 的平台默认值 Mod+R 与显式配置的 formatSql 冲突时清空 replace。
+    const replaceOccupied = normalizeShortcutSettings({ replace: "Mod+H", formatSql: "Mod+R" }, "MacIntel");
+    expect(replaceOccupied.replace).toBe("");
+    expect(replaceOccupied.formatSql).toBe("Mod+R");
+    // 无占用时仍按原逻辑修复到平台默认值。
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ find: "Mod+H" }, "MacIntel").find).toBe("Mod+F");
+    // 占用者仅来自默认（未显式配置）时不清空；⌃H 不是保留键，也原样保留。
+    expect(normalizeShortcutSettings({ find: "Mod+H", replace: "Ctrl+H" }, "MacIntel").find).toBe("Mod+F");
+    expect(normalizeShortcutSettings({ replace: "Ctrl+H" }, "MacIntel").replace).toBe("Ctrl+H");
+    // 非 mac 平台 Mod+H = Ctrl+H 不是保留键，原样保留且不触发清空。
+    const windows = normalizeShortcutSettings({ find: "Mod+H", formatSql: "Mod+F" }, "Win32");
+    expect(windows.find).toBe("Mod+H");
+    expect(windows.formatSql).toBe("Mod+F");
+  });
+
+  describe("findCrossScopeShortcutConflicts", () => {
+    it("reports the intentional cross-scope overlaps in the defaults", () => {
+      // 默认配置里确实存在跨作用域同键，这是设计使然；设置界面把它作为“提示”
+      // 展示，而 normalizeShortcutSettings 的占用判定刻意不管它们。
+      const conflicts = findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS);
+      expect(conflicts.find).toContain("focusSearch");
+      expect(conflicts.focusSearch).toContain("find");
+      expect(conflicts.acceptCompletion).toContain("toggleTranspose");
+      expect(conflicts.explainSql).toContain("editSidebarConnection");
+      // Shift+Mod+D 与 Mod+Shift+D 经 formatShortcut 规范化后同键。
+      expect(conflicts.viewTableDdl).toContain("editTableStructure");
+    });
+
+    it("never reports same-scope duplicates (those are blocking conflicts)", () => {
+      // uppercaseSelection 改成 Mod+A 只与同作用域的 selectAll 重复，
+      // 跨作用域提示不应把它列出来——那属于 findShortcutConflict 的职责。
+      const shortcuts = normalizeShortcutSettings({ uppercaseSelection: "Mod+A" });
+      expect(findShortcutConflict("uppercaseSelection", shortcuts.uppercaseSelection, shortcuts)).toBe("selectAll");
+      expect(findCrossScopeShortcutConflicts(shortcuts).uppercaseSelection).toBeUndefined();
+    });
+
+    it("ignores unbound shortcuts", () => {
+      const shortcuts = normalizeShortcutSettings({ find: "", focusSearch: "" });
+      expect(shortcuts.find).toBe("");
+      expect(shortcuts.focusSearch).toBe("");
+      const conflicts = findCrossScopeShortcutConflicts(shortcuts);
+      expect(conflicts.find).toBeUndefined();
+      expect(conflicts.focusSearch).toBeUndefined();
+      // goToColumn 默认未绑定，也不参与比较。
+      expect(conflicts.goToColumn).toBeUndefined();
+    });
+
+    it("resolves platform-dependent keys before comparing", () => {
+      // Win32 上 Mod+F 展开为 Ctrl+F，两边仍然是同键，提示照旧成立；
+      // 未自定义的组合也不会被误判。
+      const windows = findCrossScopeShortcutConflicts(normalizeShortcutSettings(undefined, "Win32"), "Win32");
+      expect(windows.find).toContain("focusSearch");
+      const mac = findCrossScopeShortcutConflicts(normalizeShortcutSettings(undefined, "MacIntel"), "MacIntel");
+      expect(mac.find).toContain("focusSearch");
+    });
+
+    it("does not mutate the settings it inspects", () => {
+      const shortcuts = normalizeShortcutSettings({ duplicateLine: "Mod+Alt+K" });
+      const before = { ...shortcuts };
+      findCrossScopeShortcutConflicts(shortcuts);
+      expect(shortcuts).toEqual(before);
+    });
+  });
+
+  describe("gotoLine", () => {
+    it("resolves the platform default and maps it to the CodeMirror key", () => {
+      // macOS 的 ⌃G 已分配给「选中下一个相同词」（JetBrains 风格），沿用
+      // CodeMirror 搜索键位里原本就指向 gotoLine 的 ⌘⌥G；Windows/Linux 用
+      // VS Code / SSMS 惯例的 Ctrl+G。
+      expect(gotoLineDefaultShortcut("MacIntel")).toBe("Mod+Alt+G");
+      expect(gotoLineDefaultShortcut("Win32")).toBe("Mod+G");
+      expect(gotoLineDefaultShortcut("Linux x86_64")).toBe("Mod+G");
+      expect(shortcutToCodeMirrorKey(gotoLineDefaultShortcut("MacIntel"))).toBe("Mod-Alt-g");
+      expect(shortcutToCodeMirrorKey(gotoLineDefaultShortcut("Win32"))).toBe("Mod-g");
+    });
+
+    it("registers an editor-scope definition with the settings label", () => {
+      expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "gotoLine")).toMatchObject({
+        id: "gotoLine",
+        labelKey: "settings.shortcutGotoLine",
+        scope: "editor",
+      });
+      expect(DEFAULT_SHORTCUT_SETTINGS.gotoLine).toBe(gotoLineDefaultShortcut());
+    });
+
+    it("re-resolves a cloud-synced default from the other platform", () => {
+      // 云同步会把另一平台的默认值当成显式配置带过来，解析后必须回到本机平台默认。
+      expect(normalizeShortcutSettings({ gotoLine: "Mod+Alt+G" }, "Win32").gotoLine).toBe("Mod+G");
+      expect(normalizeShortcutSettings({ gotoLine: "Mod+G" }, "MacIntel").gotoLine).toBe("Mod+Alt+G");
+      // 用户真正自定义的组合原样保留，清空仍然表示「不绑定」。
+      expect(normalizeShortcutSettings({ gotoLine: "Alt+Mod+Shift+L" }, "Win32").gotoLine).toBe("Alt+Mod+Shift+L");
+      expect(normalizeShortcutSettings({ gotoLine: "" }, "Win32").gotoLine).toBe("");
+    });
+
+    it("never collides with the same-scope selection-occurrence shortcuts", () => {
+      // 非 mac 的 Mod+G 展开后是 Ctrl+G，恰好等于 mac 上
+      // addNextSelectionOccurrence 的默认键；两者分属不同平台，不能互相判为冲突。
+      for (const platform of ["MacIntel", "Win32", "Linux x86_64"]) {
+        const shortcuts = normalizeShortcutSettings(undefined, platform);
+        expect(shortcuts.gotoLine).toBe(gotoLineDefaultShortcut(platform));
+        expect(findShortcutConflict("gotoLine", shortcuts.gotoLine, shortcuts, platform)).toBeNull();
+        expect(findShortcutConflict("addNextSelectionOccurrence", shortcuts.addNextSelectionOccurrence, shortcuts, platform)).toBeNull();
+      }
+    });
+  });
+
+  describe("resolveCapturedShortcutEdit", () => {
+    // #9881：设置面板「应用」点了毫无反应、「应用并关闭」每次都弹未保存确认，
+    // 根因就是捕获到的组合被落盘口径改写，草稿和 store 值再也对不上。
+    const macDefaults = normalizeShortcutSettings(undefined, "MacIntel");
+    const crossPlatformCases: [ShortcutActionId, string][] = [
+      ["closeOtherTabs", "Shift+Alt+W"],
+      ["navigateTabHistoryBack", "Mod+Alt+ArrowLeft"],
+      ["navigateTabHistoryForward", "Mod+Alt+ArrowRight"],
+      ["addNextSelectionOccurrence", "Alt+J"],
+      ["selectAllSelectionOccurrences", "Ctrl+Alt+Shift+J"],
+      ["toggleAiPanel", "Ctrl+Alt+I"],
+      ["gotoLine", "Mod+G"],
+    ];
+
+    it("flags combinations that are another platform's default for the same action", () => {
+      for (const [actionId, shortcut] of crossPlatformCases) {
+        const edit = resolveCapturedShortcutEdit(actionId, shortcut, macDefaults, "MacIntel");
+
+        expect(edit.rejectedByPlatformDefault).toBe(true);
+        // 落盘值是该动作本机平台的默认键，绝不能用它当草稿值写入
+        expect(edit.shortcuts[actionId]).not.toBe(shortcut);
+      }
+    });
+
+    it("accepts a plain rebind and keeps the draft a fixed point of the persistence normalizer", () => {
+      const edit = resolveCapturedShortcutEdit("executeSql", "Shift+Ctrl+U", macDefaults, "MacIntel");
+
+      expect(edit.rejectedByPlatformDefault).toBe(false);
+      expect(edit.changed).toBe(true);
+      expect(edit.shortcuts.executeSql).toBe("Shift+Ctrl+U");
+      // 关键不变式：草稿再走一遍落盘口径不会被改写，否则“未保存”永远消不掉
+      expect(normalizeShortcutSettings(edit.shortcuts, "MacIntel")).toEqual(edit.shortcuts);
+    });
+
+    it("adopts the copyCurrentRow/editTableStructure legacy migration into the draft", () => {
+      const draft = normalizeShortcutSettings({ ...macDefaults, copyCurrentRow: "" }, "MacIntel");
+      const edit = resolveCapturedShortcutEdit("editTableStructure", "Mod+D", draft, "MacIntel");
+
+      expect(edit.rejectedByPlatformDefault).toBe(false);
+      expect(edit.changed).toBe(true);
+      expect(edit.shortcuts).toMatchObject({ editTableStructure: "Mod+Shift+D", copyCurrentRow: "Mod+D" });
+      expect(normalizeShortcutSettings(edit.shortcuts, "MacIntel")).toEqual(edit.shortcuts);
+    });
+
+    it("reports no changes when the user re-presses the current combination", () => {
+      const edit = resolveCapturedShortcutEdit("closeOtherTabs", macDefaults.closeOtherTabs, macDefaults, "MacIntel");
+
+      expect(edit.rejectedByPlatformDefault).toBe(false);
+      expect(edit.changed).toBe(false);
+      expect(edit.shortcuts).toEqual(macDefaults);
+    });
+
+    it("still applies the cross-platform rule on Windows for the macOS default literals", () => {
+      const windowsDefaults = normalizeShortcutSettings(undefined, "Win32");
+      const edit = resolveCapturedShortcutEdit("closeOtherTabs", "Alt+Mod+W", windowsDefaults, "Win32");
+
+      expect(edit.rejectedByPlatformDefault).toBe(true);
+      expect(edit.shortcuts.closeOtherTabs).toBe(closeOtherTabsDefaultShortcut("Win32"));
+    });
+  });
+
+  describe("countShortcutConflictPairs", () => {
+    it("counts an unordered pair once even though the map is bidirectional", () => {
+      expect(countShortcutConflictPairs({ find: "focusSearch", focusSearch: "find" })).toBe(1);
+    });
+
+    it("flattens multi-partner entries", () => {
+      expect(countShortcutConflictPairs({ find: ["focusSearch", "formatSql"], formatSql: ["find"] })).toBe(2);
+    });
+
+    it("ignores empty entries", () => {
+      expect(countShortcutConflictPairs({})).toBe(0);
+      expect(countShortcutConflictPairs({ find: "" })).toBe(0);
+      expect(countShortcutConflictPairs({ find: [] })).toBe(0);
+    });
   });
 });

@@ -12,6 +12,15 @@ export interface RedisArgvResult {
   unclosedQuoteStart?: number;
 }
 
+/**
+ * Redis has no comment syntax, but `#` and `--` lines are common as notes in saved
+ * scripts. The editor treats them as comments everywhere — diagnostics, statement
+ * ranges and execution — so a note never reaches the server as a command.
+ */
+export function isRedisCommentLine(line: string): boolean {
+  return /^\s*(#|--)/.test(line);
+}
+
 function escapedCharacter(value: string): string {
   return value === "n" ? "\n" : value === "r" ? "\r" : value === "t" ? "\t" : value;
 }

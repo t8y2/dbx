@@ -255,7 +255,7 @@ func scanCQLRow(iter *gocql.Iter, columns []gocql.ColumnInfo) ([]any, bool, erro
 				if allNull {
 					return nil
 				}
-				return normalizeCQLValue(values)
+				return normalizeCQLValue(cqlTuple(values))
 			})
 			continue
 		}

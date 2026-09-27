@@ -280,6 +280,11 @@ async function flushUi() {
   for (let index = 0; index < 4; index++) {
     await Promise.resolve();
     await nextTick();
+    // The mount chain (ensureConnected → load → render) spans more than a fixed
+    // number of microtask rounds once a real timer is in it, and DocumentBrowser
+    // renders from state those steps produce. Yielding to the macrotask queue
+    // lets each of them settle instead of leaving the component half-loaded.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
 
@@ -1047,6 +1052,53 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(JSON.parse(filter)).toEqual({ _id: "1" });
   });
 
+  it("keeps the filter builder open and says why a rejected rule did not apply", async () => {
+    app?.unmount();
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: 1, title: "Numeric id" }],
+      raw_documents: [],
+      total: 1,
+      total_is_exact: true,
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "mongo-1",
+      database: "test",
+      collection: "numeric_ids",
+      databaseType: "mongodb",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
+
+    const valueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
+    valueInput.value = "abc";
+    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+
+    const callsBeforeApply = backend.documentFindDocuments.mock.calls.length;
+    buttonWithText("grid.applyFilter").click();
+    await flushUi();
+
+    // The shared error banner sits in the document pane, which this popover covers, so the
+    // reason has to appear inside the builder or the click reads as a dead button.
+    expect(document.body.querySelector("[data-document-filter-builder-error]")?.textContent).toContain("number");
+    expect(document.body.querySelector('[data-testid="popover-content"]')).not.toBeNull();
+    expect(backend.documentFindDocuments.mock.calls.length).toBe(callsBeforeApply);
+
+    // Correcting the rule drops the stale message.
+    valueInput.value = "1";
+    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    expect(document.body.querySelector("[data-document-filter-builder-error]")).toBeNull();
+
+    buttonWithText("grid.applyFilter").click();
+    await flushUi();
+    expect(JSON.parse(backend.documentFindDocuments.mock.calls.at(-1)?.[5])).toEqual({ _id: 1 });
+  });
+
   it("exposes the applicable shared table view options", async () => {
     app?.unmount();
     app = createApp(DocumentBrowser, {
@@ -1061,6 +1113,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     buttonWithTitle("grid.viewOptions").click();
     await flushUi();
     expect(document.body.textContent).toContain("grid.renderMode");
+    expect(document.body.textContent).toContain("grid.columnWidthMode");
     expect(document.body.textContent).toContain("grid.tableFontFamily");
     expect(document.body.textContent).toContain("grid.tableFontSize");
     expect(document.body.textContent).toContain("grid.transposeMultiRowToggle");
@@ -1068,6 +1121,9 @@ describe("DocumentBrowser MongoDB filter value types", () => {
 
     buttonWithText("grid.columnWidthCompact").click();
     expect(settings.updateEditorSettings).toHaveBeenCalledWith({ columnWidthDensity: "compact" });
+
+    buttonWithText("grid.columnWidthModeContent").click();
+    expect(settings.updateEditorSettings).toHaveBeenCalledWith({ dataGridColumnWidthMode: "content" });
 
     buttonWithText("grid.domRenderMode").click();
     expect(settings.updateEditorSettings).toHaveBeenCalledWith({ dataGridRenderMode: "dom" });

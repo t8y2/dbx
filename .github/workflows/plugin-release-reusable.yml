@@ -31,10 +31,12 @@ on:
         required: false
         type: string
       go-version:
+        description: Go version to install; leave empty for plugins without a Go backend
         default: "1.22.x"
         required: false
         type: string
       rust-toolchain:
+        description: Rust toolchain to install; leave empty unless the plugin or source-built CLI requires Rust
         default: stable
         required: false
         type: string
@@ -77,17 +79,61 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve Node dependency cache
+        id: node-cache
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PROJECT_DIRECTORY: ${{ inputs.working-directory }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const packageJson = fs.existsSync("package.json")
+            ? JSON.parse(fs.readFileSync("package.json", "utf8"))
+            : {};
+          const declaredManager = typeof packageJson.packageManager === "string"
+            ? packageJson.packageManager.split("@")[0]
+            : "";
+          const npmLock = ["npm-shrinkwrap.json", "package-lock.json"].find((file) => fs.existsSync(file));
+          const manager = declaredManager || (fs.existsSync("pnpm-lock.yaml") ? "pnpm" : npmLock ? "npm" : "");
+          const lockfile = manager === "pnpm" ? "pnpm-lock.yaml" : manager === "npm" ? npmLock : "";
+          const cache = lockfile && fs.existsSync(lockfile) ? manager : "";
+          const outputs = {
+            manager,
+            cache,
+            "dependency-path": cache ? path.join(process.env.PROJECT_DIRECTORY, lockfile).replaceAll("\\", "/") : "",
+            "pnpm-version": manager === "pnpm" && !declaredManager ? "10.27.0" : "",
+          };
+          for (const [name, value] of Object.entries(outputs)) {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
+          }
+          NODE
+
+      - uses: pnpm/action-setup@v4
+        if: steps.node-cache.outputs.manager == 'pnpm'
+        with:
+          version: ${{ steps.node-cache.outputs.pnpm-version }}
+          package_json_file: ${{ inputs.working-directory }}/package.json
+          run_install: false
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.node-cache.outputs.cache }}
+          cache-dependency-path: ${{ steps.node-cache.outputs.dependency-path }}
 
       - uses: actions/setup-go@v5
+        if: inputs.go-version != ''
         with:
           go-version: ${{ inputs.go-version }}
+          cache: ${{ hashFiles(format('{0}/**/go.sum', inputs.working-directory)) != '' }}
+          cache-dependency-path: ${{ inputs.working-directory }}/**/go.sum
 
       - uses: dtolnay/rust-toolchain@stable
+        if: inputs.rust-toolchain != '' || (inputs.install-plugin-cli && inputs.install-plugin-cli-from-source)
         with:
-          toolchain: ${{ inputs.rust-toolchain }}
+          toolchain: ${{ inputs.rust-toolchain || 'stable' }}
 
       - name: Checkout DBX plugin SDK
         if: inputs.install-plugin-cli && inputs.install-plugin-cli-from-source

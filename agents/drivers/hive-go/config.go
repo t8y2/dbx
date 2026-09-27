@@ -22,6 +22,9 @@ import (
 const (
 	defaultHivePort            = 10000
 	defaultHiveDatabase        = "default"
+	defaultHiveIdentifierQuote = "`"
+	trinoIdentifierQuote       = "\""
+	kyuubiEngineTypeSetting    = "kyuubi.engine.type"
 	defaultHiveHTTPPath        = "cliservice"
 	defaultHiveService         = "hive"
 	defaultImpalaService       = "impala"
@@ -730,6 +733,31 @@ func hiveAssignmentValue(values map[string]string, key string) string {
 	for candidate, value := range values {
 		if strings.EqualFold(strings.TrimSpace(candidate), key) {
 			return value
+		}
+	}
+	return ""
+}
+
+func (config connectionConfig) identifierQuote() string {
+	if !strings.EqualFold(config.DatabaseType, "kyuubi") {
+		return defaultHiveIdentifierQuote
+	}
+	engineType := openSessionConfigurationValue(config.HiveConfiguration, kyuubiEngineTypeSetting)
+	if strings.EqualFold(strings.TrimSpace(engineType), "TRINO") {
+		return trinoIdentifierQuote
+	}
+	return defaultHiveIdentifierQuote
+}
+
+func openSessionConfigurationValue(values map[string]string, key string) string {
+	// Hive JDBC-style URL fragments are sent as hive variables, while values
+	// after '?' are sent as hive confs. Kyuubi strips either prefix before it
+	// resolves session-scoped settings such as kyuubi.engine.type.
+	for _, wanted := range []string{"set:hivevar:" + key, "set:hiveconf:" + key, key} {
+		for candidate, value := range values {
+			if strings.EqualFold(strings.TrimSpace(candidate), wanted) {
+				return value
+			}
 		}
 	}
 	return ""

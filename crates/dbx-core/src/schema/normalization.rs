@@ -162,6 +162,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -298,6 +299,7 @@ mod tests {
             db::TableInfo {
                 name: "USERS".to_string(),
                 table_type: "TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -305,6 +307,7 @@ mod tests {
             db::TableInfo {
                 name: "BIN$abc123==$0".to_string(),
                 table_type: "TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,

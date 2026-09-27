@@ -3,6 +3,7 @@ import SqlInsertModeDialog from "@/components/export/SqlInsertModeDialog.vue";
 import i18n from "@/i18n";
 
 export type SqlInsertMode = "batch" | "single";
+export type SqlInsertDialect = "source" | "standard";
 
 export interface SqlExportOptions {
   insertMode: SqlInsertMode;
@@ -10,6 +11,7 @@ export interface SqlExportOptions {
 }
 
 export const DEFAULT_SQL_INSERT_MODE: SqlInsertMode = "batch";
+export const DEFAULT_SQL_INSERT_DIALECT: SqlInsertDialect = "source";
 
 export function showSqlInsertModeDialog(options: { allowSplit?: boolean } = {}): Promise<SqlExportOptions | null> {
   if (typeof document === "undefined") return Promise.resolve({ insertMode: DEFAULT_SQL_INSERT_MODE });

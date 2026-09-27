@@ -2,7 +2,7 @@
 use std::ffi::OsString;
 use std::sync::Arc;
 
-use dbx_core::{models::connection::ConnectionConfig, storage::Storage};
+use dbx_core::{connection::AppState, models::connection::ConnectionConfig, storage::Storage};
 use dbx_mcp::{DbxBackend, DbxMcpServer, LocalBackend, McpScope};
 use rmcp::{model::CallToolRequestParams, ServiceExt};
 use serde_json::{json, Map, Value};
@@ -146,7 +146,12 @@ async fn local_vector_search_rejects_empty_semantic_version_before_network_acces
 async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
     let directory = tempdir().expect("temporary data directory");
     let db_path = directory.path().join("dbx.db");
-    let storage = Storage::open(&db_path).await.expect("open storage");
+    let storage = Storage::open_with_secret_key_policy(
+        &db_path,
+        dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir,
+    )
+    .await
+    .expect("open storage");
     storage
         .save_mcp_global_policy(&dbx_core::storage::McpGlobalPolicy {
             read_only: false,
@@ -220,7 +225,10 @@ async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
         .await
         .expect("save sidebar layout");
 
-    let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
+    let backend = Arc::new(LocalBackend::from_app_state(
+        Arc::new(AppState::new(storage.clone())),
+        directory.path().to_path_buf(),
+    ));
     let policy = backend.load_mcp_global_policy().await.expect("load configured policy");
     assert!(!policy.read_only);
     let server =
@@ -309,7 +317,12 @@ async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
     client.cancel().await.expect("close client");
     server_task.abort();
 
-    let reopened = Storage::open(&db_path).await.expect("reopen storage");
+    let reopened = Storage::open_with_secret_key_policy(
+        &db_path,
+        dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir,
+    )
+    .await
+    .expect("reopen storage");
     let connections = reopened.load_connections().await.expect("reload connections");
     assert_eq!(connections.len(), 4, "failed duplicates must not add connections");
     let copied = connections

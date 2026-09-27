@@ -192,6 +192,13 @@ pub struct MeilisearchIndexRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MeilisearchCreateIndexRequest {
+    pub connection_id: String,
+    pub input: dbx_core::db::meilisearch_driver::MeilisearchCreateIndexInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MeilisearchDocumentGetRequest {
     pub connection_id: String,
     pub index: String,
@@ -611,6 +618,17 @@ pub async fn meilisearch_get_overview(
             .await
             .map_err(AppError::from)?;
     Ok(Json(result))
+}
+
+pub async fn meilisearch_create_index(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchCreateIndexRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Create index").await?;
+    dbx_core::document_ops::meilisearch_create_index_core(&state.app, &req.connection_id, &req.input)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
 }
 
 pub async fn meilisearch_delete_index(

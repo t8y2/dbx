@@ -1,6 +1,6 @@
 [package]
 name = "dbx-plugin-cli"
-version = "0.1.6"
+version = "0.1.9"
 edition = "2021"
 license = "Apache-2.0"
 description = "Scaffold and package DBX plugins"

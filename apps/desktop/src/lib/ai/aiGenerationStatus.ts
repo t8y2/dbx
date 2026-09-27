@@ -16,6 +16,7 @@
  * by `tool_call_start`/`tool_call_end`, not by `assistantMode`.
  */
 import type { AgentEvent } from "@/lib/backend/tauri";
+import { formatAgentToolName } from "@/lib/ai/aiAgentStepPresentation";
 
 export interface AiGenerationStatus {
   /** When `send()` set `isGenerating=true`. Elapsed time is derived from this. */
@@ -56,7 +57,7 @@ export type AiStatusTranslate = {
   (key: string, named: Record<string, unknown>): string;
 };
 
-/** i18n key per agent tool name; unknown tools fall back to the raw snake_case name. */
+/** i18n key per agent tool name; unknown tools fall back to the raw name (plugin tools as `prefix › tool`). */
 export const STATUS_TOOL_LABEL_KEYS: Record<string, string> = {
   execute_query: "ai.status.toolLabels.executeQuery",
   execute_sql: "ai.status.toolLabels.executeSql",
@@ -148,7 +149,10 @@ export function applyStatusEvent(status: AiGenerationStatus, event: AgentEvent, 
     case "write_sql_confirmation_required":
     case "production_write_blocked":
     case "context_compacted":
-      // Only refresh lastEventAt above; do NOT change phase.
+    case "tool_approval_required":
+    case "tool_approval_resolved":
+      // Only refresh lastEventAt above; do NOT change phase. A pending plugin
+      // tool approval keeps its tool active until the call ends.
       break;
     case "agent_end":
     case "error":
@@ -186,7 +190,7 @@ export function markCancelling(status: AiGenerationStatus, now: number): AiGener
 /** Resolve a snake_case tool name through the i18n label map, falling back to the raw name. */
 export function toolLabel(toolName: string, t: AiStatusTranslate): string {
   const key = STATUS_TOOL_LABEL_KEYS[toolName];
-  return key ? t(key) : toolName;
+  return key ? t(key) : formatAgentToolName(toolName);
 }
 
 /** Round a duration up to whole seconds, never below 0 (guards a stale timer -1s). */

@@ -1,5 +1,5 @@
 import { computed, ref, watch, watchPostEffect, type ComputedRef, type Ref } from "vue";
-import { BACKGROUND_IMAGE_SURFACE_VARS, backgroundImageStyle, backgroundImageSurfaceAlpha, surfaceColorWithAlpha, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
+import { BACKGROUND_IMAGE_INVERTED_TEXT_VARS, BACKGROUND_IMAGE_SURFACE_VARS, backgroundImageSolidVarName, backgroundImageStyle, backgroundImageSurfaceAlpha, surfaceColorWithAlpha, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { APP_CUSTOM_UI_COLOR_DEFS, appCustomUiColorValue, deriveCustomUiColors } from "@/lib/app/appTheme";
 import { readBackgroundImage } from "@/lib/backend/api";
 import { useTheme } from "@/composables/useTheme";
@@ -112,7 +112,7 @@ export function useBackgroundImage(settingsStore: SettingsStoreLike): Background
     const alpha = backgroundImageSurfaceAlpha(backgroundSettings.value);
     const isActive = active.value;
     const customBase = customSurfaceBaseColors();
-    for (const varName of BACKGROUND_IMAGE_SURFACE_VARS) {
+    for (const varName of [...BACKGROUND_IMAGE_SURFACE_VARS, ...BACKGROUND_IMAGE_INVERTED_TEXT_VARS.map(backgroundImageSolidVarName)]) {
       doc.style.removeProperty(varName);
     }
     doc.classList.toggle(BACKGROUND_IMAGE_ACTIVE_CLASS, isActive);
@@ -125,9 +125,15 @@ export function useBackgroundImage(settingsStore: SettingsStoreLike): Background
     }
     const computedStyle = getComputedStyle(doc);
     for (const varName of BACKGROUND_IMAGE_SURFACE_VARS) {
-      const base = customBase.get(varName) ?? computedStyle.getPropertyValue(varName);
+      const base = (customBase.get(varName) ?? computedStyle.getPropertyValue(varName)).trim();
       const tinted = surfaceColorWithAlpha(base, alpha);
       if (tinted) doc.style.setProperty(varName, tinted);
+    }
+    // Inverted-text surfaces (`bg-foreground text-background`) keep the opaque
+    // palette color: their glyphs must not inherit the wallpaper alpha.
+    for (const varName of BACKGROUND_IMAGE_INVERTED_TEXT_VARS) {
+      const base = (customBase.get(varName) ?? computedStyle.getPropertyValue(varName)).trim();
+      if (base) doc.style.setProperty(backgroundImageSolidVarName(varName), base);
     }
   });
 

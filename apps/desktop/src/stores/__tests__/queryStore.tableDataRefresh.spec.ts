@@ -179,6 +179,102 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledWith("cache-1", "USER", 'SELECT * FROM "SS"."SS_User" ORDER BY "ID" ASC', undefined, expect.any(String), expect.objectContaining({ maxRows: 100, fetchSize: 100, rowOffset: 100 }));
   });
 
+  it("uses JDBC ResultSet offset pagination for dialects that cannot paginate in SQL", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "sybase-1",
+      name: "Sybase ASE 16",
+      db_type: "jdbc",
+      database: "app",
+      connection_string: "jdbc:sybase:Tds:db.example.com:5000/app",
+      query_timeout_secs: 30,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM dbo.users ORDER BY id ASC");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("sybase-1", "app", "users", "data", "dbo");
+    store.setTableMeta(tabId, {
+      schema: "dbo",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.orderByInput = "id ASC";
+    tab.resultPageLimit = 100;
+    tab.resultPageOffset = 100;
+
+    await store.refreshDataTab(tabId);
+
+    // Generic JDBC emits a bare SELECT, so the agent has to skip the offset;
+    // otherwise page 2 re-renders page 1 (#9015).
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        databaseType: "jdbc",
+        limit: 100,
+        offset: 100,
+        useDriverRowOffset: true,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledWith("sybase-1", "app", "SELECT * FROM dbo.users ORDER BY id ASC", undefined, expect.any(String), expect.objectContaining({ maxRows: 100, fetchSize: 100, rowOffset: 100 }));
+  });
+
+  it("keeps YashanDB JDBC tabs on server-side pagination", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "yasdb-1",
+      name: "YashanDB",
+      db_type: "jdbc",
+      database: "app",
+      connection_string: "jdbc:yasdb://localhost:1688/app",
+      query_timeout_secs: 30,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM app.users");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("yasdb-1", "app", "users", "data");
+    store.setTableMeta(tabId, {
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultPageLimit = 100;
+    tab.resultPageOffset = 100;
+
+    await store.refreshDataTab(tabId);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.not.objectContaining({ useDriverRowOffset: true }));
+    expect(mocks.executeMulti).toHaveBeenCalledWith("yasdb-1", "app", "SELECT * FROM app.users", undefined, expect.any(String), expect.not.objectContaining({ rowOffset: expect.anything() }));
+  });
+
+  it("executes Doris external catalog data tabs against the catalog database, not the connection default database", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "doris-1",
+      name: "Doris",
+      db_type: "doris",
+      database: "yunye",
+      query_timeout_secs: 30,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM `ice`.`mydb`.`tt2` LIMIT 100");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("doris-1", "mydb", "tt2", "data", undefined, undefined, "ice");
+    store.setTableMeta(tabId, {
+      catalog: "ice",
+      tableName: "tt2",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
+      primaryKeys: [],
+    });
+
+    await store.refreshDataTab(tabId);
+
+    // The backend switches catalog first and then runs USE <database>, so the
+    // connection's internal default database ("yunye") would fail with 1049.
+    expect(mocks.executeMulti).toHaveBeenCalledWith("doris-1", "mydb", "SELECT * FROM `ice`.`mydb`.`tt2` LIMIT 100", undefined, expect.any(String), expect.objectContaining({ catalog: "ice" }));
+  });
+
   it("refreshes one targeted tab while preserving its query context", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

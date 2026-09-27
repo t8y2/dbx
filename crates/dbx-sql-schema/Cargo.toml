@@ -1,0 +1,25 @@
+[package]
+name = "dbx-sql-schema"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+duckdb-sidecar = []
+
+[dependencies]
+dbx-sql-core = { path = "../dbx-sql-core" }
+dbx-sql-dialect = { path = "../dbx-sql-dialect" }
+dbx-types = { path = "../dbx-types", default-features = false }
+log = "0.4"
+rayon = "1"
+regex = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+serde_yaml = "0.9"
+sqlparser = { version = "0.62.0", features = ["visitor"] }
+
+[dev-dependencies]
+rusqlite = { version = "0.32", default-features = false }

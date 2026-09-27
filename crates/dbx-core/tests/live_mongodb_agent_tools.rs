@@ -8,7 +8,6 @@ use dbx_core::agent_tools::{execute_tool, AgentSqlPermissions};
 use dbx_core::connection::{AppState, PoolKind};
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::mongo_ops::mongo_create_index_core;
-use dbx_core::storage::Storage;
 use mongodb::bson::{doc, Bson};
 use mongodb::event::{command::CommandEvent, EventHandler};
 use mongodb::options::ClientOptions;
@@ -76,7 +75,7 @@ async fn call_agent_tool_with_limit(
 #[ignore = "requires DBX_LIVE_MONGODB_* env vars pointing at a MongoDB database with a non-empty stores collection"]
 async fn mongodb_agent_find_one_returns_real_data_and_keeps_writes_blocked() {
     let directory = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let config = live_mongodb_config("live-mongodb-agent");
     let database = config.database.clone().expect("database");
@@ -96,7 +95,7 @@ async fn mongodb_agent_find_one_returns_real_data_and_keeps_writes_blocked() {
 #[ignore = "requires DBX_LIVE_MONGODB_* env vars pointing at a MongoDB database with a products collection containing at least 8 documents"]
 async fn mongodb_agent_enforces_limits_and_find_skips_total_count() {
     let directory = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let config = live_mongodb_config("live-mongodb-agent-limits");
     let database = config.database.clone().expect("database");
@@ -143,7 +142,7 @@ async fn mongodb_agent_enforces_limits_and_find_skips_total_count() {
 async fn stalled_mongodb_index_build_does_not_block_another_connection() {
     let uri = std::env::var("DBX_LIVE_MONGODB_42_URL").expect("DBX_LIVE_MONGODB_42_URL");
     let directory = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let primary_id = "live-mongodb-42-index";
     let database = "dbx_issue_7720_primary";

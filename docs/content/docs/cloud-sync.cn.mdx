@@ -1,6 +1,6 @@
 ---
 title: DBX 配置云同步
-description: 使用 WebDAV、GitHub Gist 或 Gitee 代码片段同步 DBX 连接、设置和保存的 SQL。
+description: 使用 WebDAV、GitHub Gist、Gitee 或 GitLab Snippets 同步 DBX 连接、设置和保存的 SQL。
 ---
 
 <Callout type="info">
@@ -12,7 +12,7 @@ DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照。�
 在 **设置 → 同步** 中选择同步方式：
 
 - **WebDAV**：适合已有 NAS、Nextcloud、坚果云或其他 WebDAV 服务的用户，支持定时自动上传。
-- **GitHub / Gitee 代码片段**：不需要自己维护服务器，通过私有 Gist 或私有代码片段保存快照。目前仅桌面端显示，且需要手动上传和下载。
+- **GitHub / Gitee / GitLab 代码片段**：通过私有代码片段保存快照，GitLab 支持企业自托管实例。目前仅桌面端显示，且需要手动上传和下载，不自动合并。
 
 ## 同步哪些内容
 
@@ -68,7 +68,7 @@ DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照。�
 <Step>
     ### 选择平台
 
-    打开 **设置 → 同步 → GitHub / Gitee**，平台选择 **GitHub Gist**。
+    打开 **设置 → 同步 → 代码片段**，平台选择 **GitHub Gist**。
   </Step>
 <Step>
     ### 填写令牌
@@ -126,15 +126,25 @@ DBX 会在 Gist 中保存一个经过**代码片段加密密码**加密的 `dbx-
 
 ### 上传与恢复
 
-1. 在 **设置 → 同步 → GitHub / Gitee** 中选择 **Gitee 代码片段**。
+1. 在 **设置 → 同步 → 代码片段** 中选择 **Gitee 代码片段**。
 2. 输入私人令牌。首次上传时将代码片段 ID 留空，DBX 会创建私有代码片段并保存 ID。
 3. 在其他设备恢复时，填写同一个代码片段 ID，然后点击 **下载**。
 
 Gitee 代码片段中同样使用 `dbx-sync.json` 文件。
 
+## GitLab Snippets（包括私有化实例）
+
+1. 在 GitLab **User Settings → Access Tokens** 创建个人访问令牌，授予 `api` 权限；不要把令牌放在实例地址里。
+2. 在桌面端 **设置 → 同步 → 代码片段** 选择 **GitLab Snippets**，输入公司的 GitLab 根地址（例如 `https://gitlab.example.com` 或内网 `http://gitlab.internal`，默认 `https://gitlab.com`）。不接受含账号密码、查询参数或片段的地址。修改地址后，失焦或按 Enter 才会切换实例。
+3. 输入令牌和代码片段加密密码；首次上传时留空 ID，DBX 创建仅自己可见的个人 Snippet。后续上传更新同一 ID 对应的 `dbx-sync.json`；在另一台设备输入相同实例、令牌、ID 和加密密码后手动下载。
+
+GitLab Snippets 不是 GitLab 仓库文件同步。不同实例的本地令牌、ID 和迁移待清理记录互相隔离；上传和下载不会自动合并。旧明文 DBX 快照须使用 **迁移旧版代码片段**，DBX 先创建加密的新 Snippet，再核对并删除旧 Snippet。如果发现旧内容已变化或清理失败，旧 Snippet 仍须手动处理。
+
+<Callout type="warn">HTTP 会明文传输 GitLab 访问令牌，即使快照内容已加密。只在可信内网使用 HTTP，优先为私有化 GitLab 配置 HTTPS。</Callout>
+
 ## 同步密码与敏感信息
 
-GitHub Gist 和 Gitee 代码片段始终使用**代码片段加密密码**加密整个快照。该密码不会上传或保存，也无法找回；它与可选敏感信息的同步密码相互独立。
+GitHub Gist、Gitee 和 GitLab 代码片段始终使用**代码片段加密密码**加密整个快照。该密码不会上传或保存，也无法找回；它与可选敏感信息的同步密码相互独立。
 
 默认快照不会包含数据库密码等密钥。如果需要在新设备直接恢复密码：
 
@@ -146,7 +156,7 @@ GitHub Gist 和 Gitee 代码片段始终使用**代码片段加密密码**加密
 同步密码使用 **Argon2id** 派生密钥，并使用 **AES-256-GCM** 加密。访问令牌只会使用设备密钥加密保存在本机，永远不会写入 `dbx-sync.json`。
 
 <Callout type="warn">
-两种密码都无法找回。GitHub/Gitee 的加密代码片段没有代码片段加密密码就无法恢复；WebDAV 中不含加密敏感信息的快照仍可不使用同步密码恢复。
+两种密码都无法找回。加密代码片段没有代码片段加密密码就无法恢复；WebDAV 中不含加密敏感信息的快照仍可不使用同步密码恢复。
 </Callout>
 
 ## WebDAV

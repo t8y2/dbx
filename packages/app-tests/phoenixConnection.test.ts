@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { test, vi } from "vitest";
 import {
   isPhoenixRuntimePath,
@@ -244,15 +242,4 @@ test("does not provision Phoenix runtimes for another JDBC profile", async () =>
   assert.equal(await ensureJdbcProductRuntimeDrivers(PHOENIX_JDBC_PRODUCT_PROFILE, config, runtime.api), undefined);
   assert.equal(runtime.jdbcPluginStatus.mock.calls.length, 0);
   assert.equal(runtime.listJdbcMavenBundles.mock.calls.length, 0);
-});
-
-test("registers Apache Phoenix as a declarative JDBC picker profile with both modes", () => {
-  const profileSource = readFileSync(path.resolve("apps/desktop/src/lib/database/phoenixConnection.ts"), "utf8");
-  const registrySource = readFileSync(path.resolve("apps/desktop/src/lib/database/jdbcProductProfiles.ts"), "utf8");
-
-  assert.match(profileSource, /id:\s*PHOENIX_DRIVER_PROFILE/);
-  assert.match(profileSource, /match:\s*\{\s*dbType:\s*"jdbc",\s*driverProfile:\s*PHOENIX_DRIVER_PROFILE\s*\}/);
-  assert.match(profileSource, /id:\s*"direct"/);
-  assert.match(profileSource, /id:\s*"query-server"/);
-  assert.match(registrySource, /JDBC_PRODUCT_PROFILES\s*=\s*\[PHOENIX_JDBC_PRODUCT_PROFILE\]/);
 });

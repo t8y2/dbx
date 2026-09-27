@@ -122,9 +122,13 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  * `mqtt`) belong to the same group: brokers have no SQL engine, and their
  * workbench is the MQ/MQTT admin tab. The sidebar entry used to open a plain
  * SQL editor against a broker (issue #8415).
+ *
+ * Meilisearch exposes its own index search and management workspaces rather
+ * than a general-purpose SQL query surface, so the generic sidebar action is
+ * hidden there as well (issue #9609).
  */
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt" && dbType !== "meilisearch" && dbType !== "salesforce";
 }
 
 /**
@@ -194,6 +198,11 @@ export function supportsSchemaDiagram(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "diagram");
 }
 
+/** Relational engines that can list tables and columns. Independent of diagram support. */
+export function supportsDataDictionary(dbType?: DatabaseType): boolean {
+  return supportsDatabaseFeature(dbType, "metadataBrowse");
+}
+
 export function supportsDatabaseSearch(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "schemaSearch");
 }
@@ -246,7 +255,9 @@ export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, 
 }
 
 export function supportsTableTruncate(dbType?: DatabaseType): boolean {
-  return !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "influxdb3" && dbType !== "victoriametrics" && dbType !== "manticoresearch";
+  return (
+    !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "influxdb3" && dbType !== "victoriametrics" && dbType !== "manticoresearch" && dbType !== "salesforce"
+  );
 }
 
 export function supportsTableVacuum(dbType?: DatabaseType): boolean {
@@ -257,7 +268,22 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng"];
+
+/** Oracle-family databases, kept ONLY for the Oracle-specific ALTER SESSION SET
+ *  CURRENT_SCHEMA compensation in queryStore. Do not use for toolbar/dirty-bit
+ *  gating — that is {@link usesProvenReadOnlyStickyTransactionState} so MySQL and
+ *  PostgreSQL participate without dragging Oracle schema-change compensation in. */
+const ORACLE_STICKY_TRANSACTION_TYPES: ReadonlySet<string> = new Set(["oracle", "oceanbase-oracle"]);
+
+/** Databases whose manual-transaction toolbar hides Commit/Rollback until an
+ *  unproven statement dirties the session. Mirrors the Rust proof gate
+ *  (crates/dbx-core/src/query/mod.rs + sql_risk.rs `prove_read_only_for_database`).
+ *  Every member must also be in TRANSACTION_SUPPORTED_TYPES above: a database
+ *  cannot reach manual mode (and this UX) without explicit transaction control
+ *  (#9018). Family members like doris/kingbase join only when their transaction
+ *  support lands. */
+const PROVEN_READ_ONLY_STICKY_TYPES: ReadonlySet<string> = new Set(["oracle", "oceanbase-oracle", "mysql", "postgres"]);
 
 /**
  * Returns true if the given database type supports explicit transaction control
@@ -309,6 +335,23 @@ const HAVING_ALIAS_REJECTED_DATABASE_TYPES: ReadonlySet<string> = new Set([
  */
 export function rejectsAliasReferenceInHaving(dbType?: string): boolean {
   return !!dbType && HAVING_ALIAS_REJECTED_DATABASE_TYPES.has(dbType);
+}
+
+/**
+ * Returns true if the database type participates in Oracle's schema-change
+ * compensation under manual transactions. Toolbar/dirty-bit gating must use
+ * `usesProvenReadOnlyStickyTransactionState` instead.
+ */
+export function usesOracleStickyTransactionState(dbType?: string): boolean {
+  return !!dbType && ORACLE_STICKY_TRANSACTION_TYPES.has(dbType);
+}
+
+/**
+ * Returns true if the database type uses the sticky manual-transaction UX:
+ * commit/rollback hidden while the session is clean (no unproven statement).
+ */
+export function usesProvenReadOnlyStickyTransactionState(dbType?: string): boolean {
+  return !!dbType && PROVEN_READ_ONLY_STICKY_TYPES.has(dbType);
 }
 
 /**

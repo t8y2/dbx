@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shallowRef } from "vue";
-import { connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
+import { connectionDeleteTargetSnapshot, connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import type { TreeNode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -174,6 +174,35 @@ describe("sidebar connection move selection", () => {
   });
 });
 
+describe("sidebar connection deletion selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sidebarFormTarget.value = null;
+    connectionDeleteTargetSnapshot.value = [];
+    showDeleteConfirm.value = false;
+  });
+
+  it("deletes the selected connections and leaves tab handling to the delete policy", async () => {
+    const nodes = [connectionNode("conn-1"), connectionNode("conn-2")];
+    const store = connectionStore(nodes.map((node) => node.id));
+    const { deleteConnection, confirmDelete } = runtime(nodes[0], store, nodes);
+
+    deleteConnection();
+    expect(showDeleteConfirm.value).toBe(true);
+
+    await confirmDelete();
+
+    expect(store.removeConnections).toHaveBeenCalledWith(["conn-1", "conn-2"]);
+    // removeConnections 已按「删除连接」策略处理页签，disconnect 必须跳过断开策略，
+    // 否则会把刚保留下来的 SQL 页签又关掉。
+    expect(store.disconnect.mock.calls).toEqual([
+      ["conn-1", { skipTabHandling: true }],
+      ["conn-2", { skipTabHandling: true }],
+    ]);
+    expect(mocks.toast).toHaveBeenCalledWith('connection.deletedSelected:{"count":2}', 2000);
+  });
+});
+
 describe("sidebar connection group deletion selection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -221,7 +250,11 @@ describe("sidebar connection group deletion selection", () => {
 
     expect(store.removeConnections).not.toHaveBeenCalled();
     expect(store.deleteConnectionGroups).toHaveBeenCalledWith(["group-1", "group-2"], true);
-    expect(store.disconnect.mock.calls).toEqual([["conn-1"], ["conn-2"]]);
+    // 页签已由 deleteConnectionGroups 按「删除连接」策略处理，disconnect 只清会话。
+    expect(store.disconnect.mock.calls).toEqual([
+      ["conn-1", { skipTabHandling: true }],
+      ["conn-2", { skipTabHandling: true }],
+    ]);
     expect(showDeleteGroupConfirm.value).toBe(false);
     expect(connectionGroupDeleteTargetSnapshot.value).toEqual([]);
     expect(deleteConnectionsWithGroup.value).toBe(false);

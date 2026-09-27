@@ -20,6 +20,8 @@ import {
   supportsTableImport,
   supportsTableVacuum,
   supportsTransaction,
+  usesOracleStickyTransactionState,
+  usesProvenReadOnlyStickyTransactionState,
   usesConnectionOnlyQueryTarget,
   usesTreeSchemaMode,
   schemaNodeHasLoadableName,
@@ -117,6 +119,10 @@ describe("connection query actions", () => {
     expect(supportsConnectionQueryActions("mq")).toBe(false);
     expect(supportsConnectionQueryActions("mqtt")).toBe(false);
   });
+
+  it("hides the sidebar new-query entry for Meilisearch", () => {
+    expect(supportsConnectionQueryActions("meilisearch")).toBe(false);
+  });
 });
 
 describe("message queue query capabilities", () => {
@@ -160,10 +166,11 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("mysql")).toBe(true);
     expect(supportsTransaction("oracle")).toBe(true);
     expect(supportsTransaction("jdbc")).toBe(true);
+    expect(supportsTransaction("oceanbase-oracle")).toBe(true);
+    expect(supportsTransaction("dameng")).toBe(true);
   });
 
   it("returns false for unsupported database types", () => {
-    expect(supportsTransaction("oceanbase-oracle")).toBe(false);
     expect(supportsTransaction("redis")).toBe(false);
     expect(supportsTransaction("mongodb")).toBe(false);
     expect(supportsTransaction("duckdb")).toBe(false);
@@ -173,7 +180,6 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("sqlite")).toBe(false);
     expect(supportsTransaction("clickhouse")).toBe(false);
     expect(supportsTransaction("sqlserver")).toBe(false);
-    expect(supportsTransaction("dameng")).toBe(false);
     expect(supportsTransaction("rqlite")).toBe(false);
     expect(supportsTransaction("agent")).toBe(false);
   });
@@ -198,6 +204,8 @@ describe("defaultAutoCommitForDbType", () => {
     expect(defaultAutoCommitForDbType("postgres", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("oracle", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("jdbc", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("dameng", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("mysql", "auto")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "auto")).toBe(true);
   });
@@ -206,10 +214,47 @@ describe("defaultAutoCommitForDbType", () => {
     expect(defaultAutoCommitForDbType("redis", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("mongodb", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("sqlite", "manual")).toBe(true);
-    expect(defaultAutoCommitForDbType("dameng", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("clickhouse", "manual")).toBe(true);
-    expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "manual")).toBe(true);
+  });
+});
+
+describe("usesOracleStickyTransactionState", () => {
+  it("marks only the Oracle family for schema-change compensation", () => {
+    expect(usesOracleStickyTransactionState("oracle")).toBe(true);
+    expect(usesOracleStickyTransactionState("oceanbase-oracle")).toBe(true);
+  });
+
+  it("keeps other databases on the generic transaction path", () => {
+    expect(usesOracleStickyTransactionState("mysql")).toBe(false);
+    expect(usesOracleStickyTransactionState("postgres")).toBe(false);
+    expect(usesOracleStickyTransactionState("jdbc")).toBe(false);
+    expect(usesOracleStickyTransactionState(undefined)).toBe(false);
+  });
+});
+
+describe("usesProvenReadOnlyStickyTransactionState", () => {
+  it("enables the sticky toolbar for the Oracle family, MySQL and PostgreSQL", () => {
+    expect(usesProvenReadOnlyStickyTransactionState("oracle")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("oceanbase-oracle")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("mysql")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("postgres")).toBe(true);
+  });
+
+  it("keeps databases without manual-transaction support on the legacy toolbar", () => {
+    expect(usesProvenReadOnlyStickyTransactionState("doris")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("kingbase")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("jdbc")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("redis")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState(undefined)).toBe(false);
+  });
+
+  it("only enables sticky state where manual mode is reachable", () => {
+    // The sticky UX gates commit/rollback in manual mode; a member without
+    // transaction support could never reach it. Guards against drift.
+    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres"]) {
+      expect(supportsTransaction(dbType)).toBe(true);
+    }
   });
 });
 
@@ -281,6 +326,10 @@ describe("supportsTableImport", () => {
   it("enables OceanBase Oracle table import", () => {
     expect(supportsTableImport("oceanbase-oracle")).toBe(true);
   });
+
+  it("keeps Xugu table import available", () => {
+    expect(supportsTableImport("xugu")).toBe(true);
+  });
 });
 
 describe("database property editing", () => {
@@ -327,8 +376,9 @@ describe("database namespace creation", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "duckdb" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "sqlite" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb" })).toBe("special");
-    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBeNull();
-    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "legacy" })).toBeNull();
+    // The Legacy Agent creates databases through runCommand, so it gets the same flow.
+    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBe("special");
+    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "legacy" })).toBe("special");
   });
 
   it("hides persistent SQLite attachment for memory and SQLCipher connections", () => {

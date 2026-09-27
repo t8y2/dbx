@@ -26,6 +26,10 @@ impl AppError {
         Self::with_status(msg.into(), StatusCode::BAD_REQUEST)
     }
 
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self::with_status(msg.into(), StatusCode::FORBIDDEN)
+    }
+
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::with_status(msg.into(), StatusCode::NOT_FOUND)
     }

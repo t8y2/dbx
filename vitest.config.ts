@@ -8,6 +8,10 @@ export default defineConfig({
     alias: {
       "@": path.resolve(import.meta.dirname, "apps/desktop/src"),
       "@dbx-app/mongo-shell": path.resolve(import.meta.dirname, "packages/mongo-shell/src/index.ts"),
+      // sql-formatter's `exports` map only declares ".", so deep imports into its
+      // bundled parser/tokenizer are rejected by Vite's exports handling. The
+      // The default layout engine needs that AST; see lib/sql/layout/internals.ts.
+      "sql-formatter/dist/": `${path.resolve(import.meta.dirname, "node_modules/sql-formatter/dist")}/`,
     },
   },
   test: {
@@ -18,8 +22,7 @@ export default defineConfig({
     // import at once, CPU contention can stall a worker's event loop past the
     // old 5s default and flake deferred-promise tests. A 10s timeout absorbs
     // that without capping throughput, so workers can scale past 4. CI keeps
-    // 4 workers: its 4-vCPU runners already run vue-tsc/oxlint/oxfmt
-    // concurrently with vitest via `pnpm check`.
+    // 4 workers to match each runner's CPU count.
     testTimeout: 10_000,
     maxWorkers: process.env.CI ? 4 : 8,
   },

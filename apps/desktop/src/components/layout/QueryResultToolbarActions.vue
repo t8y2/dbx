@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onScopeDispose, ref } from "vue";
 import { GitBranch, Gauge, Loader2, PlugZap, Upload } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -36,12 +36,21 @@ const installedPlugins = ref<InstalledPlugin[]>([]);
 const resultViews = computed<PluginContributionEntry<PluginResultViewContribution>[]>(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value).listResultViews());
 const visibleResultViews = computed(() => (props.hasResult ? resultViews.value.slice(0, 4) : []));
 
-void api.listPlugins().then(
-  (plugins) => {
+async function refreshInstalledPlugins() {
+  try {
+    const plugins = await api.listPlugins();
     installedPlugins.value = plugins.filter((plugin) => plugin.compatibility.compatible);
-  },
-  () => {},
-);
+  } catch {
+    // Keep the previous list: an empty registry would drop live plugin result-view entries.
+  }
+}
+
+// Plugin install/update/uninstall from the Plugin Center broadcasts this event;
+// without it the toolbar keeps the mount-time snapshot until DBX restarts.
+const onPluginsChanged = () => void refreshInstalledPlugins();
+window.addEventListener("dbx:plugins-changed", onPluginsChanged);
+onScopeDispose(() => window.removeEventListener("dbx:plugins-changed", onPluginsChanged));
+void refreshInstalledPlugins();
 </script>
 
 <template>

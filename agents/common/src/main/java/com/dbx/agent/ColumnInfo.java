@@ -13,6 +13,8 @@ public final class ColumnInfo {
     private Integer numeric_precision;
     private Integer numeric_scale;
     private Integer character_maximum_length;
+    private String character_set;
+    private String collation;
 
     public ColumnInfo() {
         this("", "", true, null, false);
@@ -34,6 +36,36 @@ public final class ColumnInfo {
         Integer numeric_scale,
         Integer character_maximum_length
     ) {
+        this(
+            name,
+            data_type,
+            is_nullable,
+            column_default,
+            is_primary_key,
+            extra,
+            comment,
+            numeric_precision,
+            numeric_scale,
+            character_maximum_length,
+            null,
+            null
+        );
+    }
+
+    public ColumnInfo(
+        String name,
+        String data_type,
+        boolean is_nullable,
+        String column_default,
+        boolean is_primary_key,
+        String extra,
+        String comment,
+        Integer numeric_precision,
+        Integer numeric_scale,
+        Integer character_maximum_length,
+        String character_set,
+        String collation
+    ) {
         this.name = name;
         this.data_type = data_type;
         this.is_nullable = is_nullable;
@@ -44,6 +76,8 @@ public final class ColumnInfo {
         this.numeric_precision = numeric_precision;
         this.numeric_scale = numeric_scale;
         this.character_maximum_length = character_maximum_length;
+        this.character_set = character_set;
+        this.collation = collation;
     }
 
     public String getName() {
@@ -86,6 +120,14 @@ public final class ColumnInfo {
         return character_maximum_length;
     }
 
+    public String getCharacter_set() {
+        return character_set;
+    }
+
+    public String getCollation() {
+        return collation;
+    }
+
     public void setName(String name) {
         this.name = name;
     }
@@ -126,6 +168,14 @@ public final class ColumnInfo {
         this.character_maximum_length = character_maximum_length;
     }
 
+    public void setCharacter_set(String character_set) {
+        this.character_set = character_set;
+    }
+
+    public void setCollation(String collation) {
+        this.collation = collation;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -140,7 +190,9 @@ public final class ColumnInfo {
             && Objects.equals(comment, that.comment)
             && Objects.equals(numeric_precision, that.numeric_precision)
             && Objects.equals(numeric_scale, that.numeric_scale)
-            && Objects.equals(character_maximum_length, that.character_maximum_length);
+            && Objects.equals(character_maximum_length, that.character_maximum_length)
+            && Objects.equals(character_set, that.character_set)
+            && Objects.equals(collation, that.collation);
     }
 
     @Override
@@ -155,7 +207,9 @@ public final class ColumnInfo {
             comment,
             numeric_precision,
             numeric_scale,
-            character_maximum_length
+            character_maximum_length,
+            character_set,
+            collation
         );
     }
 
@@ -171,6 +225,8 @@ public final class ColumnInfo {
             + ", numeric_precision=" + numeric_precision
             + ", numeric_scale=" + numeric_scale
             + ", character_maximum_length=" + character_maximum_length
+            + ", character_set=" + character_set
+            + ", collation=" + collation
             + ")";
     }
 }

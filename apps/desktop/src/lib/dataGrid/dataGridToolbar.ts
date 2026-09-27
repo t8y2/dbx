@@ -32,7 +32,7 @@ export function isDataGridToolbarActionCompact(action: DataGridToolbarActionKey,
   return actionIndex < Math.max(0, Math.floor(compactActionCount));
 }
 
-export type DataGridReloadIntent = "refresh";
+export type DataGridReloadIntent = "refresh" | "auto-refresh";
 
 export interface DataGridToolbarActionCapability {
   label: string;
@@ -104,6 +104,8 @@ export interface DataGridToolbarAutoRefreshCapability {
   disabled?: boolean;
   enabled: boolean;
   intervalSeconds: number;
+  /** Bumped whenever the auto-refresh countdown (re)starts, so the toolbar's clock hand restarts in phase with the real timer. */
+  sweepKey: number;
   intervalOptions: readonly number[];
   intervalLabel: (seconds: number) => string;
   onToggle: () => void | Promise<void>;

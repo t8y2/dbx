@@ -58,6 +58,15 @@ describe("SchemaDiffOptionsPanel", () => {
     expect(normalized.ignoreColumnNameCase).toBe(false);
   });
 
+  it("exposes charset comparison only for supported MySQL targets and defaults it on", () => {
+    expect(getSchemaDiffOptionsForDbType("mysql").map((item) => item.id)).toContain("compareCharset");
+    expect(getSchemaDiffOptionsForDbType("goldendb").map((item) => item.id)).toContain("compareCharset");
+    expect(getSchemaDiffOptionsForDbType("starrocks").map((item) => item.id)).not.toContain("compareCharset");
+    expect(getSchemaDiffOptionsForDbType("doris").map((item) => item.id)).not.toContain("compareCharset");
+    expect(getSchemaDiffOptionsForDbType("postgres").map((item) => item.id)).not.toContain("compareCharset");
+    expect(normalizeSchemaDiffCompareOptions({}, "mysql").compareCharset).toBe(true);
+  });
+
   it("keeps unsaved checkbox edits when the parent refreshes equivalent options", async () => {
     const options = ref<SchemaDiffCompareOptions>({ ...DEFAULT_POSTGRES_OPTIONS });
     const optionTree: SchemaDiffOptionItem[] = [{ id: "views", labelKey: "views", defaultChecked: true }];

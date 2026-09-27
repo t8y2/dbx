@@ -3,10 +3,14 @@ import type { QueryResult } from "@/types/database";
 import {
   buildKingbaseCancelQuerySql,
   buildKingbasePgCancelQuerySql,
+  buildKingbasePgTerminateSessionSql,
+  buildKingbaseTerminateSessionSql,
   buildPgCancelQuerySql,
+  buildPgTerminateSessionSql,
   isKingbaseOwnSessionCatalogCompatibilityError,
   isKingbaseProcessListCatalogCompatibilityError,
   isKingbaseCancelCatalogCompatibilityError,
+  isKingbaseTerminateCatalogCompatibilityError,
   isPgProcessListCompatibilityError,
   KINGBASE_OWN_SESSION_SQL,
   KINGBASE_PG_OWN_SESSION_SQL,
@@ -18,6 +22,7 @@ import {
   kingbaseCancelQueryResultError,
   kingbasePgCancelQueryResultError,
   pgCancelQueryResultError,
+  pgTerminateSessionResultError,
   PG_PROCESS_LIST_LEGACY_SQL,
   PG_PROCESS_LIST_SQL,
 } from "@/lib/database/postgresProcessList";
@@ -120,6 +125,32 @@ describe("PostgreSQL-family process SQL", () => {
   });
 });
 
+describe("session termination statements", () => {
+  it("builds pg_terminate_backend so an idle backend is really disconnected", () => {
+    expect(buildPgTerminateSessionSql(4211)).toBe("SELECT pg_terminate_backend(4211)");
+    expect(buildKingbaseTerminateSessionSql(4211)).toBe("SELECT sys_terminate_backend(4211)");
+    expect(buildKingbasePgTerminateSessionSql(4211)).toBe("SELECT pg_terminate_backend(4211)");
+  });
+
+  it("rejects non-integer or nonpositive pids", () => {
+    expect(() => buildPgTerminateSessionSql(1.5)).toThrow();
+    expect(() => buildPgTerminateSessionSql(0)).toThrow();
+    expect(() => buildPgTerminateSessionSql(Number.NaN)).toThrow();
+  });
+
+  it("requires the server to confirm that a backend was terminated", () => {
+    expect(pgTerminateSessionResultError([result(["pg_terminate_backend"], [[true]])])).toBeNull();
+    expect(pgTerminateSessionResultError([result(["pg_terminate_backend"], [["t"]])])).toBeNull();
+    expect(pgTerminateSessionResultError([result(["pg_terminate_backend"], [[false]])])).toContain("did not terminate");
+    expect(pgTerminateSessionResultError([result(["pg_terminate_backend"], [])])).toContain("did not terminate");
+  });
+
+  it("detects the Kingbase fallback trigger for a missing sys_terminate_backend", () => {
+    expect(isKingbaseTerminateCatalogCompatibilityError(new Error("function sys_terminate_backend(integer) does not exist"))).toBe(true);
+    expect(isKingbaseTerminateCatalogCompatibilityError(new Error("permission denied"))).toBe(false);
+  });
+});
+
 describe("Postgres compatibility", () => {
   it("provides a pre-9.6 query and only falls back for missing wait-event columns", () => {
     expect(PG_PROCESS_LIST_SQL).toContain("wait_event_type");
@@ -145,7 +176,10 @@ describe("resolveProcessListDriver", () => {
     const mysql = resolveProcessListDriver("mysql");
     const postgres = resolveProcessListDriver("postgres");
     expect(mysql?.buildCancelQuerySql(7)).toBe("KILL QUERY 7");
+    expect(mysql?.buildTerminateSessionSql?.(7)).toBe("KILL 7");
     expect(postgres?.buildCancelQuerySql(7)).toBe("SELECT pg_cancel_backend(7)");
+    expect(postgres?.buildTerminateSessionSql?.(7)).toBe("SELECT pg_terminate_backend(7)");
+    expect(postgres?.terminateSessionResultError?.([result(["pg_terminate_backend"], [[false]])])).toContain("did not terminate");
     expect(postgres?.fallbackListSql).toBe(PG_PROCESS_LIST_LEGACY_SQL);
     expect(postgres?.shouldUseFallbackListSql?.(new Error('column "wait_event" does not exist'))).toBe(true);
     expect(postgres?.cancelQueryResultError?.([result(["pg_cancel_backend"], [[false]])])).toContain("did not cancel");
@@ -177,6 +211,8 @@ describe("connectionSupportsProcessList", () => {
     expect(connectionSupportsProcessList(conn({ db_type: "gaussdb", driver_profile: "opengauss" }))).toBe(true);
     expect(connectionSupportsProcessList(conn({ db_type: "gaussdb", driver_profile: "gaussdb" }))).toBe(false);
     expect(connectionSupportsProcessList(conn({ db_type: "kingbase" }))).toBe(true);
+    expect(resolveProcessListDriver("kingbase")?.buildTerminateSessionSql?.(7)).toBe("SELECT sys_terminate_backend(7)");
+    expect(resolveProcessListDriver("opengauss")?.buildTerminateSessionSql?.(7)).toBe("SELECT pg_terminate_backend(7)");
     expect(connectionSupportsProcessList(conn({ db_type: "sqlite" }))).toBe(false);
     expect(connectionSupportsProcessList(undefined)).toBe(false);
   });

@@ -2057,6 +2057,7 @@ dependencies = [
  "csv",
  "dbx-core",
  "dbx-mcp",
+ "dbx-tauri-consul",
  "deadpool-postgres",
  "font-kit",
  "futures",
@@ -2613,6 +2614,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlparser",
+]
+
+[[package]]
+name = "dbx-tauri-consul"
+version = "0.1.0"
+dependencies = [
+ "dbx-core",
+ "serde",
+ "serde_json",
+ "tauri",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
+import { editorRootSelection } from "@/lib/editor/queryEditorNativeSelection";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis } from "@/lib/sql/semantic/references";
 import { sqlServerUseDatabaseBeforeCursor } from "@/lib/sql/sqlCompletionLookupTarget";
@@ -135,15 +136,6 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           severity: "error" | "warning";
         } => !!range,
       );
-  }
-
-  // Mirrors CodeMirror's own root handling: shadow roots only expose
-  // `getSelection` on some browsers, otherwise the owner document holds it.
-  function editorRootSelection(currentView: EditorViewType): Selection | null {
-    const root = currentView.root as unknown as ShadowRoot & { getSelection?: () => Selection | null };
-    if (root.nodeType !== 11) return (root as unknown as Document).getSelection();
-    if (typeof root.getSelection === "function") return root.getSelection() ?? null;
-    return root.ownerDocument?.getSelection() ?? null;
   }
 
   // See queryEditorDiagnosticCaretAnchor.ts for why the browser caret needs re-anchoring.

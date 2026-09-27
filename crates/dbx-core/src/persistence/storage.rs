@@ -1479,9 +1479,16 @@ impl Storage {
                         let mut count = 0;
                         for row in rows {
                             let json = row.map_err(|e| e.to_string())?;
-                            let config: ConnectionConfig = serde_json::from_str(&json).map_err(|e| {
-                                format!("invalid connection configuration during migration preflight: {e}")
-                            })?;
+                            // Legacy rows saved by older app versions may carry a db_type the
+                            // current enum no longer knows (e.g. pre-plugin `s3`). load_connections
+                            // skips those at runtime, so they must not brick the migration either.
+                            let config: ConnectionConfig = match serde_json::from_str(&json) {
+                                Ok(config) => config,
+                                Err(error) => {
+                                    warn!("Skipping unreadable saved connection during migration preflight: {error}");
+                                    continue;
+                                }
+                            };
                             if connection_config_has_inline_secrets(&config) {
                                 count += 1;
                             }
@@ -2019,7 +2026,15 @@ impl Storage {
             let mut configs = conn.prepare("SELECT config_json FROM connections").map_err(|e| e.to_string())?;
             for row in configs.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())? {
                 let json = row.map_err(|e| e.to_string())?;
-                let config: ConnectionConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+                // Rows skipped by the migrator (unreadable legacy db_type) keep their stored
+                // config_json; only readable rows are verified here.
+                let config: ConnectionConfig = match serde_json::from_str(&json) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        warn!("Skipping unreadable saved connection after migration: {error}");
+                        continue;
+                    }
+                };
                 if connection_config_has_inline_secrets(&config) {
                     return Err("plaintext connection configuration remains after migration".to_string());
                 }
@@ -2281,8 +2296,12 @@ fn migrate_legacy_connection_config_json_sync(conn: &mut Connection, codec: &Sec
     for (id, json) in rows {
         let config: ConnectionConfig = match serde_json::from_str(&json) {
             Ok(config) => config,
+            // load_connections skips unreadable rows at runtime; migration must not
+            // fail on them either. Their inline secrets stay as stored until the
+            // connection is repaired or removed (#10227).
             Err(error) => {
-                return Err(format!("Failed to parse legacy connection '{id}' during secret migration: {error}"))
+                warn!("Skipping unreadable saved connection '{id}' during secret migration: {error}");
+                continue;
             }
         };
         if connection_config_has_inline_secrets(&config) {
@@ -8622,6 +8641,75 @@ mod tests {
         assert!(after.get("cachedScan").is_none());
         assert!(after.get("cachedScanFingerprint").is_none());
         assert!(!storage.inspect_data_migration().await.unwrap().needs_migration);
+    }
+
+    #[tokio::test]
+    async fn migration_tolerates_unreadable_legacy_connection_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                // A readable row carrying an inline password must keep counting…
+                let readable = serde_json::json!({
+                    "id": "conn-readable",
+                    "name": "Readable",
+                    "db_type": "mysql",
+                    "host": "127.0.0.1",
+                    "port": 3306,
+                    "username": "root",
+                    "password": "secret-password",
+                    "database": null
+                });
+                conn.execute(
+                    "INSERT INTO connections (id, config_json) VALUES ('conn-readable', ?1)",
+                    [readable.to_string()],
+                )
+                .unwrap();
+                // …while a pre-plugin row saved with a db_type the current enum no
+                // longer knows (legacy built-in s3) must not brick the scan (#10227).
+                let legacy = serde_json::json!({
+                    "id": "conn-legacy-s3",
+                    "name": "Legacy S3",
+                    "db_type": "s3",
+                    "host": "127.0.0.1",
+                    "port": 9000,
+                    "username": "minio",
+                    "password": "secret-s3",
+                    "database": null
+                });
+                conn.execute(
+                    "INSERT INTO connections (id, config_json) VALUES ('conn-legacy-s3', ?1)",
+                    [legacy.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let preflight = storage.inspect_data_migration().await.unwrap();
+        assert_eq!(preflight.database_plaintext_count, 1);
+
+        storage.start_data_migration().await.unwrap();
+
+        // The unreadable row is preserved untouched; the readable row had its
+        // inline password moved into the encrypted secret store.
+        let (legacy_json, readable_json) = storage
+            .with_conn(|conn| {
+                let legacy: String = conn
+                    .query_row("SELECT config_json FROM connections WHERE id = 'conn-legacy-s3'", [], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                let readable: String = conn
+                    .query_row("SELECT config_json FROM connections WHERE id = 'conn-readable'", [], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                Ok((legacy, readable))
+            })
+            .await
+            .unwrap();
+        assert!(legacy_json.contains("\"s3\""), "legacy row must be preserved verbatim: {legacy_json}");
+        assert!(!readable_json.contains("secret-password"), "readable row must be scrubbed: {readable_json}");
+        let stored = storage.get_secret("conn-readable", "password").await.unwrap().unwrap_or_default();
+        assert_eq!(stored, "secret-password");
     }
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {

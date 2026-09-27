@@ -556,7 +556,7 @@ func isQueryStatement(sql string) bool {
 		return false
 	}
 	switch strings.ToUpper(fields[0]) {
-	case "SELECT", "SHOW", "DESC", "DESCRIBE", "EXPLAIN", "WITH":
+	case "SELECT", "SHOW", "DESC", "DESCRIBE", "EXPLAIN", "WITH", "LIST":
 		return true
 	default:
 		return false

@@ -784,13 +784,14 @@ export async function buildAiContext(
   const maxFksPerTable = options.maxFksPerTable ?? 10;
   const databaseType = aiDatabaseTypeForConnection(connection);
   const { database, schema } = resolveAiDatabaseTarget(tab, connection);
+  const supportsMetadata = connection.db_type !== "plugin";
   const tables: AiSchemaTable[] = [];
   const tableKeys = new Set<string>();
   let truncated = false;
   let schemaScope: AiContext["schemaScope"] = "database";
   let currentCollectionName: string | undefined;
 
-  if (tab.tableMeta) {
+  if (supportsMetadata && tab.tableMeta) {
     schemaScope = "focused_table";
     const s = tab.tableMeta.schema ?? "";
     const tName = tab.tableMeta.tableName;
@@ -809,7 +810,7 @@ export async function buildAiContext(
     truncated = tab.tableMeta.columns.length > maxColumnsPerTable;
   }
 
-  for (const mention of options.mentionedTables ?? []) {
+  for (const mention of supportsMetadata ? (options.mentionedTables ?? []) : []) {
     const key = aiTableMentionKey(mention.schema, mention.table);
     if (tableKeys.has(key)) continue;
     const entry = await loadMentionedTableContext(tab, connection, mention, maxColumnsPerTable, maxIndexesPerTable, maxFksPerTable).catch(() => undefined);
@@ -819,7 +820,7 @@ export async function buildAiContext(
   }
 
   // Vector databases: load collections instead of SQL tables
-  if (isVectorDbType(databaseType)) {
+  if (supportsMetadata && isVectorDbType(databaseType)) {
     try {
       const collections = await api.vectorListCollections(tab.connectionId, database);
 
@@ -854,7 +855,7 @@ export async function buildAiContext(
     }
   }
 
-  if (!tab.tableMeta && !["redis", "mongodb"].includes(connection.db_type) && !isVectorDbType(databaseType)) {
+  if (supportsMetadata && !tab.tableMeta && !["redis", "mongodb"].includes(connection.db_type) && !isVectorDbType(databaseType)) {
     try {
       const schemas = await loadCandidateSchemas(tab, connection);
       for (const schema of schemas) {

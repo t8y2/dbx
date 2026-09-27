@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2, Layers, MoreHorizontal, BetweenVerticalStart, Eye, WrapText, RefreshCw } from "@lucide/vue";
+import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2, Layers, MoreHorizontal, BetweenVerticalStart, Eye, WrapText, RefreshCw, UserRound } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -215,6 +215,38 @@ const showConnectionProductionBadge = computed(() => activeProductionContext.val
 const showDatabaseProductionBadge = computed(() => activeProductionContext.value.reason === "database");
 const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
+// Salesforce identity badge. A Salesforce tab talks to one live org and every grid
+// save is a real REST write, so the signed-in user stays visible next to the
+// connection controls. Advisory only: Salesforce enforces the actual permissions.
+const isSalesforceTab = computed(() => props.activeConnection?.db_type === "salesforce");
+const salesforceIdentity = computed(() => (props.activeConnection ? connectionStore.salesforceCurrentUser(props.activeConnection.id) : null));
+const salesforceIdentityLabel = computed(() => {
+  const identity = salesforceIdentity.value;
+  if (!identity) return "";
+  const user = identity.username || identity.name || identity.email;
+  const org = identity.orgName || identity.organizationId;
+  if (user && org) return `${user} @ ${org}`;
+  return user || org;
+});
+const salesforceIdentityTooltip = computed(() => {
+  const identity = salesforceIdentity.value;
+  if (!identity) return "";
+  const lines = [identity.name || identity.username || identity.email, identity.profileName || t("toolbar.salesforceIdentityUnknownProfile")];
+  if (identity.isAdmin === true) lines.push(t("toolbar.salesforceIdentityAdmin"));
+  else if (identity.isAdmin === false) lines.push(t("toolbar.salesforceIdentityNonAdmin"));
+  else lines.push(t("toolbar.salesforceIdentityUnknownRights"));
+  return lines.filter((line) => !!line).join("\n");
+});
+watch(
+  () => [isSalesforceTab.value, props.activeConnection?.id ?? "", connectionStore.connectedIds.has(props.activeConnection?.id ?? "")] as const,
+  ([salesforce, connectionId, connected]) => {
+    // Never connect on a tab switch: only resolve the identity once the user has
+    // established the connection themselves. A failed lookup hides the badge.
+    if (!salesforce || !connected || !connectionId) return;
+    void connectionStore.loadSalesforceCurrentUser(connectionId);
+  },
+  { immediate: true },
+);
 const supportsExplain = computed(() => {
   const dbType = props.activeConnection?.db_type;
   return (
@@ -233,7 +265,8 @@ const supportsExplain = computed(() => {
     dbType !== "consul" &&
     dbType !== "mq" &&
     dbType !== "nacos" &&
-    dbType !== "victoriametrics"
+    dbType !== "victoriametrics" &&
+    dbType !== "salesforce"
   );
 });
 const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_type));
@@ -285,7 +318,7 @@ const sqlSemanticDiagnosticsEnabled = computed(() => settingsStore.editorSetting
 const sqlSemanticDiagnosticsToggleTooltip = computed(() => (sqlSemanticDiagnosticsEnabled.value ? t("toolbar.sqlSemanticDiagnosticsToggleOn") : t("toolbar.sqlSemanticDiagnosticsToggleOff")));
 const supportsSqlSemanticDiagnosticsToggle = computed(() => {
   const dbType = props.activeConnection?.db_type;
-  return dbType !== "redis" && dbType !== "victoriametrics";
+  return dbType !== "redis" && dbType !== "victoriametrics" && dbType !== "salesforce";
 });
 function toggleSqlSemanticDiagnostics() {
   settingsStore.updateEditorSettings({
@@ -925,6 +958,11 @@ async function changeCatalog(selectedCatalog: string) {
     <div v-if="activeTab.mode === 'data' && activeTab.tableMeta" class="ml-2 inline-flex shrink-0 items-center gap-1 rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums">
       <Table2 class="h-3.5 w-3.5 shrink-0" />
       <span class="truncate">{{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }}</span>
+    </div>
+    <div v-if="salesforceIdentity" data-testid="salesforce-identity-badge" class="ml-2 inline-flex max-w-[20rem] shrink-0 items-center gap-1 rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground" :title="salesforceIdentityTooltip">
+      <Shield v-if="salesforceIdentity.isAdmin === true" class="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      <UserRound v-else class="h-3.5 w-3.5 shrink-0" />
+      <span class="truncate">{{ salesforceIdentityLabel }}</span>
     </div>
   </div>
   <div v-if="autoCommitTxnRolledBack" data-auto-commit-txn-rolled-back class="flex items-center gap-2 px-3 py-1 text-xs bg-amber-500/10 text-amber-700 dark:text-amber-300 border-b border-amber-500/20">

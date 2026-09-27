@@ -1,15 +1,33 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import UpdateDialog from "@/components/layout/UpdateDialog.vue";
 
 const runtimeState = vi.hoisted(() => ({ tauri: true }));
 
+const updateMocks = vi.hoisted(() => ({
+  fetchChangelog: vi.fn(),
+  getAppVersion: vi.fn(),
+  openExternal: vi.fn(),
+}));
+
 vi.mock("@/lib/backend/tauriRuntime", () => ({
   isTauriRuntime: () => runtimeState.tauri,
 }));
+
+vi.mock("@/lib/app/changelog", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/app/changelog")>();
+  return { ...actual, fetchChangelog: updateMocks.fetchChangelog };
+});
+
+vi.mock("@/lib/backend/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/backend/api")>();
+  return { ...actual, getAppVersion: updateMocks.getAppVersion };
+});
+
+vi.mock("@tauri-apps/plugin-shell", () => ({ open: updateMocks.openExternal }));
 
 const mountedApps: App[] = [];
 
@@ -135,6 +153,13 @@ async function clickOutside() {
   document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
   await flushDialog();
 }
+
+beforeEach(() => {
+  // 默认没有历史版本：只有专门的历史版本用例才提供发布记录
+  updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "", releases: [] });
+  updateMocks.getAppVersion.mockResolvedValue("0.5.60");
+  updateMocks.openExternal.mockClear();
+});
 
 afterEach(() => {
   runtimeState.tauri = true;
@@ -377,10 +402,116 @@ describe("UpdateDialog release notes safety", () => {
     expect(document.body.querySelector("script, img")).toBeNull();
     expect(Array.from(document.body.querySelectorAll("a")).every((anchor) => anchor.href.startsWith("https://"))).toBe(true);
   });
+
+  it("hides HTML comments such as the CNB mirror marker instead of rendering them as text", async () => {
+    await mountDialog(0, { releaseNotes: "### 安装\n- 条目\n\n<!-- dbx-cnb-mirror -->\n> 国内下载：[CNB 镜像](https://cnb.cool/dbxio.com/dbx/-/releases)" });
+    await vi.waitFor(() => {
+      expect(document.body.querySelector('a[href^="https://cnb.cool"]')).not.toBeNull();
+    });
+    expect(document.body.textContent).not.toContain("dbx-cnb-mirror");
+    expect(document.body.textContent).not.toContain("<!--");
+  });
+});
+
+describe("UpdateDialog older versions", () => {
+  const release = (tag: string, date: string) => ({ tag, name: `DBX ${tag}`, date, sections: [] });
+  const upToDateInfo = {
+    current_version: "0.5.60",
+    latest_version: "0.5.60",
+    update_available: false,
+    portable_mode: false,
+    manual_update_only: false,
+    release_name: "",
+    release_url: "",
+    release_notes: "",
+  };
+  const historyRegion = () => document.body.querySelector<HTMLElement>("[data-update-history]");
+  const historyButton = (text: string) => Array.from(historyRegion()?.querySelectorAll("button") ?? []).find((button) => button.textContent?.includes(text));
+
+  it("lists only versions older than the current build and opens their release page", async () => {
+    updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.60", "2026-09-01"), release("v0.5.59", "2026-08-20")] });
+
+    await mountDialog(0, {}, undefined, { updateInfo: upToDateInfo, updateCheckMessage: "DBX is up to date (0.5.60)." });
+    await flushDialog();
+
+    // 默认折叠：即使没有可用更新也先收起，且列表只保留低于当前版本的版本
+    const region = historyRegion();
+    expect(region?.textContent).toContain("Older versions");
+    expect(region?.textContent).not.toContain("v0.5.59");
+
+    historyButton("Older versions")?.click();
+    await flushDialog();
+
+    expect(region?.textContent).toContain("Back up your data before rolling back");
+    expect(region?.textContent).toContain("v0.5.59");
+    expect(region?.textContent).not.toContain("v0.5.61");
+
+    historyButton("Open Release")?.click();
+    await flushDialog();
+
+    expect(updateMocks.openExternal).toHaveBeenCalledWith("https://github.com/t8y2/dbx/releases/tag/v0.5.59");
+  });
+
+  it("keeps the history collapsed until the user expands it", async () => {
+    updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.59", "2026-08-20")] });
+
+    await mountDialog(0);
+    await flushDialog();
+
+    expect(historyRegion()?.textContent).toContain("Older versions");
+    expect(historyRegion()?.textContent).not.toContain("v0.5.59");
+
+    historyButton("Older versions")?.click();
+    await flushDialog();
+
+    expect(historyRegion()?.textContent).toContain("v0.5.59");
+  });
+
+  it("starts collapsed again after the dialog is reopened", async () => {
+    updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.59", "2026-08-20")] });
+
+    const { state } = await mountDialog(0, {}, undefined, { updateInfo: upToDateInfo, updateCheckMessage: "DBX is up to date (0.5.60)." });
+    await flushDialog();
+
+    historyButton("Older versions")?.click();
+    await flushDialog();
+    expect(historyRegion()?.textContent).toContain("v0.5.59");
+
+    state.open = false;
+    await flushDialog();
+    state.open = true;
+    await flushDialog();
+
+    expect(historyRegion()?.textContent).toContain("Older versions");
+    expect(historyRegion()?.textContent).not.toContain("v0.5.59");
+  });
+
+  it("hides the history section when no release is older than the current build", async () => {
+    updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.60", "2026-09-01")] });
+
+    await mountDialog(0);
+    await flushDialog();
+
+    expect(historyRegion()).toBeNull();
+  });
+
+  it("surfaces a changelog load failure instead of hiding it silently", async () => {
+    updateMocks.fetchChangelog.mockRejectedValue(new Error("offline"));
+
+    await mountDialog(0, {}, undefined, { updateInfo: upToDateInfo, updateCheckMessage: "DBX is up to date (0.5.60)." });
+    await flushDialog();
+
+    expect(historyRegion()?.textContent).toContain("Older versions");
+
+    historyButton("Older versions")?.click();
+    await flushDialog();
+
+    expect(historyRegion()?.textContent).toContain("Failed to load older versions");
+  });
 });
 
 describe("UpdateDialog aggregate update center", () => {
-  it("hides the tab bar when no updates are available", async () => {
+  it("keeps only the client tab when nothing is updatable", async () => {
     await mountDialog(0, {}, undefined, {
       updateInfo: {
         current_version: "0.5.60",
@@ -395,8 +526,9 @@ describe("UpdateDialog aggregate update center", () => {
       updateCheckMessage: "DBX is up to date (0.5.60).",
     });
 
-    expect(document.body.querySelector('[role="tablist"]')).toBeNull();
-    expect(document.body.querySelector('[data-update-tab="app"]')).toBeNull();
+    // 客户端页签常驻（承载回退入口），但没有可更新项时不再出现其他页签
+    expect(document.body.querySelector('[data-update-tab="app"]')).not.toBeNull();
+    expect(document.body.querySelector('[data-update-tab="drivers"]')).toBeNull();
     expect(document.body.textContent).toContain("DBX is up to date (0.5.60).");
   });
 
@@ -492,7 +624,7 @@ describe("UpdateDialog aggregate update center", () => {
     await mountDialog(0, {}, undefined, {
       driverUpdates: [{ db_type: "mysql", label: "MySQL", version: "9.0.0", installed_version: "8.0.0", update_available: true }],
       jdbcUpdate: { installed: true, version: "0.1.0", latest_version: "0.2.0", update_available: true, compatible: true, path: "/tmp/jdbc" },
-      mcpUpdate: { installed: true, npm_available: true, current_version: "1.0.0", latest_version: "1.1.0", update_available: true },
+      mcpUpdate: { installed: true, installation_source: "npm", npm_available: true, npm_installed: true, current_version: "1.0.0", latest_version: "1.1.0", update_available: true },
       pluginUpdates: [
         {
           key: "official:example",
@@ -554,7 +686,7 @@ describe("UpdateDialog aggregate update center", () => {
 
     // "Update all" skips the changed-source plugin, so the dialog has to explain why it stays.
     const hint = "Confirm the change in the Plugin Center first";
-    const rows = [...document.body.querySelectorAll<HTMLElement>(".rounded-md.border.p-3")];
+    const rows = [...document.body.querySelectorAll<HTMLElement>("[data-update-entry]")];
     const rowFor = (name: string) => rows.find((row) => row.textContent?.includes(name));
     expect(rowFor("moved plugin")?.textContent).toContain(hint);
     expect(rowFor("same plugin")?.textContent).not.toContain(hint);

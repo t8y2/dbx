@@ -4014,7 +4014,6 @@ mod tests {
 
         use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
         use crate::models::connection::ConnectionConfig;
-        use crate::storage::Storage;
 
         let directory = tempfile::tempdir().unwrap();
         let mut file = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
@@ -4047,7 +4046,7 @@ for line in sys.stdin:
         .await
         .unwrap();
         client.try_optional_handshake("test").await.unwrap();
-        let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = crate::connection::AppState::new(storage);
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "legacy",

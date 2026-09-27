@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatToolDurationMs, toolCallStepKey, upsertAgentStep, type AiAgentStepItem } from "@/lib/ai/aiAgentStepPresentation";
+import { formatAgentToolName, formatToolDurationMs, toolCallStepKey, updateAgentStepApproval, upsertAgentStep, type AiAgentStepApproval, type AiAgentStepItem } from "@/lib/ai/aiAgentStepPresentation";
 
 const startStep: AiAgentStepItem = {
   key: "tool-call-1",
@@ -73,6 +73,38 @@ describe("aiAgentStepPresentation", () => {
       });
 
       expect(steps[0].durationMs).toBe(0);
+    });
+  });
+
+  describe("plugin tool approvals", () => {
+    const approval: AiAgentStepApproval = {
+      approvalId: "a1",
+      sessionId: "s1",
+      pluginName: "SSH",
+      pluginTool: "ssh_exec",
+      connectionName: "prod",
+      args: { command: "uptime" },
+      expiresAtMs: 5_000,
+      status: "pending",
+    };
+
+    it("attaches the approval to the tool card and keeps it when the call ends", () => {
+      const steps: AiAgentStepItem[] = [];
+      upsertAgentStep(steps, startStep);
+      expect(updateAgentStepApproval(steps, "tool-call-1", () => approval)).toBe(true);
+      expect(updateAgentStepApproval(steps, "tool-missing", () => approval)).toBe(false);
+      updateAgentStepApproval(steps, "tool-call-1", (current) => (current ? { ...current, status: "approved" } : current));
+      upsertAgentStep(steps, { key: "tool-call-1", labelKey: "ai.agentSteps.toolDone", tone: "success", toolName: "list_tables", toolResult: "ok", endedAtMs: 2_000 });
+      expect(steps).toHaveLength(1);
+      expect(steps[0].approval).toEqual({ ...approval, status: "approved" });
+      expect(steps[0].toolResult).toBe("ok");
+    });
+
+    it("formats plugin tool names with their provenance and leaves built-in names alone", () => {
+      expect(formatAgentToolName("kafka__kafka_topics_list")).toBe("kafka › kafka_topics_list");
+      expect(formatAgentToolName("execute_query")).toBe("execute_query");
+      expect(formatAgentToolName("__odd")).toBe("__odd");
+      expect(formatAgentToolName("odd__")).toBe("odd__");
     });
   });
 

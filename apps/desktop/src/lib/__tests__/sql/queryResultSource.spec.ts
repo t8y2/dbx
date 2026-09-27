@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
+import { queryResultNameFromPreamble, queryResultSourceLabel, queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
 
 describe("queryResultNameFromPreamble", () => {
   it("uses only the immediately preceding line comment", () => {
@@ -63,5 +63,17 @@ describe("queryResultSourceLabel", () => {
     expect(queryResultSourceLabel("SELECT * FROM (SELECT * FROM users) nested", { database: "app", databaseType: "mysql" })).toBeUndefined();
     expect(queryResultSourceLabel("SELECT * FROM read_csv('users.csv') csv", { database: "main", databaseType: "duckdb" })).toBeUndefined();
     expect(queryResultSourceLabel("SELECT 1", { database: "app", databaseType: "mysql" })).toBeUndefined();
+  });
+});
+
+describe("queryResultSourceNameParts", () => {
+  it("keeps the qualifier separate even when the database name contains dots", () => {
+    expect(queryResultSourceNameParts("SELECT * FROM data_monitor", { database: "cosimulation2.0", databaseType: "mysql" })).toEqual({ qualifier: "cosimulation2.0", name: "data_monitor" });
+  });
+
+  it("prefers the explicit qualifier and drops an empty one", () => {
+    expect(queryResultSourceNameParts("SELECT * FROM analytics.events", { database: "app", databaseType: "mysql" })).toEqual({ qualifier: "analytics", name: "events" });
+    expect(queryResultSourceNameParts("SELECT * FROM events", { databaseType: "mysql" })).toEqual({ name: "events" });
+    expect(queryResultSourceNameParts("SELECT 1", { database: "app", databaseType: "mysql" })).toBeUndefined();
   });
 });

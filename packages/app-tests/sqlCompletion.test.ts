@@ -1343,6 +1343,44 @@ test("uses the full Unicode prefix as the replacement range without result reuse
   assert.equal(getSqlCompletionResultValidFor(sql, sql.length), undefined);
 });
 
+test("keeps FROM tables when the select list is separated from FROM by a blank line (#10196)", () => {
+  const sql = "SELECT id, name\n\nFROM users";
+  const cursor = "SELECT id, name".length;
+  const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+  assert.equal(context.suggestColumns, true);
+  assert.equal(shouldAutoOpenSqlCompletion(sql, cursor, { databaseType: "mysql" }), true);
+});
+
+test("keeps column hints while typing a select-list prefix before a blank-line FROM (#10196)", () => {
+  const sql = "SELECT id, na\n\nFROM users";
+  const cursor = sql.indexOf("na") + 2;
+  const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+  assert.equal(context.suggestColumns, true);
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+  assert.equal(shouldAutoOpenSqlCompletion(sql, cursor, { databaseType: "mysql" }), true);
+});
+
+test("select-list column context still works without a blank line before FROM", () => {
+  const sql = "SELECT id, name\nFROM users";
+  const cursor = "SELECT id, name".length;
+  const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+  assert.equal(context.suggestColumns, true);
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+});
+
 test("ranks prefix matches above substring matches for table names", () => {
   const sql = "select * from user";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -2093,6 +2131,24 @@ test("auto-opens column completion immediately after condition context whitespac
   }
 });
 
+test("auto-opens column completion after SELECT and UPDATE column-list keywords", () => {
+  const cases = [
+    { sql: "SELECT  FROM public.users", cursor: "SELECT ".length },
+    { sql: "UPDATE public.users SET  WHERE id = 1", cursor: "UPDATE public.users SET ".length },
+  ];
+
+  for (const { sql, cursor } of cases) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, cursor), true, sql);
+    const items = buildSqlCompletionItems(sql, cursor, { tables, columnsByTable });
+    assert.ok(
+      items.some((item) => item.type === "column" && item.label === "id"),
+      sql,
+    );
+  }
+
+  assert.equal(shouldAutoOpenSqlCompletion("SELECT ", "SELECT ".length), false);
+});
+
 test("does not auto-open column completion immediately after comparison operators", () => {
   for (const sql of ["SELECT * FROM public.users WHERE id>", "SELECT * FROM public.users WHERE id> ", "SELECT * FROM public.users WHERE id = "]) {
     assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), false, sql);
@@ -2818,6 +2874,43 @@ test("prioritizes current Oracle schema tables and safely qualifies other schema
   assert.deepEqual(
     matches.map((item) => item.apply),
     ["DEPT_DICT", "COMM.DEPT_DICT", "SYS.DEPT_DICT"],
+  );
+});
+
+test("prioritizes current OceanBase Oracle schema tables and safely qualifies other schemas", () => {
+  const sql = "select * from orders";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "ORDERS", schema: "STAGING", type: "table", applyName: "STAGING.ORDERS", boost: 0 },
+      { name: "ORDERS", schema: "DWD", type: "table", applyName: "ORDERS", boost: 2400 },
+    ],
+    columnsByTable,
+    databaseType: "oceanbase-oracle",
+    currentSchema: "DWD",
+  });
+  const matches = items.filter((item) => item.label === "ORDERS");
+
+  assert.deepEqual(
+    matches.map((item) => item.apply),
+    ["ORDERS", "STAGING.ORDERS"],
+  );
+});
+
+test("qualifies OceanBase Oracle tables outside the current schema without applyName", () => {
+  const sql = "select * from orders";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "ORDERS", schema: "STAGING", type: "table", boost: 0 },
+      { name: "ORDERS", schema: "DWD", type: "table", boost: 2400 },
+    ],
+    columnsByTable,
+    databaseType: "oceanbase-oracle",
+    currentSchema: "DWD",
+  });
+
+  assert.deepEqual(
+    items.filter((item) => item.label === "ORDERS").map((item) => item.apply),
+    ["ORDERS", "STAGING.ORDERS"],
   );
 });
 

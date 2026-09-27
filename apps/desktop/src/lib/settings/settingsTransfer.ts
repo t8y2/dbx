@@ -140,6 +140,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   data: [
     "showColumnCommentsInHeader",
     "showColumnTypesInHeader",
+    "showColumnHeaderTooltips",
+    "showResultSourceDatabase",
     "dataGridShowTransposeFieldMetadata",
     "colorizeDataGridCellTypes",
     "dataGridTypeColorSchemes",
@@ -268,6 +270,8 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "confirmUnsavedSqlClose",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
+  "showColumnHeaderTooltips",
+  "showResultSourceDatabase",
   "colorizeDataGridCellTypes",
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",

@@ -24,6 +24,7 @@ import {
   Eraser,
   Eye,
   FileCode,
+  FileText,
   Info,
   GripVertical,
   KeyRound,
@@ -75,7 +76,7 @@ import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, PgTablePartitioning, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
-import { supportsAiAssistantContext, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
+import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
@@ -250,7 +251,7 @@ const eventEditorKey = computed(() =>
   }),
 );
 // Table info panel state
-const tableInfoTab = ref<TableInfoTab>("info");
+const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableOverviewStats = ref<ObjectStatistics | null>(null);
 const tableOverviewComment = ref<string | null>(null);
 const tableOverviewLoading = ref(false);
@@ -409,6 +410,7 @@ const objectCounts = computed(() => countObjectBrowserRowsByFilter(rows.value));
 const objectSearchSummary = computed(() => summarizeObjectBrowserSearch(rows.value, search.value));
 const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tableStructureDatabaseType.value));
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
+const canOpenDataDictionary = computed(() => !!props.database && supportsDataDictionary(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
 const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(props.connection) && supportsTableVacuum(effectiveDatabaseType.value));
@@ -1011,6 +1013,9 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
     case "open-source":
       void (row.type === "EVENT" ? openEventEditor(row) : openSource(row));
       break;
+    case "open-source-tab":
+      openSourceTab(row);
+      break;
   }
 }
 
@@ -1038,7 +1043,7 @@ function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
   const activation = settingsStore.editorSettings.sidebarActivation;
   const { action, isDouble } = resolveRowClickAction(row, event.detail, activation, effectiveDatabaseType.value);
   // Double click: cancel any pending single-click and fire immediately. When
-  // the row's single/double actions are identical (e.g. VIEW → open-source),
+  // the row's single/double actions are identical (e.g. SEQUENCE → open-source),
   // this gesture's first click already ran it — re-executing would toggle the
   // just-opened side panel back off (or emit open-table twice for MongoDB).
   if (isDouble) {
@@ -1559,6 +1564,24 @@ function openTableStructureEditor() {
   queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, tableInfoTab.value, undefined, props.catalog);
 }
 
+/**
+ * Double-clicking a routine opens its source as an editable query tab
+ * (issue #10202), the same container the sidebar and editor navigation use.
+ * The store owns connection setup, source loading and tab de-duplication, so
+ * this path deliberately does not fall back to the side panel.
+ */
+function openSourceTab(row: ObjectBrowserRow) {
+  queryStore.openObjectSourceTabPending({
+    connectionId: props.connection.id,
+    database: props.database,
+    title: `Source - ${row.displayName || row.name}`,
+    schema: row.schema || selectedSchema.value || props.database,
+    catalog: props.catalog,
+    initialEditing: true,
+    request: { name: row.name, objectType: row.type as ObjectSourceKind, signature: row.signature ?? undefined },
+  });
+}
+
 async function openSource(row: ObjectBrowserRow) {
   // Toggle off if clicking the same source row
   if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "source") {
@@ -1583,6 +1606,11 @@ async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditin
   sourceEditableText.value = "";
   sourceDraft.value = "";
   sourceSaveError.value = "";
+  // A new source context owns the save spinner: the previous save's finally()
+  // can no longer run once this load starts (the guard epoch moved on) — the
+  // success path itself closes the panel, which bumps the epoch — so without
+  // this reset the Save button would spin and stay disabled for good.
+  sourceSaving.value = false;
   sourceLoading.value = true;
   const connectionId = props.connection.id;
   const database = props.database;
@@ -1971,6 +1999,15 @@ function openDataCompare(row: ObjectBrowserRow) {
     database: props.database,
     schema: row.schema || selectedSchema.value,
     tableName: row.type === "TABLE" ? row.name : undefined,
+  };
+}
+
+function openDataDictionary(row: ObjectBrowserRow) {
+  connectionStore.dataDictionarySource = {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: row.schema || selectedSchema.value,
+    tableNames: [row.name],
   };
 }
 
@@ -3429,6 +3466,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     exportDataSubmenu(item),
     { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
     ...tableClipboardMenuItems(item),
@@ -3457,6 +3495,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     exportDataSubmenu(item),
     { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
     {
       label: t("contextMenu.dropView"),

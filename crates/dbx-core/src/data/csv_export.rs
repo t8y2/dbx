@@ -42,6 +42,16 @@ async fn connection_database_type(state: &AppState, connection_id: &str) -> Resu
 
 pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExportOptions) -> Result<u64, String> {
     let database_type = connection_database_type(state, &options.connection_id).await?;
+    // This loop pages with `LIMIT <page_size> OFFSET <n>` and stops at the first
+    // short page. Neither half holds for SOQL: a `/query` response carries at most
+    // 2000 rows and hands the rest back as a QueryLocator (`has_more` +
+    // `session_id`), and OFFSET is capped at 2000, so the first page always looks
+    // short and the export would stop there — a CSV silently missing the rest of
+    // the object. Refuse instead of truncating; a Salesforce export has to follow
+    // the QueryLocator (`fetch_more`) the way the grid's "load more" does.
+    if database_type == DatabaseType::Salesforce {
+        return Err("Exporting a Salesforce object to CSV is not supported yet: SOQL pages through a QueryLocator, not LIMIT/OFFSET. Run a SOQL query and export its result instead.".to_string());
+    }
     let page_size = options.page_size.unwrap_or(TABLE_DATA_EXPORT_PAGE_SIZE).max(1);
     let mut writer =
         BufWriter::new(File::create(&options.file_path).map_err(|err| format!("Failed to write CSV file: {err}"))?);
@@ -108,4 +118,59 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
     }
     writer.flush().map_err(|err| err.to_string())?;
     Ok(rows_exported)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{export_table_data_csv_core, CsvQuoteMode, TableCsvExportOptions};
+    use crate::connection::AppState;
+    use crate::models::connection::{ConnectionConfig, DatabaseType};
+
+    fn salesforce_config(id: &str) -> ConnectionConfig {
+        let mut config = serde_json::from_value::<ConnectionConfig>(serde_json::json!({
+            "id": id,
+            "name": "SFDC QA",
+            "db_type": "postgres",
+            "host": "example.my.salesforce.com",
+            "port": 443,
+            "username": "user@example.com",
+            "password": "",
+            "database": ""
+        }))
+        .unwrap();
+        config.db_type = DatabaseType::Salesforce;
+        config
+    }
+
+    /// The refusal has to land before `File::create`, otherwise the user is left
+    /// holding a header-only CSV that looks like an object with no records.
+    #[tokio::test]
+    async fn salesforce_table_csv_export_is_refused_before_a_file_is_created() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let config = salesforce_config("sfdc-csv");
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let csv_path = directory.path().join("Account.csv");
+        let error = export_table_data_csv_core(
+            &state,
+            TableCsvExportOptions {
+                file_path: csv_path.to_string_lossy().into_owned(),
+                connection_id: "sfdc-csv".to_string(),
+                database: String::new(),
+                schema: None,
+                table_name: "Account".to_string(),
+                columns: vec!["Id".to_string(), "Name".to_string()],
+                page_size: None,
+                timeout_secs: None,
+                csv_quote_mode: CsvQuoteMode::default(),
+            },
+        )
+        .await
+        .expect_err("SOQL cannot page an export with LIMIT/OFFSET");
+
+        assert!(error.contains("QueryLocator"), "unexpected error: {error}");
+        assert!(!csv_path.exists(), "a refused export must not leave a truncated CSV behind");
+    }
 }

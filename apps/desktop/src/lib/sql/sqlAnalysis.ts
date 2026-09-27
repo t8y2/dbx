@@ -75,23 +75,31 @@ export function resolveMetadataColumnName(databaseType: string, sourceName: stri
   if (sourceNameQuoted === undefined) {
     const exact = metadataColumns.find((column) => column === sourceName);
     if (exact || POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType) || ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) return exact;
-    const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
-    return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+    return uniqueCaseInsensitiveColumn(metadataColumns, sourceName);
   }
 
+  // Dialect folding is only an assumption about what the server stored: Dameng
+  // keeps the case an unquoted identifier was created with (issue #10233), so
+  // the folded spelling can miss even though the column exists. Fall back to a
+  // case-only match when it is unambiguous -- never when the folded name itself
+  // resolves, so quoted or equally-spelled columns keep their exact identity.
   if (POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
     const folded = sourceName.toLowerCase();
-    return metadataColumns.find((column) => column === folded);
+    return metadataColumns.find((column) => column === folded) ?? uniqueCaseInsensitiveColumn(metadataColumns, folded);
   }
   if (ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
     const folded = sourceName.toUpperCase();
-    return metadataColumns.find((column) => column === folded);
+    return metadataColumns.find((column) => column === folded) ?? uniqueCaseInsensitiveColumn(metadataColumns, folded);
   }
 
   const exact = metadataColumns.find((column) => column === sourceName);
   if (exact) return exact;
-  const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
-  return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+  return uniqueCaseInsensitiveColumn(metadataColumns, sourceName);
+}
+
+function uniqueCaseInsensitiveColumn(metadataColumns: readonly string[], name: string): string | undefined {
+  const matches = metadataColumns.filter((column) => column.toLowerCase() === name.toLowerCase());
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export interface ResolvedSourceColumnRef {

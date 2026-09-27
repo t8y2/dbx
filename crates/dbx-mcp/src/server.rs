@@ -1,12 +1,17 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, ContentBlock, ErrorData, Implementation, ListResourceTemplatesResult, ListResourcesResult,
+        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
+        ServerCapabilities, ServerInfo,
+    },
     schemars, tool, tool_handler, tool_router, ServerHandler,
 };
 use serde::Deserialize;
 use serde_json::json;
+use url::Url;
 use uuid::Uuid;
 
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
@@ -17,21 +22,37 @@ use dbx_core::{
     agent_tools::{
         format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow, MAX_EXECUTE_QUERY_ROWS,
     },
+    connection::SalesforceCurrentUser,
     database_manifest,
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
+    db::salesforce_driver::parse_salesforce_statement,
     history::HistoryEntry,
+    mcp_policy::connection_allows_salesforce_dml,
     models::connection::ConnectionConfig,
     models::connection::DatabaseType,
     production_safety::{
         is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
         targets_production_database,
     },
-    query_execution_sql::is_write_sql_for_database,
+    query_execution_sql::{classify_salesforce_statement_risk, is_write_sql_for_database, SalesforceStatementRisk},
     sql_risk::{
         classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch, SqlRisk,
     },
     storage::{McpDatabaseScope, McpGlobalPolicy},
 };
+
+const CONNECTIONS_RESOURCE_URI: &str = "dbx://connections";
+const DATABASES_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/databases";
+const TABLES_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/tables{?database,schema}";
+const TABLE_SCHEMA_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/table-schema{?database,schema,table}";
+
+#[derive(Debug, PartialEq, Eq)]
+enum DbxResourceRequest {
+    Connections,
+    Databases { connection_id: String },
+    Tables { connection_id: String, database: Option<String>, schema: Option<String> },
+    TableSchema { connection_id: String, database: Option<String>, schema: Option<String>, table: String },
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListConnectionsRequest {}
@@ -369,11 +390,129 @@ pub struct ExecuteBatchQueryRequest {
     pub use_transaction: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SalesforceIdentityRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SalesforcePrepareWriteRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(
+        description = "Database name. Salesforce has no databases, so omit this unless DBX MCP settings scope the connection."
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub database: Option<String>,
+    #[schemars(description = "Write operation: \"insert\", \"update\" or \"delete\". One record per call.")]
+    pub op: String,
+    #[schemars(
+        description = "Salesforce object API name, e.g. \"Account\", \"Contact\" or a custom object such as \"Invoice__c\"."
+    )]
+    pub object: String,
+    #[schemars(
+        description = "Record Id of the row to change. Required for update and delete; omit for insert, where Salesforce assigns it."
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub id: Option<String>,
+    #[schemars(
+        description = "Field API name to value map, e.g. {\"Name\": \"Acme\", \"AnnualRevenue\": 1200}. Required and non-empty for insert and update; omit for delete. Never include \"Id\"."
+    )]
+    #[schemars(extend("type" = "object"))]
+    pub fields: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SalesforceApplyWriteRequest {
+    #[schemars(
+        description = "The confirm_token returned by dbx_salesforce_prepare_write. Single-use, and valid only for the exact write that was summarized."
+    )]
+    pub confirm_token: String,
+}
+
+/// How long a prepared Salesforce write stays applicable. Long enough for an
+/// agent to show the summary and for a human to answer, short enough that a
+/// token left in a transcript cannot be replayed much later against a changed
+/// org.
+const SALESFORCE_WRITE_CONFIRM_TTL: Duration = Duration::from_secs(300);
+/// Ceiling on simultaneously pending confirmations. Prepared writes live in
+/// process memory, so an agent that prepares in a loop must not be able to grow
+/// the map without bound.
+const SALESFORCE_WRITE_PENDING_LIMIT: usize = 64;
+/// Field rows shown in a confirmation summary before it collapses the rest into
+/// a count. The full statement is still in `structured_content`.
+const SALESFORCE_SUMMARY_MAX_FIELDS: usize = 40;
+/// Characters of one field value shown in the summary.
+const SALESFORCE_SUMMARY_MAX_VALUE_CHARS: usize = 200;
+/// Header the Salesforce driver routes to its REST DML endpoints. Mirrors
+/// `dbx-sql`'s grid save builder; the driver matches it case-insensitively.
+const SALESFORCE_DML_HEADER: &str = "DBX SALESFORCE DML";
+
+/// One write prepared by `dbx_salesforce_prepare_write` and waiting for its
+/// `dbx_salesforce_apply_write` call.
+///
+/// Salesforce has no transactions and no rollback, so this confirmation step is
+/// the only place a write can still be stopped. The statement text is captured
+/// here verbatim and re-sent verbatim: what the summary showed the user is
+/// exactly what the org receives, and an agent cannot widen it in between.
+#[derive(Debug, Clone)]
+struct PendingSalesforceWrite {
+    connection_id: String,
+    database: String,
+    statement: String,
+    created_at: Instant,
+}
+
+#[derive(Debug)]
+struct PendingSalesforceWrites {
+    ttl: Duration,
+    entries: tokio::sync::Mutex<HashMap<String, PendingSalesforceWrite>>,
+}
+
+impl PendingSalesforceWrites {
+    fn new(ttl: Duration) -> Arc<Self> {
+        Arc::new(Self { ttl, entries: tokio::sync::Mutex::new(HashMap::new()) })
+    }
+
+    fn ttl_secs(&self) -> u64 {
+        self.ttl.as_secs()
+    }
+
+    fn is_expired(&self, pending: &PendingSalesforceWrite) -> bool {
+        pending.created_at.elapsed() >= self.ttl
+    }
+
+    /// Store a prepared write under its token, dropping expired entries first
+    /// and then the oldest ones until the cap has room.
+    async fn insert(&self, token: String, pending: PendingSalesforceWrite) {
+        let mut entries = self.entries.lock().await;
+        entries.retain(|_, entry| !self.is_expired(entry));
+        while entries.len() >= SALESFORCE_WRITE_PENDING_LIMIT {
+            let Some(oldest) = entries.iter().min_by_key(|(_, entry)| entry.created_at).map(|(token, _)| token.clone())
+            else {
+                break;
+            };
+            entries.remove(&oldest);
+        }
+        entries.insert(token, pending);
+    }
+
+    /// Consume a token. Single-use by design: a failed apply, a retry, or a
+    /// second call with the same token all have to go back through prepare, so
+    /// every write that reaches Salesforce was summarized again first.
+    async fn take(&self, token: &str) -> Option<PendingSalesforceWrite> {
+        let entry = self.entries.lock().await.remove(token.trim())?;
+        (!self.is_expired(&entry)).then_some(entry)
+    }
+}
+
 #[derive(Clone)]
 pub struct DbxMcpServer {
     backend: Arc<dyn DbxBackend>,
     scope: McpScope,
     sessions: Arc<McpSessionStore>,
+    pending_salesforce_writes: Arc<PendingSalesforceWrites>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -462,7 +601,13 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_send_message");
             tool_router.disable_route("dbx_peek_messages");
         }
-        Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
+        Self {
+            backend,
+            scope,
+            sessions: McpSessionStore::new(),
+            pending_salesforce_writes: PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL),
+            tool_router,
+        }
     }
 
     fn spawn_session_cleanup(&self, session: McpSession) -> tokio::sync::oneshot::Receiver<SessionCleanupResult> {
@@ -786,6 +931,22 @@ impl DbxMcpServer {
                 "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command.",
             );
         }
+        if connection.db_type == DatabaseType::Salesforce
+            && !is_database_discovery_sql(&request.sql)
+            && is_write_sql_for_database(&request.sql, DatabaseType::Salesforce)
+        {
+            // SOQL has no write verbs, so anything the Salesforce classifier reads
+            // as a write here is a `DBX SALESFORCE DML` pseudo-command. Letting it
+            // ride along as a "query" would bypass both the connection's DML opt-in
+            // and the two-step confirmation, and Salesforce cannot roll it back.
+            // `SHOW DATABASES` is the one non-SOQL probe exempted: SOQL rules read
+            // every non-SELECT as opaque, and the discovery path below answers it
+            // with the "one org is one scope" explanation instead.
+            return tool_error(
+                "SALESFORCE_DML_REQUIRES_CONFIRMATION",
+                "Salesforce writes cannot run through dbx_execute_query. Call dbx_salesforce_prepare_write, show its summary to the user, then dbx_salesforce_apply_write with the confirm_token it returns.",
+            );
+        }
         if sql_requires_batch_execution(&request.sql, connection.db_type) {
             return self
                 .execute_batch_request(ExecuteBatchQueryRequest {
@@ -1072,6 +1233,12 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         let connection = &resolved.connection;
+        if connection.db_type == DatabaseType::Salesforce {
+            return tool_error(
+                "DBX_BATCH_UNSUPPORTED",
+                "Salesforce has no batch execution: SOQL is read-only and every write touches exactly one record. Use dbx_execute_query for SOQL, and dbx_salesforce_prepare_write followed by dbx_salesforce_apply_write for a write.",
+            );
+        }
         if matches!(connection.db_type, DatabaseType::Redis | DatabaseType::MongoDb) {
             return tool_error(
                 "DBX_BATCH_UNSUPPORTED",
@@ -1434,6 +1601,12 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         let connection = &resolved.connection;
+        if connection.db_type == DatabaseType::Salesforce {
+            return tool_error(
+                "SESSION_UNSUPPORTED",
+                "Salesforce connections are stateless REST calls: there is no session to pin, no USE, and no transaction. Use dbx_execute_query for SOQL, and dbx_salesforce_prepare_write followed by dbx_salesforce_apply_write for a write.",
+            );
+        }
         if matches!(connection.db_type, DatabaseType::Redis | DatabaseType::MongoDb) {
             return tool_error(
                 "SESSION_UNSUPPORTED",
@@ -2220,10 +2393,213 @@ impl DbxMcpServer {
             Err(error) => backend_tool_error("DBX_NOT_RUNNING", error),
         }
     }
+
+    #[tool(
+        name = "dbx_salesforce_current_user",
+        description = "Show the Salesforce identity behind a DBX connection: the connected user, their profile, whether that profile holds \"Modify All Data\" (which bypasses field-level security and record sharing), and the org. Read-only. Call it before preparing a write so the user knows who the change will be attributed to, and to tell a permission failure apart from a bad record Id."
+    )]
+    async fn salesforce_current_user(
+        &self,
+        Parameters(request): Parameters<SalesforceIdentityRequest>,
+    ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_salesforce_current_user").await {
+            return error;
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let connection = &resolved.connection;
+        if connection.db_type != DatabaseType::Salesforce {
+            return not_salesforce_error(connection);
+        }
+        match self.backend.salesforce_current_user(connection).await {
+            Ok(identity) => {
+                let mut result = text(format_salesforce_identity_block(connection, Some(&identity)));
+                result.structured_content = Some(salesforce_identity_json(&identity));
+                result
+            }
+            Err(error) => tool_error("SALESFORCE_IDENTITY_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_salesforce_prepare_write",
+        description = "Step 1 of 2 for a Salesforce write: prepare an insert, update or delete of exactly ONE record. Nothing is sent to Salesforce. The call validates the request against DBX MCP policy and returns a human-readable summary plus a single-use confirm_token. Show that summary to the user and wait for their approval, then call dbx_salesforce_apply_write with the token. Salesforce has no transactions, so an applied write cannot be rolled back. Reads never need this: use dbx_execute_query with SOQL."
+    )]
+    async fn salesforce_prepare_write(
+        &self,
+        Parameters(request): Parameters<SalesforcePrepareWriteRequest>,
+    ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_salesforce_prepare_write").await {
+            return error;
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let connection = &resolved.connection;
+        if connection.db_type != DatabaseType::Salesforce {
+            return not_salesforce_error(connection);
+        }
+        let database = match self.resolve_database(request.database, &resolved) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        if !connection_allows_salesforce_dml(&resolved.policy, &connection.id) {
+            return tool_error(
+                "SALESFORCE_DML_DISABLED",
+                format!(
+                    "Salesforce writes are disabled for connection \"{}\". The user has to enable the \"Allow DML\" switch for this connection in DBX Settings → MCP, and the connection must not be read-only. Reads are unaffected: use dbx_execute_query with SOQL.",
+                    connection.name
+                ),
+            );
+        }
+        let statement = match build_salesforce_dml_statement(
+            &request.op,
+            &request.object,
+            request.id.as_deref(),
+            request.fields.as_ref(),
+        ) {
+            Ok(statement) => statement,
+            Err(error) => return tool_error("SALESFORCE_DML_INVALID", error),
+        };
+        // The driver is the authority on what a statement means. Refusing here
+        // rather than at apply time means a token is never handed out for a write
+        // the org would reject.
+        if let Err(error) = parse_salesforce_statement(&statement) {
+            return tool_error("SALESFORCE_DML_INVALID", error);
+        }
+        let policy =
+            effective_policy_for_database_with_groups(&resolved.policy, &resolved.group_ids, connection, &database);
+        // The same envelope every other statement passes through: global and
+        // connection read-only rules, the high-risk tier for a write whose scope
+        // the classifier cannot pin down, and the production block. SOQL and the
+        // DML pseudo-command cannot name another database, so the SQL
+        // database-scope guards have nothing to add here.
+        if let Err(error) = validate_sql_policy(connection, &policy, &database, &statement, false) {
+            return error;
+        }
+        // Best effort: a failed identity lookup must not block the confirmation,
+        // it only leaves the "signed in as" line out of the summary.
+        let identity = self.backend.salesforce_current_user(connection).await.ok();
+        let token = format!("sfdml-{}", Uuid::new_v4());
+        let expires_in_secs = self.pending_salesforce_writes.ttl_secs();
+        self.pending_salesforce_writes
+            .insert(
+                token.clone(),
+                PendingSalesforceWrite {
+                    connection_id: connection.id.clone(),
+                    database: database.clone(),
+                    statement: statement.clone(),
+                    created_at: Instant::now(),
+                },
+            )
+            .await;
+        let summary =
+            format_salesforce_write_summary(&statement, connection, identity.as_ref(), &token, expires_in_secs);
+        let mut result = text(summary);
+        result.structured_content = Some(json!({
+            "confirm_token": token,
+            "expires_in_secs": expires_in_secs,
+            "connection_id": connection.id,
+            "statement": statement,
+            "identity": identity.as_ref().map(salesforce_identity_json),
+        }));
+        result
+    }
+
+    #[tool(
+        name = "dbx_salesforce_apply_write",
+        description = "Step 2 of 2 for a Salesforce write: execute exactly the write prepared by dbx_salesforce_prepare_write, identified by its confirm_token. The token is single-use, expires 5 minutes after it was issued, and is bound to that one statement — a changed write needs a new prepare. Call this only after the user has approved the summary they were shown. Returns the Salesforce result, or the org's own per-record error text."
+    )]
+    async fn salesforce_apply_write(
+        &self,
+        Parameters(request): Parameters<SalesforceApplyWriteRequest>,
+    ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_salesforce_apply_write").await {
+            return error;
+        }
+        let Some(pending) = self.pending_salesforce_writes.take(&request.confirm_token).await else {
+            return tool_error(
+                "CONFIRM_TOKEN_INVALID",
+                format!(
+                    "No pending Salesforce write for confirm_token \"{}\". Tokens are single-use and expire {} seconds after they are issued; call dbx_salesforce_prepare_write again and show the new summary to the user.",
+                    request.confirm_token.trim(),
+                    self.pending_salesforce_writes.ttl_secs()
+                ),
+            );
+        };
+        // Re-read the connection and the whole policy envelope at apply time: the
+        // user may have flipped the connection to read-only, withdrawn the DML
+        // opt-in or narrowed the scope while the summary was on screen.
+        let resolved = match self
+            .resolve_connection(&ConnectionSelector {
+                connection_id: Some(pending.connection_id.clone()),
+                connection_name: None,
+            })
+            .await
+        {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let connection = &resolved.connection;
+        if connection.db_type != DatabaseType::Salesforce {
+            return not_salesforce_error(connection);
+        }
+        if !connection_allows_salesforce_dml(&resolved.policy, &connection.id) {
+            return tool_error(
+                "SALESFORCE_DML_DISABLED",
+                format!(
+                    "Salesforce writes were disabled for connection \"{}\" after this write was prepared. Nothing was sent. Re-enable the \"Allow DML\" switch in DBX Settings → MCP and prepare the write again.",
+                    connection.name
+                ),
+            );
+        }
+        let policy = effective_policy_for_database_with_groups(
+            &resolved.policy,
+            &resolved.group_ids,
+            connection,
+            &pending.database,
+        );
+        let permissions = match validate_sql_policy(connection, &policy, &pending.database, &pending.statement, false) {
+            Ok(permissions) => permissions,
+            Err(error) => return error,
+        };
+        let mut arguments = json!({ "sql": pending.statement, "limit": 1 });
+        if let Some(secs) = resolved.policy.query_timeout_secs {
+            arguments["timeout_secs"] = json!(secs);
+        }
+        let label = salesforce_write_label(&pending.statement);
+        let started_at = Instant::now();
+        let result = self
+            .backend
+            .execute_agent_tool(connection, &pending.database, "execute_query", arguments, permissions)
+            .await;
+        let success = !result.is_error;
+        let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
+        self.save_mcp_sql_history(connection, &pending.database, &pending.statement, started_at, success, error, None)
+            .await;
+        if !success {
+            return agent_result(result);
+        }
+        text(format!("Salesforce write applied: {label}.\n{}", result.content))
+    }
 }
 
 impl DbxMcpServer {
     async fn list_databases_for_resolved(&self, resolved: &ResolvedConnection) -> CallToolResult {
+        if resolved.connection.db_type == DatabaseType::Salesforce
+            && !matches!(resolved.database_scope, DatabaseScope::None)
+        {
+            // An org has no database layer, so an empty list would read as a
+            // broken connection. Point at the surface that does exist instead.
+            return text(
+                "Salesforce has no databases: the whole org is one scope.\n\
+                 List its objects with dbx_list_tables, then read them with dbx_execute_query using SOQL, e.g. SELECT Id, Name FROM Account LIMIT 10.\n\
+                 Writes go through dbx_salesforce_prepare_write and dbx_salesforce_apply_write.",
+            );
+        }
         match &resolved.database_scope {
             DatabaseScope::None => tool_error(
                 "DATABASE_OUT_OF_SCOPE",
@@ -2489,9 +2865,99 @@ impl DbxMcpServer {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DbxMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
             .with_server_info(Implementation::new("dbx", env!("CARGO_PKG_VERSION")))
             .with_instructions("Use DBX connections to inspect schemas and query databases safely.")
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let tools = self.policy_filtered_tools().await;
+        let resources = tools
+            .iter()
+            .any(|tool| tool.name.as_ref() == "dbx_list_connections")
+            .then(|| {
+                Resource::new(CONNECTIONS_RESOURCE_URI, "dbx_connections")
+                    .with_title("DBX connections")
+                    .with_description("Database connections visible to the current DBX MCP scope")
+                    .with_mime_type("text/markdown")
+            })
+            .into_iter()
+            .collect();
+        Ok(ListResourcesResult { resources, meta: None, next_cursor: None })
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        let tools = self.policy_filtered_tools().await;
+        let has_tool = |name: &str| tools.iter().any(|tool| tool.name.as_ref() == name);
+        let mut resource_templates = Vec::new();
+        if has_tool("dbx_list_databases") {
+            resource_templates.push(
+                ResourceTemplate::new(DATABASES_RESOURCE_TEMPLATE, "dbx_connection_databases")
+                    .with_title("DBX connection databases")
+                    .with_description("Databases visible through a DBX connection")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        if has_tool("dbx_list_tables") {
+            resource_templates.push(
+                ResourceTemplate::new(TABLES_RESOURCE_TEMPLATE, "dbx_connection_tables")
+                    .with_title("DBX connection tables")
+                    .with_description("Tables and views visible through a DBX connection and optional database/schema")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        if has_tool("dbx_describe_table") {
+            resource_templates.push(
+                ResourceTemplate::new(TABLE_SCHEMA_RESOURCE_TEMPLATE, "dbx_table_schema")
+                    .with_title("DBX table schema")
+                    .with_description("Column definitions for a table visible through a DBX connection")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        Ok(ListResourceTemplatesResult { resource_templates, meta: None, next_cursor: None })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let uri = request.uri;
+        let result = match parse_dbx_resource_uri(&uri)? {
+            DbxResourceRequest::Connections => self.list_connections(Parameters(ListConnectionsRequest {})).await,
+            DbxResourceRequest::Databases { connection_id } => {
+                self.list_databases(Parameters(ListDatabasesRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                }))
+                .await
+            }
+            DbxResourceRequest::Tables { connection_id, database, schema } => {
+                self.list_tables(Parameters(ListTablesRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                    database,
+                    schema,
+                }))
+                .await
+            }
+            DbxResourceRequest::TableSchema { connection_id, database, schema, table } => {
+                self.describe_table(Parameters(DescribeTableRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                    table,
+                    database,
+                    schema,
+                }))
+                .await
+            }
+        };
+        resource_result_from_tool(uri, result)
     }
 
     /// Hide tools the global policy disallows from the advertised list, the
@@ -2508,6 +2974,102 @@ impl ServerHandler for DbxMcpServer {
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult { tools: self.policy_filtered_tools().await, meta: None, next_cursor: None })
     }
+}
+
+fn parse_dbx_resource_uri(uri: &str) -> Result<DbxResourceRequest, ErrorData> {
+    let parsed = Url::parse(uri).map_err(|_| ErrorData::invalid_params("Invalid DBX resource URI.", None))?;
+    if parsed.scheme() != "dbx"
+        || parsed.host_str() != Some("connections")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ErrorData::resource_not_found(format!("Unknown DBX resource: {uri}"), None));
+    }
+
+    let path = parsed.path().trim_matches('/');
+    let segments = if path.is_empty() { Vec::new() } else { path.split('/').collect::<Vec<_>>() };
+    let mut query = HashMap::new();
+    for (key, value) in parsed.query_pairs() {
+        let key = key.into_owned();
+        if query.insert(key.clone(), value.into_owned()).is_some() {
+            return Err(ErrorData::invalid_params(format!("Duplicate DBX resource parameter: {key}"), None));
+        }
+    }
+
+    match segments.as_slice() {
+        [] => {
+            reject_resource_parameters(&query, &[])?;
+            Ok(DbxResourceRequest::Connections)
+        }
+        [connection_id, "databases"] => {
+            reject_resource_parameters(&query, &[])?;
+            Ok(DbxResourceRequest::Databases {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+            })
+        }
+        [connection_id, "tables"] => {
+            reject_resource_parameters(&query, &["database", "schema"])?;
+            Ok(DbxResourceRequest::Tables {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+                database: optional_resource_parameter(&query, "database"),
+                schema: optional_resource_parameter(&query, "schema"),
+            })
+        }
+        [connection_id, "table-schema"] => {
+            reject_resource_parameters(&query, &["database", "schema", "table"])?;
+            Ok(DbxResourceRequest::TableSchema {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+                database: optional_resource_parameter(&query, "database"),
+                schema: optional_resource_parameter(&query, "schema"),
+                table: required_resource_parameter(&query, "table")?,
+            })
+        }
+        _ => Err(ErrorData::resource_not_found(format!("Unknown DBX resource: {uri}"), None)),
+    }
+}
+
+fn reject_resource_parameters(parameters: &HashMap<String, String>, allowed: &[&str]) -> Result<(), ErrorData> {
+    if let Some(name) = parameters.keys().find(|name| !allowed.contains(&name.as_str())) {
+        return Err(ErrorData::invalid_params(format!("Unknown DBX resource parameter: {name}"), None));
+    }
+    Ok(())
+}
+
+fn optional_resource_parameter(parameters: &HashMap<String, String>, name: &str) -> Option<String> {
+    parameters.get(name).map(|value| value.trim()).filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+fn required_resource_parameter(parameters: &HashMap<String, String>, name: &str) -> Result<String, ErrorData> {
+    optional_resource_parameter(parameters, name)
+        .ok_or_else(|| ErrorData::invalid_params(format!("Missing DBX resource parameter: {name}"), None))
+}
+
+fn required_resource_value(name: &str, value: &str) -> Result<String, ErrorData> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(ErrorData::invalid_params(format!("Missing DBX resource parameter: {name}"), None))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn resource_result_from_tool(uri: String, result: CallToolResult) -> Result<ReadResourceResult, ErrorData> {
+    let output = result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if result.is_error == Some(true) {
+        let message = if output.is_empty() { "DBX resource read failed.".to_string() } else { output };
+        return Err(ErrorData::invalid_params(message, Some(json!({ "uri": uri }))));
+    }
+    if output.is_empty() {
+        return Err(ErrorData::internal_error("DBX resource returned no text content.", Some(json!({ "uri": uri }))));
+    }
+    Ok(ReadResourceResult::new(vec![ResourceContents::text(output, uri).with_mime_type("text/markdown")]))
 }
 
 fn text(value: impl Into<String>) -> CallToolResult {
@@ -2595,6 +3157,17 @@ fn sql_requires_batch_execution(sql: &str, database_type: DatabaseType) -> bool 
 const BATCH_MAX_ROWS: usize = 100;
 
 fn mcp_sql_activity_kind(sql: &str, database_type: DatabaseType) -> &'static str {
+    if database_type == DatabaseType::Salesforce {
+        // The generic path below derives the kind from SQL risk tiers, and the
+        // Salesforce tiers deliberately fail closed: an unscoped or unrecognized
+        // write lands in the DDL tier, which would file a record mutation under
+        // "schema_change". Every Salesforce statement is either a SOQL read or a
+        // DML write, so classify it as one unit instead.
+        return match classify_salesforce_statement_risk(sql) {
+            SalesforceStatementRisk::Read => "query",
+            SalesforceStatementRisk::ScopedWrite | SalesforceStatementRisk::OpaqueWrite => "data_change",
+        };
+    }
     let risks = dbx_core::sql::sql_execution_plan_for_database(sql, database_type)
         .statements
         .into_iter()
@@ -2610,6 +3183,18 @@ fn mcp_sql_activity_kind(sql: &str, database_type: DatabaseType) -> &'static str
 }
 
 fn mcp_sql_operation(sql: &str, database_type: DatabaseType) -> String {
+    if database_type == DatabaseType::Salesforce {
+        // Naming the DML verb keeps history readable; "DBX" (the first word of
+        // the pseudo-command header) would say nothing about what changed.
+        return match classify_salesforce_statement_risk(sql) {
+            SalesforceStatementRisk::Read => "SELECT".to_string(),
+            SalesforceStatementRisk::ScopedWrite | SalesforceStatementRisk::OpaqueWrite => {
+                parse_salesforce_statement(sql)
+                    .map(|parsed| parsed.op.as_str().to_ascii_uppercase())
+                    .unwrap_or_else(|_| "DML".to_string())
+            }
+        };
+    }
     dbx_core::sql::sql_execution_plan_for_database(sql, database_type)
         .statements
         .first()
@@ -2674,6 +3259,7 @@ fn empty_query_result() -> dbx_core::db::QueryResult {
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -3090,6 +3676,208 @@ fn validate_transaction_sql_shape(sql: &str) -> Result<(), String> {
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
 #[allow(clippy::result_large_err)]
+fn not_salesforce_error(connection: &ConnectionConfig) -> CallToolResult {
+    tool_error(
+        "NOT_SALESFORCE_CONNECTION",
+        format!(
+            "Connection \"{}\" is a {:?} connection, not Salesforce. The dbx_salesforce_* tools only work against a Salesforce org.",
+            connection.name, connection.db_type
+        ),
+    )
+}
+
+/// Build the exact `DBX SALESFORCE DML` pseudo-command the driver executes.
+///
+/// Validation lives here rather than in the driver so a rejected shape never
+/// receives a confirm token: the statement that gets summarized is the statement
+/// that gets sent, one record at a time. Upsert and bulk shapes are refused
+/// outright — the driver cannot express them, and a token must not promise what
+/// the org cannot do.
+fn build_salesforce_dml_statement(
+    op: &str,
+    object: &str,
+    id: Option<&str>,
+    fields: Option<&serde_json::Value>,
+) -> Result<String, String> {
+    let op = op.trim().to_ascii_lowercase();
+    let object = object.trim();
+    if object.is_empty() {
+        return Err("'object' must be a non-empty Salesforce object API name, e.g. \"Account\".".to_string());
+    }
+    let id = id.map(str::trim).filter(|id| !id.is_empty());
+    let fields = match fields {
+        None => None,
+        Some(serde_json::Value::Object(map)) => (!map.is_empty()).then_some(map),
+        Some(_) => return Err("'fields' must be a JSON object mapping field API names to values.".to_string()),
+    };
+    let body = match op.as_str() {
+        "insert" => {
+            if id.is_some() {
+                return Err("insert creates a new record: drop 'id' and let Salesforce assign it.".to_string());
+            }
+            let Some(fields) = fields else {
+                return Err("insert requires a non-empty 'fields' object.".to_string());
+            };
+            reject_salesforce_identity_field(fields)?;
+            json!({ "op": "insert", "object": object, "fields": fields })
+        }
+        "update" => {
+            let Some(id) = id else {
+                return Err("update requires the 'id' of the record to change.".to_string());
+            };
+            let Some(fields) = fields else {
+                return Err("update requires a non-empty 'fields' object.".to_string());
+            };
+            reject_salesforce_identity_field(fields)?;
+            json!({ "op": "update", "object": object, "id": id, "fields": fields })
+        }
+        "delete" => {
+            let Some(id) = id else {
+                return Err("delete requires the 'id' of the record to remove.".to_string());
+            };
+            if fields.is_some() {
+                return Err("delete takes no 'fields' — it removes the whole record.".to_string());
+            }
+            json!({ "op": "delete", "object": object, "id": id })
+        }
+        other => {
+            return Err(format!(
+                "Unknown op \"{other}\". Expected insert, update or delete — upsert, bulk and composite writes are not supported."
+            ));
+        }
+    };
+    Ok(format!("{SALESFORCE_DML_HEADER}\n{body}"))
+}
+
+/// `Id` is the record identity, never a write target: sending it would either be
+/// ignored (insert) or read as an attempt to re-key a record (update).
+fn reject_salesforce_identity_field(fields: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    if fields.keys().any(|name| name.eq_ignore_ascii_case("Id")) {
+        return Err(
+            "'fields' must not contain Id — the record identity is the 'id' parameter, and Salesforce assigns it on insert."
+                .to_string(),
+        );
+    }
+    if fields.keys().any(|name| name.trim().is_empty()) {
+        return Err("'fields' contains an empty field name.".to_string());
+    }
+    Ok(())
+}
+
+/// One-line description of a prepared statement, in the same words the driver
+/// uses in its own errors, so a summary and a failure line up.
+fn salesforce_write_label(statement: &str) -> String {
+    match parse_salesforce_statement(statement) {
+        Ok(parsed) => match parsed.id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => format!("{} on {} (Id {id})", parsed.op.as_str(), parsed.object),
+            None => format!("{} on {}", parsed.op.as_str(), parsed.object),
+        },
+        // Unreachable for a token the server issued; keep the line honest anyway.
+        Err(_) => "Salesforce write".to_string(),
+    }
+}
+
+/// The confirmation an agent must show the user before applying a prepared
+/// write. It names the operation, the exact field values, and the identity the
+/// change will be attributed to, then states the two properties that make
+/// Salesforce different from SQL: no transaction and no rollback.
+fn format_salesforce_write_summary(
+    statement: &str,
+    connection: &ConnectionConfig,
+    identity: Option<&SalesforceCurrentUser>,
+    token: &str,
+    expires_in_secs: u64,
+) -> String {
+    let mut lines = vec!["Salesforce write prepared — nothing has been sent yet.".to_string(), String::new()];
+    match parse_salesforce_statement(statement) {
+        Ok(parsed) => {
+            lines.push(format!("Operation:  {}", parsed.op.as_str()));
+            lines.push(format!("Object:     {}", parsed.object));
+            if let Some(id) = parsed.id.as_deref().filter(|id| !id.is_empty()) {
+                lines.push(format!("Record Id:  {id}"));
+            }
+            if let Some(fields) = parsed.fields.as_ref() {
+                lines.push(format!("Fields ({}):", fields.len()));
+                for (index, (name, value)) in fields.iter().enumerate() {
+                    if index >= SALESFORCE_SUMMARY_MAX_FIELDS {
+                        lines.push(format!(
+                            "  … and {} more (full statement in structured_content)",
+                            fields.len() - index
+                        ));
+                        break;
+                    }
+                    lines.push(format!("  - {name} = {}", truncate_salesforce_value(value)));
+                }
+            }
+        }
+        Err(error) => lines.push(format!("Operation:  unparseable ({error})")),
+    }
+    lines.push(String::new());
+    lines.push(format!("Connection:   {} ({})", connection.name, connection.id));
+    lines.extend(format_salesforce_identity_lines(identity));
+    lines.push(String::new());
+    lines.push(
+        "Salesforce writes are not transactional: once applied, this cannot be rolled back. Field-level security, record sharing, validation rules and flows all still apply, and a refusal comes back as Salesforce's own error text."
+            .to_string(),
+    );
+    lines.push(String::new());
+    lines.push(format!(
+        "Show this summary to the user. Only if they approve, call dbx_salesforce_apply_write with confirm_token \"{token}\". The token is single-use and expires in {expires_in_secs} seconds; any change to the write needs a new dbx_salesforce_prepare_write."
+    ));
+    lines.join("\n")
+}
+
+/// The whole identity block, for `dbx_salesforce_current_user`.
+fn format_salesforce_identity_block(connection: &ConnectionConfig, identity: Option<&SalesforceCurrentUser>) -> String {
+    let mut lines = vec![format!("Salesforce identity for connection \"{}\" ({})", connection.name, connection.id)];
+    lines.extend(format_salesforce_identity_lines(identity));
+    lines.join("\n")
+}
+
+fn format_salesforce_identity_lines(identity: Option<&SalesforceCurrentUser>) -> Vec<String> {
+    let Some(identity) = identity else {
+        return vec![
+            "Signed in as:   unknown — the identity lookup failed, so treat every permission as unverified. Salesforce still enforces its own rules on the write."
+                .to_string(),
+        ];
+    };
+    let profile = identity.profile_name.as_deref().map(str::trim).filter(|name| !name.is_empty()).unwrap_or("unknown");
+    let rights = match identity.is_admin {
+        Some(true) => "has \"Modify All Data\": it bypasses field-level security and record sharing",
+        Some(false) => "no \"Modify All Data\": field-level security and record sharing apply",
+        None => "\"Modify All Data\" could not be determined, so treat it as if it were granted",
+    };
+    vec![
+        format!("Signed in as:   {} <{}> (user Id {})", identity.name, identity.email, identity.user_id),
+        format!("Organization:   {} ({})", identity.org_name, identity.organization_id),
+        format!("Profile:        \"{profile}\" — {rights}"),
+    ]
+}
+
+fn salesforce_identity_json(identity: &SalesforceCurrentUser) -> serde_json::Value {
+    json!({
+        "user_id": identity.user_id,
+        "name": identity.name,
+        "email": identity.email,
+        "username": identity.username,
+        "organization_id": identity.organization_id,
+        "org_name": identity.org_name,
+        "profile_name": identity.profile_name,
+        "is_admin": identity.is_admin,
+    })
+}
+
+fn truncate_salesforce_value(value: &serde_json::Value) -> String {
+    let rendered = value.to_string();
+    if rendered.chars().count() <= SALESFORCE_SUMMARY_MAX_VALUE_CHARS {
+        return rendered;
+    }
+    let kept: String = rendered.chars().take(SALESFORCE_SUMMARY_MAX_VALUE_CHARS).collect();
+    format!("{kept}…")
+}
+
+// CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
+#[allow(clippy::result_large_err)]
 fn validate_sql_policy(
     connection: &dbx_core::models::connection::ConnectionConfig,
     policy: &McpGlobalPolicy,
@@ -3430,6 +4218,34 @@ mod tests {
     };
     use std::{collections::HashSet, sync::atomic::AtomicUsize, time::Duration};
 
+    #[test]
+    fn parses_dbx_resource_uris_and_decodes_query_values() {
+        assert_eq!(parse_dbx_resource_uri(CONNECTIONS_RESOURCE_URI).unwrap(), DbxResourceRequest::Connections);
+        assert_eq!(
+            parse_dbx_resource_uri("dbx://connections/connection-1/databases").unwrap(),
+            DbxResourceRequest::Databases { connection_id: "connection-1".to_string() }
+        );
+        assert_eq!(
+            parse_dbx_resource_uri(
+                "dbx://connections/connection-1/table-schema?database=sales%20data&schema=public&table=order%20items"
+            )
+            .unwrap(),
+            DbxResourceRequest::TableSchema {
+                connection_id: "connection-1".to_string(),
+                database: Some("sales data".to_string()),
+                schema: Some("public".to_string()),
+                table: "order items".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_dbx_resource_uris() {
+        assert!(parse_dbx_resource_uri("dbx://connections/connection-1/table-schema").is_err());
+        assert!(parse_dbx_resource_uri("dbx://connections/connection-1/tables?unknown=value").is_err());
+        assert!(parse_dbx_resource_uri("file:///tmp/connections").is_err());
+    }
+
     struct FakeTransactionIo {
         in_transaction: bool,
         executed_sql: Arc<std::sync::Mutex<Vec<String>>>,
@@ -3465,6 +4281,7 @@ mod tests {
                     affected_rows: 0,
                     execution_time_ms: 0,
                     server_execute_time_us: None,
+                    query_timings_ms: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -3546,6 +4363,7 @@ mod tests {
         transaction_open_after_owner: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         transaction_open_error: Option<String>,
         policy_override: std::sync::Mutex<Option<McpGlobalPolicy>>,
+        salesforce_identity: Option<SalesforceCurrentUser>,
     }
 
     impl Default for FakeBackend {
@@ -3567,6 +4385,7 @@ mod tests {
                 transaction_open_after_owner: None,
                 transaction_open_error: None,
                 policy_override: std::sync::Mutex::new(None),
+                salesforce_identity: None,
             }
         }
     }
@@ -3682,6 +4501,13 @@ mod tests {
             }
         }
 
+        async fn salesforce_current_user(
+            &self,
+            _connection: &ConnectionConfig,
+        ) -> Result<SalesforceCurrentUser, String> {
+            self.salesforce_identity.clone().ok_or_else(|| "no Salesforce pool".to_string())
+        }
+
         #[cfg(feature = "mq-admin")]
         async fn peek_messages(
             &self,
@@ -3782,6 +4608,7 @@ mod tests {
                     affected_rows: 0,
                     execution_time_ms: 1,
                     server_execute_time_us: None,
+                    query_timings_ms: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -3969,9 +4796,9 @@ mod tests {
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 25);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 23);
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_peek_messages"));
         #[cfg(not(feature = "mq-admin"))]
@@ -3991,6 +4818,9 @@ mod tests {
         assert!(names.contains(&"dbx_duplicate_connection"));
         assert!(names.contains(&"dbx_remove_connection"));
         assert!(names.contains(&"dbx_execute_redis_command"));
+        assert!(names.contains(&"dbx_salesforce_current_user"));
+        assert!(names.contains(&"dbx_salesforce_prepare_write"));
+        assert!(names.contains(&"dbx_salesforce_apply_write"));
         assert!(names.contains(&"dbx_get_schema_context"));
         assert!(names.contains(&"dbx_open_table"));
         assert!(names.contains(&"dbx_execute_and_show"));
@@ -4238,9 +5068,9 @@ mod tests {
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 20);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 18);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
@@ -4254,6 +5084,12 @@ mod tests {
         assert!(names.iter().any(|name| name == "dbx_begin_transaction"));
         assert!(names.iter().any(|name| name == "dbx_commit_transaction"));
         assert!(names.iter().any(|name| name == "dbx_rollback_transaction"));
+        // The Salesforce tools act on the scoped connection itself, so connection
+        // scoping keeps them visible. What narrows them is the per-connection DML
+        // opt-in and the execution policy, both re-checked on every call.
+        assert!(names.iter().any(|name| name == "dbx_salesforce_current_user"));
+        assert!(names.iter().any(|name| name == "dbx_salesforce_prepare_write"));
+        assert!(names.iter().any(|name| name == "dbx_salesforce_apply_write"));
         #[cfg(feature = "mq-admin")]
         assert!(names.iter().any(|name| name == "dbx_send_message"));
     }
@@ -4384,6 +5220,7 @@ mod tests {
                         allow_dangerous_sql: false,
                     },
                 ],
+                allow_salesforce_dml: false,
             }],
             ..Default::default()
         };
@@ -4422,6 +5259,7 @@ mod tests {
                     database_policies: Vec::new(),
                     execution_mode_configured: false,
                     execution_mode_policy_version: None,
+                    allow_salesforce_dml: false,
                 }],
                 ..Default::default()
             },
@@ -4598,6 +5436,7 @@ mod tests {
                         allow_dangerous_sql: false,
                     },
                 ],
+                allow_salesforce_dml: false,
             }],
             ..Default::default()
         };
@@ -5912,6 +6751,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_history_metadata_reads_salesforce_statements_as_one_unit() {
+        let database_type = DatabaseType::Salesforce;
+        assert_eq!(mcp_sql_activity_kind("SELECT Id FROM Account", database_type), "query");
+        assert_eq!(mcp_sql_operation("SELECT Id FROM Account", database_type), "SELECT");
+
+        let update = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"001x\",\"fields\":{\"Name\":\"Acme\"}}";
+        assert_eq!(mcp_sql_activity_kind(update, database_type), "data_change");
+        assert_eq!(mcp_sql_operation(update, database_type), "UPDATE");
+
+        // An unscoped write fails closed to the high-risk tier, which the generic
+        // tier-based path would file under "schema_change". It is still a record
+        // mutation; only the driver's own parser can say which verb it was.
+        let unscoped = "DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Account\"}";
+        assert_eq!(mcp_sql_activity_kind(unscoped, database_type), "data_change");
+        assert_eq!(mcp_sql_operation(unscoped, database_type), "DML");
+
+        // A field value that reads like another statement is data, not a second
+        // statement: the label must not change because of what it contains.
+        let literal =
+            "DBX SALESFORCE DML\n{\"op\":\"insert\",\"object\":\"Lead\",\"fields\":{\"Description\":\"a; CREATE TABLE t (id int)\"}}";
+        assert_eq!(mcp_sql_activity_kind(literal, database_type), "data_change");
+        assert_eq!(mcp_sql_operation(literal, database_type), "INSERT");
+    }
+
     #[tokio::test]
     async fn execute_batch_rejects_transaction_with_session() {
         let postgres = connection("pg", "pg", "postgres", "app");
@@ -6218,6 +7082,7 @@ mod tests {
                 affected_rows: 0,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -6250,6 +7115,7 @@ mod tests {
                 affected_rows: 2,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -6283,6 +7149,7 @@ mod tests {
                 affected_rows: 1,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -6405,5 +7272,497 @@ mod tests {
         assert!(!result_text(&result).contains("Statement 1"));
         let structured = result.structured_content.as_ref().expect("structured content must be populated");
         assert_eq!(structured["results"][0]["merged"], true);
+    }
+
+    fn salesforce_connection() -> ConnectionConfig {
+        connection("sfdc", "Acme QA org", "salesforce", "")
+    }
+
+    fn salesforce_dml_policy(allow_dml: bool, read_only: bool) -> McpGlobalPolicy {
+        McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            connection_policies: vec![dbx_core::storage::McpConnectionPolicy {
+                connection_id: "sfdc".to_string(),
+                read_only,
+                allow_dangerous_sql: false,
+                execution_mode_configured: false,
+                execution_mode_policy_version: None,
+                database_scope: McpDatabaseScope::All,
+                allowed_databases: Vec::new(),
+                database_policies: Vec::new(),
+                allow_salesforce_dml: allow_dml,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn salesforce_identity(is_admin: Option<bool>) -> SalesforceCurrentUser {
+        SalesforceCurrentUser {
+            user_id: "005000000000000001".to_string(),
+            name: "Jane Doe".to_string(),
+            email: "jane.doe@example.test".to_string(),
+            organization_id: "00D000000000000001".to_string(),
+            username: "jane.doe@example.test".to_string(),
+            profile_name: Some("System Administrator".to_string()),
+            is_admin,
+            org_name: "Acme".to_string(),
+        }
+    }
+
+    fn salesforce_server(policy: McpGlobalPolicy, identity: Option<SalesforceCurrentUser>) -> Arc<FakeBackend> {
+        Arc::new(FakeBackend {
+            connections: vec![salesforce_connection()],
+            policy,
+            salesforce_identity: identity,
+            ..Default::default()
+        })
+    }
+
+    fn prepare_request(
+        op: &str,
+        object: &str,
+        id: Option<&str>,
+        fields: Option<serde_json::Value>,
+    ) -> Parameters<SalesforcePrepareWriteRequest> {
+        Parameters(SalesforcePrepareWriteRequest {
+            selector: selector("sfdc"),
+            database: None,
+            op: op.to_string(),
+            object: object.to_string(),
+            id: id.map(str::to_string),
+            fields,
+        })
+    }
+
+    fn confirm_token(result: &CallToolResult) -> String {
+        result.structured_content.as_ref().expect("prepare returns structured content")["confirm_token"]
+            .as_str()
+            .expect("confirm_token")
+            .to_string()
+    }
+
+    #[test]
+    fn salesforce_dml_builder_accepts_only_single_scoped_records() {
+        let update =
+            build_salesforce_dml_statement("UPDATE", " Account ", Some(" 001x "), Some(&json!({"Name": "Acme"})))
+                .expect("a scoped update is the shape the driver executes");
+        assert!(update.starts_with("DBX SALESFORCE DML\n"), "missing pseudo-command header: {update}");
+        assert_eq!(
+            classify_salesforce_statement_risk(&update),
+            SalesforceStatementRisk::ScopedWrite,
+            "a prepared write must never land in the read tier"
+        );
+        let parsed = parse_salesforce_statement(&update).expect("the driver must accept what prepare handed out");
+        assert_eq!(parsed.op.as_str(), "update");
+        assert_eq!(parsed.object, "Account");
+        assert_eq!(parsed.id.as_deref(), Some("001x"));
+        assert_eq!(parsed.fields.expect("fields")["Name"], json!("Acme"));
+        assert_eq!(salesforce_write_label(&update), "update on Account (Id 001x)");
+
+        let insert = build_salesforce_dml_statement("insert", "Lead", None, Some(&json!({"Company": "Acme"}))).unwrap();
+        assert_eq!(salesforce_write_label(&insert), "insert on Lead");
+        let delete = build_salesforce_dml_statement("delete", "Lead", Some("00Qx"), None).unwrap();
+        assert_eq!(salesforce_write_label(&delete), "delete on Lead (Id 00Qx)");
+
+        let rejected: Vec<(&str, Result<String, String>)> = vec![
+            ("no object", build_salesforce_dml_statement("update", "  ", Some("001x"), Some(&json!({"Name": "a"})))),
+            ("no fields on insert", build_salesforce_dml_statement("insert", "Lead", None, None)),
+            ("empty fields", build_salesforce_dml_statement("insert", "Lead", None, Some(&json!({})))),
+            ("fields not an object", build_salesforce_dml_statement("insert", "Lead", None, Some(&json!(["Name"])))),
+            (
+                "id on insert",
+                build_salesforce_dml_statement("insert", "Lead", Some("00Qx"), Some(&json!({"Company": "a"}))),
+            ),
+            ("no id on update", build_salesforce_dml_statement("update", "Lead", None, Some(&json!({"Company": "a"})))),
+            ("no id on delete", build_salesforce_dml_statement("delete", "Lead", None, None)),
+            (
+                "fields on delete",
+                build_salesforce_dml_statement("delete", "Lead", Some("00Qx"), Some(&json!({"Company": "a"}))),
+            ),
+            (
+                "Id inside fields",
+                build_salesforce_dml_statement("update", "Lead", Some("00Qx"), Some(&json!({"id": "00Qy"}))),
+            ),
+            (
+                "empty field name",
+                build_salesforce_dml_statement("update", "Lead", Some("00Qx"), Some(&json!({" ": "x"}))),
+            ),
+            ("upsert", build_salesforce_dml_statement("upsert", "Lead", Some("00Qx"), Some(&json!({"Company": "a"})))),
+            ("raw sql", build_salesforce_dml_statement("DELETE FROM Lead", "Lead", None, None)),
+        ];
+        for (label, result) in rejected {
+            assert!(result.is_err(), "{label} must be refused, got {:?}", result.ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_salesforce_writes_are_single_use_and_expire() {
+        let statement =
+            build_salesforce_dml_statement("update", "Account", Some("001x"), Some(&json!({"Name": "Acme"}))).unwrap();
+        let pending = || PendingSalesforceWrite {
+            connection_id: "sfdc".to_string(),
+            database: String::new(),
+            statement: statement.clone(),
+            created_at: Instant::now(),
+        };
+
+        let live = PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL);
+        live.insert("sfdml-a".to_string(), pending()).await;
+        assert!(live.take("sfdml-a").await.is_some(), "a fresh token must apply");
+        assert!(live.take("sfdml-a").await.is_none(), "a token is single-use: a replay must not execute twice");
+        assert!(live.take(" sfdml-missing ").await.is_none());
+
+        let expired = PendingSalesforceWrites::new(Duration::ZERO);
+        expired.insert("sfdml-b".to_string(), pending()).await;
+        assert!(expired.take("sfdml-b").await.is_none(), "an expired token must not execute");
+    }
+
+    #[tokio::test]
+    async fn pending_salesforce_writes_stay_bounded() {
+        let store = PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL);
+        for index in 0..(SALESFORCE_WRITE_PENDING_LIMIT + 10) {
+            store
+                .insert(
+                    format!("sfdml-{index}"),
+                    PendingSalesforceWrite {
+                        connection_id: "sfdc".to_string(),
+                        database: String::new(),
+                        statement: "DBX SALESFORCE DML\n{}".to_string(),
+                        created_at: Instant::now(),
+                    },
+                )
+                .await;
+        }
+        assert_eq!(store.entries.lock().await.len(), SALESFORCE_WRITE_PENDING_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn salesforce_prepare_write_needs_an_explicit_connection_opt_in() {
+        for (label, policy) in [
+            ("no connection rule", McpGlobalPolicy::default()),
+            ("opt-in off", salesforce_dml_policy(false, false)),
+            ("opt-in void on read-only", salesforce_dml_policy(true, true)),
+        ] {
+            let backend = salesforce_server(policy, None);
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            let prepared = server
+                .salesforce_prepare_write(prepare_request(
+                    "update",
+                    "Account",
+                    Some("001x"),
+                    Some(json!({"Name": "Acme"})),
+                ))
+                .await;
+            assert!(result_text(&prepared).contains("SALESFORCE_DML_DISABLED"), "{label}: {prepared:?}");
+            assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "{label} must not reach the org");
+        }
+    }
+
+    #[tokio::test]
+    async fn salesforce_prepare_write_summarises_the_write_and_the_identity() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), Some(salesforce_identity(Some(true))));
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let prepared = server
+            .salesforce_prepare_write(prepare_request(
+                "update",
+                "Account",
+                Some("001x"),
+                Some(json!({"Name": "Acme", "AnnualRevenue": 1200})),
+            ))
+            .await;
+        let summary = result_text(&prepared);
+        assert_ne!(prepared.is_error, Some(true), "{prepared:?}");
+        for expected in [
+            "nothing has been sent yet",
+            "Operation:  update",
+            "Object:     Account",
+            "Record Id:  001x",
+            "Name = \"Acme\"",
+            "AnnualRevenue = 1200",
+            "Jane Doe",
+            "\"System Administrator\"",
+            "Modify All Data",
+            "cannot be rolled back",
+            "dbx_salesforce_apply_write",
+        ] {
+            assert!(summary.contains(expected), "summary is missing \"{expected}\":\n{summary}");
+        }
+        assert!(confirm_token(&prepared).starts_with("sfdml-"));
+        assert_eq!(
+            prepared.structured_content.as_ref().unwrap()["statement"].as_str().unwrap(),
+            build_salesforce_dml_statement(
+                "update",
+                "Account",
+                Some("001x"),
+                Some(&json!({"Name": "Acme", "AnnualRevenue": 1200}))
+            )
+            .unwrap()
+        );
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "prepare must not write");
+    }
+
+    #[tokio::test]
+    async fn salesforce_prepare_write_survives_a_failed_identity_lookup() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), None);
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let prepared = server.salesforce_prepare_write(prepare_request("delete", "Lead", Some("00Qx"), None)).await;
+        assert_ne!(prepared.is_error, Some(true), "{prepared:?}");
+        assert!(result_text(&prepared).contains("identity lookup failed"), "{}", result_text(&prepared));
+    }
+
+    #[tokio::test]
+    async fn salesforce_apply_write_sends_the_prepared_statement_exactly_once() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), Some(salesforce_identity(Some(false))));
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let prepared = server
+            .salesforce_prepare_write(prepare_request("update", "Account", Some("001x"), Some(json!({"Name": "Acme"}))))
+            .await;
+        let token = confirm_token(&prepared);
+        let statement = prepared.structured_content.as_ref().unwrap()["statement"].as_str().unwrap().to_string();
+
+        let applied = server
+            .salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token.clone() }))
+            .await;
+        assert_ne!(applied.is_error, Some(true), "{applied:?}");
+        assert!(
+            result_text(&applied).starts_with("Salesforce write applied: update on Account (Id 001x)."),
+            "{}",
+            result_text(&applied)
+        );
+
+        let recorded = backend.recorded_arguments.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "exactly one write reached the backend: {recorded:?}");
+        assert_eq!(recorded[0].0, "execute_query");
+        assert_eq!(
+            recorded[0].1["sql"].as_str(),
+            Some(statement.as_str()),
+            "the applied statement must be the prepared one"
+        );
+        assert_eq!(recorded[0].1["limit"], json!(1));
+
+        let history = backend.history.lock().unwrap().clone();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].sql, statement);
+        assert_eq!(history[0].operation, "UPDATE");
+        assert_eq!(history[0].activity_kind, "data_change");
+        assert!(history[0].success);
+
+        let replayed =
+            server.salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token })).await;
+        assert!(result_text(&replayed).contains("CONFIRM_TOKEN_INVALID"), "{replayed:?}");
+        assert_eq!(backend.recorded_arguments.lock().unwrap().len(), 1, "a replayed token must not write again");
+    }
+
+    #[tokio::test]
+    async fn salesforce_apply_write_rejects_a_token_it_never_issued() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), None);
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let applied = server
+            .salesforce_apply_write(Parameters(SalesforceApplyWriteRequest {
+                confirm_token: "sfdml-forged".to_string(),
+            }))
+            .await;
+        assert!(result_text(&applied).contains("CONFIRM_TOKEN_INVALID"), "{applied:?}");
+        assert!(result_text(&applied).contains("dbx_salesforce_prepare_write"));
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn salesforce_prepare_write_honours_read_only_and_production_rules() {
+        let read_only = McpGlobalPolicy { read_only: true, ..salesforce_dml_policy(true, false) };
+        let backend = salesforce_server(read_only, None);
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let prepared = server
+            .salesforce_prepare_write(prepare_request("update", "Account", Some("001x"), Some(json!({"Name": "Acme"}))))
+            .await;
+        assert!(result_text(&prepared).contains("MCP_READ_ONLY"), "{prepared:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+
+        let mut production = salesforce_connection();
+        production.is_production = true;
+        let backend = Arc::new(FakeBackend {
+            connections: vec![production],
+            policy: salesforce_dml_policy(true, false),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let prepared = server
+            .salesforce_prepare_write(prepare_request("update", "Account", Some("001x"), Some(json!({"Name": "Acme"}))))
+            .await;
+        assert!(result_text(&prepared).contains("PRODUCTION_WRITE_BLOCKED"), "{prepared:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn salesforce_write_pseudo_commands_cannot_sneak_through_execute_query() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![salesforce_connection()],
+            policy: McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() },
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let statement = build_salesforce_dml_statement("delete", "Account", Some("001x"), None).unwrap();
+        let blocked = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sfdc"),
+                database: None,
+                sql: statement,
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert!(result_text(&blocked).contains("SALESFORCE_DML_REQUIRES_CONFIRMATION"), "{blocked:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "the write must not reach the org");
+
+        // SOQL stays readable even when a literal or a custom field name looks
+        // like a write verb to a keyword scan.
+        for soql in ["SELECT Id FROM Case WHERE Subject = 'Delete request'", "SELECT Id, Update__c FROM Lead LIMIT 5"] {
+            let queried = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sfdc"),
+                    database: None,
+                    sql: soql.to_string(),
+                    session_id: None,
+                    cell_char_offset: None,
+                    cell_char_limit: None,
+                    max_rows: None,
+                }))
+                .await;
+            assert_ne!(queried.is_error, Some(true), "{soql}: {queried:?}");
+        }
+        let recorded = backend.recorded_arguments.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 2, "{recorded:?}");
+        assert_eq!(recorded[0].1["sql"], json!("SELECT Id FROM Case WHERE Subject = 'Delete request'"));
+    }
+
+    #[tokio::test]
+    async fn salesforce_database_discovery_probe_is_not_read_as_a_write() {
+        // `SHOW DATABASES` is not SOQL, so the Salesforce classifier calls it an
+        // opaque write. Answering it with "writes need confirmation" would send an
+        // agent looking for a schema into the DML flow; the discovery path already
+        // has the right answer.
+        let backend = salesforce_server(McpGlobalPolicy::default(), None);
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        for probe in ["SHOW DATABASES", " show schemas; "] {
+            let probed = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sfdc"),
+                    database: None,
+                    sql: probe.to_string(),
+                    session_id: None,
+                    cell_char_offset: None,
+                    cell_char_limit: None,
+                    max_rows: None,
+                }))
+                .await;
+            assert_ne!(probed.is_error, Some(true), "{probe}: {probed:?}");
+            assert!(result_text(&probed).contains("Salesforce has no databases"), "{probe}: {probed:?}");
+        }
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "a discovery probe must not reach the org");
+
+        // The exemption is exact-match, so a pseudo-command still cannot use it as
+        // a way past the confirmation guard.
+        let smuggled = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sfdc"),
+                database: None,
+                sql: "show databases; DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Account\",\"id\":\"001x\"}"
+                    .to_string(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert!(result_text(&smuggled).contains("SALESFORCE_DML_REQUIRES_CONFIRMATION"), "{smuggled:?}");
+    }
+
+    #[tokio::test]
+    async fn salesforce_has_no_batch_and_no_session() {
+        let backend = salesforce_server(McpGlobalPolicy::default(), None);
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let batch = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("sfdc"),
+                database: None,
+                sql: "SELECT Id FROM Account".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: None,
+                cell_window: CellWindowArgs::default(),
+            }))
+            .await;
+        assert!(result_text(&batch).contains("DBX_BATCH_UNSUPPORTED"), "{batch:?}");
+        let session = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("sfdc"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
+        assert!(result_text(&session).contains("SESSION_UNSUPPORTED"), "{session:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn salesforce_list_databases_points_at_objects_and_soql() {
+        let backend = salesforce_server(McpGlobalPolicy::default(), None);
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let listed = server.list_databases(Parameters(ListDatabasesRequest { selector: selector("sfdc") })).await;
+        assert_ne!(listed.is_error, Some(true), "{listed:?}");
+        let text = result_text(&listed);
+        assert!(text.contains("Salesforce has no databases"), "{text}");
+        assert!(text.contains("dbx_list_tables"), "{text}");
+        assert!(text.contains("SELECT Id, Name FROM Account LIMIT 10"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn salesforce_current_user_names_the_profile_rights() {
+        for (is_admin, expected) in [
+            (Some(true), "bypasses field-level security"),
+            (Some(false), "field-level security and record sharing apply"),
+            (None, "could not be determined"),
+        ] {
+            let backend = salesforce_server(McpGlobalPolicy::default(), Some(salesforce_identity(is_admin)));
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            let identity = server
+                .salesforce_current_user(Parameters(SalesforceIdentityRequest { selector: selector("sfdc") }))
+                .await;
+            assert_ne!(identity.is_error, Some(true), "{identity:?}");
+            let text = result_text(&identity);
+            assert!(text.contains("Jane Doe"), "{text}");
+            assert!(text.contains(expected), "{text}");
+            assert_eq!(identity.structured_content.as_ref().unwrap()["is_admin"], json!(is_admin));
+            assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "identity must not run a query");
+        }
+    }
+
+    #[tokio::test]
+    async fn salesforce_tools_refuse_other_database_types() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("pg", "pg", "postgres", "app")],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let postgres_selector = || ConnectionSelector { connection_id: Some("pg".to_string()), connection_name: None };
+        let identity = server
+            .salesforce_current_user(Parameters(SalesforceIdentityRequest { selector: postgres_selector() }))
+            .await;
+        assert!(result_text(&identity).contains("NOT_SALESFORCE_CONNECTION"), "{identity:?}");
+        let prepared = server
+            .salesforce_prepare_write(Parameters(SalesforcePrepareWriteRequest {
+                selector: postgres_selector(),
+                database: None,
+                op: "update".to_string(),
+                object: "Account".to_string(),
+                id: Some("001x".to_string()),
+                fields: Some(json!({"Name": "Acme"})),
+            }))
+            .await;
+        assert!(result_text(&prepared).contains("NOT_SALESFORCE_CONNECTION"), "{prepared:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
     }
 }

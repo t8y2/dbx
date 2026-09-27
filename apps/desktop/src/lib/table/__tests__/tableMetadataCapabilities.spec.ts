@@ -14,6 +14,21 @@ describe("tableMetadataCapabilities", () => {
     });
   });
 
+  it("exposes only describe fields for Salesforce objects", () => {
+    // An SObject has no index, foreign key, trigger or DDL metadata; only the
+    // describe payload (fields) is real, so every other structure tab stays off
+    // instead of rendering permanently empty.
+    expect(getTableMetadataCapabilities("salesforce")).toEqual({
+      columns: true,
+      indexes: false,
+      foreignKeys: false,
+      constraints: false,
+      triggers: false,
+      partitions: false,
+      ddl: false,
+    });
+  });
+
   it("exposes structured constraints only for dialects that implement list_constraints", () => {
     expect(getTableMetadataCapabilities("oracle").constraints).toBe(true);
     expect(getTableMetadataCapabilities("postgres").constraints).toBe(true);

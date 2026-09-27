@@ -2264,7 +2264,6 @@ mod tests {
         default_redis_key_separator, ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::persistence::secret_codec::{managed_key_path, SecretKeyPolicy};
-    use crate::storage::Storage;
 
     fn make_test_config(name: &str, is_default: bool) -> AiConfigItem {
         AiConfigItem {
@@ -2683,7 +2682,7 @@ mod tests {
 
     #[tokio::test]
     async fn webdav_upload_terminates_collection_request_paths() {
-        let storage = Storage::open(&temp_db_path("webdav-collection-paths")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("webdav-collection-paths")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let (endpoint, server) = spawn_webdav_server(vec![201, 201, 200], true).await;
         let client = WebDavClient::new(WebDavConfig {
@@ -2707,7 +2706,8 @@ mod tests {
 
     #[tokio::test]
     async fn webdav_upload_accepts_existing_collections() {
-        let storage = Storage::open(&temp_db_path("webdav-existing-collections")).await.unwrap();
+        let storage =
+            crate::persistence::test_storage::open(&temp_db_path("webdav-existing-collections")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let (endpoint, server) = spawn_webdav_server(vec![405, 405, 200], false).await;
         let client = WebDavClient::new(WebDavConfig {
@@ -2731,7 +2731,8 @@ mod tests {
 
     #[tokio::test]
     async fn webdav_upload_preserves_collection_conflicts() {
-        let storage = Storage::open(&temp_db_path("webdav-collection-conflict")).await.unwrap();
+        let storage =
+            crate::persistence::test_storage::open(&temp_db_path("webdav-collection-conflict")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let (endpoint, server) = spawn_webdav_server(vec![409], false).await;
         let client = WebDavClient::new(WebDavConfig {
@@ -2749,7 +2750,7 @@ mod tests {
 
     #[tokio::test]
     async fn webdav_upload_skips_collection_requests_for_single_file() {
-        let storage = Storage::open(&temp_db_path("webdav-single-file")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("webdav-single-file")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let (endpoint, server) = spawn_webdav_server(vec![200], false).await;
         let client = WebDavClient::new(WebDavConfig {
@@ -2916,7 +2917,8 @@ mod tests {
         assert_eq!(tls["truststore_password"], "");
         assert_eq!(tls["keystore_password"], "");
 
-        let storage = Storage::open(&temp_db_path("cassandra-sensitive-payload")).await.unwrap();
+        let storage =
+            crate::persistence::test_storage::open(&temp_db_path("cassandra-sensitive-payload")).await.unwrap();
         let payload = build_sensitive_payload(&storage, &[config], &[]).await.unwrap();
         assert!(payload.connection_secrets.iter().any(|secret| {
             secret.connection_id == "cassandra"
@@ -2999,7 +3001,8 @@ mod tests {
 
     #[tokio::test]
     async fn encrypted_snippet_snapshot_hides_and_restores_the_full_snapshot() {
-        let storage = Storage::open(&temp_db_path("encrypted-snippet-snapshot")).await.unwrap();
+        let storage =
+            crate::persistence::test_storage::open(&temp_db_path("encrypted-snippet-snapshot")).await.unwrap();
         storage.save_connections(&[postgres_connection("pg", "db-secret")]).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, Some("sync-pass")).await.unwrap();
 
@@ -3017,7 +3020,8 @@ mod tests {
 
     #[tokio::test]
     async fn encrypted_snippet_can_exclude_secrets_and_keep_local_credentials_on_restore() {
-        let source = Storage::open(&temp_db_path("snippet-without-secrets-source")).await.unwrap();
+        let source =
+            crate::persistence::test_storage::open(&temp_db_path("snippet-without-secrets-source")).await.unwrap();
         source.save_connections(&[postgres_connection("pg", "remote-secret")]).await.unwrap();
         let snapshot = build_sync_snapshot(&source, "test-version", None, None).await.unwrap();
         assert!(snapshot.encrypted_secrets.is_none());
@@ -3025,7 +3029,8 @@ mod tests {
         let encrypted = encrypt_snippet_snapshot(&snapshot, "snippet-password").unwrap();
         let restored =
             parse_snippet_snapshot(&serde_json::to_string(&encrypted).unwrap(), Some("snippet-password")).unwrap();
-        let target = Storage::open(&temp_db_path("snippet-without-secrets-target")).await.unwrap();
+        let target =
+            crate::persistence::test_storage::open(&temp_db_path("snippet-without-secrets-target")).await.unwrap();
         target.save_connections(&[postgres_connection("pg", "local-secret")]).await.unwrap();
 
         let summary = apply_sync_snapshot(
@@ -3042,7 +3047,8 @@ mod tests {
 
     #[tokio::test]
     async fn skipping_snippet_secret_restore_keeps_local_credentials() {
-        let source = Storage::open(&temp_db_path("snippet-skip-secrets-source")).await.unwrap();
+        let source =
+            crate::persistence::test_storage::open(&temp_db_path("snippet-skip-secrets-source")).await.unwrap();
         source.save_connections(&[postgres_connection("pg", "remote-secret")]).await.unwrap();
         let snapshot = build_sync_snapshot(&source, "test-version", None, Some("secrets-password")).await.unwrap();
         assert!(snapshot.encrypted_secrets.is_some());
@@ -3050,7 +3056,8 @@ mod tests {
         let encrypted = encrypt_snippet_snapshot(&snapshot, "snippet-password").unwrap();
         let restored =
             parse_snippet_snapshot(&serde_json::to_string(&encrypted).unwrap(), Some("snippet-password")).unwrap();
-        let target = Storage::open(&temp_db_path("snippet-skip-secrets-target")).await.unwrap();
+        let target =
+            crate::persistence::test_storage::open(&temp_db_path("snippet-skip-secrets-target")).await.unwrap();
         target.save_connections(&[postgres_connection("pg", "local-secret")]).await.unwrap();
 
         let summary = apply_sync_snapshot(
@@ -3067,7 +3074,7 @@ mod tests {
 
     #[tokio::test]
     async fn existing_encrypted_snippet_rejects_wrong_password_without_patch() {
-        let storage = Storage::open(&temp_db_path("snippet-password-guard")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("snippet-password-guard")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let encrypted = encrypt_snippet_snapshot(&snapshot, "correct-password").unwrap();
         let (base, server) =
@@ -3089,7 +3096,7 @@ mod tests {
 
     #[tokio::test]
     async fn existing_encrypted_snippet_accepts_correct_password_before_patch() {
-        let storage = Storage::open(&temp_db_path("snippet-password-update")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("snippet-password-update")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let encrypted = encrypt_snippet_snapshot(&snapshot, "correct-password").unwrap();
         let (base, server) = spawn_snippet_server(vec![
@@ -3114,7 +3121,8 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_migration_skips_delete_when_remote_content_changes() {
-        let storage = Storage::open(&temp_db_path("legacy-snippet-change-guard")).await.unwrap();
+        let storage =
+            crate::persistence::test_storage::open(&temp_db_path("legacy-snippet-change-guard")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let legacy_content = serde_json::to_string(&snapshot).unwrap();
         let changed_content =
@@ -3153,7 +3161,7 @@ mod tests {
     #[tokio::test]
     async fn pending_legacy_cleanup_survives_response_loss_and_retries_after_restart() {
         let db = temp_db_path("legacy-snippet-cleanup-retry");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let legacy_content = serde_json::to_string(&snapshot).unwrap();
         let (base, server) = spawn_snippet_server(vec![
@@ -3178,7 +3186,7 @@ mod tests {
         assert_eq!(server.await.unwrap(), vec!["GET /gists/legacy-id HTTP/1.1", "POST /gists HTTP/1.1"]);
         drop(storage);
 
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&db).await.unwrap();
         let settings = snippet_sync_settings(&storage, SnippetProvider::GitHub).await.unwrap();
         assert_eq!(settings.snippet_id.as_deref(), Some("new-id"));
         assert_eq!(settings.legacy_cleanup_required_id.as_deref(), Some("legacy-id"));
@@ -3206,7 +3214,8 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_snippet_migration_preserves_remote_snapshot() {
-        let storage = Storage::open(&temp_db_path("legacy-snippet-migration-guard")).await.unwrap();
+        let storage =
+            crate::persistence::test_storage::open(&temp_db_path("legacy-snippet-migration-guard")).await.unwrap();
         let local_snapshot = build_sync_snapshot(&storage, "local-version", None, None).await.unwrap();
         let remote_snapshot = build_sync_snapshot(&storage, "remote-version", None, None).await.unwrap();
         let mut legacy = serde_json::to_value(remote_snapshot).unwrap();
@@ -3228,7 +3237,8 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_snippet_migration_refuses_unverifiable_encrypted_secrets() {
-        let storage = Storage::open(&temp_db_path("legacy-snippet-migration-secrets")).await.unwrap();
+        let storage =
+            crate::persistence::test_storage::open(&temp_db_path("legacy-snippet-migration-secrets")).await.unwrap();
         storage.save_connections(&[postgres_connection("pg", "db-secret")]).await.unwrap();
         let remote_snapshot = build_sync_snapshot(&storage, "remote-version", None, Some("remote-pass")).await.unwrap();
         let content = serde_json::to_string(&remote_snapshot).unwrap();
@@ -3254,7 +3264,7 @@ mod tests {
 
     #[tokio::test]
     async fn snippet_sync_id_is_persisted_per_provider() {
-        let storage = Storage::open(&temp_db_path("snippet-sync-id")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("snippet-sync-id")).await.unwrap();
 
         save_snippet_sync_id(&storage, SnippetProvider::GitHub, Some("github-id")).await.unwrap();
         save_snippet_sync_id(&storage, SnippetProvider::Gitee, Some("gitee-id")).await.unwrap();
@@ -3309,7 +3319,7 @@ mod tests {
 
     #[tokio::test]
     async fn gitlab_instances_keep_saved_tokens_ids_and_cleanup_separate() {
-        let storage = Storage::open(&temp_db_path("gitlab-instance-isolation")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-instance-isolation")).await.unwrap();
         let first = "https://gitlab.example.com";
         let second = "https://gitlab.other.com";
         let config = |instance: &str| SnippetSyncConfig {
@@ -3349,7 +3359,7 @@ mod tests {
 
     #[tokio::test]
     async fn gitlab_create_and_download_use_private_personal_snippet_and_raw_file() {
-        let storage = Storage::open(&temp_db_path("gitlab-create-download")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-create-download")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let encrypted = encrypt_snippet_snapshot(&snapshot, "password").unwrap();
         let (base, server) = spawn_gitlab_server(vec![
@@ -3385,7 +3395,7 @@ mod tests {
 
     #[tokio::test]
     async fn gitlab_download_uses_snippet_raw_url_branch() {
-        let storage = Storage::open(&temp_db_path("gitlab-raw-url-branch")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-raw-url-branch")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
         let (base, server) = spawn_gitlab_server_with_status(vec![
@@ -3416,7 +3426,7 @@ mod tests {
 
     #[tokio::test]
     async fn gitlab_download_falls_back_to_master_when_main_raw_file_is_missing() {
-        let storage = Storage::open(&temp_db_path("gitlab-master-fallback")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-master-fallback")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
         let (base, server) = spawn_gitlab_server_with_status(vec![
@@ -3463,7 +3473,7 @@ mod tests {
 
     #[tokio::test]
     async fn gitlab_update_checks_existing_password_before_put() {
-        let storage = Storage::open(&temp_db_path("gitlab-password-guard")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-password-guard")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
         let (base, server) = spawn_gitlab_server(vec![
@@ -3492,7 +3502,7 @@ mod tests {
 
     #[tokio::test]
     async fn gitlab_wrong_password_never_updates_existing_snippet() {
-        let storage = Storage::open(&temp_db_path("gitlab-wrong-password")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-wrong-password")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "correct").unwrap()).unwrap();
         let (base, server) =
@@ -3514,7 +3524,7 @@ mod tests {
 
     #[tokio::test]
     async fn gitlab_legacy_migration_creates_before_deleting_and_tracks_instance() {
-        let storage = Storage::open(&temp_db_path("gitlab-legacy-migration")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-legacy-migration")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let legacy_content = serde_json::to_string(&snapshot).unwrap();
         let metadata = serde_json::json!({"files": [{"path": "dbx-sync.json"}]}).to_string();
@@ -3604,7 +3614,7 @@ mod tests {
 
     #[tokio::test]
     async fn webdav_sync_secrets_preference_round_trips_and_clears_passphrase() {
-        let storage = Storage::open(&temp_db_path("sync-secrets-preference")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("sync-secrets-preference")).await.unwrap();
 
         let status = webdav_sync_secrets_status(&storage).await.unwrap();
         assert!(!status.enabled);
@@ -3627,7 +3637,7 @@ mod tests {
 
     #[tokio::test]
     async fn saved_sync_passphrase_encrypts_snapshot_secrets_without_exposing_connection_passwords() {
-        let storage = Storage::open(&temp_db_path("saved-sync-snapshot")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("saved-sync-snapshot")).await.unwrap();
         storage.save_connections(&[postgres_connection("pg", "db-secret")]).await.unwrap();
 
         let plain_snapshot =
@@ -3651,7 +3661,7 @@ mod tests {
     async fn legacy_sync_payload_preserves_credentials_but_explicit_empty_clears_them() {
         let directory = tempfile::tempdir().unwrap();
         let database_path = directory.path().join("dbx.db");
-        let target = Storage::open_unmigrated(&database_path)
+        let target = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -3685,7 +3695,7 @@ mod tests {
         .await
         .unwrap();
         drop(target);
-        let target = Storage::open_unmigrated(&database_path)
+        let target = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -3709,7 +3719,7 @@ mod tests {
             assert_eq!(restored_snippet.token.as_deref(), (!restore_secrets).then_some("local-token"));
         }
         drop(target);
-        let target = Storage::open_unmigrated(&database_path)
+        let target = crate::persistence::test_storage::open_unmigrated(&database_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -3725,12 +3735,12 @@ mod tests {
     async fn metadata_only_sync_roundtrip_preserves_public_url_params_and_target_secrets() {
         let source_directory = tempfile::tempdir().unwrap();
         let target_directory = tempfile::tempdir().unwrap();
-        let source = Storage::open_unmigrated(&source_directory.path().join("dbx.db"))
+        let source = crate::persistence::test_storage::open_unmigrated(&source_directory.path().join("dbx.db"))
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
         let target_path = target_directory.path().join("dbx.db");
-        let target = Storage::open_unmigrated(&target_path)
+        let target = crate::persistence::test_storage::open_unmigrated(&target_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -3758,7 +3768,7 @@ mod tests {
         .await
         .unwrap();
         drop(target);
-        let target = Storage::open_unmigrated(&target_path)
+        let target = crate::persistence::test_storage::open_unmigrated(&target_path)
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
@@ -3782,7 +3792,7 @@ mod tests {
         assert!(encrypted.starts_with("dbxenc1."));
 
         let locked_directory = tempfile::tempdir().unwrap();
-        let locked_target = Storage::open_unmigrated(&locked_directory.path().join("dbx.db"))
+        let locked_target = crate::persistence::test_storage::open_unmigrated(&locked_directory.path().join("dbx.db"))
             .await
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir)
@@ -3831,7 +3841,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_credentials_are_rewrapped_for_the_destination_device() {
-        let source = Storage::open(&temp_db_path("sync-global-credentials-source")).await.unwrap();
+        let source =
+            crate::persistence::test_storage::open(&temp_db_path("sync-global-credentials-source")).await.unwrap();
         let webdav = WebDavConfig {
             endpoint: "https://dav.example.test/remote.php/dav/files/alice".to_string(),
             username: Some("alice".to_string()),
@@ -3860,7 +3871,7 @@ mod tests {
         assert!(credentials.iter().any(|credential| credential.secret == "github-token"));
 
         let target_path = temp_db_path("sync-global-credentials-target");
-        let target = Storage::open(&target_path).await.unwrap();
+        let target = crate::persistence::test_storage::open(&target_path).await.unwrap();
         apply_sync_snapshot(
             &target,
             &snapshot,
@@ -3880,7 +3891,7 @@ mod tests {
         // database does not affect the restored credentials.
         drop(target);
         drop(source);
-        let target = Storage::open(&target_path).await.unwrap();
+        let target = crate::persistence::test_storage::open(&target_path).await.unwrap();
         let mut reopened_webdav = webdav.clone();
         resolve_webdav_password(&target, &mut reopened_webdav).await.unwrap();
         assert_eq!(reopened_webdav.password.as_deref(), Some("webdav-secret"));
@@ -3910,7 +3921,7 @@ mod tests {
 
     #[tokio::test]
     async fn plugin_connection_secrets_are_scrubbed_from_public_sync_metadata() {
-        let storage = Storage::open(&temp_db_path("plugin-public-sync")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("plugin-public-sync")).await.unwrap();
         let mut config = postgres_connection("plugin", "");
         config.db_type = DatabaseType::Plugin;
         config.plugin_id = Some("example.plugin".to_string());
@@ -3932,7 +3943,8 @@ mod tests {
 
     #[tokio::test]
     async fn plugin_secrets_export_even_when_primary_password_is_not_saved() {
-        let storage = Storage::open(&temp_db_path("plugin-secret-without-password")).await.unwrap();
+        let storage =
+            crate::persistence::test_storage::open(&temp_db_path("plugin-secret-without-password")).await.unwrap();
         let mut config = postgres_connection("plugin-no-password", "");
         config.db_type = DatabaseType::Plugin;
         config.save_password = false;
@@ -3965,7 +3977,8 @@ mod tests {
 
     #[tokio::test]
     async fn excluded_plugin_secrets_do_not_clear_destination_credentials() {
-        let source = Storage::open(&temp_db_path("plugin-secret-excluded-source")).await.unwrap();
+        let source =
+            crate::persistence::test_storage::open(&temp_db_path("plugin-secret-excluded-source")).await.unwrap();
         let mut config = postgres_connection("plugin-preserve", "");
         config.db_type = DatabaseType::Plugin;
         config.plugin_id = Some("example.plugin".to_string());
@@ -3987,7 +4000,8 @@ mod tests {
         .await
         .unwrap();
 
-        let target = Storage::open(&temp_db_path("plugin-secret-excluded-target")).await.unwrap();
+        let target =
+            crate::persistence::test_storage::open(&temp_db_path("plugin-secret-excluded-target")).await.unwrap();
         let mut target_config = config.clone();
         target_config.connection_secrets.insert("api_token".to_string(), "local-plugin-secret".to_string());
         target.save_connections(std::slice::from_ref(&target_config)).await.unwrap();
@@ -4007,12 +4021,14 @@ mod tests {
 
     #[tokio::test]
     async fn sync_restore_does_not_revive_password_when_connection_disables_saving() {
-        let source = Storage::open(&temp_db_path("sync-no-save-password-source")).await.unwrap();
+        let source =
+            crate::persistence::test_storage::open(&temp_db_path("sync-no-save-password-source")).await.unwrap();
         source.save_connections(&[postgres_connection("pg", "remote-secret")]).await.unwrap();
         let mut snapshot = build_sync_snapshot(&source, "test-version", None, Some("sync-pass")).await.unwrap();
         snapshot.connections[0].save_password = false;
 
-        let target = Storage::open(&temp_db_path("sync-no-save-password-target")).await.unwrap();
+        let target =
+            crate::persistence::test_storage::open(&temp_db_path("sync-no-save-password-target")).await.unwrap();
         apply_sync_snapshot(
             &target,
             &snapshot,
@@ -4027,11 +4043,11 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_sync_passphrase_does_not_modify_the_destination() {
-        let source = Storage::open(&temp_db_path("sync-wrong-pass-source")).await.unwrap();
+        let source = crate::persistence::test_storage::open(&temp_db_path("sync-wrong-pass-source")).await.unwrap();
         source.save_connections(&[postgres_connection("remote", "remote-secret")]).await.unwrap();
         let snapshot = build_sync_snapshot(&source, "test-version", None, Some("correct-pass")).await.unwrap();
 
-        let target = Storage::open(&temp_db_path("sync-wrong-pass-target")).await.unwrap();
+        let target = crate::persistence::test_storage::open(&temp_db_path("sync-wrong-pass-target")).await.unwrap();
         target.save_connections(&[postgres_connection("local", "local-secret")]).await.unwrap();
         let before = target.load_connections().await.unwrap();
         assert!(apply_sync_snapshot(
@@ -4048,14 +4064,16 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_plaintext_snapshot_secrets_are_migrated_only_on_explicit_restore() {
-        let source = Storage::open(&temp_db_path("legacy-plaintext-sync-source")).await.unwrap();
+        let source =
+            crate::persistence::test_storage::open(&temp_db_path("legacy-plaintext-sync-source")).await.unwrap();
         source.save_connections(&[postgres_connection("legacy", "unused")]).await.unwrap();
         let mut snapshot = build_sync_snapshot(&source, "legacy-version", None, None).await.unwrap();
         snapshot.schema_version = LEGACY_SNAPSHOT_SCHEMA_VERSION;
         snapshot.connections[0].password = "legacy-password".to_string();
         snapshot.connections[0].init_script = Some("CREATE SECRET legacy".to_string());
 
-        let target = Storage::open(&temp_db_path("legacy-plaintext-sync-target")).await.unwrap();
+        let target =
+            crate::persistence::test_storage::open(&temp_db_path("legacy-plaintext-sync-target")).await.unwrap();
         apply_sync_snapshot(
             &target,
             &snapshot,
@@ -4066,7 +4084,8 @@ mod tests {
         assert_eq!(target.get_secret("legacy", "password").await.unwrap().as_deref(), Some("legacy-password"));
         assert_eq!(target.get_secret("legacy", "init_script").await.unwrap().as_deref(), Some("CREATE SECRET legacy"));
 
-        let metadata_only_target = Storage::open(&temp_db_path("legacy-plaintext-sync-metadata-only")).await.unwrap();
+        let metadata_only_target =
+            crate::persistence::test_storage::open(&temp_db_path("legacy-plaintext-sync-metadata-only")).await.unwrap();
         apply_sync_snapshot(
             &metadata_only_target,
             &snapshot,
@@ -4080,13 +4099,17 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_only_sync_removes_existing_password_when_connection_disables_saving() {
-        let source = Storage::open(&temp_db_path("sync-no-save-password-metadata-source")).await.unwrap();
+        let source = crate::persistence::test_storage::open(&temp_db_path("sync-no-save-password-metadata-source"))
+            .await
+            .unwrap();
         let mut source_connection = postgres_connection("pg", "unused");
         source_connection.save_password = false;
         source.save_connections(&[source_connection]).await.unwrap();
         let snapshot = build_sync_snapshot(&source, "test-version", None, None).await.unwrap();
 
-        let target = Storage::open(&temp_db_path("sync-no-save-password-metadata-target")).await.unwrap();
+        let target = crate::persistence::test_storage::open(&temp_db_path("sync-no-save-password-metadata-target"))
+            .await
+            .unwrap();
         target.save_connections(&[postgres_connection("pg", "local-secret")]).await.unwrap();
         apply_sync_snapshot(&target, &snapshot, ApplySnapshotOptions::default()).await.unwrap();
 
@@ -4096,7 +4119,7 @@ mod tests {
 
     #[tokio::test]
     async fn saved_sync_passphrase_encrypts_nacos_auth_password_without_exposing_it() {
-        let storage = Storage::open(&temp_db_path("saved-sync-nacos-snapshot")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("saved-sync-nacos-snapshot")).await.unwrap();
         storage.save_connections(&[nacos_connection("nacos", "nacos-secret")]).await.unwrap();
 
         save_webdav_sync_secrets_preference(&storage, true, Some("sync-pass")).await.unwrap();
@@ -4115,7 +4138,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_never_snapshots_or_restores_nacos_passwords_when_saving_is_disabled() {
-        let source = Storage::open(&temp_db_path("sync-no-save-nacos-source")).await.unwrap();
+        let source = crate::persistence::test_storage::open(&temp_db_path("sync-no-save-nacos-source")).await.unwrap();
         let mut config = nacos_connection("nacos", "transient-secret");
         config.save_password = false;
         let payload = build_sensitive_payload(&source, std::slice::from_ref(&config), &[]).await.unwrap();
@@ -4150,7 +4173,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_snapshot_round_trips_tunnel_profiles() {
-        let storage = Storage::open(&temp_db_path("tunnel-profiles-src")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("tunnel-profiles-src")).await.unwrap();
         let profile = TransportLayerConfig::Ssh(SshTunnelConfig {
             id: "profile-1".to_string(),
             name: "Bastion".to_string(),
@@ -4179,7 +4202,7 @@ mod tests {
         assert!(!public_json.contains("tunnel-secret"));
 
         // Applying with the passphrase restores the full profile on the target.
-        let target = Storage::open(&temp_db_path("tunnel-profiles-dst")).await.unwrap();
+        let target = crate::persistence::test_storage::open(&temp_db_path("tunnel-profiles-dst")).await.unwrap();
         apply_sync_snapshot(
             &target,
             &snapshot,
@@ -4194,7 +4217,7 @@ mod tests {
 
     #[tokio::test]
     async fn sensitive_payload_ai_configs_none_falls_through_to_legacy() {
-        let storage = Storage::open(&temp_db_path("ai-cfg-none")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("ai-cfg-none")).await.unwrap();
 
         // No ai_configs in payload — fall through to ai_config (legacy) branch
         let payload = SensitiveSyncPayload {
@@ -4212,7 +4235,7 @@ mod tests {
 
     #[tokio::test]
     async fn sensitive_payload_ai_configs_empty_clears_table() {
-        let storage = Storage::open(&temp_db_path("ai-cfg-empty")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("ai-cfg-empty")).await.unwrap();
 
         // Pre-populate with a config
         let cfg = make_test_config("to-be-cleared", true);
@@ -4234,7 +4257,7 @@ mod tests {
 
     #[tokio::test]
     async fn sensitive_payload_ai_configs_some_saves_configs() {
-        let storage = Storage::open(&temp_db_path("ai-cfg-some")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("ai-cfg-some")).await.unwrap();
 
         let mut cfg = make_test_config("synced", true);
         cfg.config.provider = crate::ai::AiProvider::OpenCodeCli;
@@ -4274,7 +4297,7 @@ mod tests {
 
     #[tokio::test]
     async fn sensitive_payload_legacy_ai_config_replaces_local_configs_with_same_name() {
-        let storage = Storage::open(&temp_db_path("ai-cfg-legacy-replace")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("ai-cfg-legacy-replace")).await.unwrap();
         storage.save_ai_config_item(&make_test_config("openai", true)).await.unwrap();
         storage.save_ai_config_item(&make_test_config("local-only", false)).await.unwrap();
 

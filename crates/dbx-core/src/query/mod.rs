@@ -3,6 +3,7 @@ pub mod document_ops;
 pub mod hbase_ops;
 pub mod mongo_ops;
 pub mod object_cache;
+pub mod plugin_data;
 pub mod plugin_plan;
 pub mod query_cancel;
 pub mod redis_ops;
@@ -2078,6 +2079,23 @@ async fn do_execute_typed(
             }
             result
         }
+        PoolKind::Salesforce(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            let result = wait_for_query_opt(cancel_token, query_timeout, async move {
+                if let Some(cursor) = options.result_session_id.as_deref() {
+                    client.fetch_more(cursor).await
+                } else {
+                    client.execute_query(&sql, max_rows).await
+                }
+            })
+            .await;
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
         PoolKind::VectorDb(client) => {
             let client = client.clone();
             let sql = sql.to_string();
@@ -2158,6 +2176,7 @@ async fn do_execute_typed(
             }
             let cancel_for_agent = cancel_token.clone();
             let result = async move {
+                let lock_started = std::time::Instant::now();
                 let mut client = match cancel_for_agent.as_ref() {
                     Some(token) => {
                         tokio::select! {
@@ -2171,7 +2190,10 @@ async fn do_execute_typed(
                     }
                     None => client.lock().await,
                 };
-                if let Some(session_id) = options.result_session_id.as_deref() {
+                let lock_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
+                let response: Result<db::QueryResult, AgentCallError> = if let Some(session_id) =
+                    options.result_session_id.as_deref()
+                {
                     let params = agent_fetch_query_page_params(session_id, options.page_size.unwrap_or(MAX_ROWS));
                     client
                         .fetch_query_page_typed_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
@@ -2186,7 +2208,14 @@ async fn do_execute_typed(
                     client
                         .execute_query_typed_with_timeout_and_cancel(params, rpc_timeout, cancel_for_agent.clone())
                         .await
-                }
+                };
+                response.map(|mut result| {
+                    // Older agents have no phase map. Do not imply complete telemetry.
+                    if let Some(timings) = result.query_timings_ms.as_mut() {
+                        timings.insert("core_lock".into(), lock_ms);
+                    }
+                    result
+                })
             }
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
@@ -4191,6 +4220,7 @@ fn error_query_result(message: String) -> db::QueryResult {
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4210,6 +4240,7 @@ fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
         affected_rows: 0,
         execution_time_ms,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4557,6 +4588,7 @@ async fn execute_statements_inner(
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4704,6 +4736,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
         | PoolKind::Meilisearch(_)
+        | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
@@ -5108,6 +5141,7 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
         | PoolKind::Meilisearch(_)
+        | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
@@ -5169,6 +5203,7 @@ async fn exec_tx_pg_inner(
             affected_rows: total_affected,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5263,6 +5298,7 @@ async fn exec_tx_mysql_inner(
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -5306,6 +5342,9 @@ async fn exec_tx_sqlite_inner(
 ) -> Result<db::QueryResult, String> {
     let statements = statements.to_vec();
     let query_timeout = budget.query_timeout;
+    if let Some(worker) = pool.worker() {
+        return exec_tx_sqlite_worker_inner(worker, statements, start, query_timeout).await;
+    }
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
             conn.execute_batch("BEGIN").map_err(|e| format!("Failed to begin transaction: {}", e))?;
@@ -5456,6 +5495,7 @@ async fn exec_tx_sqlite_inner(
                         affected_rows: total_affected,
                         execution_time_ms: start.elapsed().as_millis(),
                         server_execute_time_us: None,
+                        query_timings_ms: None,
                         truncated: false,
                         session_id: None,
                         has_more: false,
@@ -5471,6 +5511,55 @@ async fn exec_tx_sqlite_inner(
                 }
             }
         })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn exec_tx_sqlite_worker_inner(
+    worker: Arc<db::sqlite_worker::SqliteWorkerClient>,
+    statements: Vec<String>,
+    start: std::time::Instant,
+    query_timeout: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    // Detached like the local spawn_blocking path, so a dropped caller cannot leave the
+    // worker connection inside an open transaction. One session keeps other requests out.
+    tokio::spawn(async move {
+        let mut session = worker.session().await;
+        session.query("BEGIN", None).await.map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        // ponytail: the worker cannot interrupt a running statement, so the budget is only
+        // checked between statements; bounding one slow statement needs a worker interrupt op.
+        let within_budget = || match query_timeout {
+            Some(timeout) if start.elapsed() >= timeout => {
+                Err(format!("Query timed out after {} seconds", timeout.as_secs()))
+            }
+            _ => Ok(()),
+        };
+        let outcome: Result<db::QueryResult, String> = async {
+            let mut total_affected = 0;
+            for (i, sql) in statements.iter().enumerate() {
+                within_budget()?;
+                total_affected += session
+                    .query(sql, None)
+                    .await
+                    .map_err(|e| {
+                        query_error_with_omitted_sql_context(&format!("Statement {} failed: {}", i + 1, e), sql)
+                    })?
+                    .affected_rows;
+            }
+            within_budget()?;
+            let committed = session.query("COMMIT", None).await.map_err(|e| format!("COMMIT failed: {e}"))?;
+            Ok(db::QueryResult {
+                affected_rows: total_affected,
+                execution_time_ms: start.elapsed().as_millis(),
+                ..committed
+            })
+        }
+        .await;
+        if outcome.is_err() {
+            let _ = session.query("ROLLBACK", None).await;
+        }
+        outcome
     })
     .await
     .map_err(|e| e.to_string())?
@@ -5540,6 +5629,7 @@ async fn exec_tx_explicit_inner(
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6543,7 +6633,9 @@ async fn execute_manual_txn_agent_statement(
         execution_schema,
         options,
     );
+    let lock_started = std::time::Instant::now();
     let mut locked = client.lock().await;
+    let lock_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
     let result = match request {
         ManualTxnAgentQueryRequest::Execute(params) => {
             locked.execute_query_typed_with_timeout::<db::QueryResult>(params, None).await
@@ -6556,7 +6648,12 @@ async fn execute_manual_txn_agent_statement(
         }
     };
     result
-        .map(|result| truncate_result_with_max_rows(result, Some(row_limit.max(1))))
+        .map(|mut result| {
+            if let Some(timings) = result.query_timings_ms.as_mut() {
+                timings.insert("core_lock".into(), lock_ms);
+            }
+            truncate_result_with_max_rows(result, Some(row_limit.max(1)))
+        })
         .map_err(|error| error.into_legacy_string())
 }
 
@@ -6648,6 +6745,7 @@ async fn execute_manual_txn_postgres_statement(
             affected_rows: affected,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6683,6 +6781,7 @@ async fn execute_manual_txn_mysql_statement(
                 affected_rows,
                 execution_time_ms: start.elapsed().as_millis(),
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -6715,6 +6814,7 @@ async fn execute_manual_txn_mysql_statement(
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -6735,6 +6835,7 @@ async fn execute_manual_txn_mysql_statement(
             affected_rows,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6792,6 +6893,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6822,6 +6924,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
         affected_rows: 0,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6923,7 +7026,9 @@ mod tests {
             fail_once: Option<&'static str>,
         ) -> (AppState, Arc<Mutex<Vec<String>>>, tempfile::TempDir) {
             let directory = tempfile::tempdir().unwrap();
-            let state = AppState::new(Storage::open(&directory.path().join("storage.db")).await.unwrap());
+            let state = AppState::new(
+                crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap(),
+            );
             let config = test_connection_config(DatabaseType::Postgres);
             state.configs.write().await.insert(config.id.clone(), config);
             let commands = Arc::new(Mutex::new(Vec::new()));
@@ -7305,6 +7410,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_ssh_worker_transaction_rolls_back_on_failure_and_commits_on_success() {
+        let remote = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().expect("open remote SQLite")));
+        remote.lock().unwrap().execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)").expect("create table");
+        let (client_stream, worker_stream) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(fake_sqlite_ssh_worker(worker_stream, remote.clone()));
+        let pool = db::sqlite::SqliteHandle::from_worker(Arc::new(
+            db::sqlite_worker::SqliteWorkerClient::from_test_stream(client_stream),
+        ));
+        let budget = DbOperationBudget::with_defaults();
+        let row_count =
+            || remote.lock().unwrap().query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0)).unwrap();
+
+        let error = exec_tx_sqlite_inner(
+            pool.clone(),
+            &["INSERT INTO t VALUES (1)".to_string(), "INSERT INTO missing VALUES (2)".to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect_err("second statement fails");
+        assert!(error.contains("Statement 2 failed") && error.contains("no such table: missing"), "{error}");
+        assert_eq!(row_count(), 0);
+
+        let result = exec_tx_sqlite_inner(
+            pool,
+            &["INSERT INTO t VALUES (1)".to_string(), "INSERT INTO t VALUES (2)".to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect("transaction commits");
+        assert_eq!(result.affected_rows, 2);
+        assert_eq!(row_count(), 2);
+    }
+
+    /// Answers SQLite worker JSONL requests from a real SQLite connection.
+    async fn fake_sqlite_ssh_worker(stream: tokio::io::DuplexStream, conn: Arc<Mutex<rusqlite::Connection>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let request: serde_json::Value = serde_json::from_str(&line).expect("worker request");
+            let mut response = {
+                let conn = conn.lock().unwrap();
+                match conn.execute_batch(request["sql"].as_str().unwrap_or_default()) {
+                    Ok(()) => serde_json::json!({ "affected_rows": conn.changes() }),
+                    Err(error) => serde_json::json!({ "error": error.to_string() }),
+                }
+            };
+            response["id"] = request["id"].clone();
+            writer.write_all(format!("{response}\n").as_bytes()).await.expect("worker response");
+        }
+    }
+
+    #[tokio::test]
     async fn sqlite_external_interrupt_without_budget_does_not_panic() {
         // Regression: with query_timeout = None (MCP policy can set it to 0 =
         // unlimited; resolve_query_timeout(Some(0)) -> None), an SQLITE_INTERRUPT
@@ -7388,7 +7548,8 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open test storage");
+        let storage =
+            crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.expect("open test storage");
         let state = Arc::new(AppState::new(storage));
         let connection_id = "sqlite-cancel-session";
         let client_session_id = "query-tab-8414";
@@ -7606,7 +7767,6 @@ mod tests {
         InstalledPlugin, PluginCompatibility, PluginDriverManifest, PluginDriverSession, PluginManifest,
         PluginRuntimeEnv,
     };
-    use crate::storage::Storage;
 
     #[cfg(unix)]
     async fn spawn_agent_batch_timeout_test_client() -> (AgentDriverClient, tempfile::NamedTempFile) {
@@ -7697,7 +7857,7 @@ for line in sys.stdin:
     async fn query_and_transaction_paths_resolve_catalog_dialect_from_connection() {
         let dir = std::env::temp_dir().join(format!("dbx-catalog-dialect-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
 
         let mut doris = test_connection_config(DatabaseType::Doris);
@@ -7959,7 +8119,7 @@ for line in sys.stdin:
         let (host, port) = address.rsplit_once(':').expect("DynamoDB endpoint must include a port");
         let dir = std::env::temp_dir().join(format!("dbx-query-dynamodb-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::DynamoDb);
         config.host = host.to_string();
@@ -8047,7 +8207,7 @@ for line in sys.stdin:
         .unwrap();
         runtime.increment_session_count();
 
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert("conn-1".to_string(), test_connection_config(DatabaseType::SqlServer));
         state
@@ -8164,7 +8324,7 @@ for line in sys.stdin:
         .unwrap();
         runtime.increment_session_count();
 
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert("conn-1".to_string(), test_connection_config(DatabaseType::Dameng));
         state
@@ -8223,7 +8383,7 @@ for line in sys.stdin:
     async fn native_pre_dispatch_cancellation_stays_typed() {
         let dir = std::env::temp_dir().join(format!("dbx-query-native-cancel-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-cancel";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8403,7 +8563,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn ddl_schema_cache_invalidates_persisted_object_snapshots() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "schema-cache";
         let sqlite =
@@ -8445,7 +8605,7 @@ for line in sys.stdin:
             ("BEGIN; ALTER TABLE users ADD COLUMN added INTEGER; COMMIT", false, false, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+            let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
             let state = AppState::new(storage);
             let sqlite = db::sqlite::connect_path_create_if_missing(dir.path().join("query.db").to_str().unwrap())
                 .await
@@ -8504,7 +8664,7 @@ for line in sys.stdin:
     async fn ddl_schema_cache_storage_failure_preserves_sql_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let storage_path = dir.path().join("storage.db");
-        let state = AppState::new(Storage::open(&storage_path).await.unwrap());
+        let state = AppState::new(crate::persistence::test_storage::open(&storage_path).await.unwrap());
         let sqlite =
             db::sqlite::connect_path_create_if_missing(dir.path().join("query.db").to_str().unwrap()).await.unwrap();
         state
@@ -8533,7 +8693,7 @@ for line in sys.stdin:
     async fn assert_sqlite_batch_error_behavior(failure_first: bool, continue_on_error: bool) {
         let dir = std::env::temp_dir().join(format!("dbx-query-batch-error-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-batch";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8584,7 +8744,7 @@ for line in sys.stdin:
     async fn transactional_sqlite_batch_rolls_back_when_a_later_statement_fails() {
         let dir = std::env::temp_dir().join(format!("dbx-query-transaction-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "sqlite-transaction";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8627,7 +8787,7 @@ for line in sys.stdin:
     async fn transactional_batch_rejects_an_unsupported_backend_before_execution() {
         let dir = std::env::temp_dir().join(format!("dbx-query-unsupported-transaction-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "message-queue-transaction";
         state
@@ -8719,7 +8879,7 @@ for line in sys.stdin:
     async fn connection_pool_is_sqlserver_agent_detects_agent_and_native_pools() {
         let dir = std::env::temp_dir().join(format!("dbx-query-sqlserver-agent-flag-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
 
         // Non-SQL-Server connections never use the SQL Server agent splitter.
@@ -8755,7 +8915,7 @@ for line in sys.stdin:
         // on failure for DDL that cannot be rolled back.
         let dir = std::env::temp_dir().join(format!("dbx-query-tx-predispatch-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "message-queue-tx-ddl";
         state
@@ -8829,7 +8989,7 @@ for line in sys.stdin:
     async fn gaussdb_on_error_stop_overrides_continue_on_error() {
         let dir = std::env::temp_dir().join(format!("dbx-query-gaussdb-on-error-stop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let connection_id = "gaussdb-on-error-stop";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
@@ -8983,6 +9143,7 @@ for line in sys.stdin:
                     affected_rows: 0,
                     execution_time_ms: 4,
                     server_execute_time_us: None,
+                    query_timings_ms: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -9258,6 +9419,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 1,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -10073,7 +10235,7 @@ for line in sys.stdin:
                 .await
                 .expect("plugin should start"),
         );
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(DatabaseType::Jdbc);
         config.id = "jdbc-conn".to_string();
@@ -10318,6 +10480,7 @@ for line in sys.stdin:
                 affected_rows: 0,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -10344,6 +10507,7 @@ for line in sys.stdin:
                 affected_rows: 0,
                 execution_time_ms: 0,
                 server_execute_time_us: None,
+                query_timings_ms: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -11295,7 +11459,7 @@ for line in sys.stdin:
 
         let dir = std::env::temp_dir().join(format!("dbx-manual-txn-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut config = test_connection_config(db_type);
         config.id = "agent-conn".to_string();
@@ -11640,6 +11804,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11678,6 +11843,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11746,6 +11912,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11786,6 +11953,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11818,6 +11986,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11857,6 +12026,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11890,6 +12060,7 @@ for line in sys.stdin:
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,

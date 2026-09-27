@@ -629,6 +629,35 @@ test("keeps saved data grid header display settings", () => {
   assert.equal(settings.compactColumnHeaderActions, false);
 });
 
+test("defaults column header hover tooltips to on", () => {
+  // Existing installs have no persisted flag, so the grid must keep showing the
+  // header tooltip until the user opts out.
+  assert.equal(DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips, true);
+  assert.equal(normalizeEditorSettings({}).showColumnHeaderTooltips, true);
+  assert.equal(normalizeEditorSettings({ showColumnHeaderTooltips: undefined } as any).showColumnHeaderTooltips, true);
+});
+
+test("keeps a disabled column header hover tooltip preference", () => {
+  assert.equal(normalizeEditorSettings({ showColumnHeaderTooltips: false } as any).showColumnHeaderTooltips, false);
+  assert.equal(normalizeEditorSettings({ showColumnHeaderTooltips: true } as any).showColumnHeaderTooltips, true);
+});
+
+test("updates the column header hover tooltip preference through the store", () => {
+  setActivePinia(createPinia());
+  const store = useSettingsStore();
+
+  assert.equal(store.editorSettings.showColumnHeaderTooltips, true);
+
+  store.updateEditorSettings({ showColumnHeaderTooltips: false });
+  assert.equal(store.editorSettings.showColumnHeaderTooltips, false);
+
+  store.updateEditorSettings({ showColumnTypesInHeader: false });
+  assert.equal(store.editorSettings.showColumnHeaderTooltips, false);
+
+  store.updateEditorSettings({ showColumnHeaderTooltips: true });
+  assert.equal(store.editorSettings.showColumnHeaderTooltips, true);
+});
+
 test("normalizes data grid render mode", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridRenderMode, "canvas");
   assert.equal(normalizeEditorSettings({}).dataGridRenderMode, "canvas");

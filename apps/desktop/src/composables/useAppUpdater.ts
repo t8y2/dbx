@@ -106,6 +106,18 @@ export function resolveUpdateReleaseUrl(info: api.UpdateInfo | null, source: unk
   return info?.release_url || fallbackUrl;
 }
 
+/**
+ * 按版本 tag 解析“下载页”地址：CNB 源指向 CNB 的 release 页，其余指向 GitHub release 页。
+ * 用于历史版本回退：只做跳转，不在应用内下载/安装旧版本。
+ */
+export function resolveReleaseTagUrl(tag: string, source: unknown): string {
+  const normalizedTag = tagVersion(tag);
+  if (normalizeUpdateDownloadSource(source) === "cnb") {
+    return `https://cnb.cool/dbxio.com/dbx/-/releases/tag/${encodeURIComponent(normalizedTag)}`;
+  }
+  return `https://github.com/t8y2/dbx/releases/tag/${encodeURIComponent(normalizedTag)}`;
+}
+
 export async function resolveUpdaterProxy(): Promise<string | undefined> {
   if (!isTauriRuntime()) return undefined;
   try {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, nextTick, onMounted, onUnmounted, reactive, ref, toRaw, watch, type Component } from "vue";
 import { uuid } from "@/lib/common/utils";
+import { deferUntilPanelResizeEnd } from "@/lib/app/panelResizeState";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import {
@@ -66,8 +67,8 @@ import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useUserSkillStore } from "@/stores/userSkillStore";
 import { buildSelectedSkillChips, capSkillsToCharLimit, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
 import { ACTIVE_SKILLS_TOTAL_MAX, type ReadUserSkill, type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillRootSettings } from "@/types/userSkills";
-import { connectionIconType } from "@/lib/connection/connectionPresentation";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import { supportsAiAssistantContext } from "@/lib/database/databaseFeatureSupport";
+import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import { useQueryStore } from "@/stores/queryStore";
@@ -154,11 +155,11 @@ import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
 import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
-import { buildAiAgentStepItems, formatToolDurationMs, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
+import { buildAiAgentStepItems, formatAgentToolName, formatToolDurationMs, toolCallStepKey, updateAgentStepApproval, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiStream, aiCancelStream, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
@@ -184,6 +185,7 @@ import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 import { buildAiConversationExport, type AiConversationExportFormat } from "@/lib/export/aiConversationExport";
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
+import AiToolApprovalCard from "@/components/editor/AiToolApprovalCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
 import { buildPluginAiRequest, pluginContextFromMessages, pluginContextText, streamPluginAiConversation, type AiPluginContext, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 
@@ -327,19 +329,6 @@ let defaultModeInitialized = false;
 let initialConversationStateLoaded = false;
 let initialConversationRestored = false;
 let assistantViewMounted = false;
-watch(
-  () => settings.isAiConfigLoaded,
-  (loaded) => {
-    if (loaded && !defaultModeInitialized) {
-      assistantMode.value = settings.defaultAiMode;
-      // Same apply-once rule as the mode: later setting changes must not
-      // disturb an active conversation.
-      activeAction.value = resolveDefaultActionSelection(settings.defaultAiMode);
-      defaultModeInitialized = true;
-    }
-  },
-  { immediate: true },
-);
 const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
@@ -367,6 +356,25 @@ const boundConnectionId = computed(() => conversationBinding.value.connectionId)
 const boundConnection = computed(() => (boundConnectionId.value ? connectionStore.getConfig(boundConnectionId.value) : undefined));
 const boundDatabase = computed(() => conversationBinding.value.database);
 const boundSchema = computed(() => conversationBinding.value.schema);
+
+// `immediate` runs this during setup whenever the AI config finished loading
+// before the panel mounted (the usual case: the app loads it at startup), and
+// `resolveDefaultActionSelection` reads `boundConnection`. It must therefore
+// stay below the binding computeds, or setup throws a TDZ ReferenceError and
+// the panel never mounts.
+watch(
+  () => settings.isAiConfigLoaded,
+  (loaded) => {
+    if (loaded && !defaultModeInitialized) {
+      assistantMode.value = settings.defaultAiMode;
+      // Same apply-once rule as the mode: later setting changes must not
+      // disturb an active conversation.
+      activeAction.value = resolveDefaultActionSelection(settings.defaultAiMode);
+      defaultModeInitialized = true;
+    }
+  },
+  { immediate: true },
+);
 
 /**
  * Binding the visible conversation's *active run* is executing against.
@@ -1193,10 +1201,15 @@ const AI_TEXTAREA_HEIGHT_STORAGE_KEY = "dbx-ai-textarea-height";
 const textareaHeight = ref<number>(AI_TEXTAREA_MIN_HEIGHT_PX);
 const assistantRootRef = ref<HTMLElement | null>(null);
 const promptPanelRef = ref<HTMLElement | null>(null);
+const compactContextControls = ref(false);
+const compactActionControls = ref(false);
 const isResizing = ref<boolean>(false);
 let resizeStartY = 0;
 let resizeStartHeight = 0;
 let promptPanelResizeObserver: ResizeObserver | undefined;
+let responsiveControlMeasureFrame: number | null = null;
+let responsiveControlMeasureForce = false;
+let lastResponsiveControlWidth: number | null = null;
 
 interface AiTableMentionCandidate {
   kind: "table";
@@ -1774,9 +1787,11 @@ watch(
 );
 watch([dbSelectOptions, selectedNamespace], syncSelectedDatabases, { immediate: true });
 
+const showAiDatabaseSelector = computed(() => !!boundConnection.value && supportsAiAssistantContext(boundConnection.value.db_type));
+
 const showAiSchemaSelector = computed(() => {
   const connection = boundConnection.value;
-  return !!connection && connection.db_type !== "dameng" && aiSchemaSelectionSupported(connection);
+  return showAiDatabaseSelector.value && !!connection && connection.db_type !== "dameng" && aiSchemaSelectionSupported(connection);
 });
 
 const aiSchemaDatabaseKey = computed(() => {
@@ -1798,7 +1813,7 @@ async function loadAiSchemas() {
 }
 
 async function loadDatabases(connection = boundConnection.value): Promise<string[]> {
-  if (!connection) return [];
+  if (!connection || !supportsAiAssistantContext(connection.db_type)) return [];
   if (connection.db_type !== "dameng") {
     await loadDatabaseOptions(connection.id);
     return databaseOptions.value[connection.id] || [];
@@ -2097,6 +2112,21 @@ function parseExplainFromData(explainData: unknown, dbType: string): ParsedExpla
   }
 }
 
+/** Sends the user's answer for a pending plugin tool approval back to the run that asked. */
+async function resolveToolApproval(step: AiAgentStepItem, approved: boolean) {
+  const approval = step.approval;
+  if (!approval || approval.status !== "pending") return;
+  approval.status = "submitting";
+  try {
+    // The final status arrives with `tool_approval_resolved`; `false` means
+    // the run stopped waiting (timed out, cancelled, or app restarted).
+    if (!(await resolveAiToolApproval(approval.sessionId, approval.approvalId, approved))) approval.status = "expired";
+  } catch (error) {
+    approval.status = "pending";
+    toast(t("ai.toolApproval.answerFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
 function agentEventToStep(event: AgentEvent, index: number, now: number): AiAgentStepItem | undefined {
   if (event.type === "context_compacted") {
     return {
@@ -2337,7 +2367,7 @@ function mentionTargetDatabase(): string {
 async function loadMentionCandidates(query: string) {
   const connection = boundConnection.value;
   const mentionDatabase = mentionTargetDatabase();
-  if (pluginContext.value || !connection || !boundConnectionId.value || !mentionDatabase) return;
+  if (pluginContext.value || !connection || !supportsAiAssistantContext(connection.db_type) || !boundConnectionId.value || !mentionDatabase) return;
 
   const key = mentionCacheKey(boundConnectionId.value, mentionDatabase, query);
   if (mentionCache.value[key]) {
@@ -3687,6 +3717,28 @@ async function send() {
           if (step) upsertAgentStep(msg.agentSteps, step);
         }
       }
+      // A plugin tool call waits for (or got) the user's approval: keep the
+      // state on the tool card so the answer buttons live next to the call.
+      if (event.type === "tool_approval_required" || event.type === "tool_approval_resolved") {
+        const msg = runMessages[assistantIdx];
+        if (msg?.agentSteps) {
+          const key = toolCallStepKey(event.tool_call_id, agentEvents.length - 1, "tool_call_start");
+          if (event.type === "tool_approval_required") {
+            updateAgentStepApproval(msg.agentSteps, key, () => ({
+              approvalId: event.approval_id,
+              sessionId,
+              pluginName: event.plugin_name,
+              pluginTool: event.plugin_tool,
+              connectionName: event.connection_name,
+              args: event.args ?? {},
+              expiresAtMs: Date.now() + event.timeout_secs * 1000,
+              status: "pending",
+            }));
+          } else {
+            updateAgentStepApproval(msg.agentSteps, key, (approval) => (approval && approval.approvalId === event.approval_id ? { ...approval, status: event.outcome } : approval));
+          }
+        }
+      }
       if (runIsVisible()) scrollToBottom();
     };
     if (runPluginContext) {
@@ -4991,7 +5043,9 @@ onMounted(async () => {
   if (typeof ResizeObserver !== "undefined" && assistantRootRef.value) {
     promptPanelResizeObserver = new ResizeObserver(handlePanelResize);
     promptPanelResizeObserver.observe(assistantRootRef.value);
+    if (promptPanelRef.value) promptPanelResizeObserver.observe(promptPanelRef.value);
   }
+  scheduleResponsiveControlMeasurement(true);
 });
 
 function maxTextareaHeight() {
@@ -5008,7 +5062,90 @@ function clampTextareaHeight(height: number) {
 
 function handlePanelResize() {
   textareaHeight.value = clampTextareaHeight(textareaHeight.value);
+  scheduleResponsiveControlMeasurement();
 }
+
+function hasHorizontalOverflow(element: HTMLElement | null): boolean {
+  return !!element && element.scrollWidth > element.clientWidth + 1;
+}
+
+function hasOverflowingLabel(element: HTMLElement | null, selector: string): boolean {
+  if (!element) return false;
+  return Array.from(element.querySelectorAll<HTMLElement>(selector)).some((label) => label.scrollWidth > label.clientWidth + 1);
+}
+
+async function measureResponsiveControls(force = false) {
+  const panel = promptPanelRef.value;
+  if (!panel) return;
+  // Reading clientWidth/scrollWidth here forces a document-wide synchronous
+  // relayout, and the AI panel divider drag fires resize events every frame.
+  // Skip measurements while the drag is in flight and re-measure once at the end.
+  if (
+    deferUntilPanelResizeEnd(() => {
+      void measureResponsiveControls(force);
+    })
+  )
+    return;
+  const panelWidth = panel.clientWidth;
+  if (!force && lastResponsiveControlWidth === panelWidth) return;
+
+  // Measure the full labels before deciding to compact. This lets a wide
+  // composer recover from icon mode after it grows, while the actual
+  // overflow checks decide independently for the context and action rows.
+  if (compactContextControls.value || compactActionControls.value) {
+    compactContextControls.value = false;
+    compactActionControls.value = false;
+    await nextTick();
+  }
+
+  const contextRow = panel.querySelector<HTMLElement>("[data-ai-composer-context-row]");
+  const actionRow = panel.querySelector<HTMLElement>("[data-ai-composer-actions]");
+  const contextOverflow = hasHorizontalOverflow(contextRow) || hasOverflowingLabel(contextRow, ".ai-template-selector-label, .ai-skills-selector-label");
+  const actionOverflow = hasHorizontalOverflow(actionRow) || hasOverflowingLabel(actionRow, ".ai-mode-action-label, .ai-model-selector-label, .ai-prompt-queue-label");
+
+  compactContextControls.value = contextOverflow;
+  compactActionControls.value = actionOverflow;
+  lastResponsiveControlWidth = panelWidth;
+}
+
+function scheduleResponsiveControlMeasurement(force = false) {
+  responsiveControlMeasureForce ||= force;
+  if (responsiveControlMeasureFrame !== null) return;
+  const measure = () => {
+    responsiveControlMeasureFrame = null;
+    const forceMeasure = responsiveControlMeasureForce;
+    responsiveControlMeasureForce = false;
+    void measureResponsiveControls(forceMeasure);
+  };
+  if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+    responsiveControlMeasureFrame = window.requestAnimationFrame(measure);
+  } else {
+    void nextTick(measure);
+  }
+}
+
+watch(
+  () => [
+    templateSelectorTriggerLabel.value,
+    selectedSkillIds.value.join(","),
+    modeActionTriggerLabel.value,
+    activeFullConfig.value?.model,
+    boundConnectionId.value,
+    selectedDatabaseLabel.value,
+    boundSchema.value,
+    connectionStore.connections.length,
+    showAiDatabaseSelector.value,
+    showAiSchemaSelector.value,
+    settings.aiConfigs.length,
+    hasActiveRunForCurrentConversation.value,
+    isGenerating.value,
+    pluginContext.value?.pluginName,
+    pluginContext.value?.title,
+    currentQueuedInput.value?.text,
+  ],
+  () => scheduleResponsiveControlMeasurement(true),
+  { flush: "post" },
+);
 
 function startResize(event: MouseEvent) {
   event.preventDefault();
@@ -5070,6 +5207,11 @@ onUnmounted(() => {
   document.removeEventListener("dbx:tauri-file-drop", onTauriFileDrop as EventListener);
   window.removeEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
   promptPanelResizeObserver?.disconnect();
+  if (responsiveControlMeasureFrame !== null && typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
+    window.cancelAnimationFrame(responsiveControlMeasureFrame);
+    responsiveControlMeasureFrame = null;
+  }
+  responsiveControlMeasureForce = false;
 });
 
 function triggerAction(action: AiAction, instruction?: string) {
@@ -5524,16 +5666,17 @@ async function openExternalUrl(url: string) {
                       <Loader2 v-if="step.tone === 'active' && step.toolName" class="h-3 w-3 shrink-0 animate-spin" />
                       <component :is="agentStepIcon(step.tone)" v-else class="h-3 w-3 shrink-0" />
                       <span class="font-medium">{{ t(step.labelKey) }}</span>
-                      <span v-if="step.toolName" class="text-muted-foreground">: {{ step.toolName }}</span>
+                      <span v-if="step.toolName" class="text-muted-foreground">: {{ formatAgentToolName(step.toolName) }}</span>
                       <template v-if="step.tone === 'active' && step.toolName">
                         <span class="ml-auto flex shrink-0 items-center gap-1">
                           <Loader2 class="h-3 w-3 animate-spin" />
-                          <span>{{ t("ai.agentSteps.executing") }}</span>
+                          <span>{{ step.approval?.status === "pending" || step.approval?.status === "submitting" ? t("ai.toolApproval.waiting") : t("ai.agentSteps.executing") }}</span>
                         </span>
                       </template>
                       <span v-else-if="step.durationMs !== undefined" class="ml-auto shrink-0 tabular-nums" :class="step.tone === 'danger' ? 'text-red-600 dark:text-red-400' : 'text-chart-2'">{{ formatToolDurationMs(step.durationMs) }}</span>
                       <ChevronRight v-if="step.toolResult || step.toolArgs?.sql" class="h-3 w-3 shrink-0 transition-transform duration-150" :class="[{ 'rotate-90': expandedSteps.has(step.key) }, !agentStepHasTail(step) ? 'ml-auto' : '']" />
                     </button>
+                    <AiToolApprovalCard v-if="step.approval" :approval="step.approval" @resolve="resolveToolApproval(step, $event)" />
                     <div v-if="expandedSteps.has(step.key)" class="border-t border-current/10 px-2 pb-2 pt-1">
                       <div v-if="step.toolArgs?.sql" class="mb-1 rounded bg-background/50 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap">{{ step.toolArgs.sql }}</div>
                       <Button v-if="step.toolName === 'explain_query' && step.toolArgs?.sql" size="sm" variant="outline" class="mb-1 h-6 gap-1 text-[10px]" @click="emit('openExplainPlan', step.toolArgs.sql as string, conversationBinding)">
@@ -5713,13 +5856,13 @@ async function openExternalUrl(url: string) {
         </div>
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
-          <div data-ai-composer-context-row :class="['ai-prompt-context-row mb-1 flex items-center gap-x-1 text-xs text-foreground/80', showAiSchemaSelector && 'ai-prompt-context-row--schema']">
+          <div data-ai-composer-context-row :class="['ai-prompt-context-row mb-1 flex min-w-0 items-center gap-x-1 text-xs text-foreground/80', showAiSchemaSelector && 'ai-prompt-context-row--schema', compactContextControls && 'ai-prompt-context-row--compact']">
             <details v-if="pluginContext" class="min-w-0 flex-1" data-ai-plugin-context>
               <summary class="cursor-pointer truncate">{{ pluginContext.pluginName }} · {{ pluginContext.title }}</summary>
               <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-all p-2 text-[11px]">{{ pluginContextText(pluginContext) }}</pre>
             </details>
             <template v-else-if="connectionStore.connections.length">
-              <DatabaseIcon v-if="boundConnection" :db-type="connectionIconType(boundConnection)" class="h-3 w-3 shrink-0" />
+              <ConnectionIcon v-if="boundConnection" :connection="boundConnection" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
               <ConnectionTreeSelect
                 :model-value="boundConnectionId"
@@ -5728,12 +5871,12 @@ async function openExternalUrl(url: string) {
                 :placeholder="t('editor.selectConnection')"
                 :search-placeholder="t('editor.searchConnection')"
                 :empty-text="t('grid.noSearchResults')"
-                :trigger-class="['h-5 px-1 text-foreground/80', showAiSchemaSelector && 'min-w-0 max-w-56 flex-1']"
+                :trigger-class="['h-5 min-w-0 max-w-full px-1 text-foreground/80', showAiSchemaSelector && 'max-w-56 flex-1']"
                 trigger-icon-class="h-3 w-3"
                 list-class="w-72 max-w-[calc(100vw-2rem)]"
                 @update:model-value="(v) => changeConnection(v)"
               />
-              <template v-if="boundConnection">
+              <template v-if="boundConnection && showAiDatabaseSelector">
                 <Database class="h-3 w-3 shrink-0 text-foreground/40" />
                 <Popover
                   @update:open="
@@ -5743,7 +5886,7 @@ async function openExternalUrl(url: string) {
                   "
                 >
                   <PopoverTrigger as-child>
-                    <Button variant="ghost" :title="selectedDatabaseLabel" :class="['h-5 max-w-64 justify-start border-0 p-0 px-1 text-xs font-normal text-foreground/80 shadow-none', showAiSchemaSelector && 'min-w-0 flex-1']">
+                    <Button variant="ghost" :title="selectedDatabaseLabel" :class="['h-5 min-w-0 max-w-64 justify-start border-0 p-0 px-1 text-xs font-normal text-foreground/80 shadow-none', showAiSchemaSelector && 'flex-1']">
                       <span class="truncate">{{ selectedDatabaseLabel }}</span>
                     </Button>
                   </PopoverTrigger>
@@ -5836,10 +5979,10 @@ async function openExternalUrl(url: string) {
             <!-- Skill selector (read-only user SKILL.md library) -->
             <Popover v-model:open="showSkillSelector">
               <PopoverTrigger as-child>
-                <button type="button" class="flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('ai.skillsEntry')" :title="t('ai.skillsEntry')">
+                <button type="button" class="ai-skills-selector-trigger flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('ai.skillsEntry')" :title="t('ai.skillsEntry')">
                   <Layers class="h-3 w-3" />
-                  <span class="truncate">{{ t("ai.skillsEntry") }}</span>
-                  <span v-if="selectedSkillIds.length" class="rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ selectedSkillIds.length }}</span>
+                  <span class="ai-skills-selector-label truncate">{{ t("ai.skillsEntry") }}</span>
+                  <span v-if="selectedSkillIds.length" class="ai-skills-selector-count rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ selectedSkillIds.length }}</span>
                 </button>
               </PopoverTrigger>
               <PopoverContent align="end" class="w-72 gap-0 p-1.5">
@@ -6066,7 +6209,7 @@ async function openExternalUrl(url: string) {
             <Clock class="h-3.5 w-3.5 shrink-0" />
             <span>{{ t("ai.status.longRunningHint") }}</span>
           </div>
-          <div class="flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden">
+          <div data-ai-composer-actions :class="['ai-prompt-action-row flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden', compactActionControls && 'ai-prompt-action-row--compact']">
             <Tooltip>
               <TooltipTrigger as-child>
                 <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isGenerating" @click="selectCsvFile">
@@ -6080,13 +6223,17 @@ async function openExternalUrl(url: string) {
               </TooltipContent>
             </Tooltip>
             <!-- Combined mode + action selector -->
-            <span v-if="pluginContext" class="shrink-0 text-xs text-muted-foreground">{{ t("ai.modes.ask") }}</span>
+            <span v-if="pluginContext" class="ai-mode-static-trigger flex shrink-0 items-center gap-1 text-xs text-muted-foreground" :title="t('ai.modes.ask')">
+              <MessageSquarePlus class="h-3 w-3" aria-hidden="true" />
+              <span class="ai-mode-action-label" aria-hidden="true">{{ t("ai.modes.ask") }}</span>
+              <span class="sr-only">{{ t("ai.modes.ask") }}</span>
+            </span>
             <Popover v-else v-model:open="modeActionOpen">
               <PopoverTrigger as-child>
-                <button type="button" class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="modeActionTriggerLabel">
+                <button type="button" class="ai-mode-action-trigger flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="modeActionTriggerLabel" :title="modeActionTriggerLabel">
                   <component :is="modeIcon" class="h-3 w-3" />
-                  <span>{{ modeActionTriggerLabel }}</span>
-                  <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
+                  <span class="ai-mode-action-label">{{ modeActionTriggerLabel }}</span>
+                  <svg class="ai-mode-action-chevron h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                 </button>
               </PopoverTrigger>
               <PopoverContent align="start" class="w-56 gap-0 p-1.5" @click.stop>
@@ -6124,12 +6271,17 @@ async function openExternalUrl(url: string) {
                 </template>
               </PopoverContent>
             </Popover>
-            <span class="min-w-0 flex-1" />
+            <span class="ai-prompt-action-spacer min-w-0 flex-1" />
             <template v-if="settings.aiConfigs.length > 0">
               <!-- Combined provider + model selector -->
               <Popover v-model:open="providerSelectorOpen">
                 <PopoverTrigger as-child>
-                  <button type="button" class="min-w-0 flex shrink items-center gap-1.5 max-w-[220px] rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground">
+                  <button
+                    type="button"
+                    class="ai-model-selector-trigger min-w-0 flex shrink items-center gap-1.5 max-w-[220px] rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                    :aria-label="activeFullConfig?.model || t('ai.selectModel')"
+                    :title="activeFullConfig?.model || t('ai.selectModel')"
+                  >
                     <AiProviderLogo
                       :provider="activeFullConfig?.provider ?? 'claude'"
                       :label="aiConfigProviderLabel(activeFullConfig)"
@@ -6137,8 +6289,8 @@ async function openExternalUrl(url: string) {
                       :icon-path="activeFullConfig ? getAiProviderPreset(activeFullConfig.provider, activeFullConfig.endpoint).iconPath : undefined"
                       class="h-3 w-3 shrink-0"
                     />
-                    <span class="min-w-0 truncate">{{ activeFullConfig?.model || t("ai.selectModel") }}</span>
-                    <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
+                    <span class="ai-model-selector-label min-w-0 truncate">{{ activeFullConfig?.model || t("ai.selectModel") }}</span>
+                    <svg class="ai-model-selector-chevron h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                   </button>
                 </PopoverTrigger>
                 <PopoverContent align="end" class="max-h-(--reka-popover-content-available-height) w-80 gap-0 overflow-y-auto p-1.5" @open-auto-focus.prevent>
@@ -6326,14 +6478,21 @@ async function openExternalUrl(url: string) {
                 </PopoverContent>
               </Popover>
             </template>
-            <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
+            <button v-if="isGenerating" class="ai-prompt-send-control h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
               <Square class="h-3.5 w-3.5" />
             </button>
-            <button v-else-if="hasActiveRunForCurrentConversation" class="h-7 shrink-0 items-center gap-1 rounded-full bg-foreground px-2.5 text-[11px] font-medium text-background-solid disabled:opacity-30 flex" :disabled="!canSubmitPrompt" :title="t('ai.queueSendHint')" @click="onSendClick">
+            <button
+              v-else-if="hasActiveRunForCurrentConversation"
+              class="ai-prompt-send-control ai-prompt-queue-control h-7 shrink-0 items-center gap-1 rounded-full bg-foreground px-2.5 text-[11px] font-medium text-background-solid disabled:opacity-30 flex"
+              :disabled="!canSubmitPrompt"
+              :aria-label="t('ai.queueSend')"
+              :title="t('ai.queueSendHint')"
+              @click="onSendClick"
+            >
               <Hourglass class="h-3.5 w-3.5" />
-              <span>{{ t("ai.queueSend") }}</span>
+              <span class="ai-prompt-queue-label">{{ t("ai.queueSend") }}</span>
             </button>
-            <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background-solid flex items-center justify-center disabled:opacity-30" :disabled="!canSubmitPrompt" @click="send">
+            <button v-else class="ai-prompt-send-control h-7 w-7 shrink-0 rounded-full bg-foreground text-background-solid flex items-center justify-center disabled:opacity-30" :disabled="!canSubmitPrompt" @click="send">
               <ArrowUp class="h-4 w-4" />
             </button>
           </div>
@@ -6383,28 +6542,66 @@ async function openExternalUrl(url: string) {
 </template>
 
 <style scoped>
-.ai-prompt-context-container {
-  container-type: inline-size;
+.ai-prompt-context-row--compact .ai-prompt-context-spacer {
+  flex: 0 0 0;
 }
 
-@container (max-width: 28rem) {
-  .ai-prompt-context-row--schema .ai-prompt-context-spacer {
-    flex: 0 0 0;
-  }
+.ai-prompt-context-row--compact .ai-template-selector-trigger,
+.ai-prompt-context-row--compact .ai-skills-selector-trigger {
+  flex: 0 0 1.5rem;
+  width: 1.5rem;
+  max-width: 1.5rem;
+  height: 1.5rem;
+  justify-content: center;
+  padding: 0;
+}
 
-  .ai-prompt-context-row--schema .ai-template-selector-trigger {
-    flex: 0 0 1.5rem;
-    width: 1.5rem;
-    max-width: 1.5rem;
-    height: 1.5rem;
-    justify-content: center;
-    padding: 0;
-  }
+.ai-prompt-context-row--compact .ai-template-selector-label,
+.ai-prompt-context-row--compact .ai-template-selector-chevron,
+.ai-prompt-context-row--compact .ai-skills-selector-label,
+.ai-prompt-context-row--compact .ai-skills-selector-count {
+  display: none;
+}
 
-  .ai-prompt-context-row--schema .ai-template-selector-label,
-  .ai-prompt-context-row--schema .ai-template-selector-chevron {
-    display: none;
-  }
+.ai-prompt-action-row--compact {
+  gap: 0.25rem;
+}
+
+.ai-prompt-action-row--compact .ai-mode-action-trigger,
+.ai-prompt-action-row--compact .ai-mode-static-trigger,
+.ai-prompt-action-row--compact .ai-model-selector-trigger {
+  flex: 0 0 1.75rem;
+  width: 1.75rem;
+  max-width: 1.75rem;
+  height: 1.75rem;
+  justify-content: center;
+  padding: 0;
+}
+
+.ai-prompt-action-row--compact .ai-mode-action-label,
+.ai-prompt-action-row--compact .ai-mode-action-chevron,
+.ai-prompt-action-row--compact .ai-model-selector-label,
+.ai-prompt-action-row--compact .ai-model-selector-chevron {
+  display: none;
+}
+
+.ai-prompt-action-row--compact .ai-model-selector-trigger {
+  min-width: 1.75rem;
+}
+
+.ai-prompt-action-row--compact .ai-prompt-send-control {
+  flex: 0 0 auto;
+}
+
+.ai-prompt-action-row--compact .ai-prompt-queue-control {
+  width: 1.75rem;
+  height: 1.75rem;
+  justify-content: center;
+  padding: 0;
+}
+
+.ai-prompt-action-row--compact .ai-prompt-queue-label {
+  display: none;
 }
 
 .ai-markdown :deep(h1) {

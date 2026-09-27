@@ -22,6 +22,7 @@ import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -109,6 +110,80 @@ class DamengAgentMetadataTest {
         Assertions.assertTrue(columnsSql.contains("LEFT JOIN ALL_COL_COMMENTS"), columnsSql);
         Assertions.assertTrue(columnsSql.contains("c.CHAR_USED"), columnsSql);
         Assertions.assertTrue(columnsSql.startsWith("SELECT /*+ PARALLEL(1) */"), columnsSql);
+    }
+
+    // #10221：dbx 在编辑器里的表没有选 schema 时，会以「不带 schema」的形态请求元数据
+    // （oracle / oceanbase-oracle 同款约定）。DM 会按会话当前 schema 解析未限定名，所以
+    // 这里必须先把空 schema 解析成当前 schema，否则会按 OWNER = '' 去查，列注释永远拿不到。
+    @Test
+    void resolvesBlankColumnSchemaFromTheSessionBeforeReadingComments() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sessionQueries = new ArrayList<>();
+        List<String> boundOwners = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, sessionSchemaConnection("SYSDBA", sessionQueries, boundOwners));
+
+        List<ColumnInfo> columns = agent.getColumns("", "USERS");
+
+        Assertions.assertTrue(
+            sessionQueries.stream().anyMatch(sql -> sql.contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')")),
+            sessionQueries.toString()
+        );
+        Assertions.assertTrue(boundOwners.contains("SYSDBA"), boundOwners.toString());
+        Assertions.assertFalse(boundOwners.contains(""), boundOwners.toString());
+        Assertions.assertEquals(1, columns.size());
+        Assertions.assertEquals("id comment", columns.get(0).getComment());
+    }
+
+    @Test
+    void resolvesBlankTableSchemaFromTheSessionBeforeListingTables() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sessionQueries = new ArrayList<>();
+        List<String> boundOwners = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, sessionSchemaConnection("SYSDBA", sessionQueries, boundOwners));
+
+        List<TableInfo> tables = agent.listTables("");
+
+        Assertions.assertTrue(boundOwners.contains("SYSDBA"), boundOwners.toString());
+        Assertions.assertFalse(boundOwners.contains(""), boundOwners.toString());
+        Assertions.assertEquals(List.of("USERS"), tables.stream().map(TableInfo::getName).toList());
+    }
+
+    @Test
+    void resolvesBlankSchemaToTheConnectedUserWhenTheSessionCannotReportIt() {
+        DamengAgent agent = new DamengAgent();
+        setConnectedUsername(agent, "DBXUSER");
+        List<String> sessionQueries = new ArrayList<>();
+        List<String> boundOwners = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, sessionSchemaConnection(null, sessionQueries, boundOwners));
+
+        List<ColumnInfo> columns = agent.getColumns("", "USERS");
+
+        Assertions.assertTrue(boundOwners.contains("DBXUSER"), boundOwners.toString());
+        Assertions.assertFalse(boundOwners.contains(""), boundOwners.toString());
+        Assertions.assertEquals(1, columns.size());
+        Assertions.assertEquals("id comment", columns.get(0).getComment());
+    }
+
+    @Test
+    void keepsAnExplicitSchemaWithoutConsultingTheSession() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sessionQueries = new ArrayList<>();
+        List<String> boundOwners = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, sessionSchemaConnection("SYSDBA", sessionQueries, boundOwners));
+
+        agent.getColumns("APP", "USERS");
+
+        Assertions.assertTrue(boundOwners.contains("APP"), boundOwners.toString());
+        Assertions.assertTrue(sessionQueries.isEmpty(), sessionQueries.toString());
+    }
+
+    @Test
+    void effectiveMetadataSchemaPrefersTheSessionSchemaThenTheConnectedUser() {
+        Assertions.assertEquals("CURRENT_SCH", DamengAgent.effectiveMetadataSchema("CURRENT_SCH", "CONNECTED"));
+        Assertions.assertEquals("CONNECTED", DamengAgent.effectiveMetadataSchema("", "CONNECTED"));
+        Assertions.assertEquals("CONNECTED", DamengAgent.effectiveMetadataSchema("   ", "CONNECTED"));
+        Assertions.assertEquals("CONNECTED", DamengAgent.effectiveMetadataSchema(null, "CONNECTED"));
+        Assertions.assertEquals("", DamengAgent.effectiveMetadataSchema(null, null));
     }
 
     @Test
@@ -2693,6 +2768,75 @@ class DamengAgentMetadataTest {
                 throw error;
             }
             if ("close".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    // Serves the session-schema probe, records every first bound parameter (the OWNER of the
+    // metadata queries under test) and answers the column/table queries these tests assert on.
+    private static Connection sessionSchemaConnection(
+        String currentSchema,
+        List<String> sessionQueries,
+        List<String> boundOwners
+    ) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("createStatement".equals(name)) {
+                return proxy(Statement.class, (statementMethod, statementArgs) -> {
+                    String statementName = statementMethod.getName();
+                    if ("executeQuery".equals(statementName)) {
+                        String sql = (String) statementArgs[0];
+                        sessionQueries.add(sql);
+                        if (sql.contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')")) {
+                            if (currentSchema == null) {
+                                throw new SQLException("SYS_CONTEXT is not supported");
+                            }
+                            return metadataResultSet(List.of(List.of(currentSchema)));
+                        }
+                        return metadataResultSet(List.of());
+                    }
+                    if ("close".equals(statementName)) {
+                        return null;
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                if (sql.contains("ALL_TAB_COLUMNS")) {
+                    return ownerRecordingStatement(defaultColumnMetadataRows("id comment"), boundOwners);
+                }
+                if (sql.contains("ALL_OBJECTS") && sql.contains("ALL_TAB_COMMENTS")) {
+                    return ownerRecordingStatement(List.of(Arrays.asList("USERS", "TABLE", "用户示例表")), boundOwners);
+                }
+                return metadataStatement(List.of());
+            }
+            if ("close".equals(name)) {
+                return null;
+            }
+            if ("isClosed".equals(name)) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static PreparedStatement ownerRecordingStatement(List<List<Object>> rows, List<String> owners) {
+        return proxy(PreparedStatement.class, (method, args) -> {
+            String name = method.getName();
+            if ("executeQuery".equals(name)) {
+                return metadataResultSet(rows);
+            }
+            if (("setString".equals(name) || "setObject".equals(name)) && Integer.valueOf(1).equals(args[0])) {
+                owners.add(args[1] == null ? null : String.valueOf(args[1]));
+                return null;
+            }
+            if ("setString".equals(name) || "setObject".equals(name)) {
+                return null;
+            }
+            if ("close".equals(name)) {
                 return null;
             }
             return defaultValue(method.getReturnType());

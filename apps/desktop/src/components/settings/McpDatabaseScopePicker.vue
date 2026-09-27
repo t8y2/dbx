@@ -89,6 +89,7 @@ function policyFor(connectionId: string): McpConnectionPolicy {
       databaseScope: "all",
       allowedDatabases: [],
       databasePolicies: [],
+      allowSalesforceDml: false,
     }
   );
 }

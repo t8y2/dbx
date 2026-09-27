@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { Channel } from "@tauri-apps/api/core";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
@@ -25,6 +26,8 @@ import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 // for this module's own signatures (a re-export does not bind local names).
 import type { PluginPlanCapabilities, PluginPlanRequest, PluginPlanResult } from "@/types/pluginPlan";
 import type { PluginTableMetadata, PluginTableMetadataRequest } from "@/types/pluginSchemaMetadata";
+import type { PluginDataGrant, PluginDataQueryRequest, PluginDataQueryResult } from "@/types/pluginData";
+import type { AiToolApprovalOutcome, PluginToolPreview } from "@/types/pluginAiTools";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   assertUpdateAllowsCommand(command);
@@ -91,6 +94,7 @@ import type {
   RuleInfo,
   OwnerInfo,
   ExtensionInfo,
+  EventTriggerInfo,
   QueryResult,
   SqlReferenceAnalysis,
   DatabaseType,
@@ -113,6 +117,7 @@ import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
+import type { SalesforceCurrentUser, SalesforceOAuthAuthorizeParams, SalesforceOAuthDevicePollResult, SalesforceOAuthDeviceStartResult, SalesforceOAuthRefreshResult, SalesforceOAuthToken } from "@/types/salesforce";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
@@ -349,6 +354,8 @@ export interface McpConnectionPolicy {
   databaseScope: "all" | "selected" | "none";
   allowedDatabases: string[];
   databasePolicies: McpDatabasePolicy[];
+  /** Opt-in for AI-agent DML against a Salesforce org; forced off by `readOnly`. */
+  allowSalesforceDml: boolean;
 }
 
 export interface McpDatabasePolicy {
@@ -597,6 +604,22 @@ export type AgentEvent =
       args: Record<string, unknown>;
     }
   | {
+      /** A plugin tool call that may change state waits for the user's approval; the run is paused. */
+      type: "tool_approval_required";
+      approval_id: string;
+      tool_call_id: string;
+      tool_name: string;
+      plugin_id: string;
+      plugin_name: string;
+      plugin_tool: string;
+      connection_id: string;
+      connection_name: string;
+      /** Exactly the arguments DBX forwards if the user approves. */
+      args: Record<string, unknown>;
+      timeout_secs: number;
+    }
+  | { type: "tool_approval_resolved"; approval_id: string; tool_call_id: string; outcome: AiToolApprovalOutcome }
+  | {
       type: "tool_call_end";
       tool_call_id: string;
       tool_name: string;
@@ -712,6 +735,25 @@ export async function aiCancelStream(sessionId: string): Promise<boolean> {
   return invoke("ai_cancel_stream", { sessionId });
 }
 
+/** Answers a pending plugin tool approval of the agent run `sessionId`; false when nothing was waiting. */
+export async function resolveAiToolApproval(sessionId: string, approvalId: string, approved: boolean): Promise<boolean> {
+  return invoke("ai_resolve_tool_approval", { sessionId, approvalId, approved });
+}
+
+/** Plugin ids whose MCP tools the built-in AI agent may call. */
+export async function getAiPluginToolPlugins(): Promise<string[]> {
+  return invoke("get_ai_plugin_tool_plugins");
+}
+
+export async function setAiPluginToolPluginEnabled(pluginId: string, enabled: boolean): Promise<string[]> {
+  return invoke("set_ai_plugin_tool_plugin_enabled", { pluginId, enabled });
+}
+
+/** Tools the built-in AI would get from a plugin (may start its sidecar). */
+export async function previewPluginAiTools(pluginId: string): Promise<PluginToolPreview> {
+  return invoke("preview_plugin_ai_tools", { pluginId });
+}
+
 export async function saveAiConfigs(configs: AiConfigItem[]): Promise<void> {
   return invoke("save_ai_configs", { configs });
 }
@@ -774,7 +816,16 @@ export interface McpHttpServerStatus {
 export interface WebMcpHttpStatus {
   enabled: boolean;
   endpointPath: string;
-  tokenSource: "environment" | "file" | null;
+  tokenSource: "environment" | "file" | "managed" | null;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+  deploymentManaged: boolean;
+  managementAvailable: boolean;
+  accessToken: string | null;
+}
+
+export interface WebMcpHttpSettings {
+  enabled: boolean;
   allowedHosts: string[];
   allowedOrigins: string[];
 }
@@ -796,7 +847,15 @@ export async function rotateMcpHttpServerToken(): Promise<McpHttpServerStatus> {
 }
 
 export async function loadWebMcpHttpStatus(): Promise<WebMcpHttpStatus> {
-  return { enabled: false, endpointPath: "/mcp", tokenSource: null, allowedHosts: [], allowedOrigins: [] };
+  return { enabled: false, endpointPath: "/mcp", tokenSource: null, allowedHosts: [], allowedOrigins: [], deploymentManaged: false, managementAvailable: false, accessToken: null };
+}
+
+export async function saveWebMcpHttpSettings(_settings: WebMcpHttpSettings): Promise<WebMcpHttpStatus> {
+  throw new Error("Web MCP settings are available only in DBX Web");
+}
+
+export async function rotateWebMcpToken(): Promise<WebMcpHttpStatus> {
+  throw new Error("Web MCP settings are available only in DBX Web");
 }
 
 export async function loadMaxAgentTurns(): Promise<number> {
@@ -1315,6 +1374,35 @@ export async function testConnectionWithInfo(config: ConnectionConfig): Promise<
     if (!isTauriCommandUnavailable(error, "test_connection_with_info")) throw error;
     return normalizeConnectionTestResult(await testConnection(config), config);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Salesforce OAuth (browser redirect + device-code flows)
+// ---------------------------------------------------------------------------
+
+export async function salesforceOauthBrowserAuthorize(params: SalesforceOAuthAuthorizeParams): Promise<SalesforceOAuthToken> {
+  return invokeBackend("salesforce_oauth_browser_authorize", { params });
+}
+
+export async function salesforceOauthDeviceStart(params: SalesforceOAuthAuthorizeParams): Promise<SalesforceOAuthDeviceStartResult> {
+  return invokeBackend("salesforce_oauth_device_start", { params });
+}
+
+export async function salesforceOauthDevicePoll(params: SalesforceOAuthAuthorizeParams, deviceCode: string, intervalSecs: number): Promise<SalesforceOAuthDevicePollResult> {
+  return invokeBackend("salesforce_oauth_device_poll", { params, deviceCode, intervalSecs });
+}
+
+export async function salesforceOauthRefresh(params: SalesforceOAuthAuthorizeParams, refreshToken: string): Promise<SalesforceOAuthRefreshResult> {
+  return invokeBackend("salesforce_oauth_refresh", { params, refreshToken });
+}
+
+export async function salesforceOauthPasswordLogin(params: SalesforceOAuthAuthorizeParams, username: string, password: string): Promise<SalesforceOAuthToken> {
+  return invokeBackend("salesforce_oauth_password_login", { params, username, password });
+}
+
+/** Identity of the user an established Salesforce connection is authenticated as (cached backend-side). */
+export async function salesforceCurrentUser(connectionId: string): Promise<SalesforceCurrentUser> {
+  return invokeBackend("salesforce_current_user", { connectionId });
 }
 
 export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
@@ -1899,6 +1987,22 @@ export async function getPluginEstimatedPlan(request: PluginPlanRequest): Promis
   return invoke<PluginPlanResult>("get_plugin_estimated_plan", { request });
 }
 
+/**
+ * Plugin Host API (`host.data:read`): one read-only statement on a connection
+ * the user granted to `pluginId`. The backend enforces permission, grant, and gate.
+ */
+export async function queryPluginData(pluginId: string, request: PluginDataQueryRequest): Promise<PluginDataQueryResult> {
+  return invoke<PluginDataQueryResult>("query_plugin_data", { pluginId, request });
+}
+
+export async function getPluginDataGrants(pluginId: string): Promise<PluginDataGrant[]> {
+  return invoke<PluginDataGrant[]>("get_plugin_data_grants", { pluginId });
+}
+
+export async function setPluginDataGrant(pluginId: string, connectionId: string, granted: boolean): Promise<PluginDataGrant[]> {
+  return invoke<PluginDataGrant[]>("set_plugin_data_grant", { pluginId, connectionId, granted });
+}
+
 export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlOptions): Promise<string | undefined> {
   const result = await invoke<string | null>("build_dropped_file_preview_sql", {
     options,
@@ -2369,10 +2473,26 @@ export async function listAvailableExtensions(connectionId: string, database: st
   return invoke("list_available_extensions", { connectionId, database });
 }
 
+export async function listEventTriggers(connectionId: string, database: string): Promise<EventTriggerInfo[]> {
+  return invoke("list_event_triggers", { connectionId, database });
+}
+
 // --- Docs ---
 
 export async function collectDocsSnapshot(connectionId: string, database: string, schemas: string[], tables: string[], projectName?: string): Promise<SchemaSnapshot> {
   return invoke("docs_collect_snapshot", { connectionId, database, schemas, tables, projectName });
+}
+
+export interface DocsCollectProgress {
+  completed: number;
+  total: number;
+  current: string;
+}
+
+export async function collectDocsSnapshotForExport(connectionId: string, database: string, schemas: string[], tables: string[], onProgress: (progress: DocsCollectProgress) => void): Promise<SchemaSnapshot> {
+  const channel = new Channel<DocsCollectProgress>();
+  channel.onmessage = onProgress;
+  return invoke("docs_collect_snapshot_for_export", { connectionId, database, schemas, tables, projectName: database, onProgress: channel });
 }
 
 export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
@@ -2878,7 +2998,9 @@ export interface UpdateDownloadProgress {
 
 export interface McpServerStatus {
   installed: boolean;
+  installation_source: "native" | "homebrew" | "npm" | null;
   npm_available: boolean;
+  npm_installed: boolean;
   node_path: string | null;
   node_version: string | null;
   current_version: string | null;
@@ -2902,8 +3024,16 @@ export async function installMcpServer(): Promise<string> {
   return invoke("install_mcp_server");
 }
 
+export async function installNativeMcpServer(): Promise<string> {
+  return invoke("install_native_mcp_server");
+}
+
 export async function uninstallMcpServer(): Promise<string> {
   return invoke("uninstall_mcp_server");
+}
+
+export async function uninstallNpmMcpServer(): Promise<string> {
+  return invoke("uninstall_npm_mcp_server");
 }
 
 export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
@@ -3293,6 +3423,10 @@ export async function redisSetKeysExpireAt(connectionId: string, db: number, key
 
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
   return invoke("redis_delete_keys", { connectionId, db, keyRaws });
+}
+
+export async function redisDeleteKeysByPattern(connectionId: string, db: number, pattern: string): Promise<number> {
+  return invoke("redis_delete_keys_by_pattern", { connectionId, db, pattern });
 }
 
 export async function redisFlushDb(connectionId: string, db: number): Promise<void> {

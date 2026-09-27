@@ -1,7 +1,33 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import { issueRedirectPath, pluginDetailShellRequest, sanitizeReturnTo, signPayload, staticAssetCacheControl, verifySignedPayload } from "../worker";
+import worker, { issueRedirectPath, pluginDetailShellRequest, sanitizeReturnTo, signPayload, staticAssetCacheControl, verifySignedPayload } from "../worker";
+
+test("native installers bypass HTML routing and are served as plain text", async () => {
+  const wrangler = JSON.parse(readFileSync(new URL("../wrangler.json", import.meta.url), "utf8"));
+  for (const pathname of ["/install-mcp", "/install-mcp.ps1"]) {
+    assert.ok(wrangler.assets.run_worker_first.includes(pathname));
+    const source = readFileSync(new URL(`../public/${pathname === "/install-mcp" ? "install-mcp.sh" : "install-mcp.ps1"}`, import.meta.url), "utf8");
+    const env = { ASSETS: { fetch: async (request: Request) => {
+      assert.equal(new URL(request.url).pathname, pathname === "/install-mcp" ? "/install-mcp.sh" : pathname);
+      return new Response(source);
+    } } };
+    const response = await worker.fetch(new Request(`https://dbxio.com${pathname}`), env);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Content-Type"), "text/plain; charset=utf-8");
+    assert.equal(await response.text(), source);
+    assert.equal(await (await worker.fetch(new Request(`https://dbxio.com${pathname}`, { method: "HEAD" }), env)).text(), "");
+    assert.equal((await worker.fetch(new Request(`https://dbxio.com${pathname}`, { method: "POST" }), env)).status, 405);
+    for (const status of [200, 404]) {
+      const missing = await worker.fetch(new Request(`https://dbxio.com${pathname}`), {
+        ASSETS: { fetch: async () => new Response("<html>not found</html>", { status, headers: { "Content-Type": "text/html" } }) },
+      });
+      assert.equal(missing.status, 503);
+      assert.equal(missing.headers.get("Cache-Control"), "no-store");
+      assert.doesNotMatch(await missing.text(), /<html>/);
+    }
+  }
+});
 
 test("plugin detail shell routes are routed to the worker before static 404 handling", () => {
   const wrangler = JSON.parse(readFileSync(new URL("../wrangler.json", import.meta.url), "utf8"));

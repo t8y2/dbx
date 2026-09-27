@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineComponent, h, nextTick, reactive } from "vue";
+import { createPinia } from "pinia";
 
 const mocks = vi.hoisted(() => ({
   store: null as any,
@@ -175,6 +176,7 @@ async function mountSidebar() {
       setup: () => () => h(AppSidebar, { sidebarWidth: 260 }),
     }),
   );
+  app.use(createPinia());
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
   await nextTick();

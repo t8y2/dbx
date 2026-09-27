@@ -51,17 +51,20 @@ export interface AddPluginDockEntryPayload {
 /** Creates (and activates) a dock terminal entry; returns its stable id. */
 export function addPluginDockEntry(payload: AddPluginDockEntryPayload): string {
   const id = uuid();
-  // Same-command entries get a sequence suffix in the title (generic: "Local terminal 1 / 2 ..."),
-  // keeps multi-instance panels distinguishable in the tab strip. Numbers are assigned at creation
-  // and advance beyond the highest live suffix — never backfilled after a close, so titles stay
-  // unique and stable (same convention as the plugin tabs in queryStore).
+  // A sequence suffix is only added on a title collision within the same
+  // command family ("Local terminal", "Local terminal 2", ...). Distinct
+  // titles — e.g. named SSH connections — keep their name verbatim. Numbers
+  // pick the lowest free slot, so a closed entry's number is reused instead
+  // of climbing forever (titles stay unique among live entries, which is all
+  // the tab strip needs to keep panels distinguishable).
   const siblings = dockEntries.value.filter((entry) => entry.pluginId === payload.pluginId && entry.commandId === payload.commandId);
-  const nextNumber =
-    siblings.reduce((highest, entry) => {
-      const suffix = / (\d+)$/.exec(entry.title);
-      return suffix ? Math.max(highest, Number(suffix[1])) : highest;
-    }, 1) + 1;
-  const title = siblings.length ? `${payload.title} ${nextNumber}` : payload.title;
+  const taken = new Set(siblings.map((entry) => entry.title));
+  let title = payload.title;
+  if (taken.has(title)) {
+    let suffix = 2;
+    while (taken.has(`${payload.title} ${suffix}`)) suffix += 1;
+    title = `${payload.title} ${suffix}`;
+  }
   dockEntries.value.push({
     id,
     pluginId: payload.pluginId,

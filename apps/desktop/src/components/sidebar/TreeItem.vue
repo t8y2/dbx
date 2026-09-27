@@ -202,10 +202,6 @@ const props = defineProps<{
   pendingRename?: boolean;
   highlighted?: boolean;
   commentLabelWidth?: number;
-  /** Plain (non-virtualized) renderer: make database/schema container rows
-   * stick to the top of the tree scroller while their children scroll under
-   * them (mirrors the overlay sticky header of the virtual renderer). */
-  stickyHeader?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -417,11 +413,15 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "group-extensions":
       return { icon: Package, colorClass: "text-violet-500" };
+    case "group-event-triggers":
+      return { icon: Package, colorClass: "text-violet-500" };
     case "group-tablespaces":
       return { icon: Database, colorClass: "text-orange-500" };
     case "group-datafiles":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-slate-500" };
     case "extension":
+      return { icon: Package, colorClass: "text-violet-400" };
+    case "event-trigger":
       return { icon: Package, colorClass: "text-violet-400" };
     case "load-more":
       return { icon: Plus, colorClass: "text-primary" };
@@ -1606,7 +1606,7 @@ function onKeydown(event: KeyboardEvent) {
     </LightTooltip>
   </div>
 
-  <div v-else :class="{ 'sidebar-tree-item--sticky': stickyHeader }" @contextmenu="onTreeItemContextMenu">
+  <div v-else @contextmenu="onTreeItemContextMenu">
     <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
@@ -1928,18 +1928,6 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-connection-tint.tree-item-active,
 .tree-item-connection-tint.tree-item-active:focus {
   background-color: transparent !important;
-}
-
-/* Plain (non-virtualized) renderer: database/schema container rows stick to
-   the top of the tree scroller while their children scroll under them,
-   mirroring the overlay sticky header the virtual renderer uses. The row is
-   min-h-7, so a solid background guarantees no content shows through while
-   rows slide underneath. */
-.sidebar-tree-item--sticky {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background-color: var(--sidebar);
 }
 
 .tree-item-connection-tint:hover::before {

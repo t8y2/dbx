@@ -7,7 +7,6 @@
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::execute_sql_statement;
-use dbx_core::storage::Storage;
 use std::sync::Arc;
 
 fn live_sqlserver_config(id: &str, database: &str) -> ConnectionConfig {
@@ -44,7 +43,7 @@ async fn live_sqlserver_display_ddl_reads_foreign_key_actions() {
     let database = format!("dbx_ddl_fk_{suffix}");
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-ddl-fk-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), live_sqlserver_config(&connection_id, "master"));
 

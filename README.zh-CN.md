@@ -1,8 +1,8 @@
 <div align="center">
-  <p style="font-size: 18px; white-space: nowrap;"><strong>25 MB 驾驭 90+ 种数据库。桌面端、Docker、CLI、内置 AI 助手与 MCP Server。</strong></p>
+  <p style="font-size: 18px; white-space: nowrap;"><strong>25 MB 驾驭 100+ 种数据库。桌面端、Docker、CLI、内置 AI 助手与 MCP Server。</strong></p>
 
   <p>
-    <img src="https://dl.dbxio.com/assets/readme-hero-20260820.png" alt="DBX 截图" width="820" />
+    <img src="https://dl.dbxio.com/assets/readme-hero-20260925.png" alt="DBX 截图" width="820" />
   </p>
 
   <p>
@@ -208,11 +208,21 @@
       <p>macOS、Windows、Linux 原生应用。通过 Docker 自托管供团队访问。Web 版本适配纯浏览器环境。同样的功能，同样的连接配置。</p>
     </td>
   </tr>
+  <tr>
+    <td>
+      <h3>📨 不止数据库</h3>
+      <p>消息队列与中间件同样是一等公民：Kafka、RocketMQ、RabbitMQ、Pulsar、MQTT 控制台，外加 Nacos、Consul、ZooKeeper、etcd。在数据库旁边直接查看主题与消息，无需再开一个工具。</p>
+    </td>
+    <td>
+      <h3>🧩 插件生态</h3>
+      <p>从内置商店安装经过签名校验的沙箱插件扩展 DBX——S3、Kubernetes、LDAP 等。也可以用 Go / TypeScript SDK 开发自己的插件。</p>
+    </td>
+  </tr>
 </table>
 
 ## 功能特性
 
-### 90+ 种数据库，一个工具搞定
+### 100+ 种数据库，一个工具搞定
 
 MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Meilisearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingbaseES、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB、Dolt 等数据库都能直接连接。Agent 配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Cloud Spanner、Kylin、SunDB、JDBCX 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、Consul KV、IRIS 等。全部装进约 25 MB 的应用里，不内嵌 Chromium。
 
@@ -253,6 +263,18 @@ CodeMirror 6 语法高亮、元数据感知自动补全、`Cmd+Enter` 执行、�
 
 - **Redis** — 模式匹配搜索、批量键操作、命令执行器、TTL 编辑，全数据类型支持（String、Hash、List、Set、ZSet、Stream）
 - **MongoDB** — 文档增删改查、分页浏览，支持 Atlas 和副本集 URL 直连
+
+### 消息队列与中间件控制台
+
+- **Kafka / RocketMQ / RabbitMQ / Pulsar** — 主题、消费组、消息浏览 / 查询 / 追踪、Broker 监控、权限与策略
+- **MQTT** — 主题树导航、订阅与发布
+- **Nacos / Consul / ZooKeeper / etcd** — 服务发现、KV / 配置浏览、健康状态与 ACL
+
+### 插件系统
+
+- **为扩展而生** — 新的连接类型与工具以插件形式接入：S3 浏览、Kubernetes、LDAP 等，内置商店一键安装
+- **签名与沙箱** — 插件包安装前签名校验，插件 UI 运行在沙箱中并拥有独立 sidecar 进程
+- **开发你的插件** — Go / TypeScript SDK，`npx @dbx-app/plugin-cli` 一行起步，通过 [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) 发布到商店
 
 ### 安全与连接
 
@@ -568,12 +590,12 @@ DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础�
 
 <details>
 <summary><strong>DBX 和 DBeaver / TablePlus / Beekeeper Studio 有什么区别？</strong></summary>
-DBX 仅 25 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 90+ 数据库、桌面端、Docker 和 Web。
+DBX 仅 25 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 100+ 数据库、桌面端、Docker 和 Web。
 </details>
 
 <details>
 <summary><strong>支持哪些数据库？</strong></summary>
-MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Meilisearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingbaseES、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等。Agent 配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Cloud Spanner、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、Consul KV、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Pulsar、Kafka、RocketMQ）。
+MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Meilisearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingbaseES、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等。Agent 配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Cloud Spanner、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、Consul KV、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Kafka、RocketMQ、RabbitMQ、Pulsar、MQTT）。
 </details>
 
 <details>

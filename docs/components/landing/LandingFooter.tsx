@@ -3,11 +3,11 @@ import type { DocsLang } from "@/lib/i18n";
 
 const i18n = {
   en: {
-    tagline: "25 MB to manage 90+ databases.",
+    tagline: "25 MB to manage 100+ databases.",
     copyright: `© ${new Date().getFullYear()} DBX. All rights reserved.`,
   },
   cn: {
-    tagline: "25MB，管理90+种数据库。",
+    tagline: "25MB，管理100+种数据库。",
     copyright: `© ${new Date().getFullYear()} DBX.`,
   },
 };

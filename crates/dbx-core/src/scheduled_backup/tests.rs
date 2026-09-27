@@ -118,7 +118,7 @@ async fn recovery_preserves_queued_jobs_and_marks_orphaned_running_jobs_failed()
 }
 
 async fn service(dir: &std::path::Path, root: Option<std::path::PathBuf>) -> BackupService {
-    let storage = crate::storage::Storage::open(&dir.join("dbx.db")).await.unwrap();
+    let storage = crate::persistence::test_storage::open(&dir.join("dbx.db")).await.unwrap();
     BackupService::new(Arc::new(crate::connection::AppState::new(storage)), dir, root)
 }
 
@@ -234,7 +234,7 @@ async fn worker_waits_for_security_migration_and_resumes_without_restarting() {
     let directory = tempfile::tempdir().unwrap();
     let legacy_path = directory.path().join("connections.json");
     std::fs::write(&legacy_path, "[]").unwrap();
-    let storage = crate::storage::Storage::open_unmigrated(&directory.path().join("dbx.db")).await.unwrap();
+    let storage = crate::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db")).await.unwrap();
     let service = BackupService::new(Arc::new(crate::connection::AppState::new(storage)), directory.path(), None);
     let queued = service.store.enqueue(request(schedule(directory.path()).config)).await.unwrap();
     assert!(!service.state.storage.inspect_data_migration().await.unwrap().is_ready());

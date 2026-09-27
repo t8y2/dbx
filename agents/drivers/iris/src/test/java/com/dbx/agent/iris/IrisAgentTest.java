@@ -148,6 +148,47 @@ class IrisAgentTest {
     }
 
     @Test
+    void readsBitColumnsAsStoredNumbers() {
+        for (int sqlType : new int[] {Types.BIT, Types.BOOLEAN}) {
+            List<String> calls = new ArrayList<>();
+            ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+                if ("getInt".equals(method.getName())) {
+                    calls.add("getInt");
+                    return 1;
+                }
+                if (method.getName().startsWith("get")) {
+                    calls.add(method.getName());
+                    throw new AssertionError("IRIS %Boolean must not be read as a Java boolean");
+                }
+                if ("wasNull".equals(method.getName())) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            });
+
+            Object value = new IrisAgent().resultValue(resultSet, 1, sqlType);
+
+            assertEquals(1, value);
+            assertEquals(Collections.singletonList("getInt"), calls);
+        }
+    }
+
+    @Test
+    void preservesNullForBitColumns() {
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getInt".equals(method.getName())) {
+                return 0;
+            }
+            if ("wasNull".equals(method.getName())) {
+                return true;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        assertNull(new IrisAgent().resultValue(resultSet, 1, Types.BIT));
+    }
+
+    @Test
     void readsColumnsAndUsesInlinePrimaryKey() {
         List<String> calls = new ArrayList<>();
         Connection conn = fakeConnection(

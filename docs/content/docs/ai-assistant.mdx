@@ -124,6 +124,19 @@ Desktop can attach read-only [`SKILL.md`](https://developers.openai.com/codex/sk
 Select skills from the composer `Skills` entry (or type `/skill`) and remove them from the chips above the input. The selection lives for the lifetime of one open AI panel — conversation switches and new conversations keep it; closing the panel or restarting DBX clears it. Nothing is persisted, and DBX never writes to skill files.
 
 Skill bodies are read only when a request is sent, directly from disk, and validated then: file deleted or unreadable, invalid frontmatter, non-UTF-8 content, over the 1 MiB per-file limit, or a symlink escaping its root blocks the send with a banner above the composer naming the failed skill and offering Retry, Refresh, Remove, or Open Settings. With no skills selected, prompts are byte-for-byte identical to the pre-feature behavior. Web ships this feature unsupported.
+
+## Plugin Tools
+
+In Agent mode with an API provider, the assistant can also call tools contributed by installed plugins — for example run a command over SSH, read container logs, or inspect Kafka consumer lag — and combine them with database tools in one answer.
+
+1. Open Plugin Center → Installed, select the plugin, and turn on **Built-in AI tools**. **Show tools** lists what the assistant would get and which tools need approval.
+2. Open the plugin connection the assistant should use (for example the SSH server). Tools only run against connections that are open.
+3. Ask in Agent mode. Tools the plugin declares read-only run directly; any other call pauses the run and shows the exact arguments with **Allow once** / **Deny**. Unanswered requests are denied after five minutes, and Stop cancels a pending request.
+
+When bound to a plugin connection, the assistant shows the plugin logo and hides the database/schema selectors. It skips database metadata loading and offers only the time utility and enabled plugin tools in Agent mode.
+
+Tool output is sent to your AI model like query results. Leave the switch off for plugins whose data should not reach the model. Turning it off also blocks subsequent calls from a run already in progress. CLI agent providers do not receive plugin tools.
+
 ## Writes and Production Safety
 
 AI Agent execution boundaries are enforced by the backend, not only by prompting:

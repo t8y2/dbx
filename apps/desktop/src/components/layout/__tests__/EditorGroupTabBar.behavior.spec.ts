@@ -13,9 +13,14 @@ vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
 }));
 
 vi.mock("@/components/ui/tooltip", () => ({
-  Tooltip: { name: "TooltipStub", template: `<div><slot /></div>` },
+  Tooltip: {
+    name: "TooltipStub",
+    props: ["open"],
+    emits: ["update:open"],
+    template: `<div class="tooltip-stub" :data-open="open === true" @mouseover="$emit('update:open', true)"><slot /></div>`,
+  },
   TooltipTrigger: { name: "TooltipTriggerStub", template: `<div><slot /></div>` },
-  TooltipContent: { name: "TooltipContentStub", template: `<div><slot /></div>` },
+  TooltipContent: { name: "TooltipContentStub", template: `<div class="tooltip-content-stub"><slot /></div>` },
 }));
 
 vi.mock("@/components/ui/popover", () => ({
@@ -50,7 +55,14 @@ interface Mounted {
   host: HTMLDivElement;
 }
 
-function mountBar(groupId: string, tabs: string[], activeTabId: string | null, activePinia: ReturnType<typeof createPinia>, onActivateTab?: (tabId: string) => void): Mounted {
+function mountBar(
+  groupId: string,
+  tabs: string[],
+  activeTabId: string | null,
+  activePinia: ReturnType<typeof createPinia>,
+  onActivateTab?: (tabId: string) => void,
+  specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; pluginCenterOpen: boolean; pluginCenterActive: boolean; driverUpdateCount: number },
+): Mounted {
   const store = useQueryStore();
   const host = createHost();
   const app = createApp(EditorGroupTabBar, {
@@ -58,6 +70,7 @@ function mountBar(groupId: string, tabs: string[], activeTabId: string | null, a
     tabs: tabs.map((id) => store.tabs.find((candidate) => candidate.id === id)!),
     activeTabId,
     "onActivate-tab": onActivateTab,
+    specialPageTabs,
   });
   // Reuse the active pinia so the component's internal store is the same
   // instance the test drives — otherwise drag validation runs against an
@@ -69,6 +82,8 @@ function mountBar(groupId: string, tabs: string[], activeTabId: string | null, a
       locale: "en",
       messages: {
         en: {
+          toolbar: { pluginCenter: "Plugin Center" },
+          common: { close: "Close" },
           contextMenu: {
             splitRight: "Split right",
             splitDown: "Split down",
@@ -157,6 +172,85 @@ describe("EditorGroupTabBar behavior", () => {
     await settle();
 
     expect(activated).toEqual([secondId]);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("closes a tab tooltip when the pointer leaves the tab", async () => {
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Plugin", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [tabId], tabId, pinia);
+    await settle();
+
+    const pill = tabPill(host, tabId);
+    pill.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+    expect(host.querySelector<HTMLElement>(".tooltip-stub")?.dataset.open).toBe("true");
+
+    pill.dispatchEvent(new MouseEvent("mouseleave"));
+    await settle();
+    expect(host.querySelector<HTMLElement>(".tooltip-stub")?.dataset.open).toBe("false");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("shows a concise DBX tooltip for a connectionless plugin tab", async () => {
+    const store = useQueryStore();
+    const tabId = store.openPluginWorkbench("com.example.toolbox", "toolbox");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [tabId], tabId, pinia);
+    await settle();
+
+    const tooltip = host.querySelector<HTMLElement>(".tooltip-stub")!;
+    tabPill(host, tabId).dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+
+    expect(tooltip.dataset.open).toBe("true");
+    expect(host.querySelector<HTMLElement>("[data-plugin-title-tooltip]")?.textContent?.trim()).toBe("toolbox");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("keeps the tooltip for a connection-bound plugin tab", async () => {
+    const store = useQueryStore();
+    const tabId = store.openPluginWorkbench("com.example.toolbox", "toolbox", { connectionId: "pg-1" });
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [tabId], tabId, pinia);
+    await settle();
+
+    const tooltip = host.querySelector<HTMLElement>(".tooltip-stub")!;
+    tabPill(host, tabId).dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+
+    expect(tooltip.dataset.open).toBe("true");
+    expect(host.querySelector("[data-plugin-title-tooltip]")).toBeNull();
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("uses the DBX tooltip for the Plugin Center tab", async () => {
+    const store = useQueryStore();
+    const mainGroup = store.groups[0];
+    const specialPageTabs = { settingsOpen: false, settingsActive: false, driverStoreOpen: false, driverStoreActive: false, pluginCenterOpen: true, pluginCenterActive: true, driverUpdateCount: 0 };
+    const { app, host } = mountBar(mainGroup.id, [], null, pinia, undefined, specialPageTabs);
+    await settle();
+
+    const tab = host.querySelector<HTMLElement>("[data-plugin-center-tab]")!;
+    expect(tab.getAttribute("title")).toBeNull();
+
+    tab.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+    expect(host.querySelector<HTMLElement>(".tooltip-stub")?.dataset.open).toBe("true");
+    expect(host.querySelector<HTMLElement>(".tooltip-content-stub")?.textContent?.trim()).toBe("Plugin Center");
+
+    tab.dispatchEvent(new MouseEvent("mouseleave"));
+    await settle();
+    expect(host.querySelector<HTMLElement>(".tooltip-stub")?.dataset.open).toBe("false");
 
     app.unmount();
     host.remove();

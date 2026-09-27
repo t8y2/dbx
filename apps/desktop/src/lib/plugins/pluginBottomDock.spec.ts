@@ -13,25 +13,28 @@ describe("pluginBottomDock", () => {
     vi.resetModules();
   });
 
-  it("numbers same-command entries beyond the highest live suffix, never duplicating after a close", async () => {
+  it("suffixes only on a title collision, taking the lowest free number; distinct titles stay verbatim", async () => {
     const dock = await loadModule();
+    // Distinct titles (e.g. named connections) never get a number.
+    dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "connection", commandId: "open-connection", title: "Prod" });
+    dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "connection", commandId: "open-connection", title: "Staging" });
     const first = dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "command", commandId: "local.terminal", title: "Local terminal" });
     const second = dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "command", commandId: "local.terminal", title: "Local terminal" });
     dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "command", commandId: "local.terminal", title: "Local terminal" });
-    expect(dock.usePluginBottomDock().entries.value.map((entry) => entry.title)).toEqual(["Local terminal", "Local terminal 2", "Local terminal 3"]);
+    expect(dock.usePluginBottomDock().entries.value.map((entry) => entry.title)).toEqual(["Prod", "Staging", "Local terminal", "Local terminal 2", "Local terminal 3"]);
 
-    // Close the middle entry, then open another: the new title must not
-    // collide with the surviving "Local terminal 3".
+    // Close the middle entry, then open another: "Local terminal 2" is the
+    // lowest free slot again (numbers belong to no entry once closed); the
+    // reopened entry appends at the strip's end.
     dock.closePluginDockEntry(second);
-    const fourth = dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "command", commandId: "local.terminal", title: "Local terminal" });
-    expect(dock.usePluginBottomDock().entries.value.map((entry) => entry.title)).toEqual(["Local terminal", "Local terminal 3", "Local terminal 4"]);
+    dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "command", commandId: "local.terminal", title: "Local terminal" });
+    expect(dock.usePluginBottomDock().entries.value.map((entry) => entry.title)).toEqual(["Prod", "Staging", "Local terminal", "Local terminal 3", "Local terminal 2"]);
 
     // Different commands number independently.
     dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "command", commandId: "other.command", title: "Other" });
     const titles = dock.usePluginBottomDock().entries.value.map((entry) => entry.title);
     expect(titles[titles.length - 1]).toBe("Other");
     dock.closePluginDockEntry(first);
-    dock.closePluginDockEntry(fourth);
   });
 
   it("finds singleton reuse candidates only inside the same plugin+command+instance-key group (§4.1)", async () => {

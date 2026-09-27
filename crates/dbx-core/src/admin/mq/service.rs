@@ -894,7 +894,6 @@ async fn ensure_connection_writable(state: &AppState, conn_id: &str, operation: 
 mod tests {
     use super::*;
     use crate::models::connection::{ConnectionConfig, DatabaseType};
-    use crate::storage::Storage;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn mq_connection(read_only: bool) -> ConnectionConfig {
@@ -987,7 +986,8 @@ mod tests {
             SystemTime::now().duration_since(UNIX_EPOCH).expect("system time should be after UNIX epoch").as_nanos();
         let dir = std::env::temp_dir().join(format!("dbx-mq-service-test-{stamp}"));
         std::fs::create_dir_all(&dir).expect("failed to create test directory");
-        let storage = Storage::open(&dir.join("storage.db")).await.expect("failed to open test storage");
+        let storage =
+            crate::persistence::test_storage::open(&dir.join("storage.db")).await.expect("failed to open test storage");
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         state.configs.write().await.insert(config.id.clone(), config);
         (state, dir)

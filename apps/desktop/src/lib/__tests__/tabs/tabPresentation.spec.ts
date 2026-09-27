@@ -10,6 +10,7 @@ import {
   resultGridCacheKey,
   resultGridColumnWidthCacheKey,
   resultGridInstanceKey,
+  resultRunItems,
   resultSourceRange,
   statementExecutionMarkers,
   tabColorStyle,
@@ -23,7 +24,7 @@ import {
   dirtyTabTitleStyle,
 } from "@/lib/tabs/tabPresentation";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
-import type { ConnectionConfig, QueryResult, QueryTab } from "@/types/database";
+import type { ConnectionConfig, QueryResult, QueryResultRun, QueryTab } from "@/types/database";
 
 const translations: Record<string, string> = {
   "tabs.tooltipConnection": "Connection:",
@@ -176,6 +177,51 @@ describe("query result labels", () => {
     expect(item?.label).toBeUndefined();
     expect(item?.title).toBe("SELECT 1");
   });
+
+  it("shows only the object name when result set names exclude the database", () => {
+    const results = [
+      {
+        columns: ["id"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceLabel: "cosimulation2.0.data_monitor",
+        sourceQualifier: "cosimulation2.0",
+        sourceName: "data_monitor",
+        sourceStatement: "SELECT * FROM data_monitor",
+      },
+    ];
+
+    const [withDatabase] = tabularResultItems(results);
+    const [withoutDatabase] = tabularResultItems(results, { includeSourceDatabase: false });
+
+    expect(withDatabase?.label).toBe("cosimulation2.0.data_monitor");
+    expect(withoutDatabase?.label).toBe("data_monitor");
+    expect(withoutDatabase?.displayLabel).toBe("data_monitor");
+    // 完整名称（含库名）仍保留在悬浮提示中
+    expect(withoutDatabase?.title).toBe("cosimulation2.0.data_monitor");
+  });
+
+  it("keeps a custom result name even when the database is hidden", () => {
+    const [item] = tabularResultItems(
+      [
+        {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+          sourceLabel: "My weekly report",
+          sourceQualifier: "app",
+          sourceName: "users",
+          sourceStatement: "SELECT * FROM users",
+        },
+      ],
+      { includeSourceDatabase: false },
+    );
+
+    expect(item?.label).toBe("My weekly report");
+    expect(item?.title).toBe("My weekly report");
+  });
 });
 
 describe("query result grid identity", () => {
@@ -189,6 +235,51 @@ describe("query result grid identity", () => {
     expect(resultGridCacheKey(rerun)).not.toBe(resultGridCacheKey(first));
     expect(resultGridColumnWidthCacheKey(rerun)).toBe(resultGridColumnWidthCacheKey(first));
     expect(resultGridColumnWidthCacheKey({ ...first, activeResultIndex: 1 })).not.toBe(resultGridColumnWidthCacheKey(first));
+  });
+});
+
+describe("result run labels", () => {
+  // 与 store 真实创建批次的方式保持一致：默认标题是 `Run N`，只有重命名/多库执行才标记 customTitle
+  const run = (id: string, sequence: number, result?: QueryResult, overrides: Partial<QueryResultRun> = {}): QueryResultRun => ({ id, title: `Run ${sequence}`, sequence, sql: "SELECT * FROM users", createdAt: sequence, result, ...overrides });
+  const sourceResult = (label: string, qualifier: string, name: string): QueryResult => ({ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceLabel: label, sourceQualifier: qualifier, sourceName: name }) as QueryResult;
+
+  it("names result runs after their source table instead of the run ordinal", () => {
+    const items = resultRunItems(
+      queryTab({
+        resultRuns: [run("run-1", 1, sourceResult("app.users", "app", "users")), run("run-2", 2, sourceResult("app.orders", "app", "orders"))],
+      }) as QueryTab,
+    );
+
+    expect(items.map((item) => item.sourceLabel)).toEqual(["app.users", "app.orders"]);
+  });
+
+  it("suffixes repeated sources and follows the database-name setting", () => {
+    const tab = queryTab({
+      resultRuns: [run("run-1", 1, sourceResult("cosimulation2.0.users", "cosimulation2.0", "users")), run("run-2", 2, sourceResult("cosimulation2.0.users", "cosimulation2.0", "users")), run("run-3", 3)],
+    }) as QueryTab;
+
+    expect(resultRunItems(tab).map((item) => item.sourceLabel)).toEqual(["cosimulation2.0.users", "cosimulation2.0.users (2)", undefined]);
+    expect(resultRunItems(tab, { includeSourceDatabase: false }).map((item) => item.sourceLabel)).toEqual(["users", "users (2)", undefined]);
+  });
+
+  it("keeps a renamed run title ahead of the source label", () => {
+    const items = resultRunItems(queryTab({ resultRuns: [run("run-1", 1, sourceResult("app.users", "app", "users"), { title: "报表", customTitle: true })] }) as QueryTab);
+
+    expect(items[0]?.title).toBe("报表");
+    expect(items[0]?.sourceLabel).toBe("app.users");
+  });
+
+  it("replaces the default Run N title with the source label", () => {
+    const items = resultRunItems(queryTab({ resultRuns: [run("run-1", 1, sourceResult("app.users", "app", "users"))] }) as QueryTab);
+
+    expect(items[0]?.title).toBe("");
+    expect(items[0]?.sourceLabel).toBe("app.users");
+  });
+
+  it("falls back to the run SQL for runs created before source labels were stored", () => {
+    const items = resultRunItems(queryTab({ resultRuns: [run("run-1", 1)] }) as QueryTab, { database: "cosimulation2.0", databaseType: "mysql" });
+
+    expect(items[0]?.sourceLabel).toBe("cosimulation2.0.users");
   });
 });
 
@@ -594,10 +685,43 @@ describe("shared tab presentation helpers", () => {
   });
 
   it("builds active/inactive color styles for classic and non-classic layouts", () => {
-    const activeClassic = tabColorStyle(queryTab({}), true, true);
-    expect(activeClassic?.boxShadow).toContain("var(--foreground)");
-    const inactiveModern = tabColorStyle(queryTab({}), false, false);
-    expect(inactiveModern?.borderColor).toBeUndefined();
+    // Node has no window/CSS globals: pin both to modern-engine answers.
+    vi.stubGlobal("CSS", { supports: () => true });
+    vi.stubGlobal("window", {
+      matchMedia: (query: string) => ({
+        media: query,
+        matches: true,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    });
+    try {
+      const activeClassic = tabColorStyle(queryTab({}), true, true);
+      expect(activeClassic?.boxShadow).toContain("var(--foreground)");
+      const inactiveModern = tabColorStyle(queryTab({}), false, false);
+      expect(inactiveModern?.borderColor).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("swaps inline color-mix tab colors for concrete rgba on legacy WebViews", () => {
+    // WebKit without color-mix() invalidates the inline values at computed-value
+    // time, which left the active tab with no background at all (macOS 12); and
+    // it cannot substitute var() inside inline custom properties, so the legacy
+    // branch resolves the token to concrete rgb. Node has no document: the
+    // helper falls back to the default theme's foreground (10, 10, 10).
+    vi.stubGlobal("CSS", { supports: () => false });
+    try {
+      const pill = tabColorStyle(queryTab({}), true, false);
+      expect(pill?.["--app-tab-background"]).toBe("rgba(10, 10, 10, 0.18)");
+      expect(pill?.borderColor).toBe("var(--ring)");
+      const classic = tabColorStyle(queryTab({}), true, true);
+      expect(classic?.["--app-tab-background"]).toBe("rgba(10, 10, 10, 0.18)");
+      expect(classic?.boxShadow).toBe("inset 0 -2px 0 rgba(10, 10, 10, 0.72)");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("resolves MQ driver icons from the connection store", () => {

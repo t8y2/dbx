@@ -716,6 +716,7 @@ async fn fetch_table_export_batch(
             affected_rows: 0,
             execution_time_ms: 0,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -2299,7 +2300,6 @@ mod tests {
     use crate::plugins::{
         InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
     };
-    use crate::storage::Storage;
     use crate::xlsx_export::{build_xlsx_workbook, XlsxWorksheetData};
     use serde_json::json;
     use std::io::Read;
@@ -2389,7 +2389,7 @@ mod tests {
             "query_timeout_secs": 30
         }))
         .unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert(config.id.clone(), config.clone());
         let export_id = format!("export-{}", uuid::Uuid::new_v4());
@@ -2565,7 +2565,7 @@ mod tests {
             "query_timeout_secs": 30
         }))
         .unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert(config.id.clone(), config);
         let export_id = format!("export-{}", uuid::Uuid::new_v4());

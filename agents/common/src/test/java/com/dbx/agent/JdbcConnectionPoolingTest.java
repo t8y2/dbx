@@ -1112,6 +1112,12 @@ class JdbcConnectionPoolingTest {
                 pageParams
             ));
             assertTrue(firstPage.get("has_more").getAsBoolean());
+            JsonObject timings = firstPage.getAsJsonObject("query_timings_ms");
+            assertNotNull(timings, "all JDBC agents expose timings through JSON RPC");
+            assertTrue(timings.get("pool_acquire").getAsDouble() >= 0);
+            assertTrue(timings.get("jdbc_execute").getAsDouble() >= 0);
+            assertTrue(timings.get("fetch").getAsDouble() >= 0);
+            assertTrue(timings.get("pool_release").getAsDouble() >= 0);
             String querySessionId = firstPage.get("session_id").getAsString();
 
             Future<JsonObject> waiting = worker.submit(

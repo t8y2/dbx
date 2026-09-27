@@ -10,6 +10,7 @@ This example exercises the complete manifest v1 path instead of mocking a contri
 - asynchronous connection/progress events;
 - sandboxed workbench UI using `window.dbxPlugin`;
 - workbench-to-sidecar RPC plus a read-only filesystem contribution rendered by DBX's host-owned file manager;
+- `mcp/tools` / `mcp/call` tools for the built-in DBX AI assistant: `hello_greet` is declared read-only, `hello_set_greeting` changes state and therefore asks the user first;
 - unsigned `.dbxp` candidate packaging plus separate repository signing;
 - automated install-to-uninstall smoke runner.
 
@@ -27,7 +28,7 @@ hello-workbench/
 └── smoke.mjs              # package + lifecycle smoke test
 ```
 
-The reusable smoke executable lives at `crates/dbx-core/examples/plugin_package_smoke.rs` so it shares DBX's workspace lockfile and dependency patches.
+The reusable smoke executables live at `crates/dbx-core/examples/plugin_package_smoke.rs` (package lifecycle) and `crates/dbx-core/examples/plugin_ai_tools_smoke.rs` (AI tool discovery and calls through the host) so they share DBX's workspace lockfile and dependency patches.
 
 ## Build an unsigned development package
 
@@ -58,6 +59,7 @@ In DBX, open **Plugin Center**, enable **Allow unsigned development package**, a
 5. Click **Save & Open**.
 6. Invoke the sidecar from the workbench.
 7. Click **Open host files** to browse and preview the virtual `hello:/` filesystem without plugin-owned file-browser UI.
+8. In Plugin Center → Installed, turn on **Built-in AI tools** for the plugin, keep the Hello connection open, and ask the AI assistant in Agent mode to greet someone or change the greeting. The greeting change pauses for your approval.
 
 The example token is persisted through `connection_secrets`; the raw connection `config_json` contains only an empty placeholder. The iframe receives the saved connection ID, never the token.
 

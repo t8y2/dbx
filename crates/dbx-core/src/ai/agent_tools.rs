@@ -280,13 +280,14 @@ pub fn is_vector_db(db_type: DatabaseType) -> bool {
 /// the current UTC time plus a caller-provided local offset.
 fn get_current_time_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "get_current_time",
+        name: "get_current_time".into(),
         description: "Get the current date and time with timezone information. \
                       Pass the client UTC offset from the system prompt; when \
                       omitted, local time safely falls back to UTC. Use this to resolve \
                       relative time expressions like \"last 7 days\", \
                       \"yesterday\", \"this month\" into concrete dates \
-                      for constructing SQL queries.",
+                      for constructing SQL queries."
+            .into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -341,7 +342,9 @@ fn execute_get_current_time(tool_call: &ToolCall) -> Result<String, String> {
 /// Get read-only tool definitions for the given database type.
 /// Returns vector tools for vector DBs, SQL tools otherwise.
 pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
-    if is_vector_db(db_type) {
+    if db_type == DatabaseType::Plugin {
+        vec![get_current_time_tool()]
+    } else if is_vector_db(db_type) {
         vec![list_collections_tool(), get_current_time_tool()]
     } else {
         vec![list_databases_tool(), list_tables_tool(), get_columns_tool(db_type), get_current_time_tool()]
@@ -352,6 +355,9 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
 /// Includes read-only tools plus execute_query, get_sample_data, and
 /// explain_query for database types that support them.
 pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) -> Vec<ToolDefinition> {
+    if db_type == DatabaseType::Plugin {
+        return vec![get_current_time_tool()];
+    }
     if is_vector_db(db_type) {
         return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
@@ -375,8 +381,8 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
 
 fn list_databases_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "list_databases",
-        description: "List databases available through the current connection. If more than one database is returned, cross-database read queries can use fully qualified names such as database.table (or database.schema.table for SQL Server).",
+        name: "list_databases".into(),
+        description: "List databases available through the current connection. If more than one database is returned, cross-database read queries can use fully qualified names such as database.table (or database.schema.table for SQL Server).".into(),
         parameters: json!({"type": "object", "properties": {}, "required": []}),
         read_only: true,
         parallel_ok: true,
@@ -385,8 +391,8 @@ fn list_databases_tool() -> ToolDefinition {
 
 fn mongo_execute_query_tool(_sql_permissions: AgentSqlPermissions) -> ToolDefinition {
     ToolDefinition {
-        name: "execute_query",
-        description: "Execute a read-only MongoDB shell command and return results (max 50 rows). Use commands such as db.collection.find({}), db.collection.findOne({}), db.collection.aggregate([]), or db.collection.countDocuments({}). Write commands are not available to the MongoDB Agent.",
+        name: "execute_query".into(),
+        description: "Execute a read-only MongoDB shell command and return results (max 50 rows). Use commands such as db.collection.find({}), db.collection.findOne({}), db.collection.aggregate([]), or db.collection.countDocuments({}). Write commands are not available to the MongoDB Agent.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -423,8 +429,8 @@ fn solr_execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefiniti
          request in one ```sql code block and ask for confirmation."
     };
     ToolDefinition {
-        name: "execute_query",
-        description,
+        name: "execute_query".into(),
+        description: description.into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -461,8 +467,9 @@ fn solr_execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefiniti
 /// list_tables tool definition.
 fn list_tables_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "list_tables",
-        description: "List all tables and views in the current database. Returns table names, types, and comments.",
+        name: "list_tables".into(),
+        description: "List all tables and views in the current database. Returns table names, types, and comments."
+            .into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -485,15 +492,17 @@ fn list_tables_tool() -> ToolDefinition {
 /// get_columns tool definition.
 fn get_columns_tool(db_type: DatabaseType) -> ToolDefinition {
     ToolDefinition {
-        name: "get_columns",
+        name: "get_columns".into(),
         description: if db_type == DatabaseType::MongoDb {
             "Sample up to 100 documents from a MongoDB collection and infer up to 512 top-level field names and types. \
              The sample may be smaller and is not a complete schema or a guarantee of required fields. \
              Nested documents and arrays remain object and array fields; numeric BSON types are reported as number."
+                .into()
         } else {
             "Get column definitions for a table: names, types, primary keys, nullable, defaults, and comments. \
              Use this when the user asks about table structure, column details, or field information — \
              even if some schema context was provided, this tool returns the authoritative and complete column list."
+                .into()
         },
         parameters: json!({
             "type": "object",
@@ -529,8 +538,8 @@ fn execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
         "Execute a read-only SQL query and return results (default 50 rows, up to 1000 with the limit argument). Cross-database reads may use fully qualified names such as database.table (or database.schema.table for SQL Server) without switching the current database. This run cannot execute writes or DDL because no specific SQL has been confirmed yet; this does not mean the database itself is read-only. When the user requests a write, first propose the exact SQL in one ```sql code block and ask for confirmation. After confirmation, DBX starts a new run that can execute only that exact SQL. Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN statements may be executed in this run."
     };
     ToolDefinition {
-        name: "execute_query",
-        description,
+        name: "execute_query".into(),
+        description: description.into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -571,8 +580,8 @@ fn execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
 /// get_sample_data tool definition.
 fn get_sample_data_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "get_sample_data",
-        description: "Get sample rows from a table to understand its data. Returns up to 20 rows.",
+        name: "get_sample_data".into(),
+        description: "Get sample rows from a table to understand its data. Returns up to 20 rows.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -603,11 +612,12 @@ fn get_sample_data_tool() -> ToolDefinition {
 /// explain_query tool definition (Phase 3).
 fn explain_query_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "explain_query",
+        name: "explain_query".into(),
         description: "Get the execution plan for a SQL query using EXPLAIN. \
                       Shows how the database will execute the query (scan type, indexes, cost). \
                       Only read-only queries (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN) are allowed. \
-                      Use this to analyze query performance and suggest index optimizations.",
+                      Use this to analyze query performance and suggest index optimizations."
+            .into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -626,8 +636,9 @@ fn explain_query_tool() -> ToolDefinition {
 /// list_collections tool definition (vector databases).
 fn list_collections_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "list_collections",
-        description: "List all collections in the current vector database. Returns collection names and dimensions.",
+        name: "list_collections".into(),
+        description: "List all collections in the current vector database. Returns collection names and dimensions."
+            .into(),
         parameters: json!({
             "type": "object",
             "properties": {},
@@ -641,8 +652,8 @@ fn list_collections_tool() -> ToolDefinition {
 /// browse_collection tool definition (vector databases).
 fn browse_collection_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "browse_collection",
-        description: "Browse documents in a collection. Returns up to 20 items with payload/metadata (vectors excluded for compactness). For ChromaDB, use the collection id (UUID from list_collections) instead of the collection name.",
+        name: "browse_collection".into(),
+        description: "Browse documents in a collection. Returns up to 20 items with payload/metadata (vectors excluded for compactness). For ChromaDB, use the collection id (UUID from list_collections) instead of the collection name.".into(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -1581,8 +1592,6 @@ mod tests {
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
     #[cfg(unix)]
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig};
-    #[cfg(unix)]
-    use crate::storage::Storage;
 
     #[cfg(unix)]
     async fn spawn_recording_agent(record_path: &std::path::Path) -> (AgentDriverClient, tempfile::NamedTempFile) {
@@ -1697,7 +1706,7 @@ for line in sys.stdin:
     #[test]
     fn vector_read_only_tools_do_not_include_collection_browsing() {
         let tools = read_only_tools(DatabaseType::Qdrant);
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
         assert!(names.contains(&"list_collections"));
         assert!(!names.contains(&"browse_collection"));
@@ -1707,7 +1716,7 @@ for line in sys.stdin:
     #[test]
     fn vector_agent_tools_include_collection_browsing() {
         let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
         assert!(names.contains(&"list_collections"));
         assert!(names.contains(&"browse_collection"));
@@ -1715,9 +1724,19 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn plugin_connections_only_receive_database_independent_builtin_tools() {
+        for tools in
+            [read_only_tools(DatabaseType::Plugin), all_tools(DatabaseType::Plugin, AgentSqlPermissions::default())]
+        {
+            let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
+            assert_eq!(names, ["get_current_time"]);
+        }
+    }
+
+    #[test]
     fn solr_agent_registers_rest_execute_query_tool() {
         let tools = all_tools(DatabaseType::Solr, AgentSqlPermissions::default());
-        let names = tools.iter().map(|tool| tool.name).collect::<Vec<_>>();
+        let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         // Solr gets the shared metadata tools plus a REST `execute_query`; SQL
         // sample/explain helpers are not meaningful for a non-SQL backend.
         assert!(names.contains(&"list_tables"));
@@ -1746,7 +1765,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn mongodb_agent_registers_shell_query_tool_and_routes_find_one_as_read_only() {
         let tools = all_tools(DatabaseType::MongoDb, AgentSqlPermissions::default());
-        let names = tools.iter().map(|tool| tool.name).collect::<Vec<_>>();
+        let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         assert!(names.contains(&"execute_query"));
         assert!(!names.contains(&"get_sample_data"));
         assert!(!names.contains(&"explain_query"));
@@ -1768,7 +1787,7 @@ for line in sys.stdin:
         assert!(!confirmed_execute_query.description.contains("confirmed write"));
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
         let state = Arc::new(AppState::new(storage));
         let call = ToolCall {
             id: "mongo-find-one".to_string(),
@@ -1797,7 +1816,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn mongodb_agent_keeps_all_writes_blocked_after_sql_confirmation() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
         let state = Arc::new(AppState::new(storage));
         let permissions = AgentSqlPermissions {
             allow_writes: true,
@@ -1906,7 +1925,7 @@ for line in sys.stdin:
     #[test]
     fn oracle_agent_tools_include_explain_query() {
         let tools = all_tools(DatabaseType::Oracle, AgentSqlPermissions::default());
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
         assert!(names.contains(&"explain_query"));
     }
@@ -1922,6 +1941,7 @@ for line in sys.stdin:
             affected_rows,
             execution_time_ms: 1,
             server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -2117,7 +2137,7 @@ for line in sys.stdin:
         let temp_dir = tempfile::tempdir().unwrap();
         let record_path = temp_dir.path().join("agent-requests.jsonl");
         let (client, _script) = spawn_recording_agent(&record_path).await;
-        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
         let state = Arc::new(AppState::new(storage));
         let connection = agent_test_connection("dameng-1", "Dameng", DatabaseType::Dameng, "APPDB");
         state.configs.write().await.insert(connection.id.clone(), connection);
@@ -2185,7 +2205,7 @@ for line in sys.stdin:
         let temp_dir = tempfile::tempdir().unwrap();
         let record_path = temp_dir.path().join("agent-requests.jsonl");
         let (client, _script) = spawn_recording_agent(&record_path).await;
-        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
         let state = Arc::new(AppState::new(storage));
         let connection = agent_test_connection("mysql-1", "MySQL", DatabaseType::Mysql, "rs_main");
         state.configs.write().await.insert(connection.id.clone(), connection);
@@ -2455,28 +2475,28 @@ for line in sys.stdin:
     #[test]
     fn get_current_time_is_in_all_tools_postgres() {
         let tools = all_tools(DatabaseType::Postgres, AgentSqlPermissions::default());
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Postgres)");
     }
 
     #[test]
     fn get_current_time_is_in_read_only_tools_postgres() {
         let tools = read_only_tools(DatabaseType::Postgres);
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Postgres)");
     }
 
     #[test]
     fn get_current_time_is_in_all_tools_qdrant() {
         let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Qdrant)");
     }
 
     #[test]
     fn get_current_time_is_in_read_only_tools_qdrant() {
         let tools = read_only_tools(DatabaseType::Qdrant);
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Qdrant)");
     }
 
@@ -2583,7 +2603,7 @@ for line in sys.stdin:
         let temp_dir = tempfile::tempdir().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let storage = crate::storage::Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+            let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
             let state = std::sync::Arc::new(crate::connection::AppState::new(storage));
             let tool_call = ToolCall {
                 id: "call-gct".to_string(),

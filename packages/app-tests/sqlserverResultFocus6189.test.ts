@@ -51,7 +51,7 @@ function sqlServerConn(id: string): ConnectionConfig {
 const THREE_RESULTS = "SELECT 1 AS a; SELECT 2 AS b; SELECT 3 AS c;";
 const TRAILING_MESSAGE = "SELECT 9 AS z; PRINT N'DBCC execution completed.';";
 
-/** Mirrors the shapes crates/dbx-drivers/src/db/sqlserver.rs:523-542 actually produces. */
+/** Mirrors the shapes crates/dbx-driver-sqlserver/src/sqlserver.rs actually produces. */
 function resultsFor(sql: string) {
   if (sql.includes("SELECT 3 AS c")) {
     return [

@@ -8,7 +8,6 @@ use dbx_core::{
         mongo_run_command_core,
     },
     mongo_shell,
-    storage::Storage,
 };
 use mongodb::bson::{doc, Document};
 
@@ -53,7 +52,8 @@ async fn find_and_modify_commands_run_over_the_legacy_agent() {
     let (host, port) = endpoint.split_once(':').expect("host:port");
     let files = tempfile::tempdir().unwrap();
     let database = format!("dbx_legacy_fam_{}", uuid::Uuid::new_v4().simple());
-    let state = AppState::new(Storage::open(&files.path().join("storage.db")).await.unwrap());
+    let state =
+        AppState::new(dbx_core::persistence::test_storage::open(&files.path().join("storage.db")).await.unwrap());
     let id = "legacy-find-and-modify-test";
     let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": id, "name": "Legacy findAndModify test", "db_type": "mongodb", "host": host, "port": port.parse::<u16>().unwrap(), "username": "", "password": "", "database": database, "driver_profile": "mongodb-legacy" })).unwrap();
     state.configs.write().await.insert(id.into(), config);
@@ -163,7 +163,8 @@ async fn distinct_runs_over_the_legacy_agent() {
     let (host, port) = endpoint.split_once(':').expect("host:port");
     let files = tempfile::tempdir().unwrap();
     let database = format!("dbx_legacy_distinct_{}", uuid::Uuid::new_v4().simple());
-    let state = AppState::new(Storage::open(&files.path().join("storage.db")).await.unwrap());
+    let state =
+        AppState::new(dbx_core::persistence::test_storage::open(&files.path().join("storage.db")).await.unwrap());
     let id = "legacy-distinct-test";
     let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": id, "name": "Legacy distinct test", "db_type": "mongodb", "host": host, "port": port.parse::<u16>().unwrap(), "username": "", "password": "", "database": database, "driver_profile": "mongodb-legacy" })).unwrap();
     state.configs.write().await.insert(id.into(), config);
@@ -212,7 +213,8 @@ async fn collection_stats_and_create_database_run_over_the_legacy_agent() {
     let (host, port) = endpoint.split_once(':').expect("host:port");
     let files = tempfile::tempdir().unwrap();
     let database = format!("dbx_legacy_admin_{}", uuid::Uuid::new_v4().simple());
-    let state = AppState::new(Storage::open(&files.path().join("storage.db")).await.unwrap());
+    let state =
+        AppState::new(dbx_core::persistence::test_storage::open(&files.path().join("storage.db")).await.unwrap());
     let id = "legacy-admin-test";
     let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": id, "name": "Legacy admin test", "db_type": "mongodb", "host": host, "port": port.parse::<u16>().unwrap(), "username": "", "password": "", "database": database, "driver_profile": "mongodb-legacy" })).unwrap();
     state.configs.write().await.insert(id.into(), config);
@@ -298,7 +300,8 @@ async fn dump_and_export_resolve_the_per_database_pool() {
     let (host, port) = endpoint.split_once(':').expect("host:port");
     let files = tempfile::tempdir().unwrap();
     let database = format!("dbx_legacy_pool_{}", uuid::Uuid::new_v4().simple());
-    let state = AppState::new(Storage::open(&files.path().join("storage.db")).await.unwrap());
+    let state =
+        AppState::new(dbx_core::persistence::test_storage::open(&files.path().join("storage.db")).await.unwrap());
     let id = "legacy-pool-key-test";
     let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": id, "name": "Legacy pool key test", "db_type": "mongodb", "host": host, "port": port.parse::<u16>().unwrap(), "username": "", "password": "", "database": database, "driver_profile": "mongodb-legacy" })).unwrap();
     state.configs.write().await.insert(id.into(), config);

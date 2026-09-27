@@ -107,6 +107,7 @@
 :root {
   --background: rgb(255 255 255);
   --foreground: rgb(10 10 10);
+  --dbx-foreground-rgb: 10, 10, 10;
   --card: rgb(255 255 255);
   --card-foreground: rgb(10 10 10);
   --popover: rgb(255 255 255);
@@ -151,6 +152,7 @@
   --success-foreground: rgb(240 253 244);
   --success-bg: color-mix(in srgb, var(--success) 12%, transparent);
   --warning: rgb(217 119 6);
+  --dbx-warning-rgb: 217, 119, 6;
   --warning-foreground: rgb(255 251 235);
   --warning-bg: color-mix(in srgb, var(--warning) 14%, transparent);
   --info: rgb(37 99 235);
@@ -169,6 +171,7 @@
 .dark {
   --background: rgb(19 20 22);
   --foreground: rgb(215 215 219);
+  --dbx-foreground-rgb: 215, 215, 219;
   --card: rgb(27 27 30);
   --card-foreground: rgb(215 215 219);
   --popover: rgb(30 30 32);
@@ -204,6 +207,7 @@
   --success-foreground: rgb(20 30 24);
   --success-bg: color-mix(in srgb, var(--success) 16%, transparent);
   --warning: rgb(251 191 36);
+  --dbx-warning-rgb: 251, 191, 36;
   --warning-foreground: rgb(40 32 12);
   --warning-bg: color-mix(in srgb, var(--warning) 16%, transparent);
   --info: rgb(96 165 250);

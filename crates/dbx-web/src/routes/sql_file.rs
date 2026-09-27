@@ -499,7 +499,7 @@ mod tests {
     use super::*;
 
     async fn restore_state(directory: &Path) -> WebState {
-        let storage = dbx_core::storage::Storage::open(&directory.join("dbx.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&directory.join("dbx.db")).await.unwrap();
         WebState::for_tests(Arc::new(dbx_core::connection::AppState::new(storage)), directory.to_path_buf())
     }
 

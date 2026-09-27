@@ -20,6 +20,7 @@ import { quoteTableIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/
 import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileRoutineSignatures } from "@/lib/database/driverProfileExtensions";
 import { DORIS_FUNCTION_DOCS, DORIS_FUNCTION_SIGNATURES } from "@/lib/sql/doris/functions";
 import { rejectsAliasReferenceInHaving } from "@/lib/database/databaseFeatureSupport";
+import { isOracleCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
@@ -1838,6 +1839,7 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
 function shouldAutoOpenColumnCompletion(context: SqlCompletionContext, sql: string, cursor: number, databaseType: DatabaseType | undefined): boolean {
   if (!context.suggestColumns || context.referencedTables.length === 0) return false;
   if (context.prefix.length > 0) return true;
+  if (context.selectListColumnContext) return true;
   return isColumnCompletionExpressionStart(sql.slice(0, cursor), databaseType);
 }
 
@@ -2306,8 +2308,19 @@ function currentLineBlockEnd(sql: string, cursor: number, start: number): number
     const boundedLineEnd = lineEnd >= 0 ? lineEnd : sql.length;
     const originalTrimmed = sql.slice(lineStart, boundedLineEnd).trimStart();
     const trimmed = masked.slice(lineStart, boundedLineEnd).trimStart();
-    if (lineStart > start && (!originalTrimmed || /^(get|post|put|delete|patch|head)\s+\//i.test(originalTrimmed))) {
+    if (lineStart > start && /^(get|post|put|delete|patch|head)\s+\//i.test(originalTrimmed)) {
       return lineStart;
+    }
+    // A blank line only ends the block when the next non-empty line opens a new
+    // top-level statement. Blank lines *inside* one statement (`SELECT list`
+    // then a blank line then `FROM t`) must keep the later FROM in scope so
+    // column hints still resolve (#10196); #9370's next-statement exclusion is
+    // already handled by the statement-start rule below.
+    if (lineStart > start && !originalTrimmed && depth === 0) {
+      const nextContent = nextNonEmptyLineTrimmed(sql, boundedLineEnd);
+      if (nextContent === null || STATEMENT_START_LINE_PATTERN.test(nextContent) || /^(get|post|put|delete|patch|head)\s+\//i.test(nextContent)) {
+        return lineStart;
+      }
     }
     // The cursor's own line always belongs to the block; only a following
     // top-level statement line ends it.
@@ -2322,6 +2335,19 @@ function currentLineBlockEnd(sql: string, cursor: number, start: number): number
     }
     lineStart = lineEnd + 1;
     atCursorLine = false;
+  }
+  return null;
+}
+
+function nextNonEmptyLineTrimmed(sql: string, from: number): string | null {
+  let offset = from;
+  while (offset < sql.length) {
+    const lineEnd = sql.indexOf("\n", offset);
+    const boundedEnd = lineEnd >= 0 ? lineEnd : sql.length;
+    const trimmed = sql.slice(offset, boundedEnd).trim();
+    if (trimmed) return trimmed;
+    if (lineEnd < 0) return null;
+    offset = lineEnd + 1;
   }
   return null;
 }
@@ -3907,10 +3933,10 @@ function resolveTableSchemaQualification(
   currentSchema: string | undefined,
   schemasByTableName: Map<string, Set<string>>,
 ): { ambiguousTableName: boolean; schemaQualification: boolean; defaultApplyName: string } {
-  const oracleSchemaQualification = databaseType === "oracle" && table.schema && table.schema.toUpperCase() !== "PUBLIC" && (!currentSchema || normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(currentSchema));
+  const oracleSchemaQualification = isOracleCompletionDatabase(databaseType) && table.schema && table.schema.toUpperCase() !== "PUBLIC" && (!currentSchema || normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(currentSchema));
   // A bare table name is ambiguous when metadata contains the same name in multiple schemas.
   // Keep Oracle's current-schema behavior, but qualify the generic/PostgreSQL/SQL Server paths.
-  const ambiguousTableName = databaseType !== "oracle" && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
+  const ambiguousTableName = !isOracleCompletionDatabase(databaseType) && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
   const schemaQualification = !!table.schema && (oracleSchemaQualification || ambiguousTableName);
   const defaultApplyName = schemaQualification ? `${quoteCompletionApplyIdentifier(table.schema!, dialect)}.${quoteCompletionApplyIdentifier(table.name, dialect)}` : quoteCompletionApplyIdentifier(table.name, dialect);
   return { ambiguousTableName, schemaQualification, defaultApplyName };
@@ -3948,7 +3974,7 @@ function buildTableItems(
         detail,
         apply: formatTableAliasApply(applyName, alias),
         boost: computeBoost(table.name, prefix) + 1000 + (table.boost ?? 0),
-        dedupeKey: table.applyName || ambiguousTableName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
+        dedupeKey: table.applyName || ambiguousTableName || (isOracleCompletionDatabase(databaseType) && table.schema) ? applyName : undefined,
       };
     })
     .sort(compareCompletionItems)
@@ -4004,7 +4030,7 @@ function buildForeignKeyRelatedTableItems(
         boost: computeBoost(table.name, context.prefix) + 3600,
         // Mirror buildTableItems' dedupeKey so an FK candidate and the regular
         // candidate for the same schema-qualified table collapse to one entry.
-        dedupeKey: ambiguousTableName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
+        dedupeKey: ambiguousTableName || (isOracleCompletionDatabase(databaseType) && table.schema) ? applyName : undefined,
       };
     })
     .sort(compareCompletionItems);
@@ -4044,7 +4070,7 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
   if (completionQualifierIsReferencedTable(context)) return [];
   const onlyProcedures = context.contextKind === "exec";
   const onlyFunctions = context.suggestColumns && context.referencedTables.length > 0 && !context.qualifier;
-  const prioritizeOracleFunctions = databaseType === "oracle" && context.statementKind === "select";
+  const prioritizeOracleFunctions = isOracleCompletionDatabase(databaseType) && context.statementKind === "select";
   return objects
     .filter((object) => object.type !== "sequence" && (!onlyProcedures || object.type === "procedure") && (!onlyFunctions || (object.type === "function" && object.name.toLowerCase().startsWith(context.prefix.toLowerCase()))) && objectMatchesCompletionContext(object, context))
     .map((object) => {
@@ -4060,7 +4086,7 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
       const detail = [locationDetail, signature ? `(${signature})` : undefined, object.dataType ? `[${object.dataType}]` : undefined].filter(Boolean).join("  ");
       const schemaBoost = onlyFunctions ? Math.min(object.boost ?? 0, 1000) : (object.boost ?? 0);
       const typeBoost = routineTypeBoost(object.type, prioritizeOracleFunctions && !onlyFunctions);
-      const baseDedupeKey = object.applyName || (databaseType === "oracle" && object.schema) ? applyName : undefined;
+      const baseDedupeKey = object.applyName || (isOracleCompletionDatabase(databaseType) && object.schema) ? applyName : undefined;
       return {
         label: object.name,
         type: "function" as const,
@@ -5470,7 +5496,7 @@ function activeSqlKeywords(databaseType?: DatabaseType): string[] {
 }
 
 function isOracleLikeDatabase(databaseType?: DatabaseType): boolean {
-  return databaseType === "oracle" || databaseType === "oceanbase-oracle";
+  return isOracleCompletionDatabase(databaseType);
 }
 
 // CQL has no table alias syntax, so Cassandra must never receive `table alias`

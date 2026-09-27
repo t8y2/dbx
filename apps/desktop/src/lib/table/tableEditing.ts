@@ -143,3 +143,49 @@ export function isClickHouseExistingRowReadonlyColumn(databaseType: DatabaseType
   const columnInfo = columns.find((info) => info.name.toLowerCase() === column.toLowerCase());
   return /\bpartition_key\b/i.test(columnInfo?.extra ?? "");
 }
+
+/**
+ * Describe flags the Salesforce driver packs into `ColumnInfo.extra`
+ * (see `parse_describe_columns` in crates/dbx-drivers/src/db/salesforce_driver.rs).
+ * `relationshipName` / `referenceTo` also live there but are consumed by SOQL
+ * completion instead (`soqlFieldFromColumnInfo`).
+ */
+export interface SalesforceColumnFlags {
+  updateable?: boolean;
+  createable?: boolean;
+  custom?: boolean;
+  label?: string;
+}
+
+export function parseSalesforceColumnExtra(extra?: string | null): SalesforceColumnFlags | null {
+  if (!extra) return null;
+  try {
+    const parsed: unknown = JSON.parse(extra);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as SalesforceColumnFlags) : null;
+  } catch {
+    return null;
+  }
+}
+
+function findColumnInfoByName(columns: ColumnInfo[], column: string): ColumnInfo | undefined {
+  return columns.find((info) => info.name.toLowerCase() === column.toLowerCase());
+}
+
+/**
+ * Existing Salesforce rows: the record `Id` is the identity and never a write
+ * target, and describe reports `updateable: false` for formula, rollup summary,
+ * auto-number and system fields (CreatedDate, CreatedById, LastModifiedDate…).
+ * Missing/unparseable metadata fails open — Salesforce enforces the real rules
+ * server-side and returns a per-record error we surface on the row.
+ */
+export function isSalesforceExistingRowReadonlyColumn(databaseType: DatabaseType | undefined, column: string, primaryKeys: readonly string[], columns: ColumnInfo[] = []): boolean {
+  if (databaseType !== "salesforce") return false;
+  if (primaryKeys.some((key) => key.toLowerCase() === column.toLowerCase())) return true;
+  return parseSalesforceColumnExtra(findColumnInfoByName(columns, column)?.extra)?.updateable === false;
+}
+
+/** New Salesforce rows: fields describe reports as `createable: false` (Id, CreatedDate, …) cannot be set on insert. */
+export function isSalesforceNewRowReadonlyColumn(databaseType: DatabaseType | undefined, column: string, columns: ColumnInfo[] = []): boolean {
+  if (databaseType !== "salesforce") return false;
+  return parseSalesforceColumnExtra(findColumnInfoByName(columns, column)?.extra)?.createable === false;
+}

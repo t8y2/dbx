@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import QueryTimingDetails from "./QueryTimingDetails.vue";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import { applyDdlSearchMarks } from "@/lib/sql/ddlSearchMarks";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
@@ -7,6 +8,7 @@ import { useUpdateBlocker } from "@/lib/app/updatePreparation";
 import { useResultViewUpdateTiming } from "@/composables/useResultViewUpdateTiming";
 import { computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, ref, shallowRef, toRaw, useSlots, watch, defineAsyncComponent, type Component, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
+import { RecycleScroller } from "vue-virtual-scroller";
 import {
   ArrowUp,
   ArrowDown,
@@ -63,6 +65,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
+import DataGridBusyOverlay from "@/components/grid/DataGridBusyOverlay.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -98,7 +101,6 @@ import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoCol
 import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
 import * as api from "@/lib/backend/api";
-import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
@@ -119,6 +121,8 @@ import {
   hiveTablePropertiesIndicateTransactional,
   isClickHouseExistingRowReadonlyColumn,
   isHiddenGridColumn,
+  isSalesforceExistingRowReadonlyColumn,
+  isSalesforceNewRowReadonlyColumn,
   isTdengineExistingRowReadonlyColumn,
   shouldIncludeSyntheticRowId,
 } from "@/lib/table/tableEditing";
@@ -334,6 +338,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { databaseSortSupportedForDatabase, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { resolveGridFocusRestoreTarget, shouldRestoreDataGridFocusAfterEditCommit } from "@/lib/dataGrid/dataGridFocusRestore";
 import { buildOrderedGridRows, type GridInsertRowPosition, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
+import { formatQueryDuration } from "@/lib/format/duration";
 import {
   DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH,
   DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER,
@@ -369,6 +374,7 @@ import { useDataGridColumnFormatter } from "@/composables/useDataGridColumnForma
 import { useDataGridTableMetadataLoaders } from "@/composables/useDataGridTableMetadataLoaders";
 import { DATA_GRID_SERVER_COLUMN_FILTER_LIMIT, useDataGridColumnFilters } from "@/composables/useDataGridColumnFilters";
 import { useDataGridLargeValues } from "@/composables/useDataGridLargeValues";
+import { useSalesforceSaveConfirmation } from "@/composables/useSalesforceSaveConfirmation";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 const ImagePreviewDialog = defineAsyncComponent(() => import("@/components/grid/ImagePreviewDialog.vue"));
@@ -550,6 +556,15 @@ interface DataGridProps {
   queryEditabilityReason?: QueryEditabilityReason;
   allowInsertRows?: boolean;
   allowDeleteRows?: boolean;
+  /**
+   * Offers a stop action in the busy overlay. Query and data tabs pass this
+   * while an execution with an id is running, so the elapsed pill can also be
+   * used to end a slow load/refresh (#9979-adjacent feedback). Loaders that
+   * call the backend directly cannot be cancelled and keep it off.
+   */
+  showCancel?: boolean;
+  cancelling?: boolean;
+  cancelDisabled?: boolean;
 }
 
 const props = withDefaults(defineProps<DataGridProps>(), {
@@ -597,6 +612,7 @@ const emit = defineEmits<{
   "update:orderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
   changeQueryTimeout: [connectionId: string];
+  cancel: [];
 }>();
 
 const autoRefresh = useDataGridAutoRefresh({
@@ -745,6 +761,7 @@ const dataGridTopbarOverflowActionCount = ref(0);
 const dataGridTopbarExpandedRequiredWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
+const showColumnHeaderTooltips = computed(() => settingsStore.editorSettings.showColumnHeaderTooltips !== false);
 const showTransposeFieldMetadata = computed(() => settingsStore.editorSettings.dataGridShowTransposeFieldMetadata);
 const showIndexIndicatorsInHeader = computed(() => settingsStore.editorSettings.showIndexIndicatorsInHeader !== false);
 const indexes = ref<IndexInfo[]>([]);
@@ -3177,11 +3194,6 @@ const canFetchNextInfiniteScrollSegment = computed(() =>
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql || !!props.countTotalRows));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const pageJumpBusy = computed(() => !!props.pageJumpProgress && props.pageJumpProgress.totalRequests > 1);
-const pageJumpProgressPercent = computed(() => {
-  const progress = props.pageJumpProgress;
-  if (!progress || progress.totalRequests <= 0) return 0;
-  return Math.min(100, Math.round((progress.completedRequests / progress.totalRequests) * 100));
-});
 /** Automatic background counts keep rows interactive; explicit count navigation still blocks the surface. */
 const gridSurfaceBusy = computed(() => isRefreshingData.value || props.loading === true || manualTotalRowCountLoading.value || pageJumpBusy.value);
 const gridPaginationBusy = computed(() => gridSurfaceBusy.value || totalRowCountBusy.value);
@@ -3797,6 +3809,57 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
   return true;
 }
 
+// Salesforce applies one REST call per record with no transaction, so every grid
+// save is reviewed here first. The identity lines are advisory only — Salesforce
+// enforces the real object/field permissions, and a failed identity lookup just
+// omits the line rather than blocking the write.
+const {
+  open: salesforceSaveConfirmOpen,
+  updates: salesforceSaveConfirmUpdates,
+  inserts: salesforceSaveConfirmInserts,
+  deletes: salesforceSaveConfirmDeletes,
+  total: salesforceSaveConfirmTotal,
+  targetLabel: salesforceSaveConfirmTarget,
+  statements: salesforceSaveConfirmStatements,
+  request: requestSalesforceSaveConfirmation,
+  confirm: confirmSalesforceSave,
+} = useSalesforceSaveConfirmation();
+const isSalesforceGrid = computed(() => resolvedDatabaseType.value === "salesforce");
+const salesforceIdentity = computed(() => (isSalesforceGrid.value && props.connectionId ? connectionStore.salesforceCurrentUser(props.connectionId) : null));
+const salesforceIdentityLabel = computed(() => {
+  const identity = salesforceIdentity.value;
+  if (!identity) return "";
+  return identity.username || identity.name || identity.email;
+});
+const salesforceSaveConfirmSummary = computed(() => {
+  const parts: string[] = [];
+  if (salesforceSaveConfirmUpdates.value > 0) parts.push(t("grid.salesforceSaveUpdates", { count: salesforceSaveConfirmUpdates.value }));
+  if (salesforceSaveConfirmInserts.value > 0) parts.push(t("grid.salesforceSaveInserts", { count: salesforceSaveConfirmInserts.value }));
+  if (salesforceSaveConfirmDeletes.value > 0) parts.push(t("grid.salesforceSaveDeletes", { count: salesforceSaveConfirmDeletes.value }));
+  return parts.join(" · ");
+});
+// The save dialog names the profile alongside the user: writability comes from
+// the profile's FLS plus record sharing, not from the admin flag alone.
+const salesforceIdentityProfile = computed(() => {
+  const profileName = salesforceIdentity.value?.profileName;
+  return profileName ? t("grid.salesforceSaveProfile", { name: profileName }) : t("toolbar.salesforceIdentityUnknownProfile");
+});
+const salesforceSaveConfirmDetails = computed(() => {
+  const lines = [salesforceSaveConfirmSummary.value, t("grid.salesforceSaveTarget", { object: salesforceSaveConfirmTarget.value || t("grid.salesforceSaveUnknownObject") })];
+  if (salesforceIdentity.value) {
+    const identity = { user: salesforceIdentityLabel.value, profile: salesforceIdentityProfile.value };
+    if (salesforceIdentity.value.isAdmin === true) lines.push(t("grid.salesforceSaveAdminIdentity", identity));
+    else if (salesforceIdentity.value.isAdmin === false) lines.push(t("grid.salesforceSaveNonAdminIdentity", identity));
+    else lines.push(t("grid.salesforceSaveUnknownRights", identity));
+  }
+  return lines.filter((line) => !!line).join("\n");
+});
+const salesforceSaveConfirmSql = computed(() => salesforceSaveConfirmStatements.value.join("\n"));
+watch(salesforceSaveConfirmOpen, (isOpen) => {
+  if (!isOpen || !props.connectionId) return;
+  void connectionStore.loadSalesforceCurrentUser(props.connectionId);
+});
+
 const editor = useDataGridEditor({
   result: computed(() => props.result),
   editable: computed(() => props.editable),
@@ -3821,6 +3884,8 @@ const editor = useDataGridEditor({
   rowStatusFilter,
   dataGridQuickEntryEnabled: computed(() => settingsStore.editorSettings.dataGridQuickEntry),
   confirmDangerousRowDeletion: computed(() => settingsStore.editorSettings.confirmDangerousSqlExecution),
+  // Only Salesforce opts in: its writes cannot be rolled back once issued.
+  confirmSaveRequest: computed(() => (isSalesforceGrid.value ? requestSalesforceSaveConfirmation : undefined)),
   includeDatabaseNameInSaveSql: computed(() => settingsStore.editorSettings.generateSqlIncludeDatabaseName),
   initialEditColumn: firstVisibleColumnIndex,
   cellEditorText: cellEditorTextForValue,
@@ -4018,10 +4083,14 @@ function canEditCellItem(item: RowItem | undefined, columnIndex: number): boolea
   if (isSavingNewRow(item)) return false;
   const column = props.result.columns[columnIndex] ?? "";
   if (customReadonlyColumns.value.has(column.toLowerCase())) return false;
-  if (!item?.isNew && !item?.isDraft) {
-    const sourceColumn = props.sourceColumns?.[columnIndex] ?? column;
+  const sourceColumn = props.sourceColumns?.[columnIndex] ?? column;
+  if (item?.isNew || item?.isDraft) {
+    // A new Salesforce record cannot carry non-createable fields (Id, CreatedDate, …).
+    if (isSalesforceNewRowReadonlyColumn(props.databaseType, sourceColumn, props.tableMeta?.columns ?? [])) return false;
+  } else {
     if (isClickHouseExistingRowReadonlyColumn(props.databaseType, sourceColumn, props.tableMeta?.primaryKeys ?? [], props.tableMeta?.columns ?? [])) return false;
     if (isTdengineExistingRowReadonlyColumn(props.databaseType, column, props.tableMeta?.columns ?? [])) return false;
+    if (isSalesforceExistingRowReadonlyColumn(props.databaseType, sourceColumn, props.tableMeta?.primaryKeys ?? [], props.tableMeta?.columns ?? [])) return false;
   }
   return true;
 }
@@ -6648,7 +6717,7 @@ let dataGridIsActive = true;
 let canvasRuntime: DataGridCanvasRuntime;
 const { elapsedMs: resultViewUpdateMs, canvasDrawCompleted: completeResultCanvasDraw } = useResultViewUpdateTiming(
   () => props.result,
-  () => resolvedDatabaseType.value === "oceanbase-oracle" && isResultsContext.value,
+  () => isResultsContext.value,
   () => (useCanvasGridRows.value ? "canvas" : "dom"),
 );
 
@@ -12673,7 +12742,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :dark="isDark"
                     :frozen="col.visibleColIdx < frozenColumnCount"
                     :frozen-separator="frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1"
-                    :tooltip-disabled="columnHeaderTooltipsDisabled"
+                    :tooltip-disabled="columnHeaderTooltipsDisabled || !showColumnHeaderTooltips"
                     :column-type="headerColumnType(col.name, col.actualColIdx)"
                     :column-comment="headerColumnComment(col.name, col.actualColIdx)"
                     :show-type-line="reserveColumnTypeLine"
@@ -13157,455 +13226,441 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 </div>
               </div>
 
-              <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
-                <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll" @wheel="onDomGridWheel">
-                  <div class="h-full min-h-[220px]" :style="{ width: 'max(100%, var(--total-w))' }" />
-                </div>
-                <div class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
-                  <component :is="hasActiveFilter ? SearchX : Inbox" class="h-8 w-8 text-muted-foreground/50" aria-hidden="true" />
-                  <div class="space-y-1">
-                    <div class="text-sm font-medium text-foreground">
-                      {{ emptyTitle }}
+              <!-- Body wrapper: gives the vertical/horizontal scrollbars (absolutely
+                   positioned) their own stacking context below the header, so their
+                   `top`/`inset` offsets are measured from the body instead of from the
+                   grid's outer relative container (which starts at the header row). -->
+              <div class="relative min-h-0 flex-1 flex flex-col overflow-hidden">
+                <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
+                  <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll" @wheel="onDomGridWheel">
+                    <div class="h-full min-h-[220px]" :style="{ width: 'max(100%, var(--total-w))' }" />
+                  </div>
+                  <div class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
+                    <component :is="hasActiveFilter ? SearchX : Inbox" class="h-8 w-8 text-muted-foreground/50" aria-hidden="true" />
+                    <div class="space-y-1">
+                      <div class="text-sm font-medium text-foreground">
+                        {{ emptyTitle }}
+                      </div>
+                      <div class="text-xs">{{ emptyDescription }}</div>
                     </div>
-                    <div class="text-xs">{{ emptyDescription }}</div>
                   </div>
                 </div>
-              </div>
 
-              <div
-                v-else-if="useCanvasGridRows"
-                ref="scrollerRef"
-                class="data-grid-scroller canvas-grid-scroller flex-1 overflow-auto overscroll-none relative"
-                :class="{
-                  'is-scrolling': isScrolling,
-                  'has-horizontal-scrollbar': hasGridHorizontalOverflow,
-                }"
-                @scroll="onCanvasScroll"
-                @wheel="onCanvasWheel"
-              >
                 <div
-                  class="relative"
-                  :style="{
-                    width: `${totalWidth}px`,
-                    height: `${canvasContentHeight}px`,
-                  }"
-                  @dblclick="onCanvasDblClick"
-                >
-                  <canvas
-                    ref="canvasRef"
-                    class="canvas-grid-surface dbx-data-grid-font-family sticky left-0 top-0 z-0 block font-normal"
-                    :style="{
-                      width: `${canvasSurfaceWidth}px`,
-                      height: `${canvasViewportHeight}px`,
-                      display: canvasUsingBackSurface ? 'none' : '',
-                    }"
-                    @mousemove="onCanvasMouseMove"
-                    @mouseleave="onCanvasMouseLeave"
-                    @mousedown="onCanvasMouseDown"
-                    @contextmenu="onCanvasContext"
-                  />
-                  <canvas
-                    ref="canvasBackRef"
-                    class="canvas-grid-surface dbx-data-grid-font-family sticky left-0 top-0 z-0 block font-normal"
-                    :style="{
-                      width: `${canvasSurfaceWidth}px`,
-                      height: `${canvasViewportHeight}px`,
-                      display: canvasUsingBackSurface ? '' : 'none',
-                    }"
-                    @mousemove="onCanvasMouseMove"
-                    @mouseleave="onCanvasMouseLeave"
-                    @mousedown="onCanvasMouseDown"
-                    @contextmenu="onCanvasContext"
-                  />
-                  <div ref="canvasOverlayRef" class="canvas-grid-overlay dbx-data-grid-font-family sticky left-0 top-0 z-10 overflow-visible" :style="canvasOverlayStyle" @dblclick.stop>
-                    <div v-if="canvasReadonlyTextCell" class="absolute pointer-events-auto z-20 tabular-nums" :style="canvasReadonlyTextCellStyle" @mousedown.stop @click.stop>
-                      <DataGridReadonlyTextSelection :value="canvasReadonlyTextCell.value" :expanded="canvasReadonlyTextCell.expanded" @close="closeReadonlyCellTextSelection" @escape="escapeReadonlyCellTextSelection" />
-                    </div>
-                    <div v-if="canvasEditingCell" class="absolute pointer-events-auto z-20 tabular-nums" :style="canvasEditingCellStyle" @mousedown.stop @click.stop>
-                      <TemporalCellEditor
-                        v-if="temporalEditorConfigForColumn(canvasEditingCell.actualColIdx)"
-                        v-model="editValue"
-                        :kind="temporalEditorConfigForColumn(canvasEditingCell.actualColIdx)!.kind"
-                        :fraction-precision="temporalEditorConfigForColumn(canvasEditingCell.actualColIdx)!.fractionPrecision"
-                        :normalize-value="(value) => normalizeTemporalCellEditorValue(value, canvasEditingCell!.actualColIdx)"
-                        @cancel="cancelEdit"
-                        @commit="commitGridEdit"
-                      />
-                      <EnumCellEditor
-                        v-else-if="isBooleanGridCell(getRowItem(canvasEditingCell.rowId), canvasEditingCell.actualColIdx)"
-                        v-model="booleanEditorModelValue"
-                        :values="BOOLEAN_CELL_EDITOR_VALUES"
-                        :nullable="isBooleanGridColumnNullable(canvasEditingCell.actualColIdx)"
-                        :initial-null="isGridCellInitialNull(canvasEditingCell.rowId, canvasEditingCell.actualColIdx)"
-                        @cancel="cancelEdit"
-                        @commit="commitBooleanGridEdit"
-                      />
-                      <EnumCellEditor
-                        v-else-if="isEnumGridColumn(canvasEditingCell.actualColIdx)"
-                        v-model="editValue"
-                        :values="enumValuesForGridColumn(canvasEditingCell.actualColIdx)"
-                        :nullable="isEnumGridColumnNullable(canvasEditingCell.actualColIdx)"
-                        :initial-null="isGridCellInitialNull(canvasEditingCell.rowId, canvasEditingCell.actualColIdx)"
-                        @cancel="cancelEdit"
-                        @commit="commitGridEdit"
-                      />
-                      <textarea
-                        v-else-if="cellUsesExpandedEditor(canvasEditingCell.rowId, canvasEditingCell.actualColIdx)"
-                        v-model="editValue"
-                        data-expanded-cell-editor="true"
-                        rows="1"
-                        :inputmode="cellEditInputModeForColumn(canvasEditingCell.actualColIdx)"
-                        autocapitalize="off"
-                        autocorrect="off"
-                        spellcheck="false"
-                        class="cell-edit-input cell-edit-input--expanded absolute left-0 top-0 min-h-full bg-background px-2.5 py-1 leading-[18px] outline-none z-10"
-                        @blur="commitEditFromCellBlur"
-                        @click.stop
-                        @focus="onCellEditTextareaInput"
-                        @input="onCellEditTextareaInput"
-                        @keydown.stop="onCellEditKeydown"
-                        @paste.stop="onCellEditTextareaPaste"
-                        @wheel.stop
-                      />
-                      <input
-                        v-else
-                        v-model="editValue"
-                        :inputmode="cellEditInputModeForColumn(canvasEditingCell.actualColIdx)"
-                        autocapitalize="off"
-                        autocorrect="off"
-                        spellcheck="false"
-                        class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2.5 py-0 leading-[22px] outline-none z-10"
-                        @blur="commitEditFromCellBlur"
-                        @click.stop
-                        @input="onCellEditTextareaInput"
-                        @keydown.stop="onCellEditKeydown"
-                        @paste.stop="onCellEditTextareaPaste"
-                      />
-                    </div>
-                    <div v-if="canvasDetailButtonCell" class="absolute pointer-events-auto z-20 flex -translate-y-1/2 items-center gap-1" :style="canvasDetailButtonStyle" @mouseenter="keepCanvasDetailHover" @mouseleave="clearCanvasDetailHover">
-                      <LightDropdownMenu
-                        v-if="canvasDetailButtonCell.canQuickDownload"
-                        :items="binaryCellDownloadMenuItems"
-                        :open="quickDownloadMenuOpenFor(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
-                        align="end"
-                        content-class="w-44"
-                        :match-trigger-width="false"
-                        @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, canvasDetailButtonCell!.rowIndex, canvasDetailButtonCell!.actualColIdx)"
-                        @select="(mode: string) => downloadCellBinaryValue(canvasDetailButtonCell!.rowIndex, canvasDetailButtonCell!.actualColIdx, mode as BinaryCellDownloadMode)"
-                      >
-                        <template #trigger="{ open, toggle }">
-                          <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                            <Download class="h-3 w-3" />
-                          </button>
-                        </template>
-                      </LightDropdownMenu>
-                      <button
-                        v-if="canvasDetailButtonCell.externalUrl"
-                        class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                        :title="t('grid.openUrl')"
-                        :aria-label="t('grid.openUrl')"
-                        @mousedown.stop
-                        @click.stop="openCellExternalUrl(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
-                      >
-                        <ExternalLink class="h-3 w-3" />
-                      </button>
-                      <button
-                        v-if="canvasDetailButtonCell.foreignKey"
-                        class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                        :title="
-                          t('grid.foreignKeyNavigate', {
-                            table: canvasDetailButtonCell.foreignKey.ref_table,
-                          })
-                        "
-                        @mousedown.stop
-                        @click.stop="navigateToForeignKeyCell(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
-                      >
-                        <ArrowUpRight class="h-3 w-3" />
-                      </button>
-                      <button
-                        v-if="cellDetailButtonEnabled"
-                        class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                        :title="t('grid.cellDetails')"
-                        @mousedown.stop
-                        @click.stop="showCellDetailsForVisibleCell(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.visibleColIdx, canvasDetailButtonCell.actualColIdx)"
-                      >
-                        <Info class="h-3 w-3" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                <!-- Infinite scroll loading indicator for Canvas -->
-                <div v-if="infiniteScrollEnabled && infiniteScrollLoading" class="absolute bottom-0 left-0 right-0 flex items-center justify-center py-2 text-xs text-muted-foreground bg-background/80 backdrop-blur-sm z-10">
-                  <Loader2 class="w-3 h-3 animate-spin mr-1" />
-                  {{ t("grid.loadingMore") }}
-                </div>
-              </div>
-
-              <!-- Virtual scrolled rows -->
-              <div v-else-if="hasVisibleRows" class="relative min-h-0 flex-1">
-                <RecycleScroller
+                  v-else-if="useCanvasGridRows"
                   ref="scrollerRef"
-                  class="data-grid-scroller dbx-data-grid-font-family h-full overflow-x-auto overscroll-none"
+                  class="data-grid-scroller canvas-grid-scroller flex-1 overflow-auto overscroll-none relative"
                   :class="{
                     'is-scrolling': isScrolling,
                     'has-horizontal-scrollbar': hasGridHorizontalOverflow,
                   }"
-                  :items="displayItems"
-                  :item-size="DOM_DATA_GRID_ROW_HEIGHT"
-                  :buffer="600"
-                  :skip-hover="true"
-                  key-field="id"
-                  @scroll="onScrollerScroll"
-                  @wheel="onDomGridWheel"
+                  @scroll="onCanvasScroll"
+                  @wheel="onCanvasWheel"
                 >
-                  <template #default="{ item }">
-                    <div
-                      class="data-grid-row flex border-b border-border h-6.5 w-(--total-w)"
-                      :class="{
-                        'data-grid-row--deleted opacity-70': item.isDeleted,
-                        'data-grid-row--new': item.isNew && !isRowActive(item.displayIndex),
-                        'data-grid-row--draft': item.isDraft && !isRowActive(item.displayIndex),
-                        'data-grid-row--striped': !item.isNew && !item.isDraft && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
-                        'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
-                        'crosshair-row': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === item.displayIndex && !item.isDeleted,
-                        'relative z-20 overflow-visible': editingCell?.rowId === item.id || readonlyTextCell?.rowId === item.id,
+                  <div
+                    class="relative"
+                    :style="{
+                      width: `${totalWidth}px`,
+                      height: `${canvasContentHeight}px`,
+                    }"
+                    @dblclick="onCanvasDblClick"
+                  >
+                    <canvas
+                      ref="canvasRef"
+                      class="canvas-grid-surface dbx-data-grid-font-family sticky left-0 top-0 z-0 block font-normal"
+                      :style="{
+                        width: `${canvasSurfaceWidth}px`,
+                        height: `${canvasViewportHeight}px`,
+                        display: canvasUsingBackSurface ? 'none' : '',
                       }"
-                      :style="dataGridRowStyle(item)"
-                      :data-row-index="item.displayIndex"
-                    >
-                      <div
-                        class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default sticky left-0 z-10"
-                        :class="[
-                          rowNumberStatusClass(item),
-                          {
-                            'data-grid-row-number--selected': isRowSelected(item.id),
-                            'data-grid-row-number--in-selection': rowNumberShowsSelectionTint(item),
-                          },
-                        ]"
-                        @mousedown="onRowNumberMouseDown(item, $event)"
-                        @dblclick.stop="toggleTranspose(item.displayIndex)"
-                        @contextmenu="onRowContext(item.id, item.displayIndex)"
-                      >
-                        {{ rowNumberText(item) }}
+                      @mousemove="onCanvasMouseMove"
+                      @mouseleave="onCanvasMouseLeave"
+                      @mousedown="onCanvasMouseDown"
+                      @contextmenu="onCanvasContext"
+                    />
+                    <canvas
+                      ref="canvasBackRef"
+                      class="canvas-grid-surface dbx-data-grid-font-family sticky left-0 top-0 z-0 block font-normal"
+                      :style="{
+                        width: `${canvasSurfaceWidth}px`,
+                        height: `${canvasViewportHeight}px`,
+                        display: canvasUsingBackSurface ? '' : 'none',
+                      }"
+                      @mousemove="onCanvasMouseMove"
+                      @mouseleave="onCanvasMouseLeave"
+                      @mousedown="onCanvasMouseDown"
+                      @contextmenu="onCanvasContext"
+                    />
+                    <div ref="canvasOverlayRef" class="canvas-grid-overlay dbx-data-grid-font-family sticky left-0 top-0 z-10 overflow-visible" :style="canvasOverlayStyle" @dblclick.stop>
+                      <div v-if="canvasReadonlyTextCell" class="absolute pointer-events-auto z-20 tabular-nums" :style="canvasReadonlyTextCellStyle" @mousedown.stop @click.stop>
+                        <DataGridReadonlyTextSelection :value="canvasReadonlyTextCell.value" :expanded="canvasReadonlyTextCell.expanded" @close="closeReadonlyCellTextSelection" @escape="escapeReadonlyCellTextSelection" />
                       </div>
-                      <div
-                        class="shrink-0"
-                        :style="{
-                          width: `${horizontalColumnWindowBeforeWidth}px`,
-                        }"
-                      />
-                      <div
-                        v-for="col in renderedGridColumns"
-                        :key="col.actualColIdx"
-                        class="data-grid-cell group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none inline-block items-center tabular-nums"
-                        :style="renderedColumnStyle(col.visibleColIdx)"
-                        :class="[
-                          gridCellTextColorClass(item, col.actualColIdx, col.visibleColIdx),
-                          selectionFrameEdgeClass(item.displayIndex, col.visibleColIdx),
-                          {
-                            'data-grid-cell--frozen': col.visibleColIdx < frozenColumnCount,
-                            'data-grid-cell--frozen-separator': frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1,
-                            'text-right': columnAligns[col.visibleColIdx] === 'right',
-                            'bg-yellow-500/10 cell-dirty': item.isDirtyCol[col.actualColIdx],
-                            'cell-selected': cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
-                            'cell-selected-dirty': cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
-                            'cell-selected--single': !selectionUsesOuterFrame && selectionFrameKindForCell(item.displayIndex, col.visibleColIdx) === 'single' && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
-                            'cell-selected--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
-                            'cell-selected-dirty--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
-                            'row-cell-selected': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
-                            'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
-                            'crosshair-column': !!crosshairTarget?.columnCrosshair && crosshairTarget.visibleColIdx === col.visibleColIdx && !item.isDeleted,
-                            'cell-search-match': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
-                            'cell-current-search-match': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
-                            'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
-                            'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
-                            'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
-                            'cursor-text': !isScrolling && !canEditCellItem(item, col.actualColIdx),
-                            'cursor-text hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx) && !(booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null),
-                            'cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null && canEditCellItem(item, col.actualColIdx),
-                            'line-through': item.isDeleted,
-                            'overflow-visible z-20 border-r-transparent': (editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx) || readonlyTextCellMatches(item.id, col.actualColIdx),
-                            'overflow-hidden': !((editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx) || readonlyTextCellMatches(item.id, col.actualColIdx)),
-                          },
-                        ]"
-                        @mousedown="
-                          prepareDataCellMouseDown(item, col.actualColIdx);
-                          handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event);
-                        "
-                        @mouseenter="onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx, $event)"
-                        @mouseleave="onCellMouseleave(item.displayIndex, col.actualColIdx)"
-                        @dblclick="onDomCellDblClick(item, col.actualColIdx, $event)"
-                        :data-visible-col-index="col.visibleColIdx"
-                        @contextmenu="onCellContext(item.id, item.displayIndex, col.actualColIdx, col.visibleColIdx, $event)"
-                      >
-                        <template v-if="readonlyTextCellMatches(item.id, col.actualColIdx)">
-                          <DataGridReadonlyTextSelection :value="readonlyTextCell!.value" :expanded="readonlyTextCell!.expanded" @close="closeReadonlyCellTextSelection" @escape="escapeReadonlyCellTextSelection" />
-                        </template>
-                        <template v-else-if="editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx">
-                          <TemporalCellEditor
-                            v-if="temporalEditorConfigForColumn(col.actualColIdx)"
-                            v-model="editValue"
-                            :kind="temporalEditorConfigForColumn(col.actualColIdx)!.kind"
-                            :fraction-precision="temporalEditorConfigForColumn(col.actualColIdx)!.fractionPrecision"
-                            :normalize-value="(value) => normalizeTemporalCellEditorValue(value, col.actualColIdx)"
-                            @cancel="cancelEdit"
-                            @commit="commitGridEdit"
-                          />
-                          <EnumCellEditor
-                            v-else-if="isBooleanGridCell(item, col.actualColIdx)"
-                            v-model="booleanEditorModelValue"
-                            :values="BOOLEAN_CELL_EDITOR_VALUES"
-                            :nullable="isBooleanGridColumnNullable(col.actualColIdx)"
-                            :initial-null="isGridCellInitialNull(item.id, col.actualColIdx)"
-                            @cancel="cancelEdit"
-                            @commit="commitBooleanGridEdit"
-                          />
-                          <EnumCellEditor
-                            v-else-if="isEnumGridColumn(col.actualColIdx)"
-                            v-model="editValue"
-                            :values="enumValuesForGridColumn(col.actualColIdx)"
-                            :nullable="isEnumGridColumnNullable(col.actualColIdx)"
-                            :initial-null="isGridCellInitialNull(item.id, col.actualColIdx)"
-                            @cancel="cancelEdit"
-                            @commit="commitGridEdit"
-                          />
-                          <textarea
-                            v-else-if="cellUsesExpandedEditor(item.id, col.actualColIdx)"
-                            v-model="editValue"
-                            data-expanded-cell-editor="true"
-                            rows="1"
-                            :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
-                            autocapitalize="off"
-                            autocorrect="off"
-                            spellcheck="false"
-                            class="cell-edit-input cell-edit-input--expanded absolute left-0 top-0 min-h-full bg-background px-2.5 py-1 leading-[18px] outline-none z-10"
-                            @blur="commitEditFromCellBlur"
-                            @click.stop
-                            @focus="onCellEditTextareaInput"
-                            @input="onCellEditTextareaInput"
-                            @keydown.stop="onCellEditKeydown"
-                            @paste.stop="onCellEditTextareaPaste"
-                            @wheel.stop
-                          />
-                          <input
-                            v-else
-                            v-model="editValue"
-                            :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
-                            autocapitalize="off"
-                            autocorrect="off"
-                            spellcheck="false"
-                            class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2.5 py-0 leading-[22px] outline-none z-10"
-                            @blur="commitEditFromCellBlur"
-                            @click.stop
-                            @input="onCellEditTextareaInput"
-                            @keydown.stop="onCellEditKeydown"
-                            @paste.stop="onCellEditTextareaPaste"
-                          />
-                        </template>
-                        <template v-else-if="booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null && canEditCellItem(item, col.actualColIdx)">
-                          <div class="flex h-full items-center justify-center">
-                            <input
-                              type="checkbox"
-                              class="h-3.5 w-3.5 rounded border-border/70 bg-background text-primary focus:ring-0"
-                              :checked="booleanCellChecked(item.data[col.actualColIdx])"
-                              :disabled="!canEditCellItem(item, col.actualColIdx)"
-                              @mousedown.stop
-                              @click.stop="cycleBooleanGridCell(item, col.actualColIdx, $event)"
-                            />
-                          </div>
-                        </template>
-                        <template v-else-if="booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] === null && canEditCellItem(item, col.actualColIdx)">
-                          <span class="italic text-muted-foreground cursor-pointer select-none" @click.stop="cycleBooleanGridCell(item, col.actualColIdx, $event)">{{
-                            firstLineCellDisplayValue(newRowCellPlaceholder(item, col.actualColIdx) ?? formatCellCached(item.data[col.actualColIdx], col.actualColIdx), flatteningMultiLineEnabled)
-                          }}</span>
-                        </template>
-                        <template v-else>
-                          <template v-if="newRowCellPlaceholder(item, col.actualColIdx)">
-                            <span class="text-muted-foreground/70 italic">{{ firstLineCellDisplayValue(newRowCellPlaceholder(item, col.actualColIdx) ?? "", flatteningMultiLineEnabled) }}</span>
+                      <div v-if="canvasEditingCell" class="absolute pointer-events-auto z-20 tabular-nums" :style="canvasEditingCellStyle" @mousedown.stop @click.stop>
+                        <TemporalCellEditor
+                          v-if="temporalEditorConfigForColumn(canvasEditingCell.actualColIdx)"
+                          v-model="editValue"
+                          :kind="temporalEditorConfigForColumn(canvasEditingCell.actualColIdx)!.kind"
+                          :fraction-precision="temporalEditorConfigForColumn(canvasEditingCell.actualColIdx)!.fractionPrecision"
+                          :normalize-value="(value) => normalizeTemporalCellEditorValue(value, canvasEditingCell!.actualColIdx)"
+                          @cancel="cancelEdit"
+                          @commit="commitGridEdit"
+                        />
+                        <EnumCellEditor
+                          v-else-if="isBooleanGridCell(getRowItem(canvasEditingCell.rowId), canvasEditingCell.actualColIdx)"
+                          v-model="booleanEditorModelValue"
+                          :values="BOOLEAN_CELL_EDITOR_VALUES"
+                          :nullable="isBooleanGridColumnNullable(canvasEditingCell.actualColIdx)"
+                          :initial-null="isGridCellInitialNull(canvasEditingCell.rowId, canvasEditingCell.actualColIdx)"
+                          @cancel="cancelEdit"
+                          @commit="commitBooleanGridEdit"
+                        />
+                        <EnumCellEditor
+                          v-else-if="isEnumGridColumn(canvasEditingCell.actualColIdx)"
+                          v-model="editValue"
+                          :values="enumValuesForGridColumn(canvasEditingCell.actualColIdx)"
+                          :nullable="isEnumGridColumnNullable(canvasEditingCell.actualColIdx)"
+                          :initial-null="isGridCellInitialNull(canvasEditingCell.rowId, canvasEditingCell.actualColIdx)"
+                          @cancel="cancelEdit"
+                          @commit="commitGridEdit"
+                        />
+                        <textarea
+                          v-else-if="cellUsesExpandedEditor(canvasEditingCell.rowId, canvasEditingCell.actualColIdx)"
+                          v-model="editValue"
+                          data-expanded-cell-editor="true"
+                          rows="1"
+                          :inputmode="cellEditInputModeForColumn(canvasEditingCell.actualColIdx)"
+                          autocapitalize="off"
+                          autocorrect="off"
+                          spellcheck="false"
+                          class="cell-edit-input cell-edit-input--expanded absolute left-0 top-0 min-h-full bg-background px-2.5 py-1 leading-[18px] outline-none z-10"
+                          @blur="commitEditFromCellBlur"
+                          @click.stop
+                          @focus="onCellEditTextareaInput"
+                          @input="onCellEditTextareaInput"
+                          @keydown.stop="onCellEditKeydown"
+                          @paste.stop="onCellEditTextareaPaste"
+                          @wheel.stop
+                        />
+                        <input
+                          v-else
+                          v-model="editValue"
+                          :inputmode="cellEditInputModeForColumn(canvasEditingCell.actualColIdx)"
+                          autocapitalize="off"
+                          autocorrect="off"
+                          spellcheck="false"
+                          class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2.5 py-0 leading-[22px] outline-none z-10"
+                          @blur="commitEditFromCellBlur"
+                          @click.stop
+                          @input="onCellEditTextareaInput"
+                          @keydown.stop="onCellEditKeydown"
+                          @paste.stop="onCellEditTextareaPaste"
+                        />
+                      </div>
+                      <div v-if="canvasDetailButtonCell" class="absolute pointer-events-auto z-20 flex -translate-y-1/2 items-center gap-1" :style="canvasDetailButtonStyle" @mouseenter="keepCanvasDetailHover" @mouseleave="clearCanvasDetailHover">
+                        <LightDropdownMenu
+                          v-if="canvasDetailButtonCell.canQuickDownload"
+                          :items="binaryCellDownloadMenuItems"
+                          :open="quickDownloadMenuOpenFor(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
+                          align="end"
+                          content-class="w-44"
+                          :match-trigger-width="false"
+                          @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, canvasDetailButtonCell!.rowIndex, canvasDetailButtonCell!.actualColIdx)"
+                          @select="(mode: string) => downloadCellBinaryValue(canvasDetailButtonCell!.rowIndex, canvasDetailButtonCell!.actualColIdx, mode as BinaryCellDownloadMode)"
+                        >
+                          <template #trigger="{ open, toggle }">
+                            <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
+                              <Download class="h-3 w-3" />
+                            </button>
                           </template>
-                          <template v-else>{{ gridCellDisplayValue(formatGridItemCell(item, col.actualColIdx), flatteningMultiLineEnabled, showWhitespaceEnabled) }}</template>
-                          <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
-                            <LightDropdownMenu
-                              v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
-                              :items="binaryCellDownloadMenuItems"
-                              :open="quickDownloadMenuOpenFor(item.displayIndex, col.actualColIdx)"
-                              align="end"
-                              content-class="w-44"
-                              :match-trigger-width="false"
-                              @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, item.displayIndex, col.actualColIdx)"
-                              @select="(mode: string) => downloadCellBinaryValue(item.displayIndex, col.actualColIdx, mode as BinaryCellDownloadMode)"
-                            >
-                              <template #trigger="{ open, toggle }">
-                                <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                                  <Download class="h-3 w-3" />
-                                </button>
-                              </template>
-                            </LightDropdownMenu>
-                            <button
-                              v-if="canOpenCellExternalUrl(item.displayIndex, col.actualColIdx)"
-                              class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                              :title="t('grid.openUrl')"
-                              :aria-label="t('grid.openUrl')"
-                              @mousedown.stop
-                              @click.stop="openCellExternalUrl(item.displayIndex, col.actualColIdx)"
-                            >
-                              <ExternalLink class="h-3 w-3" />
-                            </button>
-                            <button
-                              v-if="cellDetailButtonEnabled"
-                              class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                              :title="t('grid.cellDetails')"
-                              @mousedown.stop
-                              @click.stop="showCellDetailsForVisibleCell(item.displayIndex, col.visibleColIdx, col.actualColIdx)"
-                            >
-                              <Info class="h-3 w-3" />
-                            </button>
-                          </div>
-                        </template>
-                      </div>
-                      <div
-                        class="shrink-0"
-                        :style="{
-                          width: `${horizontalColumnWindow.afterWidth}px`,
-                        }"
-                      />
-                    </div>
-                  </template>
-                </RecycleScroller>
-                <div v-if="domSelectionDragOverlayStyle" class="data-grid-selection-drag-overlay pointer-events-none absolute z-20" :style="domSelectionDragOverlayStyle" />
-              </div>
-              <!-- Infinite scroll loading indicator for RecycleScroller -->
-              <div v-if="infiniteScrollEnabled && infiniteScrollLoading && !gridSurfaceBusy" class="flex items-center justify-center py-2 text-xs text-muted-foreground">
-                <Loader2 class="w-3 h-3 animate-spin mr-1" />
-                {{ t("grid.loadingMore") }}
-              </div>
-              <div v-if="hasGridHorizontalOverflow" ref="gridHorizontalScrollbarTrackRef" class="data-grid-horizontal-scrollbar" @pointerdown="startGridHorizontalScrollbarDrag">
-                <div ref="gridHorizontalScrollbarThumbRef" class="data-grid-horizontal-scrollbar__thumb" />
-              </div>
-              <div v-if="hasGridVerticalOverflow" ref="gridVerticalScrollbarTrackRef" class="data-grid-vertical-scrollbar" @pointerdown="startGridVerticalScrollbarDrag">
-                <div ref="gridVerticalScrollbarThumbRef" class="data-grid-vertical-scrollbar__thumb" />
-              </div>
-              <div v-if="gridSurfaceBusy" class="absolute inset-0 z-20 flex items-center justify-center" :class="pageJumpProgress ? 'bg-background/35 backdrop-blur-[1px]' : 'bg-background/50'">
-                <div v-if="pageJumpProgress" class="w-72 max-w-[calc(100%-2rem)] rounded-lg border bg-background/95 p-3.5 shadow-lg">
-                  <div class="flex items-center gap-3">
-                    <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-                      <Loader2 class="h-4 w-4 animate-spin" />
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <div class="truncate text-sm font-medium text-foreground">{{ t("grid.pageJumpLoading", { page: pageJumpProgress.targetPage }) }}</div>
-                      <div class="mt-0.5 flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
-                        <span>{{ t("grid.pageJumpProgress", { current: pageJumpProgress.completedRequests, total: pageJumpProgress.totalRequests }) }}</span>
-                        <span class="shrink-0 tabular-nums">{{ formatElapsedSeconds(loadingElapsed) }}s</span>
+                        </LightDropdownMenu>
+                        <button
+                          v-if="canvasDetailButtonCell.externalUrl"
+                          class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                          :title="t('grid.openUrl')"
+                          :aria-label="t('grid.openUrl')"
+                          @mousedown.stop
+                          @click.stop="openCellExternalUrl(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
+                        >
+                          <ExternalLink class="h-3 w-3" />
+                        </button>
+                        <button
+                          v-if="canvasDetailButtonCell.foreignKey"
+                          class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                          :title="
+                            t('grid.foreignKeyNavigate', {
+                              table: canvasDetailButtonCell.foreignKey.ref_table,
+                            })
+                          "
+                          @mousedown.stop
+                          @click.stop="navigateToForeignKeyCell(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
+                        >
+                          <ArrowUpRight class="h-3 w-3" />
+                        </button>
+                        <button
+                          v-if="cellDetailButtonEnabled"
+                          class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                          :title="t('grid.cellDetails')"
+                          @mousedown.stop
+                          @click.stop="showCellDetailsForVisibleCell(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.visibleColIdx, canvasDetailButtonCell.actualColIdx)"
+                        >
+                          <Info class="h-3 w-3" />
+                        </button>
                       </div>
                     </div>
                   </div>
-                  <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-valuemin="0" :aria-valuemax="pageJumpProgress.totalRequests" :aria-valuenow="pageJumpProgress.completedRequests">
-                    <div class="h-full rounded-full bg-primary transition-[width] duration-200 ease-out" :style="{ width: `${pageJumpProgressPercent}%` }" />
+                  <!-- Infinite scroll loading indicator for Canvas -->
+                  <div v-if="infiniteScrollEnabled && infiniteScrollLoading" class="absolute bottom-0 left-0 right-0 flex items-center justify-center py-2 text-xs text-muted-foreground bg-background/80 backdrop-blur-sm z-10">
+                    <Loader2 class="w-3 h-3 animate-spin mr-1" />
+                    {{ t("grid.loadingMore") }}
                   </div>
                 </div>
-                <div v-else class="flex items-center gap-2 rounded-md border bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
-                  <Loader2 class="w-3.5 h-3.5 animate-spin" />
-                  <span class="tabular-nums">{{ formatElapsedSeconds(loadingElapsed) }}s</span>
+
+                <!-- Virtual scrolled rows -->
+                <div v-else-if="hasVisibleRows" class="relative min-h-0 flex-1">
+                  <RecycleScroller
+                    ref="scrollerRef"
+                    class="data-grid-scroller dbx-data-grid-font-family h-full overflow-x-auto overscroll-none"
+                    :class="{
+                      'is-scrolling': isScrolling,
+                      'has-horizontal-scrollbar': hasGridHorizontalOverflow,
+                    }"
+                    :items="displayItems"
+                    :item-size="DOM_DATA_GRID_ROW_HEIGHT"
+                    :buffer="600"
+                    :skip-hover="true"
+                    key-field="id"
+                    @scroll="onScrollerScroll"
+                    @wheel="onDomGridWheel"
+                  >
+                    <template #default="{ item }">
+                      <div
+                        class="data-grid-row flex border-b border-border h-6.5 w-(--total-w)"
+                        :class="{
+                          'data-grid-row--deleted opacity-70': item.isDeleted,
+                          'data-grid-row--new': item.isNew && !isRowActive(item.displayIndex),
+                          'data-grid-row--draft': item.isDraft && !isRowActive(item.displayIndex),
+                          'data-grid-row--striped': !item.isNew && !item.isDraft && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
+                          'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
+                          'crosshair-row': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === item.displayIndex && !item.isDeleted,
+                          'relative z-20 overflow-visible': editingCell?.rowId === item.id || readonlyTextCell?.rowId === item.id,
+                        }"
+                        :style="dataGridRowStyle(item)"
+                        :data-row-index="item.displayIndex"
+                      >
+                        <div
+                          class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default sticky left-0 z-10"
+                          :class="[
+                            rowNumberStatusClass(item),
+                            {
+                              'data-grid-row-number--selected': isRowSelected(item.id),
+                              'data-grid-row-number--in-selection': rowNumberShowsSelectionTint(item),
+                            },
+                          ]"
+                          @mousedown="onRowNumberMouseDown(item, $event)"
+                          @dblclick.stop="toggleTranspose(item.displayIndex)"
+                          @contextmenu="onRowContext(item.id, item.displayIndex)"
+                        >
+                          {{ rowNumberText(item) }}
+                        </div>
+                        <div
+                          class="shrink-0"
+                          :style="{
+                            width: `${horizontalColumnWindowBeforeWidth}px`,
+                          }"
+                        />
+                        <div
+                          v-for="col in renderedGridColumns"
+                          :key="col.actualColIdx"
+                          class="data-grid-cell group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none inline-block items-center tabular-nums"
+                          :style="renderedColumnStyle(col.visibleColIdx)"
+                          :class="[
+                            gridCellTextColorClass(item, col.actualColIdx, col.visibleColIdx),
+                            selectionFrameEdgeClass(item.displayIndex, col.visibleColIdx),
+                            {
+                              'data-grid-cell--frozen': col.visibleColIdx < frozenColumnCount,
+                              'data-grid-cell--frozen-separator': frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1,
+                              'text-right': columnAligns[col.visibleColIdx] === 'right',
+                              'bg-yellow-500/10 cell-dirty': item.isDirtyCol[col.actualColIdx],
+                              'cell-selected': cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                              'cell-selected-dirty': cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                              'cell-selected--single': !selectionUsesOuterFrame && selectionFrameKindForCell(item.displayIndex, col.visibleColIdx) === 'single' && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                              'cell-selected--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                              'cell-selected-dirty--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                              'row-cell-selected': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                              'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                              'crosshair-column': !!crosshairTarget?.columnCrosshair && crosshairTarget.visibleColIdx === col.visibleColIdx && !item.isDeleted,
+                              'cell-search-match': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
+                              'cell-current-search-match': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
+                              'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
+                              'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
+                              'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
+                              'cursor-text': !isScrolling && !canEditCellItem(item, col.actualColIdx),
+                              'cursor-text hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx) && !(booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null),
+                              'cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null && canEditCellItem(item, col.actualColIdx),
+                              'line-through': item.isDeleted,
+                              'overflow-visible z-20 border-r-transparent': (editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx) || readonlyTextCellMatches(item.id, col.actualColIdx),
+                              'overflow-hidden': !((editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx) || readonlyTextCellMatches(item.id, col.actualColIdx)),
+                            },
+                          ]"
+                          @mousedown="
+                            prepareDataCellMouseDown(item, col.actualColIdx);
+                            handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event);
+                          "
+                          @mouseenter="onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx, $event)"
+                          @mouseleave="onCellMouseleave(item.displayIndex, col.actualColIdx)"
+                          @dblclick="onDomCellDblClick(item, col.actualColIdx, $event)"
+                          :data-visible-col-index="col.visibleColIdx"
+                          @contextmenu="onCellContext(item.id, item.displayIndex, col.actualColIdx, col.visibleColIdx, $event)"
+                        >
+                          <template v-if="readonlyTextCellMatches(item.id, col.actualColIdx)">
+                            <DataGridReadonlyTextSelection :value="readonlyTextCell!.value" :expanded="readonlyTextCell!.expanded" @close="closeReadonlyCellTextSelection" @escape="escapeReadonlyCellTextSelection" />
+                          </template>
+                          <template v-else-if="editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx">
+                            <TemporalCellEditor
+                              v-if="temporalEditorConfigForColumn(col.actualColIdx)"
+                              v-model="editValue"
+                              :kind="temporalEditorConfigForColumn(col.actualColIdx)!.kind"
+                              :fraction-precision="temporalEditorConfigForColumn(col.actualColIdx)!.fractionPrecision"
+                              :normalize-value="(value) => normalizeTemporalCellEditorValue(value, col.actualColIdx)"
+                              @cancel="cancelEdit"
+                              @commit="commitGridEdit"
+                            />
+                            <EnumCellEditor
+                              v-else-if="isBooleanGridCell(item, col.actualColIdx)"
+                              v-model="booleanEditorModelValue"
+                              :values="BOOLEAN_CELL_EDITOR_VALUES"
+                              :nullable="isBooleanGridColumnNullable(col.actualColIdx)"
+                              :initial-null="isGridCellInitialNull(item.id, col.actualColIdx)"
+                              @cancel="cancelEdit"
+                              @commit="commitBooleanGridEdit"
+                            />
+                            <EnumCellEditor
+                              v-else-if="isEnumGridColumn(col.actualColIdx)"
+                              v-model="editValue"
+                              :values="enumValuesForGridColumn(col.actualColIdx)"
+                              :nullable="isEnumGridColumnNullable(col.actualColIdx)"
+                              :initial-null="isGridCellInitialNull(item.id, col.actualColIdx)"
+                              @cancel="cancelEdit"
+                              @commit="commitGridEdit"
+                            />
+                            <textarea
+                              v-else-if="cellUsesExpandedEditor(item.id, col.actualColIdx)"
+                              v-model="editValue"
+                              data-expanded-cell-editor="true"
+                              rows="1"
+                              :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
+                              autocapitalize="off"
+                              autocorrect="off"
+                              spellcheck="false"
+                              class="cell-edit-input cell-edit-input--expanded absolute left-0 top-0 min-h-full bg-background px-2.5 py-1 leading-[18px] outline-none z-10"
+                              @blur="commitEditFromCellBlur"
+                              @click.stop
+                              @focus="onCellEditTextareaInput"
+                              @input="onCellEditTextareaInput"
+                              @keydown.stop="onCellEditKeydown"
+                              @paste.stop="onCellEditTextareaPaste"
+                              @wheel.stop
+                            />
+                            <input
+                              v-else
+                              v-model="editValue"
+                              :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
+                              autocapitalize="off"
+                              autocorrect="off"
+                              spellcheck="false"
+                              class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2.5 py-0 leading-[22px] outline-none z-10"
+                              @blur="commitEditFromCellBlur"
+                              @click.stop
+                              @input="onCellEditTextareaInput"
+                              @keydown.stop="onCellEditKeydown"
+                              @paste.stop="onCellEditTextareaPaste"
+                            />
+                          </template>
+                          <template v-else-if="booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null && canEditCellItem(item, col.actualColIdx)">
+                            <div class="flex h-full items-center justify-center">
+                              <input
+                                type="checkbox"
+                                class="h-3.5 w-3.5 rounded border-border/70 bg-background text-primary focus:ring-0"
+                                :checked="booleanCellChecked(item.data[col.actualColIdx])"
+                                :disabled="!canEditCellItem(item, col.actualColIdx)"
+                                @mousedown.stop
+                                @click.stop="cycleBooleanGridCell(item, col.actualColIdx, $event)"
+                              />
+                            </div>
+                          </template>
+                          <template v-else-if="booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] === null && canEditCellItem(item, col.actualColIdx)">
+                            <span class="italic text-muted-foreground cursor-pointer select-none" @click.stop="cycleBooleanGridCell(item, col.actualColIdx, $event)">{{
+                              firstLineCellDisplayValue(newRowCellPlaceholder(item, col.actualColIdx) ?? formatCellCached(item.data[col.actualColIdx], col.actualColIdx), flatteningMultiLineEnabled)
+                            }}</span>
+                          </template>
+                          <template v-else>
+                            <template v-if="newRowCellPlaceholder(item, col.actualColIdx)">
+                              <span class="text-muted-foreground/70 italic">{{ firstLineCellDisplayValue(newRowCellPlaceholder(item, col.actualColIdx) ?? "", flatteningMultiLineEnabled) }}</span>
+                            </template>
+                            <template v-else>{{ gridCellDisplayValue(formatGridItemCell(item, col.actualColIdx), flatteningMultiLineEnabled, showWhitespaceEnabled) }}</template>
+                            <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                              <LightDropdownMenu
+                                v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
+                                :items="binaryCellDownloadMenuItems"
+                                :open="quickDownloadMenuOpenFor(item.displayIndex, col.actualColIdx)"
+                                align="end"
+                                content-class="w-44"
+                                :match-trigger-width="false"
+                                @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, item.displayIndex, col.actualColIdx)"
+                                @select="(mode: string) => downloadCellBinaryValue(item.displayIndex, col.actualColIdx, mode as BinaryCellDownloadMode)"
+                              >
+                                <template #trigger="{ open, toggle }">
+                                  <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
+                                    <Download class="h-3 w-3" />
+                                  </button>
+                                </template>
+                              </LightDropdownMenu>
+                              <button
+                                v-if="canOpenCellExternalUrl(item.displayIndex, col.actualColIdx)"
+                                class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                                :title="t('grid.openUrl')"
+                                :aria-label="t('grid.openUrl')"
+                                @mousedown.stop
+                                @click.stop="openCellExternalUrl(item.displayIndex, col.actualColIdx)"
+                              >
+                                <ExternalLink class="h-3 w-3" />
+                              </button>
+                              <button
+                                v-if="cellDetailButtonEnabled"
+                                class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                                :title="t('grid.cellDetails')"
+                                @mousedown.stop
+                                @click.stop="showCellDetailsForVisibleCell(item.displayIndex, col.visibleColIdx, col.actualColIdx)"
+                              >
+                                <Info class="h-3 w-3" />
+                              </button>
+                            </div>
+                          </template>
+                        </div>
+                        <div
+                          class="shrink-0"
+                          :style="{
+                            width: `${horizontalColumnWindow.afterWidth}px`,
+                          }"
+                        />
+                      </div>
+                    </template>
+                  </RecycleScroller>
+                  <div v-if="domSelectionDragOverlayStyle" class="data-grid-selection-drag-overlay pointer-events-none absolute z-20" :style="domSelectionDragOverlayStyle" />
+                </div>
+                <!-- Infinite scroll loading indicator for RecycleScroller -->
+                <div v-if="infiniteScrollEnabled && infiniteScrollLoading && !gridSurfaceBusy" class="flex items-center justify-center py-2 text-xs text-muted-foreground">
+                  <Loader2 class="w-3 h-3 animate-spin mr-1" />
+                  {{ t("grid.loadingMore") }}
+                </div>
+                <div v-if="hasGridHorizontalOverflow" ref="gridHorizontalScrollbarTrackRef" class="data-grid-horizontal-scrollbar" @pointerdown="startGridHorizontalScrollbarDrag">
+                  <div ref="gridHorizontalScrollbarThumbRef" class="data-grid-horizontal-scrollbar__thumb" />
+                </div>
+                <div v-if="hasGridVerticalOverflow" ref="gridVerticalScrollbarTrackRef" class="data-grid-vertical-scrollbar" @pointerdown="startGridVerticalScrollbarDrag">
+                  <div ref="gridVerticalScrollbarThumbRef" class="data-grid-vertical-scrollbar__thumb" />
+                </div>
+                <div v-if="gridSurfaceBusy" class="absolute inset-0 z-20 flex items-center justify-center" :class="pageJumpProgress ? 'bg-background/35 backdrop-blur-[1px]' : 'bg-background/50'">
+                  <DataGridBusyOverlay :elapsed-ms="loadingElapsed" :page-jump-progress="pageJumpProgress" :show-cancel="showCancel" :cancelling="cancelling" :cancel-disabled="cancelDisabled" @cancel="emit('cancel')" />
                 </div>
               </div>
             </template>
@@ -13942,13 +13997,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         </span>
         <span v-if="showTruncationWarning" class="shrink-0 text-amber-500 text-xs">(truncated)</span>
         <span v-if="!hasData" class="shrink-0">{{ t("grid.rowsAffected", { count: result.affected_rows }) }}</span>
-        <template v-if="resolvedDatabaseType === 'oceanbase-oracle' && isResultsContext">
-          <span class="shrink-0" :title="t('grid.serverExecuteTimeHint')">{{ result.server_execute_time_us !== undefined ? t("grid.serverExecuteTime", { us: result.server_execute_time_us }) : t("grid.serverExecuteTimeUnavailable") }}</span>
-          <span class="shrink-0" :title="t('grid.agentExecuteTimeHint')">{{ t("grid.agentExecuteTime", { ms: result.execution_time_ms }) }}</span>
-          <span v-if="result.client_request_wait_ms !== undefined" class="shrink-0" :title="t('grid.clientRequestWaitHint')">{{ t("grid.clientRequestWait", { ms: result.client_request_wait_ms }) }}</span>
-          <span v-if="resultViewUpdateMs !== undefined" class="shrink-0" :title="t('grid.resultViewUpdateHint')">{{ t("grid.resultViewUpdate", { ms: resultViewUpdateMs }) }}</span>
-        </template>
-        <span v-else class="shrink-0">{{ result.execution_time_ms }}ms</span>
+        <QueryTimingDetails v-if="isResultsContext" :result="result" :render-ms="resultViewUpdateMs" />
+        <span v-else class="shrink-0">{{ formatQueryDuration(result.execution_time_ms) }}</span>
 
         <template v-if="editable && hasDataGridSaveTarget">
           <span v-if="hasPendingChanges" class="shrink-0 text-foreground">
@@ -14210,6 +14260,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :loading="dropAllMongoIndexesLoading"
       :close-on-confirm="false"
       @confirm="confirmDropAllMongoIndexes"
+    />
+    <!-- Salesforce applies each record with its own REST call and cannot roll back, so the
+         save is reviewed here first. Cancel (or closing) denies it and keeps the edits staged. -->
+    <DangerConfirmDialog
+      v-model:open="salesforceSaveConfirmOpen"
+      :title="t('grid.salesforceSaveConfirmTitle')"
+      :message="t('grid.salesforceSaveConfirmMessage', { count: salesforceSaveConfirmTotal })"
+      :details-text="salesforceSaveConfirmDetails"
+      :sql="salesforceSaveConfirmSql"
+      :confirm-label="t('grid.salesforceSaveConfirm')"
+      :close-on-confirm="false"
+      @confirm="confirmSalesforceSave"
     />
     <ImagePreviewDialog v-if="imagePreviewMounted" v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
     <component v-if="previewDialogOpen && previewDialogConfig" :is="previewDialogConfig.component" v-model:open="previewDialogOpen" v-bind="previewDialogConfig.props" />

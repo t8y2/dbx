@@ -999,6 +999,36 @@ pub async fn get_plugin_estimated_plan(
     dbx_core::query::plugin_plan::explain_estimated_plan(&state, request).await
 }
 
+/// Read-only data query for the plugin Host API (`host.data:read`). The
+/// plugin id is bound by the host bridge; the core enforces the manifest
+/// permission, the user's grant, and the read-only statement gate.
+#[tauri::command]
+pub async fn query_plugin_data(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    plugin_id: String,
+    request: dbx_core::query::plugin_data::PluginDataQueryRequest,
+) -> Result<dbx_core::query::plugin_data::PluginDataQueryResult, String> {
+    dbx_core::query::plugin_data::query_plugin_data(&state, &plugin_id, request).await
+}
+
+#[tauri::command]
+pub async fn get_plugin_data_grants(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    plugin_id: String,
+) -> Result<Vec<dbx_core::query::plugin_data::PluginDataGrant>, String> {
+    dbx_core::query::plugin_data::list_plugin_data_grants(&state, &plugin_id).await
+}
+
+#[tauri::command]
+pub async fn set_plugin_data_grant(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    plugin_id: String,
+    connection_id: String,
+    granted: bool,
+) -> Result<Vec<dbx_core::query::plugin_data::PluginDataGrant>, String> {
+    dbx_core::query::plugin_data::set_plugin_data_grant(&state, &plugin_id, &connection_id, granted).await
+}
+
 #[tauri::command]
 pub fn build_create_user_sql(username: String, password: String, tablespace: String) -> Result<String, String> {
     Ok(dbx_core::db_admin_sql::build_create_user_sql(&username, &password, &tablespace))
@@ -1007,13 +1037,12 @@ pub fn build_create_user_sql(username: String, password: String, tablespace: Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dbx_core::storage::Storage;
     use std::sync::Arc;
 
     async fn test_app_state() -> Arc<AppState> {
         let dir = std::env::temp_dir().join(format!("dbx-query-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")))
     }
 

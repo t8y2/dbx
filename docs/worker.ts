@@ -633,6 +633,19 @@ export class IssueSubmissionLimiter {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/install-mcp" || url.pathname === "/install-mcp.ps1") {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return new Response("Method not allowed\n", { status: 405, headers: { Allow: "GET, HEAD", "Content-Type": "text/plain; charset=utf-8" } });
+      }
+      const assetPath = url.pathname === "/install-mcp" ? "/install-mcp.sh" : "/install-mcp.ps1";
+      const asset = await env.ASSETS.fetch(new Request(`${url.origin}${assetPath}`));
+      if (!asset.ok || asset.headers.get("Content-Type")?.includes("text/html")) {
+        return new Response("Installer unavailable\n", { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+      }
+      return new Response(request.method === "HEAD" ? null : asset.body, {
+        headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff" },
+      });
+    }
     const issueRedirect = issueRedirectPath(url.pathname, preferredIssueLanguage(request));
     if (issueRedirect && request.method === "GET") return Response.redirect(`${url.origin}${issueRedirect}`, 308);
     // Turkish docs routes no longer exist; keep old /tr/* links working by sending them to English.

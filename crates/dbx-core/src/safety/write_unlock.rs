@@ -97,7 +97,6 @@ mod tests {
     use crate::models::connection::ConnectionConfig;
     use crate::query::{check_read_only_for_connection, connection_readonly_name};
     use crate::session_credentials::with_credential_owner;
-    use crate::storage::Storage;
 
     fn mysql_config(id: &str, name: &str, read_only: bool) -> ConnectionConfig {
         serde_json::from_value(serde_json::json!({
@@ -116,7 +115,8 @@ mod tests {
 
     async fn test_state(configs: &[ConnectionConfig]) -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open storage");
+        let storage =
+            crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.expect("open storage");
         let state = AppState::new_with_plugin_dir(storage, dir.path().join("plugins"));
         {
             let mut stored = state.configs.write().await;

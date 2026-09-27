@@ -84,6 +84,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   iotdb: { type: "iotdb", profile: "iotdb", label: "Apache IoTDB", defaultPort: 6667 },
   iris: { type: "iris", profile: "iris", label: "IRIS", defaultPort: 1972 },
   victoriametrics: { type: "victoriametrics", profile: "victoriametrics", label: "VictoriaMetrics", defaultPort: 8428 },
+  salesforce: { type: "salesforce", profile: "salesforce", label: "Salesforce", defaultPort: 443 },
 };
 
 const OCEANBASE_ORACLE_PROFILE: ConnectionProfile = {
@@ -105,6 +106,7 @@ const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   weaviate: SCHEME_PROFILES.weaviate,
   chromadb: SCHEME_PROFILES.chromadb,
   victoriametrics: SCHEME_PROFILES.victoriametrics,
+  salesforce: SCHEME_PROFILES.salesforce,
   consul: SCHEME_PROFILES.consul,
   "nacos-v2": SCHEME_PROFILES["nacos-v2"],
   "nacos-v3": SCHEME_PROFILES["nacos-v3"],

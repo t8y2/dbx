@@ -345,6 +345,58 @@ pub async fn ai_cancel_stream(Json(body): Json<AiCancelStreamRequest>) -> Result
 }
 
 // ---------------------------------------------------------------------------
+// Plugin tools for the built-in agent
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiResolveToolApprovalRequest {
+    pub session_id: String,
+    pub approval_id: String,
+    pub approved: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginToolPluginRequest {
+    pub plugin_id: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Answers a pending plugin tool approval of the agent run `session_id`.
+pub async fn ai_resolve_tool_approval(Json(body): Json<AiResolveToolApprovalRequest>) -> Result<Json<bool>, AppError> {
+    Ok(Json(dbx_core::tool_approval::resolve_tool_approval(&body.session_id, &body.approval_id, body.approved)))
+}
+
+pub async fn get_ai_plugin_tool_plugins(State(state): State<Arc<WebState>>) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(state.app.storage.load_ai_plugin_tool_plugin_ids().await.map_err(AppError::from)?))
+}
+
+pub async fn set_ai_plugin_tool_plugin_enabled(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<AiPluginToolPluginRequest>,
+) -> Result<Json<Vec<String>>, AppError> {
+    let plugin_ids = state
+        .app
+        .storage
+        .set_ai_plugin_tool_plugin_enabled(&body.plugin_id, body.enabled)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(plugin_ids))
+}
+
+pub async fn preview_plugin_ai_tools(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<AiPluginToolPluginRequest>,
+) -> Result<Json<dbx_core::plugin_tools::PluginToolPreview>, AppError> {
+    let preview = dbx_core::plugin_tools::preview_plugin_tools(&state.app, None, &body.plugin_id)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(preview))
+}
+
+// ---------------------------------------------------------------------------
 // AI stream (POST returns SSE directly)
 // ---------------------------------------------------------------------------
 
@@ -461,6 +513,10 @@ pub async fn ai_agent_stream(
         sql_permissions,
         max_agent_turns,
         prompt_cache_key: request.prompt_cache_key.clone(),
+        session_id: Some(session_id.clone()),
+        // The loop below runs on its own current-thread runtime; plugin
+        // sidecar calls must stay on the server runtime that owns the sessions.
+        host_runtime: Some(tokio::runtime::Handle::current()),
     };
 
     let sid = session_id.clone();
@@ -603,7 +659,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("dbx-web-intg-max-retries-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
-        let storage = dbx_core::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         storage.save_max_retries(0).await.unwrap();
         assert_eq!(storage.load_max_retries().await.unwrap(), 0);
 

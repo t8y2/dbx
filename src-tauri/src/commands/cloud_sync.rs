@@ -311,7 +311,6 @@ mod tests {
     use std::sync::Arc;
 
     use dbx_core::cloud_sync::SnippetProvider;
-    use dbx_core::storage::Storage;
     use tauri::Manager;
 
     use super::AppState;
@@ -321,11 +320,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-snippet-cleanup-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("storage.db");
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&db).await.unwrap();
         storage.save_snippet_migration_state("github", "replacement-id", "legacy-id", "content-hash").await.unwrap();
         drop(storage);
 
-        let storage = Storage::open(&db).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&db).await.unwrap();
         let app_state = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let app = tauri::test::mock_app();
         app.manage(app_state);

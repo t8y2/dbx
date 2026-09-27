@@ -5,14 +5,13 @@ use super::{
 use crate::connection::{AppState, PoolKind, METADATA_POOL_ACQUIRE_TIMEOUT};
 use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec, AgentRuntimeClient};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::storage::Storage;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 async fn state(db_type: DatabaseType) -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+    let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
     let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
         storage,
         dir.path().join("plugins"),

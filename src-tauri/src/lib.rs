@@ -686,10 +686,12 @@ fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_connection_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_connection_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-connection-links", links);
     }
-    let _ = app.emit("dbx-open-connection-links", links);
     show_main_window(app);
 }
 
@@ -697,10 +699,12 @@ fn open_ai_config_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_ai_config_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_ai_config_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-ai-config-links", links);
     }
-    let _ = app.emit("dbx-open-ai-config-links", links);
     show_main_window(app);
 }
 
@@ -708,10 +712,12 @@ fn open_plugin_install_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_plugin_install_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_plugin_install_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-plugin-install-links", links);
     }
-    let _ = app.emit("dbx-open-plugin-install-links", links);
     show_main_window(app);
 }
 
@@ -1676,6 +1682,13 @@ pub fn run() {
                     .open_url(url, None::<&str>)
                     .map_err(|err| format!("Failed to open the system browser: {err}"))
             }));
+            let sf_app_handle = app.handle().clone();
+            state.set_salesforce_browser_opener(Arc::new(move |url| {
+                sf_app_handle
+                    .opener()
+                    .open_url(url, None::<&str>)
+                    .map_err(|err| format!("Failed to open the system browser: {err}"))
+            }));
             let state = Arc::new(state);
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
@@ -1795,6 +1808,10 @@ pub fn run() {
             commands::ai::ai_stream,
             commands::ai::ai_agent_stream,
             commands::ai::ai_cancel_stream,
+            commands::ai::ai_resolve_tool_approval,
+            commands::ai::get_ai_plugin_tool_plugins,
+            commands::ai::set_ai_plugin_tool_plugin_enabled,
+            commands::ai::preview_plugin_ai_tools,
             commands::ai::ai_test_connection,
             commands::ai::ai_list_models,
             commands::ai::ai_resolve_model_effort,
@@ -1894,6 +1911,12 @@ pub fn run() {
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
             commands::connection::test_ssh_tunnel,
+            commands::salesforce_oauth::salesforce_oauth_browser_authorize,
+            commands::salesforce_oauth::salesforce_oauth_device_start,
+            commands::salesforce_oauth::salesforce_oauth_device_poll,
+            commands::salesforce_oauth::salesforce_oauth_refresh,
+            commands::salesforce_oauth::salesforce_oauth_password_login,
+            commands::salesforce_oauth::salesforce_current_user,
             commands::connection::connect_db,
             commands::connection::connection_final_proxy_port,
             commands::connection::disconnect_db,
@@ -2016,6 +2039,7 @@ pub fn run() {
             commands::schema::get_table_owner,
             commands::schema::list_extensions,
             commands::schema::list_available_extensions,
+            commands::schema::list_event_triggers,
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_diff::generate_schema_sync_plan,
@@ -2052,6 +2076,9 @@ pub fn run() {
             commands::query::get_explain_info,
             commands::query::get_plugin_plan_capabilities,
             commands::query::get_plugin_estimated_plan,
+            commands::query::query_plugin_data,
+            commands::query::get_plugin_data_grants,
+            commands::query::set_plugin_data_grant,
             commands::query::build_create_user_sql,
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
@@ -2179,6 +2206,7 @@ pub fn run() {
             commands::redis_cmd::redis_set_keys_ttl,
             commands::redis_cmd::redis_set_keys_expire_at,
             commands::redis_cmd::redis_delete_keys,
+            commands::redis_cmd::redis_delete_keys_by_pattern,
             commands::redis_cmd::redis_flush_db,
             commands::redis_cmd::redis_execute_command,
             commands::redis_cmd::redis_load_more,
@@ -2384,6 +2412,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_rename_collection,
             commands::mongo_cmd::mongo_clone_collection,
             commands::docs::docs_collect_snapshot,
+            commands::docs::docs_collect_snapshot_for_export,
             commands::docs::docs_load_annotations,
             commands::docs::docs_apply_annotations,
             commands::docs::docs_save_annotations,
@@ -2635,7 +2664,9 @@ pub fn run() {
             commands::history::delete_history_entry,
             commands::mcp::check_mcp_server_status,
             commands::mcp::install_mcp_server,
+            commands::mcp::install_native_mcp_server,
             commands::mcp::uninstall_mcp_server,
+            commands::mcp::uninstall_npm_mcp_server,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
             commands::update::get_system_proxy_url,

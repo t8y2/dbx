@@ -1626,10 +1626,20 @@ describe("line block statement boundary", () => {
     expect(items.some((item) => item.label === "name")).toBe(true);
   });
 
-  it("still ends the block at a real blank line", () => {
+  it("still ends the block at a blank line before a new statement", () => {
+    // #10196 refined the blank-line rule: a blank line only ends the block when
+    // the next non-empty line opens a new top-level statement. A blank line
+    // before FROM/WHERE continues the same statement.
+    const sql = "select na from t1\n\nselect nb from t2";
+    const context = getSqlCompletionContext(sql, "select na from t1".length, { databaseType: "iris" });
+    expect(context.referencedTables.map((table) => table.name)).toEqual(["t1"]);
+  });
+
+  it("keeps FROM tables when the select list is separated from FROM by a blank line (#10196)", () => {
     const sql = "select na\n\nfrom users";
     const context = getSqlCompletionContext(sql, "select na".length, { databaseType: "iris" });
-    expect(context.referencedTables).toEqual([]);
+    expect(context.referencedTables.map((table) => table.name)).toEqual(["users"]);
+    expect(context.suggestColumns).toBe(true);
   });
 
   it("stops the active block at a top-level statement line without a semicolon", () => {

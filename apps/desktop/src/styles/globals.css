@@ -331,6 +331,7 @@ html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"]):dis
 html.theme-soft {
   --background: rgb(250 251 253);
   --foreground: rgb(40 44 52);
+  --dbx-foreground-rgb: 40, 44, 52;
   --card: rgb(255 255 255);
   --card-foreground: rgb(36 40 48);
   --popover: rgb(255 255 255);
@@ -372,6 +373,7 @@ html.theme-soft {
 html.theme-soft.dark {
   --background: rgb(31 33 37);
   --foreground: rgb(202 206 214);
+  --dbx-foreground-rgb: 202, 206, 214;
   --card: rgb(38 41 46);
   --card-foreground: rgb(202 206 214);
   --popover: rgb(42 45 51);
@@ -413,6 +415,7 @@ html.theme-soft.dark {
 html.theme-graphite {
   --background: rgb(249 250 252);
   --foreground: rgb(42 45 51);
+  --dbx-foreground-rgb: 42, 45, 51;
   --card: rgb(255 255 255);
   --card-foreground: rgb(39 42 48);
   --popover: rgb(255 255 255);
@@ -454,6 +457,7 @@ html.theme-graphite {
 html.theme-graphite.dark {
   --background: rgb(30 32 36);
   --foreground: rgb(198 201 207);
+  --dbx-foreground-rgb: 198, 201, 207;
   --card: rgb(38 40 45);
   --card-foreground: rgb(199 202 208);
   --popover: rgb(42 44 50);
@@ -495,6 +499,7 @@ html.theme-graphite.dark {
 html.theme-cobalt {
   --background: rgb(247 250 253);
   --foreground: rgb(32 43 58);
+  --dbx-foreground-rgb: 32, 43, 58;
   --card: rgb(255 255 255);
   --card-foreground: rgb(30 41 56);
   --popover: rgb(255 255 255);
@@ -536,6 +541,7 @@ html.theme-cobalt {
 html.theme-cobalt.dark {
   --background: rgb(25 31 42);
   --foreground: rgb(198 207 219);
+  --dbx-foreground-rgb: 198, 207, 219;
   --card: rgb(31 38 51);
   --card-foreground: rgb(200 209 221);
   --popover: rgb(35 43 58);
@@ -577,6 +583,7 @@ html.theme-cobalt.dark {
 html.theme-sage {
   --background: rgb(248 250 248);
   --foreground: rgb(36 48 43);
+  --dbx-foreground-rgb: 36, 48, 43;
   --card: rgb(255 255 255);
   --card-foreground: rgb(34 46 41);
   --popover: rgb(255 255 255);
@@ -618,6 +625,7 @@ html.theme-sage {
 html.theme-sage.dark {
   --background: rgb(27 35 33);
   --foreground: rgb(198 208 204);
+  --dbx-foreground-rgb: 198, 208, 204;
   --card: rgb(34 43 40);
   --card-foreground: rgb(200 210 206);
   --popover: rgb(38 48 45);
@@ -659,6 +667,7 @@ html.theme-sage.dark {
 html.theme-amber {
   --background: rgb(255 252 242);
   --foreground: rgb(56 48 32);
+  --dbx-foreground-rgb: 56, 48, 32;
   --card: rgb(255 255 250);
   --card-foreground: rgb(51 44 30);
   --popover: rgb(255 255 250);
@@ -700,6 +709,7 @@ html.theme-amber {
 html.theme-amber.dark {
   --background: rgb(37 34 27);
   --foreground: rgb(217 208 188);
+  --dbx-foreground-rgb: 217, 208, 188;
   --card: rgb(45 41 32);
   --card-foreground: rgb(219 210 191);
   --popover: rgb(50 46 36);
@@ -741,6 +751,7 @@ html.theme-amber.dark {
 html.theme-blush {
   --background: rgb(255 248 251);
   --foreground: rgb(61 48 56);
+  --dbx-foreground-rgb: 61, 48, 56;
   --card: rgb(255 255 255);
   --card-foreground: rgb(57 45 53);
   --popover: rgb(255 255 255);
@@ -782,6 +793,7 @@ html.theme-blush {
 html.theme-blush.dark {
   --background: rgb(42 35 40);
   --foreground: rgb(221 205 214);
+  --dbx-foreground-rgb: 221, 205, 214;
   --card: rgb(52 42 49);
   --card-foreground: rgb(223 207 216);
   --popover: rgb(58 47 55);
@@ -823,6 +835,7 @@ html.theme-blush.dark {
 html.theme-vscode {
   --background: rgb(255 255 255);
   --foreground: rgb(51 51 51);
+  --dbx-foreground-rgb: 51, 51, 51;
   --card: rgb(255 255 255);
   --card-foreground: rgb(45 45 45);
   --popover: rgb(255 255 255);
@@ -865,6 +878,7 @@ html.theme-vscode {
 html.theme-vscode.dark {
   --background: rgb(30 30 30);
   --foreground: rgb(204 204 204);
+  --dbx-foreground-rgb: 204, 204, 204;
   --card: rgb(37 37 38);
   --card-foreground: rgb(204 204 204);
   --popover: rgb(45 45 48);
@@ -907,6 +921,7 @@ html.theme-vscode.dark {
 html.theme-idea {
   --background: rgb(250 250 250);
   --foreground: rgb(43 43 43);
+  --dbx-foreground-rgb: 43, 43, 43;
   --card: rgb(255 255 255);
   --card-foreground: rgb(40 40 40);
   --popover: rgb(255 255 255);
@@ -948,6 +963,7 @@ html.theme-idea {
 html.theme-idea.dark {
   --background: rgb(43 43 43);
   --foreground: rgb(187 187 187);
+  --dbx-foreground-rgb: 187, 187, 187;
   --card: rgb(60 63 65);
   --card-foreground: rgb(187 187 187);
   --popover: rgb(67 70 72);
@@ -989,6 +1005,7 @@ html.theme-idea.dark {
 html.theme-xcode {
   --background: rgb(250 252 255);
   --foreground: rgb(31 41 55);
+  --dbx-foreground-rgb: 31, 41, 55;
   --card: rgb(255 255 255);
   --card-foreground: rgb(29 39 53);
   --popover: rgb(255 255 255);
@@ -1030,6 +1047,7 @@ html.theme-xcode {
 html.theme-xcode.dark {
   --background: rgb(31 35 41);
   --foreground: rgb(215 221 231);
+  --dbx-foreground-rgb: 215, 221, 231;
   --card: rgb(37 41 50);
   --card-foreground: rgb(216 222 232);
   --popover: rgb(45 51 59);
@@ -1071,6 +1089,7 @@ html.theme-xcode.dark {
 html.theme-jetbrains {
   --background: rgb(248 249 251);
   --foreground: rgb(31 35 40);
+  --dbx-foreground-rgb: 31, 35, 40;
   --card: rgb(255 255 255);
   --card-foreground: rgb(28 32 37);
   --popover: rgb(255 255 255);
@@ -1112,6 +1131,7 @@ html.theme-jetbrains {
 html.theme-jetbrains.dark {
   --background: rgb(30 31 34);
   --foreground: rgb(223 225 229);
+  --dbx-foreground-rgb: 223, 225, 229;
   --card: rgb(43 45 48);
   --card-foreground: rgb(223 225 229);
   --popover: rgb(49 51 56);
@@ -1153,6 +1173,7 @@ html.theme-jetbrains.dark {
 html.theme-cursor {
   --background: rgb(251 252 254);
   --foreground: rgb(31 36 45);
+  --dbx-foreground-rgb: 31, 36, 45;
   --card: rgb(255 255 255);
   --card-foreground: rgb(28 33 42);
   --popover: rgb(255 255 255);
@@ -1194,6 +1215,7 @@ html.theme-cursor {
 html.theme-cursor.dark {
   --background: rgb(15 17 26);
   --foreground: rgb(213 215 222);
+  --dbx-foreground-rgb: 213, 215, 222;
   --card: rgb(21 24 33);
   --card-foreground: rgb(214 216 223);
   --popover: rgb(27 30 39);
@@ -1235,6 +1257,7 @@ html.theme-cursor.dark {
 html.theme-claude {
   --background: rgb(251 247 239);
   --foreground: rgb(51 43 35);
+  --dbx-foreground-rgb: 51, 43, 35;
   --card: rgb(255 253 248);
   --card-foreground: rgb(48 40 32);
   --popover: rgb(255 253 248);
@@ -1276,6 +1299,7 @@ html.theme-claude {
 html.theme-claude.dark {
   --background: rgb(33 31 28);
   --foreground: rgb(216 208 196);
+  --dbx-foreground-rgb: 216, 208, 196;
   --card: rgb(42 39 35);
   --card-foreground: rgb(219 211 199);
   --popover: rgb(49 45 40);
@@ -2092,6 +2116,151 @@ html.dbx-legacy-webview .hover\:bg-primary\/90:hover {
   background-color: rgba(var(--dbx-primary-rgb), 0.9) !important;
 }
 
+/*
+ * Foreground alpha tints: Tailwind v4 emits `bg-foreground/10` as a full-color
+ * declaration with the real tint inside `@supports (color: color-mix(...))`,
+ * and WebKit without color-mix() (macOS 12 Safari < 16.2) keeps the full-color
+ * one. The update dialog tab badge then renders as a solid near-black pill
+ * instead of a 10% tint. Mirror the bg-primary fallbacks above with the
+ * --dbx-foreground-rgb token defined beside every --foreground theme color.
+ * Dark rules must stay after the hover rules: at equal specificity the later
+ * dark-mode tint has to win, matching Tailwind's own variant order.
+ */
+html.dbx-legacy-webview .bg-foreground\/6 {
+  background-color: rgba(var(--dbx-foreground-rgb), 0.06) !important;
+}
+
+html.dbx-legacy-webview .bg-foreground\/10 {
+  background-color: rgba(var(--dbx-foreground-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .hover\:bg-foreground\/10:hover {
+  background-color: rgba(var(--dbx-foreground-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .hover\:bg-foreground\/15:hover {
+  background-color: rgba(var(--dbx-foreground-rgb), 0.15) !important;
+}
+
+html.dbx-legacy-webview.dark .dark\:bg-foreground\/20 {
+  background-color: rgba(var(--dbx-foreground-rgb), 0.2) !important;
+}
+
+html.dbx-legacy-webview.dark .dark\:hover\:bg-foreground\/25:hover {
+  background-color: rgba(var(--dbx-foreground-rgb), 0.25) !important;
+}
+
+html.dbx-legacy-webview .border-foreground\/20 {
+  border-color: rgba(var(--dbx-foreground-rgb), 0.2) !important;
+}
+
+html.dbx-legacy-webview .border-foreground\/80 {
+  border-color: rgba(var(--dbx-foreground-rgb), 0.8) !important;
+}
+
+/*
+ * Status alpha tints (warning/destructive): same full-color fallback problem
+ * as the foreground utilities above — the base declaration is a theme var, so
+ * WebKit without color-mix() (macOS 12 Safari < 16.2) paints it at full
+ * opacity and alert surfaces turn into solid blocks with same-color unreadable
+ * text. Palette shades need no entry here: the bundler precomputes their known
+ * oklch mixes into hex-alpha literals that old WebKit parses fine. Solid
+ * text and ring alpha variants stay out: solid text on the restored tint is
+ * readable, and rings never worked on these WebKits anyway.
+ */
+
+html.dbx-legacy-webview .active\:bg-destructive\/30:active {
+  background-color: rgba(var(--destructive-rgb), 0.3) !important;
+}
+
+html.dbx-legacy-webview .bg-destructive\/10 {
+  background-color: rgba(var(--destructive-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .bg-destructive\/15 {
+  background-color: rgba(var(--destructive-rgb), 0.15) !important;
+}
+
+html.dbx-legacy-webview .bg-destructive\/5 {
+  background-color: rgba(var(--destructive-rgb), 0.05) !important;
+}
+
+html.dbx-legacy-webview .bg-error\/10 {
+  background-color: rgba(var(--destructive-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .bg-warning\/10 {
+  background-color: rgba(var(--dbx-warning-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .bg-warning\/5 {
+  background-color: rgba(var(--dbx-warning-rgb), 0.05) !important;
+}
+
+html.dbx-legacy-webview .data-\[variant\=destructive\]\:focus\:bg-destructive\/10[data-variant="destructive"]:focus {
+  background-color: rgba(var(--destructive-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .focus-visible\:bg-destructive\/10:focus-visible {
+  background-color: rgba(var(--destructive-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .focus\:bg-destructive\/10:focus {
+  background-color: rgba(var(--destructive-rgb), 0.1) !important;
+}
+
+html.dbx-legacy-webview .aria-invalid\:border-destructive\/55[aria-invalid="true"] {
+  border-color: rgba(var(--destructive-rgb), 0.55) !important;
+}
+
+html.dbx-legacy-webview .aria-invalid\:border-destructive\/70[aria-invalid="true"] {
+  border-color: rgba(var(--destructive-rgb), 0.7) !important;
+}
+
+html.dbx-legacy-webview .border-destructive\/15 {
+  border-color: rgba(var(--destructive-rgb), 0.15) !important;
+}
+
+html.dbx-legacy-webview .border-destructive\/20 {
+  border-color: rgba(var(--destructive-rgb), 0.2) !important;
+}
+
+html.dbx-legacy-webview .border-destructive\/25 {
+  border-color: rgba(var(--destructive-rgb), 0.25) !important;
+}
+
+html.dbx-legacy-webview .border-destructive\/30 {
+  border-color: rgba(var(--destructive-rgb), 0.3) !important;
+}
+
+html.dbx-legacy-webview .border-destructive\/40 {
+  border-color: rgba(var(--destructive-rgb), 0.4) !important;
+}
+
+html.dbx-legacy-webview .border-destructive\/50 {
+  border-color: rgba(var(--destructive-rgb), 0.5) !important;
+}
+
+html.dbx-legacy-webview .border-destructive\/70 {
+  border-color: rgba(var(--destructive-rgb), 0.7) !important;
+}
+
+html.dbx-legacy-webview .border-error\/30 {
+  border-color: rgba(var(--destructive-rgb), 0.3) !important;
+}
+
+html.dbx-legacy-webview .border-warning\/15 {
+  border-color: rgba(var(--dbx-warning-rgb), 0.15) !important;
+}
+
+html.dbx-legacy-webview .border-warning\/30 {
+  border-color: rgba(var(--dbx-warning-rgb), 0.3) !important;
+}
+
+html.dbx-legacy-webview .focus-visible\:border-destructive\/40:focus-visible {
+  border-color: rgba(var(--destructive-rgb), 0.4) !important;
+}
+
 html.dbx-legacy-webview [data-slot="tabs"][data-orientation="horizontal"] {
   flex-direction: column !important;
 }
@@ -2575,8 +2744,51 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
 .panel-resize-handle--left {
   left: -4px;
 }
+.app-panel-gutter .panel-resize-handle--right::before {
+  transform: translate(calc(-50% + 2.5px), -50%);
+}
+.app-panel-gutter .panel-resize-handle--left::before {
+  transform: translate(calc(-50% - 2.5px), -50%);
+}
+/* The vertical editor tab bar is its own overflow-hidden clipping context, so
+   its handles keep the grip dots just inside the bar edge instead of the
+   gutter center, where they would be clipped away entirely. */
+.app-panel-gutter .app-tab-bar > .panel-resize-handle--right::before {
+  transform: translate(calc(-50% - 2.5px), -50%);
+}
+.app-panel-gutter .app-tab-bar > .panel-resize-handle--left::before {
+  transform: translate(calc(-50% + 2.5px), -50%);
+}
 .panel-resize-handle::before {
-  display: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 5px 0 currentColor, 0 10px 0 currentColor;
+  color: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+  content: "";
+  opacity: 0.75;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  transition: color 140ms ease, opacity 140ms ease;
+}
+.panel-resize-handle:hover::before,
+.panel-resize-handle:focus-visible::before,
+.panel-resize-handle:active::before {
+  color: var(--ring);
+  opacity: 1;
+}
+body.dbx-is-resizing .panel-resize-handle::before {
+  color: var(--primary);
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-resize-handle::before {
+    transition: none;
+  }
 }
 
 /* Shared menu surfaces */

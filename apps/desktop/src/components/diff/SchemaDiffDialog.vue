@@ -40,6 +40,7 @@ import {
   schemaDiffDeployTargetSchema,
   normalizeDialectKind,
   databaseTypeToDialectKind,
+  schemaDiffEngineDatabaseType,
   findSchemaDiffObject,
   flattenSchemaDiffObjects,
   schemaDiffSelectionTargets,
@@ -107,6 +108,10 @@ const showFieldMappingDialog = ref(false);
 const showConfigSelector = ref(false);
 const sourceDbType = computed(() => store.getConfig(sourceConnectionId.value)?.db_type ?? "");
 const targetDbType = computed(() => store.getConfig(targetConnectionId.value)?.db_type ?? "");
+// A JDBC connection stores `jdbc` in db_type while its product lives in the driver
+// profile; the diff engine needs the product for clause shapes and view comparison.
+const sourceEngineDbType = computed(() => schemaDiffEngineDatabaseType(store.getConfig(sourceConnectionId.value)));
+const targetEngineDbType = computed(() => schemaDiffEngineDatabaseType(store.getConfig(targetConnectionId.value)));
 
 // Clear stale field mappings when source and target are the same type
 watch([sourceDbType, targetDbType], ([src, tgt]) => {
@@ -742,6 +747,8 @@ function handleCompare(): void {
       targetSchema: targetSchema.value,
       sourceDbType,
       targetDbType,
+      sourceEngineDbType: sourceEngineDbType.value,
+      targetEngineDbType: targetEngineDbType.value,
       options,
       ignoreComments: ignoreComments.value,
       label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value)}`,
@@ -802,11 +809,12 @@ function rebuildDiffGroups() {
 }
 
 function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
+  const engineDbType = targetEngineDbType.value ?? getDbType();
   return {
-    databaseType: getDbType(),
+    databaseType: engineDbType,
     targetSchema: schemaDiffDeployTargetSchema(getDbType(), targetDatabase.value, targetSchema.value),
     cascadeDelete: options.cascadeDelete,
-    sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceDbType.value ? databaseTypeToDialectKind(sourceDbType.value) : undefined,
+    sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceEngineDbType.value ? databaseTypeToDialectKind(sourceEngineDbType.value) : undefined,
     fieldMappings: options.fieldMappings,
     enableRollback: options.enableRollback,
   };

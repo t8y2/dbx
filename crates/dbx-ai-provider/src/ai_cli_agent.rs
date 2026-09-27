@@ -68,6 +68,14 @@ pub fn dbx_mcp_enabled_tools(agent_mode: bool) -> Vec<&'static str> {
     if agent_mode {
         tools.push("dbx_execute_query");
         tools.push("dbx_execute_redis_command");
+        // Read-only Salesforce identity, so an agent working against an org can tell the
+        // user who a change would be attributed to. The `dbx_salesforce_prepare_write` /
+        // `dbx_salesforce_apply_write` pair is deliberately absent: DBX spawns these CLI
+        // agents with `--permission-mode dontAsk`, so a tool listed here runs with no
+        // interactive gate, and a Salesforce write cannot be rolled back. The two-step
+        // confirmation belongs to MCP clients that do put the summary in front of a
+        // person; the connection-level DML switch alone is not a substitute.
+        tools.push("dbx_salesforce_current_user");
     }
     tools
 }

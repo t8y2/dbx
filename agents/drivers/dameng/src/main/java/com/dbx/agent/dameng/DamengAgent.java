@@ -569,7 +569,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return queryConstrainedTables(schema, MetadataListConstraints.orNone(constraints));
     }
 
-    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+    private List<TableInfo> queryConstrainedTables(String rawSchema, MetadataListConstraints constraints) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
         }
@@ -905,6 +906,43 @@ public final class DamengAgent extends AbstractJdbcAgent {
             && schema.equalsIgnoreCase(connectedUsername);
     }
 
+    /**
+     * DM resolves an unqualified object name in the session's current schema, and dbx sends an
+     * unqualified metadata request whenever the editor's source table has no schema selected
+     * (the same Oracle-like contract `oracle` and `oceanbase-oracle` follow). Looking up
+     * `OWNER = ''` instead reported "no columns" for tables that exist, so column comments never
+     * reached the result-column tooltip (issue #10221).
+     */
+    private String normalizeSchema(String schema) {
+        if (schema != null && !schema.isBlank()) {
+            return schema;
+        }
+        return effectiveMetadataSchema(currentSchemaOrBlank(), connectedUsername);
+    }
+
+    static String effectiveMetadataSchema(String currentSchema, String connectedUsername) {
+        if (currentSchema != null && !currentSchema.isBlank()) {
+            return currentSchema;
+        }
+        return connectedUsername == null ? "" : connectedUsername;
+    }
+
+    private String currentSchemaOrBlank() {
+        try (Statement stmt = requireConnected().createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")) {
+            if (rs.next()) {
+                String current = rs.getString(1);
+                if (current != null && !current.isBlank()) {
+                    return current;
+                }
+            }
+        } catch (SQLException error) {
+            // A server without SYS_CONTEXT support still resolves an unqualified name to the
+            // connected user, which is what the caller falls back to.
+        }
+        return "";
+    }
+
     private static boolean includesSupportedObjectTypes(MetadataListConstraints constraints) {
         return constraints.includesTableLikeTypes()
             || constraints.objectTypeAllowed("PROCEDURE")
@@ -1095,7 +1133,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return queryConstrainedObjects(schema, MetadataListConstraints.orNone(constraints));
     }
 
-    private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+    private List<ObjectInfo> queryConstrainedObjects(String rawSchema, MetadataListConstraints constraints) {
+        final String schema = normalizeSchema(rawSchema);
         List<ObjectInfo> objects = queryConstrainedObjectsWithoutValidity(schema, constraints);
         applyViewValidity(objects, schema);
         return objects;
@@ -1349,7 +1388,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public ObjectSource getObjectSource(String schema, String name, String objectType) {
+    public ObjectSource getObjectSource(String rawSchema, String name, String objectType) {
+        final String schema = normalizeSchema(rawSchema);
         return unchecked(() -> {
             String dbmsType = damengDdlObjectType(objectType);
             RuntimeException dbmsError;
@@ -1775,7 +1815,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public String getTableDdl(String schema, String table) {
+    public String getTableDdl(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return super.getTableDdl(schema, table);
         }
@@ -1869,7 +1910,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public List<ColumnInfo> getColumns(String schema, String table) {
+    public List<ColumnInfo> getColumns(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return StandardJdbcMetadata.INSTANCE.getColumns(
                 requireConnected(),
@@ -2175,7 +2217,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public List<IndexInfo> listIndexes(String schema, String table) {
+    public List<IndexInfo> listIndexes(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return StandardJdbcMetadata.INSTANCE.listIndexes(
                 requireConnected(),
@@ -2234,7 +2277,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public List<ForeignKeyInfo> listForeignKeys(String schema, String table) {
+    public List<ForeignKeyInfo> listForeignKeys(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return StandardJdbcMetadata.INSTANCE.listForeignKeys(requireConnected(), schema, table);
         }
@@ -2268,7 +2312,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    public List<TriggerInfo> listTriggers(String schema, String table) {
+    public List<TriggerInfo> listTriggers(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
             return StandardJdbcMetadata.INSTANCE.listTriggers(schema, table);
         }

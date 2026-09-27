@@ -4,7 +4,6 @@ use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::execute_sql_statement;
 use dbx_core::sql::SqlFileRequest;
 use dbx_core::sql_file_import::execute_sql_file_path;
-use dbx_core::storage::Storage;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -44,7 +43,8 @@ async fn live_postgres_all_schema_export_restores_one_sql_file() {
     let source_connection_id = format!("postgres-all-schema-source-{suffix}");
     let target_connection_id = format!("postgres-all-schema-target-{suffix}");
     let dir = tempfile::tempdir().expect("create export temp directory");
-    let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open temp storage");
+    let storage =
+        dbx_core::persistence::test_storage::open(&dir.path().join("storage.db")).await.expect("open temp storage");
     let state = Arc::new(AppState::new(storage));
     state
         .configs

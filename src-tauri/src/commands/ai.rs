@@ -316,6 +316,37 @@ pub async fn ai_cancel_stream(session_id: String) -> Result<bool, String> {
     Ok(dbx_core::ai::cancel_stream(&session_id).await)
 }
 
+/// Answers a pending plugin tool approval of the agent run `session_id`.
+/// Returns false when nothing was waiting (already answered or expired).
+#[tauri::command]
+pub async fn ai_resolve_tool_approval(session_id: String, approval_id: String, approved: bool) -> Result<bool, String> {
+    Ok(dbx_core::tool_approval::resolve_tool_approval(&session_id, &approval_id, approved))
+}
+
+/// Plugin ids whose MCP tools the built-in AI agent may call.
+#[tauri::command]
+pub async fn get_ai_plugin_tool_plugins(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
+    state.storage.load_ai_plugin_tool_plugin_ids().await
+}
+
+#[tauri::command]
+pub async fn set_ai_plugin_tool_plugin_enabled(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    enabled: bool,
+) -> Result<Vec<String>, String> {
+    state.storage.set_ai_plugin_tool_plugin_enabled(&plugin_id, enabled).await
+}
+
+/// Lists the tools the built-in AI would get from `plugin_id`.
+#[tauri::command]
+pub async fn preview_plugin_ai_tools(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+) -> Result<dbx_core::plugin_tools::PluginToolPreview, String> {
+    dbx_core::plugin_tools::preview_plugin_tools(state.inner(), None, &plugin_id).await
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn ai_agent_stream(
@@ -395,6 +426,8 @@ pub async fn ai_agent_stream(
         sql_permissions,
         max_agent_turns,
         prompt_cache_key: request.prompt_cache_key.clone(),
+        session_id: Some(session_id.clone()),
+        host_runtime: Some(tokio::runtime::Handle::current()),
     };
     let is_agent_mode = mode.as_deref() == Some("agent");
 
@@ -802,7 +835,7 @@ mod tests {
     async fn tauri_entry_respects_global_max_retries_zero() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-mr-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
-        let storage = dbx_core::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         storage.save_max_retries(0).await.unwrap();
         assert_eq!(storage.load_max_retries().await.unwrap(), 0);
 

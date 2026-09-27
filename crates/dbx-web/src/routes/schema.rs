@@ -889,6 +889,17 @@ pub async fn list_available_extensions(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
+pub async fn list_event_triggers(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let result = dbx_core::schema::list_event_triggers_core(&state.app, &q.connection_id, database)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

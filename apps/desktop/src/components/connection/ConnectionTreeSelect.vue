@@ -5,9 +5,8 @@ import { Check, ChevronDown, ChevronRight, Folder, Search } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
 import { buildConnectionPickerRows, connectionPickerSelectableRows } from "@/lib/connection/connectionPickerTree";
-import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { cn } from "@/lib/common/utils";
 import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
@@ -184,7 +183,7 @@ function handleKeydown(event: KeyboardEvent) {
                 @click="selectConnection(row.id)"
               >
                 <Check :class="cn('h-3.5 w-3.5 shrink-0', row.id === modelValue ? 'opacity-100' : 'opacity-0')" />
-                <DatabaseIcon :db-type="connectionIconType(connectionById.get(row.id))" class="h-3.5 w-3.5 shrink-0" />
+                <ConnectionIcon :connection="connectionById.get(row.id)" class="h-3.5 w-3.5 shrink-0" />
                 <span class="min-w-0 flex-1 truncate">{{ row.label }}</span>
               </button>
             </template>

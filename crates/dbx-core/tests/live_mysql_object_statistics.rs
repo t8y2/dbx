@@ -8,7 +8,6 @@
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::execute_sql_statement;
-use dbx_core::storage::Storage;
 
 fn live_mysql_config(connection_id: &str, database: &str) -> ConnectionConfig {
     let host = std::env::var("DBX_LIVE_MYSQL_HOST").expect("DBX_LIVE_MYSQL_HOST");
@@ -50,7 +49,7 @@ async fn live_mysql_object_statistics_refresh_after_writes() {
     let table = format!("dbx_stats_fresh_{}", &suffix[..12]);
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-object-statistics-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(connection_id.clone(), live_mysql_config(&connection_id, &database));
 

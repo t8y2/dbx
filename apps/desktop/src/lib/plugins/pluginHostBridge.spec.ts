@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { reactive, readonly } from "vue";
-import { PluginHostBridge, pluginSandboxDocument, pluginSdkSource } from "./pluginHostBridge";
+import { MAX_CONCURRENT_PLUGIN_DATA_QUERIES, PLUGIN_CLIPBOARD_AUDIT_CAPACITY, PluginHostBridge, clipboardReadGateAllows, createClipboardReadGate, pluginSandboxDocument, pluginSdkSource, recordClipboardRead } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginResultViewContribution, PluginWorkbenchContribution } from "@/types/database";
 
 function plugin(permissions: string[] = [], contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
@@ -1038,6 +1038,318 @@ describe("PluginHostBridge", () => {
     } as MessageEvent);
     await vi.waitFor(() => expect(messages).toHaveLength(1));
     expect(messages[0]).toMatchObject({ id: "nocopy", error: "Host clipboard is unavailable" });
+  });
+
+  it("serves host.clipboardRead only with the declared host.clipboard:read permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const clipboardRead = vi.fn().mockResolvedValue("pasted text");
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Without the permission the read is refused before the host clipboard is touched.
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+    });
+    denied.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "read-denied", method: "host.clipboardRead" },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(clipboardRead).not.toHaveBeenCalled();
+    expect(messages[0]).toMatchObject({ id: "read-denied", error: "Plugin has not declared permission 'host.clipboard:read'" });
+
+    // With the permission (and session consent granted) the call is scoped to
+    // the owning plugin and unwraps to { text }.
+    const allowed = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    allowed.sendInit();
+    expect((messages[1] as { capabilities?: { clipboardRead?: boolean } }).capabilities?.clipboardRead).toBe(true);
+    send(allowed, "read-ok", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "read-ok")).toBe(true));
+    expect(clipboardRead).toHaveBeenCalledWith("sample");
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(byId.get("read-ok")).toMatchObject({ id: "read-ok", result: { text: "pasted text" } });
+  });
+
+  it("rejects host.clipboardRead when the host cannot read the clipboard and caps oversized reads", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Legacy or web host: no clipboardRead in the API surface.
+    const noRead = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(noRead, "read-missing", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "read-missing", error: "Host clipboard read is unavailable" });
+
+    // An oversized clipboard read is clamped to the bridge payload bound.
+    const clipboardRead = vi.fn().mockResolvedValue("x".repeat(2 * 1024 * 1024 + 1));
+    const clamping = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(clamping, "read-huge", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "read-huge")).toBe(true));
+    expect(clipboardRead).toHaveBeenCalled();
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    const result = (byId.get("read-huge") as { result?: { text?: string } }).result;
+    expect(result?.text).toHaveLength(2 * 1024 * 1024);
+  });
+
+  it("asks session consent before the first clipboard read and remembers a denial for the bridge lifetime", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // Denial on the consent prompt: the read rejects and the host clipboard is never touched.
+    const clipboardRead = vi.fn().mockResolvedValue("secret");
+    const deny = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(false),
+    });
+    send(deny, "consent-denied", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-denied")).toBe(true));
+    expect(clipboardRead).not.toHaveBeenCalled();
+    const denialById = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(denialById.get("consent-denied")).toMatchObject({ id: "consent-denied", error: "Clipboard read was denied for this plugin session" });
+    expect(deny.clipboardAudit).toEqual([{ at: expect.any(Number), outcome: "denied", length: 0 }]);
+
+    // A denial is remembered: a second read rejects without asking again.
+    const confirm = (deny as unknown as { api: { confirmClipboardRead: ReturnType<typeof vi.fn> } }).api.confirmClipboardRead;
+    send(deny, "consent-denied-2", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-denied-2")).toBe(true));
+    expect(confirm).toHaveBeenCalledTimes(1);
+
+    // Consent: the read proceeds, and later reads skip the prompt for the session.
+    const allow = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(allow, "consent-1", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-1" && (message as { result?: { text?: string } }).result).valueOf()).toBe(true));
+    // The rate gate demands PLUGIN_CLIPBOARD_READ_MIN_INTERVAL_MS between reads.
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    send(allow, "consent-2", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "consent-2" && (message as { result?: { text?: string } }).result).valueOf()).toBe(true));
+    const allowConfirm = (allow as unknown as { api: { confirmClipboardRead: ReturnType<typeof vi.fn> } }).api.confirmClipboardRead;
+    expect(allowConfirm).toHaveBeenCalledTimes(1);
+    // Shared mock: the deny bridge never reached the clipboard, the allow bridge read twice.
+    expect(clipboardRead).toHaveBeenCalledTimes(2);
+    expect(readTextFromSharedBridgeAudit(allow)).toEqual(["granted", "granted"]);
+  });
+
+  function readTextFromSharedBridgeAudit(bridge: PluginHostBridge) {
+    return bridge.clipboardAudit.map((entry) => entry.outcome);
+  }
+
+  function dataApi(overrides: Record<string, unknown> = {}) {
+    return {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      queryData: vi.fn().mockResolvedValue({ dbType: "postgres", columns: [{ name: "id" }], rows: [[1]], truncated: false, elapsedMs: 3 }),
+      hasDataGrant: vi.fn().mockResolvedValue(false),
+      confirmDataAccess: vi.fn().mockResolvedValue(true),
+      grantDataAccess: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+  }
+
+  function dataHarness(permissions: string[], api: ReturnType<typeof dataApi>) {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(permissions), workbench, {}, () => target, api);
+    const query = async (id: string, params: unknown) => {
+      bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method: "host.queryData", params } } as MessageEvent);
+      await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === id)).toBe(true));
+      return messages.find((message) => (message as { id?: string }).id === id) as { result?: unknown; error?: string };
+    };
+    return { bridge, messages, query };
+  }
+
+  it("serves host.queryData only with host.data:read and after the user's consent", async () => {
+    const withoutPermission = dataHarness([], dataApi());
+    expect(await withoutPermission.query("no-permission", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Plugin has not declared permission 'host.data:read'" });
+
+    const api = dataApi();
+    const { query } = dataHarness(["host.data:read"], api);
+    const first = await query("first", { connectionId: " conn-1 ", sql: " SELECT id FROM users ", maxRows: 99_999, database: " " });
+    expect(first).toMatchObject({ result: { rows: [[1]] } });
+    expect(api.confirmDataAccess).toHaveBeenCalledWith("sample", expect.any(String), "conn-1");
+    expect(api.grantDataAccess).toHaveBeenCalledWith("sample", "conn-1");
+    // Bound to the owning plugin, trimmed, and pre-clamped to the host row cap.
+    expect(api.queryData).toHaveBeenCalledWith("sample", { connectionId: "conn-1", sql: "SELECT id FROM users", maxRows: 5_000 });
+
+    // The consent is remembered for this connection; another connection asks again.
+    await query("second", { connectionId: "conn-1", sql: "SELECT 2" });
+    expect(api.confirmDataAccess).toHaveBeenCalledTimes(1);
+    expect(api.hasDataGrant).toHaveBeenCalledTimes(1);
+    await query("other-connection", { connectionId: "conn-2", sql: "SELECT 3" });
+    expect(api.confirmDataAccess).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips the prompt for an existing grant and asks again after the backend reports a revocation", async () => {
+    const api = dataApi({
+      hasDataGrant: vi.fn().mockResolvedValue(true),
+      queryData: vi
+        .fn()
+        .mockResolvedValueOnce({ dbType: "mysql", columns: [], rows: [], truncated: false, elapsedMs: 1 })
+        .mockRejectedValueOnce(new Error("PLUGIN_DATA_ACCESS_NOT_GRANTED: the user has not granted this plugin access to the connection"))
+        .mockResolvedValue({ dbType: "mysql", columns: [], rows: [], truncated: false, elapsedMs: 1 }),
+    });
+    const { query } = dataHarness(["host.data:read"], api);
+    await query("granted", { connectionId: "conn-1", sql: "SELECT 1" });
+    expect(api.confirmDataAccess).not.toHaveBeenCalled();
+    expect(await query("revoked", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: expect.stringContaining("PLUGIN_DATA_ACCESS_NOT_GRANTED") });
+    await query("after-revoke", { connectionId: "conn-1", sql: "SELECT 1" });
+    expect(api.hasDataGrant).toHaveBeenCalledTimes(2);
+  });
+
+  it("remembers a declined data access and never queries without consent", async () => {
+    const api = dataApi({ confirmDataAccess: vi.fn().mockResolvedValue(false) });
+    const { query } = dataHarness(["host.data:read"], api);
+    expect(await query("declined", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Data access to this connection was denied" });
+    expect(await query("declined-again", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Data access to this connection was denied for this plugin session" });
+    expect(api.confirmDataAccess).toHaveBeenCalledTimes(1);
+    expect(api.grantDataAccess).not.toHaveBeenCalled();
+    expect(api.queryData).not.toHaveBeenCalled();
+
+    // A host without a consent surface denies instead of granting silently.
+    const noSurface = dataApi({ confirmDataAccess: undefined });
+    const { query: queryWithoutSurface } = dataHarness(["host.data:read"], noSurface);
+    expect(await queryWithoutSurface("no-surface", { connectionId: "conn-1", sql: "SELECT 1" })).toMatchObject({ error: "Data access to this connection was denied" });
+    expect(noSurface.queryData).not.toHaveBeenCalled();
+  });
+
+  it("caps concurrent data queries per bridge so a plugin cannot occupy the shared pool", async () => {
+    const pending: Array<(value: unknown) => void> = [];
+    const api = dataApi({
+      hasDataGrant: vi.fn().mockResolvedValue(true),
+      queryData: vi.fn().mockImplementation(() => new Promise((resolve) => pending.push(resolve))),
+    });
+    const { bridge, messages } = dataHarness(["host.data:read"], api);
+    const target = (bridge as unknown as { targetWindow: () => Window }).targetWindow();
+    const start = (id: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method: "host.queryData", params: { connectionId: "conn-1", sql: "SELECT 1" } } } as MessageEvent);
+    for (let index = 0; index < MAX_CONCURRENT_PLUGIN_DATA_QUERIES; index += 1) start(`running-${index}`);
+    await vi.waitFor(() => expect(api.queryData).toHaveBeenCalledTimes(MAX_CONCURRENT_PLUGIN_DATA_QUERIES));
+    start("over-limit");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "over-limit")).toBe(true));
+    expect(messages.find((message) => (message as { id?: string }).id === "over-limit")).toMatchObject({ error: expect.stringContaining("data queries may run at once") });
+
+    // A finished query frees its slot.
+    pending.shift()?.({ dbType: "postgres", columns: [], rows: [], truncated: false, elapsedMs: 1 });
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "running-0")).toBe(true));
+    start("after-slot");
+    await vi.waitFor(() => expect(api.queryData).toHaveBeenCalledTimes(MAX_CONCURRENT_PLUGIN_DATA_QUERIES + 1));
+  });
+
+  it("rejects malformed data requests and advertises dataApi only with a complete consent surface", async () => {
+    const api = dataApi();
+    const { query, bridge, messages } = dataHarness(["host.data:read"], api);
+    expect(await query("no-sql", { connectionId: "conn-1" })).toMatchObject({ error: "host.queryData requires sql" });
+    expect(await query("blank-sql", { connectionId: "conn-1", sql: "  " })).toMatchObject({ error: "host.queryData requires a non-empty sql" });
+    expect(await query("no-connection", { sql: "SELECT 1" })).toMatchObject({ error: "connectionId must be a string" });
+    expect(await query("huge-sql", { connectionId: "conn-1", sql: "x".repeat(100_001) })).toMatchObject({ error: "sql must be at most 100000 characters" });
+    expect(api.queryData).not.toHaveBeenCalled();
+
+    bridge.sendInit();
+    const init = messages.find((message) => (message as { type?: string }).type === "init") as { capabilities?: Record<string, boolean> };
+    expect(init.capabilities?.dataApi).toBe(true);
+
+    const partial = dataHarness(["host.data:read"], dataApi({ grantDataAccess: undefined }));
+    partial.bridge.sendInit();
+    const partialInit = partial.messages.find((message) => (message as { type?: string }).type === "init") as { capabilities?: Record<string, boolean> };
+    expect(partialInit.capabilities?.dataApi).toBe(false);
+  });
+
+  it("denies clipboard reads on hosts without a consent surface and rate-limits repeated reads", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const send = (bridge: PluginHostBridge, id: string, method: string) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method } } as MessageEvent);
+
+    // No consent surface: deny rather than silently allow (option-a hardening).
+    const noSurface = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead: vi.fn().mockResolvedValue("secret"),
+    });
+    send(noSurface, "no-surface", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "no-surface")).toBe(true));
+    const noSurfaceById = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(noSurfaceById.get("no-surface")).toMatchObject({ error: "Clipboard read was denied for this plugin session" });
+
+    // Rate gate: two back-to-back reads — the second is refused with a retry hint
+    // and recorded as rate-limited without touching the clipboard.
+    const clipboardRead = vi.fn().mockResolvedValue("text");
+    const readBridge = new PluginHostBridge(plugin(["host.clipboard:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      clipboardRead,
+      confirmClipboardRead: vi.fn().mockResolvedValue(true),
+    });
+    send(readBridge, "rate-1", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "rate-1" && (message as { result?: unknown }).result).valueOf()).toBe(true));
+    send(readBridge, "rate-2", "host.clipboardRead");
+    await vi.waitFor(() => expect(messages.some((message) => (message as { id?: string }).id === "rate-2")).toBe(true));
+    const rateById = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(String((rateById.get("rate-2") as { error?: string }).error)).toContain("rate limit");
+    expect(readBridge.clipboardAudit.map((entry) => entry.outcome)).toEqual(["granted", "rate-limited"]);
+    expect(clipboardRead).toHaveBeenCalledTimes(1);
+  });
+
+  it("caps the clipboard read audit trail and exposes the pure rate helpers", () => {
+    expect(PLUGIN_CLIPBOARD_AUDIT_CAPACITY).toBeLessThanOrEqual(500);
+    const gate = createClipboardReadGate();
+    for (let index = 0; index < PLUGIN_CLIPBOARD_AUDIT_CAPACITY + 20; index += 1) {
+      recordClipboardRead(gate, index * 10_000, "granted", index);
+    }
+    expect(gate.audit).toHaveLength(PLUGIN_CLIPBOARD_AUDIT_CAPACITY);
+    expect(gate.audit[0].length).toBe(20);
+    // Exactly one read per min interval passes; within the window the gate refuses.
+    expect(clipboardReadGateAllows(gate, gate.audit[PLUGIN_CLIPBOARD_AUDIT_CAPACITY - 1].at + 999)).toBe(false);
+    expect(clipboardReadGateAllows(gate, gate.audit[PLUGIN_CLIPBOARD_AUDIT_CAPACITY - 1].at + 1_000)).toBe(true);
+    // A fresh gate (never read) always allows the first read.
+    expect(clipboardReadGateAllows(createClipboardReadGate(), 0)).toBe(true);
+  });
+
+  it("exposes the sandbox clipboard namespace mapping writeText to host.copy and readText to host.clipboardRead", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("clipboard: Object.freeze({");
+    expect(source).toContain("writeText: (text) => request('host.copy', { text })");
+    expect(source).toContain("request('host.clipboardRead')");
   });
 
   it("routes host.storage through the owning plugin, caps values, and needs the declared permission", async () => {

@@ -100,6 +100,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["influxdb3", ["TABLE"]],
   ["victoriametrics", ["TABLE"]],
   ["hbase", ["TABLE"]],
+  ["salesforce", ["TABLE"]],
   ["questdb", ["TABLE", "VIEW", "MATERIALIZED_VIEW"]],
   ["manticoresearch", ["TABLE", "FUNCTION"]],
   ["databend", ["TABLE", "VIEW", "PROCEDURE"]],

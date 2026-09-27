@@ -19,9 +19,19 @@ describe("data grid row number labels", () => {
     expect(resolveDataGridRowNumberLabel({ displayIndex: 2, sourceIndex: 36, sourceRowNumbers: true, pageOffset: 100 })).toBe("137");
   });
 
-  it("falls back to the view position for rows without a source index", () => {
-    // 新增行还没有落库位置，sourceIndex 为 undefined
-    expect(resolveDataGridRowNumberLabel({ displayIndex: 7, sourceRowNumbers: true, pageOffset: 0 })).toBe("8");
+  it("uses a placeholder for rows without an original position", () => {
+    // 新增行还没有落库位置（sourceIndex 为 undefined）：原始行号模式下用 "+" 占位。
+    // 不能回退到视图序号，否则会与紧随其后的那一行撞号。
+    expect(resolveDataGridRowNumberLabel({ displayIndex: 7, sourceRowNumbers: true, pageOffset: 0 })).toBe("+");
+    expect(resolveDataGridRowNumberLabel({ displayIndex: 7, sourceRowNumbers: true, pageOffset: 100 })).toBe("+");
+    // 视图序号模式不受影响，新增行照常显示它在列表中的位置
+    expect(resolveDataGridRowNumberLabel({ displayIndex: 7, sourceRowNumbers: false, pageOffset: 0 })).toBe("8");
+  });
+
+  it("keeps an inserted row from colliding with the row below it", () => {
+    // 新增行占住显示位置 3（displayIndex 2），紧随其后的原始第 3 行 sourceIndex 为 2
+    expect(resolveDataGridRowNumberLabel({ displayIndex: 2, sourceRowNumbers: true, pageOffset: 0 })).toBe("+");
+    expect(resolveDataGridRowNumberLabel({ displayIndex: 3, sourceIndex: 2, sourceRowNumbers: true, pageOffset: 0 })).toBe("3");
   });
 
   it("keeps the draft placeholder regardless of the mode", () => {

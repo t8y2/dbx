@@ -80,6 +80,7 @@ export function executePluginCommand(registry: FrontendPluginRegistry, queryStor
   };
   // singleton (default) reuses the existing instance tab; new forces a fresh one.
   queryStore.openPluginWorkbench(pluginId, action.workbench, {
+    commandId: command.id,
     title: command.label,
     context,
     forceNew: action.reuse === "new",

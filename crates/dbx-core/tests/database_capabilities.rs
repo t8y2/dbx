@@ -364,6 +364,18 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(!uxdb.capabilities.data_transfer);
     assert!(!uxdb.capabilities.user_admin);
 
+    let salesforce = find_driver(DatabaseType::Salesforce);
+    assert_eq!(salesforce.label, "Salesforce");
+    assert_eq!(salesforce.support_level, "operate");
+    assert!(salesforce.capabilities.query_execution);
+    assert!(salesforce.capabilities.metadata_browse);
+    assert!(salesforce.capabilities.object_browser);
+    assert!(salesforce.capabilities.schema_search);
+    assert!(salesforce.capabilities.table_data_edit);
+    assert!(!salesforce.capabilities.table_structure_edit);
+    assert!(!salesforce.capabilities.object_source);
+    assert!(!salesforce.capabilities.diagram);
+
     let spanner = find_driver(DatabaseType::Spanner);
     assert_eq!(spanner.label, "Google Cloud Spanner");
     assert_eq!(spanner.runtime_mode, "agent");

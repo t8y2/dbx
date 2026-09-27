@@ -76,7 +76,7 @@ const STANDARD_URL_SCHEMES: Partial<Record<DatabaseType, string>> = {
 };
 
 /** Schemes that are plain HTTP(S) endpoints. */
-const HTTP_URL_DB_TYPES = new Set<DatabaseType>(["elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "rqlite", "consul", "victoriametrics", "influxdb", "influxdb3", "dynamodb"]);
+const HTTP_URL_DB_TYPES = new Set<DatabaseType>(["elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "rqlite", "consul", "victoriametrics", "influxdb", "influxdb3", "dynamodb", "salesforce"]);
 
 /**
  * Generic `prefix://host:port/db` JDBC dialects. Dialects with a different URL

@@ -71,7 +71,18 @@ function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, child
     const regularChildren = normalized.filter((child) => child.type !== "user-admin" && child.type !== "dameng-users" && child.type !== "dameng-roles" && child.type !== "saved-sql-root");
     const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...userAdminNodes];
 
-    if (databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "solr" || databaseType === "qdrant" || databaseType === "milvus" || databaseType === "weaviate" || databaseType === "chromadb") {
+    if (
+      databaseType === "mongodb" ||
+      databaseType === "elasticsearch" ||
+      databaseType === "easysearch" ||
+      databaseType === "meilisearch" ||
+      databaseType === "solr" ||
+      databaseType === "qdrant" ||
+      databaseType === "milvus" ||
+      databaseType === "weaviate" ||
+      databaseType === "chromadb" ||
+      databaseType === "salesforce"
+    ) {
       const meilisearchSystem = regularChildren.filter((child) => child.type === "meilisearch-system");
       const databaseObjects = regularChildren.filter((child) => child.type !== "meilisearch-system");
       return withConnectionUtilityOrder([...sortByLabel(databaseObjects), ...meilisearchSystem]);

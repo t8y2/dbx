@@ -220,7 +220,6 @@ mod tests {
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
-    use dbx_core::storage::Storage;
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
@@ -414,7 +413,7 @@ mod tests {
     async fn saving_memory_sqlite_attachments_keeps_the_live_pool_intact() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-sqlite-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = sqlite_config(std::path::Path::new(":memory:"), "");
         let pool = dbx_core::db::sqlite::connect_path(":memory:").await.unwrap();
@@ -578,7 +577,7 @@ mod tests {
     async fn persist_mongo_legacy_driver_profile_updates_only_the_target_connection() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-mongo-profile-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let mongo = mongodb_config();
         let mut other = mongodb_config();
@@ -647,7 +646,7 @@ mod tests {
     async fn save_connection_configs_updates_runtime_cache_and_drops_mq_adapter() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
@@ -684,7 +683,7 @@ mod tests {
     async fn load_connection_configs_syncs_runtime_cache_and_drops_stale_pool() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
@@ -719,7 +718,7 @@ mod tests {
     async fn save_connection_configs_removes_deleted_runtime_config_and_mq_adapter() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let kept = mongodb_config();
         let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
@@ -766,7 +765,7 @@ mod tests {
     async fn save_connection_configs_retains_one_time_runtime_config_and_its_pool() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let persisted = mongodb_config();
         let preview = duckdb_preview_config();
@@ -791,7 +790,7 @@ mod tests {
     async fn save_connection_configs_keeps_session_credential_of_one_time_config() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let persisted = mongodb_config();
         let preview = duckdb_preview_config();
@@ -812,7 +811,7 @@ mod tests {
     async fn save_connection_configs_removes_deleted_connection_pools() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let kept = mongodb_config();
         let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
@@ -838,7 +837,7 @@ mod tests {
     async fn sync_connection_configs_ignores_password_only_changes() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
 
         let mut initial = mongodb_config();
@@ -871,7 +870,7 @@ mod tests {
     async fn sync_connection_configs_preserves_nacos_session_password_for_scope_updates() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-nacos-scope-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = nacos_config("nacos-a");
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
@@ -1444,6 +1443,17 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::Salesforce => {
+                let client = db::salesforce_driver::SfClient::from_config(
+                    &url,
+                    Some(&config.password),
+                    config.external_config.as_ref(),
+                    connect_timeout,
+                )?;
+                db::salesforce_driver::SfClient::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Easysearch => {
                 let mut client = db::easysearch_driver::EasysearchClient::from_config(
                     &url,
@@ -1921,6 +1931,16 @@ pub async fn connect_db(
             )?;
             db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Elasticsearch(client)
+        }
+        DatabaseType::Salesforce => {
+            let client = db::salesforce_driver::SfClient::from_config(
+                &url,
+                Some(&db_config.password),
+                db_config.external_config.as_ref(),
+                connect_timeout,
+            )?;
+            db::salesforce_driver::SfClient::test_connection(&client, connect_timeout).await?;
+            PoolKind::Salesforce(client)
         }
         DatabaseType::Easysearch => {
             let mut client = db::easysearch_driver::EasysearchClient::from_config(

@@ -1383,6 +1383,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, affecte
         affected_rows,
         execution_time_ms: 0,
         server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -1636,8 +1637,6 @@ mod tests {
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
     #[cfg(unix)]
     use crate::models::connection::ConnectionConfig;
-    #[cfg(unix)]
-    use crate::storage::Storage;
 
     #[cfg(unix)]
     async fn legacy_mongo_state(
@@ -1795,7 +1794,7 @@ for line in sys.stdin:
         .await
         .unwrap();
         client.try_optional_handshake("test").await.unwrap();
-        let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "legacy",

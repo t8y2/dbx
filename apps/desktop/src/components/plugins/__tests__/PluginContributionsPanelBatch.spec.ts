@@ -3,7 +3,7 @@
 import { createApp, nextTick, type App, type ComponentPublicInstance } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
-import type { MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { formatMarketplaceReleasedDate, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { COMPONENT_PLUGINS_UPDATED_EVENT, COMPONENT_UPDATES_CHANGED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 const mocks = vi.hoisted(() => ({
@@ -56,6 +56,9 @@ vi.mock("@/components/ui/tooltip", async () => {
   return { Tooltip: stub, TooltipContent: stub, TooltipTrigger: stub };
 });
 vi.mock("@/components/plugins/PluginIcon.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginIcon") }));
+// Shortcut preferences have their own component/store tests. Keep this batch
+// harness scoped to plugin mutations and their exact backend call counts.
+vi.mock("@/components/plugins/PluginShortcutSettings.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginShortcutSettings") }));
 
 import PluginContributionsPanel from "@/components/plugins/PluginContributionsPanel.vue";
 
@@ -63,6 +66,7 @@ type PanelState = {
   batchRunning: boolean;
   batchMode: boolean;
   marketplaceViewMode: "grid" | "list";
+  marketplaceSortMode: string;
   marketplaceRepositoryId: string;
   marketplaceListings: MarketplacePluginListing[];
   catalogResults: PluginRepositoryCatalogResult[];
@@ -780,5 +784,129 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0" });
     expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.batchSummary:{"success":1,"failed":0,"names":""}', 4000);
     expect(state.batchRunning).toBe(false);
+  });
+});
+
+describe("PluginContributionsPanel marketplace sort", () => {
+  const OLDEST = "2025-01-01T00:00:00Z";
+  const NEWEST = "2026-06-01T00:00:00Z";
+
+  // Name order (a.older, b.newer) is deliberately the opposite of date order, so the
+  // rendered order tells the two sort modes apart.
+  function datedCatalog(): PluginRepositoryCatalogResult {
+    const result = catalog("first", ["a.older", "b.newer"]);
+    const [older, newer] = result.catalog!.plugins;
+    older.versions[0].releasedAt = OLDEST;
+    newer.versions[0].releasedAt = NEWEST;
+    return result;
+  }
+
+  function renderedOrder(): string[] {
+    return [...host.querySelectorAll("article")].map((article) => (article.textContent?.includes("a.older") ? "a.older" : "b.newer"));
+  }
+
+  // The persisted sort mode is read during setup, so restoring it can only be observed
+  // by mounting again with localStorage already seeded.
+  async function remount(): Promise<void> {
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp(PluginContributionsPanel, { onPluginRuntimeReplaced: mocks.refreshPluginWorkbenches });
+    state = (app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } }).$.setupState;
+    await flushUi();
+    state.batchMode = true;
+    state.selectedPluginId = "a";
+    await nextTick();
+  }
+
+  it("restores the persisted mode on remount, shows the release date in both views, and persists changes", async () => {
+    mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([datedCatalog()]);
+    localStorage.setItem("dbx-plugin-marketplace-sort-mode", "recently-updated");
+    await remount();
+
+    expect(state.marketplaceSortMode).toBe("recently-updated");
+    expect(renderedOrder()).toEqual(["b.newer", "a.older"]);
+    const newestText = formatMarketplaceReleasedDate(NEWEST, "en");
+    const oldestText = formatMarketplaceReleasedDate(OLDEST, "en");
+    expect(newestText).not.toBe("");
+    expect(host.querySelectorAll("article")[0].textContent).toContain(newestText);
+    expect(host.querySelectorAll("article")[1].textContent).toContain(oldestText);
+
+    state.marketplaceViewMode = "list";
+    await nextTick();
+    expect(renderedOrder()).toEqual(["b.newer", "a.older"]);
+    expect(host.querySelectorAll("article")[0].textContent).toContain(newestText);
+    expect(host.querySelectorAll("article")[1].textContent).toContain(oldestText);
+
+    state.marketplaceSortMode = "name";
+    await flushUi();
+    expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
+    expect(localStorage.getItem("dbx-plugin-marketplace-sort-mode")).toBe("name");
+  });
+
+  it("falls back to name order when the stored sort mode is unknown", async () => {
+    mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([datedCatalog()]);
+    localStorage.setItem("dbx-plugin-marketplace-sort-mode", "not-a-mode");
+    await remount();
+
+    expect(state.marketplaceSortMode).toBe("name");
+    expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
+  });
+});
+
+describe("PluginContributionsPanel marketplace card layout", () => {
+  it("wraps the grid card header and pins the version badge so it never clips in a narrow panel", async () => {
+    state.batchMode = false;
+    state.marketplaceViewMode = "grid";
+    await nextTick();
+
+    const card = host.querySelector("article");
+    expect(card, "a marketplace grid card should render").not.toBeNull();
+
+    // The header row (icon + name + github/globe/date/version cluster) must be allowed to wrap,
+    // otherwise the non-shrinkable right cluster overflows the narrow column and the version
+    // badge is clipped (e.g. "v0.1.C") when the plugin center shares width with the AI panel.
+    const header = card!.querySelector(":scope > div");
+    expect(header?.classList.contains("flex-wrap"), "grid card header row should wrap").toBe(true);
+
+    // The version badge must not shrink, so it is never squished even when it stays on one line.
+    const versionBadge = [...host.querySelectorAll<HTMLElement>("[data-stub='Badge']")].find((element) => element.textContent?.trim() === "v3.0.0");
+    expect(versionBadge, "version badge should render").toBeDefined();
+    expect(versionBadge!.classList.contains("shrink-0"), "version badge should be shrink-0").toBe(true);
+  });
+});
+
+describe("PluginContributionsPanel single uninstall outcomes", () => {
+  it("re-reads the installed list and notifies listeners when a single uninstall fails", async () => {
+    const changed = vi.fn();
+    window.addEventListener("dbx:plugins-changed", changed);
+    const failure = "The process cannot access the file because it is being used by another process. (os error 32)";
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error(failure));
+    // The backend kept the plugin installed (the uninstall never committed), and the panel has to
+    // show exactly that instead of the state it guessed before the call.
+    mocks.listPlugins.mockResolvedValueOnce([installed("a"), installed("b", "9.9.9")]);
+
+    try {
+      await state.uninstallSelectedPlugin();
+    } finally {
+      window.removeEventListener("dbx:plugins-changed", changed);
+    }
+
+    expect(mocks.toast).toHaveBeenLastCalledWith(failure, 5000);
+    expect(mocks.listPlugins).toHaveBeenCalledOnce();
+    expect(state.installedPlugins.map((plugin) => `${plugin.manifest.id}@${plugin.manifest.version}`)).toEqual(["a@1.0.0", "b@9.9.9"]);
+    expect(changed).toHaveBeenCalledOnce();
+    expect(state.error).toBe("");
+  });
+
+  it("keeps the uninstall failure visible when the follow-up refresh also fails", async () => {
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error("denied"));
+    mocks.listPlugins.mockRejectedValueOnce(new Error("refresh offline"));
+
+    await state.uninstallSelectedPlugin();
+
+    expect(mocks.toast).toHaveBeenLastCalledWith("denied", 5000);
+    expect(state.error).toBe('pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}');
   });
 });

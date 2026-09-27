@@ -148,6 +148,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   const folders = ref<SavedSqlFolder[]>([]);
   const files = ref<SavedSqlFile[]>([]);
   const isLoaded = ref(false);
+  const loadState = ref<"idle" | "loading" | "loaded" | "failed">("idle");
   let pendingSync: Promise<void> | null = null;
   let initFromStoragePromise: Promise<void> | null = null;
   const pendingFolderCreates = new Map<string, Promise<SavedSqlFolder>>();
@@ -186,13 +187,20 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   async function initFromStorage() {
     if (isLoaded.value) return;
     if (!initFromStoragePromise) {
+      loadState.value = "loading";
       initFromStoragePromise = (async () => {
         await migrateLegacyLocalStorage();
         applyLibrary(await api.loadSavedSqlLibrary());
         isLoaded.value = true;
-      })().finally(() => {
-        initFromStoragePromise = null;
-      });
+        loadState.value = "loaded";
+      })()
+        .catch((error) => {
+          loadState.value = "failed";
+          throw error;
+        })
+        .finally(() => {
+          initFromStoragePromise = null;
+        });
     }
     await initFromStoragePromise;
   }
@@ -821,6 +829,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     folders,
     files,
     isLoaded,
+    loadState,
     version,
     treeVersion,
     initFromStorage,

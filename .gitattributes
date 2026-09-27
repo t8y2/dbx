@@ -38,3 +38,9 @@ packages/**/*.test.ts linguist-vendored
 # bytes and fail the guard for a contributor who touched neither file.
 crates/dbx-core/assets/docs-export.js -text -diff linguist-generated
 crates/dbx-core/assets/docs-export.css -text -diff linguist-generated
+
+# The pnpm launcher fixtures are captured from real installations and baked into
+# the Rust unit tests with include_str!, so the bytes those tests hand to the shim
+# parser must not depend on the contributor's core.autocrlf: a CRLF checkout
+# silently rewrites all three files.
+src-tauri/tests/fixtures/** text eol=lf

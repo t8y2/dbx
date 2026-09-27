@@ -71,9 +71,15 @@ interface ColumnarQueryResult {
   execution_time_ms: number;
   server_execute_time_us?: number;
   client_request_wait_ms?: number;
+  query_timings_ms?: QueryResult["query_timings_ms"];
+  client_prepare_ms?: number;
+  client_result_ms?: number;
+  timing_page_count?: number;
   truncated?: boolean;
   has_more?: boolean;
   sourceLabel?: string;
+  sourceQualifier?: string;
+  sourceName?: string;
   sourceStatement?: string;
   sourceFrom?: number;
   sourceTo?: number;
@@ -359,10 +365,16 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     execution_time_ms: result.execution_time_ms,
     server_execute_time_us: result.server_execute_time_us,
     client_request_wait_ms: result.client_request_wait_ms,
+    query_timings_ms: result.query_timings_ms ? { ...result.query_timings_ms } : undefined,
+    client_prepare_ms: result.client_prepare_ms,
+    client_result_ms: result.client_result_ms,
+    timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
+    sourceQualifier: result.sourceQualifier,
+    sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,
@@ -416,9 +428,15 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     execution_time_ms: result.execution_time_ms,
     server_execute_time_us: result.server_execute_time_us,
     client_request_wait_ms: result.client_request_wait_ms,
+    query_timings_ms: result.query_timings_ms ? { ...result.query_timings_ms } : undefined,
+    client_prepare_ms: result.client_prepare_ms,
+    client_result_ms: result.client_result_ms,
+    timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
+    sourceQualifier: result.sourceQualifier,
+    sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,
@@ -445,10 +463,16 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     execution_time_ms: result.execution_time_ms,
     server_execute_time_us: result.server_execute_time_us,
     client_request_wait_ms: result.client_request_wait_ms,
+    query_timings_ms: result.query_timings_ms ? { ...result.query_timings_ms } : undefined,
+    client_prepare_ms: result.client_prepare_ms,
+    client_result_ms: result.client_result_ms,
+    timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
+    sourceQualifier: result.sourceQualifier,
+    sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,

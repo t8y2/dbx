@@ -1,7 +1,6 @@
 use dbx_core::connection::AppState;
 use dbx_core::db::mysql;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-use dbx_core::storage::Storage;
 use dbx_core::transfer::{
     drop_backup_tables, execute_on_pool, rename_tables_to_backup, sort_tables_by_fk_dependency_with_foreign_keys,
     transfer_table, TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
@@ -174,7 +173,7 @@ async fn run_live_mysql_cross_version_transfer_completes_on_small_stack() {
     );
     let dir = task_tmp.join(format!("small-stack-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(source_connection_id.clone(), source_config);
     state.configs.write().await.insert(target_connection_id.clone(), target_config);
@@ -329,7 +328,7 @@ async fn live_mysql_transfer_keeps_columns_whose_comment_mentions_foreign_key() 
     );
     let dir = task_tmp.join(format!("live-mysql-fk-comment-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(source_connection_id.clone(), source_config);
     state.configs.write().await.insert(target_connection_id.clone(), target_config);
@@ -486,7 +485,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
     );
     let dir = task_tmp.join(format!("live-mysql-collation-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(source_connection_id.clone(), source_config);
     state.configs.write().await.insert(target_connection_id.clone(), target_config);
@@ -673,7 +672,7 @@ async fn live_mysql_transfer_preserves_spatial_values_and_modes() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
@@ -856,7 +855,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
 
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-struct-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
@@ -1012,7 +1011,7 @@ async fn live_mysql_transfer_structure_only_rejects_incompatible_target_columns(
 
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-structonly-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
@@ -1111,7 +1110,7 @@ async fn live_mysql_transfer_drop_target_parent_child_foreign_key() {
     mysql::execute_query(&setup_pool, &setup, true).await.unwrap();
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-parent-child-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
@@ -1304,7 +1303,7 @@ async fn live_mysql_transfer_drop_target_rebuilds_incompatible_structure() {
 
     let dir = std::env::temp_dir().join(format!("dbx-mysql-drop-rebuild-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
@@ -1493,7 +1492,7 @@ async fn live_mysql_transfer_drop_target_rejects_external_incoming_fk() {
 
     let dir = std::env::temp_dir().join(format!("dbx-mysql-ext-fk-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let pool_key = state.get_or_create_pool(&connection_id, Some(&database)).await.unwrap();
@@ -1583,7 +1582,7 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
 
     let dir = std::env::temp_dir().join(format!("dbx-mysql-circular-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
@@ -1812,7 +1811,7 @@ async fn live_mysql_transfer_drop_target_retains_backup_on_failure() {
 
     let dir = std::env::temp_dir().join(format!("dbx-mysql-retain-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
@@ -1989,7 +1988,7 @@ async fn live_mysql_keyset_pagination_copies_every_row() {
     );
     let dir = task_tmp.join(format!("live-mysql-keyset-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(source_connection_id.clone(), source_config);
     state.configs.write().await.insert(target_connection_id.clone(), target_config);
@@ -2109,7 +2108,7 @@ async fn live_mysql_progress_read_survives_total_duration_beyond_timeout() {
     );
     let dir = task_tmp.join(format!("live-mysql-progress-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     // The read runs under the source's query timeout; keep it at 1s so the test only
     // passes when the transfer treats it as an inactivity budget, not a wall clock.
@@ -2215,7 +2214,7 @@ async fn live_mysql_transfer_drop_target_inspects_dependent_views_without_the_us
 
     let dir = std::env::temp_dir().join(format!("dbx-mysql-legacy-dependency-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();

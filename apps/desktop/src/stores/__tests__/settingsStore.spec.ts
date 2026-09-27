@@ -697,6 +697,17 @@ describe("normalizeMcpGlobalPolicy", () => {
     expect(policy.connectionPolicies[0].executionModePolicyVersion).toBeNull();
   });
 
+  it("defaults the Salesforce DML opt-in to off and revokes it under read-only", () => {
+    // Policies saved before the switch existed carry no field at all.
+    expect(normalizeMcpGlobalPolicy({ connectionPolicies: [{ connectionId: "sfdc", databaseScope: "all" } as any] }).connectionPolicies[0].allowSalesforceDml).toBe(false);
+
+    expect(normalizeMcpGlobalPolicy({ connectionPolicies: [{ connectionId: "sfdc", allowSalesforceDml: true } as any] }).connectionPolicies[0].allowSalesforceDml).toBe(true);
+
+    expect(normalizeMcpGlobalPolicy({ connectionPolicies: [{ connectionId: "sfdc", readOnly: true, allowSalesforceDml: true } as any] }).connectionPolicies[0].allowSalesforceDml).toBe(false);
+
+    expect(normalizeMcpGlobalPolicy({ connectionPolicies: [{ connectionId: "sfdc", allowSalesforceDml: "yes" } as any] }).connectionPolicies[0].allowSalesforceDml).toBe(false);
+  });
+
   it("round-trips queryTimeoutSecs null, undefined and positive numbers", () => {
     expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: null }).queryTimeoutSecs).toBeNull();
     expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: undefined } as any).queryTimeoutSecs).toBeNull();

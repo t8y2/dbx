@@ -5,6 +5,10 @@ edition = "2021"
 license = "Apache-2.0"
 publish = false
 
+[features]
+default = []
+postgres-legacy-tls = ["dep:openssl", "dep:postgres-openssl"]
+
 [dependencies]
 dbx-driver-support = { path = "../dbx-driver-support" }
 dbx-sql-core = { path = "../dbx-sql-core" }
@@ -14,9 +18,9 @@ bytes = "1"
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 futures = "0.3"
 log = "0.4"
-openssl = { version = "0.10", features = ["vendored"] }
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 percent-encoding = "2"
-postgres-openssl = "0.5"
+postgres-openssl = { version = "0.5", optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2"
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }

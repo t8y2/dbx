@@ -78,6 +78,8 @@ export interface MongoCompletionContext {
   replaceClosingQuote?: '"' | "'";
   /** Collection the cursor's command targets, used to load field metadata. */
   collection?: string;
+  /** Database the cursor's command targets when reached through `db.getSiblingDB(…)`, used instead of the editor's active database. */
+  database?: string;
   /** Enclosing aggregation stage (`$lookup`, `$group`, …), when inside one. */
   stage?: string;
   /** Collection method whose options object the cursor sits in. */
@@ -257,13 +259,14 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const beforeCursor = text.slice(0, safeCursor);
   const collection = extractActiveCollection(text, safeCursor);
+  const database = extractActiveDatabase(text, safeCursor);
   const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
   const replaceClosingQuote = closingQuoteAtCursor(prefix, text, safeCursor);
-  const at = (mode: MongoCompletionMode, stage?: string, method?: string, bulkWriteOperation?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage, method, bulkWriteOperation });
+  const at = (mode: MongoCompletionMode, stage?: string, method?: string, bulkWriteOperation?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, database, stage, method, bulkWriteOperation });
 
   if (isInsideMongoComment(text, safeCursor)) return { mode: "none", prefix: "", from: safeCursor };
 
-  if (endsAtDbRootDot(beforeCursor)) return { mode: "collection", prefix: "", from: safeCursor, collection };
+  if (endsAtDbRootDot(beforeCursor)) return { mode: "collection", prefix: "", from: safeCursor, collection, database };
 
   const getCollectionPrefix = matchGetCollectionPrefix(beforeCursor);
   if (getCollectionPrefix) {
@@ -273,6 +276,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
       from: getCollectionPrefix.from,
       replaceClosingQuote: closingQuoteAtCursor(getCollectionPrefix.prefix, text, safeCursor),
       collection,
+      database,
     };
   }
 
@@ -283,18 +287,19 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
       prefix: collectionPrefix.prefix,
       from: collectionPrefix.from,
       collection,
+      database,
     };
   }
 
   if (isAfterCollectionDot(beforeCursor)) {
     const methodPrefix = readMethodPrefix(beforeCursor);
-    return { mode: "method", prefix: methodPrefix.prefix, from: methodPrefix.from, collection };
+    return { mode: "method", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, database };
   }
 
   const cursorChain = matchCursorMethodDot(beforeCursor);
   if (cursorChain) {
     const methodPrefix = readMethodPrefix(beforeCursor);
-    return { mode: "cursorMethod", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, stage: cursorChain.countable ? "countable" : undefined };
+    return { mode: "cursorMethod", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, database, stage: cursorChain.countable ? "countable" : undefined };
   }
 
   const call = findInnermostMongoCall(beforeCursor);
@@ -328,7 +333,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = rootItems(prefix);
       break;
     case "collection":
-      items = collectionItems(prefix, collections);
+      items = collectionItems(prefix, collections, context.database !== undefined);
       break;
     case "collectionOrMethod":
       items = collectionOrMethodItems(prefix, collections);
@@ -918,9 +923,9 @@ function rootItems(prefix: string): MongoCompletionItem[] {
   return dedupeAndSort([...snippets, ...methods]);
 }
 
-function collectionItems(prefix: string, collections: string[]): MongoCompletionItem[] {
+function collectionItems(prefix: string, collections: string[], siblingRoot = false): MongoCompletionItem[] {
   const names = collectionNameItems(prefix, collections);
-  const methods = DATABASE_METHODS.filter((method) => matchesFuzzyPrefix(method.label, prefix)).map((method) => ({
+  const methods = DATABASE_METHODS.filter((method) => (siblingRoot ? method.label !== "getSiblingDB" : true) && matchesFuzzyPrefix(method.label, prefix)).map((method) => ({
     label: method.label,
     type: "function" as const,
     detail: method.detail,
@@ -1322,6 +1327,17 @@ function extractActiveCollection(text: string, cursor: number): string | undefin
   const directIndex = lastDirect?.index ?? -1;
   if (getCollectionIndex > directIndex) return lastGetCollection?.[1];
   return lastDirect?.[1];
+}
+
+/**
+ * The last `db.getSiblingDB("name")` before the cursor decides which database the
+ * command targets; plain `db.` references leave it unset so the editor's active
+ * database keeps applying.
+ */
+function extractActiveDatabase(text: string, cursor: number): string | undefined {
+  const before = text.slice(0, cursor);
+  const matches = [...before.matchAll(new RegExp(String.raw`(?:^|[\s;(])db\s*\.\s*getSiblingDB\s*\(\s*(["'])([^"']*)\1\s*\)`, "g"))];
+  return matches[matches.length - 1]?.[2] || undefined;
 }
 
 function collectFieldTypes(value: unknown, prefix: string, out: Map<string, Set<string>>, depth: number) {

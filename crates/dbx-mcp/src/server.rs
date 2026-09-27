@@ -1088,8 +1088,8 @@ impl DbxMcpServer {
                 allowed.iter().map(|(id, name)| format!("{id} = {name}")).collect::<Vec<_>>().join("; ")
             ),
         };
-        let hidden_note =
-            (hidden > 0).then(|| format!("\n{} further tool(s) of this plugin are hidden by the DBX MCP tool allowlist.", hidden));
+        let hidden_note = (hidden > 0)
+            .then(|| format!("\n{} further tool(s) of this plugin are hidden by the DBX MCP tool allowlist.", hidden));
         text(format!(
             "{} tool(s) of plugin {plugin_id}:\n\n{}\n\n{connection_note}\nCall through dbx_plugin_call (plugin_id + tool + arguments).{}",
             owned.len(),
@@ -5705,26 +5705,20 @@ mod tests {
             ..Default::default()
         });
         let server = DbxMcpServer::with_runtime_options(restricted, McpScope::default(), false);
-        let listing = server
-            .plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.kafka".into() }))
-            .await;
+        let listing = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.kafka".into() })).await;
         assert_eq!(listing.is_error, Some(false));
         let text = result_text(&listing);
         assert!(text.contains("kafka_topics_list"), "{text}");
         assert!(!text.contains("kafka_topics_delete"), "denied tool must be hidden: {text}");
         assert!(text.contains("1 further tool(s)"), "{text}");
 
-        let all_hidden = server
-            .plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.ssh".into() }))
-            .await;
+        let all_hidden = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.ssh".into() })).await;
         assert_eq!(all_hidden.is_error, Some(true));
         assert!(result_text(&all_hidden).contains("All 1 tool(s)"), "{}", result_text(&all_hidden));
 
         // A plugin whose every tool is denied resolves to the hidden reason.
         // Unknown plugin ids (never installed) keep the plain not-found text.
-        let unknown = server
-            .plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.nope".into() }))
-            .await;
+        let unknown = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.nope".into() })).await;
         assert_eq!(unknown.is_error, Some(true));
         assert!(result_text(&unknown).contains("does not contribute MCP tools"), "{}", result_text(&unknown));
     }

@@ -55,10 +55,11 @@ import { createColumnReferencePayload, tableReferenceInsertText } from "@/lib/ed
 import { clearRememberedFocusedQueryEditorView, focusedQueryEditorView, queryEditorInsertContext, registerQueryEditorInsertContext, rememberFocusedQueryEditorView, unregisterQueryEditorInsertContext } from "@/lib/editor/focusedQueryEditorView";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { structurePeekPanelId } from "@/lib/editor/structurePeekPanel";
+import { parkEditorNativeSelection, type EditorNativeSelectionPark } from "@/lib/editor/queryEditorNativeSelection";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import QueryEditorContextMenu, { type QueryEditorContextMenuState, type QueryEditorContextMenuActions } from "./QueryEditorContextMenu.vue";
 
-import { readTextFromClipboard } from "@/lib/common/clipboard";
+import { clipboardLineEndings, readTextFromClipboard } from "@/lib/common/clipboard";
 
 import { resolveExecutableSql, type SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import { supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
@@ -191,6 +192,37 @@ useQueryEditorLayout(editorRef);
 const view = shallowRef<EditorViewType | null>(null);
 const contextMenuOpen = ref(false);
 let contextMenuPointerCleanup: (() => void) | null = null;
+
+// The editor's own context menu is a DOM overlay, so a long selection stays
+// live underneath it and macOS keeps asking the web view to serialize that
+// selection while the pointer moves over the menu. Parking the browser
+// selection for as long as the menu is up is what keeps right click usable on
+// a few hundred selected lines; see queryEditorNativeSelection.ts.
+let parkedNativeSelection: EditorNativeSelectionPark | null = null;
+
+function parkNativeSelectionUnderContextMenu() {
+  const currentView = view.value;
+  if (!currentView) return;
+  parkedNativeSelection?.release();
+  // `clipboardLineEndings` is what the editor registers as its
+  // `clipboardOutputFilter`; passing it here keeps Cmd+C working while the
+  // selection is parked and leaves the copied bytes unchanged.
+  parkedNativeSelection = parkEditorNativeSelection(currentView, { finalizeClipboardText: clipboardLineEndings });
+}
+
+function releaseParkedNativeSelection() {
+  parkedNativeSelection?.release();
+  parkedNativeSelection = null;
+}
+
+watch(
+  contextMenuOpen,
+  (open) => {
+    if (open) parkNativeSelectionUnderContextMenu();
+    else releaseParkedNativeSelection();
+  },
+  { flush: "sync" },
+);
 
 const executionViewportOwnership = createQueryEditorExecutionViewportOwnership();
 
@@ -2555,6 +2587,7 @@ onBeforeUnmount(() => {
   pointerInteractions.dispose();
   objectNavigation.dispose();
   contextMenuPointerCleanup?.();
+  releaseParkedNativeSelection();
   postCompositionKeyGuardCleanup?.();
   postCompositionKeyGuardCleanup = null;
   batchSelection.dispose();

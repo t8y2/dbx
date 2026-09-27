@@ -671,7 +671,6 @@ export default withEnglishFallback({
     restore: "Ripristina pannello",
     newTerminal: "Nuovo terminale",
     newLocalTerminal: "Terminale locale",
-    connectionTerminal: "Connessione",
     filter: "Filtra…",
     noMatch: "Nessuna corrispondenza",
   },

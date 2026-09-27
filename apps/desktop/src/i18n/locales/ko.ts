@@ -678,7 +678,6 @@ export default withEnglishFallback({
     restore: "패널 복원",
     newTerminal: "새 터미널",
     newLocalTerminal: "로컬 터미널",
-    connectionTerminal: "연결",
     filter: "필터…",
     noMatch: "일치 항목이 없습니다",
   },

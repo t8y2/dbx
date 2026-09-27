@@ -674,7 +674,6 @@ export default withEnglishFallback({
     restore: "還原面板",
     newTerminal: "新增終端",
     newLocalTerminal: "本機終端",
-    connectionTerminal: "連線",
     filter: "篩選…",
     noMatch: "沒有符合項目",
   },

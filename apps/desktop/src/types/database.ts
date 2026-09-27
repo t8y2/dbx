@@ -362,7 +362,9 @@ export interface PluginFormField {
   default?: PluginFormFieldValue | null;
   options?: PluginFormFieldOption[];
   /** Plugin method returning `{ options: [{ value, label }] }` for dynamic
-   * select rendering; falls back to the declared type when unavailable. */
+   * select rendering; the host calls it with `{ locale }` (the current DBX UI
+   * locale) so plugins can localize the labels. Falls back to the declared
+   * type when unavailable. */
   options_action?: string;
   /** Host API 1.1: offer a local-file action on this field. */
   picker?: PluginFormFieldPicker;
@@ -517,8 +519,10 @@ export interface PluginOpenWorkbenchAction extends PluginOpenWorkbenchTarget {
   /**
    * Generic launch-options extension point: sidecar method returning
    * `{ entries: [{ label, description?, context? }] }` for the dock "+" picker.
-   * The host renders labels and merges the chosen context into the
-   * host-authored panel context — never interpreting the business meaning.
+   * The host calls it with `{ locale }` (the current DBX UI locale, e.g.
+   * "en"/"zh-CN") so plugins can localize the returned labels, renders the
+   * labels and merges the chosen context into the host-authored panel
+   * context — never interpreting the business meaning.
    */
   options_action?: string;
   /** When true, the host also offers the plugin's own saved connections as launch targets. */

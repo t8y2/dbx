@@ -685,7 +685,6 @@ export default {
     restore: "Restore panel",
     newTerminal: "New terminal",
     newLocalTerminal: "Local terminal",
-    connectionTerminal: "Connection",
     filter: "Filter…",
     noMatch: "No matches",
   },

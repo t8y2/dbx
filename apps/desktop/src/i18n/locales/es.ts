@@ -676,7 +676,6 @@ export default withEnglishFallback({
     restore: "Restaurar panel",
     newTerminal: "Nuevo terminal",
     newLocalTerminal: "Terminal local",
-    connectionTerminal: "Conexión",
     filter: "Filtrar…",
     noMatch: "Sin coincidencias",
   },

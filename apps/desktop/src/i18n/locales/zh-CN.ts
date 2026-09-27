@@ -601,7 +601,6 @@ export default withEnglishFallback({
     restore: "还原面板",
     newTerminal: "新建终端",
     newLocalTerminal: "本地终端",
-    connectionTerminal: "连接",
     filter: "筛选…",
     noMatch: "没有匹配项",
   },

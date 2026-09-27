@@ -630,7 +630,6 @@ export default withEnglishFallback({
     restore: "Восстановить панель",
     newTerminal: "Новый терминал",
     newLocalTerminal: "Локальный терминал",
-    connectionTerminal: "Подключение",
     filter: "Фильтр…",
     noMatch: "Совпадений нет",
   },

@@ -593,8 +593,13 @@ test("completes commands addressed to another database through getSiblingDB", ()
   // The parser accepts `db.getSiblingDB("x").coll.find(…)`, so the editor has to complete it the
   // same way it completes `db.coll.find(…)` — including resolving the collection, which is what
   // loads field names.
-  // Addressing another database offers exactly what `db.` offers.
-  assert.deepEqual(labels('db.getSiblingDB("archive").', { collections }), labels("db.", { collections }));
+  // Addressing another database offers what `db.` offers, except `getSiblingDB` itself — the
+  // parser rejects chaining it, and accepting that suggestion would produce a statement that
+  // cannot run.
+  const siblingRoot = labels('db.getSiblingDB("archive").', { collections });
+  assert.deepEqual(siblingRoot, labels("db.", { collections }).filter((label: string) => label !== "getSiblingDB"));
+  assert.ok(!siblingRoot.includes("getSiblingDB"));
+  assert.equal(getMongoCompletionContext('db.getSiblingDB("archive").', 'db.getSiblingDB("archive").'.length).database, "archive");
   assert.deepEqual(labels('db.getSiblingDB("archive").user_ev', { collections }), ["user_events"]);
 
   const methods = labels('db.getSiblingDB("archive").users.', { collections });

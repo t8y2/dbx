@@ -1035,13 +1035,29 @@ impl DbxMcpServer {
             Err(error) => return backend_tool_error("DBX_TOOL_ERROR", error),
         };
         let entries = crate::plugin_tools::build_catalog(&providers);
-        let owned: Vec<&crate::plugin_tools::PluginToolEntry> =
-            entries.iter().filter(|entry| entry.plugin_id == plugin_id).collect();
+        // Disclose only what the flat surface would advertise: the per-tool
+        // allowlist filters the listing just like `tools/list`, with a count
+        // of hidden tools so the caller knows the view is narrowed.
+        let policy = self.load_policy().await.ok();
+        let (owned, hidden) = {
+            let owned: Vec<&crate::plugin_tools::PluginToolEntry> = entries
+                .iter()
+                .filter(|entry| {
+                    entry.plugin_id == plugin_id
+                        && policy.as_ref().is_none_or(|policy| policy_allows_tool(policy, &entry.exposed_name))
+                })
+                .collect();
+            let total = entries.iter().filter(|entry| entry.plugin_id == plugin_id).count();
+            let hidden = total - owned.len();
+            (owned, hidden)
+        };
         if owned.is_empty() {
-            return tool_error(
-                "PLUGIN_NOT_FOUND",
-                format!("Plugin \"{plugin_id}\" does not contribute MCP tools. Use dbx_plugin_list to list plugins."),
-            );
+            let reason = if hidden > 0 {
+                format!("All {hidden} tool(s) of plugin \"{plugin_id}\" are hidden by the DBX MCP tool allowlist.")
+            } else {
+                format!("Plugin \"{plugin_id}\" does not contribute MCP tools. Use dbx_plugin_list to list plugins.")
+            };
+            return tool_error("PLUGIN_NOT_FOUND", reason);
         }
         let allowed = match self.allowed_plugin_connections_for(plugin_id).await {
             Ok(allowed) => allowed,
@@ -1072,10 +1088,13 @@ impl DbxMcpServer {
                 allowed.iter().map(|(id, name)| format!("{id} = {name}")).collect::<Vec<_>>().join("; ")
             ),
         };
+        let hidden_note =
+            (hidden > 0).then(|| format!("\n{} further tool(s) of this plugin are hidden by the DBX MCP tool allowlist.", hidden));
         text(format!(
-            "{} tool(s) of plugin {plugin_id}:\n\n{}\n\n{connection_note}\nCall through dbx_plugin_call (plugin_id + tool + arguments).",
+            "{} tool(s) of plugin {plugin_id}:\n\n{}\n\n{connection_note}\nCall through dbx_plugin_call (plugin_id + tool + arguments).{}",
             owned.len(),
-            lines.join("\n\n")
+            lines.join("\n\n"),
+            hidden_note.unwrap_or_default()
         ))
     }
 
@@ -5660,6 +5679,54 @@ mod tests {
         // list 仍在白名单内，可列出。
         let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
         assert_eq!(list.is_error, Some(false), "{}", result_text(&list));
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_listing_is_filtered_by_the_flat_allowlist() {
+        // dbx_plugin_tools must disclose only what the flat surface would:
+        // denied tools stay hidden (with a count note) even though calls are
+        // gated separately.
+        let restricted = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy {
+                allowed_tool_names: Some(vec![
+                    "dbx_plugin_tools".to_string(),
+                    "dbx_kafka__kafka_topics_list".to_string(),
+                ]),
+                ..Default::default()
+            },
+            plugin_providers: vec![
+                plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing()),
+                plugin_provider(
+                    "io.dbx.ssh",
+                    "Terminal",
+                    json!({ "tools": [{ "name": "ssh_exec", "description": "Run a command" }] }),
+                ),
+            ],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(restricted, McpScope::default(), false);
+        let listing = server
+            .plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.kafka".into() }))
+            .await;
+        assert_eq!(listing.is_error, Some(false));
+        let text = result_text(&listing);
+        assert!(text.contains("kafka_topics_list"), "{text}");
+        assert!(!text.contains("kafka_topics_delete"), "denied tool must be hidden: {text}");
+        assert!(text.contains("1 further tool(s)"), "{text}");
+
+        let all_hidden = server
+            .plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.ssh".into() }))
+            .await;
+        assert_eq!(all_hidden.is_error, Some(true));
+        assert!(result_text(&all_hidden).contains("All 1 tool(s)"), "{}", result_text(&all_hidden));
+
+        // A plugin whose every tool is denied resolves to the hidden reason.
+        // Unknown plugin ids (never installed) keep the plain not-found text.
+        let unknown = server
+            .plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.nope".into() }))
+            .await;
+        assert_eq!(unknown.is_error, Some(true));
+        assert!(result_text(&unknown).contains("does not contribute MCP tools"), "{}", result_text(&unknown));
     }
 
     #[tokio::test]

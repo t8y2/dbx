@@ -254,7 +254,17 @@ export function useQueryEditorBatchSelection(options: QueryEditorBatchSelectionO
   function prepareBatchColumnSelectionSession(items: SqlCompletionItem[], document: string, from: number, to: number): BatchColumnSelectionSession | null {
     const selectableItems = items.filter((item) => item.type === "column" && item.batchSelectionMode && item.apply);
     if (selectableItems.length === 0) {
-      clearBatchColumnSelectionSession();
+      // One completion request builds several result sets (the local pass plus
+      // the metadata pass) and only some of them carry column candidates.
+      // Clearing the stored session for such an empty sibling result left the
+      // checkbox rows rendered by the other result attached to a session that
+      // no longer existed, so clicking a checkbox did nothing. It also made the
+      // expanded-rendering flag flap false→true on every pass, reconfiguring
+      // CodeMirror's autocompletion compartment while a source was still
+      // pending; the recreated list stayed disabled (ArrowUp/Down ignored, then
+      // closed on the next caret move). Keep the session and only report "no
+      // batch selection" for this result (dbx#9973). The session is still
+      // dropped when the popup closes, on Escape and after an accepted row.
       return null;
     }
 

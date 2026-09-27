@@ -44,6 +44,126 @@ const ARCHIVE_EXTRACT_BACKOFF_MS: &[u64] = &[100, 250, 500];
 /// the download server, local disk, or the application's file descriptors.
 const MAX_CONCURRENT_AGENT_UPDATES: usize = 4;
 
+#[derive(Debug, Clone)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum ManagedAgentProcessTarget {
+    Driver { jar_path: PathBuf, native_path: PathBuf },
+    JreDirectory(PathBuf),
+}
+
+impl ManagedAgentProcessTarget {
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn description(&self) -> String {
+        match self {
+            Self::Driver { jar_path, .. } => format!("driver artifact {}", jar_path.display()),
+            Self::JreDirectory(path) => format!("JRE directory {}", path.display()),
+        }
+    }
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn normalized_process_path(path: &Path) -> String {
+    let normalized = path.to_string_lossy().trim_matches('"').replace('/', "\\");
+    normalized.strip_prefix(r"\\?\").unwrap_or(&normalized).trim_end_matches('\\').to_ascii_lowercase()
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn process_path_is_within(candidate: &str, directory: &str) -> bool {
+    candidate == directory || candidate.strip_prefix(directory).is_some_and(|remainder| remainder.starts_with('\\'))
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn process_matches_managed_agent(
+    executable: Option<&Path>,
+    command: &[std::ffi::OsString],
+    target: &ManagedAgentProcessTarget,
+) -> bool {
+    let executable = executable.map(normalized_process_path);
+    match target {
+        ManagedAgentProcessTarget::Driver { jar_path, native_path } => {
+            let jar_path = normalized_process_path(jar_path);
+            let native_path = normalized_process_path(native_path);
+            executable.as_deref() == Some(native_path.as_str())
+                || command.iter().any(|argument| normalized_process_path(Path::new(argument)) == jar_path)
+        }
+        ManagedAgentProcessTarget::JreDirectory(directory) => {
+            let directory = normalized_process_path(directory);
+            executable.as_deref().is_some_and(|path| process_path_is_within(path, &directory))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn stop_external_managed_agent_processes_blocking(target: ManagedAgentProcessTarget) -> Result<(), String> {
+    use sysinfo::{get_current_pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+
+    let refresh = ProcessRefreshKind::new().with_cmd(UpdateKind::Always).with_exe(UpdateKind::Always);
+    let mut system = System::new_with_specifics(RefreshKind::new().with_processes(refresh));
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+    let current_pid = get_current_pid().ok();
+    let mut matched = Vec::new();
+
+    for (pid, process) in system.processes() {
+        if current_pid == Some(*pid) || !process_matches_managed_agent(process.exe(), process.cmd(), &target) {
+            continue;
+        }
+        let name = process.name().to_string_lossy().into_owned();
+        let sent = process.kill();
+        log::info!(
+            "Stopping external DBX agent process before replacing {}: pid={}, name={}, kill_sent={sent}",
+            target.description(),
+            pid.as_u32(),
+            name
+        );
+        matched.push((*pid, name));
+    }
+
+    if matched.is_empty() {
+        return Ok(());
+    }
+
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+        matched.retain(|(pid, _)| system.process(*pid).is_some());
+        if matched.is_empty() {
+            return Ok(());
+        }
+    }
+
+    let remaining =
+        matched.into_iter().map(|(pid, name)| format!("{name} (PID {})", pid.as_u32())).collect::<Vec<_>>().join(", ");
+    Err(format!("Failed to stop DBX agent process(es) holding {}: {remaining}", target.description()))
+}
+
+async fn stop_external_managed_agent_processes(target: ManagedAgentProcessTarget) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return tokio::task::spawn_blocking(move || stop_external_managed_agent_processes_blocking(target))
+            .await
+            .map_err(|error| format!("Failed to inspect DBX agent processes: {error}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        Ok(())
+    }
+}
+
+async fn stop_driver_processes_before_replacement(am: &AgentManager, db_type: &str) -> Result<(), String> {
+    am.stop_daemon_by_key(db_type).await;
+    stop_external_managed_agent_processes(ManagedAgentProcessTarget::Driver {
+        jar_path: am.driver_jar_path(db_type),
+        native_path: am.driver_native_path(db_type),
+    })
+    .await
+}
+
+async fn stop_jre_processes_before_replacement(am: &AgentManager, jre_key: &str) -> Result<(), String> {
+    stop_daemons_using_jre(am, jre_key).await;
+    stop_external_managed_agent_processes(ManagedAgentProcessTarget::JreDirectory(am.jre_dir(jre_key))).await
+}
+
 /// Delete an old JRE directory, retrying on Windows to cover the daemon-exit
 /// and AV-scan release window. Returns the original `std::io::Error` when all
 /// retries fail so callers can decide whether to fall back to rename-stash.
@@ -637,13 +757,16 @@ pub async fn install_agent_driver(
 /// Ensure both Linux worker binaries are available for remote SQLite over SSH.
 ///
 /// Unlike a regular native Agent, this driver is selected by the remote SSH
-/// host's architecture rather than by the desktop application's platform.
+/// host's architecture rather than by the desktop application's platform. The
+/// online installer always fetches every platform, so this readiness check asks
+/// for all of them; an offline import may legitimately provide just one (the
+/// remote host's), which [`AgentManager::driver_native_installed`] accepts.
 pub async fn ensure_sqlite_worker_driver_ready(am: &AgentManager) -> Result<(), String> {
-    if am.driver_native_installed(SQLITE_WORKER_DRIVER_KEY) {
+    if am.sqlite_worker_all_platforms_installed() {
         return Ok(());
     }
     install_agent_driver(am, SQLITE_WORKER_DRIVER_KEY, |_| {}).await?;
-    if am.driver_native_installed(SQLITE_WORKER_DRIVER_KEY) {
+    if am.sqlite_worker_all_platforms_installed() {
         Ok(())
     } else {
         Err("SQLite SSH worker installation completed without both Linux binaries".to_string())
@@ -984,6 +1107,7 @@ pub async fn uninstall_agent_driver(am: &AgentManager, db_type: &str) -> Result<
     {
         let driver_lock = driver_operation_lock(am, db_type);
         let _driver_guard = driver_lock.lock().await;
+        stop_driver_processes_before_replacement(am, db_type).await?;
         prune_driver_download_cache(am, db_type)?;
         let jar_path = am.driver_jar_path(db_type);
         if jar_path.exists() {
@@ -995,7 +1119,6 @@ pub async fn uninstall_agent_driver(am: &AgentManager, db_type: &str) -> Result<
             }
         }
         am.mutate_state(|state| state.installed_drivers.remove(db_type))?;
-        am.stop_daemon_by_key(db_type).await;
     }
     Ok(())
 }
@@ -1027,6 +1150,7 @@ pub async fn uninstall_agent_jre(am: &AgentManager, jre_key: &str) -> Result<(),
         // Stop daemons first so any java.exe holding the JRE files exits before
         // we try to remove the directory (Windows ERROR_ACCESS_DENIED otherwise).
         am.stop_daemons().await;
+        stop_external_managed_agent_processes(ManagedAgentProcessTarget::JreDirectory(am.jre_dir(jre_key))).await?;
         let jre_dir = am.jre_dir(jre_key);
         if let Err(err) = remove_jre_dir_with_retry(&jre_dir) {
             return Err(format_jre_dir_remove_error(&jre_dir, &err));
@@ -1085,6 +1209,7 @@ pub async fn reinstall_agent_jre_from(
     // handles on Windows (Issue #1100). Falls back to a rename-stash if the
     // directory still cannot be removed.
     am.stop_daemons().await;
+    stop_external_managed_agent_processes(ManagedAgentProcessTarget::JreDirectory(jre_dir.clone())).await?;
     let stash = replace_old_jre_dir(&jre_dir)?;
     persist_pending_jre_cleanup(am, stash.as_ref()).await?;
     extract_jre_archive(&jre_archive, &jre_dir, platform_jre.format)?;
@@ -1293,8 +1418,8 @@ async fn install_agent_driver_with_batch_unlocked(
             // anyway because the same tokens are cancelled).
             if can_fallback_to_local_agent(am, db_type, cancellations).await {
                 if let Some(local_jar) = find_local_agent_jar(db_type) {
+                    stop_driver_processes_before_replacement(am, db_type).await?;
                     install_local_agent(am, db_type, local_jar)?;
-                    am.stop_daemon_by_key(db_type).await;
                     progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
                     return Ok(());
                 }
@@ -1374,7 +1499,7 @@ async fn ensure_jre_from_registry(
     // Stop only daemons that use this JRE before replacing its directory
     // (Windows ERROR_ACCESS_DENIED, Issue #1100).  In a concurrent
     // upgrade-all this avoids killing unrelated daemons mid-install.
-    stop_daemons_using_jre(am, jre_key).await;
+    stop_jre_processes_before_replacement(am, jre_key).await?;
     let stash = replace_old_jre_dir(&jre_dir)?;
 
     // Persist the stash path *before* extraction so that a crash during
@@ -1450,6 +1575,7 @@ async fn commit_local_agent_install(
     jre_key: &str,
     jre_version: Option<&str>,
 ) -> Result<(), String> {
+    stop_driver_processes_before_replacement(am, db_type).await?;
     install_local_agent_file(am, db_type, local_jar)?;
     persist_local_agent_install_state(am, db_type, jre_key, jre_version).await
 }
@@ -1489,7 +1615,6 @@ async fn install_local_agent_with_registry_jre(
         registry.resolve_jre(jre_key).map(|jre| jre.version.as_str()),
     )
     .await?;
-    am.stop_daemon_by_key(db_type).await;
     progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
     Ok(())
 }
@@ -1671,6 +1796,7 @@ async fn install_agent_driver_from_registry(
         std::fs::remove_file(&download_path).ok();
         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
     }
+    stop_driver_processes_before_replacement(am, db_type).await?;
     install_downloaded_driver_artifact(
         &download_path,
         &target_path,
@@ -1712,7 +1838,6 @@ async fn install_agent_driver_from_registry(
             },
         );
     })?;
-    am.stop_daemon_by_key(db_type).await;
     cleanup_driver_download_cache_after_success(am, db_type);
     progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
     Ok(())
@@ -2646,6 +2771,7 @@ async fn import_tar_zstd_jre_package(
     extract_and_validate_standalone_jre(package_path, staging.path(), info)?;
     // Validate before stopping active daemons or replacing a working runtime.
     am.stop_daemons().await;
+    stop_external_managed_agent_processes(ManagedAgentProcessTarget::JreDirectory(am.jre_dir(&info.key))).await?;
     let pending_cleanup = replace_imported_jre_dir(staging.path(), &am.jre_dir(&info.key))?;
     am.mutate_state(|state| {
         state.jre_versions.insert(info.key.clone(), info.version.clone());
@@ -2668,7 +2794,7 @@ pub struct OfflineImportPlan {
 }
 
 type OfflineJreEntry = (String, String, Option<ArtifactFormat>);
-type OfflineDriverEntry = (String, String, bool);
+type OfflineDriverEntry = (String, String, bool, Option<String>);
 type OfflineArchiveEntries = (Vec<OfflineJreEntry>, Vec<OfflineDriverEntry>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2743,6 +2869,7 @@ async fn import_tar_zstd_driver_package(
         }
         DriverArtifactKind::Native => am.driver_native_path(&info.db_type),
     };
+    stop_driver_processes_before_replacement(am, &info.db_type).await?;
     install_driver_from_tar_zstd_package(
         package_path,
         &target_path,
@@ -2773,7 +2900,6 @@ async fn import_tar_zstd_driver_package(
             );
         })?;
     }
-    am.stop_daemon_by_key(&info.db_type).await;
     result.drivers_installed.push(info.db_type);
     Ok(result)
 }
@@ -2880,7 +3006,12 @@ pub fn inspect_offline_zip(zip_path: &Path) -> Result<OfflineImportPlan, String>
     let (jre_entries, driver_entries) = collect_offline_entries(&mut archive, &registry)?;
     validate_offline_zip_preflight(&mut archive, &registry, &jre_entries, &driver_entries)?;
     Ok(OfflineImportPlan {
-        driver_keys: driver_entries.into_iter().map(|(db_type, _, _)| db_type).collect(),
+        driver_keys: driver_entries
+            .into_iter()
+            .map(|(db_type, _, _, _)| db_type)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         includes_jre: !jre_entries.is_empty(),
     })
 }
@@ -2938,7 +3069,8 @@ pub async fn import_offline_zip(
         // A blocked write (anti-virus, disk quota) or an invalid archive must
         // not abort the rest of the package: record the failure and continue so
         // the drivers still install.
-        let outcome = (|| -> Result<(), String> {
+        let jre_dir = am.jre_dir(jre_key);
+        let staged = (|| -> Result<(PathBuf, PathBuf), String> {
             let mut entry = archive
                 .by_name(entry_name)
                 .map_err(|e| format!("Failed to read {entry_name}: {}", describe_error(&e)))?;
@@ -2950,7 +3082,6 @@ pub async fn import_offline_zip(
                     .map_err(|e| format!("Failed to extract JRE archive: {}", describe_error(&e)))?;
             }
 
-            let jre_dir = am.jre_dir(jre_key);
             let staging_dir = am.base_dir().join(format!(".jre-offline-import-{}", uuid::Uuid::new_v4()));
             if let Err(error) = extract_jre_archive(&tmp_archive, &staging_dir, *format) {
                 std::fs::remove_dir_all(&staging_dir).ok();
@@ -2962,17 +3093,30 @@ pub async fn import_offline_zip(
                 std::fs::remove_file(&tmp_archive).ok();
                 return Err(format!("Offline JRE archive does not contain a Java executable: {entry_name}"));
             }
-            let pending_cleanup = replace_imported_jre_dir(&staging_dir, &jre_dir)?;
-            std::fs::remove_file(&tmp_archive).ok();
-            if let Some(path) = pending_cleanup {
-                local_state.pending_jre_cleanup.push(path);
-            }
-
-            if let Some(ver) = jre_version {
-                local_state.jre_versions.insert(jre_key.clone(), ver);
-            }
-            Ok(())
+            Ok((tmp_archive, staging_dir))
         })();
+        let outcome = match staged {
+            Ok((tmp_archive, staging_dir)) => {
+                let result = async {
+                    stop_jre_processes_before_replacement(am, jre_key).await?;
+                    let pending_cleanup = replace_imported_jre_dir(&staging_dir, &jre_dir)?;
+                    if let Some(path) = pending_cleanup {
+                        local_state.pending_jre_cleanup.push(path);
+                    }
+                    if let Some(ver) = jre_version {
+                        local_state.jre_versions.insert(jre_key.clone(), ver);
+                    }
+                    Ok(())
+                }
+                .await;
+                std::fs::remove_file(&tmp_archive).ok();
+                if result.is_err() {
+                    std::fs::remove_dir_all(&staging_dir).ok();
+                }
+                result
+            }
+            Err(error) => Err(error),
+        };
         match outcome {
             Ok(()) => result.jre_installed.push(jre_key.clone()),
             Err(error) => {
@@ -2982,19 +3126,33 @@ pub async fn import_offline_zip(
         }
     }
 
-    for (db_type, entry_name, is_native) in &driver_entries {
+    // Decide up front which drivers are already up to date. A single driver can
+    // contribute several entries (the SQLite worker ships one binary per remote
+    // platform), and the check must not skip the second artifact just because
+    // installing the first one updated the recorded version.
+    let mut up_to_date_drivers = std::collections::BTreeSet::new();
+    for (db_type, _, _, _) in &driver_entries {
+        if up_to_date_drivers.contains(db_type) {
+            continue;
+        }
+        let Some(remote_driver) = registry.drivers.get(db_type) else { continue };
+        let Some(installed) = local_state.installed_drivers.get(db_type) else { continue };
+        if installed.version != "0.1.0-local"
+            && installed.version != "local"
+            && !dbx_platform::version::is_newer_version(&remote_driver.version, &installed.version)
+        {
+            up_to_date_drivers.insert(db_type.clone());
+        }
+    }
+
+    for (db_type, entry_name, is_native, worker_platform) in &driver_entries {
         current += 1;
 
-        if let Some(remote_driver) = registry.drivers.get(db_type) {
-            if let Some(installed) = local_state.installed_drivers.get(db_type) {
-                if installed.version != "0.1.0-local"
-                    && installed.version != "local"
-                    && !dbx_platform::version::is_newer_version(&remote_driver.version, &installed.version)
-                {
-                    result.drivers_skipped.push(db_type.clone());
-                    continue;
-                }
+        if up_to_date_drivers.contains(db_type) {
+            if !result.drivers_skipped.contains(db_type) {
+                result.drivers_skipped.push(db_type.clone());
             }
+            continue;
         }
 
         progress(OfflineImportProgress {
@@ -3005,10 +3163,10 @@ pub async fn import_offline_zip(
             db_type: Some(db_type.clone()),
         });
 
-        let driver_path = if *is_native { am.driver_native_path(db_type) } else { am.driver_jar_path(db_type) };
+        let driver_path = offline_driver_target_path(am, db_type, *is_native, worker_platform.as_deref());
         // Same per-item isolation as the JRE loop: one unreadable or blocked
         // driver must not stop the remaining drivers from installing.
-        let outcome = (|| -> Result<(), String> {
+        let staged = (|| -> Result<PathBuf, String> {
             if let Some(parent) = driver_path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create driver directory: {}", describe_error(&e)))?;
@@ -3030,7 +3188,13 @@ pub async fn import_offline_zip(
             }
             drop(out);
             if *is_native {
-                if let Err(error) = validate_native_agent_binary(&staging_path) {
+                // The SQLite SSH worker carries the remote host's architecture, so
+                // validate against the packaged platform rather than this desktop.
+                let native_platform = match worker_platform {
+                    Some(packaged) => packaged.as_str(),
+                    None => AgentManager::current_platform(),
+                };
+                if let Err(error) = validate_native_agent_binary_for_platform(&staging_path, native_platform) {
                     std::fs::remove_file(&staging_path).ok();
                     return Err(error);
                 }
@@ -3043,24 +3207,41 @@ pub async fn import_offline_zip(
                     return Err(format!("Offline agent jar is invalid or corrupt: {entry_name}"));
                 }
             }
-            replace_imported_agent_file(&staging_path, &driver_path)?;
-            if *is_native {
-                std::fs::remove_file(am.driver_jar_path(db_type)).ok();
-            } else {
-                std::fs::remove_file(am.driver_native_path(db_type)).ok();
-            }
-
-            let version =
-                registry.drivers.get(db_type).map(|d| d.version.clone()).unwrap_or_else(|| "local".to_string());
-            let jre_key =
-                registry.drivers.get(db_type).map(|d| d.jre.clone()).unwrap_or_else(|| DEFAULT_JRE_KEY.to_string());
-
-            local_state.installed_drivers.insert(
-                db_type.clone(),
-                InstalledDriver { version, installed_at: chrono::Utc::now().to_rfc3339(), jre: jre_key },
-            );
-            Ok(())
+            Ok(staging_path)
         })();
+        let outcome = match staged {
+            Ok(staging_path) => {
+                let result = async {
+                    stop_driver_processes_before_replacement(am, db_type).await?;
+                    replace_imported_agent_file(&staging_path, &driver_path)?;
+                    if *is_native {
+                        std::fs::remove_file(am.driver_jar_path(db_type)).ok();
+                    } else {
+                        std::fs::remove_file(am.driver_native_path(db_type)).ok();
+                    }
+
+                    let version =
+                        registry.drivers.get(db_type).map(|d| d.version.clone()).unwrap_or_else(|| "local".to_string());
+                    let jre_key = registry
+                        .drivers
+                        .get(db_type)
+                        .map(|d| d.jre.clone())
+                        .unwrap_or_else(|| DEFAULT_JRE_KEY.to_string());
+
+                    local_state.installed_drivers.insert(
+                        db_type.clone(),
+                        InstalledDriver { version, installed_at: chrono::Utc::now().to_rfc3339(), jre: jre_key },
+                    );
+                    Ok(())
+                }
+                .await;
+                if result.is_err() {
+                    std::fs::remove_file(&staging_path).ok();
+                }
+                result
+            }
+            Err(error) => Err(error),
+        };
         match outcome {
             Ok(()) => result.drivers_installed.push(db_type.clone()),
             Err(error) => {
@@ -3096,7 +3277,10 @@ fn collect_offline_entries(
 ) -> Result<OfflineArchiveEntries, String> {
     let platform = AgentManager::current_platform();
     let mut jres = std::collections::BTreeMap::<String, (String, Option<ArtifactFormat>)>::new();
-    let mut drivers = std::collections::BTreeMap::<String, (String, bool)>::new();
+    // One driver can contribute more than one entry: the SQLite SSH worker ships
+    // a binary per remote Linux platform, and a bundle may carry both a native
+    // artifact and a Java fallback for the same key.
+    let mut drivers = std::collections::BTreeMap::<String, Vec<(String, bool, Option<String>)>>::new();
 
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|e| format!("Failed to inspect ZIP entry: {e}"))?;
@@ -3127,21 +3311,77 @@ fn collect_offline_entries(
                 .or_else(|| extract_db_type_from_filename(&name))
                 .ok_or_else(|| format!("Unable to identify offline driver: {name}"))?;
             validate_offline_driver_key(&db_type)?;
-            drivers.entry(db_type).or_insert((name, false));
+            drivers.entry(db_type).or_default().push((name, false, None));
         } else if name.starts_with("drivers/") {
-            if let Some(db_type) = db_type_for_native_offline_entry(registry, platform, &name) {
+            if let Some((db_type, worker_platform)) = native_offline_entry_target(registry, platform, &name) {
                 validate_offline_driver_key(&db_type)?;
-                // Prefer the native artifact when a package contains both the
-                // platform executable and a Java fallback for the same driver.
-                drivers.insert(db_type, (name, true));
+                drivers.entry(db_type).or_default().push((name, true, worker_platform));
             }
         }
     }
 
-    Ok((
-        jres.into_iter().map(|(jre_key, (name, format))| (jre_key, name, format)).collect(),
-        drivers.into_iter().map(|(db_type, (name, is_native))| (db_type, name, is_native)).collect(),
-    ))
+    let driver_entries = drivers
+        .into_iter()
+        .flat_map(|(db_type, mut entries)| {
+            // Prefer native artifacts when a package contains both the platform
+            // executable and a Java fallback for the same driver.
+            if entries.iter().any(|(_, is_native, _)| *is_native) {
+                entries.retain(|(_, is_native, _)| *is_native);
+            } else {
+                entries.truncate(1);
+            }
+            entries
+                .into_iter()
+                .map(move |(name, is_native, worker_platform)| (db_type.clone(), name, is_native, worker_platform))
+        })
+        .collect();
+
+    Ok((jres.into_iter().map(|(jre_key, (name, format))| (jre_key, name, format)).collect(), driver_entries))
+}
+
+/// Where an offline native artifact must be installed.
+///
+/// Everything except the SQLite SSH worker installs under the desktop platform
+/// path; the worker is chosen by the remote SSH host's architecture, so its
+/// Linux packages are addressed by the platform baked into their filename.
+fn offline_driver_target_path(
+    am: &AgentManager,
+    db_type: &str,
+    is_native: bool,
+    worker_platform: Option<&str>,
+) -> PathBuf {
+    match (is_native, worker_platform) {
+        (true, Some(platform)) => am.driver_native_platform_path(db_type, platform),
+        (true, None) => am.driver_native_path(db_type),
+        (false, _) => am.driver_jar_path(db_type),
+    }
+}
+
+/// Resolve a `drivers/` native entry to its driver key and, for the SQLite SSH
+/// worker, to the remote Linux platform the binary belongs to.
+fn native_offline_entry_target(
+    registry: &AgentRegistry,
+    platform: &str,
+    name: &str,
+) -> Option<(String, Option<String>)> {
+    let filename = name.rsplit('/').next()?;
+    // The SQLite SSH worker follows the remote SSH host, so resolve it against
+    // its own platform list first: the generic lookup below would match the
+    // desktop platform on a Linux machine and wrongly point at the flat native
+    // path instead of the per-platform one the SSH launcher reads.
+    for (db_type, driver) in &registry.drivers {
+        if !AgentManager::is_sqlite_worker_driver(db_type) {
+            continue;
+        }
+        for worker_platform in SQLITE_WORKER_NATIVE_PLATFORMS {
+            let artifact_filename =
+                driver.native.get(*worker_platform).and_then(|artifact| artifact.url.rsplit('/').next());
+            if artifact_filename == Some(filename) {
+                return Some((db_type.clone(), Some((*worker_platform).to_string())));
+            }
+        }
+    }
+    db_type_for_native_offline_entry(registry, platform, name).map(|db_type| (db_type, None))
 }
 
 fn validate_offline_zip_preflight(
@@ -3164,7 +3404,7 @@ fn validate_offline_zip_preflight(
         }
     }
 
-    for (db_type, entry_name, is_native) in driver_entries {
+    for (db_type, entry_name, is_native, worker_platform) in driver_entries {
         let Some(driver) = registry.drivers.get(db_type) else {
             // Older locally assembled ZIPs can identify a JAR solely from its
             // canonical filename. Preserve that import path when no registry
@@ -3172,7 +3412,7 @@ fn validate_offline_zip_preflight(
             continue;
         };
         let artifact = if *is_native {
-            driver.native.get(platform)
+            driver.native.get(worker_platform.as_deref().unwrap_or(platform))
         } else {
             let jre_key = driver.jre.trim();
             if !jre_key.is_empty() {
@@ -3913,6 +4153,8 @@ pub async fn import_agent_driver(am: &AgentManager, db_type: &str, source_path: 
         return Err(format!("File not found: {}", source_path.display()));
     }
 
+    stop_driver_processes_before_replacement(am, db_type).await?;
+
     if source_path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("jar")) {
         install_local_agent(am, db_type, source_path.to_path_buf())?;
         std::fs::remove_file(am.driver_native_path(db_type)).ok();
@@ -4119,6 +4361,50 @@ fn is_windows_binary_for_machine(file: &mut std::fs::File, magic: &[u8; 4], expe
 #[cfg(test)]
 mod agent_download_url_tests {
     use super::*;
+
+    #[test]
+    fn managed_driver_process_matches_jar_argument_or_native_executable() {
+        let target = ManagedAgentProcessTarget::Driver {
+            jar_path: PathBuf::from(r"C:\Users\alice\.dbx\agents\drivers\dameng\agent.jar"),
+            native_path: PathBuf::from(r"C:\Users\alice\.dbx\agents\drivers\dameng\agent.exe"),
+        };
+        let java_command = vec![
+            std::ffi::OsString::from("-jar"),
+            std::ffi::OsString::from(r"c:/users/ALICE/.dbx/agents/drivers/dameng/agent.jar"),
+        ];
+
+        assert!(process_matches_managed_agent(
+            Some(Path::new(r"C:\Users\alice\.dbx\agents\jre-21\bin\java.exe")),
+            &java_command,
+            &target
+        ));
+        assert!(process_matches_managed_agent(
+            Some(Path::new(r"\\?\C:\Users\alice\.dbx\agents\drivers\dameng\agent.exe")),
+            &[],
+            &target
+        ));
+        assert!(!process_matches_managed_agent(
+            Some(Path::new(r"C:\Program Files\Java\bin\java.exe")),
+            &[std::ffi::OsString::from(r"C:\tmp\agent.jar")],
+            &target
+        ));
+    }
+
+    #[test]
+    fn managed_jre_process_requires_a_path_boundary() {
+        let target = ManagedAgentProcessTarget::JreDirectory(PathBuf::from(r"C:\Users\alice\.dbx\agents\jre-21"));
+
+        assert!(process_matches_managed_agent(
+            Some(Path::new(r"c:/users/alice/.dbx/agents/jre-21/bin/java.exe")),
+            &[],
+            &target
+        ));
+        assert!(!process_matches_managed_agent(
+            Some(Path::new(r"C:\Users\alice\.dbx\agents\jre-210\bin\java.exe")),
+            &[],
+            &target
+        ));
+    }
 
     #[test]
     fn r2_cache_buster_uses_version_query() {
@@ -6291,6 +6577,129 @@ mod agent_registry_install_tests {
             tokio::time::timeout(std::time::Duration::from_secs(1), manager.installation_operation_lock.write())
                 .await
                 .expect("offline import did not resume after driver operations completed");
+    }
+
+    /// A minimal ELF header that passes the native-agent platform check.
+    fn linux_native_binary(machine: u16) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 20];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+
+    /// A registry entry for the SSH worker carrying both Linux binaries, the way
+    /// a release bundle does.
+    fn registry_with_sqlite_worker(version: &str) -> AgentRegistry {
+        let native = SQLITE_WORKER_NATIVE_PLATFORMS
+            .iter()
+            .map(|platform| {
+                (
+                    (*platform).to_string(),
+                    ArtifactInfo {
+                        url: format!("https://example.com/dbx-agent-sqlite-worker-{version}-{platform}"),
+                        sha256: None,
+                        size: 0,
+                        format: None,
+                    },
+                )
+            })
+            .collect();
+        AgentRegistry {
+            jre: None,
+            jres: std::collections::HashMap::new(),
+            drivers: [(
+                SQLITE_WORKER_DRIVER_KEY.to_string(),
+                DriverInfo {
+                    version: version.to_string(),
+                    label: "SQLite SSH Worker".to_string(),
+                    min_app_version: "0.1.0".to_string(),
+                    jar: None,
+                    native,
+                    jre: DEFAULT_JRE_KEY.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    fn sqlite_worker_entry(manager: &AgentManager, registry: &AgentRegistry) -> AgentDriverInfo {
+        build_agent_list(manager, Some(registry))
+            .into_iter()
+            .find(|driver| driver.db_type == SQLITE_WORKER_DRIVER_KEY)
+            .expect("sqlite-worker is part of the driver catalog")
+    }
+
+    #[tokio::test]
+    async fn offline_zip_installs_the_single_sqlite_worker_platform_it_ships() {
+        let version = "0.1.3";
+        let x64_name = format!("dbx-agent-sqlite-worker-{version}-linux-x64");
+        let registry = registry_with_sqlite_worker(version);
+        let (_dir, package) = write_offline_zip(&registry, &[(format!("drivers/{x64_name}"), linux_native_binary(62))]);
+
+        let plan = inspect_offline_zip(&package).unwrap();
+        assert_eq!(plan.driver_keys, vec![SQLITE_WORKER_DRIVER_KEY.to_string()]);
+
+        let manager = test_manager("offline-sqlite-worker-single-platform");
+        assert!(!manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
+        assert!(!sqlite_worker_entry(&manager, &registry).installed);
+
+        let result = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        assert!(result.failures.is_empty(), "unexpected failures: {:?}", result.failures);
+        assert_eq!(result.drivers_installed, vec![SQLITE_WORKER_DRIVER_KEY.to_string()]);
+
+        // Only the packaged platform lands on disk, and that alone must count as
+        // installed so the SSH connection stops trying to download it (#8987).
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").is_file());
+        assert!(!manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-aarch64").exists());
+        assert!(manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
+        assert!(sqlite_worker_entry(&manager, &registry).installed, "Driver Manager must report the worker installed");
+
+        // Re-importing the same package is a no-op instead of a bogus reinstall.
+        let again = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        assert_eq!(again.drivers_skipped, vec![SQLITE_WORKER_DRIVER_KEY.to_string()]);
+        assert!(again.drivers_installed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn offline_zip_installs_both_sqlite_worker_platforms_when_packaged() {
+        let version = "0.1.4";
+        let x64_name = format!("dbx-agent-sqlite-worker-{version}-linux-x64");
+        let arm_name = format!("dbx-agent-sqlite-worker-{version}-linux-aarch64");
+        let registry = registry_with_sqlite_worker(version);
+        let (_dir, package) = write_offline_zip(
+            &registry,
+            &[
+                (format!("drivers/{x64_name}"), linux_native_binary(62)),
+                (format!("drivers/{arm_name}"), linux_native_binary(183)),
+            ],
+        );
+
+        let manager = test_manager("offline-sqlite-worker-both-platforms");
+        let result = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        assert!(result.failures.is_empty(), "unexpected failures: {:?}", result.failures);
+        // Installing the first artifact updates the recorded version; the second
+        // must still be written instead of being treated as already up to date.
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").is_file());
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-aarch64").is_file());
+        assert!(manager.sqlite_worker_all_platforms_installed());
+    }
+
+    #[tokio::test]
+    async fn offline_zip_rejects_a_sqlite_worker_binary_for_the_wrong_architecture() {
+        let version = "0.1.5";
+        let name = format!("dbx-agent-sqlite-worker-{version}-linux-x64");
+        let registry = registry_with_sqlite_worker(version);
+        // An aarch64 ELF packaged as the x64 artifact must not be installed.
+        let (_dir, package) = write_offline_zip(&registry, &[(format!("drivers/{name}"), linux_native_binary(183))]);
+
+        let manager = test_manager("offline-sqlite-worker-wrong-arch");
+        let result = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        assert!(!result.failures.is_empty(), "a mismatched binary must be reported as a failure");
+        assert!(!manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").exists());
+        assert!(!manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
     }
 }
 

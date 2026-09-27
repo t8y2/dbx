@@ -6637,11 +6637,6 @@ watch(
     inset 0 1px 0 color-mix(in oklab, var(--primary) 55%, transparent),
     inset 0 -1px 0 color-mix(in oklab, var(--primary) 55%, transparent);
 }
-
-/* Inputs are bg-transparent; give them a solid surface on the selected row so fields stay readable. */
-.structure-column-search-current :is(input, button, [role="combobox"], [data-slot="select-trigger"]) {
-  background-color: var(--background);
-}
 </style>
 
 <style>

@@ -449,6 +449,8 @@ pub struct SchemaDiffPreparationOptions {
     pub cascade_delete: bool,
     #[serde(default)]
     pub compare_column_order: bool,
+    #[serde(default = "default_compare_charset")]
+    pub compare_charset: bool,
     #[serde(default)]
     pub ignore_table_name_case: bool,
     #[serde(default)]
@@ -481,6 +483,10 @@ pub struct SchemaDiffPreparationOptions {
     pub field_mappings: Vec<FieldMapping>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub table_mappings: Vec<SchemaDiffTableMapping>,
+}
+
+const fn default_compare_charset() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1167,6 +1173,7 @@ pub fn diff_columns_with_compatibility(
         compatibility_threshold,
         field_mappings,
         false,
+        source_dialect == DialectKind::Mysql && target_dialect == DialectKind::Mysql,
     )
 }
 
@@ -1181,6 +1188,7 @@ fn diff_columns_with_compatibility_options(
     compatibility_threshold: f64,
     field_mappings: &[FieldMapping],
     ignore_column_name_case: bool,
+    compare_charset: bool,
 ) -> (Vec<ColumnDiff>, Vec<ColumnCompatibilityWarning>) {
     use crate::sql_dialect::descriptor::TypeMappingMatrix;
 
@@ -1197,6 +1205,7 @@ fn diff_columns_with_compatibility_options(
         None,
         None,
         ignore_column_name_case,
+        compare_charset,
     );
 
     let mut warnings = Vec::new();
@@ -1647,6 +1656,7 @@ pub fn shard_diff(options: &SchemaDiffPreparationOptions, shard_strategy: &Shard
                 ignore_comments: options.ignore_comments,
                 cascade_delete: options.cascade_delete,
                 compare_column_order: options.compare_column_order,
+                compare_charset: options.compare_charset,
                 ignore_table_name_case: options.ignore_table_name_case,
                 ignore_column_name_case: options.ignore_column_name_case,
                 source_dialect: options.source_dialect,
@@ -1920,6 +1930,7 @@ impl Default for SchemaDiffPreparationOptions {
             ignore_comments: false,
             cascade_delete: false,
             compare_column_order: false,
+            compare_charset: true,
             ignore_table_name_case: false,
             ignore_column_name_case: false,
             detect_renames: false,
@@ -2090,6 +2101,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
                             options.compatibility_threshold,
                             &options.field_mappings,
                             options.ignore_column_name_case,
+                            compare_mysql_column_charset(&options),
                         );
                         all_warnings.extend(warnings);
                     }
@@ -2276,6 +2288,17 @@ fn resolve_schema_diff_table_names(
 
     let target_only = target_names.iter().filter(|name| !used_targets.contains(name.as_str())).cloned().collect();
     SchemaDiffTableNameResolution { pairs, source_only, target_only }
+}
+
+fn compare_mysql_column_charset(options: &SchemaDiffPreparationOptions) -> bool {
+    if !options.compare_charset || !matches!(options.database_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
+        return false;
+    }
+
+    let target_dialect =
+        options.target_dialect.unwrap_or_else(|| DialectKind::from_database_type(options.database_type));
+    let source_dialect = options.source_dialect.unwrap_or(target_dialect);
+    source_dialect == DialectKind::Mysql && target_dialect == DialectKind::Mysql
 }
 
 fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
@@ -2573,6 +2596,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             options.source_dialect,
             options.target_dialect,
             options.ignore_column_name_case,
+            compare_mysql_column_charset(options),
         );
         let index_diffs = diff_indexes_with_options(&source.indexes, &target.indexes, options.ignore_column_name_case);
         let normalized_source_fks: Vec<ForeignKeyInfo> = source
@@ -3164,6 +3188,17 @@ fn column_types_equal_for_dialects(
     }
 }
 
+fn mysql_charset_value(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn mysql_charset_values_differ(source: Option<&str>, target: Option<&str>) -> bool {
+    match (mysql_charset_value(source), mysql_charset_value(target)) {
+        (Some(source), Some(target)) => !source.eq_ignore_ascii_case(target),
+        _ => false,
+    }
+}
+
 fn column_type_similarity_score(source_type: &str, target_type: &str) -> f64 {
     let s = ColumnType::parse(source_type).base_type.to_ascii_lowercase();
     let t = ColumnType::parse(target_type).base_type.to_ascii_lowercase();
@@ -3237,6 +3272,7 @@ fn diff_columns_with_dialect_options(
         source_dialect,
         target_dialect,
         false,
+        source_dialect == Some(DialectKind::Mysql) && target_dialect == Some(DialectKind::Mysql),
     )
 }
 
@@ -3288,6 +3324,7 @@ fn diff_columns_with_identifier_options(
     source_dialect: Option<DialectKind>,
     target_dialect: Option<DialectKind>,
     ignore_column_name_case: bool,
+    compare_charset: bool,
 ) -> Vec<ColumnDiff> {
     let mut diffs = Vec::new();
     let column_matches = resolve_column_matches(source, target, ignore_column_name_case);
@@ -3320,6 +3357,27 @@ fn diff_columns_with_identifier_options(
                     "default: {} → {}",
                     target_column.column_default.as_deref().unwrap_or("NULL"),
                     source_column.column_default.as_deref().unwrap_or("NULL")
+                ));
+            }
+            if compare_charset
+                && mysql_charset_values_differ(
+                    source_column.character_set.as_deref(),
+                    target_column.character_set.as_deref(),
+                )
+            {
+                changes.push(format!(
+                    "character set: {} → {}",
+                    mysql_charset_value(target_column.character_set.as_deref()).unwrap_or_default(),
+                    mysql_charset_value(source_column.character_set.as_deref()).unwrap_or_default()
+                ));
+            }
+            if compare_charset
+                && mysql_charset_values_differ(source_column.collation.as_deref(), target_column.collation.as_deref())
+            {
+                changes.push(format!(
+                    "collation: {} → {}",
+                    mysql_charset_value(target_column.collation.as_deref()).unwrap_or_default(),
+                    mysql_charset_value(source_column.collation.as_deref()).unwrap_or_default()
                 ));
             }
             if !ignore_comments
@@ -4091,11 +4149,28 @@ fn column_modifier_tail(
 }
 
 fn column_def(col: &ColumnInfo, db_type: DatabaseType, source_dialect: Option<DialectKind>) -> String {
+    column_def_with_charset(col, db_type, source_dialect, false)
+}
+
+fn column_def_with_charset(
+    col: &ColumnInfo,
+    db_type: DatabaseType,
+    source_dialect: Option<DialectKind>,
+    include_charset: bool,
+) -> String {
     if db_type == DatabaseType::SqlServer {
         return sqlserver_column_definition(col, &col.data_type, source_dialect, None);
     }
     let profile = profile_for(db_type);
     let mut definition = format!("{} {}", quote_id(&col.name, db_type), col.data_type);
+    if include_charset && matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
+        if let Some(character_set) = mysql_charset_value(col.character_set.as_deref()) {
+            definition.push_str(&format!(" CHARACTER SET {}", quote_id(character_set, db_type)));
+        }
+        if let Some(collation) = mysql_charset_value(col.collation.as_deref()) {
+            definition.push_str(&format!(" COLLATE {}", quote_id(collation, db_type)));
+        }
+    }
     definition.push_str(&column_modifier_tail(&profile, col, &col.data_type, db_type, source_dialect, false));
     // Suffix-style auto-increment is only valid in MySQL-family ALTER clauses
     // (ADD/MODIFY/CHANGE). Other dialects' identity clauses are order-sensitive
@@ -6327,9 +6402,12 @@ fn generate_schema_sync_sql_inner(
                             } else if profile.alter_uses_modify_column {
                                 if column.changes.iter().any(|change| !change.starts_with("order:")) {
                                     let modify_keyword = profile.alter_modify_keyword();
+                                    let include_charset = column.changes.iter().any(|change| {
+                                        change.starts_with("character set:") || change.starts_with("collation:")
+                                    });
                                     parts.push(format!(
                                         "  {modify_keyword} {}",
-                                        column_def(&mapped, db_type, source_dialect)
+                                        column_def_with_charset(&mapped, db_type, source_dialect, include_charset)
                                     ));
                                 }
                             } else {
@@ -6796,6 +6874,154 @@ mod tests {
         }
     }
 
+    fn mysql_charset_options(compare_charset: bool) -> SchemaDiffPreparationOptions {
+        let mut source_column = column("name", "varchar(64)", None);
+        source_column.character_set = Some("utf8mb4".to_string());
+        source_column.collation = Some("utf8mb4_0900_ai_ci".to_string());
+        let mut target_column = column("name", "varchar(64)", None);
+        target_column.character_set = Some("latin1".to_string());
+        target_column.collation = Some("latin1_swedish_ci".to_string());
+
+        SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("users", "TABLE")],
+            target_tables: vec![table_info("users", "TABLE")],
+            source_details: vec![TableSchemaDetail {
+                name: "users".to_string(),
+                columns: vec![source_column],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            target_details: vec![TableSchemaDetail {
+                name: "users".to_string(),
+                columns: vec![target_column],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: None,
+            }],
+            database_type: DatabaseType::Mysql,
+            source_dialect: Some(DialectKind::Mysql),
+            target_dialect: Some(DialectKind::Mysql),
+            compare_charset,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mysql_charset_comparison_is_enabled_by_default_and_serializes_as_camel_case() {
+        let legacy: SchemaDiffPreparationOptions =
+            serde_json::from_value(serde_json::json!({ "databaseType": "mysql" })).unwrap();
+        assert!(legacy.compare_charset);
+
+        let json = serde_json::to_value(legacy).unwrap();
+        assert_eq!(json["compareCharset"], true);
+        assert!(json.get("compare_charset").is_none());
+
+        let disabled: SchemaDiffPreparationOptions =
+            serde_json::from_value(serde_json::json!({ "databaseType": "mysql", "compareCharset": false })).unwrap();
+        assert!(!disabled.compare_charset);
+    }
+
+    #[test]
+    fn mysql_charset_only_difference_is_reported_when_enabled() {
+        let result = prepare_schema_diff(mysql_charset_options(true));
+        let columns = result.diffs[0].columns.as_ref().expect("column diff");
+
+        assert_eq!(
+            columns[0].changes,
+            vec![
+                "character set: latin1 → utf8mb4".to_string(),
+                "collation: latin1_swedish_ci → utf8mb4_0900_ai_ci".to_string(),
+            ]
+        );
+        assert!(result.sync_sql.contains("CHARACTER SET `utf8mb4` COLLATE `utf8mb4_0900_ai_ci`"));
+    }
+
+    #[test]
+    fn mysql_charset_only_difference_is_suppressed_when_disabled_and_restored_when_reenabled() {
+        assert!(prepare_schema_diff(mysql_charset_options(false)).diffs.is_empty());
+        assert_eq!(prepare_schema_diff(mysql_charset_options(true)).diffs.len(), 1);
+    }
+
+    #[test]
+    fn mysql_charset_missing_metadata_is_unknown() {
+        let mut options = mysql_charset_options(true);
+        options.target_details[0].columns[0].character_set = None;
+        options.target_details[0].columns[0].collation = None;
+        options.source_details[0].ddl =
+            Some("CREATE TABLE users (name varchar(64)) DEFAULT CHARSET=utf8mb4".to_string());
+        options.target_details[0].ddl =
+            Some("CREATE TABLE users (name varchar(64)) DEFAULT CHARSET=latin1".to_string());
+
+        assert!(prepare_schema_diff(options).diffs.is_empty());
+    }
+
+    #[test]
+    fn goldendb_charset_metadata_uses_the_mysql_dialect() {
+        let mut options = mysql_charset_options(true);
+        options.database_type = DatabaseType::Goldendb;
+        options.source_dialect = None;
+        options.target_dialect = None;
+
+        let result = prepare_schema_diff(options);
+        assert_eq!(result.diffs.len(), 1);
+        assert!(result.sync_sql.contains("CHARACTER SET `utf8mb4` COLLATE `utf8mb4_0900_ai_ci`"));
+    }
+
+    #[test]
+    fn disabling_mysql_charset_comparison_preserves_other_column_and_key_differences() {
+        let mut options = mysql_charset_options(false);
+        let source_column = &mut options.source_details[0].columns[0];
+        source_column.data_type = "varchar(128)".to_string();
+        source_column.is_nullable = false;
+        source_column.column_default = Some("source".to_string());
+        source_column.comment = Some("source comment".to_string());
+        let target_column = &mut options.target_details[0].columns[0];
+        target_column.is_nullable = true;
+        target_column.column_default = Some("target".to_string());
+        target_column.comment = Some("target comment".to_string());
+        options.source_details[0].indexes.push(index(IndexInfo {
+            name: "uq_users_name".to_string(),
+            columns: vec!["name".to_string()],
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: Vec::new(),
+            key_options: Vec::new(),
+            constraint_backed: false,
+        }));
+
+        let result = prepare_schema_diff(options);
+        let table = &result.diffs[0];
+        let column_changes = &table.columns.as_ref().expect("column diff")[0].changes;
+        assert!(column_changes.iter().any(|change| change.starts_with("type:")));
+        assert!(column_changes.iter().any(|change| change.starts_with("nullable:")));
+        assert!(column_changes.iter().any(|change| change.starts_with("default:")));
+        assert!(column_changes.iter().any(|change| change.starts_with("comment:")));
+        assert!(!column_changes.iter().any(|change| change.starts_with("character set:")));
+        assert!(!column_changes.iter().any(|change| change.starts_with("collation:")));
+        assert!(table.indexes.as_ref().is_some_and(|indexes| {
+            indexes.iter().any(|index| {
+                index.diff_type == "added"
+                    && index.source.as_ref().is_some_and(|info| info.is_unique && info.name == "uq_users_name")
+            })
+        }));
+    }
+
+    #[test]
+    fn mysql_charset_metadata_is_not_compared_unless_both_dialects_are_mysql() {
+        let mut options = mysql_charset_options(true);
+        options.source_dialect = Some(DialectKind::Postgres);
+
+        assert!(prepare_schema_diff(options).diffs.is_empty());
+    }
+
     #[test]
     fn oracle_schema_sync_drops_indexes_without_if_exists() {
         assert_eq!(
@@ -7137,6 +7363,56 @@ mod tests {
         assert!(sql.contains("LONGTEXT"), "text→LONGTEXT: {sql}");
         assert!(sql.contains("TINYINT(1)"), "boolean→TINYINT(1): {sql}");
         assert!(sql.contains("INT"), "integer→INT: {sql}");
+    }
+
+    #[test]
+    fn postgres_create_table_serial_pk_omits_source_sequence_default() {
+        // #10086: on a Postgres-family target (Kingbase in the report), the source
+        // column's raw `column_default` is a live `nextval('<old>_id_seq'::regclass)`
+        // cast pointing at the *source* database's sequence. Inlining that into
+        // `CREATE TABLE ... DEFAULT nextval(...)` fails at parse time on the target
+        // because that sequence doesn't exist there yet ("relation ... does not
+        // exist") — before the table is even created. The correct default is the
+        // `ALTER TABLE ... SET DEFAULT nextval('<name>_<col>_seq')` this function
+        // already emits further down, against the *new* sequence it just created.
+        let columns = vec![ColumnDiff {
+            diff_type: "added".into(),
+            name: "id".into(),
+            source: Some(ColumnInfo {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: Some("nextval('collection_abnormal_record_id_seq'::regclass)".into()),
+                ..Default::default()
+            }),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        }];
+        let (sql, missing) = generate_create_table_sql(
+            "collection_abnormal_record",
+            &columns,
+            &[],
+            &[],
+            None,
+            DatabaseType::Postgres,
+            None,
+            Some(DialectKind::Postgres),
+            &[],
+            &[],
+        );
+        assert!(missing.is_empty(), "{missing:?}");
+        let create_table = sql.split("CREATE SEQUENCE").next().unwrap();
+        assert!(
+            !create_table.contains("nextval"),
+            "CREATE TABLE must not reference the source's sequence before the new one exists: {sql}"
+        );
+        assert!(sql.contains("CREATE SEQUENCE IF NOT EXISTS"), "new sequence: {sql}");
+        assert!(
+            sql.contains("ALTER TABLE \"collection_abnormal_record\" ALTER COLUMN \"id\" SET DEFAULT nextval("),
+            "default wired up after the sequence exists: {sql}"
+        );
     }
 
     #[test]
@@ -13008,6 +13284,7 @@ mod tests {
             ignore_comments: false,
             cascade_delete: false,
             compare_column_order: false,
+            compare_charset: true,
             ignore_table_name_case: false,
             ignore_column_name_case: false,
             detect_renames: false,

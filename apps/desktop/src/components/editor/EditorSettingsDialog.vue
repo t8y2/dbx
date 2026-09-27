@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
 import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
 import type { Ref } from "vue";
@@ -107,6 +108,7 @@ import {
   type ClickTableNavigationTarget,
   type EditorSettings,
   type SqlCompletionTriggerMode,
+  type SqlTableCompletionSchemaQualification,
   type TableHoverLookupMode,
   SIDEBAR_INDENT_MIN,
   SIDEBAR_INDENT_MAX,
@@ -140,6 +142,8 @@ import {
   mcpHttpServerStatus,
   rotateMcpHttpServerToken,
   loadWebMcpHttpStatus,
+  saveWebMcpHttpSettings,
+  rotateWebMcpToken,
   forgetSnippetSavedToken,
   forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
@@ -173,6 +177,7 @@ import {
   type McpHttpServerSettings,
   type McpHttpServerStatus,
   type WebMcpHttpStatus,
+  type WebMcpHttpSettings,
   type McpServerStatus,
   type SnippetProvider,
   type SnippetSyncConfig,
@@ -302,7 +307,10 @@ const { t, locale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const historyRetention = useHistoryRetentionSetting();
+const mcpHistoryRetention = useHistoryRetentionSetting(loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit);
 const { draft: editHistoryRetentionLimit, loaded: historyRetentionLoaded, loading: historyRetentionLoading, saving: historyRetentionSaving, loadError: historyRetentionLoadError } = historyRetention;
+const { draft: editMcpHistoryRetentionLimit, loaded: mcpHistoryRetentionLoaded, loading: mcpHistoryRetentionLoading, saving: mcpHistoryRetentionSaving, loadError: mcpHistoryRetentionLoadError } = mcpHistoryRetention;
+const mcpHistoryCleanupLoading = ref(false);
 const connectionStore = useConnectionStore();
 const hasSqlServerConnection = computed(() => connectionStore.connections.some((connection) => effectiveDatabaseTypeForConnection(connection) === "sqlserver"));
 const savedSqlStore = useSavedSqlStore();
@@ -616,6 +624,15 @@ const editShowLineNumbers = ref(settingsStore.editorSettings.showLineNumbers);
 const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
+const editTableCompletionSchemaQualification = ref<SqlTableCompletionSchemaQualification>(settingsStore.editorSettings.tableCompletionSchemaQualification);
+const tableCompletionSchemaQualificationDescription = computed(() => {
+  const key = {
+    never: "settings.tableCompletionSchemaQualificationNeverDescription",
+    collision: "settings.tableCompletionSchemaQualificationCollisionDescription",
+    always: "settings.tableCompletionSchemaQualificationAlwaysDescription",
+  }[editTableCompletionSchemaQualification.value];
+  return t(key);
+});
 const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSpaceAfterCompletion);
 const editSqlServerSpaceConfirmsCompletion = ref(settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion);
 const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnection.value || settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || editSqlServerSpaceConfirmsCompletion.value);
@@ -984,6 +1001,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showCurrentStatementFrame: editShowCurrentStatementFrame.value,
     showInsertValueHints: editShowInsertValueHints.value,
     autoAliasTables: editAutoAliasTables.value,
+    tableCompletionSchemaQualification: editTableCompletionSchemaQualification.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
     sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion.value,
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
@@ -1630,6 +1648,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editTableCompletionSchemaQualification.value = settingsStore.editorSettings.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
   editSqlServerSpaceConfirmsCompletion.value = settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion;
   editSortCompletionColumnsAlphabetically.value = settingsStore.editorSettings.sortCompletionColumnsAlphabetically;
@@ -1768,6 +1787,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showCurrentStatementFrame: editShowCurrentStatementFrame,
   showInsertValueHints: editShowInsertValueHints,
   autoAliasTables: editAutoAliasTables,
+  tableCompletionSchemaQualification: editTableCompletionSchemaQualification,
   insertSpaceAfterCompletion: editInsertSpaceAfterCompletion,
   sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion,
   sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically,
@@ -1905,6 +1925,7 @@ watch(
     if (open) {
       syncEditorSettingsDraftFromStore();
       void historyRetention.load();
+      void mcpHistoryRetention.load();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
@@ -1914,6 +1935,7 @@ watch(
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     } else {
       historyRetention.discard();
+      mcpHistoryRetention.discard();
       clearThemePaletteOptionPreview();
       clearUiFontOptionPreview();
       restoreLocaleOptionPreview();
@@ -2113,11 +2135,25 @@ const queryResultRowLimitDraftTouched = computed(
     normalizeTableOpenPageSizeDraft(editPageSize.value) !== normalizeTableOpenPageSizeDraft(editEditorSettingsBase.value.pageSize),
 );
 const hasBlockingQueryResultRowLimit = computed(() => queryResultRowLimitViolated.value && queryResultRowLimitDraftTouched.value);
-const hasApplyBlocker = computed(() => historyRetention.invalid.value || historyRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
+const hasApplyBlocker = computed(() => historyRetention.invalid.value || mcpHistoryRetention.invalid.value || historyRetentionSaving.value || mcpHistoryRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
+
+async function cleanupMcpHistory() {
+  if (mcpHistoryCleanupLoading.value) return;
+  mcpHistoryCleanupLoading.value = true;
+  try {
+    const deleted = await cleanupMcpHistoryRetention();
+    toast(t("settings.mcpHistoryCleanupCompleted", { count: deleted }));
+  } catch (error) {
+    toast(t("settings.mcpHistoryCleanupFailed", { error: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    mcpHistoryCleanupLoading.value = false;
+  }
+}
 
 function hasChanges(): boolean {
   return (
     historyRetention.changed.value ||
+    mcpHistoryRetention.changed.value ||
     hasImportedSettingsPendingApply.value ||
     hasEditorDraftChanges.value ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
@@ -2134,6 +2170,7 @@ function hasChanges(): boolean {
 async function persistSettings() {
   if (hasApplyBlocker.value) return;
   await historyRetention.save();
+  await mcpHistoryRetention.save();
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
@@ -2239,6 +2276,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+    editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
     editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
     editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
@@ -2313,6 +2351,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   } else if (tab === "data") {
     historyRetention.reset();
+    mcpHistoryRetention.reset();
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editShowColumnHeaderTooltips.value = DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips;
@@ -2374,6 +2413,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
 
 function resetAllDefaults() {
   historyRetention.reset();
+  mcpHistoryRetention.reset();
   // Same contract as resetDefaultsForTab: a full reset also exits any
   // in-progress shortcut capture (#9066).
   editingShortcutId.value = null;
@@ -2395,6 +2435,7 @@ function resetAllDefaults() {
   editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+  editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
   editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
   editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
@@ -2640,6 +2681,12 @@ function onDefaultTransactionModeChange(v: any) {
 function onCompletionTriggerModeChange(v: any) {
   if (v === "manual" || v === "require-prefix" || v === "positional") {
     editCompletionTriggerMode.value = v;
+  }
+}
+
+function onTableCompletionSchemaQualificationChange(v: any) {
+  if (v === "never" || v === "collision" || v === "always") {
+    editTableCompletionSchemaQualification.value = v;
   }
 }
 
@@ -3303,6 +3350,11 @@ const mcpHttpSettings = ref<McpHttpServerSettings>({
 });
 const mcpHttpStatus = ref<McpHttpServerStatus | null>(null);
 const webMcpHttpStatus = ref<WebMcpHttpStatus | null>(null);
+const webMcpEnabledDraft = ref(false);
+const webMcpAllowedHostsText = ref("");
+const webMcpAllowedOriginsText = ref("");
+const webMcpSaving = ref(false);
+const webMcpError = ref("");
 const mcpHttpLoading = ref(false);
 const mcpHttpSaving = ref(false);
 const mcpHttpError = ref("");
@@ -3808,7 +3860,12 @@ async function loadMcpHttpSettings() {
   mcpHttpError.value = "";
   try {
     if (isWeb) {
-      webMcpHttpStatus.value = await loadWebMcpHttpStatus();
+      const status = await loadWebMcpHttpStatus();
+      webMcpHttpStatus.value = status;
+      webMcpEnabledDraft.value = status.enabled;
+      webMcpAllowedHostsText.value = status.allowedHosts.join("\n");
+      webMcpAllowedOriginsText.value = status.allowedOrigins.join("\n");
+      webMcpError.value = "";
       return;
     }
     const [settings, status] = await Promise.all([loadMcpHttpServerSettings(), mcpHttpServerStatus()]);
@@ -3821,6 +3878,41 @@ async function loadMcpHttpSettings() {
     mcpHttpError.value = formatMcpHttpError(error);
   } finally {
     mcpHttpLoading.value = false;
+  }
+}
+
+async function saveWebMcpSettings() {
+  if (webMcpSaving.value || webMcpHttpStatus.value?.deploymentManaged) return;
+  webMcpSaving.value = true;
+  webMcpError.value = "";
+  const settings: WebMcpHttpSettings = {
+    enabled: webMcpEnabledDraft.value,
+    allowedHosts: mcpHttpList(webMcpAllowedHostsText.value),
+    allowedOrigins: mcpHttpList(webMcpAllowedOriginsText.value),
+  };
+  try {
+    const status = await saveWebMcpHttpSettings(settings);
+    webMcpHttpStatus.value = status;
+    webMcpEnabledDraft.value = status.enabled;
+    webMcpAllowedHostsText.value = status.allowedHosts.join("\n");
+    webMcpAllowedOriginsText.value = status.allowedOrigins.join("\n");
+  } catch (error: unknown) {
+    webMcpError.value = formatMcpHttpError(error);
+  } finally {
+    webMcpSaving.value = false;
+  }
+}
+
+async function rotateWebMcpAccessToken() {
+  if (webMcpSaving.value || webMcpHttpStatus.value?.deploymentManaged) return;
+  webMcpSaving.value = true;
+  webMcpError.value = "";
+  try {
+    webMcpHttpStatus.value = await rotateWebMcpToken();
+  } catch (error: unknown) {
+    webMcpError.value = formatMcpHttpError(error);
+  } finally {
+    webMcpSaving.value = false;
   }
 }
 
@@ -6378,6 +6470,25 @@ onUnmounted(() => {
                   </div>
                   <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
                 </div>
+
+                <div class="settings-item flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-table-completion-schema-qualification>
+                  <div class="min-w-0 space-y-1">
+                    <Label>{{ t("settings.tableCompletionSchemaQualification") }}</Label>
+                    <p class="text-xs leading-tight text-muted-foreground">
+                      {{ tableCompletionSchemaQualificationDescription }}
+                    </p>
+                  </div>
+                  <Select :model-value="editTableCompletionSchemaQualification" @update:model-value="onTableCompletionSchemaQualificationChange">
+                    <SelectTrigger class="h-8 w-44 shrink-0">
+                      <SelectValue :placeholder="t('settings.tableCompletionSchemaQualification')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="never">{{ t("settings.tableCompletionSchemaQualificationNever") }}</SelectItem>
+                      <SelectItem value="collision">{{ t("settings.tableCompletionSchemaQualificationCollision") }}</SelectItem>
+                      <SelectItem value="always">{{ t("settings.tableCompletionSchemaQualificationAlways") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
 
               <Separator />
@@ -7633,11 +7744,13 @@ onUnmounted(() => {
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" data-settings-search-id="data" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('data')]">
-              <div data-settings-search-id="history-retention" :class="['space-y-2', settingsSearchTargetClass('history-retention')]">
-                <Label for="history-retention-limit">{{ t("settings.historyRetentionLimit") }}</Label>
-                <p class="text-xs text-muted-foreground">{{ t("settings.historyRetentionDescription") }}</p>
+              <div data-settings-search-id="history-retention" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('history-retention')]">
+                <div class="min-w-0 space-y-1">
+                  <Label for="history-retention-limit">{{ t("settings.historyRetentionLimit") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.historyRetentionDescription") }}</p>
+                </div>
                 <Select :model-value="String(editHistoryRetentionLimit)" :disabled="!historyRetentionLoaded || historyRetentionSaving" @update:model-value="(value) => (editHistoryRetentionLimit = Number(value))">
-                  <SelectTrigger id="history-retention-limit" class="w-40"><SelectValue /></SelectTrigger>
+                  <SelectTrigger id="history-retention-limit" class="w-40 shrink-0"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem v-for="limit in HISTORY_RETENTION_LIMITS" :key="limit" :value="String(limit)">{{ limit === 0 ? t("settings.historyRetentionUnlimited") : String(limit) }}</SelectItem>
                   </SelectContent>
@@ -7646,6 +7759,28 @@ onUnmounted(() => {
                 <div v-if="historyRetentionLoadError" class="flex items-center gap-2 text-xs text-destructive" role="alert">
                   <span>{{ t("settings.historyRetentionLoadFailed", { error: historyRetentionLoadError }) }}</span>
                   <Button type="button" variant="outline" size="sm" @click="historyRetention.load">{{ t("common.retry") }}</Button>
+                </div>
+              </div>
+              <div data-settings-search-id="mcp-history-retention" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('mcp-history-retention')]">
+                <div class="min-w-0 space-y-1">
+                  <Label for="mcp-history-retention-limit">{{ t("settings.mcpHistoryRetentionLimit") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.mcpHistoryRetentionDescription") }}</p>
+                </div>
+                <div class="flex shrink-0 items-center gap-2">
+                  <Select :model-value="String(editMcpHistoryRetentionLimit)" :disabled="!mcpHistoryRetentionLoaded || mcpHistoryRetentionSaving" @update:model-value="(value) => (editMcpHistoryRetentionLimit = Number(value))">
+                    <SelectTrigger id="mcp-history-retention-limit" class="w-40"><SelectValue /></SelectTrigger>
+                    <SelectContent
+                      ><SelectItem v-for="limit in HISTORY_RETENTION_LIMITS" :key="limit" :value="String(limit)">{{ limit === 0 ? t("settings.historyRetentionUnlimited") : String(limit) }}</SelectItem></SelectContent
+                    >
+                  </Select>
+                  <p v-if="mcpHistoryRetentionLoading" class="text-xs text-muted-foreground">{{ t("common.loading") }}</p>
+                  <div v-if="mcpHistoryRetentionLoadError" class="flex items-center gap-2 text-xs text-destructive" role="alert">
+                    <span>{{ t("settings.historyRetentionLoadFailed", { error: mcpHistoryRetentionLoadError }) }}</span>
+                    <Button type="button" variant="outline" size="sm" @click="mcpHistoryRetention.load">{{ t("common.retry") }}</Button>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" :disabled="mcpHistoryCleanupLoading || !mcpHistoryRetentionLoaded" @click="cleanupMcpHistory">
+                    {{ mcpHistoryCleanupLoading ? t("common.loading") : t("settings.mcpHistoryCleanup") }}
+                  </Button>
                 </div>
               </div>
               <div id="data-grid-toolbar-layout" data-settings-search-id="data-grid-toolbar-layout" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('data-grid-toolbar-layout')]">
@@ -9737,25 +9872,63 @@ LIMIT 100;</pre
                       </TabsList>
                       <TabsContent value="http" class="m-0 space-y-4">
                         <div v-if="isWeb" class="space-y-4">
-                          <div class="rounded-md border bg-muted/20 p-4 space-y-2">
+                          <div class="space-y-3 border-t border-border/60 pt-3">
                             <div class="flex items-center justify-between gap-3">
                               <Label class="text-base">{{ t("settings.mcpHttpWebServiceTitle") }}</Label>
                               <Badge :variant="webMcpHttpStatus?.enabled ? 'default' : 'outline'">{{ webMcpHttpStatus?.enabled ? t("settings.mcpHttpStatusLabelEnabled") : t("settings.mcpHttpStatusLabelDisabled") }}</Badge>
                             </div>
                             <p class="text-xs text-muted-foreground">{{ t("settings.mcpHttpWebServiceDescription") }}</p>
+                            <p v-if="mcpHttpError" class="text-xs text-destructive">{{ mcpHttpError }}</p>
                             <template v-if="webMcpHttpStatus">
-                              <code class="block rounded border bg-background px-2 py-1.5 text-xs">{{ webMcpEndpoint }}</code>
+                              <p v-if="!webMcpHttpStatus.enabled" class="text-xs text-muted-foreground">{{ t("settings.mcpHttpWebDisabledHint") }}</p>
+                              <code v-else class="block overflow-x-auto rounded border bg-background px-2 py-1.5 text-xs">{{ webMcpEndpoint }}</code>
                               <p class="text-[11px] text-muted-foreground">
                                 {{
                                   t("settings.mcpHttpWebTokenSourceAndHosts", {
-                                    tokenSource: webMcpHttpStatus.tokenSource || t("settings.mcpHttpNotConfigured"),
+                                    tokenSource: webMcpHttpStatus.tokenSource === "managed" ? t("settings.mcpHttpWebManagedTokenSource") : webMcpHttpStatus.tokenSource || t("settings.mcpHttpNotConfigured"),
                                     hosts: webMcpHttpStatus.allowedHosts.join(", ") || t("settings.mcpHttpNotConfigured"),
                                   })
                                 }}
                               </p>
                               <p v-if="webMcpHttpStatus.allowedOrigins.length" class="text-[11px] text-muted-foreground">{{ t("settings.mcpHttpWebAllowedOrigins", { origins: webMcpHttpStatus.allowedOrigins.join(", ") }) }}</p>
+                              <p v-if="webMcpHttpStatus.deploymentManaged" class="text-xs text-muted-foreground">{{ t("settings.mcpHttpWebDeploymentManaged") }}</p>
+                              <p v-else-if="!webMcpHttpStatus.managementAvailable" class="text-xs text-muted-foreground">{{ t("settings.mcpHttpWebPasswordRequired") }}</p>
+                              <template v-else>
+                                <div class="flex items-center justify-between gap-3 border-t border-border/60 pt-3">
+                                  <Label for="web-mcp-enabled" class="text-sm">{{ t("settings.mcpHttpWebEnableLabel") }}</Label>
+                                  <Switch id="web-mcp-enabled" v-model="webMcpEnabledDraft" :disabled="webMcpSaving" />
+                                </div>
+                                <div class="space-y-1.5">
+                                  <Label for="web-mcp-hosts">{{ t("settings.mcpHttpAllowedHostsLabel") }}</Label>
+                                  <textarea id="web-mcp-hosts" v-model="webMcpAllowedHostsText" rows="2" :disabled="webMcpSaving" class="min-h-16 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs" placeholder="192.168.0.77:4224" />
+                                  <p class="text-[11px] text-muted-foreground">{{ t("settings.mcpHttpHostsHint") }}</p>
+                                </div>
+                                <div class="space-y-1.5">
+                                  <Label for="web-mcp-origins">{{ t("settings.mcpHttpAllowedOriginsLabel") }}</Label>
+                                  <textarea id="web-mcp-origins" v-model="webMcpAllowedOriginsText" rows="2" :disabled="webMcpSaving" class="min-h-16 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs" placeholder="https://mcp-client.example.com" />
+                                  <p class="text-[11px] text-muted-foreground">{{ t("settings.mcpHttpWebOriginsHint") }}</p>
+                                </div>
+                                <div v-if="webMcpHttpStatus.enabled && webMcpHttpStatus.accessToken" class="space-y-1.5">
+                                  <div class="flex items-center justify-between gap-2">
+                                    <Label>Bearer Token</Label>
+                                    <Button type="button" variant="outline" size="sm" :disabled="webMcpSaving" @click="rotateWebMcpAccessToken">{{ t("settings.mcpHttpRotateToken") }}</Button>
+                                  </div>
+                                  <div class="flex min-w-0 items-center gap-2">
+                                    <code class="min-w-0 flex-1 overflow-x-auto rounded border bg-background px-2 py-1.5 text-xs">{{ webMcpHttpStatus.accessToken }}</code>
+                                    <Button type="button" variant="outline" size="icon" :title="t('common.copy')" @click="copyMcpText('http-token', webMcpHttpStatus.accessToken || '')">
+                                      <CheckCircle2 v-if="mcpCopied === 'http-token'" class="h-3.5 w-3.5 text-green-500" />
+                                      <Copy v-else class="h-3.5 w-3.5" />
+                                    </Button>
+                                  </div>
+                                </div>
+                                <p v-if="webMcpError" class="text-xs text-destructive">{{ webMcpError }}</p>
+                                <div class="flex flex-wrap justify-end gap-2">
+                                  <Button type="button" variant="outline" size="sm" :disabled="mcpHttpLoading || webMcpSaving" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReloadStatus") }}</Button>
+                                  <Button type="button" size="sm" :disabled="webMcpSaving || (webMcpEnabledDraft && !mcpHttpList(webMcpAllowedHostsText).length)" @click="saveWebMcpSettings">{{ t("settings.mcpHttpWebSave") }}</Button>
+                                </div>
+                              </template>
                             </template>
-                            <Button type="button" variant="outline" size="sm" :disabled="mcpHttpLoading" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReloadStatus") }}</Button>
+                            <Button v-if="!webMcpHttpStatus || webMcpHttpStatus.deploymentManaged" type="button" variant="outline" size="sm" :disabled="mcpHttpLoading" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReloadStatus") }}</Button>
                           </div>
                         </div>
 
@@ -9766,7 +9939,7 @@ LIMIT 100;</pre
                                 <div class="flex items-center gap-2">
                                   <Label class="text-base">{{ t("settings.mcpHttpServiceTitle") }}</Label>
                                   <Badge :variant="mcpHttpStatus?.running ? 'default' : 'outline'">
-                                    {{ mcpHttpStatus?.running ? t("settings.mcpHttpStatusLabelRunning") : mcpHttpSettings.enabled ? t("settings.mcpHttpStatusLabelPending") : t("settings.mcpHttpStatusLabelDisabled") }}
+                                    {{ mcpHttpStatus?.running ? t("settings.mcpHttpStatusLabelRunning") : mcpHttpSettings.enabled ? t("settings.mcpHttpStatusLabelNotRunning") : t("settings.mcpHttpStatusLabelDisabled") }}
                                   </Badge>
                                 </div>
                                 <p class="text-xs leading-relaxed text-muted-foreground">{{ t("settings.mcpHttpServiceDescription") }}</p>
@@ -9832,10 +10005,9 @@ LIMIT 100;</pre
                                 {{ mcpHttpHasUnsavedChanges ? t("settings.mcpHttpUnsavedChangesHint") : t("settings.mcpHttpSaveHint") }}
                               </p>
                               <div class="flex shrink-0 justify-end gap-2">
-                                <Button type="button" variant="outline" :disabled="mcpHttpLoading || mcpHttpSaving" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReload") }}</Button>
                                 <Button type="button" :disabled="mcpHttpLoading || mcpHttpSaving || Boolean(mcpHttpDraftValidationError)" @click="saveMcpHttpSettings">
                                   <Loader2 v-if="mcpHttpSaving" class="mr-2 h-4 w-4 animate-spin" />
-                                  {{ t("settings.mcpHttpSaveAndStart") }}
+                                  {{ t("settings.mcpHttpApply") }}
                                 </Button>
                               </div>
                             </div>
@@ -9844,10 +10016,9 @@ LIMIT 100;</pre
                           <div v-else class="flex flex-col gap-3 rounded-md border border-dashed px-4 py-3 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
                             <p>{{ t("settings.mcpHttpDisabledHint") }}</p>
                             <div class="flex shrink-0 justify-end gap-2">
-                              <Button type="button" variant="outline" :disabled="mcpHttpLoading || mcpHttpSaving" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReload") }}</Button>
                               <Button type="button" :disabled="mcpHttpLoading || mcpHttpSaving" @click="saveMcpHttpSettings">
                                 <Loader2 v-if="mcpHttpSaving" class="mr-2 h-4 w-4 animate-spin" />
-                                {{ t("settings.mcpHttpSaveAndStop") }}
+                                {{ t("settings.mcpHttpApply") }}
                               </Button>
                             </div>
                           </div>

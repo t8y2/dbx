@@ -499,6 +499,48 @@ mod tests {
         assert_eq!(launch.program, PathBuf::from("java"));
         assert_eq!(launch.args, vec!["-jar".to_string(), format!("{}/agent.jar", driver_dir.to_string_lossy())]);
     }
+
+    #[test]
+    fn sqlite_worker_counts_as_installed_with_one_linux_platform() {
+        let manager = test_manager("sqlite-worker-single-platform");
+        assert!(!manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
+        assert!(!manager.sqlite_worker_all_platforms_installed());
+
+        touch(&manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64"));
+
+        // An offline package may legitimately carry only the remote host's
+        // architecture, which still means the driver is usable (#8987).
+        assert!(manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
+        assert!(manager.sqlite_worker_platform_installed("linux-x64"));
+        assert!(!manager.sqlite_worker_platform_installed("linux-aarch64"));
+        // The online installer is the caller that still wants every binary.
+        assert!(!manager.sqlite_worker_all_platforms_installed());
+
+        touch(&manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-aarch64"));
+        assert!(manager.sqlite_worker_all_platforms_installed());
+    }
+
+    #[test]
+    fn sqlite_worker_needs_a_file_not_just_a_directory() {
+        let manager = test_manager("sqlite-worker-directory-only");
+        fs::create_dir_all(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64")).unwrap();
+        fs::create_dir_all(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-aarch64")).unwrap();
+
+        assert!(!manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
+        assert!(!manager.sqlite_worker_all_platforms_installed());
+    }
+
+    #[test]
+    fn regular_native_driver_ignores_per_platform_directories() {
+        let manager = test_manager("regular-native-platform-dir");
+        touch(&manager.driver_native_platform_path("kafka", "linux-x64"));
+
+        // Only the SQLite worker resolves through per-platform directories; a
+        // regular native Agent still needs its flat executable.
+        assert!(!manager.driver_native_installed("kafka"));
+        touch(&manager.driver_native_path("kafka"));
+        assert!(manager.driver_native_installed("kafka"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -839,11 +881,27 @@ impl AgentManager {
         db_type == SQLITE_WORKER_DRIVER_KEY
     }
 
+    /// Whether the remote SQLite worker binary for one Linux platform is on disk.
+    pub fn sqlite_worker_platform_installed(&self, platform: &str) -> bool {
+        self.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, platform).is_file()
+    }
+
+    /// Whether every Linux worker binary the online installer fetches is on disk.
+    pub fn sqlite_worker_all_platforms_installed(&self) -> bool {
+        SQLITE_WORKER_NATIVE_PLATFORMS.iter().all(|platform| self.sqlite_worker_platform_installed(platform))
+    }
+
+    /// Whether a driver's native artifact is installed.
+    ///
+    /// The SQLite SSH worker is the one driver whose binary platform follows the
+    /// remote SSH host instead of this desktop (see [`SQLITE_WORKER_NATIVE_PLATFORMS`]),
+    /// and one binary is a complete installation for such a host: a user whose
+    /// offline package only carries `linux-x64` must see the driver as installed
+    /// (#8987). Callers that need both Linux binaries — the online installer —
+    /// ask [`Self::sqlite_worker_all_platforms_installed`].
     pub fn driver_native_installed(&self, db_type: &str) -> bool {
         if Self::is_sqlite_worker_driver(db_type) {
-            SQLITE_WORKER_NATIVE_PLATFORMS
-                .iter()
-                .all(|platform| self.driver_native_platform_path(db_type, platform).is_file())
+            SQLITE_WORKER_NATIVE_PLATFORMS.iter().any(|platform| self.sqlite_worker_platform_installed(platform))
         } else {
             self.driver_native_path(db_type).exists()
         }

@@ -621,6 +621,41 @@ describe("DataGridFilterBuilder", () => {
     expect(buttons()[0].props.disabled).toBe(true);
   });
 
+  it("labels panel rule actions and allows removing the final rule", async () => {
+    const updateRule = vi.fn();
+    const remove = vi.fn();
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [{ id: "r1", columnName: "id", mode: "equals", rawValue: "7", rawEndValue: "", conjunction: "AND" }],
+      columns: ["id"],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      layout: "panel",
+      showApplyOnly: true,
+      onUpdateRule: updateRule,
+      onRemove: remove,
+    });
+
+    const tooltips = () => findAll(mounted.root, (node) => node.props["data-stub"] === "LightTooltip");
+    const tooltipTexts = () => tooltips().map((node) => node.props.text);
+    const applyOnlyButton = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.filterBuilderApplyOnly");
+    const toggleButton = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.filterBuilderDisableRule");
+    const removeButton = findOne(mounted.root, (node) => node.props["aria-label"] === "common.remove");
+
+    expect(tooltipTexts()).toEqual(["grid.filterBuilderApplyOnly", "grid.filterBuilderDisableRule", "common.remove"]);
+    expect(tooltips().every((tooltip) => tooltip.props.side === "top")).toBe(true);
+    expect(removeButton.props.disabled).toBeFalsy();
+    dispatch(toggleButton, "click");
+    dispatch(removeButton, "click");
+    expect(updateRule).toHaveBeenCalledWith("r1", { disabled: true });
+    expect(remove).toHaveBeenCalledWith("r1");
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "id", mode: "equals", rawValue: "7", rawEndValue: "", conjunction: "AND", disabled: true }] });
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.filterBuilderEnableRule")).toBeTruthy();
+    expect(tooltipTexts()).toEqual(["grid.filterBuilderApplyOnly", "grid.filterBuilderEnableRule", "common.remove"]);
+    expect(applyOnlyButton.props["aria-label"]).toBe("grid.filterBuilderApplyOnly");
+  });
+
   it("renders a compact text rule without framed form controls", async () => {
     const updateRule = vi.fn();
     const add = vi.fn();

@@ -374,7 +374,7 @@ import { useDataGridColumnFormatter } from "@/composables/useDataGridColumnForma
 import { useDataGridTableMetadataLoaders } from "@/composables/useDataGridTableMetadataLoaders";
 import { DATA_GRID_SERVER_COLUMN_FILTER_LIMIT, useDataGridColumnFilters } from "@/composables/useDataGridColumnFilters";
 import { useDataGridLargeValues } from "@/composables/useDataGridLargeValues";
-import { useSalesforceSaveConfirmation } from "@/composables/useSalesforceSaveConfirmation";
+import { useDataGridSaveConfirmation } from "@/composables/useDataGridSaveConfirmation";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 const ImagePreviewDialog = defineAsyncComponent(() => import("@/components/grid/ImagePreviewDialog.vue"));
@@ -1277,14 +1277,9 @@ let structuredFilterHydrationRequestId = 0;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
 const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");
-const isFilterEditorPinnedOpen = computed(() => isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);
-const effectiveFilterBuilderOpen = computed({
-  get: () => isFilterEditorPinnedOpen.value || filterBuilderOpen.value,
-  set: (open: boolean) => {
-    if (isFilterEditorPinnedOpen.value) return;
-    filterBuilderOpen.value = open;
-  },
-});
+// Keep the persisted preference as the initial state for persistent views, but
+// do not use it as a lock: the toolbar toggle must always be able to close them.
+filterBuilderOpen.value = isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 interface ForeignKeyDisplayLabelState {
@@ -1652,7 +1647,7 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
 
 async function applyStructuredWhere(where: string) {
   appliedStructuredWhereInput.value = where;
-  if (!isFilterEditorPinnedOpen.value) filterBuilderOpen.value = false;
+  if (filterEditorView.value === "quick") filterBuilderOpen.value = false;
   await applyWhereFilter();
 }
 
@@ -1712,9 +1707,16 @@ function copyFilterSqlPreview() {
 watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
 
 watch(filterEditorView, (view) => {
-  filterBuilderOpen.value = false;
+  filterBuilderOpen.value = (view === "conditions" || view === "text") && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
   if (view === "conditions" || view === "text") ensureStructuredFilterRule();
 });
+
+watch(
+  () => settingsStore.editorSettings.dataGridKeepFilterEditorExpanded,
+  (expanded) => {
+    if (isPersistentFilterView.value) filterBuilderOpen.value = expanded;
+  },
+);
 
 const filterPreviewVisible = computed(() => canUseWhereSearch.value && (filterEditorView.value === "conditions" || filterEditorView.value === "text"));
 watch(
@@ -2264,6 +2266,7 @@ function scrollToColumnIndex(columnIndex: number) {
 
 // --- Column resize composable ---
 const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWidthDensity);
+const columnWidthMode = computed(() => settingsStore.editorSettings.dataGridColumnWidthMode ?? "fill");
 const tableFontFamily = computed(() => settingsStore.editorSettings.tableFontFamily);
 const columnWidthCacheKey = computed(() => props.columnWidthCacheKey?.trim() || props.cacheKey?.trim() || undefined);
 const columnStructureSignature = computed(() => createDataGridColumnStructureSignature(props.result.columns, props.result.column_types));
@@ -2315,6 +2318,7 @@ const { initColumnWidths, onResizeStart, autoFitColumn, autoFitAllColumns, rende
   sourceRows: computed(() => props.result.rows),
   columnIndexes: visibleColumnIndexes,
   density: columnWidthDensity,
+  widthMode: columnWidthMode,
   compactColumnHeaderActions,
   columnIndexIndicators: visibleColumnIndexIndicators,
   cacheKey: columnWidthCacheKey,
@@ -3270,6 +3274,7 @@ const resultSourceColumns = computed(() => props.result.columns.map((column, ind
 const canEditExistingRows = computed(
   () => !!props.customSaveHandler || (canEditExistingTableRows(props.databaseType, hiveTableTransactional.value, props.tableMeta?.primaryKeys ?? []) && hasCompleteTdengineRowIdentity(props.databaseType, props.tableMeta?.primaryKeys ?? [], resultSourceColumns.value)),
 );
+const canUpdateExistingRows = computed(() => canEditExistingRows.value && props.customSaveHandler?.canUpdate !== false);
 const customReadonlyColumns = computed(() => new Set((props.customSaveHandler?.readonlyColumns ?? []).map((column) => column.toLowerCase())));
 const hasDataGridSaveTarget = computed(() => !!props.tableMeta || !!props.customSaveHandler);
 const hasDataGridInsertTarget = computed(() => {
@@ -3809,22 +3814,22 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
   return true;
 }
 
-// Salesforce applies one REST call per record with no transaction, so every grid
-// save is reviewed here first. The identity lines are advisory only — Salesforce
-// enforces the real object/field permissions, and a failed identity lookup just
-// omits the line rather than blocking the write.
+// Non-transactional or specialized mutations can require a final review of the
+// exact statements after changes have been staged. Salesforce and guarded
+// InfluxDB 1.x deletion share the promise-backed dialog state below.
 const {
-  open: salesforceSaveConfirmOpen,
-  updates: salesforceSaveConfirmUpdates,
-  inserts: salesforceSaveConfirmInserts,
-  deletes: salesforceSaveConfirmDeletes,
-  total: salesforceSaveConfirmTotal,
-  targetLabel: salesforceSaveConfirmTarget,
-  statements: salesforceSaveConfirmStatements,
-  request: requestSalesforceSaveConfirmation,
-  confirm: confirmSalesforceSave,
-} = useSalesforceSaveConfirmation();
+  open: saveConfirmOpen,
+  updates: saveConfirmUpdates,
+  inserts: saveConfirmInserts,
+  deletes: saveConfirmDeletes,
+  total: saveConfirmTotal,
+  targetLabel: saveConfirmTarget,
+  statements: saveConfirmStatements,
+  request: requestDataGridSaveConfirmation,
+  confirm: confirmDataGridSave,
+} = useDataGridSaveConfirmation();
 const isSalesforceGrid = computed(() => resolvedDatabaseType.value === "salesforce");
+const isInfluxDbV1DeleteGrid = computed(() => props.customSaveHandler?.confirmation === "influxdb-v1-delete");
 const salesforceIdentity = computed(() => (isSalesforceGrid.value && props.connectionId ? connectionStore.salesforceCurrentUser(props.connectionId) : null));
 const salesforceIdentityLabel = computed(() => {
   const identity = salesforceIdentity.value;
@@ -3833,9 +3838,9 @@ const salesforceIdentityLabel = computed(() => {
 });
 const salesforceSaveConfirmSummary = computed(() => {
   const parts: string[] = [];
-  if (salesforceSaveConfirmUpdates.value > 0) parts.push(t("grid.salesforceSaveUpdates", { count: salesforceSaveConfirmUpdates.value }));
-  if (salesforceSaveConfirmInserts.value > 0) parts.push(t("grid.salesforceSaveInserts", { count: salesforceSaveConfirmInserts.value }));
-  if (salesforceSaveConfirmDeletes.value > 0) parts.push(t("grid.salesforceSaveDeletes", { count: salesforceSaveConfirmDeletes.value }));
+  if (saveConfirmUpdates.value > 0) parts.push(t("grid.salesforceSaveUpdates", { count: saveConfirmUpdates.value }));
+  if (saveConfirmInserts.value > 0) parts.push(t("grid.salesforceSaveInserts", { count: saveConfirmInserts.value }));
+  if (saveConfirmDeletes.value > 0) parts.push(t("grid.salesforceSaveDeletes", { count: saveConfirmDeletes.value }));
   return parts.join(" · ");
 });
 // The save dialog names the profile alongside the user: writability comes from
@@ -3845,7 +3850,7 @@ const salesforceIdentityProfile = computed(() => {
   return profileName ? t("grid.salesforceSaveProfile", { name: profileName }) : t("toolbar.salesforceIdentityUnknownProfile");
 });
 const salesforceSaveConfirmDetails = computed(() => {
-  const lines = [salesforceSaveConfirmSummary.value, t("grid.salesforceSaveTarget", { object: salesforceSaveConfirmTarget.value || t("grid.salesforceSaveUnknownObject") })];
+  const lines = [salesforceSaveConfirmSummary.value, t("grid.salesforceSaveTarget", { object: saveConfirmTarget.value || t("grid.salesforceSaveUnknownObject") })];
   if (salesforceIdentity.value) {
     const identity = { user: salesforceIdentityLabel.value, profile: salesforceIdentityProfile.value };
     if (salesforceIdentity.value.isAdmin === true) lines.push(t("grid.salesforceSaveAdminIdentity", identity));
@@ -3854,9 +3859,13 @@ const salesforceSaveConfirmDetails = computed(() => {
   }
   return lines.filter((line) => !!line).join("\n");
 });
-const salesforceSaveConfirmSql = computed(() => salesforceSaveConfirmStatements.value.join("\n"));
-watch(salesforceSaveConfirmOpen, (isOpen) => {
-  if (!isOpen || !props.connectionId) return;
+const saveConfirmSql = computed(() => saveConfirmStatements.value.join("\n"));
+const saveConfirmTitle = computed(() => (isInfluxDbV1DeleteGrid.value ? t("grid.influxDeleteConfirmTitle") : t("grid.salesforceSaveConfirmTitle")));
+const saveConfirmMessage = computed(() => (isInfluxDbV1DeleteGrid.value ? t("grid.influxDeleteConfirmMessage", { count: saveConfirmDeletes.value }) : t("grid.salesforceSaveConfirmMessage", { count: saveConfirmTotal.value })));
+const saveConfirmDetails = computed(() => (isInfluxDbV1DeleteGrid.value ? t("grid.influxDeleteTarget", { measurement: saveConfirmTarget.value || "—" }) : salesforceSaveConfirmDetails.value));
+const saveConfirmLabel = computed(() => (isInfluxDbV1DeleteGrid.value ? t("grid.influxDeleteConfirm") : t("grid.salesforceSaveConfirm")));
+watch(saveConfirmOpen, (isOpen) => {
+  if (!isOpen || !isSalesforceGrid.value || !props.connectionId) return;
   void connectionStore.loadSalesforceCurrentUser(props.connectionId);
 });
 
@@ -3884,8 +3893,7 @@ const editor = useDataGridEditor({
   rowStatusFilter,
   dataGridQuickEntryEnabled: computed(() => settingsStore.editorSettings.dataGridQuickEntry),
   confirmDangerousRowDeletion: computed(() => settingsStore.editorSettings.confirmDangerousSqlExecution),
-  // Only Salesforce opts in: its writes cannot be rolled back once issued.
-  confirmSaveRequest: computed(() => (isSalesforceGrid.value ? requestSalesforceSaveConfirmation : undefined)),
+  confirmSaveRequest: computed(() => (isSalesforceGrid.value || isInfluxDbV1DeleteGrid.value ? requestDataGridSaveConfirmation : undefined)),
   includeDatabaseNameInSaveSql: computed(() => settingsStore.editorSettings.generateSqlIncludeDatabaseName),
   initialEditColumn: firstVisibleColumnIndex,
   cellEditorText: cellEditorTextForValue,
@@ -4079,7 +4087,8 @@ function canEditRowItem(item: RowItem | undefined): boolean {
 }
 
 function canEditCellItem(item: RowItem | undefined, columnIndex: number): boolean {
-  if (!canEditRowItem(item) || !canEditColumn(columnIndex)) return false;
+  if (!canEditRowItem(item) || !item || !canEditColumn(columnIndex)) return false;
+  if (!item.isNew && !item.isDraft && !canUpdateExistingRows.value) return false;
   if (isSavingNewRow(item)) return false;
   const column = props.result.columns[columnIndex] ?? "";
   if (customReadonlyColumns.value.has(column.toLowerCase())) return false;
@@ -4342,7 +4351,7 @@ function isDecimalColumnType(dataType: string): boolean {
 
 function canDeleteRowItem(item: RowItem | undefined): boolean {
   if (!item) return false;
-  return canDeleteGridRowItem({
+  const canDelete = canDeleteGridRowItem({
     editable: !!props.editable && canDeleteRows.value,
     isDraft: !!item.isDraft,
     isDeleted: item.isDeleted,
@@ -4350,6 +4359,8 @@ function canDeleteRowItem(item: RowItem | undefined): boolean {
     canEditExistingRows: canEditExistingRows.value && canDeleteExistingRows.value,
     isSavingNewRow: isSavingNewRow(item),
   });
+  if (!canDelete || item.isNew || !props.customSaveHandler?.canDeleteRow) return canDelete;
+  return item.sourceIndex !== undefined && props.customSaveHandler.canDeleteRow(item.sourceIndex, item.data);
 }
 
 function resetInfiniteScrollState() {
@@ -5739,7 +5750,11 @@ function affectedRowIds(): number[] {
 }
 
 function deletableRowIds(rowIds: number[]): number[] {
-  return rowIds.filter((rowId) => canDeleteRowItem(getRowItem(rowId)));
+  const eligible = rowIds.filter((rowId) => canDeleteRowItem(getRowItem(rowId)));
+  // A custom row-safety predicate is an all-or-nothing contract. Never silently
+  // drop an unsafe row from a multi-row request while deleting its neighbors.
+  if (props.customSaveHandler?.canDeleteRow && eligible.length !== rowIds.length) return [];
+  return eligible;
 }
 
 function exportSelectedRowsCsv() {
@@ -7729,6 +7744,7 @@ const {
   copyWithPreference,
   previewWithPreference,
   canCopyWithExtractor,
+  exportWithExtractor,
   exportCsv,
   exportCurrentPageCsv,
   exportJson,
@@ -7874,6 +7890,9 @@ function saveExtractorConfiguration(value: { preference: DataGridCopyPreference;
     dataGridCopyExtractor: value.preference,
     dataGridExtractorOptions: value.options,
   });
+  // The dialog closes on save; without this the write is invisible and users
+  // report the save button as doing nothing (#9872).
+  toast(t("grid.copyExtractorSaved"));
 }
 
 const pageSizeMenuItems = computed(() =>
@@ -8362,7 +8381,7 @@ function selectedRangeTargetsOnlyDraftRow(): boolean {
   return displayItemAt(range.startRow)?.isDraft === true;
 }
 
-const replaceAvailable = computed(() => !!props.editable && hasDataGridSaveTarget.value && canEditExistingRows.value && !resolvedConnectionConfig.value?.read_only && !isConditionalUpdateActive.value);
+const replaceAvailable = computed(() => !!props.editable && hasDataGridSaveTarget.value && canUpdateExistingRows.value && !resolvedConnectionConfig.value?.read_only && !isConditionalUpdateActive.value);
 const replaceResolving = ref(false);
 const replaceBusy = computed(() => replaceResolving.value || isSaving.value || gridSurfaceBusy.value || props.loading === true);
 
@@ -11769,7 +11788,7 @@ function filterSubmenu(): ContextMenuItem {
   });
 }
 
-function buildExtractorContextItems(): ContextMenuItem[] {
+function buildExtractorContextItems(destination: "copy" | "export" = "copy"): ContextMenuItem[] {
   const items: ContextMenuItem[] = [];
   let separatorPending = false;
   for (const extractor of DATA_GRID_COPY_EXTRACTOR_IDS) {
@@ -11782,21 +11801,21 @@ function buildExtractorContextItems(): ContextMenuItem[] {
     const extractorItems: ContextMenuItem[] = [];
     if (extractor === "sql-inserts") {
       for (const excludePrimaryKeysFromInsert of [false, true]) {
-        if (selected && settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert === excludePrimaryKeysFromInsert) continue;
+        if (destination === "copy" && selected && settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert === excludePrimaryKeysFromInsert) continue;
         const options = sqlInsertExtractorOptions(excludePrimaryKeysFromInsert);
         extractorItems.push({
           label: t(excludePrimaryKeysFromInsert ? "grid.copyExtractorSqlInsertsWithoutPrimaryKeys" : "grid.copyExtractorSqlInsertsWithPrimaryKeys"),
-          action: () => void copyWithExtractor(extractor, options),
+          action: () => void (destination === "copy" ? copyWithExtractor(extractor, options) : exportWithExtractor(extractor, options)),
           disabled: !canCopyWithExtractor(extractor, options),
         });
       }
-    } else if (!selected) {
+    } else if (destination === "export" || !selected) {
       extractorItems.push({
         label: copyExtractorLabel(extractor),
         action: () => {
-          // One-off copy as the chosen format; do NOT persist it as the default —
+          // One-off use of the chosen format; do NOT persist it as the default —
           // the saved default stays controlled by the toolbar/settings dialog.
-          void copyWithExtractor(extractor);
+          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor));
         },
         disabled: !canCopyWithExtractor(extractor),
       });
@@ -11900,12 +11919,18 @@ function exportSubmenu(): ContextMenuItem {
       { label: t("grid.exportSelectedRowsTxt"), action: exportSelectedRowsTxt },
     );
   }
+  const extractorItems = buildExtractorContextItems("export");
+  if (extractorItems.length > 0) {
+    items.push({ label: "", separator: true }, ...extractorItems);
+  }
   return { label: t("grid.export"), icon: Upload, children: items };
 }
 
 const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   const row = contextRowItem.value;
   const rowLabels = rowActionLabels();
+  const rowIdsForDelete = isMultiRow.value ? affectedRowIds() : row ? [row.id] : [];
+  const deletableContextRowIds = deletableRowIds(rowIdsForDelete);
   const hasEditableSelection = selectionHasEditableCells();
   const selectedColumnCount = selectedVisibleColumnIndexes().length;
   const gridSnapshotContext = contextHeaderColumn.value && hasColumnSelection.value ? "columns" : contextCell.value?.col === -1 && affectedRowIds().length > 0 ? "rows" : contextCell.value && hasCellSelection.value && selectedCellMatrix.value ? "cells" : null;
@@ -12075,13 +12100,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       hasRow: !!row,
       canClone: !!row && canInsertRows.value && !row.isDraft,
       deleted: !!row?.isDeleted,
-      canDelete: !!row && canDeleteRowItem(row),
+      canDelete: deletableContextRowIds.length > 0,
       labels: rowLabels,
       icons: { clone: CopyPlus, restore: Undo2, delete: Trash2 },
       actions: {
         clone: () => void (isMultiRow.value ? cloneRows(affectedRowIds()) : row && cloneRow(row.id)),
         restore: () => (isMultiRow.value ? restoreRows(affectedRowIds()) : row && restoreRow(row.id)),
-        delete: () => (isMultiRow.value ? requestDeleteRows(deletableRowIds(affectedRowIds())) : row && requestDeleteRow(row.id)),
+        delete: () => {
+          if (deletableContextRowIds.length > 0) requestDeleteRows(deletableContextRowIds);
+        },
       },
     }),
     [exportSubmenu()],
@@ -12202,7 +12229,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 <DataGridQueryControls
                   v-model:where-input="whereFilterInput"
                   v-model:order-by-input="orderByInput"
-                  v-model:filter-builder-open="effectiveFilterBuilderOpen"
+                  v-model:filter-builder-open="filterBuilderOpen"
                   :filter-editor-view="filterEditorView"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
                   :condition-columns="conditionColumns"
@@ -12259,6 +12286,22 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           >
             <template #leading>
               <slot v-if="hasResultToolbarActionsSlot" name="result-toolbar-actions" :compact="compactDataGridToolbar" />
+              <Tooltip v-if="props.context === 'table-data' && canOpenTableStructureEditor">
+                <TooltipTrigger as-child>
+                  <Button
+                    data-grid-edit-table-structure-action
+                    variant="ghost"
+                    size="sm"
+                    :class="['data-grid-topbar-action-button h-5 shrink-0 px-1.5 text-xs', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
+                    :aria-label="t('contextMenu.editStructure')"
+                    @click="openTableStructureEditor"
+                  >
+                    <PencilRuler class="data-grid-topbar-action-icon h-3 w-3" />
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("contextMenu.editStructure") }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{{ t("contextMenu.editStructure") }}</TooltipContent>
+              </Tooltip>
               <Tooltip v-if="showQueryEditReadOnlyBadge">
                 <TooltipTrigger as-child>
                   <div class="flex h-5 items-center gap-1 rounded border border-muted-foreground/30 bg-muted/60 px-1.5 text-xs font-medium text-muted-foreground">
@@ -12356,7 +12399,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           </DataGridToolbar>
         </div>
         <DataGridFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'conditions' && effectiveFilterBuilderOpen"
+          v-if="canUseWhereSearch && filterEditorView === 'conditions' && filterBuilderOpen"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"
           :columns="filterBuilderColumnOptions"
@@ -12378,7 +12421,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @update-rule="updateStructuredFilterRule"
         />
         <DataGridTextFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'text' && effectiveFilterBuilderOpen"
+          v-if="canUseWhereSearch && filterEditorView === 'text' && filterBuilderOpen"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"
@@ -14261,18 +14304,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :close-on-confirm="false"
       @confirm="confirmDropAllMongoIndexes"
     />
-    <!-- Salesforce applies each record with its own REST call and cannot roll back, so the
-         save is reviewed here first. Cancel (or closing) denies it and keeps the edits staged. -->
-    <DangerConfirmDialog
-      v-model:open="salesforceSaveConfirmOpen"
-      :title="t('grid.salesforceSaveConfirmTitle')"
-      :message="t('grid.salesforceSaveConfirmMessage', { count: salesforceSaveConfirmTotal })"
-      :details-text="salesforceSaveConfirmDetails"
-      :sql="salesforceSaveConfirmSql"
-      :confirm-label="t('grid.salesforceSaveConfirm')"
-      :close-on-confirm="false"
-      @confirm="confirmSalesforceSave"
-    />
+    <!-- Specialized non-transactional saves are reviewed here first. Cancel (or closing)
+         denies the request and keeps the pending rows staged. -->
+    <DangerConfirmDialog v-model:open="saveConfirmOpen" :title="saveConfirmTitle" :message="saveConfirmMessage" :details-text="saveConfirmDetails" :sql="saveConfirmSql" :confirm-label="saveConfirmLabel" :close-on-confirm="false" @confirm="confirmDataGridSave" />
     <ImagePreviewDialog v-if="imagePreviewMounted" v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
     <component v-if="previewDialogOpen && previewDialogConfig" :is="previewDialogConfig.component" v-model:open="previewDialogOpen" v-bind="previewDialogConfig.props" />
     <ExportProgressDialog

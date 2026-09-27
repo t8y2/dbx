@@ -973,6 +973,7 @@ jobs:
               - 'packages/mcp-server/**'
               - 'crates/dbx-cli/**'
               - 'crates/dbx-mcp/**'
+              - 'skills/dbx/**'
               - 'scripts/verify-package-install.mjs'
               - 'package.json'
               - 'pnpm-lock.yaml'

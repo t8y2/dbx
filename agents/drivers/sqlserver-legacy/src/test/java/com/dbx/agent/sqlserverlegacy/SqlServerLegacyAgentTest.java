@@ -62,6 +62,30 @@ class SqlServerLegacyAgentTest {
     }
 
     @Test
+    void traditionalChineseSqlServer8RejectionsTriggerTheOldDriverFallback() {
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("此驅動程式不支援 SQL Server 版本 8。")
+        ));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("此驅動程式不支援 SQL Server 8 版。")
+        ));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("此驅動程式不支援 SQL Server 版本 8.0。")
+        ));
+
+        SQLException chained = new SQLException("連線失敗");
+        chained.setNextException(new SQLException("此驅動程式不支援 SQL Server 版本 8。"));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(chained));
+
+        Assertions.assertFalse(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("登入失敗：SQL Server 版本 8 的使用者 'sa' 無法登入。")
+        ));
+        Assertions.assertFalse(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("TLS 交握失敗：此驅動程式不支援 TLSv1。")
+        ));
+    }
+
+    @Test
     void jtdsUrlUsesLegacySqlServerSyntax() {
         ConnectParams params = new ConnectParams(
             "db.example.com",

@@ -7,6 +7,9 @@ import {
   FIELD_QUERY_OPERATORS,
   PIPELINE_STAGES,
   PUSH_MODIFIERS,
+  BULK_WRITE_OPERATION_FIELDS,
+  BULK_WRITE_OPERATIONS,
+  METHOD_OPTION_KEYS,
   STAGE_OPTION_KEYS,
   TOP_LEVEL_QUERY_OPERATORS,
   UPDATE_OPERATORS,
@@ -46,7 +49,10 @@ export type MongoCompletionMode =
   | "expression"
   | "accumulator"
   | "stage"
-  | "stageOption";
+  | "stageOption"
+  | "methodOption"
+  | "bulkWriteOperation"
+  | "bulkWriteField";
 
 export interface MongoCompletionField {
   name: string;
@@ -74,6 +80,10 @@ export interface MongoCompletionContext {
   collection?: string;
   /** Enclosing aggregation stage (`$lookup`, `$group`, …), when inside one. */
   stage?: string;
+  /** Collection method whose options object the cursor sits in. */
+  method?: string;
+  /** bulkWrite operation (`updateOne`, `deleteMany`, …) whose body the cursor sits in. */
+  bulkWriteOperation?: string;
 }
 
 export interface MongoCompletionInput {
@@ -191,12 +201,12 @@ const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number
 type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options";
 
 const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
-  find: ["filter", "projection", "options"],
+  find: ["filter", "projection"],
   findOne: ["filter", "projection", "options"],
-  countDocuments: ["filter", "options"],
-  count: ["filter", "options"],
-  deleteOne: ["filter", "options"],
-  deleteMany: ["filter", "options"],
+  countDocuments: ["filter"],
+  count: ["filter"],
+  deleteOne: ["filter"],
+  deleteMany: ["filter"],
   findOneAndDelete: ["filter", "options"],
   updateOne: ["filter", "update", "options"],
   updateMany: ["filter", "update", "options"],
@@ -204,8 +214,8 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   bulkWrite: ["operations", "options"],
   findOneAndUpdate: ["filter", "update", "options"],
   findOneAndReplace: ["filter", "replacement", "options"],
-  insertOne: ["document", "options"],
-  insertMany: ["documents", "options"],
+  insertOne: ["document"],
+  insertMany: ["documents"],
   aggregate: ["pipeline", "options"],
   createIndex: ["keys", "options"],
   distinct: ["fieldName", "filter"],
@@ -249,7 +259,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const collection = extractActiveCollection(text, safeCursor);
   const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
   const replaceClosingQuote = closingQuoteAtCursor(prefix, text, safeCursor);
-  const at = (mode: MongoCompletionMode, stage?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage });
+  const at = (mode: MongoCompletionMode, stage?: string, method?: string, bulkWriteOperation?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage, method, bulkWriteOperation });
 
   if (isInsideMongoComment(text, safeCursor)) return { mode: "none", prefix: "", from: safeCursor };
 
@@ -294,7 +304,10 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   if (!scan) return at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
-  return { ...at(classified.mode, classified.stage), collection: classified.collection ?? collection };
+  return {
+    ...at(classified.mode, classified.stage, classified.method, classified.bulkWriteOperation),
+    collection: classified.collection ?? collection,
+  };
 }
 
 export function buildMongoCompletionItems(text: string, cursor: number, input: MongoCompletionInput = {}): MongoCompletionItem[] {
@@ -370,6 +383,15 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "stageOption":
       items = specItems(STAGE_OPTION_KEYS[context.stage ?? ""] ?? [], prefix, `${context.stage} option`, 100);
+      break;
+    case "methodOption":
+      items = specItems(METHOD_OPTION_KEYS[context.method ?? ""] ?? [], prefix, `${context.method}() option`, 100);
+      break;
+    case "bulkWriteOperation":
+      items = specItems(BULK_WRITE_OPERATIONS, prefix, "bulkWrite operation", 100);
+      break;
+    case "bulkWriteField":
+      items = specItems(BULK_WRITE_OPERATION_FIELDS[context.bulkWriteOperation ?? ""] ?? [], prefix, `${context.bulkWriteOperation} field`, 100);
       break;
     default:
       items = [];
@@ -547,6 +569,8 @@ interface MongoCursorClass {
   mode: MongoCompletionMode;
   stage?: string;
   collection?: string;
+  method?: string;
+  bulkWriteOperation?: string;
 }
 
 /**
@@ -647,10 +671,10 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
       return { mode: scan.stack.length === 0 ? "fieldPath" : "none" };
     case "pipeline":
       return classifyPipeline(scan);
-    // bulkWrite operations are `{ <op>: { filter, update, … } }` entries; completing inside them is a follow-up.
     case "operations":
+      return classifyBulkWriteOperations(scan);
     case "options":
-      return { mode: "none" };
+      return classifyMethodOptions(method, scan);
     default:
       return { mode: "none" };
   }
@@ -718,6 +742,65 @@ function classifyKeyMap(scan: MongoCallScan, rootIndex: number): MongoCompletion
   if (!inner || scan.inValue) return "none";
   if (inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return "none";
   return "field";
+}
+
+/** Option keys whose value is a field-to-value map, so the cursor completes field names there. */
+const FIELD_MAP_OPTION_KEYS = new Set(["sort", "projection"]);
+
+function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursorClass {
+  const inner = innermost(scan);
+  const depth = innerDepth(scan, 0);
+  if (!inner || depth < 0) return { mode: "none" };
+
+  // `{ sort: { … } }` and `{ projection: { … } }` are field maps one level in.
+  if (depth === 1 && inner.kind === "object" && FIELD_MAP_OPTION_KEYS.has(inner.key ?? "")) {
+    return { mode: scan.inValue ? "none" : "field", method };
+  }
+  if (depth !== 0 || scan.inValue) return { mode: "none" };
+  return { mode: inner.kind === "object" ? "methodOption" : "none", method };
+}
+
+/**
+ * `bulkWrite([{ <operation>: { <field>: … } }])`, which nests one level deeper than the other
+ * arguments: the array holds operation wrappers, each wrapper holds exactly one operation whose
+ * body carries the fields, and those fields are ordinary filters, updates and documents.
+ */
+function classifyBulkWriteOperations(scan: MongoCallScan): MongoCursorClass {
+  const arrayIndex = scan.stack.findIndex((container) => container.kind === "array");
+  if (arrayIndex !== 0) return { mode: "none" };
+
+  const wrapper = scan.stack[arrayIndex + 1];
+  if (!wrapper || wrapper.kind !== "object") return { mode: "none" };
+
+  // `[{ … }]` — naming the operation.
+  if (scan.stack.length - 1 === arrayIndex + 1) {
+    return { mode: scan.inValue ? "none" : "bulkWriteOperation" };
+  }
+
+  const operation = scan.stack[arrayIndex + 2]?.key ?? "";
+  const fields = BULK_WRITE_OPERATION_FIELDS[operation];
+  if (!fields) return { mode: "none" };
+
+  // `[{ updateOne: { … } }]` — naming a field of the operation.
+  if (scan.stack.length - 1 === arrayIndex + 2) {
+    return { mode: scan.inValue ? "value" : "bulkWriteField", bulkWriteOperation: operation };
+  }
+
+  // Inside a field's value, where the shapes are the ordinary ones.
+  const fieldIndex = arrayIndex + 3;
+  switch (scan.stack[fieldIndex]?.key ?? "") {
+    case "filter":
+      return { mode: classifyFilter(scan, fieldIndex), bulkWriteOperation: operation };
+    case "arrayFilters":
+      return { mode: classifyFilter(scan, fieldIndex + 1), bulkWriteOperation: operation };
+    case "update":
+      return { mode: classifyUpdate(scan, fieldIndex), bulkWriteOperation: operation };
+    case "document":
+    case "replacement":
+      return { mode: classifyDocument(scan, fieldIndex), bulkWriteOperation: operation };
+    default:
+      return { mode: "none" };
+  }
 }
 
 function classifyPipeline(scan: MongoCallScan): MongoCursorClass {

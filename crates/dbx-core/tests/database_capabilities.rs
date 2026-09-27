@@ -492,6 +492,19 @@ fn vastbase_declares_data_transfer_support() {
 }
 
 #[test]
+fn yashandb_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let yashandb = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::Yashandb)
+        .expect("YashanDB manifest entry");
+
+    assert!(yashandb.capabilities.table_import);
+    assert!(yashandb.capabilities.data_transfer);
+}
+
+#[test]
 fn xugu_declares_table_import_support() {
     let manifest = driver_manifest();
     let xugu =

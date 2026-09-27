@@ -21,6 +21,7 @@ import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -1726,7 +1727,12 @@ class DamengAgentMetadataTest {
             Arrays.asList("DEFAULT_VALUE", "VARCHAR2", "Y", null, null, 80, 20, null, "default length"),
             Arrays.asList("WORD_VALUE", "VARCHAR2", "Y", null, null, 128, 32, "BYTE", "word byte length"),
             Arrays.asList("NATIONAL_VALUE", "NVARCHAR2", "Y", null, null, 80, 20, "C", "national length"),
-            Arrays.asList("NATIONAL_FIXED", "NCHAR", "Y", null, null, 40, 10, "B", "national fixed length")
+            Arrays.asList("NATIONAL_FIXED", "NCHAR", "Y", null, null, 40, 10, "B", "national fixed length"),
+            // DM8 reports CHAR_USED as 'B' for byte- and character-length columns alike and
+            // records the declared unit in SCALE instead.
+            Arrays.asList("SCALE_CHAR_VAR", "VARCHAR2", "Y", null, 7, 40, 10, "B", "dameng char unit"),
+            Arrays.asList("SCALE_CHAR_FIXED", "CHAR", "Y", null, 8, 10, 10, "B", "dameng fixed char unit"),
+            Arrays.asList("SCALE_BYTE_VAR", "VARCHAR2", "Y", null, 0, 10, 10, "B", "dameng byte unit")
         )));
 
         List<ColumnInfo> columns = agent.getColumns("APP", "USERS");
@@ -1738,18 +1744,49 @@ class DamengAgentMetadataTest {
         Assertions.assertEquals("VARCHAR2(128 BYTE)", columns.get(4).getData_type());
         Assertions.assertEquals("NVARCHAR2(20)", columns.get(5).getData_type());
         Assertions.assertEquals("NCHAR(10)", columns.get(6).getData_type());
+        Assertions.assertEquals("VARCHAR2(10 CHAR)", columns.get(7).getData_type());
+        Assertions.assertEquals("CHAR(10 CHAR)", columns.get(8).getData_type());
+        Assertions.assertEquals("VARCHAR2(10 BYTE)", columns.get(9).getData_type());
+    }
+
+    @Test
+    void readsDeclaredLengthWhenAllTabColumnsHasNoCharacterLength() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, metadataConnectionForColumns(
+            List.of(
+                // DM8 leaves CHAR_LENGTH at 0 for NVARCHAR2 and reports the byte length in
+                // DATA_LENGTH, so the declared character length has to come from SYSCOLUMNS.
+                Arrays.asList("NATIONAL_VALUE", "NVARCHAR2", "Y", null, 7, 400, 0, null, "national length"),
+                Arrays.asList("BIG_CHAR_VALUE", "VARCHAR2", "Y", null, 7, 800, 0, "B", "char unit from scale")
+            ),
+            List.of(Arrays.asList("NATIONAL_VALUE", 100), Arrays.asList("BIG_CHAR_VALUE", 200))
+        ));
+
+        List<ColumnInfo> columns = agent.getColumns("APP", "USERS");
+
+        Assertions.assertEquals("NVARCHAR2(100)", columns.get(0).getData_type());
+        Assertions.assertEquals("VARCHAR2(200 CHAR)", columns.get(1).getData_type());
     }
 
     @Test
     void appendsTableAndColumnCommentsToTableDdl() {
         DamengAgent agent = new DamengAgent();
-        TestSupport.setPrivateConnection(agent, metadataConnection());
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnection(
+            "id comment",
+            null,
+            false,
+            List.of(),
+            sqls
+        ));
 
         String ddl = agent.getTableDdl("APP", "USERS");
 
         Assertions.assertTrue(ddl.contains("CREATE TABLE \"APP\".\"USERS\""), ddl);
         Assertions.assertTrue(ddl.contains("COMMENT ON TABLE \"APP\".\"USERS\" IS '用户示例表';"), ddl);
         Assertions.assertTrue(ddl.contains("COMMENT ON COLUMN \"APP\".\"USERS\".\"ID\" IS 'id comment';"), ddl);
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM ALL_COL_COMMENTS")), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("ALL_CONS_COLUMNS")), String.join("\n", sqls));
     }
 
     @Test
@@ -1861,11 +1898,72 @@ class DamengAgentMetadataTest {
             ddl.contains("CREATE UNIQUE INDEX \"APP\".\"UX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");"),
             ddl
         );
+        Assertions.assertTrue(
+            ddl.contains("CREATE SPATIAL INDEX \"APP\".\"IDX_USERS_GEO\" ON \"APP\".\"USERS\" (\"GEO\");"),
+            ddl
+        );
         Assertions.assertFalse(ddl.contains("PK_USERS"), ddl);
-        String indexSql = sqls.stream().filter(sql -> sql.contains("ALL_INDEXES")).findFirst().orElseThrow();
-        Assertions.assertTrue(indexSql.contains("CONSTRAINT_TYPE IN ('P', 'U')"), indexSql);
+        String indexSql = sqls.stream().filter(sql -> sql.contains("SYS.SYSINDEXES")).findFirst().orElseThrow();
+        Assertions.assertTrue(indexSql.contains("constraint_metadata.TYPE$ IN ('P', 'U')"), indexSql);
+        Assertions.assertTrue(indexSql.contains("schema_object.NAME = ?"), indexSql);
+        Assertions.assertTrue(indexSql.contains("table_object.NAME = ?"), indexSql);
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("ALL_INDEXES")), String.join("\n", sqls));
         long dbmsMetadataCalls = sqls.stream().filter(sql -> sql.contains("DBMS_METADATA.GET_DDL")).count();
         Assertions.assertEquals(1, dbmsMetadataCalls);
+    }
+
+    @Test
+    void fallsBackToDictionaryViewsWhenSystemIndexCatalogIsUnavailable() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnection(
+            "id comment",
+            null,
+            false,
+            List.of(indexRow("IDX_USERS_NAME", "NAME", "N", "BT", 0)),
+            sqls,
+            "CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER\n);",
+            defaultColumnMetadataRows("id comment"),
+            null,
+            new SQLException("no SYS index catalog privilege")
+        ));
+
+        String ddl = agent.getTableDdl("APP", "USERS");
+
+        Assertions.assertTrue(
+            ddl.contains("CREATE INDEX \"APP\".\"IDX_USERS_NAME\" ON \"APP\".\"USERS\" (\"NAME\");"),
+            ddl
+        );
+        int systemQuery = indexOfSql(sqls, "SYS.SYSINDEXES");
+        int fallbackQuery = indexOfSql(sqls, "ALL_INDEXES");
+        Assertions.assertTrue(systemQuery >= 0, String.join("\n", sqls));
+        Assertions.assertTrue(fallbackQuery > systemQuery, String.join("\n", sqls));
+    }
+
+    @Test
+    void doesNotRetryIndexCatalogAfterConnectionFailure() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnection(
+            "id comment",
+            null,
+            false,
+            List.of(),
+            sqls,
+            "CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER\n);",
+            defaultColumnMetadataRows("id comment"),
+            null,
+            new SQLNonTransientConnectionException("connection lost")
+        ));
+
+        RuntimeException error = Assertions.assertThrows(
+            RuntimeException.class,
+            () -> agent.getTableDdl("APP", "USERS")
+        );
+
+        Assertions.assertEquals("connection lost", error.getCause().getMessage());
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("SYS.SYSINDEXES")), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("ALL_INDEXES")), String.join("\n", sqls));
     }
 
     @Test
@@ -1877,8 +1975,8 @@ class DamengAgentMetadataTest {
             null,
             false,
             List.of(
-                indexRow("IDX_USERS_NAME", "NAME", "NONUNIQUE", "NORMAL"),
-                indexRow("SYS_INTERNAL_DDL", "ID", "NONUNIQUE", "INNER CLUSTER INDEX")
+                indexRow("IDX_USERS_NAME", "NAME", "N", "BT", 0),
+                indexRow("SYS_INTERNAL_DDL", "ID", "N", "BT", 1)
             ),
             sqls
         ));
@@ -2078,8 +2176,9 @@ class DamengAgentMetadataTest {
             null,
             false,
             List.of(
-                indexRow("IDX_USERS_NAME", "NAME", "NONUNIQUE", "NORMAL"),
-                indexRow("UX_USERS_EMAIL", "EMAIL", "UNIQUE", "NORMAL")
+                indexRow("IDX_USERS_NAME", "NAME", "N", "BT", 0),
+                indexRow("UX_USERS_EMAIL", "EMAIL", "Y", "BT", 0),
+                indexRow("IDX_USERS_GEO", "GEO", "N", "ST", 0)
             ),
             sqls
         );
@@ -2128,6 +2227,13 @@ class DamengAgentMetadataTest {
     }
 
     private static Connection metadataConnectionForColumns(List<List<Object>> columnRows) {
+        return metadataConnectionForColumns(columnRows, null);
+    }
+
+    private static Connection metadataConnectionForColumns(
+        List<List<Object>> columnRows,
+        List<List<Object>> declaredColumnLengths
+    ) {
         return metadataConnection(
             "id comment",
             null,
@@ -2135,7 +2241,10 @@ class DamengAgentMetadataTest {
             List.of(),
             null,
             "CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER\n);",
-            columnRows
+            columnRows,
+            null,
+            null,
+            declaredColumnLengths
         );
     }
 
@@ -2170,6 +2279,56 @@ class DamengAgentMetadataTest {
         List<List<Object>> columnRows,
         String dbmsMetadataError
     ) {
+        return metadataConnection(
+            allColumnComment,
+            fallbackColumnComment,
+            includeMaterializedView,
+            independentIndexes,
+            sqls,
+            dbmsMetadataDdl,
+            columnRows,
+            dbmsMetadataError,
+            null
+        );
+    }
+
+    private static Connection metadataConnection(
+        String allColumnComment,
+        String fallbackColumnComment,
+        boolean includeMaterializedView,
+        List<List<Object>> independentIndexes,
+        List<String> sqls,
+        String dbmsMetadataDdl,
+        List<List<Object>> columnRows,
+        String dbmsMetadataError,
+        SQLException systemIndexError
+    ) {
+        return metadataConnection(
+            allColumnComment,
+            fallbackColumnComment,
+            includeMaterializedView,
+            independentIndexes,
+            sqls,
+            dbmsMetadataDdl,
+            columnRows,
+            dbmsMetadataError,
+            systemIndexError,
+            null
+        );
+    }
+
+    private static Connection metadataConnection(
+        String allColumnComment,
+        String fallbackColumnComment,
+        boolean includeMaterializedView,
+        List<List<Object>> independentIndexes,
+        List<String> sqls,
+        String dbmsMetadataDdl,
+        List<List<Object>> columnRows,
+        String dbmsMetadataError,
+        SQLException systemIndexError,
+        List<List<Object>> declaredColumnLengths
+    ) {
         boolean[] dbmsMetadataResultOpen = {false};
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
@@ -2190,8 +2349,17 @@ class DamengAgentMetadataTest {
                 if (sql.startsWith("SELECT NAME FROM SYS.SYSOBJECTS WHERE TYPE$ = 'SCH'")) {
                     return metadataStatement(List.of(List.of("APP"), List.of("EMPTY_SCHEMA"), List.of("SYSDBA")));
                 }
+                if (sql.contains("SYS.SYSINDEXES")) {
+                    if (systemIndexError != null) {
+                        return failingMetadataStatement(systemIndexError);
+                    }
+                    return metadataStatement(independentIndexes);
+                }
                 if (sql.contains("ALL_CONS_COLUMNS")) {
                     return metadataStatement(List.of(List.of("ID")));
+                }
+                if (sql.contains("SYS.SYSCOLUMNS") && sql.contains("LENGTH$")) {
+                    return metadataStatement(declaredColumnLengths == null ? List.of() : declaredColumnLengths);
                 }
                 if (sql.contains("SYS.SYSCOLUMNS")) {
                     return metadataStatement(List.of(List.of("ID")));
@@ -2233,7 +2401,7 @@ class DamengAgentMetadataTest {
                     return metadataStatement(List.of());
                 }
                 if (sql.contains("ALL_INDEXES")) {
-                    return metadataStatement(independentIndexes);
+                    return metadataStatement(dictionaryIndexRows(independentIndexes));
                 }
                 if (sql.contains("ALL_TAB_COMMENTS")) {
                     List<List<Object>> rows = new ArrayList<>();
@@ -2261,7 +2429,9 @@ class DamengAgentMetadataTest {
                     return metadataStatement(List.of());
                 }
                 if (sql.contains("ALL_COL_COMMENTS") && !sql.contains("ALL_TAB_COLUMNS")) {
-                    return metadataStatement(List.of());
+                    return metadataStatement(
+                        allColumnComment == null ? List.of() : List.of(List.of("ID", allColumnComment))
+                    );
                 }
                 if (sql.contains("ALL_TAB_COLUMNS")) {
                     return metadataStatement(columnRows);
@@ -2309,8 +2479,26 @@ class DamengAgentMetadataTest {
         });
     }
 
-    private static List<Object> indexRow(String name, String columns, String uniqueness, String indexType) {
-        return List.of(name, columns, uniqueness, indexType);
+    private static List<Object> indexRow(String name, String columns, String uniqueness, String indexType, int flags) {
+        return List.of(name, columns, uniqueness, indexType, flags);
+    }
+
+    private static List<List<Object>> dictionaryIndexRows(List<List<Object>> systemRows) {
+        return systemRows.stream().map(row -> List.of(
+            row.get(0),
+            row.get(1),
+            "Y".equals(row.get(2)) ? "UNIQUE" : "NONUNIQUE",
+            "ST".equals(row.get(3)) ? "SPATIAL" : "NORMAL"
+        )).toList();
+    }
+
+    private static int indexOfSql(List<String> sqls, String fragment) {
+        for (int i = 0; i < sqls.size(); i++) {
+            if (sqls.get(i).contains(fragment)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static PreparedStatement dbmsMetadataStatement(String ddl, boolean[] resultOpen) {
@@ -2904,6 +3092,10 @@ class DamengAgentMetadataTest {
                     case "CACHE_SIZE" -> string(rows, index[0], 5);
                     default -> null;
                 };
+            }
+            if ("getInt".equals(name) && args[0] instanceof Integer columnIndex) {
+                Object value = rows.get(index[0]).get(columnIndex - 1);
+                return value instanceof Number number ? number.intValue() : Integer.parseInt(String.valueOf(value));
             }
             if ("getCharacterStream".equals(name) && args[0] instanceof Integer columnIndex) {
                 Object value = rows.get(index[0]).get(columnIndex - 1);

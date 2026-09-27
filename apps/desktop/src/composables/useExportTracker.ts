@@ -582,6 +582,7 @@ export function useExportTracker() {
     request: api.TransferRequest,
     label: string,
     options: {
+      onStarted?: () => void;
       onDone?: () => void | Promise<void>;
       formatOverlapError?: (tables: string[]) => string;
     } = {},
@@ -607,13 +608,23 @@ export function useExportTracker() {
 
     activeTransferRuns.add(request.transferId);
     let terminalStatus: api.TransferProgress["status"] | null = null;
+    let startAcknowledged = false;
+    const acknowledgeStart = () => {
+      if (startAcknowledged) return;
+      startAcknowledged = true;
+      options.onStarted?.();
+    };
 
     void (async () => {
       try {
-        await api.startTransfer(request, (progress) => {
-          terminalStatus = isTerminalTransferProgress(progress) ? progress.status : terminalStatus;
-          updateDataTransferTask(progress.transferId, progress);
-        });
+        await api.startTransfer(
+          request,
+          (progress) => {
+            terminalStatus = isTerminalTransferProgress(progress) ? progress.status : terminalStatus;
+            updateDataTransferTask(progress.transferId, progress);
+          },
+          acknowledgeStart,
+        );
 
         if (terminalStatus === "done" && task.status === "Done") {
           await options.onDone?.();

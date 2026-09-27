@@ -14,14 +14,17 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
-import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { supportsSqlFileExecution, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { beginManualTransaction, commitManualTransaction, rollbackManualTransaction, cancelSqlFileExecution, executeSqlFiles, inspectSqlFileTables, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus, type SqlFileTable } from "@/lib/backend/api";
+import { activeTabExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, type ExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { isSqlFilePath } from "@/lib/sql/sqlFileOpen";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
 import { parseSqlFilePathInput } from "./sqlFilePathInput";
 import SqlFileProgressIndicator from "./SqlFileProgressIndicator.vue";
@@ -43,6 +46,7 @@ const props = defineProps<{
 }>();
 
 const store = useConnectionStore();
+const queryStore = useQueryStore();
 const productionSafetyStore = useProductionSafetyStore();
 // Tauri = real filesystem paths; Web = browser File.name (no path) + server temp paths.
 const isDesktopRuntime = isTauriRuntime();
@@ -92,7 +96,7 @@ async function commitPathInput() {
     return;
   }
   const typed = pathInput.value;
-  await loadPreviews(paths);
+  await loadPreviews(paths, true);
   // Failed load: keep what was typed so the path can be corrected.
   pathInput.value = previews.value.length > 0 ? filePathDisplay.value : typed;
 }
@@ -116,6 +120,7 @@ const connectionId = ref("");
 const database = ref("");
 const databaseOptions = ref<string[]>([]);
 const loadingDatabases = ref(false);
+const preferredTarget = ref<ExternalSqlFileTarget>();
 const continueOnError = ref(false);
 const skipRelationalConstraints = ref(false);
 const manualTransaction = ref(false);
@@ -169,7 +174,7 @@ function resetPerFileState() {
   currentFileName.value = "";
 }
 
-const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "salesforce"].includes(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((connection) => supportsSqlFileExecution(connection.db_type)));
 // Mirrors the core executor gate (`relational_constraint_bypass_kind` in
 // sql_file_import.rs): MySQL-family types use the session-scoped
 // FOREIGN_KEY_CHECKS toggle, PostgreSQL-family types use DISABLE/ENABLE
@@ -376,22 +381,29 @@ function statusLabel(status: SqlFileStatus | "idle") {
   return t(`sqlFile.status.${status}`);
 }
 
-function resolveInitialConnectionId() {
+function resolveInitialTarget(): ExternalSqlFileTarget {
   if (props.prefillConnectionId && sqlConnections.value.some((c) => c.id === props.prefillConnectionId)) {
-    return props.prefillConnectionId;
+    return { connectionId: props.prefillConnectionId, database: props.prefillDatabase ?? "" };
   }
-  if (props.prefillFilePath) return "";
-  return sqlConnections.value[0]?.id ?? "";
+  if (props.prefillFilePath) return { connectionId: "", database: "" };
+  return activeTabExternalSqlFileTarget(queryStore.tabs, queryStore.activeTabId, (connectionId) => store.getConfig(connectionId));
+}
+
+function applyTarget(target: ExternalSqlFileTarget) {
+  preferredTarget.value = target;
+  connectionId.value = target.connectionId;
+  database.value = target.database;
 }
 
 function chooseDatabase(names: string[], id: string) {
   const configDatabase = store.getConfig(id)?.database ?? "";
+  const preferredDatabase = preferredTarget.value?.connectionId === id ? preferredTarget.value.database : props.prefillDatabase;
   if (names.length > 0) {
-    if (props.prefillDatabase && names.includes(props.prefillDatabase)) return props.prefillDatabase;
+    if (preferredDatabase && names.includes(preferredDatabase)) return preferredDatabase;
     if (configDatabase && names.includes(configDatabase)) return configDatabase;
     return names.length === 1 ? names[0] : "";
   }
-  return props.prefillDatabase ?? configDatabase;
+  return preferredDatabase ?? configDatabase;
 }
 
 function resetExecution() {
@@ -410,11 +422,11 @@ function resetExecution() {
 }
 
 function resetState() {
+  const initialTarget = resolveInitialTarget();
   previews.value = [];
   selectingFile.value = false;
   loadingPreview.value = false;
-  connectionId.value = resolveInitialConnectionId();
-  database.value = "";
+  applyTarget(initialTarget);
   databaseOptions.value = [];
   loadingDatabases.value = false;
   continueOnError.value = false;
@@ -469,7 +481,7 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
   return previewWebSqlFile(file);
 }
 
-async function loadPreviews(filesOrPaths: Array<string | File>) {
+async function loadPreviews(filesOrPaths: Array<string | File>, resolveSelectedFileTarget = false) {
   if (executionLocked.value) return;
   await releaseManagedPreviews();
   loadingPreview.value = true;
@@ -481,6 +493,11 @@ async function loadPreviews(filesOrPaths: Array<string | File>) {
       nextPreviews.push(await previewSelectedSqlFile(fileOrPath));
     }
     previews.value = nextPreviews;
+    if (resolveSelectedFileTarget) {
+      const firstPath = typeof filesOrPaths[0] === "string" && isSqlFilePath(filesOrPaths[0]) ? filesOrPaths[0] : undefined;
+      const target = firstPath ? resolveExternalSqlFileTargetForActiveTab(firstPath, queryStore.tabs, queryStore.activeTabId, (connectionId) => store.getConfig(connectionId)) : activeTabExternalSqlFileTarget(queryStore.tabs, queryStore.activeTabId, (connectionId) => store.getConfig(connectionId));
+      applyTarget(target);
+    }
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {
@@ -515,7 +532,7 @@ async function selectFile() {
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length > 0) {
-      await loadPreviews(paths);
+      await loadPreviews(paths, true);
     }
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
@@ -531,7 +548,7 @@ async function handleFileInputChange(event: Event) {
   if (files.length === 0 || executionLocked.value) return;
   selectingFile.value = true;
   try {
-    await loadPreviews(files);
+    await loadPreviews(files, true);
   } finally {
     selectingFile.value = false;
   }
@@ -772,7 +789,7 @@ watch(connectionId, (id) => {
 
 watch(sqlConnections, () => {
   if (!open.value || executionLocked.value || selectedConnection.value) return;
-  connectionId.value = resolveInitialConnectionId();
+  applyTarget(resolveInitialTarget());
 });
 
 watch(

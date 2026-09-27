@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   removePluginTrustedKey: vi.fn(),
   toast: vi.fn(),
   isTauriRuntime: vi.fn(),
+  openExternal: vi.fn(),
   refreshPluginWorkbenches: vi.fn(),
 }));
 
@@ -31,6 +32,7 @@ vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connec
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => vi.fn()) }));
+vi.mock("@tauri-apps/plugin-shell", () => ({ open: mocks.openExternal }));
 vi.mock("vue-i18n", async () => {
   const { ref } = await import("vue");
   return { useI18n: () => ({ locale: ref("en"), t: (key: string, values = {}) => `${key}:${JSON.stringify(values)}` }) };
@@ -267,6 +269,33 @@ describe("PluginContributionsPanel batch source validation", () => {
       { repositoryId: "second", pluginId: "b", version },
     ]);
     expect(state.selectedListingKeys.size).toBe(0);
+  });
+});
+
+describe("PluginContributionsPanel external links", () => {
+  it("hands GitHub and homepage clicks to the desktop shell without selecting the card", async () => {
+    const linkedCatalog = catalog("first", ["linked"]);
+    Object.assign(linkedCatalog.catalog!.plugins[0], {
+      source: "https://github.com/dbxio/linked",
+      homepage: "https://dbxio.com/plugins/linked",
+    });
+    state.catalogResults = [linkedCatalog];
+    state.marketplaceViewMode = "grid";
+    mocks.isTauriRuntime.mockReturnValue(true);
+    await nextTick();
+
+    const sourceButton = host.querySelector<HTMLButtonElement>('[aria-label^="pluginPlatform.sourceRepository"]')!;
+    const homepageButton = host.querySelector<HTMLButtonElement>('[aria-label^="pluginPlatform.pluginHomepage"]')!;
+    const cardClick = vi.fn();
+    sourceButton.closest("article")!.addEventListener("click", cardClick);
+
+    sourceButton.click();
+    await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledTimes(1));
+    homepageButton.click();
+    await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledTimes(2));
+
+    expect(mocks.openExternal.mock.calls).toEqual([["https://github.com/dbxio/linked"], ["https://dbxio.com/plugins/linked"]]);
+    expect(cardClick).not.toHaveBeenCalled();
   });
 });
 
@@ -852,5 +881,61 @@ describe("PluginContributionsPanel marketplace sort", () => {
 
     expect(state.marketplaceSortMode).toBe("name");
     expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
+  });
+});
+
+describe("PluginContributionsPanel marketplace card layout", () => {
+  it("wraps the grid card header and pins the version badge so it never clips in a narrow panel", async () => {
+    state.batchMode = false;
+    state.marketplaceViewMode = "grid";
+    await nextTick();
+
+    const card = host.querySelector("article");
+    expect(card, "a marketplace grid card should render").not.toBeNull();
+
+    // The header row (icon + name + github/globe/date/version cluster) must be allowed to wrap,
+    // otherwise the non-shrinkable right cluster overflows the narrow column and the version
+    // badge is clipped (e.g. "v0.1.C") when the plugin center shares width with the AI panel.
+    const header = card!.querySelector(":scope > div");
+    expect(header?.classList.contains("flex-wrap"), "grid card header row should wrap").toBe(true);
+
+    // The version badge must not shrink, so it is never squished even when it stays on one line.
+    const versionBadge = [...host.querySelectorAll<HTMLElement>("[data-stub='Badge']")].find((element) => element.textContent?.trim() === "v3.0.0");
+    expect(versionBadge, "version badge should render").toBeDefined();
+    expect(versionBadge!.classList.contains("shrink-0"), "version badge should be shrink-0").toBe(true);
+  });
+});
+
+describe("PluginContributionsPanel single uninstall outcomes", () => {
+  it("re-reads the installed list and notifies listeners when a single uninstall fails", async () => {
+    const changed = vi.fn();
+    window.addEventListener("dbx:plugins-changed", changed);
+    const failure = "The process cannot access the file because it is being used by another process. (os error 32)";
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error(failure));
+    // The backend kept the plugin installed (the uninstall never committed), and the panel has to
+    // show exactly that instead of the state it guessed before the call.
+    mocks.listPlugins.mockResolvedValueOnce([installed("a"), installed("b", "9.9.9")]);
+
+    try {
+      await state.uninstallSelectedPlugin();
+    } finally {
+      window.removeEventListener("dbx:plugins-changed", changed);
+    }
+
+    expect(mocks.toast).toHaveBeenLastCalledWith(failure, 5000);
+    expect(mocks.listPlugins).toHaveBeenCalledOnce();
+    expect(state.installedPlugins.map((plugin) => `${plugin.manifest.id}@${plugin.manifest.version}`)).toEqual(["a@1.0.0", "b@9.9.9"]);
+    expect(changed).toHaveBeenCalledOnce();
+    expect(state.error).toBe("");
+  });
+
+  it("keeps the uninstall failure visible when the follow-up refresh also fails", async () => {
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error("denied"));
+    mocks.listPlugins.mockRejectedValueOnce(new Error("refresh offline"));
+
+    await state.uninstallSelectedPlugin();
+
+    expect(mocks.toast).toHaveBeenLastCalledWith("denied", 5000);
+    expect(state.error).toBe('pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}');
   });
 });

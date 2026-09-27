@@ -44,6 +44,11 @@ const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
 const KEYLESS_GUARD_COUNT_ALIAS: &str = "dbx_keyless_row_matches";
 const KEYLESS_AMBIGUOUS_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, so the row is identified by matching every column value, and more than one row in the table matches that condition. Add a primary key or unique index, or make the rows distinguishable, before editing.";
 const KEYLESS_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key and none of the result columns map to a table column, so there is no condition that can target a single row. Add a primary key, or edit the table directly, before saving.";
+/// Dameng rejects every comparison against its binary LOB types with
+/// `Data type mismatch` (SQLSTATE 22000, code -6105), and spatial columns are
+/// BLOB-backed and behave the same, so a keyless row predicate — which matches
+/// every result column value — cannot carry one of them.
+const DAMENG_KEYLESS_BINARY_LOB_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, and Dameng cannot compare binary LOB values, so Dbx cannot build a condition that targets it. Add a primary key or unique index, or exclude the binary LOB column from the query, before editing.";
 
 const MYSQL_DATA_GRID_BATCH_MAX_ROWS: usize = 500;
 const MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES: usize = 256 * 1024;
@@ -1060,25 +1065,17 @@ fn is_sqlserver_legacy_profile(driver_profile: Option<&str>) -> bool {
 }
 
 pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
-    let table = if crate::sql_dialect::uses_connection_identifier_quote(
+    // Keep the reference identical to the one the grid's SELECT uses: Caché/IRIS
+    // reject quoted ordinary names when delimited identifiers are disabled, so
+    // the count must not be the only statement that quotes them (#8929).
+    let table = data_grid_qualified_table_name(
         options.database_type,
+        options.catalog.as_deref(),
+        options.schema.as_deref(),
+        options.database.as_deref(),
+        &options.table_name,
         options.identifier_quote.as_deref(),
-    ) {
-        crate::sql_dialect::table_data_qualified_table_name(
-            options.database_type,
-            options.schema.as_deref(),
-            &options.table_name,
-            options.identifier_quote.as_deref(),
-        )
-    } else {
-        crate::sql_dialect::qualified_table_name_with_catalog(
-            options.database_type,
-            options.catalog.as_deref(),
-            options.schema.as_deref(),
-            options.database.as_deref(),
-            &options.table_name,
-        )
-    };
+    );
     let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     let hint = options.count_hint.as_deref().unwrap_or("");
@@ -1223,6 +1220,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
     if let Some(error) = validate_oracle_keyless_lob_predicate(options) {
         return Some(error);
     }
+    if let Some(error) = validate_dameng_keyless_binary_lob_predicate(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_keyless_row_predicate(options) {
         return Some(error);
     }
@@ -1339,6 +1339,44 @@ fn validate_oracle_keyless_lob_predicate(options: &DataGridSaveStatementOptions)
     // LOB equality is unsupported in Oracle-compatible SQL. Refuse unsafe
     // keyless writes instead of dropping LOB predicates and risking extra rows.
     Some("Cannot safely update or delete this Oracle-compatible row because the table has LOB columns but no primary key or ROWID identifier.".to_string())
+}
+
+/// Dameng refuses `=` and `LIKE` against binary LOB columns with a bare
+/// `Data type mismatch`, so a non-NULL binary LOB value can never appear in the
+/// keyless row predicate built from every result column. Spatial columns
+/// (`SYSGEO2.ST_GEOMETRY` and friends) are BLOB-backed and fail the same way.
+/// Refuse the write with an actionable message instead of sending SQL the
+/// server rejects. NULL values stay editable because they only need `IS NULL`,
+/// and textual LOBs (`CLOB`, `TEXT`) compare fine and are left alone.
+fn validate_dameng_keyless_binary_lob_predicate(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if options.database_type != Some(DatabaseType::Dameng)
+        || !options.table_meta.primary_keys.is_empty()
+        || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty())
+    {
+        return None;
+    }
+    let save_columns = effective_columns(options);
+    let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let touched_row_indexes =
+        options.dirty_rows.iter().map(|(row_index, _)| *row_index).chain(options.deleted_rows.iter().copied());
+    for row_index in touched_row_indexes {
+        let Some(row) = options.rows.get(row_index) else {
+            continue;
+        };
+        let compares_binary_lob = save_columns.iter().enumerate().any(|(index, column)| {
+            let Some(column) = column.as_deref() else {
+                return false;
+            };
+            if is_synthetic_row_id(options.database_type, Some(column)) || row.get(index).is_none_or(Value::is_null) {
+                return false;
+            }
+            column_info_for(column_info, column).is_some_and(|info| is_dameng_uncomparable_lob_type(&info.data_type))
+        });
+        if compares_binary_lob {
+            return Some(DAMENG_KEYLESS_BINARY_LOB_ERROR.to_string());
+        }
+    }
+    None
 }
 
 /// Without a primary key a row can only be addressed by matching every column
@@ -3307,6 +3345,19 @@ fn is_oracle_lob_type(data_type: &str) -> bool {
         || lower.starts_with("character large object")
 }
 
+/// Dameng binary LOB types have no comparison operator: `=`, `LIKE` and even
+/// `col = col` all raise `Data type mismatch`, so they cannot be part of a
+/// keyless row predicate. Spatial types are BLOB-backed and behave the same.
+fn is_dameng_uncomparable_lob_type(data_type: &str) -> bool {
+    let lower = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    if lower.starts_with("binary large object") {
+        return true;
+    }
+    let head = lower.split(['(', ':', ' ']).next().unwrap_or("");
+    let base = head.rsplit('.').next().unwrap_or(head).trim();
+    matches!(base, "blob" | "image" | "longvarbinary" | "bfile" | "geometry") || base.ends_with("_geometry")
+}
+
 fn oracle_character_lob_constructor(data_type: &str) -> Option<&'static str> {
     let lower = data_type.trim().trim_matches('"').to_ascii_lowercase();
     let base = lower.split(['(', ':', ' ']).next().unwrap_or("");
@@ -3424,10 +3475,19 @@ fn find_column_index(database_type: Option<DatabaseType>, columns: &[Option<Stri
     }
     // PostgreSQL can have distinct `id` and quoted `"ID"` columns. Only
     // dialects whose result metadata is known to drift in case may fall back,
-    // and even then a case-only match must be unique.
+    // and even then a case-only match must be unique. Vastbase reports result
+    // labels upper-cased (`ID`) while primary-key metadata keeps the stored
+    // spelling (`id`), so the grid's primary-key badge and the save path have
+    // to agree on the same column (#8797).
     if !matches!(
         database_type,
-        Some(DatabaseType::Goldendb | DatabaseType::Kingbase | DatabaseType::Tdengine | DatabaseType::Hive)
+        Some(
+            DatabaseType::Goldendb
+                | DatabaseType::Kingbase
+                | DatabaseType::Tdengine
+                | DatabaseType::Hive
+                | DatabaseType::Vastbase
+        )
     ) {
         return None;
     }
@@ -3977,6 +4037,10 @@ mod tests {
 
     #[test]
     fn iris_data_grid_count_queries_the_table_without_wrapping_top_sql() {
+        // Caché 2016 runs with delimited identifiers disabled, where a quoted
+        // ordinary name is not a table reference — the count must use the same
+        // unquoted spelling as the grid SELECT (#8929). Delimited names keep
+        // their quotes.
         assert_eq!(
             build_data_grid_count_sql(DataGridCountSqlOptions {
                 database_type: Some(DatabaseType::Iris),
@@ -3988,7 +4052,20 @@ mod tests {
                 where_input: Some("SSUSR_IsActive = 'Y'".to_string()),
                 count_hint: None,
             }),
-            "SELECT COUNT(*) AS cnt FROM \"SS\".\"SS_User\" WHERE (SSUSR_IsActive = 'Y')"
+            "SELECT COUNT(*) AS cnt FROM SS.SS_User WHERE (SSUSR_IsActive = 'Y')"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Iris),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("App Schema".to_string()),
+                table_name: "Patient Record".to_string(),
+                where_input: None,
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM \"App Schema\".\"Patient Record\""
         );
     }
 
@@ -6829,6 +6906,84 @@ mod tests {
     }
 
     #[test]
+    fn vastbase_column_index_prefers_exact_case_and_rejects_ambiguous_fallback() {
+        let columns = vec![Some("id".to_string()), Some("ID".to_string())];
+
+        assert_eq!(find_column_index(Some(DatabaseType::Vastbase), &columns, "ID"), Some(1));
+        assert_eq!(find_column_index(Some(DatabaseType::Vastbase), &columns[..1], "ID"), Some(0));
+        assert_eq!(
+            find_column_index(Some(DatabaseType::Vastbase), &[Some("id".to_string()), Some("Id".to_string())], "ID"),
+            None
+        );
+    }
+
+    /// Vastbase reports `SELECT *` labels upper-cased while the primary-key
+    /// metadata keeps the stored lower-case spelling (#8797). The grid badges
+    /// the column as the primary key, so the backend has to resolve it through
+    /// the same unique case-insensitive fallback instead of refusing the edit.
+    #[test]
+    fn vastbase_save_uses_unique_case_insensitive_primary_key_from_uppercased_labels() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Vastbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app_support".to_string()),
+                table_name: "auth_mobile_user".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "varchar", false, None), column("third_id", "varchar", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "THIRD_ID".to_string()],
+            source_columns: Some(vec![Some("ID".to_string()), Some("THIRD_ID".to_string())]),
+            rows: vec![vec![json!("207515959510335490"), json!("88271")]],
+            dirty_rows: vec![(0, vec![(1, json!("88272"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"app_support\".\"auth_mobile_user\" SET \"THIRD_ID\" = '88272' WHERE \"id\" = '207515959510335490';"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_vastbase_save_when_case_insensitive_primary_key_match_is_ambiguous() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Vastbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app_support".to_string()),
+                table_name: "auth_mobile_user".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "varchar", false, None),
+                    column("ID", "varchar", false, None),
+                    column("third_id", "varchar", true, None),
+                ]),
+            },
+            columns: vec!["Id".to_string(), "iD".to_string(), "THIRD_ID".to_string()],
+            source_columns: Some(vec![Some("Id".to_string()), Some("iD".to_string()), Some("THIRD_ID".to_string())]),
+            rows: vec![vec![json!("1"), json!("2"), json!("88271")]],
+            dirty_rows: vec![(0, vec![(2, json!("88272"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert!(result.validation_error.as_deref().is_some_and(|error| error.contains("missing: id")));
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
     fn goldendb_column_index_prefers_exact_case_and_rejects_ambiguous_fallback() {
         let columns = vec![Some("id".to_string()), Some("ID".to_string())];
 
@@ -7656,6 +7811,149 @@ mod tests {
         );
         assert!(result.statements.is_empty());
         assert!(result.rollback_statements.is_empty());
+    }
+
+    fn dameng_keyless_options(
+        table_columns: Vec<DataGridColumnInfo>,
+        columns: Vec<String>,
+        row: Vec<Value>,
+    ) -> DataGridSaveStatementOptions {
+        DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Dameng),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("SYSDBA".to_string()),
+                table_name: "T8819".to_string(),
+                primary_keys: vec![],
+                columns: Some(table_columns),
+            },
+            columns,
+            source_columns: None,
+            rows: vec![row],
+            dirty_rows: vec![(0, vec![(1, json!("b"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        }
+    }
+
+    #[test]
+    fn rejects_dameng_keyless_binary_lob_writes() {
+        // Regression test for https://github.com/t8y2/dbx/issues/8819: Dameng
+        // rejects `"B" = '0x0102'` with `Data type mismatch` (code -6105), so a
+        // keyless row predicate cannot carry a non-NULL binary LOB column.
+        let result = prepare_data_grid_save(dameng_keyless_options(
+            vec![
+                column("GID", "INT", true, None),
+                column("NAME", "VARCHAR(10)", true, None),
+                column("B", "BLOB", true, None),
+            ],
+            vec!["GID".to_string(), "NAME".to_string(), "B".to_string()],
+            vec![json!(1), json!("a"), json!("0x0102")],
+        ));
+
+        assert_eq!(result.validation_error.as_deref(), Some(DAMENG_KEYLESS_BINARY_LOB_ERROR));
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+        assert!(result.keyless_guards.is_empty());
+    }
+
+    #[test]
+    fn rejects_dameng_keyless_binary_lob_deletes() {
+        let mut options = dameng_keyless_options(
+            vec![column("GID", "INT", true, None), column("B", "BLOB", true, None)],
+            vec!["GID".to_string(), "B".to_string()],
+            vec![json!(1), json!("0x0102")],
+        );
+        options.dirty_rows = vec![];
+        options.deleted_rows = vec![0];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error.as_deref(), Some(DAMENG_KEYLESS_BINARY_LOB_ERROR));
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_dameng_keyless_spatial_lob_writes() {
+        // The issue's column is a DMGEO2 spatial type, which Dbx receives as
+        // `SYSGEO2.ST_GEOMETRY(...)` text and which the server also refuses to
+        // compare. Spatial columns are BLOB-backed, so they are refused too.
+        let result = prepare_data_grid_save(dameng_keyless_options(
+            vec![
+                column("GID", "INT", true, None),
+                column("NAME", "VARCHAR(10)", true, None),
+                column("GEOM", "SYSGEO2.ST_GEOMETRY", true, None),
+            ],
+            vec!["GID".to_string(), "NAME".to_string(), "GEOM".to_string()],
+            vec![json!(1), json!("a"), json!("SYSGEO2.ST_GEOMETRY(dm.jdbc.driver.DmdbBlob@5f0f259e)")],
+        ));
+
+        assert_eq!(result.validation_error.as_deref(), Some(DAMENG_KEYLESS_BINARY_LOB_ERROR));
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn allows_dameng_keyless_writes_when_comparable_values_remain() {
+        // Textual LOBs and NULL binary LOBs are comparable (`= 'text'`,
+        // `IS NULL`), so keyless editing keeps working and only the columns
+        // that really cannot be compared are refused.
+        let result = prepare_data_grid_save(dameng_keyless_options(
+            vec![
+                column("GID", "INT", true, None),
+                column("NAME", "VARCHAR(10)", true, None),
+                column("BODY", "CLOB", true, None),
+                column("B", "BLOB", true, None),
+            ],
+            vec!["GID".to_string(), "NAME".to_string(), "BODY".to_string(), "B".to_string()],
+            vec![json!(1), json!("a"), json!("body"), Value::Null],
+        ));
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                r#"UPDATE "SYSDBA"."T8819" SET "NAME" = 'b' WHERE "GID" = 1 AND "NAME" = 'a' AND "BODY" = 'body' AND "B" IS NULL;"#
+            ]
+        );
+        assert_guards_cover_statement_predicates(&result);
+    }
+
+    #[test]
+    fn allows_dameng_binary_lob_writes_with_a_primary_key() {
+        let mut options = dameng_keyless_options(
+            vec![
+                column("GID", "INT", false, None),
+                column("NAME", "VARCHAR(10)", true, None),
+                column("B", "BLOB", true, None),
+            ],
+            vec!["GID".to_string(), "NAME".to_string(), "B".to_string()],
+            vec![json!(1), json!("a"), json!("0x0102")],
+        );
+        options.table_meta.primary_keys = vec!["GID".to_string()];
+
+        assert_eq!(prepare_data_grid_save(options).validation_error, None);
+    }
+
+    #[test]
+    fn allows_dameng_keyless_writes_that_do_not_load_the_binary_lob_column() {
+        // A binary LOB column outside the result set never reaches the row
+        // predicate, so it must not block the save.
+        let mut options = dameng_keyless_options(
+            vec![
+                column("GID", "INT", true, None),
+                column("NAME", "VARCHAR(10)", true, None),
+                column("B", "BLOB", true, None),
+            ],
+            vec!["GID".to_string(), "NAME".to_string()],
+            vec![json!(1), json!("a")],
+        );
+        options.dirty_rows = vec![(0, vec![(1, json!("b"))])];
+
+        assert_eq!(prepare_data_grid_save(options).validation_error, None);
     }
 
     fn daily_stats_keyless_options() -> DataGridSaveStatementOptions {

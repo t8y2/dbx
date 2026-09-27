@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, watch, onBeforeUnmount, inject, reactive, ref, shallowRef } from "vue";
+import { computed, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
 import { createRoutedSidebarDialogController, routedCanSetCreateDatabaseCharset } from "./sidebarDialogControllerRouting";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
@@ -88,7 +88,18 @@ import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTr
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
-import { hasTableVGroupEntries, isTableVGroupContainerNode, isTableVGroupGroupableRowType, resolveTableVGroupScopeFromNode, selectedTableVGroupMoveTargets, tableVGroupDestinationRows, tableVGroupPathForTable, tableVGroupScopeKey, tableVGroupsEnabled } from "@/lib/table/tableVGroup";
+import {
+  hasTableTreeLoadMore,
+  hasTableVGroupEntries,
+  isTableVGroupContainerNode,
+  isTableVGroupGroupableRowType,
+  resolveTableVGroupScopeFromNode,
+  selectedTableVGroupMoveTargets,
+  tableVGroupDestinationRows,
+  tableVGroupPathForTable,
+  tableVGroupScopeKey,
+  tableVGroupsEnabled,
+} from "@/lib/table/tableVGroup";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
 import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchFocus";
@@ -378,12 +389,22 @@ const { toast } = useToast();
 const installedPlugins = ref<InstalledPlugin[]>([]);
 const sidebarPluginRegistry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
 
-void api.listPlugins().then(
-  (plugins) => {
+async function refreshInstalledPlugins() {
+  try {
+    const plugins = await api.listPlugins();
     installedPlugins.value = plugins.filter((plugin) => plugin.compatibility.compatible);
-  },
-  () => {},
-);
+  } catch {
+    // Keep the previous list: an empty registry would drop live plugin context-menu entries.
+  }
+}
+
+// Plugin install/update/uninstall from the Plugin Center broadcasts this event;
+// without it the sidebar registry keeps the mount-time snapshot and the Table /
+// Connection context menus stay empty until DBX restarts.
+const onPluginsChanged = () => void refreshInstalledPlugins();
+window.addEventListener("dbx:plugins-changed", onPluginsChanged);
+onScopeDispose(() => window.removeEventListener("dbx:plugins-changed", onPluginsChanged));
+void refreshInstalledPlugins();
 
 const { highlight } = useSqlHighlighter();
 
@@ -874,7 +895,8 @@ async function toggle(requestId = beginNavigationRequest()) {
   // particular, schema-level trigger/type groups have no tableName, so they
   // must use the generic object loader rather than the table-trigger loader.
   const databaseObjectGroup = !!objectTypesForGroupNode(node.type);
-  if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node)) {
+  const needsConfiguredTablePageDrain = node.type === "group-tables" && connectionStore.getConfig(node.connectionId || "")?.sidebar_auto_load_all_tables === true && hasTableTreeLoadMore(node.children ?? []);
+  if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node) && !needsConfiguredTablePageDrain) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
@@ -1117,27 +1139,32 @@ async function toggle(requestId = beginNavigationRequest()) {
   }
 }
 
-function runRowClickAction(clickDetail: number, requestId: number) {
+function runRowClickAction(clickDetail: number) {
   const node = activeNode.value;
   if (node.type === "load-more") {
     if (clickDetail > 1) return;
+    beginNavigationRequest();
     void loadMoreObjectGroupChildren();
     return;
   }
   if (node.type === "object-browser") {
     if (clickDetail > 1) return;
+    beginNavigationRequest();
     void openObjectBrowser();
     return;
   }
   if (node.type === "mongo-gridfs") {
+    beginNavigationRequest();
     openMongoTreeData(node);
     return;
   }
   if (node.type === "event") {
+    beginNavigationRequest();
     void openObjectBrowser(false, true);
     return;
   }
   if (node.type === "group-events") {
+    beginNavigationRequest();
     void openObjectBrowser();
     return;
   }
@@ -1146,13 +1173,17 @@ function runRowClickAction(clickDetail: number, requestId: number) {
   // between adjacent rows. Nacos entries are idempotent navigation targets, so
   // do not mistake that rapid one-click switching for a double-click toggle.
   if (!shouldRunTreeNodeRowAction(action, clickDetail, isGroupLabel(node) || isRepeatableNavigationTreeNode(node.type))) return;
+  // A double click emits click(detail=2) before dblclick. Claim ownership only
+  // after that follow-up click has resolved to a real action, otherwise it
+  // makes the first click's pending connection/expansion request look stale.
+  const requestId = beginNavigationRequest();
   if (action === "open-data") {
     scheduleOpenData(node);
   } else if (action === "open-object-browser") {
     void openObjectBrowser(false, false, true);
   } else if (action === "open-object-browser-and-expand") {
     void openObjectBrowser(false, false, true);
-    if (!node.isExpanded) void toggle();
+    if (!node.isExpanded) void toggle(requestId);
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
   } else if (action === "open-extension-details") {
@@ -1542,21 +1573,27 @@ function requestDeleteSelectedNode(): boolean {
 function onDoubleClick(event: MouseEvent) {
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   if (activeNode.value.type === "event") {
+    beginNavigationRequest();
     void openObjectBrowser(false, true);
     return;
   }
   if (activeNode.value.type === "group-events") {
+    beginNavigationRequest();
     void openObjectBrowser();
     return;
   }
   const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value, settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
+  // In single-click mode the trailing dblclick normally has no action and must
+  // leave the first click's request ownership intact.
+  if (action === "none") return;
+  const requestId = beginNavigationRequest();
   if (action === "open-database-browser") {
     void openDatabaseBrowser();
   } else if (action === "open-object-browser") {
     void openObjectBrowser(false, false, true);
   } else if (action === "open-object-browser-and-expand") {
     void openObjectBrowser(false, false, true);
-    if (!activeNode.value.isExpanded) void toggle();
+    if (!activeNode.value.isExpanded) void toggle(requestId);
   } else if (action === "open-data") {
     openDataImmediately(activeNode.value);
   } else if (action === "activate-data") {
@@ -1572,7 +1609,7 @@ function onDoubleClick(event: MouseEvent) {
   } else if (action === "toggle" && (activeNode.value.type === "mongo-gridfs" || isDocumentBrowserTreeNode(activeNode.value.type))) {
     openMongoTreeData(activeNode.value);
   } else if (action === "toggle") {
-    toggle();
+    void toggle(requestId);
   }
 }
 
@@ -6883,9 +6920,8 @@ function buildContextMenu(node: TreeNode): ContextMenuItem[] {
 }
 
 function handleRowClick(node: TreeNode, clickDetail: number) {
-  const requestId = beginNavigationRequest();
   activateRuntimeNode(node);
-  runRowClickAction(clickDetail, requestId);
+  runRowClickAction(clickDetail);
 }
 
 function handleRowDoubleClick(node: TreeNode, event: MouseEvent) {
@@ -6897,7 +6933,6 @@ function handleRowDoubleClick(node: TreeNode, event: MouseEvent) {
     activateRuntimeNode(node);
     return;
   }
-  beginNavigationRequest();
   activateRuntimeNode(node);
   onDoubleClick(event);
 }

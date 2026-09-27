@@ -223,7 +223,7 @@ func (server *server) connectionInfo() (map[string]any, error) {
 		"username":          username,
 		"version":           version,
 		"sqlDialect":        "HIVE",
-		"identifierQuote":   "`",
+		"identifierQuote":   server.config.identifierQuote(),
 		"compatibilityMode": compatibilityMode,
 		"databaseInfo": map[string]string{
 			"productName":            productName,
@@ -334,14 +334,14 @@ func (server *server) listTables(schema string, constraints metadataListConstrai
 	if containsString(requestedTypes, "TABLE") {
 		fallbackQueries = append(fallbackQueries, fallbackQuery{
 			operation:  "SHOW TABLES",
-			statement:  "SHOW TABLES IN " + quoteHiveIdentifier(schema),
+			statement:  "SHOW TABLES IN " + server.quoteIdentifier(schema),
 			objectType: "TABLE",
 		})
 	}
 	if containsString(requestedTypes, "VIEW") || containsString(requestedTypes, "MATERIALIZED VIEW") {
 		fallbackQueries = append(fallbackQueries, fallbackQuery{
 			operation:  "SHOW VIEWS",
-			statement:  "SHOW VIEWS IN " + quoteHiveIdentifier(schema),
+			statement:  "SHOW VIEWS IN " + server.quoteIdentifier(schema),
 			objectType: "VIEW",
 		})
 	}
@@ -634,7 +634,7 @@ func (server *server) getColumns(schema, table string) ([]columnInfo, error) {
 		}
 		return values, nil
 	}
-	qualified := qualifiedHiveName(schema, table)
+	qualified := server.qualifiedName(schema, table)
 	result, err := server.executeQuery(queryOptions{SQL: "DESCRIBE " + qualified, MaxRows: metadataQueryLimit})
 	if err != nil {
 		return nil, fmt.Errorf("HiveServer2 metadata failed (%v); DESCRIBE fallback failed: %w", metadataErr, err)
@@ -716,7 +716,7 @@ func (server *server) getTableDDL(schema, table string) (string, error) {
 		return "", errors.New("table is required")
 	}
 	result, err := server.executeQuery(queryOptions{
-		SQL:     "SHOW CREATE TABLE " + qualifiedHiveName(schema, table),
+		SQL:     "SHOW CREATE TABLE " + server.qualifiedName(schema, table),
 		MaxRows: metadataQueryLimit,
 	})
 	if err != nil {
@@ -871,11 +871,11 @@ func metadataListConstraintsFromParams(params map[string]json.RawMessage) metada
 	}
 }
 
-func qualifiedHiveName(schema, table string) string {
+func (server *server) qualifiedName(schema, table string) string {
 	if strings.TrimSpace(schema) == "" {
-		return quoteHiveIdentifier(table)
+		return server.quoteIdentifier(table)
 	}
-	return quoteHiveIdentifier(schema) + "." + quoteHiveIdentifier(table)
+	return server.quoteIdentifier(schema) + "." + server.quoteIdentifier(table)
 }
 
 func metadataNameMatches(name, filter string) bool {

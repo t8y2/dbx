@@ -80,6 +80,42 @@ fn quotes_spanner_identifiers_by_connection_dialect() {
 }
 
 #[test]
+fn kyuubi_table_data_uses_connection_identifier_quote() {
+    let columns = vec!["id".to_string(), "order\"value".to_string()];
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Kyuubi),
+        schema: Some("sales\"daily".to_string()),
+        table_name: "event\"log".to_string(),
+        columns,
+        limit: Some(25),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            identifier_quote: Some("\"".to_string()),
+            ..base.clone()
+        }),
+        "SELECT \"id\", \"order\"\"value\" FROM \"sales\"\"daily\".\"event\"\"log\" LIMIT 25;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            identifier_quote: Some("`".to_string()),
+            ..base.clone()
+        }),
+        "SELECT `id`, `order\"value` FROM `sales\"daily`.`event\"log` LIMIT 25;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Hive),
+            identifier_quote: Some("\"".to_string()),
+            ..base
+        }),
+        "SELECT `id` AS `id`, `order\"value` AS `order\"value` FROM `sales\"daily`.`event\"log` LIMIT 25;"
+    );
+}
+
+#[test]
 fn quotes_gaussdb_jdbc_identifiers_selectively() {
     for (name, expected) in [
         ("schema_01", "schema_01"),
@@ -1171,6 +1207,46 @@ fn builds_iris_table_data_sql_with_literal_top_and_ordinary_object() {
     assert!(!sql.contains("?"));
     assert!(!sql.contains(":%qpar"));
     assert!(!sql.contains(" LIMIT "));
+}
+
+#[test]
+fn iris_table_data_pages_use_a_vid_window_instead_of_a_repeated_top() {
+    let options = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Iris),
+        schema: Some("Ens".to_string()),
+        table_name: "AlarmResponse".to_string(),
+        table_type: None,
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "Status".to_string()],
+        fallback_order_columns: Vec::new(),
+        order_by: Some("ID ASC".to_string()),
+        limit: Some(25),
+        offset: Some(0),
+        where_input: Some("WHERE Status = 'Open'".to_string()),
+        include_row_id: false,
+        ..Default::default()
+    };
+    // First page keeps the historical TOP-only statement.
+    assert_eq!(
+        build_table_data_select_sql(options.clone()),
+        "SELECT TOP 25 * FROM Ens.AlarmResponse WHERE (Status = 'Open') ORDER BY ID ASC"
+    );
+    // Later pages must move the window: InterSystems SQL has no OFFSET clause,
+    // so the page is derived from TOP(offset + limit) and `%VID` drops the rows
+    // before the offset (#8929).
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions { offset: Some(100), ..options.clone() }),
+        "SELECT * FROM (SELECT TOP 125 * FROM Ens.AlarmResponse WHERE (Status = 'Open') ORDER BY ID ASC) WHERE %VID > 100"
+    );
+    // The JDBC driver applies the offset itself, so its statement stays unwrapped.
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            offset: Some(100),
+            use_driver_row_offset: true,
+            ..options
+        }),
+        "SELECT * FROM Ens.AlarmResponse WHERE (Status = 'Open') ORDER BY ID ASC"
+    );
 }
 
 #[test]

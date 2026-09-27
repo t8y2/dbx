@@ -50,6 +50,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -68,6 +69,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private static final int DBMS_OUTPUT_ENABLE_TIMEOUT_SECS = 5;
     private static final int DBMS_OUTPUT_ENABLE_NETWORK_TIMEOUT_MILLIS = 5_000;
     private static final int VIEW_VALIDITY_BATCH_SIZE = 500;
+    // Dameng encodes the declared length unit of a character column in SCALE: see
+    // declaredWithCharacterLength.
+    private static final int CHARACTER_SCALE_VARIABLE = 7;
+    private static final int CHARACTER_SCALE_FIXED = 8;
     private static final Pattern DATABASE_VERSION_MAJOR_PATTERN = Pattern.compile("(\\d+)\\.");
     // Word-boundary match so a type or default merely containing the letters is not mistaken
     // for the IDENTITY keyword.
@@ -1946,6 +1951,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
 
             Set<String> identityColumns = identityColumns(schema, table);
+            // Lazily filled in only when a column's declared length is not visible in
+            // ALL_TAB_COLUMNS; the dictionary lookup costs an extra round trip.
+            Map<String, Integer> declaredColumnLengths = null;
             List<ColumnInfo> result = new ArrayList<>();
             // DATA_DEFAULT is a LONG column — it must be selected first and read first
             // in JDBC, otherwise the data is truncated.
@@ -1982,7 +1990,15 @@ public final class DamengAgent extends AbstractJdbcAgent {
                         Integer dataLen = intObject(rs, "DATA_LENGTH");
                         Integer charLen = intObject(rs, "CHAR_LENGTH");
                         String charUsed = rs.getString("CHAR_USED");
-                        String dataType = formatDataType(baseType, numPrec, numScale, dataLen, charLen, charUsed);
+                        Integer declaredCharLen = null;
+                        if (needsDeclaredCharacterLength(baseType, numScale, charLen)) {
+                            if (declaredColumnLengths == null) {
+                                declaredColumnLengths = declaredColumnLengths(schema, table);
+                            }
+                            declaredCharLen = declaredColumnLengths.get(name);
+                        }
+                        String dataType =
+                            formatDataType(baseType, numPrec, numScale, dataLen, charLen, charUsed, declaredCharLen);
 
                         result.add(new ColumnInfo(
                             name,
@@ -2603,15 +2619,17 @@ public final class DamengAgent extends AbstractJdbcAgent {
         Integer numScale,
         Integer dataLen,
         Integer charLen,
-        String charUsed
+        String charUsed,
+        Integer declaredCharLen
     ) {
         return switch (base.toUpperCase(Locale.ROOT)) {
             case "VARCHAR2", "VARCHAR", "CHAR" -> {
-                Integer length = characterLength(dataLen, charLen, charUsed);
-                yield length != null ? base + "(" + length + characterLengthUnit(charUsed) + ")" : base;
+                String unit = characterLengthUnit(base, numScale, charUsed);
+                Integer length = characterLength(dataLen, charLen, unit, declaredCharLen);
+                yield length != null ? base + "(" + length + unit + ")" : base;
             }
             case "NVARCHAR2", "NCHAR" -> {
-                Integer length = charLen != null ? charLen : dataLen;
+                Integer length = firstPositive(charLen, declaredCharLen, dataLen);
                 yield length != null ? base + "(" + length + ")" : base;
             }
             case "NUMBER", "NUMERIC", "DECIMAL" -> {
@@ -2625,16 +2643,18 @@ public final class DamengAgent extends AbstractJdbcAgent {
         };
     }
 
-    private static Integer characterLength(Integer dataLen, Integer charLen, String charUsed) {
-        String normalized = charUsed == null ? "" : charUsed.trim().toUpperCase(Locale.ROOT);
-        if ("B".equals(normalized) || "BYTE".equals(normalized)) {
-            return dataLen != null ? dataLen : charLen;
+    private static Integer characterLength(Integer dataLen, Integer charLen, String unit, Integer declaredCharLen) {
+        if (" BYTE".equals(unit)) {
+            return firstPositive(dataLen, declaredCharLen, charLen);
         }
-        return charLen != null ? charLen : dataLen;
+        return firstPositive(charLen, declaredCharLen, dataLen);
     }
 
-    private static String characterLengthUnit(String charUsed) {
-        if (charUsed == null) {
+    private static String characterLengthUnit(String base, Integer numScale, String charUsed) {
+        if (declaredWithCharacterLength(base, numScale)) {
+            return " CHAR";
+        }
+        if (charUsed == null || charUsed.isBlank()) {
             return "";
         }
         return switch (charUsed.trim().toUpperCase(Locale.ROOT)) {
@@ -2642,6 +2662,83 @@ public final class DamengAgent extends AbstractJdbcAgent {
             case "C", "CHAR" -> " CHAR";
             default -> "";
         };
+    }
+
+    private static Integer firstPositive(Integer... values) {
+        for (Integer value : values) {
+            if (value != null && value > 0) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Dameng keeps a character column's declared length unit in its SCALE field instead of in
+     * CHAR_USED, which reads 'B' for byte- and character-length columns alike: SCALE is 7 for
+     * VARCHAR/VARCHAR2/NVARCHAR2 and 8 for CHAR/NCHAR columns declared with character
+     * semantics, and 0 for byte semantics. Reading CHAR_USED alone rendered a column created as
+     * <code>VARCHAR2(100 CHAR)</code> as <code>VARCHAR2(400 BYTE)</code> on a UTF-8 server.
+     */
+    private static boolean declaredWithCharacterLength(String base, Integer numScale) {
+        if (numScale == null) {
+            return false;
+        }
+        return switch (base.toUpperCase(Locale.ROOT)) {
+            case "VARCHAR2", "VARCHAR", "NVARCHAR2" -> numScale == CHARACTER_SCALE_VARIABLE;
+            case "CHAR", "NCHAR" -> numScale == CHARACTER_SCALE_FIXED;
+            default -> false;
+        };
+    }
+
+    /**
+     * NVARCHAR2/NCHAR columns leave CHAR_LENGTH at 0 in ALL_TAB_COLUMNS, and a character-length
+     * column always reports DATA_LENGTH in bytes, so the declared length has to come from
+     * elsewhere. Only ask when the cheaper columns cannot answer.
+     */
+    private static boolean needsDeclaredCharacterLength(String base, Integer numScale, Integer charLen) {
+        if (charLen != null && charLen > 0) {
+            return false;
+        }
+        String type = base.toUpperCase(Locale.ROOT);
+        return switch (type) {
+            case "NVARCHAR2", "NCHAR" -> true;
+            case "VARCHAR2", "VARCHAR", "CHAR" -> declaredWithCharacterLength(type, numScale);
+            default -> false;
+        };
+    }
+
+    /**
+     * SYS.SYSCOLUMNS.LENGTH$ keeps the length exactly as declared, which ALL_TAB_COLUMNS cannot
+     * report for NVARCHAR2/NCHAR. The view is not granted to PUBLIC, so a permission error just
+     * means the caller keeps using the ALL_TAB_COLUMNS values instead of failing the request.
+     */
+    private Map<String, Integer> declaredColumnLengths(String schema, String table) {
+        Map<String, Integer> result = new HashMap<>();
+        String sql = """
+            SELECT /*+ PARALLEL(1) */ c.NAME, c.LENGTH$
+            FROM SYS.SYSCOLUMNS c
+            JOIN SYS.SYSOBJECTS t ON c.ID = t.ID
+            JOIN SYS.SYSOBJECTS s ON t.SCHID = s.ID
+            WHERE s.NAME = ? AND t.NAME = ?
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString(1);
+                    int length = rs.getInt(2);
+                    if (notBlank(name) && length > 0) {
+                        result.put(name, length);
+                    }
+                }
+            }
+        } catch (Exception error) {
+            LOGGER.log(Level.FINE, "Unable to read declared column lengths for " + schema + "." + table, error);
+            return Map.of();
+        }
+        return result;
     }
 
     private static Integer intObject(ResultSet rs, String column) throws Exception {
@@ -2749,13 +2846,37 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (notBlank(tableComment) && !containsCommentOnTable(result.toString(), schema, table)) {
             appendCommentStatement(result, "COMMENT ON TABLE " + tableRef + " IS '" + sqlStringBody(tableComment) + "';");
         }
-        for (ColumnInfo column : getColumns(schema, table)) {
-            if (!notBlank(column.getComment()) || containsCommentOnColumn(result.toString(), schema, table, column.getName())) {
+        for (Map.Entry<String, String> column : tableColumnComments(schema, table).entrySet()) {
+            if (containsCommentOnColumn(result.toString(), schema, table, column.getKey())) {
                 continue;
             }
-            appendCommentStatement(result, "COMMENT ON COLUMN " + tableRef + "." + JdbcIdentifiers.INSTANCE.doubleQuote(column.getName()) + " IS '" + sqlStringBody(column.getComment()) + "';");
+            appendCommentStatement(result, "COMMENT ON COLUMN " + tableRef + "." + JdbcIdentifiers.INSTANCE.doubleQuote(column.getKey()) + " IS '" + sqlStringBody(column.getValue()) + "';");
         }
         return result.toString();
+    }
+
+    private Map<String, String> tableColumnComments(String schema, String table) throws Exception {
+        Map<String, String> result = new LinkedHashMap<>();
+        String sql = """
+            SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS
+            FROM ALL_COL_COMMENTS
+            WHERE OWNER = ? AND TABLE_NAME = ? AND COMMENTS IS NOT NULL
+            ORDER BY COLUMN_NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String column = rs.getString(1);
+                    String comment = rs.getString(2);
+                    if (notBlank(column) && notBlank(comment)) {
+                        result.put(column, comment);
+                    }
+                }
+            }
+        }
+        return result;
     }
 
     private String appendIndependentIndexDdl(String ddl, String schema, String table) throws Exception {
@@ -2774,6 +2895,84 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private List<IndexInfo> independentIndexes(String schema, String table) throws Exception {
+        try {
+            return independentIndexesFromSystemCatalog(schema, table);
+        } catch (Exception systemCatalogError) {
+            if (isDamengConnectionError(systemCatalogError)) {
+                throw systemCatalogError;
+            }
+            try {
+                return independentIndexesFromDictionaryViews(schema, table);
+            } catch (Exception dictionaryViewError) {
+                dictionaryViewError.addSuppressed(systemCatalogError);
+                throw dictionaryViewError;
+            }
+        }
+    }
+
+    private List<IndexInfo> independentIndexesFromSystemCatalog(String schema, String table) throws Exception {
+        List<IndexInfo> result = new ArrayList<>();
+        // DM's ALL_INDEXES view performs privilege filtering across the complete catalog and can
+        // take tens of seconds in installations with very large index dictionaries (#10075).
+        // The DM JDBC driver and DBeaver instead resolve the requested table id first and read its
+        // SYS index rows directly. Keep the ALL_* implementation below as a compatibility and
+        // permission fallback for deployments that do not expose these catalog tables.
+        String sql = """
+            SELECT /*+ PARALLEL(1) */ index_object.NAME,
+                LISTAGG(column_object.NAME, ',') WITHIN GROUP (
+                    ORDER BY SF_GET_INDEX_KEY_SEQ(index_metadata.KEYNUM, index_metadata.KEYINFO, column_object.COLID)
+                ) AS COLUMNS,
+                index_metadata.ISUNIQUE,
+                index_metadata.TYPE$,
+                index_metadata.FLAG
+            FROM SYS.SYSOBJECTS schema_object
+            JOIN SYS.SYSOBJECTS table_object ON table_object.SCHID = schema_object.ID
+                AND table_object.TYPE$ = 'SCHOBJ' AND table_object.SUBTYPE$ = 'UTAB'
+            JOIN SYS.SYSOBJECTS index_object ON index_object.PID = table_object.ID
+                AND index_object.SUBTYPE$ = 'INDEX'
+            JOIN SYS.SYSINDEXES index_metadata ON index_metadata.ID = index_object.ID
+            JOIN SYS.SYSCOLUMNS column_object ON column_object.ID = table_object.ID
+                AND SF_COL_IS_IDX_KEY(
+                    index_metadata.KEYNUM,
+                    index_metadata.KEYINFO,
+                    column_object.COLID
+                ) = 1
+            WHERE schema_object.TYPE$ = 'SCH' AND schema_object.NAME = ? AND table_object.NAME = ?
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM SYS.SYSCONS constraint_metadata
+                    WHERE constraint_metadata.TABLEID = table_object.ID
+                        AND constraint_metadata.INDEXID = index_metadata.ID
+                        AND constraint_metadata.TYPE$ IN ('P', 'U')
+                )
+            GROUP BY index_object.NAME, index_metadata.ISUNIQUE, index_metadata.TYPE$, index_metadata.FLAG
+            ORDER BY index_object.NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String indexName = rs.getString(1);
+                    if (notBlank(indexName)) {
+                        result.add(new IndexInfo(
+                            indexName,
+                            splitNonEmpty(coalesce(rs.getString(2)), ","),
+                            "Y".equalsIgnoreCase(rs.getString(3)),
+                            false,
+                            null,
+                            damengSystemIndexType(rs.getString(4), rs.getInt(5)),
+                            null,
+                            null
+                        ));
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    private List<IndexInfo> independentIndexesFromDictionaryViews(String schema, String table) throws Exception {
         List<IndexInfo> result = new ArrayList<>();
         // Primary-key and unique-constraint backing indexes are already represented in table DDL.
         String sql = """
@@ -2817,6 +3016,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         return result;
+    }
+
+    private static String damengSystemIndexType(String catalogType, int flags) {
+        if ((flags & 3) != 0) {
+            return "INTERNAL";
+        }
+        return "ST".equalsIgnoreCase(coalesce(catalogType).trim()) ? "SPATIAL" : catalogType;
     }
 
     static String indexDdl(String schema, String table, IndexInfo index) {

@@ -91,8 +91,23 @@ describe("QueryEditor batch selection ownership", () => {
     batch.toggleAllBatchColumnSelection(currentView, session.key);
     expect(next.selectedKeys.size).toBe(0);
     expect(next.completionOptions.size).toBe(0);
-    batch.prepareBatchColumnSelectionSession([], next.document, next.from, next.to);
-    expect(batch.expandedRendering).toBe(false);
+  });
+
+  it("keeps the checked fields when a sibling result carries no column candidates (dbx#9973)", () => {
+    const { batch, session, items, currentView, row } = createHarness();
+    batch.toggleAllBatchColumnSelection(currentView, session.key);
+    // One completion request builds several result sets and only some of them
+    // carry column candidates. The empty one must not drop the session that the
+    // rendered checkbox rows still point at.
+    expect(batch.prepareBatchColumnSelectionSession([], session.document, session.from, session.to)).toBeNull();
+    expect(batch.expandedRendering).toBe(true);
+    expect(batch.prepareBatchColumnSelectionSession(items, session.document, session.from, session.to)).toBe(session);
+    expect(session.selectedKeys).toEqual(new Set(session.candidates.map((candidate) => candidate.key)));
+    const { checkbox } = row(0);
+    expect(checkbox.checked).toBe(true);
+    checkbox.dispatchEvent(new PointerEvent("pointerdown", { button: 0, buttons: 1, isPrimary: true, pointerId: 5, bubbles: true }));
+    expect(session.selectedKeys.has(session.candidates[0].key)).toBe(false);
+    document.body.style.userSelect = "";
   });
 
   it("guards label clicks and applies checked fields together, never an individual row", () => {

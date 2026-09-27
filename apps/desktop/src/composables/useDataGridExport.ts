@@ -5,7 +5,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/lib/export/saveTextFile";
 import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
-import type { DataGridExtractRequest, DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridExtractRequest, type DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { clipboardCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
@@ -764,7 +764,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  const { copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
+  const { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
     columns,
     displayItems,
     allColumns,
@@ -816,6 +816,28 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     } finally {
       finish();
     }
+  }
+
+  async function exportWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
+    let exported = false;
+    await runExclusiveExport(async () => {
+      if (!canCopyWithExtractor(extractor, extractorOptions)) return;
+      try {
+        const extraction = await extractWithExtractor(extractor, extractorOptions);
+        if (!extraction) return;
+        const extension = extraction.result.fileExtension.replace(/^\.+/, "") || "txt";
+        const baseName = `${exportFileBaseName?.value || tableMeta.value?.tableName || "export"}_selected`;
+        const saved = await saveTextFile(extraction.result.text, exportFileName(baseName, extension, { preferFallback: true }), extension.toUpperCase(), extension, {
+          operation: `selection-extractor-${extractor}`,
+        });
+        if (!saved) return;
+        toast(t("grid.exported"));
+        exported = true;
+      } catch (e: any) {
+        toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
+      }
+    });
+    return exported;
   }
 
   async function exportCsv(rowIds?: number[]) {
@@ -1709,6 +1731,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     previewWithExtractor,
     previewWithPreference,
     canCopyWithExtractor,
+    exportWithExtractor,
     exportCsv,
     exportCurrentPageCsv,
     exportJson,

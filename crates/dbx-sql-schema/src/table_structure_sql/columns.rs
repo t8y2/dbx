@@ -1,10 +1,11 @@
 use super::column_alter::{
     build_clickhouse_existing_column_sql, build_dameng_existing_column_sql, build_doris_existing_column_sql,
-    build_h2_existing_column_sql, build_informix_existing_column_sql, build_iris_existing_column_sql,
-    build_mysql_existing_column_clause, build_oracle_like_existing_column_sql, build_oscar_existing_column_sql,
-    build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_sqlite_existing_column_sql,
-    build_sqlserver_existing_column_sql, build_xugu_existing_column_sql, dameng_drops_identity,
-    has_column_extra_change, has_existing_column_attribute_change, validate_dameng_existing_identity_change,
+    build_duckdb_existing_column_sql, build_h2_existing_column_sql, build_informix_existing_column_sql,
+    build_iris_existing_column_sql, build_mysql_existing_column_clause, build_oracle_like_existing_column_sql,
+    build_oscar_existing_column_sql, build_postgres_existing_column_sql, build_questdb_existing_column_sql,
+    build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql, build_xugu_existing_column_sql,
+    dameng_drops_identity, has_column_extra_change, has_existing_column_attribute_change,
+    validate_dameng_existing_identity_change,
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
@@ -291,6 +292,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 warnings,
             )),
             StructureDialect::Sqlite => statements.extend(build_sqlite_existing_column_sql(&table, column, warnings)),
+            StructureDialect::DuckDb => statements.extend(build_duckdb_existing_column_sql(&table, column)),
             StructureDialect::Questdb => statements.extend(build_questdb_existing_column_sql(&table, column)),
             _ => warnings.push(format!("Editing existing columns is not supported for {database_label} yet.")),
         }

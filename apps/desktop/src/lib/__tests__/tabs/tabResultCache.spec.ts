@@ -17,6 +17,19 @@ function backend(name: ResultCacheBackend["name"], overrides: Partial<ResultCach
 }
 
 describe("tab result cache statement execution metadata", () => {
+  it("retains Redis console output through cache restore", () => {
+    const result = {
+      columns: ["result"],
+      rows: [["PONG"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      sourceStatement: "PING",
+      redis_console_output: "PONG",
+    };
+
+    expect(decodeTabResultSnapshot(encodeTabResultSnapshot({ result, cachedAt: 1 }))?.result).toMatchObject({ sourceStatement: "PING", redis_console_output: "PONG" });
+  });
+
   it("retains timing details for active, array and historical results through cache restore", async () => {
     const { buildTabResultSnapshot } = await import("@/lib/tabs/tabResultCache");
     const timing = { query_timings_ms: { agent_total: 40, pool_acquire: 20, pool_release: 2 }, client_prepare_ms: 3, client_result_ms: 4, timing_page_count: 2 };

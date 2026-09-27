@@ -1551,6 +1551,7 @@ pub fn run() {
     builder
         .manage(CloseBehaviorState::new())
         .manage(commands::plugin_file::PluginFileState::new())
+        .manage(commands::plugin_media::PluginMediaState::new())
         .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
         .on_page_load(|webview, payload| {
@@ -1845,6 +1846,8 @@ pub fn run() {
             commands::app_settings::save_max_agent_turns,
             commands::app_settings::load_history_retention_limit,
             commands::app_settings::save_history_retention_limit,
+            commands::app_settings::load_mcp_history_retention_limit,
+            commands::app_settings::save_mcp_history_retention_limit,
             commands::app_settings::load_max_retries,
             commands::app_settings::save_max_retries,
             commands::app_settings::set_app_locale,
@@ -1945,6 +1948,8 @@ pub fn run() {
             commands::plugin_file::plugin_file_read,
             commands::plugin_file::plugin_file_write,
             commands::plugin_file::plugin_file_close,
+            commands::plugin_media::plugin_media_open,
+            commands::plugin_media::plugin_media_close,
             commands::plugin_storage::plugin_ui_storage_get,
             commands::plugin_storage::plugin_ui_storage_set,
             commands::plugin_storage::plugin_ui_storage_delete,
@@ -2516,6 +2521,8 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_topics,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_topics_page,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_topic,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_delete_topic,
@@ -2527,6 +2534,8 @@ pub fn run() {
             commands::mq_cmd::mq_get_topic_internal_stats,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_exchanges,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_exchanges_page,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_exchange,
             #[cfg(feature = "mq-admin")]
@@ -2666,6 +2675,8 @@ pub fn run() {
             commands::history::search_history,
             commands::history::load_history_connection_options,
             commands::history::clear_history,
+            commands::history::clear_history_by_source,
+            commands::history::cleanup_mcp_history_retention,
             commands::history::delete_history_entry,
             commands::mcp::check_mcp_server_status,
             commands::mcp::install_mcp_server,

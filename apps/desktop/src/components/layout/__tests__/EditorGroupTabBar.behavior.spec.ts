@@ -177,6 +177,33 @@ describe("EditorGroupTabBar behavior", () => {
     host.remove();
   });
 
+  it("keeps a focus-return click on tab-strip whitespace out of native window dragging", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const activated: string[] = [];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia, (tabId) => activated.push(tabId));
+    await settle();
+
+    const tabTail = host.querySelector<HTMLElement>('[data-tauri-drag-region="false"]');
+    expect(tabTail).not.toBeNull();
+
+    window.dispatchEvent(new Event("blur"));
+    window.dispatchEvent(new Event("focus"));
+    tabTail!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, detail: 1 }));
+    tabTail!.click();
+    await settle();
+    expect(activated).toEqual([]);
+
+    tabPill(host, secondId).click();
+    await settle();
+    expect(activated).toEqual([secondId]);
+
+    app.unmount();
+    host.remove();
+  });
+
   it("closes a tab tooltip when the pointer leaves the tab", async () => {
     const store = useQueryStore();
     const tabId = store.createTab("pg-1", "app", "Plugin", "query");

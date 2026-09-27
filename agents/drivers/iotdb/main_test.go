@@ -70,6 +70,56 @@ func TestParseConnectionConfig(t *testing.T) {
 	}
 }
 
+func TestParseConnectionConfigCompressionAliases(t *testing.T) {
+	tests := []struct {
+		name             string
+		connectionString string
+		urlParams        string
+		want             bool
+	}{
+		{name: "default disabled"},
+		{name: "documented enabled", urlParams: "enable_compression=true", want: true},
+		{name: "documented disabled", urlParams: "enable_compression=false"},
+		{name: "existing alias enabled", urlParams: "rpc_compression=true", want: true},
+		{name: "existing alias disabled", urlParams: "rpc_compression=false"},
+		{name: "JDBC alias enabled in URL parameters", urlParams: "rpc_compress=true", want: true},
+		{name: "JDBC alias false", urlParams: "rpc_compress=false"},
+		{
+			name:             "JDBC alias enabled in connection string",
+			connectionString: "jdbc:iotdb://localhost:6667/?rpc_compress=true",
+			want:             true,
+		},
+		{
+			name:             "URL parameters override same connection string key",
+			connectionString: "jdbc:iotdb://localhost:6667/?rpc_compress=true",
+			urlParams:        "rpc_compress=false",
+		},
+		{
+			name:      "documented option takes precedence",
+			urlParams: "enable_compression=false&rpc_compression=true&rpc_compress=true",
+		},
+		{
+			name:      "existing alias takes precedence over JDBC alias",
+			urlParams: "rpc_compression=false&rpc_compress=true",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := parseConnectionConfig(connectParams{
+				ConnectionString: test.connectionString,
+				URLParams:        test.urlParams,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if config.EnableCompression != test.want {
+				t.Fatalf("EnableCompression = %t, want %t", config.EnableCompression, test.want)
+			}
+		})
+	}
+}
+
 func TestBundledTimeZoneDatabase(t *testing.T) {
 	dataSet, err := client.NewIoTDBRpcDataSet(
 		"", nil, nil, nil, true, false, 0, 0, nil, 0, nil, 0, nil,

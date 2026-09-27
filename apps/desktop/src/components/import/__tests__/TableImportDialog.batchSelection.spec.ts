@@ -26,6 +26,7 @@ vi.mock("@/stores/connectionStore", () => ({
     getConfig: (id: string) => {
       if (id === "connection-1") return { id, name: "SQLite", db_type: "sqlite" };
       if (id === "postgres-1") return { id, name: "PostgreSQL", db_type: "postgres" };
+      if (id === "sqlserver-1") return { id, name: "SQL Server", db_type: "sqlserver" };
       return undefined;
     },
     ensureConnected: mocks.ensureConnected,
@@ -158,6 +159,21 @@ import TableImportDialog from "@/components/import/TableImportDialog.vue";
 const mountedApps: App[] = [];
 const sheets = ["First", "Second", "Third"];
 
+function delimitedPreview(): TableImportPreview {
+  return {
+    fileName: "rows.csv",
+    filePath: "/tmp/rows.csv",
+    sourceRef: "delimited-source",
+    fileType: "csv",
+    sizeBytes: 10,
+    columns: ["id", "name"],
+    rows: [[1, "a"]],
+    totalRows: 2,
+    totalRowsExact: true,
+    sourceFingerprint: "rows-csv",
+  };
+}
+
 function workbookPreview(sheetName: string): TableImportPreview {
   const index = sheets.indexOf(sheetName);
   return {
@@ -182,10 +198,10 @@ async function flushAsyncUpdates() {
   }
 }
 
-async function mountDialog(files = [new File(["workbook"], "rows.xlsx")]) {
+async function mountDialog(files = [new File(["workbook"], "rows.xlsx")], connectionId = "connection-1") {
   const container = document.createElement("div");
   document.body.append(container);
-  const app = createApp(defineComponent({ setup: () => () => h(TableImportDialog, { open: true, prefillConnectionId: "connection-1", prefillDatabase: "main" }) }));
+  const app = createApp(defineComponent({ setup: () => () => h(TableImportDialog, { open: true, prefillConnectionId: connectionId, prefillDatabase: "main" }) }));
   mountedApps.push(app);
   app.use(i18n);
   app.mount(container);
@@ -254,6 +270,60 @@ afterEach(() => {
 });
 
 describe("TableImportDialog batch selection", () => {
+  it("lets the import setup dialog be minimized and restored before import starts", async () => {
+    await mountDialog();
+    expect(button("Next").disabled).toBe(false);
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Minimize import"]')!.click();
+    await flushAsyncUpdates();
+
+    expect(document.body.querySelector('button[aria-label="Restore import"]')).toBeTruthy();
+    expect(document.body.querySelector('button[aria-label="Next"]')).toBeNull();
+    expect(document.body.textContent).toContain("Ready to import");
+    expect(document.body.textContent).not.toContain("Writing data");
+
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Restore import"]')!.click();
+    await flushAsyncUpdates();
+    expect(button("Next").disabled).toBe(false);
+    expect(document.body.querySelector('button[aria-label="Minimize import"]')).toBeTruthy();
+    expect(mocks.importTableFile).not.toHaveBeenCalled();
+  });
+
+  it("hides the skip-duplicates option for dialects without conflict handling", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name\n1,a"], "rows.csv")], "sqlserver-1");
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("Trim values");
+    expect(document.body.textContent).not.toContain("Skip duplicate rows");
+    expect(document.body.textContent).not.toContain("Update the existing row");
+  });
+
+  it("offers the skip-duplicates option for dialects with conflict handling", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name\n1,a"], "rows.csv")]);
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("Trim values");
+    expect(document.body.textContent).toContain("Skip duplicate rows");
+  });
+
+  it("serializes the explicit skip policy with the legacy compatibility flag", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name\n1,a"], "rows.csv")]);
+    const policySelect = document.body.querySelector<HTMLSelectElement>('[data-testid="table-import-conflict-policy"]');
+    expect(policySelect).toBeTruthy();
+    if (policySelect) {
+      policySelect.value = "skip";
+      policySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await flushAsyncUpdates();
+
+    await startImport();
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    expect(mocks.importTableFile.mock.calls[0]![0]).toMatchObject({
+      conflictPolicy: "skip",
+      skipDuplicateRows: true,
+    });
+  });
+
   it("keeps every worksheet selected by default and imports them in workbook order", async () => {
     await mountDialog();
     for (const name of ["rows_First", "rows_Second", "rows_Third"]) expect(taskCheckbox(name).checked).toBe(true);
@@ -380,6 +450,41 @@ describe("TableImportDialog batch selection", () => {
     pending[1]!.resolve({ importId: pending[1]!.request.importId, rowsImported: 5, totalRows: 5, elapsedMs: 1 });
     await flushAsyncUpdates();
     expect(document.body.textContent).toContain("7 / 7");
+    expect(document.body.textContent).toContain("Import complete");
+  });
+
+  it("keeps the import and its progress active while minimized, then restores the same dialog state", async () => {
+    let finish!: (summary: TableImportSummary) => void;
+    mocks.importTableFile.mockImplementation((request, onProgress) => {
+      onProgress({ importId: request.importId, status: "running", phase: "writing", rowsImported: 1, totalRows: 2, elapsedMs: 1 });
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    await mountDialog();
+    await selectTask("rows_Second", false);
+    await selectTask("rows_Third", false);
+    await startImport();
+
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    const minimizeButton = document.body.querySelector<HTMLButtonElement>('button[aria-label="Minimize import"]');
+    expect(minimizeButton).toBeTruthy();
+    minimizeButton!.click();
+    await flushAsyncUpdates();
+
+    expect(document.body.querySelector('button[aria-label="Minimize import"]')).toBeNull();
+    expect(document.body.textContent).toContain("Writing data");
+    expect(document.body.textContent).toMatch(/\d+%/);
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Restore import"]')!.click();
+    await flushAsyncUpdates();
+    expect(document.body.querySelector('button[aria-label="Minimize import"]')).toBeTruthy();
+    expect(document.body.textContent).toContain("1 / 2");
+    expect(taskCheckbox("rows_First").disabled).toBe(true);
+
+    finish({ importId: "finished-import", rowsImported: 2, totalRows: 2, elapsedMs: 2 });
+    await flushAsyncUpdates();
     expect(document.body.textContent).toContain("Import complete");
   });
 

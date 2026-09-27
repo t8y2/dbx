@@ -42,6 +42,7 @@ const PACKAGE_RELEASE_PATHS = [
   "packages/mcp-win32-x64/",
   "crates/dbx-mcp/",
   "crates/dbx-cli/",
+  "skills/dbx/",
   "crates/dbx-driver-mongodb/src/mongo_shell.rs",
   "Cargo.toml",
   "Cargo.lock",

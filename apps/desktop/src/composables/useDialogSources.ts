@@ -209,13 +209,13 @@ export function useDialogSources() {
       },
     );
 
-    // Clear the pre-filled file path once the dialog closes so a later open
-    // via the toolbar (which doesn't go through sqlFileSource) doesn't re-load
-    // the previously previewed file. prefillConnectionId/database are harmless
-    // when stale (they only preselect dropdowns), but a stale path triggers an
-    // async file read + preview render — a visible side effect.
+    // Clear the complete prefill once the dialog closes. A later toolbar open
+    // derives its target from the then-active SQL tab, so neither the old path
+    // nor its connection context may leak into that session.
     watch(showSqlFileDialog, (open) => {
       if (!open) {
+        sqlFilePrefillConnectionId.value = "";
+        sqlFilePrefillDatabase.value = "";
         sqlFilePrefillFilePath.value = "";
         sqlFilePrefillPreview.value = undefined;
       }

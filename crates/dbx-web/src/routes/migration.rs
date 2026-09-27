@@ -19,6 +19,12 @@ pub async fn start(
         Ok(report) => {
             let ready =
                 state.app.storage.inspect_data_migration().await.map(|status| status.is_ready()).unwrap_or(false);
+            if ready {
+                let allow_managed = !state.password_disabled && state.password_hash.read().await.is_some();
+                if let Err(error) = state.web_mcp.reload(&state.app.storage, allow_managed).await {
+                    log::error!("Web MCP remained disabled after data migration: {error}");
+                }
+            }
             state.migration_ready.store(ready, std::sync::atomic::Ordering::Release);
             Ok(Json(report))
         }

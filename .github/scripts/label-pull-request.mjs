@@ -151,6 +151,7 @@ export function inferAreaLabels(changedFiles) {
   if (has((file) => file.startsWith("crates/dbx-cli/")
     || file.startsWith("packages/cli-")
     || file.startsWith("packages/cli/")
+    || file.startsWith("skills/dbx/")
     || file.startsWith("examples/cli/"))) {
     labels.add("area/cli");
   }

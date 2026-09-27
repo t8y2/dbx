@@ -3142,14 +3142,16 @@ pub async fn completion_assistant_search(
     let pattern = mysql_completion_like_pattern(&request.mask, request.match_mode.as_ref());
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let mut candidates = Vec::new();
+    let mut compatibility = MysqlCompletionCompatibility::default();
 
     if kinds
         .iter()
         .any(|kind| matches!(kind, CompletionAssistantObjectKind::Database | CompletionAssistantObjectKind::Schema))
     {
-        let sql = mysql_completion_schemas_sql(&pattern, limit.saturating_sub(candidates.len()));
-        let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        let rows = mysql_completion_rows(&mut conn, &mut compatibility, false, |policy| {
+            mysql_completion_schemas_sql(&pattern, limit.saturating_sub(candidates.len()), policy)
+        })
+        .await?;
         for row in rows {
             let schema_name = get_str_by_name(&row, "schema_name");
             candidates.push(CompletionAssistantCandidate {
@@ -3167,9 +3169,10 @@ pub async fn completion_assistant_search(
     }
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_table_like) {
-        let sql = mysql_completion_tables_sql(database, &pattern, &kinds, limit.saturating_sub(candidates.len()));
-        let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        let rows = mysql_completion_rows(&mut conn, &mut compatibility, false, |policy| {
+            mysql_completion_tables_sql(database, &pattern, &kinds, limit.saturating_sub(candidates.len()), policy)
+        })
+        .await?;
         for row in rows {
             let table_type = get_str_by_name(&row, "table_type");
             candidates.push(CompletionAssistantCandidate {
@@ -3193,9 +3196,11 @@ pub async fn completion_assistant_search(
     }
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_routine_like) {
-        let sql = mysql_completion_routines_sql(database, &pattern, &kinds, limit.saturating_sub(candidates.len()));
-        let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        let remaining = limit.saturating_sub(candidates.len());
+        let rows = mysql_completion_rows(&mut conn, &mut compatibility, true, |policy| {
+            mysql_completion_routines_sql(database, &pattern, &kinds, remaining, policy)
+        })
+        .await?;
         for row in rows {
             let routine_type = get_str_by_name(&row, "routine_type");
             candidates.push(CompletionAssistantCandidate {
@@ -3220,9 +3225,10 @@ pub async fn completion_assistant_search(
 
     if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Column)) {
         if let Some(table) = request.parent_name.as_deref().filter(|table| !table.trim().is_empty()) {
-            let sql = mysql_completion_columns_sql(database, table, &pattern, limit.saturating_sub(candidates.len()));
-            let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-            let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+            let rows = mysql_completion_rows(&mut conn, &mut compatibility, false, |policy| {
+                mysql_completion_columns_sql(database, table, &pattern, limit.saturating_sub(candidates.len()), policy)
+            })
+            .await?;
             for row in rows {
                 candidates.push(CompletionAssistantCandidate {
                     name: get_str_by_name(&row, "object_name"),
@@ -3241,16 +3247,80 @@ pub async fn completion_assistant_search(
         }
     }
 
-    Ok(CompletionAssistantResponse { incomplete: candidates.len() >= limit, candidates, fallback_used: false })
+    Ok(CompletionAssistantResponse {
+        incomplete: candidates.len() >= limit,
+        candidates,
+        fallback_used: compatibility.omit_escape || compatibility.use_dtd_identifier,
+    })
 }
 
-fn mysql_completion_schemas_sql(pattern: &str, limit: usize) -> String {
+#[derive(Clone, Copy, Debug, Default)]
+struct MysqlCompletionCompatibility {
+    omit_escape: bool,
+    use_dtd_identifier: bool,
+}
+
+impl MysqlCompletionCompatibility {
+    fn escape_clause(self) -> &'static str {
+        if self.omit_escape {
+            ""
+        } else {
+            " ESCAPE '\\\\'"
+        }
+    }
+
+    fn retry_after(&mut self, error: &mysql_async::Error, routine: bool) -> bool {
+        if !self.omit_escape && mysql_completion_escape_is_unsupported(error) {
+            self.omit_escape = true;
+            true
+        } else if routine && !self.use_dtd_identifier && mysql_routine_data_type_is_unsupported(error) {
+            self.use_dtd_identifier = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn mysql_completion_escape_is_unsupported(error: &mysql_async::Error) -> bool {
+    let mysql_async::Error::Server(error) = error else {
+        return false;
+    };
+    let message = error.message.to_ascii_lowercase();
+    let diagnostic = message.trim().strip_prefix("errcode = 2, detailmessage =").unwrap_or(message.trim()).trim_start();
+    error.code == 1105
+        && error.state.eq_ignore_ascii_case("HY000")
+        && diagnostic.starts_with("mismatched input 'escape' expecting ")
+}
+
+async fn mysql_completion_rows(
+    conn: &mut mysql_async::Conn,
+    compatibility: &mut MysqlCompletionCompatibility,
+    routine: bool,
+    build_sql: impl Fn(MysqlCompletionCompatibility) -> String,
+) -> Result<Vec<mysql_async::Row>, String> {
+    // Each flag can change only once: at most three attempts for routines,
+    // two for other kinds. Share the discovered ESCAPE policy in this request.
+    loop {
+        let sql = build_sql(*compatibility);
+        match conn.query_iter(&sql).await {
+            Ok(result) => return result.collect_and_drop().await.map_err(|error| error.to_string()),
+            Err(error) if compatibility.retry_after(&error, routine) => {
+                log::debug!("Retrying MySQL completion with compatible catalog syntax: {error}");
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+fn mysql_completion_schemas_sql(pattern: &str, limit: usize, policy: MysqlCompletionCompatibility) -> String {
     format!(
         "SELECT SCHEMA_NAME AS schema_name \
          FROM information_schema.SCHEMATA \
-         WHERE SCHEMA_NAME LIKE {} ESCAPE '\\\\' \
+         WHERE SCHEMA_NAME LIKE {}{} \
          ORDER BY SCHEMA_NAME LIMIT {}",
         quote_value(pattern),
+        policy.escape_clause(),
         limit,
     )
 }
@@ -3260,15 +3330,17 @@ fn mysql_completion_tables_sql(
     pattern: &str,
     kinds: &[CompletionAssistantObjectKind],
     limit: usize,
+    policy: MysqlCompletionCompatibility,
 ) -> String {
     let table_types = mysql_completion_table_types(kinds);
     format!(
         "SELECT TABLE_NAME AS object_name, TABLE_TYPE AS table_type, TABLE_COMMENT AS object_comment \
          FROM information_schema.TABLES \
-         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME LIKE {pattern} ESCAPE '\\\\' AND TABLE_TYPE IN ({table_types}) \
+         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME LIKE {pattern}{escape} AND TABLE_TYPE IN ({table_types}) \
          ORDER BY TABLE_NAME LIMIT {limit}",
         db = quote_value(database),
         pattern = quote_value(pattern),
+        escape = policy.escape_clause(),
         table_types = table_types,
         limit = limit,
     )
@@ -3279,29 +3351,48 @@ fn mysql_completion_routines_sql(
     pattern: &str,
     kinds: &[CompletionAssistantObjectKind],
     limit: usize,
+    policy: MysqlCompletionCompatibility,
 ) -> String {
     let routine_types = mysql_completion_routine_types(kinds);
+    let data_type_column = if policy.use_dtd_identifier { "DTD_IDENTIFIER" } else { "DATA_TYPE" };
     format!(
-        "SELECT ROUTINE_NAME AS object_name, ROUTINE_TYPE AS routine_type, ROUTINE_COMMENT AS object_comment, DATA_TYPE AS data_type \
+        "SELECT ROUTINE_NAME AS object_name, ROUTINE_TYPE AS routine_type, ROUTINE_COMMENT AS object_comment, {data_type_column} AS data_type \
          FROM information_schema.ROUTINES \
-         WHERE ROUTINE_SCHEMA = {db} AND ROUTINE_NAME LIKE {pattern} ESCAPE '\\\\' AND ROUTINE_TYPE IN ({routine_types}) \
+         WHERE ROUTINE_SCHEMA = {db} AND ROUTINE_NAME LIKE {pattern}{escape} AND ROUTINE_TYPE IN ({routine_types}) \
          ORDER BY ROUTINE_NAME LIMIT {limit}",
         db = quote_value(database),
         pattern = quote_value(pattern),
+        escape = policy.escape_clause(),
         routine_types = routine_types,
         limit = limit,
     )
 }
 
-fn mysql_completion_columns_sql(database: &str, table: &str, pattern: &str, limit: usize) -> String {
+fn mysql_routine_data_type_is_unsupported(error: &mysql_async::Error) -> bool {
+    let mysql_async::Error::Server(error) = error else {
+        return false;
+    };
+    let missing_column = (error.code == 1054 && error.state.eq_ignore_ascii_case("42S22"))
+        || (error.code == 1105 && error.state.eq_ignore_ascii_case("HY000"));
+    missing_column && error.message.to_ascii_lowercase().contains("unknown column 'data_type' in ")
+}
+
+fn mysql_completion_columns_sql(
+    database: &str,
+    table: &str,
+    pattern: &str,
+    limit: usize,
+    policy: MysqlCompletionCompatibility,
+) -> String {
     format!(
         "SELECT COLUMN_NAME AS object_name, COLUMN_TYPE AS data_type, COLUMN_COMMENT AS object_comment \
          FROM information_schema.COLUMNS \
-         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME = {table} AND COLUMN_NAME LIKE {pattern} ESCAPE '\\\\' \
+         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME = {table} AND COLUMN_NAME LIKE {pattern}{escape} \
          ORDER BY ORDINAL_POSITION LIMIT {limit}",
         db = quote_value(database),
         table = quote_value(table),
         pattern = quote_value(pattern),
+        escape = policy.escape_clause(),
         limit = limit,
     )
 }
@@ -7956,16 +8047,85 @@ mod tests {
     }
 
     #[test]
+    fn mysql_completion_routine_fallback_preserves_filters_and_escaping() {
+        for kinds in [
+            vec![CompletionAssistantObjectKind::Routine],
+            vec![CompletionAssistantObjectKind::Function],
+            vec![CompletionAssistantObjectKind::Procedure],
+        ] {
+            let primary = mysql_completion_routines_sql(
+                "DATA_TYPE'app",
+                "json\\_extract%",
+                &kinds,
+                17,
+                MysqlCompletionCompatibility::default(),
+            );
+            let fallback = mysql_completion_routines_sql(
+                "DATA_TYPE'app",
+                "json\\_extract%",
+                &kinds,
+                17,
+                MysqlCompletionCompatibility { use_dtd_identifier: true, ..Default::default() },
+            );
+            assert_eq!(fallback, primary.replacen("DATA_TYPE AS data_type", "DTD_IDENTIFIER AS data_type", 1));
+            assert!(fallback.contains("ROUTINE_SCHEMA = 'DATA_TYPE\\'app'"));
+            assert!(fallback.contains("ORDER BY ROUTINE_NAME LIMIT 17"));
+            assert!(fallback.contains("ROUTINE_NAME LIKE 'json\\\\_extract%' ESCAPE '\\\\'"));
+        }
+    }
+
+    #[test]
+    fn mysql_completion_routine_fallback_requires_precise_missing_column_diagnostic() {
+        let cases = [
+            (1054, "42S22", "Unknown column 'DATA_TYPE' in 'field list'", true),
+            (
+                1105,
+                "HY000",
+                "errCode = 2, detailMessage = Unknown column 'DATA_TYPE' in 'table list' in PROJECT clause",
+                true,
+            ),
+            (1105, "HY000", "Unknown column 'data_type' in 'table list' in PROJECT clause", true),
+            (1054, "42S22", "Unknown column 'ROUTINE_COMMENT' in 'field list'", false),
+            (1054, "42S22", "Unknown column 'DATA_TYPE_EXTRA' in 'field list'", false),
+            (1054, "42S22", "Unknown column 'DTD_IDENTIFIER' in 'field list'", false),
+            (1105, "HY000", "Access denied to column DATA_TYPE", false),
+            (1105, "HY000", "Unknown table 'DATA_TYPE'", false),
+            (1105, "HY000", "DATA_TYPE not available", false),
+            (1105, "HY000", "connection timed out", false),
+            (1142, "42000", "Unknown column 'DATA_TYPE' in 'field list'", false),
+            (1105, "42000", "Unknown column 'DATA_TYPE' in 'field list'", false),
+            (1054, "HY000", "Unknown column 'DATA_TYPE' in 'field list'", false),
+        ];
+        for (code, state, message, expected) in cases {
+            let error = mysql_async::Error::Server(mysql_async::ServerError {
+                code,
+                state: state.into(),
+                message: message.into(),
+            });
+            assert_eq!(mysql_routine_data_type_is_unsupported(&error), expected, "{error}");
+        }
+        let error = mysql_async::Error::from(std::io::Error::new(std::io::ErrorKind::TimedOut, "query timed out"));
+        assert!(!mysql_routine_data_type_is_unsupported(&error));
+    }
+
+    #[test]
     fn mysql_completion_sql_filters_before_limit() {
         let table_sql = mysql_completion_tables_sql(
             "app",
             "Temp%",
             &[CompletionAssistantObjectKind::Table, CompletionAssistantObjectKind::View],
             100,
+            MysqlCompletionCompatibility::default(),
         );
-        let routine_sql =
-            mysql_completion_routines_sql("app", "%audit%", &[CompletionAssistantObjectKind::Routine], 50);
-        let column_sql = mysql_completion_columns_sql("app", "users", "id%", 25);
+        let routine_sql = mysql_completion_routines_sql(
+            "app",
+            "%audit%",
+            &[CompletionAssistantObjectKind::Routine],
+            50,
+            MysqlCompletionCompatibility::default(),
+        );
+        let column_sql =
+            mysql_completion_columns_sql("app", "users", "id%", 25, MysqlCompletionCompatibility::default());
 
         assert!(table_sql.contains("TABLE_NAME LIKE 'Temp%' ESCAPE '\\\\'"));
         assert!(table_sql.contains("TABLE_TYPE IN ('BASE TABLE','SYSTEM VERSIONED','VIEW')"));
@@ -7974,6 +8134,89 @@ mod tests {
         assert!(routine_sql.contains("ROUTINE_TYPE IN ('PROCEDURE','FUNCTION')"));
         assert!(column_sql.contains("COLUMN_NAME LIKE 'id%' ESCAPE '\\\\'"));
         assert!(column_sql.contains("ORDER BY ORDINAL_POSITION LIMIT 25"));
+    }
+
+    fn completion_server_error(code: u16, state: &str, message: &str) -> mysql_async::Error {
+        mysql_async::Error::Server(mysql_async::ServerError { code, state: state.into(), message: message.into() })
+    }
+
+    #[test]
+    fn mysql_completion_escape_fallback_requires_precise_parser_diagnostic() {
+        for (code, state, message, expected) in [
+            (
+                1105,
+                "HY000",
+                "errCode = 2, detailMessage = mismatched input 'ESCAPE' expecting {<EOF>, ';'}(line 4, pos 32)",
+                true,
+            ),
+            (1105, "hy000", "mismatched input 'escape' expecting <EOF>", true),
+            (1064, "HY000", "mismatched input 'ESCAPE' expecting <EOF>", false),
+            (1105, "42000", "mismatched input 'ESCAPE' expecting <EOF>", false),
+            (1105, "HY000", "mismatched input 'ESCAPED' expecting <EOF>", false),
+            (1105, "HY000", "mismatched input 'LIMIT' expecting ESCAPE", false),
+            (1105, "HY000", "Unknown column 'ESCAPE' in 'field list'", false),
+            (1105, "HY000", "Access denied to ESCAPE", false),
+            (1105, "HY000", "query failed: SELECT 'mismatched input \'ESCAPE\' expecting <EOF>'", false),
+        ] {
+            let error = completion_server_error(code, state, message);
+            assert_eq!(mysql_completion_escape_is_unsupported(&error), expected, "{error}");
+        }
+        let error = mysql_async::Error::from(std::io::Error::new(std::io::ErrorKind::TimedOut, "ESCAPE"));
+        assert!(!mysql_completion_escape_is_unsupported(&error));
+    }
+
+    #[test]
+    fn mysql_completion_retries_are_bounded_in_both_error_orders() {
+        let escape = completion_server_error(1105, "HY000", "mismatched input 'ESCAPE' expecting <EOF>");
+        let data_type = completion_server_error(1105, "HY000", "Unknown column 'DATA_TYPE' in 'table list'");
+        let unrelated = completion_server_error(1105, "HY000", "Access denied");
+        for errors in [[&escape, &data_type], [&data_type, &escape]] {
+            let mut policy = MysqlCompletionCompatibility::default();
+            let mut attempts = 1;
+            for error in errors {
+                assert!(policy.retry_after(error, true));
+                attempts += 1;
+                assert!(!policy.retry_after(error, true), "same rejected capability must not retry twice");
+            }
+            assert_eq!(attempts, 3);
+            assert!(policy.omit_escape && policy.use_dtd_identifier);
+            assert!(!policy.retry_after(&escape, true));
+            assert!(!policy.retry_after(&data_type, true));
+            assert!(!policy.retry_after(&unrelated, true));
+            // Later candidate kinds inherit ESCAPE handling within the request.
+            assert!(!policy.retry_after(&escape, false));
+        }
+        let mut policy = MysqlCompletionCompatibility::default();
+        assert!(!policy.retry_after(&data_type, false), "column metadata must not use routine fallback");
+        assert!(!policy.retry_after(&unrelated, true));
+        assert!(policy.retry_after(&escape, false));
+        assert!(!policy.retry_after(&escape, false));
+        assert!(!policy.use_dtd_identifier);
+    }
+
+    #[test]
+    fn mysql_completion_implicit_escape_preserves_all_builder_filters_and_patterns() {
+        let pattern = mysql_completion_like_pattern("a_b%c\\d'ESCAPE", None);
+        assert_eq!(pattern, "a\\_b\\%c\\\\d'ESCAPE%");
+        let kinds = [CompletionAssistantObjectKind::Table, CompletionAssistantObjectKind::Routine];
+        let build = |policy| {
+            [
+                mysql_completion_schemas_sql(&pattern, 7, policy),
+                mysql_completion_tables_sql("db'ESCAPE", &pattern, &kinds, 7, policy),
+                mysql_completion_routines_sql("db'ESCAPE", &pattern, &kinds, 7, policy),
+                mysql_completion_columns_sql("db'ESCAPE", "t'ESCAPE", &pattern, 7, policy),
+            ]
+        };
+        for dtd in [false, true] {
+            let primary = MysqlCompletionCompatibility { use_dtd_identifier: dtd, ..Default::default() };
+            let implicit = MysqlCompletionCompatibility { omit_escape: true, ..primary };
+            for (original, compatible) in build(primary).into_iter().zip(build(implicit)) {
+                assert_eq!(original.matches(primary.escape_clause()).count(), 1);
+                assert_eq!(compatible, original.replacen(primary.escape_clause(), "", 1));
+                assert!(compatible.contains(&quote_value(&pattern)));
+                assert!(compatible.ends_with("LIMIT 7"));
+            }
+        }
     }
 
     #[test]

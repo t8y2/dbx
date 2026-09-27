@@ -126,6 +126,8 @@ test("CI and release tracking follow the new source owners", () => {
     assert.ok(ci.includes(`'${input}'`), `CI misses ${input}`);
   }
   assert.ok(read("scripts/release.mjs").includes('"crates/dbx-driver-mongodb/src/mongo_shell.rs"'));
+  assert.ok(read("scripts/release.mjs").includes('"skills/dbx/"'));
+  assert.ok(ci.includes("'skills/dbx/**'"));
 });
 
 test("the standalone DuckDB lockfile includes core's internal dependency closure", () => {

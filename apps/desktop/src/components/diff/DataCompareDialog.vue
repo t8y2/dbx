@@ -1447,7 +1447,7 @@ onBeforeUnmount(() => {
       </div>
 
       <DialogFooter v-if="!hasResults">
-        <Button variant="outline" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
+        <Button variant="outline" size="sm" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
         <span v-if="compareProgressLabel" class="text-xs text-muted-foreground self-center">{{ compareProgressLabel }}</span>
         <Button size="sm" :disabled="!canCompare || comparing" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3.5 h-3.5 animate-spin mr-1" />
@@ -1457,7 +1457,7 @@ onBeforeUnmount(() => {
       </DialogFooter>
 
       <DialogFooter v-else class="flex items-center gap-2">
-        <Button variant="outline" :disabled="(executing && manualTransaction) || resolvingTransaction" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
+        <Button variant="outline" size="sm" :disabled="(executing && manualTransaction) || resolvingTransaction" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
         <Button variant="outline" size="sm" :disabled="comparing || executionLocked || !canCompare" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3 h-3 animate-spin mr-1" />
           <RotateCcw v-else class="w-3 h-3 mr-1" />

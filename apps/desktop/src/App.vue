@@ -93,7 +93,7 @@ import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
-import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { activeTabExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, unassociatedExternalSqlFileTarget, type ExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePath, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TabOutputView, TreeNode } from "@/types/database";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
@@ -184,6 +184,7 @@ import ExternalSqlFileChangeDialog from "@/components/editor/ExternalSqlFileChan
 import { resolveWindowContext } from "@/lib/app/windowContext";
 import { openDetachedTabWindow } from "@/lib/app/detachedTabWindow";
 import { OPEN_PLUGIN_AI_CONVERSATION, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
+import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
 
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
 const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugins/PluginWorkbenchTab.vue"));
@@ -403,6 +404,7 @@ const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
 const showAiPanel = ref(safeLocalStorageGet("dbx-ai-panel-open") === "true");
 const isAiPanelMaximized = ref(false);
+const isHistoryPanelMaximized = ref(false);
 const isZenMode = ref(false);
 const showSqlLibraryPanel = ref(safeLocalStorageGet("dbx-sql-library-open") === "true");
 const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
@@ -491,6 +493,20 @@ const blockingAiRunCount = computed(() => (isDesktop ? blockingDesktopAiRunsForQ
 let aiRunsQuitConfirmed = false;
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
+const pluginAiRecommendationsByTab = ref<Record<string, PluginAiRecommendationHostUpdate>>({});
+const activePluginAiRecommendations = computed(() => {
+  const tab = activeTab.value;
+  if (!tab || tab.mode !== "plugin-workbench" || !tab.pluginWorkbench) return undefined;
+  return pluginAiRecommendationsByTab.value[tab.id];
+});
+
+function updatePluginAiRecommendations(tabId: string, update: PluginAiRecommendationHostUpdate): void {
+  const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+  if (!tab?.pluginWorkbench || tab.pluginWorkbench.pluginId !== update.pluginId || tab.pluginWorkbench.contributionId !== update.contributionId) return;
+  const expectedWorkbenchId = typeof tab.pluginWorkbench.context?.workbenchId === "string" ? tab.pluginWorkbench.context.workbenchId : undefined;
+  if (expectedWorkbenchId && update.workbenchId && expectedWorkbenchId !== update.workbenchId) return;
+  pluginAiRecommendationsByTab.value = { ...pluginAiRecommendationsByTab.value, [tabId]: update };
+}
 // Plugin workbench tabs stay mounted once opened (hidden via v-show): an
 // iframe moved out of the DOM reloads from scratch, so KeepAlive/ContentArea
 // remounts flash the whole webview and drop its live session state.
@@ -944,9 +960,16 @@ function requestActiveEditorExecute(source?: "pointer" | "keyboard", tabId?: str
   void tryExecute(undefined, targetTabId ? { tabId: targetTabId } : undefined);
 }
 
-function requestActiveEditorExecuteInNewResultTab() {
-  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
-  void tryExecuteInNewResultTab();
+function requestActiveEditorExecuteInNewResultTab(source?: "pointer" | "keyboard", tabId?: string) {
+  const snapshot = pendingToolbarExecutionSnapshot.value;
+  pendingToolbarExecutionSnapshot.value = undefined;
+  const targetTabId = tabId ?? (source === "pointer" ? snapshot?.tabId : undefined);
+  if (source === "pointer" && snapshot && snapshot.tabId === targetTabId) {
+    void tryExecuteInNewResultTab(snapshot, { tabId: targetTabId });
+    return;
+  }
+  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.(targetTabId)) return;
+  void tryExecuteInNewResultTab(undefined, targetTabId ? { tabId: targetTabId } : undefined);
 }
 
 const toolbarAgentDriverUpdateCount = computed(() => Math.max(agentDriverUpdateCount.value, componentUpdates.driverUpdateCount.value));
@@ -990,6 +1013,7 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   databaseRequiredSignalFor: (tabId: string) => (databaseRequiredTabId.value === tabId ? databaseRequiredSignal.value : 0),
   captureExecutionSnapshot: captureActiveEditorExecutionSnapshot,
   toolbarExecute: requestActiveEditorExecute,
+  toolbarExecuteInNewResultTab: requestActiveEditorExecuteInNewResultTab,
   cancelExecution: (tabId: string) => cancelActiveExecution(tabId),
   explain: (tabId: string) => tryExplain(undefined, { tabId }),
   formatSql: formatActiveSql,
@@ -1682,6 +1706,7 @@ function applyRightSidebarPanelState(next: RightSidebarPanelState) {
 }
 
 function setRightSidebarPanelOpen(panelId: RightSidebarPanelId, open: boolean) {
+  if ((panelId === "history" && !open) || (panelId !== "history" && open)) isHistoryPanelMaximized.value = false;
   if (panelId === "ai" && !open) {
     isAiPanelMaximized.value = false;
   } else if (open && panelId !== "ai" && isAiPanelMaximized.value) {
@@ -2411,8 +2436,7 @@ async function saveActiveSqlAsLocalFile() {
   if (tab) await saveExternalSqlTabAs(tab);
 }
 
-function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
-  const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+function applyExternalSqlTarget(tab: QueryTab, target: ExternalSqlFileTarget) {
   if (target.connectionId !== tab.connectionId) {
     queryStore.updateConnection(tab.id, target.connectionId, target.database);
   }
@@ -2423,6 +2447,13 @@ function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
   // updateConnection/updateCatalog/updateDatabase all reset the schema, so the
   // remembered schema has to be reapplied after them.
   if (target.schema !== tab.schema) queryStore.updateSchema(tab.id, target.schema);
+}
+
+function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
+  applyExternalSqlTarget(
+    tab,
+    resolveExternalSqlFileTargetForActiveTab(path, queryStore.tabs, tab.id, (connectionId) => connectionStore.getConfig(connectionId)),
+  );
 }
 
 async function openSqlFile() {
@@ -2453,6 +2484,10 @@ async function openSqlFile() {
         if (!file) return;
         try {
           queryStore.updateSql(tab.id, await readBrowserSqlFile(file, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb)));
+          applyExternalSqlTarget(
+            tab,
+            activeTabExternalSqlFileTarget(queryStore.tabs, tab.id, (connectionId) => connectionStore.getConfig(connectionId)),
+          );
         } catch (e: any) {
           toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
         }
@@ -2496,6 +2531,8 @@ async function openSqlFilePath(path: string) {
   try {
     await desktopOpenTabsRestorationBarrier?.settled;
     const snapshot = await api.readExternalSqlFileSnapshot(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
+    // Startup and OS-open events have no initiating editor tab. Keep new files
+    // unassociated even if persisted tab restoration has since selected one.
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
     queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog, target.schema);
   } catch (e: any) {
@@ -3266,7 +3303,7 @@ async function handleQuickOpenSelect(item: any) {
   if (item.type === "content_match" && item.filePath) {
     try {
       const snapshot = await api.readExternalSqlFileSnapshot(item.filePath, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
-      const target = resolveExternalSqlFileTarget(item.filePath, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+      const target = resolveExternalSqlFileTargetForActiveTab(item.filePath, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId));
       queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version, target.catalog, target.schema, { line: item.line ?? 1, column: item.column });
     } catch (e: any) {
       toast(
@@ -3280,7 +3317,7 @@ async function handleQuickOpenSelect(item: any) {
   if (item.type === "sql_file" && item.filePath) {
     try {
       const snapshot = await api.readExternalSqlFileSnapshot(item.filePath, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
-      const target = resolveExternalSqlFileTarget(item.filePath, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+      const target = resolveExternalSqlFileTargetForActiveTab(item.filePath, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId));
       queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version, target.catalog, target.schema);
     } catch (e: any) {
       toast(
@@ -3871,13 +3908,14 @@ function onLoginSuccess() {
 async function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
-  void Promise.all([initSavedSqlEditorPositions(), savedSqlStore.initFromStorage()])
+  const savedSqlInitialization = Promise.all([initSavedSqlEditorPositions(), savedSqlStore.initFromStorage()])
     .then(() => {
       console.log(`[STARTUP]   savedSqlStore.initFromStorage: ${(performance.now() - t0).toFixed(0)}ms`);
-      void queryStore.hydrateSavedSqlTabs();
+      return true;
     })
     .catch((e: any) => {
       toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
+      return false;
     });
 
   const restoreOpenTabs = async () => {
@@ -3907,6 +3945,13 @@ async function initApp() {
         onOptionalStateError: (error) => console.error("[STARTUP] settingsStore.initAiConfigs failed", error),
       });
     }
+    void savedSqlInitialization
+      .then((initialized) => {
+        if (initialized) return queryStore.hydrateSavedSqlTabs();
+      })
+      .catch((e: any) => {
+        toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
+      });
     await runPendingComponentUpdatesBeforePluginReconnect({
       hasPendingComponentUpdates: () => !isDetachedWindowContext && hasPendingComponentUpdatesAfterAppRestart(),
       prepareStartup: async () => {
@@ -4186,7 +4231,11 @@ onUnmounted(() => {
             @mousedown="rememberSidebarSearchSurface"
           />
 
-          <div v-show="!isAiPanelMaximized || isZenMode" :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
+          <div
+            data-editor-content
+            v-show="(!isAiPanelMaximized && !isHistoryPanelMaximized) || isZenMode"
+            :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'"
+          >
             <div class="h-full flex min-h-0 min-w-0 flex-col">
               <AppTabBar
                 v-if="!isDetachedWindowContext"
@@ -4449,6 +4498,7 @@ onUnmounted(() => {
                     :contribution-id="workbenchTab.pluginWorkbench!.contributionId"
                     :context="workbenchTab.pluginWorkbench!.context"
                     @close-tab="queryStore.closeTab(workbenchTab.id)"
+                    @recommendations="updatePluginAiRecommendations(workbenchTab.id, $event)"
                   />
                 </div>
               </div>
@@ -4458,7 +4508,7 @@ onUnmounted(() => {
 
           <div
             v-if="!isDetachedWindowContext && showAiPanel"
-            v-show="!isZenMode"
+            v-show="!isHistoryPanelMaximized && !isZenMode"
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full']"
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
           >
@@ -4470,6 +4520,7 @@ onUnmounted(() => {
                 :tab="activeTab"
                 :connection="activeConnection"
                 :maximized="isAiPanelMaximized"
+                :plugin-recommendations="activePluginAiRecommendations"
                 @append-sql="onAiAppendSql"
                 @execute-sql="onAiExecuteSql"
                 @temp-run-sql="onAiTempRunSql"
@@ -4487,20 +4538,28 @@ onUnmounted(() => {
           <div
             v-if="!isDetachedWindowContext && showHistory"
             v-show="!isAiPanelMaximized && !isZenMode"
-            :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
-            :style="{ width: historyWidth + 'px' }"
+            :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isHistoryPanelMaximized ? 'min-w-0 flex-1' : 'shrink-0 max-w-full']"
+            :style="isHistoryPanelMaximized ? {} : { width: historyWidth + 'px' }"
           >
-            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
+            <div v-if="!isHistoryPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('history')">
               <div data-history-panel class="h-full min-h-0">
-                <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
+                <QueryHistory
+                  :maximized="isHistoryPanelMaximized"
+                  @toggle-maximize="isHistoryPanelMaximized = !isHistoryPanelMaximized"
+                  :current-connection-id="activeTab?.connectionId"
+                  :current-database="activeTab?.database"
+                  @restore="restoreHistorySql"
+                  @analyze-ai="analyzeHistoryWithAi"
+                  @close="closeRightSidebarPanel('history')"
+                />
               </div>
             </div>
           </div>
 
           <div
             v-if="!isDetachedWindowContext && showSqlLibraryPanel"
-            v-show="!isAiPanelMaximized && !isZenMode"
+            v-show="!isAiPanelMaximized && !isHistoryPanelMaximized && !isZenMode"
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
             :style="{ width: sqlLibraryWidth + 'px' }"
           >
@@ -4514,7 +4573,7 @@ onUnmounted(() => {
 
           <div
             v-if="!isDetachedWindowContext && showSqlFilePanel"
-            v-show="!isAiPanelMaximized && !isZenMode"
+            v-show="!isAiPanelMaximized && !isHistoryPanelMaximized && !isZenMode"
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
             :style="{ width: sqlFilePanelWidth + 'px' }"
           >

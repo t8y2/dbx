@@ -121,7 +121,7 @@ watch([sourceDbType, targetDbType], ([src, tgt]) => {
 });
 const optionTree = computed(() => {
   const targetConfig = store.getConfig(targetConnectionId.value);
-  const dbType = targetConfig?.db_type || "postgres";
+  const dbType = schemaDiffEngineDatabaseType(targetConfig) || targetConfig?.db_type || "postgres";
   return getSchemaDiffOptionsForDbType(dbType);
 });
 

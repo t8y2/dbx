@@ -811,6 +811,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+          tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -873,6 +874,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+          tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -1194,6 +1196,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+      tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     });
 
@@ -1655,6 +1658,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+      tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     });
 

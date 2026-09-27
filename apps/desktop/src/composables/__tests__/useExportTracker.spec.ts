@@ -35,10 +35,14 @@ function transferRequest(transferId: string, tables = ["users"]): TransferReques
     targetSchema: "public",
     tables,
     createTable: true,
+    content: "structureAndData",
+    objects: [],
     mode: "append",
     targetTableNameCase: "preserve",
     quoteTargetColumnNames: true,
     batchSize: 1000,
+    dropTargetBeforeCreate: false,
+    dropTargetConfirmed: false,
   };
 }
 
@@ -138,14 +142,44 @@ describe("data transfer task duration", () => {
   it("records an immediate start failure as a terminal duration", async () => {
     vi.mocked(api.startTransfer).mockRejectedValueOnce(new Error("start failed"));
     const tracker = useExportTracker();
+    const onStarted = vi.fn();
     now = 10_000;
-    const task = tracker.startDataTransferTask(transferRequest("start-failure"), "users");
+    const task = tracker.startDataTransferTask(transferRequest("start-failure"), "users", { onStarted });
     now = 10_025;
 
     await vi.waitFor(() => expect(task.status).toBe("Error"));
 
+    expect(onStarted).not.toHaveBeenCalled();
     expect(task.finishedAt! - task.startedAt!).toBe(25);
     expect(task.errorMessage).toBe("start failed");
+  });
+
+  it.each([
+    ["append", { content: "structureAndData", mode: "append", createTable: true, dropTargetBeforeCreate: false }],
+    ["rebuild", { content: "structureAndData", mode: "append", createTable: true, dropTargetBeforeCreate: true }],
+    ["data-only", { content: "dataOnly", mode: "append", createTable: false, dropTargetBeforeCreate: false }],
+  ] as const)("launches one %s task and acknowledges its accepted submission once", async (_flow, overrides) => {
+    let finishTransfer!: () => void;
+    vi.mocked(api.startTransfer).mockImplementationOnce((_request, _onProgress, onStarted) => {
+      onStarted?.();
+      onStarted?.();
+      return new Promise<void>((resolve) => {
+        finishTransfer = resolve;
+      });
+    });
+    const tracker = useExportTracker();
+    const onStarted = vi.fn();
+    const request = { ...transferRequest(`start-${_flow}`), ...overrides };
+
+    const task = tracker.startDataTransferTask(request, _flow, { onStarted });
+
+    expect(task.status).toBe("Running");
+    expect(api.startTransfer).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.startTransfer).mock.calls[0]?.[0]).toMatchObject(overrides);
+    expect(onStarted).toHaveBeenCalledTimes(1);
+
+    finishTransfer();
+    await Promise.resolve();
   });
 
   it("freezes an overlapping transfer failure without starting another request", async () => {
@@ -155,11 +189,13 @@ describe("data transfer task duration", () => {
     now = 100;
     tracker.startDataTransferTask(transferRequest("active"), "active");
     now = 130;
-    const overlapping = tracker.startDataTransferTask(transferRequest("overlap"), "overlap");
+    const onStarted = vi.fn();
+    const overlapping = tracker.startDataTransferTask(transferRequest("overlap"), "overlap", { onStarted });
 
     expect(overlapping.status).toBe("Error");
     expect(overlapping.finishedAt! - overlapping.startedAt!).toBe(0);
     expect(api.startTransfer).toHaveBeenCalledTimes(1);
+    expect(onStarted).not.toHaveBeenCalled();
 
     resolveFirst();
     await Promise.resolve();

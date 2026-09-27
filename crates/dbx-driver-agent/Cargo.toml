@@ -30,3 +30,6 @@ tokio-util = { version = "0.7", features = ["compat"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 zstd = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+sysinfo = { version = "0.32", features = ["system"] }

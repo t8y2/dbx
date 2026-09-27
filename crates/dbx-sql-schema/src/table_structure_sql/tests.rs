@@ -4123,6 +4123,81 @@ fn builds_duckdb_create_table_statements() {
     );
 }
 
+#[cfg(feature = "duckdb-sidecar")]
+fn existing_duckdb_column(name: &str) -> EditableStructureColumn {
+    let mut existing = column(name);
+    existing.original = Some(ColumnInfo {
+        name: name.to_string(),
+        data_type: existing.data_type.clone(),
+        is_nullable: existing.is_nullable,
+        column_default: None,
+        ..Default::default()
+    });
+    existing
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+#[test]
+fn duckdb_column_rename_generates_quoted_sql() {
+    let mut renamed = existing_duckdb_column("old_name");
+    renamed.name = "new_name".to_string();
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::DuckDb, None, "events", vec![renamed]));
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec![r#"ALTER TABLE "events" RENAME COLUMN "old_name" TO "new_name";"#]);
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+#[test]
+fn duckdb_column_rename_quotes_special_identifiers() {
+    let mut renamed = existing_duckdb_column("old \"code\"");
+    renamed.name = "select value".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::DuckDb,
+        None,
+        "event log",
+        vec![renamed],
+    ));
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec![r#"ALTER TABLE "event log" RENAME COLUMN "old ""code""" TO "select value";"#]);
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+#[test]
+fn duckdb_column_rename_ignores_unchanged_columns() {
+    let unchanged = existing_duckdb_column("event_id");
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::DuckDb,
+        None,
+        "events",
+        vec![unchanged],
+    ));
+
+    assert!(result.statements.is_empty());
+    assert!(result.warnings.is_empty());
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+#[test]
+fn duckdb_column_rename_with_unsupported_attribute_change_fails_closed() {
+    let mut changed = existing_duckdb_column("event_id");
+    changed.name = "renamed_id".to_string();
+    changed.data_type = "BIGINT".to_string();
+    changed.is_nullable = false;
+    changed.default_value = "42".to_string();
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::DuckDb, None, "events", vec![changed]));
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings, vec!["Editing existing columns is not supported for duckdb yet."]);
+}
+
 #[test]
 fn builds_clickhouse_nullable_comment_and_reorder_statements() {
     let mut source = column("source");

@@ -4,7 +4,7 @@ import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { buildTransferObjectSelections } from "./transferSelections";
+import { buildTransferObjectSelections, countTransferObjects } from "./transferSelections";
 import { createTaskLoadTracker } from "./taskLoadTracker";
 import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, transferStrategyOptions, type TransferStrategy } from "./transferStrategy";
 import { Input } from "@/components/ui/input";
@@ -815,6 +815,7 @@ function runTransfer(request: api.TransferRequest, shouldRefreshTargetTree: bool
   isSubmitting.value = true;
   startDataTransferTask(request, `${request.sourceDatabase} → ${request.targetDatabase}`, {
     formatOverlapError: (tables) => t("transfer.targetTableBusy", { tables: tables.join(", ") }),
+    onStarted: () => toast(t("transfer.backgroundStarted")),
     onDone: async () => {
       if (shouldRefreshTargetTree) {
         await store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog);
@@ -1052,7 +1053,7 @@ const confirmationSummary = computed(() => {
   if (!request) return "";
   const source = formatTransferEndpointLabel(getConnectionName(request.sourceConnectionId), request.sourceDatabase, request.sourceSchema, request.sourceCatalog);
   const target = formatTransferEndpointLabel(getConnectionName(request.targetConnectionId), request.targetDatabase, request.targetSchema, request.targetCatalog);
-  const count = request.tables.length + request.objects.reduce((total, selection) => total + selection.names.length, 0);
+  const count = countTransferObjects(request);
   return t("transfer.startConfirmMessage", { source, target, count });
 });
 

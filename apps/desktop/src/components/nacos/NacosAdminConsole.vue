@@ -48,7 +48,7 @@ import {
   type NacosConfigDeleteSnapshot,
 } from "@/lib/nacos/nacosAdmin";
 import { createNacosNamespaceRequestGuard, subscribeNacosNamespacesChanged, type NacosNamespacesChangedDetail } from "@/lib/nacos/nacosNamespaceCache";
-import { nacosInstanceMatchesPatch, nacosInstanceRefIdentity, nacosIpAddressIsValid, nacosServiceDetailMatches } from "@/lib/nacos/nacosServiceManagement";
+import { nacosInstanceMatchesPatch, nacosInstanceRefIdentity, nacosIpAddressIsValid, nacosServiceDetailMatches, nacosServiceInstanceHealthSummary } from "@/lib/nacos/nacosServiceManagement";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
@@ -473,6 +473,12 @@ const canRequestBatchDeleteConfigs = computed(() => !props.readOnly && !savingCo
 const pendingBatchDeleteDetails = computed(() => pendingBatchDelete.value?.keys.map((key) => `namespace=${key.namespace || "public"}\ndataId=${key.dataId}\ngroup=${key.group || "DEFAULT_GROUP"}`).join("\n\n") || "");
 const pendingHistoryRollbackDetails = computed(() => (pendingHistoryRollback.value ? buildNacosConfigHistoryRollbackConfirm(pendingHistoryRollback.value, namespace.value) : ""));
 const pendingInstanceDetails = computed(() => (pendingInstanceUpdate.value && selectedService.value ? buildNacosInstanceConfirm(selectedService.value, pendingInstanceUpdate.value.instance, pendingInstanceUpdate.value.patch, serviceGroup.value, namespace.value) : ""));
+const pendingInstanceAvailabilityAction = computed(() => {
+  const enabled = pendingInstanceUpdate.value?.patch.enabled;
+  return enabled == null ? "" : t(enabled ? "nacos.online" : "nacos.offline");
+});
+const pendingInstanceTitle = computed(() => (pendingInstanceAvailabilityAction.value ? `${t("nacos.confirmInstanceTitle")}: ${pendingInstanceAvailabilityAction.value}` : t("nacos.confirmInstanceTitle")));
+const pendingInstanceConfirmLabel = computed(() => pendingInstanceAvailabilityAction.value || t("dangerDialog.confirm"));
 const pendingInstanceDeregisterDetails = computed(() => {
   if (!pendingInstanceDeregister.value || !selectedService.value) return "";
   const ref = instanceRef(pendingInstanceDeregister.value);
@@ -2111,6 +2117,35 @@ function serviceIdentity(service: NacosServiceInfo | null) {
   return service ? `${service.groupName || "DEFAULT_GROUP"}\u0000${service.serviceName}` : "";
 }
 
+function serviceInstanceHealthLabel(service: NacosServiceInfo) {
+  const summary = nacosServiceInstanceHealthSummary(service);
+  if (!summary) return "";
+  const counts = { healthy: summary.healthy, total: summary.total };
+  switch (summary.status) {
+    case "allHealthy":
+      return t("nacos.serviceInstancesAllHealthy", counts);
+    case "partiallyHealthy":
+      return t("nacos.serviceInstancesPartiallyHealthy", counts);
+    case "noHealthyInstances":
+      return t("nacos.serviceInstancesNoHealthyInstances", counts);
+    case "noInstances":
+      return t("nacos.serviceInstancesNoInstances");
+  }
+}
+
+function serviceInstanceHealthClass(service: NacosServiceInfo) {
+  switch (nacosServiceInstanceHealthSummary(service)?.status) {
+    case "allHealthy":
+      return "border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+    case "partiallyHealthy":
+      return "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+    case "noHealthyInstances":
+      return "border-destructive/50 bg-destructive/10 text-destructive";
+    default:
+      return "border-muted-foreground/40 text-muted-foreground";
+  }
+}
+
 async function loadServiceDetail() {
   const service = selectedService.value ? { ...selectedService.value } : null;
   if (!service || !getServiceCapability.value.supported) return;
@@ -2367,7 +2402,9 @@ async function reconcileInstancePresence(ref: NacosInstanceRef, shouldExist: boo
 async function updateInstance(instance: NacosInstanceInfo, patch: NacosInstancePatch) {
   if (!selectedService.value || props.readOnly || !supportsInstanceUpdate.value) return;
   const ref = instanceRef(instance);
-  if (!(await confirmNacosMutation(t("nacos.confirmInstanceTitle"), props.connectionId, ref.namespace || namespace.value))) return;
+  const availabilityAction = patch.enabled == null ? "" : t(patch.enabled ? "nacos.online" : "nacos.offline");
+  const reviewText = availabilityAction ? `${t("nacos.confirmInstanceTitle")}: ${availabilityAction}` : t("nacos.confirmInstanceTitle");
+  if (!(await confirmNacosMutation(reviewText, props.connectionId, ref.namespace || namespace.value))) return;
   const key = instanceIdentity(instance);
   const updateId = ++instanceUpdateSequence;
   const operationToken = beginInstanceOperation(key);
@@ -3193,8 +3230,11 @@ useUpdateBlocker(() =>
               <span class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <Server class="h-3.5 w-3.5" />
                 {{ service.groupName || serviceGroup }}
-                <span v-if="service.ipCount != null">· {{ t("nacos.instanceCount", { count: service.ipCount }) }}</span>
-                <span v-if="service.healthyInstanceCount != null">· {{ t("nacos.healthy") }} {{ service.healthyInstanceCount }}</span>
+                <Badge v-if="serviceInstanceHealthLabel(service)" data-testid="nacos-service-instance-status" variant="outline" class="h-5" :class="serviceInstanceHealthClass(service)">{{ serviceInstanceHealthLabel(service) }}</Badge>
+                <template v-else>
+                  <span v-if="service.ipCount != null">· {{ t("nacos.instanceCount", { count: service.ipCount }) }}</span>
+                  <span v-if="service.healthyInstanceCount != null">· {{ t("nacos.healthy") }} {{ service.healthyInstanceCount }}</span>
+                </template>
                 <span v-if="service.clusterCount != null">· {{ t("nacos.cluster") }} {{ service.clusterCount }}</span>
                 <Badge v-if="service.triggerFlag === 'true'" variant="outline" class="h-5 border-amber-500 text-amber-700">{{ t("nacos.protectionTriggered") }}</Badge>
               </span>
@@ -3337,7 +3377,9 @@ useUpdateBlocker(() =>
                       <span class="nacos-instance-address max-w-full font-mono text-sm font-medium">{{ instance.ip }}:{{ instance.port }}</span>
                       <Badge variant="outline">{{ instance.clusterName || "DEFAULT" }}</Badge>
                       <Badge variant="outline" :class="instance.healthy === false ? 'border-destructive/50 text-destructive' : 'border-emerald-500/50 text-emerald-700 dark:text-emerald-300'">{{ instance.healthy === false ? t("nacos.unhealthy") : t("nacos.healthy") }}</Badge>
-                      <Badge :variant="instance.enabled === false ? 'outline' : 'secondary'" :class="instance.enabled === false ? 'border-muted-foreground/50 text-muted-foreground' : ''">{{ instance.enabled === false ? t("nacos.offline") : t("nacos.enabled") }}</Badge>
+                      <Badge data-testid="nacos-instance-availability-status" :variant="instance.enabled === false ? 'outline' : 'secondary'" :class="instance.enabled === false ? 'border-muted-foreground/50 text-muted-foreground' : ''">{{
+                        instance.enabled === false ? t("nacos.offline") : t("nacos.online")
+                      }}</Badge>
                       <Badge v-if="instance.ephemeral != null" variant="outline">{{ instance.ephemeral ? t("nacos.ephemeral") : t("nacos.persistent") }}</Badge>
                     </div>
                     <div class="nacos-instance-detail-grid mt-3 grid gap-x-5 gap-y-3 text-xs">
@@ -3380,12 +3422,13 @@ useUpdateBlocker(() =>
                       size="sm"
                       variant="outline"
                       class="h-7 gap-1"
+                      data-testid="nacos-instance-availability-action"
                       :class="instance.enabled === false ? 'border-emerald-500/50 text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200' : 'border-destructive/50 text-destructive hover:bg-destructive/10'"
                       :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)"
                       @click="requestUpdateInstance(instance, { enabled: !instance.enabled })"
                     >
                       <Loader2 v-if="isInstanceUpdating(instance)" class="h-3 w-3 animate-spin" />
-                      {{ instance.enabled === false ? t("nacos.enable") : t("nacos.disable") }}
+                      {{ instance.enabled === false ? t("nacos.online") : t("nacos.offline") }}
                     </Button>
                     <Button v-if="updateInstanceHealthCapability.supported" size="sm" variant="outline" class="h-7" :disabled="readOnly || isInstanceUpdating(instance)" @click="requestUpdateInstance(instance, { healthy: !instance.healthy })">
                       {{ instance.healthy === false ? t("nacos.markHealthy") : t("nacos.markUnhealthy") }}
@@ -3711,10 +3754,10 @@ useUpdateBlocker(() =>
 
     <DangerConfirmDialog
       :open="!!pendingInstanceUpdate"
-      :title="t('nacos.confirmInstanceTitle')"
+      :title="pendingInstanceTitle"
       :message="t('nacos.confirmInstanceMessage')"
       :details="pendingInstanceDetails"
-      :confirm-label="t('dangerDialog.confirm')"
+      :confirm-label="pendingInstanceConfirmLabel"
       :loading="pendingInstanceUpdate ? isInstanceUpdating(pendingInstanceUpdate.instance) : false"
       :close-on-confirm="false"
       @update:open="

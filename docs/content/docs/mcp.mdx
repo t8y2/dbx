@@ -162,6 +162,10 @@ DBX plugins whose sidecar implements the `mcp/tools` bridge are **discovered aut
 - The tool allowlist matches exact names: after enabling plugin tools, add each `dbx_<prefix>__<tool>` you want exposed (or clear the allowlist to allow everything).
 - The Web / Docker backend does not serve plugin tools.
 
+### Lazy discovery (`DBX_MCP_PLUGIN_TOOLS`)
+
+With many plugins, one flat `tools/list` spends a lot of context on argument schemas. Set `DBX_MCP_PLUGIN_TOOLS=lazy` to expose only three meta tools — `dbx_plugin_list` (filterable plugin catalog), `dbx_plugin_tools` (one plugin's tools and schemas), and `dbx_plugin_call` (call by **plugin id** + tool) — so schemas enter the context on demand. `both` advertises the flat tools and the meta tools at once. The default stays `flat`.
+
 ## Resources
 
 Clients that support MCP Resources can read the connection catalog and expand templates for database metadata:

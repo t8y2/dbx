@@ -162,6 +162,10 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 - 工具白名单按精确名称匹配：启用插件工具后，请把要暴露的 `dbx_<前缀>__<工具名>` 逐个加入白名单（或清空白名单以全部放行）；
 - Web / Docker 后端不提供插件工具。
 
+### 懒发现（`DBX_MCP_PLUGIN_TOOLS`）
+
+插件较多时，平铺的 `tools/list` 会在参数 schema 上消耗大量上下文。设置 `DBX_MCP_PLUGIN_TOOLS=lazy` 只暴露三个元工具——`dbx_plugin_list`（可过滤的插件目录）、`dbx_plugin_tools`（按**插件 id** 查看某插件的工具与 schema）、`dbx_plugin_call`（按插件 id + 工具名调用）——schema 在需要时才进入上下文。`both` 同时平铺与元工具。默认仍为 `flat`。
+
 ## Resources
 
 支持 MCP Resources 的客户端可以读取连接目录，并通过模板获取数据库元数据：

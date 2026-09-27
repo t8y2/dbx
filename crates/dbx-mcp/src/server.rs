@@ -64,6 +64,34 @@ pub struct ListDatabasesRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PluginListRequest {
+    #[schemars(description = "Optional case-insensitive keyword matched against plugin ids and names")]
+    #[schemars(extend("type" = "string"))]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PluginToolsRequest {
+    #[schemars(description = "Unique ID of the plugin, as returned by dbx_plugin_list")]
+    pub plugin_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PluginCallRequest {
+    #[schemars(description = "Unique ID of the plugin, as returned by dbx_plugin_list")]
+    pub plugin_id: String,
+    #[schemars(description = "Tool name exactly as listed by dbx_plugin_tools")]
+    pub tool: String,
+    #[schemars(description = "Tool arguments object, matching the tool schema returned by dbx_plugin_tools")]
+    pub arguments: Option<serde_json::Value>,
+    #[schemars(
+        description = "Optional DBX connection to run the tool on when the plugin has several allowed connections"
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub dbx_connection: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConnectionSelector {
     #[schemars(description = "Unique ID of the DBX connection")]
     #[schemars(extend("type" = "string"))]
@@ -662,9 +690,41 @@ fn bounded_history_response<T: serde::Serialize>(value: &T) -> String {
 pub struct DbxMcpServer {
     backend: Arc<dyn DbxBackend>,
     scope: McpScope,
+    plugin_tools_mode: PluginToolsMode,
     sessions: Arc<McpSessionStore>,
     pending_salesforce_writes: Arc<PendingSalesforceWrites>,
     tool_router: ToolRouter<Self>,
+}
+
+/// How plugin tools appear on the external server (`DBX_MCP_PLUGIN_TOOLS`):
+/// `flat` lists every plugin tool in `tools/list` (default, compatible),
+/// `lazy` exposes only the `dbx_plugin_*` meta tools so schemas enter the
+/// context on demand, `both` advertises both views.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PluginToolsMode {
+    #[default]
+    Flat,
+    Lazy,
+    Both,
+}
+
+impl PluginToolsMode {
+    pub fn from_env() -> Self {
+        match std::env::var("DBX_MCP_PLUGIN_TOOLS").ok().as_deref().map(str::trim) {
+            Some(value) if value.eq_ignore_ascii_case("lazy") => Self::Lazy,
+            Some(value) if value.eq_ignore_ascii_case("both") => Self::Both,
+            Some(value) if value.eq_ignore_ascii_case("flat") => Self::Flat,
+            _ => Self::default(),
+        }
+    }
+
+    pub fn advertise_flat(&self) -> bool {
+        matches!(self, Self::Flat | Self::Both)
+    }
+
+    pub fn advertise_meta(&self) -> bool {
+        matches!(self, Self::Lazy | Self::Both)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -732,6 +792,17 @@ impl DbxMcpServer {
     }
 
     pub fn with_runtime_options(backend: Arc<dyn DbxBackend>, scope: McpScope, web_mode: bool) -> Self {
+        Self::with_plugin_tools_mode(backend, scope, web_mode, PluginToolsMode::from_env())
+    }
+
+    /// Same as [`with_runtime_options`], but pins the plugin-tools mode —
+    /// used by tests so parallel cases cannot observe each other's env.
+    pub fn with_plugin_tools_mode(
+        backend: Arc<dyn DbxBackend>,
+        scope: McpScope,
+        web_mode: bool,
+        plugin_tools_mode: PluginToolsMode,
+    ) -> Self {
         // The workspace enables more than one rustls crypto feature through
         // transitive dependencies. Native MCP runs outside the desktop/web
         // startup paths, so select the same provider before any TLS tool call.
@@ -752,9 +823,18 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_send_message");
             tool_router.disable_route("dbx_peek_messages");
         }
+        // In `flat` mode plugin tools are merged directly into tools/list and
+        // the lazy meta tools would only duplicate them; in `lazy`/`both`
+        // they stay enabled so clients can discover on demand.
+        if !plugin_tools_mode.advertise_meta() {
+            tool_router.disable_route("dbx_plugin_list");
+            tool_router.disable_route("dbx_plugin_tools");
+            tool_router.disable_route("dbx_plugin_call");
+        }
         Self {
             backend,
             scope,
+            plugin_tools_mode,
             sessions: McpSessionStore::new(),
             pending_salesforce_writes: PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL),
             tool_router,
@@ -898,6 +978,142 @@ impl DbxMcpServer {
 
 #[tool_router]
 impl DbxMcpServer {
+    #[tool(
+        name = "dbx_plugin_list",
+        description = "List DBX plugins that contribute MCP tools. Returns each plugin's id, name, tool count, and the number of connections available for its tools. Use dbx_plugin_tools with a plugin id to inspect its tools; call them through dbx_plugin_call."
+    )]
+    async fn plugin_list(&self, Parameters(request): Parameters<PluginListRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_plugin_list").await {
+            return error;
+        }
+        let (rows, note) = match self.plugin_tool_catalog().await {
+            Ok(catalog) => catalog,
+            Err(error) => return error,
+        };
+        let filter = request.filter.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        let mut lines = Vec::new();
+        for (plugin_id, plugin_name, tool_count, connection_count) in &rows {
+            let matches = |haystack: &str| -> bool {
+                filter.is_none_or(|needle| haystack.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()))
+            };
+            if filter.is_some() && !matches(plugin_id) && !matches(plugin_name) {
+                continue;
+            }
+            lines.push(format!(
+                "- {plugin_id} · {plugin_name} · {tool_count} tool(s) · {connection_count} allowed connection(s)"
+            ));
+        }
+        if lines.is_empty() {
+            return text(match (filter, &note) {
+                (Some(_), _) => "No DBX plugin matches the filter.".to_string(),
+                (None, Some(note)) => note.clone(),
+                (None, None) => "No DBX plugin contributes MCP tools.".to_string(),
+            });
+        }
+        text(format!(
+            "{} plugin(s) contribute MCP tools:\n{}\n\nInspect tools with dbx_plugin_tools (plugin_id), call them with dbx_plugin_call.{}",
+            lines.len(),
+            lines.join("\n"),
+            note.as_ref().map(|note| format!("\n{note}")).unwrap_or_default()
+        ))
+    }
+
+    #[tool(
+        name = "dbx_plugin_tools",
+        description = "List the MCP tools of one DBX plugin by its plugin id (from dbx_plugin_list). Returns each tool's name, description, arguments schema, read-only hint, and whether a connection must be selected. Call the tool through dbx_plugin_call."
+    )]
+    async fn plugin_tools(&self, Parameters(request): Parameters<PluginToolsRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_plugin_tools").await {
+            return error;
+        }
+        let plugin_id = request.plugin_id.trim();
+        if plugin_id.is_empty() {
+            return tool_error("PLUGIN_ID_REQUIRED", "plugin_id is required; use dbx_plugin_list to find plugin ids.");
+        }
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => return backend_tool_error("DBX_TOOL_ERROR", error),
+        };
+        let entries = crate::plugin_tools::build_catalog(&providers);
+        let owned: Vec<&crate::plugin_tools::PluginToolEntry> =
+            entries.iter().filter(|entry| entry.plugin_id == plugin_id).collect();
+        if owned.is_empty() {
+            return tool_error(
+                "PLUGIN_NOT_FOUND",
+                format!("Plugin \"{plugin_id}\" does not contribute MCP tools. Use dbx_plugin_list to list plugins."),
+            );
+        }
+        let allowed = match self.allowed_plugin_connections_for(plugin_id).await {
+            Ok(allowed) => allowed,
+            Err(error) => return error,
+        };
+        let mut lines = Vec::new();
+        for entry in &owned {
+            let mut line = format!(
+                "### {}\n{}",
+                entry.tool.name,
+                crate::plugin_tools::external_tool_description(&entry.plugin_name, &entry.tool)
+            );
+            if entry.tool.read_only {
+                line.push_str("\nRead-only.");
+            }
+            let schema = crate::plugin_tools::external_tool_parameters(&entry.tool.input_schema, &allowed);
+            line.push_str(&format!("\nArguments schema: {schema}"));
+            if entry.injects_connection_id {
+                line.push_str("\nThe host injects the bound connection's id automatically.");
+            }
+            lines.push(line);
+        }
+        let connection_note = match allowed.len() {
+            0 => "No allowed connection is configured for this plugin; only connection-less tools can run.".to_string(),
+            1 => format!("Tools run on connection {} ({}); you may omit dbx_connection.", allowed[0].0, allowed[0].1),
+            _ => format!(
+                "Pass dbx_connection to choose among: {}",
+                allowed.iter().map(|(id, name)| format!("{id} = {name}")).collect::<Vec<_>>().join("; ")
+            ),
+        };
+        text(format!(
+            "{} tool(s) of plugin {plugin_id}:\n\n{}\n\n{connection_note}\nCall through dbx_plugin_call (plugin_id + tool + arguments).",
+            owned.len(),
+            lines.join("\n\n")
+        ))
+    }
+
+    #[tool(
+        name = "dbx_plugin_call",
+        description = "Call one MCP tool of a DBX plugin by plugin id (from dbx_plugin_list) and tool name (from dbx_plugin_tools). The host binds the connection from DBX settings and generates the credentials payload; pass dbx_connection only when dbx_plugin_tools lists several allowed connections."
+    )]
+    async fn plugin_call(&self, Parameters(request): Parameters<PluginCallRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_plugin_call").await {
+            return error;
+        }
+        let plugin_id = request.plugin_id.trim();
+        if plugin_id.is_empty() {
+            return tool_error("PLUGIN_ID_REQUIRED", "plugin_id is required; use dbx_plugin_list to find plugin ids.");
+        }
+        let tool = request.tool.trim();
+        if tool.is_empty() {
+            return tool_error(
+                "TOOL_NAME_REQUIRED",
+                "tool is required; use dbx_plugin_tools to list this plugin's tools.",
+            );
+        }
+        let mut arguments = request.arguments.clone().unwrap_or_else(|| json!({}));
+        if !arguments.is_object() {
+            return tool_error("INVALID_ARGUMENTS", "arguments must be a JSON object.");
+        }
+        if let Some(selector) = request.dbx_connection.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(object) = arguments.as_object_mut() {
+                object.insert(crate::plugin_tools::PLUGIN_CONNECTION_ARGUMENT.to_string(), json!(selector));
+            }
+        }
+        let dispatched = match self.call_plugin_by_id(plugin_id, tool, arguments).await {
+            Ok(result) => result,
+            Err(error) => return error,
+        };
+        self.postprocess_plugin_result(plugin_id, tool, &request.dbx_connection, dispatched).await
+    }
+
     #[tool(
         name = "dbx_list_connections",
         description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, and selected databases."
@@ -2917,7 +3133,9 @@ impl DbxMcpServer {
                 .collect(),
             None => self.tool_router.list_all(),
         };
-        tools.extend(self.plugin_tools_view(policy.as_ref()).await);
+        if self.plugin_tools_mode.advertise_flat() {
+            tools.extend(self.plugin_tools_view(policy.as_ref()).await);
+        }
         tools
     }
 
@@ -3191,6 +3409,165 @@ impl DbxMcpServer {
             Ok(value) => Ok(crate::plugin_tools::call_result_to_rmcp(value)),
             Err(error) => Ok(backend_tool_error("DBX_TOOL_ERROR", error)),
         }
+    }
+
+    /// Loaded plugin-tool catalog for the meta tools: `(plugin id, name,
+    /// tool count, allowed-connection count)` rows plus an optional note
+    /// when policy filtering hid plugins. Discovery errors degrade to a
+    /// note instead of failing `dbx_plugin_list`.
+    async fn plugin_tool_catalog(
+        &self,
+    ) -> Result<(Vec<(String, String, usize, usize)>, Option<String>), CallToolResult> {
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => {
+                return Ok((Vec::new(), Some(format!("Plugin tools are unavailable: {error}"))));
+            }
+        };
+        let allowed = match self.allowed_plugin_connections().await {
+            Ok(allowed) => allowed,
+            Err(error) => return Err(error),
+        };
+        let policy = self.load_policy().await.ok();
+        let mut rows = Vec::new();
+        let mut hidden = 0usize;
+        for provider in &providers {
+            if policy.as_ref().is_none_or(|policy| {
+                provider.tools.iter().any(|tool| {
+                    policy_allows_tool(
+                        policy,
+                        &format!(
+                            "dbx_{}__{}",
+                            {
+                                let prefixes = crate::plugin_tools::build_catalog(&[provider.clone()]);
+                                prefixes
+                                    .first()
+                                    .map(|entry| {
+                                        entry
+                                            .exposed_name
+                                            .trim_start_matches("dbx_")
+                                            .split("__")
+                                            .next()
+                                            .unwrap_or_default()
+                                            .to_string()
+                                    })
+                                    .unwrap_or_default()
+                            },
+                            &tool.name
+                        ),
+                    )
+                })
+            }) {
+                let connections = allowed.get(&provider.plugin_id).map_or(0, Vec::len);
+                rows.push((
+                    provider.plugin_id.clone(),
+                    provider.plugin_name.clone(),
+                    provider.tools.len(),
+                    connections,
+                ));
+            } else {
+                hidden += 1;
+            }
+        }
+        let note = (hidden > 0).then(|| format!("{hidden} plugin(s) are hidden by the DBX MCP tool allowlist."));
+        Ok((rows, note))
+    }
+
+    /// Resolves the policy-allowed connections of one plugin for the meta
+    /// tools. Fails closed on policy errors (same as flat calls).
+    async fn allowed_plugin_connections_for(&self, plugin_id: &str) -> Result<Vec<(String, String)>, CallToolResult> {
+        let allowed = self.allowed_plugin_connections().await?;
+        Ok(allowed.get(plugin_id).cloned().unwrap_or_default())
+    }
+
+    /// Shared call core for `dbx_plugin_call`: locates the tool by
+    /// `(plugin_id, tool name)` over a fresh discovery pass, strips
+    /// selector arguments, binds the connection, and forwards to the
+    /// backend. Returns the raw plugin answer for the caller to render.
+    async fn call_plugin_by_id(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        mut arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, CallToolResult> {
+        let providers = match self.backend.list_plugin_mcp_tools().await {
+            Ok(providers) => providers,
+            Err(error) => return Err(backend_tool_error("DBX_TOOL_ERROR", error)),
+        };
+        let entry = crate::plugin_tools::build_catalog(&providers)
+            .into_iter()
+            .find(|entry| entry.plugin_id == plugin_id && entry.tool.name == tool);
+        let Some(entry) = entry else {
+            return Err(tool_error(
+                "TOOL_NOT_FOUND",
+                format!(
+                    "Plugin \"{plugin_id}\" does not provide a tool named \"{tool}\". Use dbx_plugin_tools to list this plugin's tools."
+                ),
+            ));
+        };
+        let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
+        if let Some(object) = arguments.as_object_mut() {
+            for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
+                object.remove(*key);
+            }
+        }
+        let allowed = match self.allowed_plugin_connections().await {
+            Ok(allowed) => allowed.get(plugin_id).cloned().unwrap_or_default(),
+            Err(error) => return Err(error),
+        };
+        let bound = match crate::plugin_tools::select_connection(&allowed, selector.as_deref()) {
+            Ok(bound) => bound.cloned(),
+            Err(message) => return Err(tool_error("CONNECTION_NOT_FOUND", message)),
+        };
+        if let Some((connection_id, connection_name)) = &bound {
+            let _ = CALL_HISTORY.try_with(|history| {
+                let mut history = history.lock().unwrap();
+                history.connection_id.clone_from(connection_id);
+                history.connection_name.clone_from(connection_name);
+            });
+        }
+        if entry.injects_connection_id {
+            if let Some((connection_id, _)) = &bound {
+                if let Some(object) = arguments.as_object_mut() {
+                    object.insert("connectionId".to_string(), serde_json::Value::String(connection_id.clone()));
+                }
+            }
+        }
+        self.backend
+            .call_plugin_mcp_tool(
+                plugin_id,
+                tool,
+                bound.as_ref().map(|(connection_id, _)| connection_id.as_str()),
+                &arguments,
+            )
+            .await
+            .map_err(|error| backend_tool_error("DBX_TOOL_ERROR", error))
+    }
+
+    /// Renders a `dbx_plugin_call` answer: converts the plugin result,
+    /// appends a connection hint when the caller must pick one explicitly.
+    async fn postprocess_plugin_result(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        requested_selector: &Option<String>,
+        value: serde_json::Value,
+    ) -> CallToolResult {
+        let mut result = crate::plugin_tools::call_result_to_rmcp(value);
+        if requested_selector.is_none() {
+            if let Ok(allowed) = self.allowed_plugin_connections_for(plugin_id).await {
+                if allowed.len() > 1 {
+                    let choices =
+                        allowed.iter().map(|(id, name)| format!("{id} = {name}")).collect::<Vec<_>>().join("; ");
+                    let hint = format!(
+                        "\n[This plugin has several allowed connections; pass dbx_connection to choose: {choices}]"
+                    );
+                    result.content.push(rmcp::model::ContentBlock::text(hint));
+                }
+            }
+        }
+        let _ = (plugin_id, tool);
+        result
     }
 }
 
@@ -5203,6 +5580,119 @@ mod tests {
         assert!(properties.get("connectionId").is_none(), "host-bound argument stays out of the advertised schema");
         let list = tools.iter().find(|tool| tool.name.as_ref() == "dbx_kafka__kafka_topics_list").unwrap();
         assert!(list.annotations.as_ref().and_then(|a| a.read_only_hint).expect("readOnlyHint passthrough"));
+    }
+
+    #[tokio::test]
+    async fn plugin_meta_tools_discover_and_call_by_plugin_id() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                plugin_connection("k1", "prod", "io.dbx.kafka"),
+                plugin_connection("k2", "test", "io.dbx.kafka"),
+            ],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        // dbx_plugin_list: one row, id + counts.
+        let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        assert_eq!(list.is_error, Some(false));
+        let text = result_text(&list);
+        assert!(text.contains("io.dbx.kafka"), "{text}");
+        assert!(text.contains("2 tool(s)") && text.contains("2 allowed connection(s)"), "{text}");
+
+        // dbx_plugin_list with a filter that matches nothing.
+        let none = server.plugin_list(Parameters(PluginListRequest { filter: Some("postgres".into()) })).await;
+        assert!(result_text(&none).contains("No DBX plugin matches"), "{}", result_text(&none));
+
+        // dbx_plugin_tools: per-plugin schemas with the connection selector note.
+        let tools = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.kafka".into() })).await;
+        assert_eq!(tools.is_error, Some(false));
+        let text = result_text(&tools);
+        assert!(text.contains("kafka_topics_delete") && text.contains("kafka_topics_list"), "{text}");
+        assert!(text.contains("dbx_connection"), "multi-connection hint expected: {text}");
+
+        // Unknown plugin id fails with a discovery pointer.
+        let unknown = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.nope".into() })).await;
+        assert_eq!(unknown.is_error, Some(true));
+        assert!(result_text(&unknown).contains("does not contribute MCP tools"), "{}", result_text(&unknown));
+
+        // dbx_plugin_call routes by plugin id + tool name; selector stripped.
+        let call = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_delete".into(),
+                arguments: Some(json!({ "topics": ["t"], "dbx_connection": "k2" })),
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(call.is_error, Some(false), "{}", result_text(&call));
+        let calls = backend.plugin_tool_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "io.dbx.kafka");
+        assert_eq!(calls[0].1, "kafka_topics_delete");
+        assert_eq!(calls[0].2.as_deref(), Some("k2"));
+        drop(calls);
+
+        // Unknown tool under a known plugin id.
+        let unknown_tool = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "nope".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(unknown_tool.is_error, Some(true));
+        assert!(result_text(&unknown_tool).contains("does not provide a tool named"), "{}", result_text(&unknown_tool));
+    }
+
+    #[tokio::test]
+    async fn plugin_meta_tools_respect_mode_and_policy() {
+        // flat 模式（默认构造走 env；此处直接构造 Lazy 验证过滤）——先验证 policy。
+        let restricted = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy {
+                allowed_tool_names: Some(vec!["dbx_plugin_list".to_string(), "dbx_list_connections".to_string()]),
+                ..Default::default()
+            },
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(restricted, McpScope::default(), false);
+        // call/tools 被白名单拒绝。
+        let call = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_list".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(call.is_error, Some(true));
+        assert!(result_text(&call).contains("TOOL_OUT_OF_SCOPE"), "{}", result_text(&call));
+        // list 仍在白名单内，可列出。
+        let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        assert_eq!(list.is_error, Some(false), "{}", result_text(&list));
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_mode_switches_advertised_views() {
+        // default（flat）：router 禁用 meta 路由。
+        let flat = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let flat_router = &flat.tool_router;
+        assert!(flat_router.list_all().iter().all(|tool| !tool.name.as_ref().starts_with("dbx_plugin_")));
+        // lazy 模式：保留 meta 路由（mode 注入，避免并行测试间的环境变量竞态）。
+        let lazy = DbxMcpServer::with_plugin_tools_mode(
+            Arc::new(FakeBackend::default()),
+            McpScope::default(),
+            false,
+            PluginToolsMode::Lazy,
+        );
+        let binding = lazy.tool_router.list_all();
+        let names: Vec<&str> = binding.iter().map(|tool| tool.name.as_ref()).collect();
+        for expected in ["dbx_plugin_list", "dbx_plugin_tools", "dbx_plugin_call"] {
+            assert!(names.contains(&expected), "{expected} missing in {names:?}");
+        }
     }
 
     #[tokio::test]

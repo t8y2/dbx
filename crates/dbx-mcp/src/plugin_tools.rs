@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+#[doc(hidden)]
+pub use dbx_core::ai::plugin_tools::CONNECTION_ARGUMENT as PLUGIN_CONNECTION_ARGUMENT;
 use dbx_core::ai::plugin_tools::{
     exposed_tool_name, plugin_prefixes, sanitize_schema, RawPluginTool, CONNECTION_ARGUMENT, HOST_BOUND_ARGUMENTS,
 };

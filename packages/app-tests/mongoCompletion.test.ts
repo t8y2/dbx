@@ -589,6 +589,28 @@ test("every suggested option key parses on the method that offers it", () => {
   }
 });
 
+test("completes commands addressed to another database through getSiblingDB", () => {
+  // The parser accepts `db.getSiblingDB("x").coll.find(…)`, so the editor has to complete it the
+  // same way it completes `db.coll.find(…)` — including resolving the collection, which is what
+  // loads field names.
+  // Addressing another database offers exactly what `db.` offers.
+  assert.deepEqual(labels('db.getSiblingDB("archive").', { collections }), labels("db.", { collections }));
+  assert.deepEqual(labels('db.getSiblingDB("archive").user_ev', { collections }), ["user_events"]);
+
+  const methods = labels('db.getSiblingDB("archive").users.', { collections });
+  assert.ok(methods.includes("find") && methods.includes("updateOne"));
+  assert.equal(getMongoCompletionContext('db.getSiblingDB("archive").users.', 'db.getSiblingDB("archive").users.'.length).collection, "users");
+
+  assert.deepEqual(labels('db.getSiblingDB("archive").users.find({ na', { fields }), ["name"]);
+  assert.ok(labels('db.getSiblingDB("archive").users.find({}).', { fields }).includes("limit"));
+  assert.ok(labels("db.getSiblingDB('archive').users.updateOne({}, { $s", { fields }).includes("$set"));
+  assert.deepEqual(labels('db.getSiblingDB("archive").getCollection("user_ev', { collections }), ["user_events"]);
+  assert.equal(
+    getMongoCompletionContext('db.getSiblingDB("archive").getCollection("users").', 'db.getSiblingDB("archive").getCollection("users").'.length).collection,
+    "users",
+  );
+});
+
 test("completes bulkWrite operations, their fields, and the shapes inside them", () => {
   assert.deepEqual(labels("db.users.bulkWrite([{ "), ["deleteMany", "deleteOne", "insertOne", "replaceOne", "updateMany", "updateOne"]);
   assert.deepEqual(labels("db.users.bulkWrite([{ upd"), ["updateMany", "updateOne"]);

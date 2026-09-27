@@ -263,7 +263,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 
   if (isInsideMongoComment(text, safeCursor)) return { mode: "none", prefix: "", from: safeCursor };
 
-  if (beforeCursor.endsWith("db.")) return { mode: "collection", prefix: "", from: safeCursor, collection };
+  if (endsAtDbRootDot(beforeCursor)) return { mode: "collection", prefix: "", from: safeCursor, collection };
 
   const getCollectionPrefix = matchGetCollectionPrefix(beforeCursor);
   if (getCollectionPrefix) {
@@ -1147,22 +1147,35 @@ function readMethodPrefix(beforeCursor: string): { prefix: string; from: number 
   return { prefix: beforeCursor.slice(from), from };
 }
 
+/**
+ * The database a command is addressed to: `db`, or another database through
+ * `db.getSiblingDB("other")`. The commands are otherwise identical, so every matcher below
+ * accepts either root rather than only a literal `db.`.
+ */
+const DB_ROOT = String.raw`db(?:\s*\.\s*getSiblingDB\s*\(\s*(?:"[^"]*"|'[^']*')\s*\))?`;
+const COLLECTION_REF = String.raw`(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+["']\))`;
+
+/** `db.` or `db.getSiblingDB("other").` immediately before the cursor. */
+function endsAtDbRootDot(beforeCursor: string): boolean {
+  return new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\s*\.$`).test(beforeCursor);
+}
+
 function matchDbCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
-  const match = /(?:^|[\s;(])db\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$/.exec(beforeCursor);
+  const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`).exec(beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
 }
 
 function matchGetCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
-  const match = /(?:^|[\s;(])db\.getCollection\(\s*(["'][^"'\\]*)$/.exec(beforeCursor);
+  const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.getCollection\(\s*(["'][^"'\\]*)$`).exec(beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
 }
 
 function isAfterCollectionDot(beforeCursor: string): boolean {
-  return /(?:^|[\s;(])db\.(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+["']\))\.[\w$-]*$/.test(beforeCursor);
+  return new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.[\w$-]*$`).test(beforeCursor);
 }
 
 /**
@@ -1170,7 +1183,7 @@ function isAfterCollectionDot(beforeCursor: string): boolean {
  * is while no other cursor method has been chained on.
  */
 function matchCursorMethodDot(beforeCursor: string): { countable: boolean } | null {
-  const collectionCall = /(?:^|[\s;(])db\.(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+["']\))\.(find|aggregate)\s*\(/g;
+  const collectionCall = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.(find|aggregate)\s*\(`, "g");
   let lastMatch: RegExpExecArray | null = null;
   let match: RegExpExecArray | null;
   while ((match = collectionCall.exec(beforeCursor))) lastMatch = match;
@@ -1301,8 +1314,8 @@ function isInsideMongoComment(text: string, cursor: number): boolean {
 
 function extractActiveCollection(text: string, cursor: number): string | undefined {
   const before = text.slice(0, cursor);
-  const getCollectionMatches = [...before.matchAll(/db\.getCollection\(["']([^"']+)["']\)/g)];
-  const directMatches = [...before.matchAll(/db\.([A-Za-z_][\w$-]*)\s*\./g)].filter((match) => match[1] !== "getCollection");
+  const getCollectionMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.getCollection\(["']([^"']+)["']\)`, "g"))];
+  const directMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.([A-Za-z_][\w$-]*)\s*\.`, "g"))].filter((match) => match[1] !== "getCollection");
   const lastGetCollection = getCollectionMatches[getCollectionMatches.length - 1];
   const lastDirect = directMatches[directMatches.length - 1];
   const getCollectionIndex = lastGetCollection?.index ?? -1;

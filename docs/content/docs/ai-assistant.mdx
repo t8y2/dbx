@@ -129,13 +129,13 @@ Skill bodies are read only when a request is sent, directly from disk, and valid
 
 In Agent mode with an API provider, the assistant can also call tools contributed by installed plugins — for example run a command over SSH, read container logs, or inspect Kafka consumer lag — and combine them with database tools in one answer.
 
-1. Open Plugin Center → Installed, select the plugin, and turn on **Built-in AI tools**. **Show tools** lists what the assistant would get and which tools need approval.
+1. Plugin tools are enabled automatically: plugins that implement the tool bridge (SSH, Files, Kafka, ...) become callable once installed. Open Plugin Center → Installed, select the plugin, and use **Show tools** to list what the assistant would get and which tools need approval. Turn the **Built-in AI tools** switch off to exclude a plugin (the opt-out persists).
 2. Open the plugin connection the assistant should use (for example the SSH server). Tools only run against connections that are open.
 3. Ask in Agent mode. Tools the plugin declares read-only run directly; any other call pauses the run and shows the exact arguments with **Allow once** / **Deny**. Unanswered requests are denied after five minutes, and Stop cancels a pending request.
 
 When bound to a plugin connection, the assistant shows the plugin logo and hides the database/schema selectors. It skips database metadata loading and offers only the time utility and enabled plugin tools in Agent mode.
 
-Tool output is sent to your AI model like query results. Leave the switch off for plugins whose data should not reach the model. Turning it off also blocks subsequent calls from a run already in progress. CLI agent providers do not receive plugin tools.
+Tool output is sent to your AI model like query results. Turn the **Built-in AI tools** switch off for plugins whose data should not reach the model. Turning it off also blocks subsequent calls from a run already in progress. CLI agent providers do not receive plugin tools.
 
 ## Writes and Production Safety
 

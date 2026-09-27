@@ -103,7 +103,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 | `engines` | Yes | Compatibility declaration; it must contain `host_api`. |
 | `permissions` | No | Minimal capability set, described below. |
 | `entrypoints` | No | UI and native-sidecar entrypoints. |
-| `contributions` | No | Connection, workbench, filesystem, connection-menu, and result-view declarations. |
+| `contributions` | No | Connection, workbench, filesystem, connection-menu, result-view, command/menu, and MCP tool-surface declarations. |
 | `localizations` | No | Locale-specific names, descriptions, fields, and action labels. |
 
 ### Engines, Permissions, and Entrypoints
@@ -702,7 +702,7 @@ A plugin with a native backend can expose tools that the built-in DBX AI assista
 
 What the host adds on top:
 
-- **Opt-in.** Nothing is exposed until the user enables the plugin under Plugin Center → Installed → Built-in AI tools; the same panel lists the tools and marks which ones need approval.
+- **Detected, revocable.** Every installed, compatible plugin with a backend contributes tools automatically — implementing the `mcp/tools` bridge is the declaration of intent. The Plugin Center switch (Installed → Built-in AI tools) turns a plugin off for good, and the same panel lists the tools and marks which ones need approval. A manifest `mcp` contribution with `ai_tools: false` opts a plugin out of this surface.
 - **Open connections only.** Tools are offered for the plugin connections the user currently has open. DBX binds the connection itself: it strips `connectionId` / `connectionName` from the schema the model sees and injects the bound `connectionId` into the forwarded arguments when your schema declares it. With several open connections the model picks one through an added `dbx_connection` argument.
 - **Approval by default.** Only tools whose entry sets `"annotations": { "readOnlyHint": true }` run without asking. Every other call pauses the run and shows the exact arguments to the user, who allows it once or denies it; an unanswered request is denied after five minutes. Mark genuinely read-only tools, and keep your own guards (read-only connection flags, two-phase confirmations) — the approval covers model mistakes, not your plugin's own safety rules.
 - **Portable schemas.** Tool names are exposed as `<prefix>__<tool>` (for example `ssh__ssh_exec`), and schemas are reduced to the subset every supported model provider accepts: `type`, `description`, `properties`, `required`, `items`, string `enum`, and numeric/length/item bounds. Keep argument names to letters, digits, and underscores.

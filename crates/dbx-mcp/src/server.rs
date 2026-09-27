@@ -3428,12 +3428,9 @@ impl DbxMcpServer {
         // the allowlist check below uses exactly the names a flat tools/list
         // would advertise.
         let entries = crate::plugin_tools::build_catalog(&providers);
-        let allowed = match self.allowed_plugin_connections().await {
-            Ok(allowed) => allowed,
-            // Listing degrades on policy errors the same way the flat view
-            // does; `dbx_plugin_tools`/`dbx_plugin_call` still fail closed.
-            Err(_) => Default::default(),
-        };
+        // Listing degrades on policy errors the same way the flat view does;
+        // `dbx_plugin_tools`/`dbx_plugin_call` still fail closed.
+        let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
         let policy = self.load_policy().await.ok();
         let mut grouped: std::collections::BTreeMap<String, (String, usize, bool)> = Default::default();
         for entry in &entries {
@@ -3493,9 +3490,7 @@ impl DbxMcpServer {
         // Lazy calls are governed by the same per-tool allowlist as the flat
         // surface: gate on the exposed name so an allowlist cannot be bypassed
         // by addressing a tool through its plugin id instead.
-        if let Err(error) = self.ensure_tool_allowed(&entry.exposed_name).await {
-            return Err(error);
-        }
+        self.ensure_tool_allowed(&entry.exposed_name).await?;
         let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
         if let Some(object) = arguments.as_object_mut() {
             for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
@@ -5618,12 +5613,13 @@ mod tests {
             }))
             .await;
         assert_eq!(call.is_error, Some(false), "{}", result_text(&call));
-        let calls = backend.plugin_tool_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "io.dbx.kafka");
-        assert_eq!(calls[0].1, "kafka_topics_delete");
-        assert_eq!(calls[0].2.as_deref(), Some("k2"));
-        drop(calls);
+        {
+            let calls = backend.plugin_tool_calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, "io.dbx.kafka");
+            assert_eq!(calls[0].1, "kafka_topics_delete");
+            assert_eq!(calls[0].2.as_deref(), Some("k2"));
+        }
 
         // Unknown tool under a known plugin id.
         let unknown_tool = server

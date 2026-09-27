@@ -3424,47 +3424,32 @@ impl DbxMcpServer {
                 return Ok((Vec::new(), Some(format!("Plugin tools are unavailable: {error}"))));
             }
         };
+        // The catalog computes the real (possibly extended) exposed names, so
+        // the allowlist check below uses exactly the names a flat tools/list
+        // would advertise.
+        let entries = crate::plugin_tools::build_catalog(&providers);
         let allowed = match self.allowed_plugin_connections().await {
             Ok(allowed) => allowed,
-            Err(error) => return Err(error),
+            // Listing degrades on policy errors the same way the flat view
+            // does; `dbx_plugin_tools`/`dbx_plugin_call` still fail closed.
+            Err(_) => Default::default(),
         };
         let policy = self.load_policy().await.ok();
+        let mut grouped: std::collections::BTreeMap<String, (String, usize, bool)> = Default::default();
+        for entry in &entries {
+            let record =
+                grouped.entry(entry.plugin_id.clone()).or_insert_with(|| (entry.plugin_name.clone(), 0, false));
+            record.1 += 1;
+            if policy.as_ref().is_none_or(|policy| policy_allows_tool(policy, &entry.exposed_name)) {
+                record.2 = true;
+            }
+        }
         let mut rows = Vec::new();
         let mut hidden = 0usize;
-        for provider in &providers {
-            if policy.as_ref().is_none_or(|policy| {
-                provider.tools.iter().any(|tool| {
-                    policy_allows_tool(
-                        policy,
-                        &format!(
-                            "dbx_{}__{}",
-                            {
-                                let prefixes = crate::plugin_tools::build_catalog(&[provider.clone()]);
-                                prefixes
-                                    .first()
-                                    .map(|entry| {
-                                        entry
-                                            .exposed_name
-                                            .trim_start_matches("dbx_")
-                                            .split("__")
-                                            .next()
-                                            .unwrap_or_default()
-                                            .to_string()
-                                    })
-                                    .unwrap_or_default()
-                            },
-                            &tool.name
-                        ),
-                    )
-                })
-            }) {
-                let connections = allowed.get(&provider.plugin_id).map_or(0, Vec::len);
-                rows.push((
-                    provider.plugin_id.clone(),
-                    provider.plugin_name.clone(),
-                    provider.tools.len(),
-                    connections,
-                ));
+        for (plugin_id, (plugin_name, tool_count, any_allowed)) in grouped {
+            if any_allowed {
+                let connections = allowed.get(&plugin_id).map_or(0, Vec::len);
+                rows.push((plugin_id, plugin_name, tool_count, connections));
             } else {
                 hidden += 1;
             }
@@ -3505,6 +3490,12 @@ impl DbxMcpServer {
                 ),
             ));
         };
+        // Lazy calls are governed by the same per-tool allowlist as the flat
+        // surface: gate on the exposed name so an allowlist cannot be bypassed
+        // by addressing a tool through its plugin id instead.
+        if let Err(error) = self.ensure_tool_allowed(&entry.exposed_name).await {
+            return Err(error);
+        }
         let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
         if let Some(object) = arguments.as_object_mut() {
             for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
@@ -5673,6 +5664,48 @@ mod tests {
         // list 仍在白名单内，可列出。
         let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
         assert_eq!(list.is_error, Some(false), "{}", result_text(&list));
+    }
+
+    #[tokio::test]
+    async fn plugin_call_is_gated_by_the_flat_tool_allowlist() {
+        // The meta tool itself is allowed, but the flat name of the targeted
+        // plugin tool is not: lazy access must not bypass the allowlist.
+        let restricted = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy {
+                allowed_tool_names: Some(vec![
+                    "dbx_plugin_call".to_string(),
+                    "dbx_kafka__kafka_topics_list".to_string(),
+                ]),
+                ..Default::default()
+            },
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(restricted.clone(), McpScope::default(), false);
+
+        let denied = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_delete".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(denied.is_error, Some(true));
+        assert!(result_text(&denied).contains("TOOL_OUT_OF_SCOPE"), "{}", result_text(&denied));
+        assert!(restricted.plugin_tool_calls.lock().unwrap().is_empty(), "the backend must not be reached");
+
+        let allowed = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_list".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(allowed.is_error, Some(false), "{}", result_text(&allowed));
+        assert_eq!(restricted.plugin_tool_calls.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

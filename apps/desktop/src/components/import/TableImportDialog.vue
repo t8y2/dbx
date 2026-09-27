@@ -179,7 +179,19 @@ const structureDatabaseType = computed(() => tableStructureDatabaseTypeForConnec
 // Mirrors the dialect list in skip-generator dispatch (transfer.rs): only these
 // engines turn the skip-duplicates option into conflict-handling INSERTs.
 const SKIP_DUPLICATE_ROWS_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "kingbase", "opengauss", "sqlite", "cloudflare-d1", "duckdb", "mysql", "doris", "starrocks"]);
+// Mirrors the conflict-clause dispatch in the import SQL generator (transfer.rs):
+// upsert/skip-existing reuse the same engines as the skip-duplicates option.
 const supportsSkipDuplicateRows = computed(() => structureDatabaseType.value !== undefined && SKIP_DUPLICATE_ROWS_DATABASE_TYPES.has(structureDatabaseType.value));
+const supportsConflictImportModes = supportsSkipDuplicateRows;
+const primaryKeyTargetColumns = computed(() => targetColumns.value.filter((column) => column.is_primary_key).map((column) => column.name));
+const mappedTargetColumnNames = computed(() => new Set(mappedColumns.value.map((mapping) => mapping.targetColumn)));
+const upsertModeIssues = computed(() => {
+  if (importMode.value !== "upsert" || targetMode.value !== "existing" || !existingTargetMetadataReady.value) return [];
+  if (primaryKeyTargetColumns.value.length === 0) return [t("tableImport.upsertNoPrimaryKey")];
+  const missing = primaryKeyTargetColumns.value.filter((name) => !mappedTargetColumnNames.value.has(name));
+  if (missing.length > 0) return [t("tableImport.upsertPrimaryKeyNotMapped", { columns: missing.join(", ") })];
+  return [];
+});
 const targetSchema = computed(() => metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema));
 const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(structureDatabaseType.value), Object.values(columnDataTypes.value)));
 const hasExistingTarget = computed(() => !!props.prefillTable || loadingExistingTables.value || existingTableNames.value.length > 0);
@@ -216,6 +228,7 @@ const batchTargetNamesValid = computed(() => {
 });
 const canImport = computed(() => {
   if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value) return false;
+  if (upsertModeIssues.value.length > 0) return false;
   if (!isBatchImport.value) return !!preview.value && !!targetTableName.value && mappingValidation.value.valid;
   if (!batchTargetNamesValid.value) return false;
   return selectedBatchTasks.value.every((task) => {
@@ -1206,6 +1219,13 @@ watch(targetMode, (mode) => {
 watch(selectedExistingTable, () => {
   if (targetMode.value === "existing") void loadTargetColumns();
 });
+// Conflict-handling modes are engine-specific; fall back to plain append when
+// the selected connection's dialect cannot express the conflict clauses.
+watch(supportsConflictImportModes, (supported) => {
+  if (!supported && importMode.value !== "append" && importMode.value !== "truncate") {
+    importMode.value = "append";
+  }
+});
 
 watch(rawProgressPercent, (percent) => {
   if (progress.value?.status === "running") {
@@ -1631,9 +1651,15 @@ watch(rawProgressPercent, (percent) => {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="append">{{ t("tableImport.append") }}</SelectItem>
+                  <SelectItem v-if="supportsConflictImportModes" value="skipExisting">{{ t("tableImport.skipExisting") }}</SelectItem>
+                  <SelectItem v-if="supportsConflictImportModes" value="upsert">{{ t("tableImport.upsert") }}</SelectItem>
                   <SelectItem value="truncate">{{ t("tableImport.truncate") }}</SelectItem>
                 </SelectContent>
               </Select>
+              <div v-for="issue in upsertModeIssues" :key="issue" class="flex items-start gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+                <AlertTriangle class="mt-0.5 h-3 w-3 shrink-0" />
+                <span>{{ issue }}</span>
+              </div>
             </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("transfer.batchSize") }}</Label>

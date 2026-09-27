@@ -5374,7 +5374,7 @@ export async function sortTablesByFkDependency(options: SortTablesByFkOptions): 
 }
 
 // --- Table File Import ---
-export type TableImportMode = "append" | "truncate";
+export type TableImportMode = "append" | "truncate" | "upsert" | "skipExisting";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
 export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql";

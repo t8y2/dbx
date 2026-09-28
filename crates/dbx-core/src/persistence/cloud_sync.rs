@@ -276,36 +276,71 @@ pub fn describe_sync_snapshot(
         && normalized_passphrase(secrets_passphrase).is_none()
         && snapshot.selection.as_ref().map_or(true, |selection| selection.ai_configs.is_none());
     let mut plugin_ui_storage = Vec::new();
-    let mut plugin_ui_storage_locked = snapshot.encrypted_secrets.is_some() && normalized_passphrase(secrets_passphrase).is_none();
-    let mut connection_secrets = snapshot.selection.as_ref().and_then(|selection| selection.connection_secrets.clone())
+    let mut plugin_ui_storage_locked =
+        snapshot.encrypted_secrets.is_some() && normalized_passphrase(secrets_passphrase).is_none();
+    let mut connection_secrets = snapshot
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.connection_secrets.clone())
         .unwrap_or_else(|| snapshot.connections.iter().map(|config| config.id.clone()).collect());
-    let mut tunnel_secrets = snapshot.selection.as_ref().and_then(|selection| selection.tunnel_secrets.clone())
-        .unwrap_or_else(|| snapshot.tunnel_profiles.as_deref().unwrap_or_default().iter().map(|profile| profile.id().to_string()).collect());
+    let mut tunnel_secrets =
+        snapshot.selection.as_ref().and_then(|selection| selection.tunnel_secrets.clone()).unwrap_or_else(|| {
+            snapshot
+                .tunnel_profiles
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|profile| profile.id().to_string())
+                .collect()
+        });
     if let (Some(blob), Some(passphrase)) = (&snapshot.encrypted_secrets, normalized_passphrase(secrets_passphrase)) {
         let payload = decrypt_sensitive_payload(blob, passphrase)?;
         ai_configs_locked = false;
         plugin_ui_storage_locked = false;
-        connection_secrets = payload.connection_secrets.iter().map(|secret| secret.connection_id.clone()).collect::<HashSet<_>>().into_iter().collect();
-        tunnel_secrets = payload.tunnel_profiles.as_deref().unwrap_or_default().iter().map(|profile| profile.id().to_string()).collect();
+        connection_secrets = payload
+            .connection_secrets
+            .iter()
+            .map(|secret| secret.connection_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        tunnel_secrets = payload
+            .tunnel_profiles
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|profile| profile.id().to_string())
+            .collect();
         ai_configs = match payload.ai_configs {
-            Some(configs) => configs.into_iter().map(|config| SyncCatalogItem { id: config.id, label: config.name }).collect(),
+            Some(configs) => {
+                configs.into_iter().map(|config| SyncCatalogItem { id: config.id, label: config.name }).collect()
+            }
             None => payload
                 .ai_config
-                .map(|config| vec![SyncCatalogItem { id: LEGACY_AI_CONFIG_SELECTION_ID.to_string(), label: config.provider.as_str().to_string() }])
+                .map(|config| {
+                    vec![SyncCatalogItem {
+                        id: LEGACY_AI_CONFIG_SELECTION_ID.to_string(),
+                        label: config.provider.as_str().to_string(),
+                    }]
+                })
                 .unwrap_or_default(),
         };
-        plugin_ui_storage = payload.plugin_ui_storage.unwrap_or_default().into_iter().map(|entry| PluginUiStorageItemRef {
-            plugin_id: entry.plugin_id,
-            key: entry.key,
-            plugin_name: None,
-        }).collect();
+        plugin_ui_storage = payload
+            .plugin_ui_storage
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| PluginUiStorageItemRef { plugin_id: entry.plugin_id, key: entry.key, plugin_name: None })
+            .collect();
     }
     let settings = serde_json::to_value(&snapshot.desktop_settings).map_err(|error| error.to_string())?;
     let mut desktop_settings = settings
         .as_object()
         .into_iter()
         .flat_map(|object| object.keys())
-        .filter(|key| !DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str()) && !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str()))
+        .filter(|key| {
+            !DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str())
+                && !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str())
+        })
         .map(|key| SyncCatalogItem { id: key.clone(), label: key.clone() })
         .collect::<Vec<_>>();
     let mut editor_settings = snapshot
@@ -329,19 +364,39 @@ pub fn describe_sync_snapshot(
         exported_at: snapshot.exported_at.clone(),
         app_version: snapshot.app_version.clone(),
         has_encrypted_secrets: snapshot.encrypted_secrets.is_some(),
-        connections: snapshot.connections.iter().map(|config| SyncCatalogItem { id: config.id.clone(), label: config.name.clone() }).collect(),
+        connections: snapshot
+            .connections
+            .iter()
+            .map(|config| SyncCatalogItem { id: config.id.clone(), label: config.name.clone() })
+            .collect(),
         connection_secrets,
-        tunnel_profiles: snapshot.tunnel_profiles.as_deref().unwrap_or_default().iter().map(|profile| {
-            let label = match profile {
-                TransportLayerConfig::Ssh(config) => &config.name,
-                TransportLayerConfig::Proxy(config) => &config.name,
-                TransportLayerConfig::HttpTunnel(config) => &config.name,
-            };
-            SyncCatalogItem { id: profile.id().to_string(), label: label.clone() }
-        }).collect(),
+        tunnel_profiles: snapshot
+            .tunnel_profiles
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|profile| {
+                let label = match profile {
+                    TransportLayerConfig::Ssh(config) => &config.name,
+                    TransportLayerConfig::Proxy(config) => &config.name,
+                    TransportLayerConfig::HttpTunnel(config) => &config.name,
+                };
+                SyncCatalogItem { id: profile.id().to_string(), label: label.clone() }
+            })
+            .collect(),
         tunnel_secrets,
-        saved_sql_folders: snapshot.saved_sql.folders.iter().map(|folder| SyncCatalogItem { id: folder.id.clone(), label: folder.name.clone() }).collect(),
-        saved_sql_files: snapshot.saved_sql.files.iter().map(|file| SyncCatalogItem { id: file.id.clone(), label: file.name.clone() }).collect(),
+        saved_sql_folders: snapshot
+            .saved_sql
+            .folders
+            .iter()
+            .map(|folder| SyncCatalogItem { id: folder.id.clone(), label: folder.name.clone() })
+            .collect(),
+        saved_sql_files: snapshot
+            .saved_sql
+            .files
+            .iter()
+            .map(|file| SyncCatalogItem { id: file.id.clone(), label: file.name.clone() })
+            .collect(),
         desktop_settings,
         editor_settings,
         ai_configs,
@@ -349,7 +404,11 @@ pub fn describe_sync_snapshot(
         plugin_ui_storage,
         plugin_ui_storage_locked,
         has_sidebar_layout: snapshot.sidebar_layout.is_some(),
-        has_pinned_tree_node_ids: snapshot.selection.as_ref().and_then(|selection| selection.pinned_tree_node_ids).unwrap_or(!snapshot.pinned_tree_node_ids.is_empty()),
+        has_pinned_tree_node_ids: snapshot
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.pinned_tree_node_ids)
+            .unwrap_or(!snapshot.pinned_tree_node_ids.is_empty()),
         selection: snapshot.selection.clone().map(|mut selection| {
             if let Some(keys) = selection.desktop_settings.as_mut() {
                 keys.retain(|key| !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str()));
@@ -386,13 +445,17 @@ pub async fn describe_local_sync_state(
         .map(|config| SyncCatalogItem { id: config.id, label: config.name })
         .collect();
     catalog.ai_configs_locked = false;
-    catalog.plugin_ui_storage = plugin_registry.map(load_plugin_ui_storage).transpose()?.unwrap_or_default().into_iter().map(|entry| {
-        PluginUiStorageItemRef {
+    catalog.plugin_ui_storage = plugin_registry
+        .map(load_plugin_ui_storage)
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| PluginUiStorageItemRef {
             plugin_id: entry.plugin_id.clone(),
             key: entry.key,
             plugin_name: plugin_registry_name(plugin_registry, &entry.plugin_id),
-        }
-    }).collect();
+        })
+        .collect();
     catalog.plugin_ui_storage_locked = false;
     catalog.has_encrypted_secrets = false;
     Ok(catalog)
@@ -555,14 +618,21 @@ fn select_saved_sql_library(
 }
 
 fn plugin_registry_name(registry: Option<&crate::plugins::PluginRegistry>, plugin_id: &str) -> Option<String> {
-    registry?.list_installed().ok()?.into_iter().find(|plugin| plugin.manifest.id == plugin_id).map(|plugin| plugin.manifest.name)
+    registry?
+        .list_installed()
+        .ok()?
+        .into_iter()
+        .find(|plugin| plugin.manifest.id == plugin_id)
+        .map(|plugin| plugin.manifest.name)
 }
 
 fn valid_plugin_storage_id(value: &str) -> bool {
     let mut chars = value.chars();
     chars.next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
         && value.len() <= 128
-        && chars.all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '.' | '_' | '-'))
+        && chars.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '.' | '_' | '-')
+        })
 }
 
 fn valid_plugin_storage_key(value: &str) -> bool {
@@ -574,7 +644,9 @@ fn load_plugin_ui_storage(registry: &crate::plugins::PluginRegistry) -> Result<V
     let mut entries = Vec::new();
     for plugin in plugins {
         let plugin_id = plugin.manifest.id;
-        if !valid_plugin_storage_id(&plugin_id) { continue; }
+        if !valid_plugin_storage_id(&plugin_id) {
+            continue;
+        }
         let path = registry.plugin_data_dir(&plugin_id).join("ui-storage.json");
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() => metadata,
@@ -605,11 +677,7 @@ fn select_plugin_ui_storage(
 ) -> Vec<PluginUiStorageEntry> {
     let Some(selected) = selected else { return entries.to_vec() };
     let selected = selected.iter().map(|entry| (entry.plugin_id.as_str(), entry.key.as_str())).collect::<HashSet<_>>();
-    entries
-        .iter()
-        .filter(|entry| selected.contains(&(entry.plugin_id.as_str(), entry.key.as_str())))
-        .cloned()
-        .collect()
+    entries.iter().filter(|entry| selected.contains(&(entry.plugin_id.as_str(), entry.key.as_str()))).cloned().collect()
 }
 
 fn prepare_plugin_ui_storage_restore(
@@ -659,7 +727,8 @@ fn write_plugin_ui_storage_restore(prepared: Vec<(std::path::PathBuf, Vec<u8>)>)
         let temp = path.with_extension("json.sync-tmp");
         {
             use std::io::Write;
-            let mut file = fs::File::create(&temp).map_err(|error| format!("cannot create plugin UI storage temp file: {error}"))?;
+            let mut file = fs::File::create(&temp)
+                .map_err(|error| format!("cannot create plugin UI storage temp file: {error}"))?;
             file.write_all(&bytes).map_err(|error| format!("cannot write plugin UI storage: {error}"))?;
             file.sync_all().map_err(|error| format!("cannot flush plugin UI storage: {error}"))?;
         }
@@ -749,7 +818,10 @@ pub async fn build_sync_snapshot_with_selection(
     let source_connections = storage.load_connections().await?;
     let source_tunnel_profiles = storage.load_tunnel_profiles().await?;
     let source_saved_sql = storage.load_saved_sql_library().await?;
-    let mut connections = select_by_id(&source_connections, selection.and_then(|selection| selection.connections.as_ref()), |item| item.id.clone());
+    let mut connections =
+        select_by_id(&source_connections, selection.and_then(|selection| selection.connections.as_ref()), |item| {
+            item.id.clone()
+        });
     let mut tunnel_profiles = select_by_id(
         &source_tunnel_profiles,
         selection.and_then(|selection| selection.tunnel_profiles.as_ref()),
@@ -798,7 +870,8 @@ pub async fn build_sync_snapshot_with_selection(
     let encrypted_secrets = if include_secrets {
         let passphrase = normalized_passphrase(options.sync_passphrase)
             .ok_or_else(|| "A sync password is required when including synced secrets.".to_string())?;
-        let mut payload = build_sensitive_payload_with_options(storage, &connections, &tunnel_profiles, options).await?;
+        let mut payload =
+            build_sensitive_payload_with_options(storage, &connections, &tunnel_profiles, options).await?;
         if let Some(profiles) = payload.tunnel_profiles.as_mut() {
             for profile in profiles {
                 clear_device_local_tunnel_path(profile);
@@ -812,7 +885,9 @@ pub async fn build_sync_snapshot_with_selection(
             if let Some(ids) = &selection.connection_secrets {
                 let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
                 let metadata_ids = connections.iter().map(|config| config.id.as_str()).collect::<HashSet<_>>();
-                payload.connection_secrets.retain(|secret| ids.contains(secret.connection_id.as_str()) && metadata_ids.contains(secret.connection_id.as_str()));
+                payload.connection_secrets.retain(|secret| {
+                    ids.contains(secret.connection_id.as_str()) && metadata_ids.contains(secret.connection_id.as_str())
+                });
             }
             if let Some(ids) = &selection.tunnel_secrets {
                 let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
@@ -895,7 +970,9 @@ fn select_syncable_desktop_settings(
         return Err("desktop settings must serialize as an object".to_string());
     };
     for key in selected {
-        if DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str()) || NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str()) {
+        if DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str())
+            || NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str())
+        {
             continue;
         }
         if let Some(value) = source.get(key) {
@@ -905,12 +982,16 @@ fn select_syncable_desktop_settings(
     serde_json::from_value(serde_json::Value::Object(filtered.clone())).map_err(|error| error.to_string())
 }
 
-fn select_syncable_editor_settings(value: Option<serde_json::Value>, selected: Option<&Vec<String>>) -> Option<serde_json::Value> {
+fn select_syncable_editor_settings(
+    value: Option<serde_json::Value>,
+    selected: Option<&Vec<String>>,
+) -> Option<serde_json::Value> {
     let value = value?;
     let Some(mut object) = value.as_object().cloned() else { return Some(value) };
     let selected = selected.map(|keys| keys.iter().map(String::as_str).collect::<HashSet<_>>());
     object.retain(|key, _| {
-        !NON_SYNCABLE_EDITOR_SETTINGS.contains(&key.as_str()) && selected.as_ref().is_none_or(|keys| keys.contains(key.as_str()))
+        !NON_SYNCABLE_EDITOR_SETTINGS.contains(&key.as_str())
+            && selected.as_ref().is_none_or(|keys| keys.contains(key.as_str()))
     });
     Some(serde_json::Value::Object(object))
 }
@@ -940,8 +1021,12 @@ fn clear_device_local_connection_paths(config: &mut ConnectionConfig) {
         }
     }
     match config.db_type {
-        DatabaseType::Mqtt => clear_external_config_path_fields(config, "auth", &["caCertPath", "clientCertPath", "clientKeyPath"]),
-        DatabaseType::Cassandra => clear_external_config_path_fields(config, "tls", &["truststore_path", "keystore_path"]),
+        DatabaseType::Mqtt => {
+            clear_external_config_path_fields(config, "auth", &["caCertPath", "clientCertPath", "clientKeyPath"])
+        }
+        DatabaseType::Cassandra => {
+            clear_external_config_path_fields(config, "tls", &["truststore_path", "keystore_path"])
+        }
         _ => {}
     }
 }
@@ -960,7 +1045,12 @@ fn clear_external_config_path_fields(config: &mut ConnectionConfig, section: &st
     }
 }
 
-fn preserve_external_config_path_fields(remote: &mut ConnectionConfig, local: &ConnectionConfig, section: &str, fields: &[&str]) {
+fn preserve_external_config_path_fields(
+    remote: &mut ConnectionConfig,
+    local: &ConnectionConfig,
+    section: &str,
+    fields: &[&str],
+) {
     let Some(local_section) = local
         .external_config
         .as_ref()
@@ -1010,18 +1100,31 @@ fn preserve_local_transport_paths(remote: &mut ConnectionConfig, local: &Connect
         remote.client_key_path.clone_from(&local.client_key_path);
         remote.jdbc_driver_paths.clone_from(&local.jdbc_driver_paths);
         for attached_database in &mut remote.attached_databases {
-            if let Some(local_database) = local.attached_databases.iter().find(|candidate| candidate.name == attached_database.name) {
+            if let Some(local_database) =
+                local.attached_databases.iter().find(|candidate| candidate.name == attached_database.name)
+            {
                 attached_database.path.clone_from(&local_database.path);
             }
         }
         match remote.db_type {
-            DatabaseType::Mqtt => preserve_external_config_path_fields(remote, local, "auth", &["caCertPath", "clientCertPath", "clientKeyPath"]),
-            DatabaseType::Cassandra => preserve_external_config_path_fields(remote, local, "tls", &["truststore_path", "keystore_path"]),
+            DatabaseType::Mqtt => preserve_external_config_path_fields(
+                remote,
+                local,
+                "auth",
+                &["caCertPath", "clientCertPath", "clientKeyPath"],
+            ),
+            DatabaseType::Cassandra => {
+                preserve_external_config_path_fields(remote, local, "tls", &["truststore_path", "keystore_path"])
+            }
             _ => {}
         }
     }
     for layer in &mut remote.transport_layers {
-        let Some(local_layer) = local.transport_layers.iter().find(|candidate| candidate.id() == layer.id() && candidate.same_type_as(layer)) else {
+        let Some(local_layer) = local
+            .transport_layers
+            .iter()
+            .find(|candidate| candidate.id() == layer.id() && candidate.same_type_as(layer))
+        else {
             continue;
         };
         if let (TransportLayerConfig::Ssh(remote), TransportLayerConfig::Ssh(local)) = (layer, local_layer) {
@@ -1088,18 +1191,20 @@ pub async fn apply_sync_snapshot_with_selection(
     plugin_registry: Option<&crate::plugins::PluginRegistry>,
 ) -> Result<ApplySnapshotSummary, String> {
     const INTERMEDIATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
-    if !matches!(snapshot.schema_version, LEGACY_SNAPSHOT_SCHEMA_VERSION | INTERMEDIATE_SNAPSHOT_SCHEMA_VERSION | SNAPSHOT_SCHEMA_VERSION) {
+    if !matches!(
+        snapshot.schema_version,
+        LEGACY_SNAPSHOT_SCHEMA_VERSION | INTERMEDIATE_SNAPSHOT_SCHEMA_VERSION | SNAPSHOT_SCHEMA_VERSION
+    ) {
         return Err(format!("Unsupported sync snapshot schema version: {}", snapshot.schema_version));
     }
     validate_sync_snapshot_metadata(snapshot)?;
 
     let selection = restore_selection.or(snapshot.selection.as_ref());
     let merge_selected_items = selection.is_some();
-    let selected_connections = select_by_id(
-        &snapshot.connections,
-        selection.and_then(|selection| selection.connections.as_ref()),
-        |item| item.id.clone(),
-    );
+    let selected_connections =
+        select_by_id(&snapshot.connections, selection.and_then(|selection| selection.connections.as_ref()), |item| {
+            item.id.clone()
+        });
     let selected_tunnel_profiles = snapshot.tunnel_profiles.as_ref().map(|profiles| {
         select_by_id(profiles, selection.and_then(|selection| selection.tunnel_profiles.as_ref()), |profile| {
             profile.id().to_string()
@@ -1113,22 +1218,28 @@ pub async fn apply_sync_snapshot_with_selection(
     let include_selected_secrets = selection.map_or(true, |selection| selection.include_secrets);
 
     let encrypted_secrets_present = snapshot.encrypted_secrets.is_some();
-    let mut sensitive_payload =
-        match (options.restore_secrets && include_selected_secrets, &snapshot.encrypted_secrets, normalized_passphrase(options.secrets_passphrase))
-        {
-            (true, Some(blob), Some(passphrase)) => Some(decrypt_sensitive_payload(blob, passphrase)?),
-            // Restore intent is explicit. Do not silently leave a user with a
-            // partial restore when the remote snapshot contains secrets.
-            (true, Some(_), None) => return Err("A sync password is required to restore synced secrets.".to_string()),
-            _ => None,
-        };
+    let mut sensitive_payload = match (
+        options.restore_secrets && include_selected_secrets,
+        &snapshot.encrypted_secrets,
+        normalized_passphrase(options.secrets_passphrase),
+    ) {
+        (true, Some(blob), Some(passphrase)) => Some(decrypt_sensitive_payload(blob, passphrase)?),
+        // Restore intent is explicit. Do not silently leave a user with a
+        // partial restore when the remote snapshot contains secrets.
+        (true, Some(_), None) => return Err("A sync password is required to restore synced secrets.".to_string()),
+        _ => None,
+    };
     // Version-1 snapshots could carry hydrated credentials directly in the
     // public connection JSON.  Treat an explicit secret restore as the
     // migration consent: extract those values before scrubbing metadata, then
     // send them through the same destination SecretStore transaction used by
     // modern encrypted payloads.  With restore disabled, metadata still
     // imports but legacy plaintext credentials are discarded.
-    if sensitive_payload.is_none() && options.restore_secrets && include_selected_secrets && snapshot.encrypted_secrets.is_none() {
+    if sensitive_payload.is_none()
+        && options.restore_secrets
+        && include_selected_secrets
+        && snapshot.encrypted_secrets.is_none()
+    {
         let tunnel_profiles = selected_tunnel_profiles.clone().unwrap_or_default();
         let has_legacy_secrets = selected_connections.iter().any(connection_has_inline_secrets)
             || tunnel_profiles.iter().any(|profile| {
@@ -1162,11 +1273,18 @@ pub async fn apply_sync_snapshot_with_selection(
         if let Some(ids) = selection.and_then(|selection| selection.connection_secrets.as_ref()) {
             let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
             let metadata_ids = selected_connections.iter().map(|config| config.id.as_str()).collect::<HashSet<_>>();
-            payload.connection_secrets.retain(|secret| ids.contains(secret.connection_id.as_str()) && metadata_ids.contains(secret.connection_id.as_str()));
+            payload.connection_secrets.retain(|secret| {
+                ids.contains(secret.connection_id.as_str()) && metadata_ids.contains(secret.connection_id.as_str())
+            });
         }
         if let Some(ids) = selection.and_then(|selection| selection.tunnel_secrets.as_ref()) {
             let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
-            let metadata_ids = selected_tunnel_profiles.as_deref().unwrap_or_default().iter().map(|profile| profile.id()).collect::<HashSet<_>>();
+            let metadata_ids = selected_tunnel_profiles
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|profile| profile.id())
+                .collect::<HashSet<_>>();
             if let Some(profiles) = payload.tunnel_profiles.as_mut() {
                 profiles.retain(|profile| ids.contains(profile.id()) && metadata_ids.contains(profile.id()));
             }
@@ -1187,9 +1305,8 @@ pub async fn apply_sync_snapshot_with_selection(
             }
         }
         if let Some(items) = selection.and_then(|selection| selection.plugin_ui_storage.as_ref()) {
-            payload.plugin_ui_storage = payload.plugin_ui_storage.take().map(|entries| {
-                select_plugin_ui_storage(&entries, Some(items))
-            });
+            payload.plugin_ui_storage =
+                payload.plugin_ui_storage.take().map(|entries| select_plugin_ui_storage(&entries, Some(items)));
         }
         if selection.is_some_and(|selection| !selection.sync_credentials) {
             payload.sync_credentials = None;
@@ -1217,7 +1334,11 @@ pub async fn apply_sync_snapshot_with_selection(
         .collect::<Vec<_>>();
     if let Some(mqtt_subscriptions) = &snapshot.mqtt_subscriptions {
         let selected_ids = connections.iter().map(|config| config.id.as_str()).collect::<HashSet<_>>();
-        let subscriptions = mqtt_subscriptions.iter().filter(|entry| selected_ids.contains(entry.connection_id.as_str())).cloned().collect::<Vec<_>>();
+        let subscriptions = mqtt_subscriptions
+            .iter()
+            .filter(|entry| selected_ids.contains(entry.connection_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
         apply_mqtt_subscriptions(&mut connections, &subscriptions)?;
     } else {
         // Snapshots created before MQTT subscription sync may still contain a
@@ -1230,48 +1351,53 @@ pub async fn apply_sync_snapshot_with_selection(
         scrub_connection_secrets(config);
     }
 
-    let (mut connection_secrets, preserve_plugin_secrets, ai_configs, mut tunnel_secret_profiles, sync_payload_credentials) =
-        if let Some(payload) = &sensitive_payload {
-            let ai_configs = if let Some(configs) = &payload.ai_configs {
-                Some(configs.clone())
-            } else {
-                payload.ai_config.as_ref().map(|old_config| {
-                    vec![AiConfigItem {
-                        id: AiConfigItem::new_id(),
-                        name: old_config.provider.as_str().to_string(),
-                        is_default: true,
-                        config: old_config.clone(),
-                    }]
-                })
-            };
-            (
-                Some(
-                    payload
-                        .connection_secrets
-                        .iter()
-                        .filter(|secret| {
-                            !(matches!(
-                                secret.key.as_str(),
-                                "password" | NACOS_AUTH_PASSWORD_KEY | NACOS_RNACOS_CONSOLE_PASSWORD_KEY
-                            ) && connections
-                                .iter()
-                                .any(|config| config.id == secret.connection_id && !config.save_password))
-                        })
-                        .map(|secret| SyncImportSecret {
-                            connection_id: secret.connection_id.clone(),
-                            key: secret.key.clone(),
-                            secret: secret.secret.clone(),
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-                !payload.plugin_secrets_included,
-                ai_configs,
-                payload.tunnel_profiles.clone(),
-                payload.sync_credentials.clone(),
-            )
+    let (
+        mut connection_secrets,
+        preserve_plugin_secrets,
+        ai_configs,
+        mut tunnel_secret_profiles,
+        sync_payload_credentials,
+    ) = if let Some(payload) = &sensitive_payload {
+        let ai_configs = if let Some(configs) = &payload.ai_configs {
+            Some(configs.clone())
         } else {
-            (None, false, None, None, None)
+            payload.ai_config.as_ref().map(|old_config| {
+                vec![AiConfigItem {
+                    id: AiConfigItem::new_id(),
+                    name: old_config.provider.as_str().to_string(),
+                    is_default: true,
+                    config: old_config.clone(),
+                }]
+            })
         };
+        (
+            Some(
+                payload
+                    .connection_secrets
+                    .iter()
+                    .filter(|secret| {
+                        !(matches!(
+                            secret.key.as_str(),
+                            "password" | NACOS_AUTH_PASSWORD_KEY | NACOS_RNACOS_CONSOLE_PASSWORD_KEY
+                        ) && connections
+                            .iter()
+                            .any(|config| config.id == secret.connection_id && !config.save_password))
+                    })
+                    .map(|secret| SyncImportSecret {
+                        connection_id: secret.connection_id.clone(),
+                        key: secret.key.clone(),
+                        secret: secret.secret.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            !payload.plugin_secrets_included,
+            ai_configs,
+            payload.tunnel_profiles.clone(),
+            payload.sync_credentials.clone(),
+        )
+    } else {
+        (None, false, None, None, None)
+    };
     let sync_credentials = if let Some(credentials) = sync_payload_credentials {
         let local_secret =
             if credentials.is_empty() { None } else { Some(storage.load_or_create_local_device_secret().await?) };
@@ -1337,7 +1463,8 @@ pub async fn apply_sync_snapshot_with_selection(
             settings
                 .keys()
                 .filter(|key| {
-                    !DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str()) && !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str())
+                    !DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str())
+                        && !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str())
                 })
                 .cloned()
                 .collect::<HashSet<_>>()
@@ -1356,13 +1483,15 @@ pub async fn apply_sync_snapshot_with_selection(
             })
             .collect(),
     );
-    let plugin_ui_storage_restore = match sensitive_payload.as_ref().and_then(|payload| payload.plugin_ui_storage.as_ref()) {
-        Some(entries) if !entries.is_empty() => {
-            let registry = plugin_registry.ok_or_else(|| "plugin storage is unavailable for restoring plugin settings".to_string())?;
-            prepare_plugin_ui_storage_restore(registry, entries)?
-        }
-        _ => Vec::new(),
-    };
+    let plugin_ui_storage_restore =
+        match sensitive_payload.as_ref().and_then(|payload| payload.plugin_ui_storage.as_ref()) {
+            Some(entries) if !entries.is_empty() => {
+                let registry = plugin_registry
+                    .ok_or_else(|| "plugin storage is unavailable for restoring plugin settings".to_string())?;
+                prepare_plugin_ui_storage_restore(registry, entries)?
+            }
+            _ => Vec::new(),
+        };
     storage
         .apply_sync_import_transaction(SyncImportPlan {
             connections,
@@ -1370,7 +1499,11 @@ pub async fn apply_sync_snapshot_with_selection(
             tunnel_profiles: sync_tunnel_profiles,
             tunnel_secret_profiles,
             merge_tunnel_profiles: merge_selected_items,
-            sidebar_layout: if selection.and_then(|selection| selection.sidebar_layout) == Some(false) { None } else { snapshot.sidebar_layout.clone() },
+            sidebar_layout: if selection.and_then(|selection| selection.sidebar_layout) == Some(false) {
+                None
+            } else {
+                snapshot.sidebar_layout.clone()
+            },
             pinned_tree_node_ids: if selection.and_then(|selection| selection.pinned_tree_node_ids) == Some(false) {
                 None
             } else {
@@ -2097,7 +2230,10 @@ async fn preserve_local_mqtt_subscriptions_for_legacy_snapshot(
     Ok(())
 }
 
-async fn preserve_local_connection_paths(storage: &Storage, connections: &mut [ConnectionConfig]) -> Result<(), String> {
+async fn preserve_local_connection_paths(
+    storage: &Storage,
+    connections: &mut [ConnectionConfig],
+) -> Result<(), String> {
     let local_connections = storage.load_connections().await?;
     for remote in connections {
         if let Some(local) = local_connections.iter().find(|connection| connection.id == remote.id) {

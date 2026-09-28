@@ -5962,9 +5962,11 @@ impl Storage {
                 let mut value = editor_settings.clone();
                 if plan.merge_editor_settings {
                     let current = tx
-                        .query_row("SELECT value_json FROM app_state WHERE key = ?1", [APP_STATE_EDITOR_SETTINGS_KEY], |row| {
-                            row.get::<_, String>(0)
-                        })
+                        .query_row(
+                            "SELECT value_json FROM app_state WHERE key = ?1",
+                            [APP_STATE_EDITOR_SETTINGS_KEY],
+                            |row| row.get::<_, String>(0),
+                        )
                         .optional()
                         .map_err(|e| e.to_string())?
                         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
@@ -8008,7 +8010,11 @@ fn apply_sync_connections_in_tx(
             .map_err(|e| e.to_string())?;
     }
     retained_ids.extend(configs.iter().map(|config| config.id.clone()));
-    if merge_existing { Ok(()) } else { delete_unreferenced_connection_secrets_in_tx(tx, &retained_ids) }
+    if merge_existing {
+        Ok(())
+    } else {
+        delete_unreferenced_connection_secrets_in_tx(tx, &retained_ids)
+    }
 }
 
 fn clear_sync_connection_secrets_in_tx(
@@ -8178,9 +8184,8 @@ fn apply_ai_configs_in_tx(
         let mut config = item.config.clone();
         clear_ai_config_device_paths(&mut config);
         let local = existing_configs.get(&item.id).or_else(|| {
-            let mut matching_provider = existing_configs
-                .values()
-                .filter(|local| local.provider.as_str() == config.provider.as_str());
+            let mut matching_provider =
+                existing_configs.values().filter(|local| local.provider.as_str() == config.provider.as_str());
             let candidate = matching_provider.next()?;
             matching_provider.next().is_none().then_some(candidate)
         });
@@ -8225,7 +8230,9 @@ fn preserve_ai_config_device_paths(remote: &mut AiConfig, local: &AiConfig) {
         (AiProvider::ClaudeCodeCli, AiProvider::ClaudeCodeCli) => {
             remote.claude_code_cli_path.clone_from(&local.claude_code_cli_path)
         }
-        (AiProvider::PiAgentCli, AiProvider::PiAgentCli) => remote.pi_agent_cli_path.clone_from(&local.pi_agent_cli_path),
+        (AiProvider::PiAgentCli, AiProvider::PiAgentCli) => {
+            remote.pi_agent_cli_path.clone_from(&local.pi_agent_cli_path)
+        }
         (AiProvider::OpenCodeCli, AiProvider::OpenCodeCli) => {
             remote.opencode_cli_path.clone_from(&local.opencode_cli_path)
         }

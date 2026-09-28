@@ -4570,14 +4570,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
     if (syncSelectionMode.value === "upload") {
       snippetIncludeSecrets.value = selection.includeSecrets;
       await runSnippetAction("upload", async () => {
-        const summary = await snippetSyncUpload(
-          currentSnippetConfig(),
-          settingsStore.editorSettings,
-          snippetPassphrase.value,
-          selection.includeSecrets,
-          selection.includeSecrets ? snippetSecretsPassphrase.value : undefined,
-          selection,
-        );
+        const summary = await snippetSyncUpload(currentSnippetConfig(), settingsStore.editorSettings, snippetPassphrase.value, selection.includeSecrets, selection.includeSecrets ? snippetSecretsPassphrase.value : undefined, selection);
         snippetId.value = summary.snippetId;
         await persistSnippetSyncId();
         return t("settings.syncSnippetUploadSuccess", { bytes: summary.bytes, id: summary.snippetId });
@@ -4586,13 +4579,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
     }
     snippetRestoreSecrets.value = selection.includeSecrets;
     await runSnippetAction("download", async () => {
-      const result = await snippetSyncDownload(
-        currentSnippetConfig(),
-        snippetPassphrase.value,
-        selection.includeSecrets,
-        selection.includeSecrets ? snippetSecretsPassphrase.value : undefined,
-        selection,
-      );
+      const result = await snippetSyncDownload(currentSnippetConfig(), snippetPassphrase.value, selection.includeSecrets, selection.includeSecrets ? snippetSecretsPassphrase.value : undefined, selection);
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
       await settingsStore.updateDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
@@ -4610,13 +4597,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
   webdavSyncSecrets.value = selection.includeSecrets;
   if (syncSelectionMode.value === "upload") {
     await runWebDavAction("upload", async () => {
-      const summary = await webdavSyncUpload(
-        currentWebDavConfig(),
-        settingsStore.editorSettings,
-        selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined,
-        selection.includeSecrets,
-        selection,
-      );
+      const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
       writeWebDavBackupSelection(selection);
       return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
     });
@@ -4624,12 +4605,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
   }
 
   await runWebDavAction("download", async () => {
-    const result = await webdavSyncDownload(
-      currentWebDavConfig(),
-      selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined,
-      selection.includeSecrets,
-      selection,
-    );
+    const result = await webdavSyncDownload(currentWebDavConfig(), selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
@@ -9330,13 +9306,7 @@ LIMIT 100;</pre
                   </p>
                 </div>
               </div>
-              <CloudSyncSelectionDialog
-                v-model:open="syncSelectionOpen"
-                :mode="syncSelectionMode"
-                :catalog="syncSelectionCatalog"
-                :default-include-secrets="syncMethodTab === 'snippet' ? snippetIncludeSecrets : webdavSyncSecrets"
-                @confirm="confirmSyncSelection"
-              />
+              <CloudSyncSelectionDialog v-model:open="syncSelectionOpen" :mode="syncSelectionMode" :catalog="syncSelectionCatalog" :default-include-secrets="syncMethodTab === 'snippet' ? snippetIncludeSecrets : webdavSyncSecrets" @confirm="confirmSyncSelection" />
             </section>
 
             <!-- AI Settings Tab -->

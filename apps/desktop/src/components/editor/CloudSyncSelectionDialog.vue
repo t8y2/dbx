@@ -24,16 +24,7 @@ const emit = defineEmits<{
 const selection = ref<SyncSelection>(emptySelection());
 const isRestore = computed(() => props.mode === "restore");
 
-const backupSettingsCategoryOrder: readonly BackupSettingsCategoryId[] = [
-  "appearance",
-  "editor",
-  "formatter",
-  "navigation",
-  "data",
-  "shortcuts",
-  "snippets",
-  "ai",
-];
+const backupSettingsCategoryOrder: readonly BackupSettingsCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "ai"];
 const backupSettingsCategoryLabelKeys: Record<BackupSettingsCategoryId, string> = {
   appearance: "settings.appearanceTab",
   ai: "settings.aiTab",
@@ -44,17 +35,7 @@ const backupSettingsCategoryLabelKeys: Record<BackupSettingsCategoryId, string> 
   shortcuts: "settings.shortcutsTab",
   snippets: "settings.snippetsTab",
 };
-const nonSyncableEditorSettingIds = new Set([
-  "updateNotificationsEnabled",
-  "autoDownloadUpdates",
-  "autoUpdateApp",
-  "autoUpdateDrivers",
-  "autoUpdateJdbc",
-  "autoUpdateMcp",
-  "autoUpdatePlugins",
-  "updateDownloadSource",
-  "ignoredUpdateVersion",
-]);
+const nonSyncableEditorSettingIds = new Set(["updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins", "updateDownloadSource", "ignoredUpdateVersion"]);
 const desktopSettingCategories: Record<string, BackupSettingsCategoryId> = {
   show_tray_icon: "appearance",
   icon_theme: "appearance",
@@ -208,9 +189,13 @@ function resetFromCatalog() {
   if (selection.value.includeSecrets && !saved) onSecretsChanged();
 }
 
-watch(() => [props.open, props.catalog] as const, ([open]) => {
-  if (open) resetFromCatalog();
-}, { immediate: true });
+watch(
+  () => [props.open, props.catalog] as const,
+  ([open]) => {
+    if (open) resetFromCatalog();
+  },
+  { immediate: true },
+);
 
 function ids(key: "connections" | "connectionSecrets" | "tunnelProfiles" | "tunnelSecrets" | "savedSqlFolders" | "savedSqlFiles" | "desktopSettings" | "editorSettings" | "aiConfigs") {
   return selection.value[key] ?? [];
@@ -248,9 +233,7 @@ function toggleSettingsCategory(category: BackupSettingsCategoryId) {
 function togglePluginItem(pluginId: string, key: string) {
   const current = selection.value.pluginUiStorage ?? [];
   const exists = current.some((item) => item.pluginId === pluginId && item.key === key);
-  selection.value.pluginUiStorage = exists
-    ? current.filter((item) => item.pluginId !== pluginId || item.key !== key)
-    : [...current, props.catalog?.pluginUiStorage.find((item) => item.pluginId === pluginId && item.key === key)!];
+  selection.value.pluginUiStorage = exists ? current.filter((item) => item.pluginId !== pluginId || item.key !== key) : [...current, props.catalog?.pluginUiStorage.find((item) => item.pluginId === pluginId && item.key === key)!];
 }
 
 function togglePluginAll() {
@@ -350,7 +333,9 @@ function confirmSelection() {
           <summary class="flex cursor-pointer list-none items-center gap-2 py-2 text-sm font-medium">{{ t("settings.syncSelectionSavedSql") }}</summary>
           <div class="ml-6 space-y-2 pb-2">
             <div>
-              <button type="button" class="mb-1 text-xs font-medium text-muted-foreground hover:text-foreground" @click="toggleAll('savedSqlFolders', catalog.savedSqlFolders)">{{ t("settings.syncSelectionFolders") }} ({{ selection.savedSqlFolders?.length ?? 0 }}/{{ catalog.savedSqlFolders.length }})</button>
+              <button type="button" class="mb-1 text-xs font-medium text-muted-foreground hover:text-foreground" @click="toggleAll('savedSqlFolders', catalog.savedSqlFolders)">
+                {{ t("settings.syncSelectionFolders") }} ({{ selection.savedSqlFolders?.length ?? 0 }}/{{ catalog.savedSqlFolders.length }})
+              </button>
               <label v-for="item in catalog.savedSqlFolders" :key="item.id" class="flex min-h-7 items-center gap-2 pl-1 text-sm">
                 <input :checked="checked('savedSqlFolders', item.id)" type="checkbox" class="size-4 accent-primary" @change="toggleId('savedSqlFolders', item.id)" />
                 <span class="min-w-0 truncate">{{ item.label || item.id }}</span>
@@ -393,7 +378,9 @@ function confirmSelection() {
                 <span>{{ t("settings.syncSelectionAiLocked") }}</span>
               </label>
               <template v-else>
-                <button type="button" class="mb-1 text-xs font-medium text-muted-foreground hover:text-foreground" :disabled="!selection.includeSecrets" @click="toggleAllAiConfigs">{{ t("settings.syncSelectionAiConfigs") }} ({{ selection.aiConfigs?.length ?? 0 }}/{{ catalog.aiConfigs.length }})</button>
+                <button type="button" class="mb-1 text-xs font-medium text-muted-foreground hover:text-foreground" :disabled="!selection.includeSecrets" @click="toggleAllAiConfigs">
+                  {{ t("settings.syncSelectionAiConfigs") }} ({{ selection.aiConfigs?.length ?? 0 }}/{{ catalog.aiConfigs.length }})
+                </button>
                 <label v-for="item in catalog.aiConfigs" :key="item.id" class="flex min-h-7 items-center gap-2 text-sm">
                   <input :checked="checked('aiConfigs', item.id)" :disabled="!selection.includeSecrets" type="checkbox" class="size-4 accent-primary" @change="toggleId('aiConfigs', item.id)" />
                   <span class="min-w-0 truncate">{{ item.label || item.id }}</span>
@@ -406,12 +393,14 @@ function confirmSelection() {
                 <span>{{ t("settings.syncSelectionPluginLocked") }}</span>
               </label>
               <template v-else>
-              <button type="button" class="mb-1 text-xs font-medium text-muted-foreground hover:text-foreground" :disabled="!selection.includeSecrets" @click="togglePluginAll">{{ t("settings.syncSelectionPluginData") }} ({{ selection.pluginUiStorage?.length ?? 0 }}/{{ catalog.pluginUiStorage.length }})</button>
-              <label v-for="item in catalog.pluginUiStorage" :key="item.pluginId + '/' + item.key" class="flex min-h-7 items-center gap-2 text-sm">
-                <input :checked="selection.pluginUiStorage?.some((entry) => entry.pluginId === item.pluginId && entry.key === item.key)" :disabled="!selection.includeSecrets" type="checkbox" class="size-4 accent-primary" @change="togglePluginItem(item.pluginId, item.key)" />
-                <span class="min-w-0 truncate">{{ item.pluginName || item.pluginId }} / {{ item.key }}</span>
-              </label>
-              <p v-if="!catalog.pluginUiStorage.length" class="text-xs text-muted-foreground">{{ t("settings.syncSelectionNoPluginData") }}</p>
+                <button type="button" class="mb-1 text-xs font-medium text-muted-foreground hover:text-foreground" :disabled="!selection.includeSecrets" @click="togglePluginAll">
+                  {{ t("settings.syncSelectionPluginData") }} ({{ selection.pluginUiStorage?.length ?? 0 }}/{{ catalog.pluginUiStorage.length }})
+                </button>
+                <label v-for="item in catalog.pluginUiStorage" :key="item.pluginId + '/' + item.key" class="flex min-h-7 items-center gap-2 text-sm">
+                  <input :checked="selection.pluginUiStorage?.some((entry) => entry.pluginId === item.pluginId && entry.key === item.key)" :disabled="!selection.includeSecrets" type="checkbox" class="size-4 accent-primary" @change="togglePluginItem(item.pluginId, item.key)" />
+                  <span class="min-w-0 truncate">{{ item.pluginName || item.pluginId }} / {{ item.key }}</span>
+                </label>
+                <p v-if="!catalog.pluginUiStorage.length" class="text-xs text-muted-foreground">{{ t("settings.syncSelectionNoPluginData") }}</p>
               </template>
             </div>
             <p v-if="!catalog.hasEncryptedSecrets && isRestore" class="text-xs text-muted-foreground">{{ t("settings.syncSelectionNoEncrypted") }}</p>

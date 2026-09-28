@@ -1,6 +1,10 @@
 packages:
   - "packages/*"
 
+overrides:
+  postcss@^8: ">=8.5.23"
+  nanoid@^3: ">=3.3.18"
+
 allowBuilds:
   better-sqlite3: true
   esbuild: true

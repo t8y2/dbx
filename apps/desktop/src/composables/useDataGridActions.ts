@@ -122,6 +122,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config?.driver_profile,
+      serverVersion: config?.database_info?.productVersion,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(tab.connectionId),
       database: tableMeta?.database,
       schema: tableMeta?.schema,

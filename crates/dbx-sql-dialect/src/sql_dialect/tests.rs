@@ -1576,6 +1576,37 @@ fn builds_oracle_and_neo4j_table_data_queries() {
 }
 
 #[test]
+fn neo4j_element_id_function_follows_the_connected_server_version() {
+    // Neo4j 4.x and older only know `id()`; `elementId()` arrived in 5.0.
+    assert_eq!(neo4j_element_id_function(Some("4.4.44")), "id");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j/4.4.44")), "id");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j 4.4.44 (community)")), "id");
+    assert_eq!(neo4j_element_id_function(Some("3.5.35")), "id");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j/5.26.0")), "elementId");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j/2025.01.0")), "elementId");
+    // Unknown or unparsable versions keep the current spelling.
+    assert_eq!(neo4j_element_id_function(None), "elementId");
+    assert_eq!(neo4j_element_id_function(Some("")), "elementId");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j Community")), "elementId");
+}
+
+#[test]
+fn builds_neo4j_table_select_with_the_legacy_element_id_on_neo4j_4() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Neo4j),
+            table_name: "Employee".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: vec!["id".to_string(), "role".to_string()],
+            server_version: Some("Neo4j/4.4.44".to_string()),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "MATCH (n:`Employee`) RETURN id(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`role` AS `role` LIMIT 100;"
+    );
+}
+
+#[test]
 fn oracle_unknown_table_type_does_not_assume_rowid_support() {
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

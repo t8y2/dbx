@@ -3895,6 +3895,7 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
   const sql = await buildTableSelectSql({
     databaseType: resolvedDatabaseType.value,
     driverProfile: connectionStore.getConfig(connectionId)?.driver_profile,
+    serverVersion: connectionStore.getConfig(connectionId)?.database_info?.productVersion,
     identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
     catalog: tableMeta.catalog,
     database: tableMeta.database,
@@ -6547,6 +6548,7 @@ async function applyOrderBySearch() {
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
       driverProfile: props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined,
+      serverVersion: props.connectionId ? connectionStore.getConfig(props.connectionId)?.database_info?.productVersion : undefined,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
       database: tableMeta.database,
@@ -6586,6 +6588,7 @@ async function applyWhereFilter() {
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
       driverProfile: props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined,
+      serverVersion: props.connectionId ? connectionStore.getConfig(props.connectionId)?.database_info?.productVersion : undefined,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
       database: tableMeta.database,
@@ -7851,6 +7854,7 @@ async function syncUserFacingSql() {
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
       driverProfile: config?.driver_profile,
+      serverVersion: config?.database_info?.productVersion,
       identifierQuote: props.connectionId ? connectionStore.connectionIdentifierQuote?.(props.connectionId) : undefined,
       catalog: props.tableMeta.catalog,
       database: props.tableMeta.database,
@@ -11341,6 +11345,7 @@ async function loadForeignKeyDisplayLabels() {
           const sql = await buildTableSelectSql({
             databaseType: resolvedDatabaseType.value,
             driverProfile: connectionStore.getConfig(props.connectionId!)?.driver_profile,
+            serverVersion: connectionStore.getConfig(props.connectionId!)?.database_info?.productVersion,
             identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
             catalog: props.tableMeta?.catalog,
             database: props.database,

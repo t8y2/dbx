@@ -4073,7 +4073,19 @@ fn policy_allows_connection(
 }
 
 fn policy_allows_tool(policy: &McpGlobalPolicy, tool_name: &str) -> bool {
-    policy.allowed_tool_names.as_ref().is_none_or(|allowed| allowed.iter().any(|name| name == tool_name))
+    let Some(allowed) = policy.allowed_tool_names.as_ref() else { return true };
+    if allowed.iter().any(|name| name == tool_name) {
+        return true;
+    }
+    // Plugin wildcard entries: plugin tool names are discovered from sidecars
+    // at runtime, so a static settings list cannot name them individually —
+    // `dbx_<prefix>__*` exposes every tool of one plugin, `dbx_*__*` every
+    // plugin. Static tools never contain the `__` separator (guarded by
+    // `is_plugin_tool_name`), so a wildcard cannot widen their access.
+    let Some((prefix, _)) = tool_name.strip_prefix("dbx_").and_then(|rest| rest.split_once("__")) else {
+        return false;
+    };
+    allowed.iter().any(|name| name == "dbx_*__*" || name == &format!("dbx_{prefix}__*"))
 }
 
 fn database_scope_for_connection(
@@ -5721,6 +5733,38 @@ mod tests {
         let unknown = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.nope".into() })).await;
         assert_eq!(unknown.is_error, Some(true));
         assert!(result_text(&unknown).contains("does not contribute MCP tools"), "{}", result_text(&unknown));
+    }
+
+    #[test]
+    fn plugin_tool_wildcards_match_only_the_plugin_namespace() {
+        let per_plugin =
+            McpGlobalPolicy { allowed_tool_names: Some(vec!["dbx_ssh__*".to_string()]), ..Default::default() };
+        assert!(policy_allows_tool(&per_plugin, "dbx_ssh__sftp_list_dir"));
+        assert!(policy_allows_tool(&per_plugin, "dbx_ssh__sftp_write_file"));
+        assert!(!policy_allows_tool(&per_plugin, "dbx_kafka__kafka_topics_list"));
+        assert!(
+            !policy_allows_tool(&per_plugin, "dbx_execute_query"),
+            "a plugin wildcard must never widen a static tool"
+        );
+
+        let every_plugin = McpGlobalPolicy {
+            allowed_tool_names: Some(vec!["dbx_plugin_list".to_string(), "dbx_*__*".to_string()]),
+            ..Default::default()
+        };
+        assert!(policy_allows_tool(&every_plugin, "dbx_kafka__kafka_topics_delete"));
+        assert!(policy_allows_tool(&every_plugin, "dbx_ssh__sftp_list_dir"));
+        assert!(policy_allows_tool(&every_plugin, "dbx_plugin_list"), "exact entries keep working beside the wildcard");
+        assert!(!policy_allows_tool(&every_plugin, "dbx_execute_query"));
+
+        let explicit = McpGlobalPolicy {
+            allowed_tool_names: Some(vec!["dbx_ssh__sftp_list_dir".to_string()]),
+            ..Default::default()
+        };
+        assert!(policy_allows_tool(&explicit, "dbx_ssh__sftp_list_dir"));
+        assert!(
+            !policy_allows_tool(&explicit, "dbx_ssh__sftp_write_file"),
+            "no wildcard means per-tool gating stays exact"
+        );
     }
 
     #[tokio::test]

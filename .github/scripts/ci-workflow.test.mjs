@@ -44,7 +44,10 @@ test("stable Rust, Agent and overall gates always inspect selected upstream resu
     ["ci", "all", ["rust", "agents", "frontend", "packages", "windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver", "nix-packaging"]],
   ]) {
     const content = job(name);
-    assert.match(content, /if: always\(\)/);
+    // A superseded run must not leave a failing gate behind: when the workflow is
+    // cancelled the selected upstream jobs are cancelled too, and `always()` alone
+    // would still run the gate and report those cancellations as failures.
+    assert.match(content, /if: always\(\) && !cancelled\(\)/);
     assert.ok(content.includes(`node .github/scripts/ci-gate.mjs ${mode}`));
     assert.ok(content.includes("${{ toJSON(needs) }}"));
     assert.ok(content.includes("uses: actions/checkout@v7"));

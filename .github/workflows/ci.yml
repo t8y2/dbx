@@ -132,7 +132,7 @@ jobs:
       - frontend-checks
       - frontend-typecheck
       - frontend-test
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -932,7 +932,7 @@ jobs:
       - fast-checks
       - rust-fmt-clippy
       - rust-test
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -1193,7 +1193,7 @@ jobs:
       - agent-rust
       - agent-go
       - agent-integration
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -1472,7 +1472,7 @@ jobs:
       - jdbc
       - offline-jdbc-release
       - nix-packaging
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

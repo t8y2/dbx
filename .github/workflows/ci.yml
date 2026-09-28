@@ -577,11 +577,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Measure dbx library command registry expansion
-        if: vars.WIN7_REGISTRY_AB == 'true'
+      - name: Measure dbx library command module costs
+        if: vars.WIN7_REGISTRY_AB == 'true' || github.head_ref == 'perf/profile-win7-command-modules'
         shell: pwsh
         run: |
-          $resultRoot = Join-Path $env:RUNNER_TEMP "dbx-lib-command-registry-ab"
+          $resultRoot = Join-Path $env:RUNNER_TEMP "dbx-lib-command-module-ab"
           $sourcePath = "src-tauri/src/lib.rs"
           New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
           $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
@@ -642,54 +642,61 @@ jobs:
             }
             Measure-Registry "full" $fullCommandCount
 
-            $insideHandler = $false
-            $handlerCommandCount = 0
-            $keptCommandCount = 0
-            $reducedLines = foreach ($line in $sourceLines) {
-              if ($line -match 'tauri::generate_handler!\[') {
-                $insideHandler = $true
-                $line
-                continue
-              }
-              if ($insideHandler -and $line -match '^\s*\]\)\)') {
-                $insideHandler = $false
-                $line
-                continue
-              }
-              if ($insideHandler -and $line -match '^\s+commands::') {
-                $handlerCommandCount++
-                if ($handlerCommandCount % 2 -eq 0) {
+            $variants = @(
+              @{ Name = "without-query"; Module = "query" },
+              @{ Name = "without-schema"; Module = "schema" },
+              @{ Name = "without-plugins"; Module = "plugins" }
+            )
+            foreach ($variant in $variants) {
+              $insideHandler = $false
+              $removedCommandCount = 0
+              $pattern = '^\s+commands::' + [regex]::Escape($variant.Module) + '::'
+              $variantLines = foreach ($line in $sourceLines) {
+                if ($line -match 'tauri::generate_handler!\[') {
+                  $insideHandler = $true
+                  $line
                   continue
                 }
-                $keptCommandCount++
+                if ($insideHandler -and $line -match '^\s*\]\)\)') {
+                  $insideHandler = $false
+                  $line
+                  continue
+                }
+                if ($insideHandler -and $line -match $pattern) {
+                  $removedCommandCount++
+                  continue
+                }
+                $line
               }
-              $line
+              if ($removedCommandCount -eq 0) {
+                throw "Could not remove the $($variant.Module) command module."
+              }
+              $variantLines | Set-Content $sourcePath -Encoding utf8NoBOM
+              Measure-Registry $variant.Name ($fullCommandCount - $removedCommandCount)
             }
-            if ($handlerCommandCount -ne $fullCommandCount -or $keptCommandCount -eq $fullCommandCount) {
-              throw "Could not create the reduced command registry."
-            }
-            $reducedLines | Set-Content $sourcePath -Encoding utf8NoBOM
-            Measure-Registry "half" $keptCommandCount
           } finally {
             $env:RUSTC_WRAPPER = $savedWrapper
             git restore --source=HEAD -- $sourcePath
           }
 
-          @(
-            "### dbx library command registry A/B"
+          $summary = @(
+            "### dbx library command module A/B"
             ""
             "| Registry | Commands | Definitions | Estimated cost | Seconds |"
             "| --- | ---: | ---: | ---: | ---: |"
-            "| Full | $($results['full'].Commands) | $($results['full'].Definitions) | $($results['full'].TotalEstimate) | $($results['full'].Seconds) |"
-            "| Half | $($results['half'].Commands) | $($results['half'].Definitions) | $($results['half'].TotalEstimate) | $($results['half'].Seconds) |"
-          ) | Add-Content $env:GITHUB_STEP_SUMMARY
+          )
+          foreach ($name in @("full", "without-query", "without-schema", "without-plugins")) {
+            $result = $results[$name]
+            $summary += "| $name | $($result.Commands) | $($result.Definitions) | $($result.TotalEstimate) | $($result.Seconds) |"
+          }
+          $summary | Add-Content $env:GITHUB_STEP_SUMMARY
 
-      - name: Upload dbx library command registry A/B
-        if: always() && vars.WIN7_REGISTRY_AB == 'true'
+      - name: Upload dbx library command module A/B
+        if: always() && vars.WIN7_REGISTRY_AB == 'true' || github.head_ref == 'perf/profile-win7-command-modules'
         uses: actions/upload-artifact@v6
         with:
-          name: DBX-win7-dbx-lib-command-registry-ab
-          path: ${{ runner.temp }}/dbx-lib-command-registry-ab/
+          name: DBX-win7-dbx-lib-command-module-ab
+          path: ${{ runner.temp }}/dbx-lib-command-module-ab/
           if-no-files-found: error
           retention-days: 3
 

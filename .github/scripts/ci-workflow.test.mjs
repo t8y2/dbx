@@ -145,22 +145,25 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.ok(win7.includes("--timings"));
   assert.ok(win7.includes("name: DBX-win7-cargo-timings"));
   assert.ok(win7.includes("path: target/cargo-timings/"));
-  assert.ok(win7.includes("name: Measure dbx library command registry expansion"));
+  assert.ok(win7.includes("name: Measure dbx library command module costs"));
   assert.ok(win7.includes("if: vars.WIN7_REGISTRY_AB == 'true'"));
   assert.ok(win7.includes("--package dbx"));
   assert.ok(win7.includes("--lib"));
   assert.ok(win7.includes('$env:RUSTC_WRAPPER = ""'));
   assert.ok(win7.includes('Measure-Registry "full" $fullCommandCount'));
-  assert.ok(win7.includes('Measure-Registry "half" $keptCommandCount'));
+  assert.ok(win7.includes("Measure-Registry $variant.Name ($fullCommandCount - $removedCommandCount)"));
+  for (const name of ["without-query", "without-schema", "without-plugins"]) {
+    assert.ok(win7.includes(`"${name}"`));
+  }
   assert.ok(win7.includes('"-Zdump-mono-stats=$outputDir"'));
   assert.ok(win7.includes('"-Zdump-mono-stats-format=json"'));
   assert.ok(win7.includes("git restore --source=HEAD -- $sourcePath"));
-  assert.ok(win7.includes("name: DBX-win7-dbx-lib-command-registry-ab"));
+  assert.ok(win7.includes("name: DBX-win7-dbx-lib-command-module-ab"));
   assert.ok(win7.includes("if: always() && vars.WIN7_REGISTRY_AB == 'true'"));
-  assert.ok(win7.includes("path: ${{ runner.temp }}/dbx-lib-command-registry-ab/"));
+  assert.ok(win7.includes("path: ${{ runner.temp }}/dbx-lib-command-module-ab/"));
   assert.ok(win7.includes("retention-days: 3"));
-  assert.ok(win7.indexOf("name: Build DBX for Windows 7") < win7.indexOf("name: Measure dbx library command registry expansion"));
-  assert.ok(win7.indexOf("name: Measure dbx library command registry expansion") < win7.indexOf("name: Upload dbx library command registry A/B"));
+  assert.ok(win7.indexOf("name: Build DBX for Windows 7") < win7.indexOf("name: Measure dbx library command module costs"));
+  assert.ok(win7.indexOf("name: Measure dbx library command module costs") < win7.indexOf("name: Upload dbx library command module A/B"));
   assert.doesNotMatch(win7, /^\s+(?:CC|CXX):/m);
 });
 

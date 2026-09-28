@@ -97,8 +97,15 @@ export interface TableImportParseSettings {
   databaseType?: DatabaseType | null;
 }
 
-export function defaultTableImportEmptyStringAsNull(format: TableImportSourceFormat): boolean {
-  return format !== "excel";
+/**
+ * 导入时分隔文本的「空字段即 NULL」默认值。
+ *
+ * 导出端默认把 NULL 写成 `\N` 字面量、空字符串才写成空字段，所以导入端默认必须
+ * 保留空字段（不当作 NULL），否则 DBX 自己导出的 CSV 在导入时会把空字符串还原成
+ * NULL，写回 `NOT NULL DEFAULT ''` 的列就会报「不允许为 null」。
+ */
+export function defaultTableImportEmptyStringAsNull(_format: TableImportSourceFormat): boolean {
+  return false;
 }
 
 export function buildTableImportParseOptions(settings: TableImportParseSettings): TableImportParseOptions {
@@ -113,6 +120,9 @@ export function buildTableImportParseOptions(settings: TableImportParseSettings)
     lastDataRow: settings.lastDataRow,
     trimValues: settings.trimValues,
     emptyStringAsNull: settings.emptyStringAsNull,
+    // 勾选「空字符串作为 NULL」= 退回旧行为：关闭 NULL 字面量，空字段一律当 NULL。
+    // 不勾选时留空，由后端使用与导出端一致的默认字面量 `\N`。
+    nullLiteral: settings.emptyStringAsNull ? "" : undefined,
     sheetName: settings.format === "excel" ? settings.sheetName || null : null,
     jsonShape: settings.format === "json" ? settings.jsonShape : null,
     // SQL 脚本需要按源方言解析字符串转义与标识符大小写（取目标连接的数据库类型）

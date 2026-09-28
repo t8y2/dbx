@@ -142,6 +142,144 @@ func TestCassandraIntegration(t *testing.T) {
 	}
 }
 
+func TestCassandraTableDataCursorIntegration(t *testing.T) {
+	host := strings.TrimSpace(os.Getenv("CASSANDRA_TEST_HOST"))
+	if host == "" {
+		t.Skip("Cassandra integration environment is not configured")
+	}
+	port, err := strconv.Atoi(envDefault("CASSANDRA_TEST_PORT", "9042"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssl, err := strconv.ParseBool(envDefault("CASSANDRA_TEST_SSL", "false"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := connectParams{
+		Host:           host,
+		Port:           port,
+		Username:       os.Getenv("CASSANDRA_TEST_USERNAME"),
+		Password:       os.Getenv("CASSANDRA_TEST_PASSWORD"),
+		URLParams:      os.Getenv("CASSANDRA_TEST_URL_PARAMS"),
+		SSL:            ssl,
+		CACertPath:     os.Getenv("CASSANDRA_TEST_CA_CERT_PATH"),
+		ClientCertPath: os.Getenv("CASSANDRA_TEST_CLIENT_CERT_PATH"),
+		ClientKeyPath:  os.Getenv("CASSANDRA_TEST_CLIENT_KEY_PATH"),
+	}
+	runtime, err := newConnectionRuntime(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.close)
+	server := newServer(runtime, connection)
+	if err := server.validateConnection(); err != nil {
+		t.Fatal(err)
+	}
+
+	keyspace := "dbx_issue7465_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	mustCQL(t, server, "CREATE KEYSPACE "+quoteCQLIdentifier(keyspace)+" WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}", "")
+	t.Cleanup(func() {
+		if _, err := server.executeQuery(queryOptions{SQL: "DROP KEYSPACE IF EXISTS " + quoteCQLIdentifier(keyspace)}); err != nil {
+			t.Errorf("drop integration keyspace %s: %v", keyspace, err)
+		}
+	})
+	mustCQL(t, server, "CREATE TABLE "+qualifiedCQLName(keyspace, "paged_rows")+" (id int PRIMARY KEY)", keyspace)
+	mustCQL(t, server, "CREATE TABLE "+qualifiedCQLName(keyspace, "empty_rows")+" (id int PRIMARY KEY)", keyspace)
+	for start := 0; start < 205; start += 25 {
+		end := min(start+25, 205)
+		statements := make([]string, 0, end-start)
+		for id := start; id < end; id++ {
+			statements = append(statements, fmt.Sprintf("INSERT INTO %s (id) VALUES (%d)", qualifiedCQLName(keyspace, "paged_rows"), id))
+		}
+		mustStatements(t, server, keyspace, statements, false)
+	}
+
+	tableSQL := `SELECT * FROM "paged_rows";`
+	page, err := server.executeQueryPage(queryOptions{SQL: tableSQL, Schema: keyspace, MaxRows: 1_000}, 100)
+	if err != nil || len(page.Rows) != 100 || !page.HasMore || page.SessionID == nil {
+		t.Fatalf("first page mismatch: rows=%d has_more=%v session=%v err=%v", len(page.Rows), page.HasMore, page.SessionID, err)
+	}
+	firstSessionID := *page.SessionID
+	page, err = server.fetchQueryPage(firstSessionID, 100)
+	if err != nil || len(page.Rows) != 100 || !page.HasMore || page.SessionID == nil || *page.SessionID != firstSessionID {
+		t.Fatalf("middle page mismatch: rows=%d has_more=%v session=%v err=%v", len(page.Rows), page.HasMore, page.SessionID, err)
+	}
+	page, err = server.fetchQueryPage(firstSessionID, 100)
+	if err != nil || len(page.Rows) != 5 || page.HasMore || page.SessionID != nil {
+		t.Fatalf("last page mismatch: rows=%d has_more=%v session=%v err=%v", len(page.Rows), page.HasMore, page.SessionID, err)
+	}
+	if _, err := server.fetchQueryPage(firstSessionID, 100); err == nil {
+		t.Fatal("exhausted query session remained usable")
+	}
+
+	page, err = server.executeQueryPage(queryOptions{SQL: tableSQL, Schema: keyspace, MaxRows: 150}, 100)
+	if err != nil || len(page.Rows) != 100 || page.SessionID == nil {
+		t.Fatalf("maxRows first page mismatch: page=%v err=%v", page, err)
+	}
+	page, err = server.fetchQueryPage(*page.SessionID, 100)
+	if err != nil || len(page.Rows) != 50 || page.HasMore || !page.Truncated {
+		t.Fatalf("maxRows terminal page mismatch: rows=%d has_more=%v truncated=%v err=%v", len(page.Rows), page.HasMore, page.Truncated, err)
+	}
+
+	page, err = server.executeQueryPage(queryOptions{SQL: tableSQL, Schema: keyspace, MaxRows: 1_000}, 100)
+	if err != nil || page.SessionID == nil {
+		t.Fatalf("close-session setup failed: page=%v err=%v", page, err)
+	}
+	closedSessionID := *page.SessionID
+	if !server.closeQuerySession(closedSessionID) {
+		t.Fatal("query session was not closed")
+	}
+	if _, err := server.fetchQueryPage(closedSessionID, 100); err == nil {
+		t.Fatal("closed query session remained usable")
+	}
+
+	page, err = server.executeQueryPage(queryOptions{SQL: tableSQL, Schema: keyspace, MaxRows: 1_000}, 40)
+	if err != nil || len(page.Rows) != 40 || page.SessionID == nil {
+		t.Fatalf("page-size restart mismatch: page=%v err=%v", page, err)
+	}
+	page, err = server.fetchQueryPage(*page.SessionID, 40)
+	if err != nil || len(page.Rows) != 40 {
+		t.Fatalf("page-size continuation mismatch: rows=%d err=%v", len(page.Rows), err)
+	}
+	if page.SessionID != nil {
+		server.closeQuerySession(*page.SessionID)
+	}
+
+	empty, err := server.executeQueryPage(queryOptions{SQL: `SELECT * FROM "empty_rows";`, Schema: keyspace, MaxRows: 1_000}, 100)
+	if err != nil || len(empty.Rows) != 0 || empty.HasMore || empty.SessionID != nil {
+		t.Fatalf("empty page mismatch: page=%v err=%v", empty, err)
+	}
+
+	deletes := make([]string, 0, 5)
+	for id := 200; id < 205; id++ {
+		deletes = append(deletes, fmt.Sprintf("DELETE FROM %s WHERE id = %d", qualifiedCQLName(keyspace, "paged_rows"), id))
+	}
+	mustStatements(t, server, keyspace, deletes, false)
+	page, err = server.executeQueryPage(queryOptions{SQL: tableSQL, Schema: keyspace, MaxRows: 1_000}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	totalRows := 0
+	pageCount := 0
+	for {
+		totalRows += len(page.Rows)
+		pageCount++
+		if !page.HasMore {
+			break
+		}
+		if page.SessionID == nil || pageCount >= 3 {
+			t.Fatalf("exact-boundary cursor did not terminate: page=%v page_count=%d", page, pageCount)
+		}
+		page, err = server.fetchQueryPage(*page.SessionID, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if totalRows != 200 {
+		t.Fatalf("exact-boundary row count mismatch: got %d", totalRows)
+	}
+}
+
 func TestCassandraMaterializedViewDDLIntegration(t *testing.T) {
 	host := strings.TrimSpace(os.Getenv("CASSANDRA_TEST_HOST"))
 	if host == "" {

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildMongoCompletionItems, getMongoCompletionContext, getMongoCompletionResultValidFor, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
-import { ACCUMULATORS, BULK_WRITE_OPERATION_FIELDS, BULK_WRITE_OPERATIONS, EXPRESSION_OPERATORS, EXTENDED_JSON_VALUES, METHOD_OPTION_KEYS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
+import { buildMongoCompletionItems, buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, getMongoDocumentQueryCompletionContext, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
+import { ACCUMULATORS, BULK_WRITE_OPERATION_FIELDS, BULK_WRITE_OPERATIONS, EXPRESSION_OPERATORS, EXTENDED_JSON_VALUES, KEY_MAP_VALUES, METHOD_OPTION_KEYS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
 import { parseMongoCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 
 const collections = ["users", "user_events", "order-items", "audit.logs"];
@@ -587,6 +587,74 @@ test("every suggested option key parses on the method that offers it", () => {
       assert.ok(parseMongoCommand(command), `${command} must parse`);
     }
   }
+});
+
+test("suggests the values a field-to-value map accepts", () => {
+  assert.deepEqual(labels("db.users.find({}).sort({ name: ", { fields }), ["-1", "1"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $sort: { name: ", { fields }), ["-1", "1"]);
+  assert.deepEqual(labels("db.users.find({}, { name: ", { fields }), ["0", "1"]);
+  assert.deepEqual(labels("db.users.findOne({}, { name: ", { fields }), ["0", "1"]);
+  assert.deepEqual(labels("db.users.createIndex({ name: ", { fields }), ["-1", '"2d"', '"2dsphere"', '"hashed"', '"text"', "1"]);
+
+  // The sort and projection options of the find-and-modify helpers are the same maps.
+  assert.deepEqual(labels("db.users.findOneAndUpdate({}, {$set:{a:1}}, { sort: { name: ", { fields }), ["-1", "1"]);
+  assert.deepEqual(labels("db.users.findOneAndDelete({}, { projection: { name: ", { fields }), ["0", "1"]);
+
+  // Keys are still field names, and a second key in the same map still gets values.
+  assert.deepEqual(labels("db.users.find({}).sort({ na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.find({}).sort({ name: 1, createdAt: ", { fields }), ["-1", "1"]);
+
+  // Inside a quote the engine stays quiet, as it does for every other value position.
+  assert.deepEqual(labels('db.users.createIndex({ name: "', { fields }), []);
+
+  // The document browser's sort bar is the same map without a surrounding command.
+  const sortBar = getMongoDocumentQueryCompletionContext("{ name: ", "{ name: ".length, "sortKeys");
+  assert.deepEqual(buildMongoCompletionItemsFromContext(sortBar, { fields }).map((item) => item.label), ["-1", "1"]);
+});
+
+test("every suggested map value parses in the position that offers it", () => {
+  const commands: Record<string, (value: string) => string> = {
+    sort: (value) => `db.users.find({}).sort({ name: ${value} })`,
+    projection: (value) => `db.users.find({}, { name: ${value} })`,
+    index: (value) => `db.users.createIndex({ name: ${value} })`,
+  };
+  for (const [keyMap, values] of Object.entries(KEY_MAP_VALUES)) {
+    const build = commands[keyMap];
+    assert.ok(build, `${keyMap} needs a sample command in this test`);
+    for (const value of values) {
+      assert.ok(parseMongoCommand(build(value.label)), build(value.label));
+    }
+  }
+});
+
+test("offers nothing rather than top-level snippets inside an unmodelled argument", () => {
+  // `db.collection.find` is not something that can be typed inside these parentheses, so the
+  // top-level snippets are noise there; the engine stays quiet until the argument is modelled.
+  for (const text of [
+    "db.users.find({}).limit(",
+    "db.users.find({}).skip(",
+    "db.users.find({}).explain(",
+    "db.users.find({}).collation({ ",
+    "db.users.drop(",
+    "db.users.renameCollection(",
+    'db.users.dropIndex("',
+    "db.users.estimatedDocumentCount(",
+    "db.runCommand({ ",
+    'db.createCollection("x", { ',
+    "use ",
+    "use ord",
+    // A modelled call followed by `use` takes the scan-failure path, not the unmodelled-call one.
+    "db.users.find({}); use ",
+  ]) {
+    assert.deepEqual(labels(text, { fields, collections }), [], text);
+  }
+
+  // A command still starts with the top-level snippets, including after one has finished.
+  assert.ok(labels("").includes("db.collection.find"));
+  assert.ok(labels("db.users.find({});\n").includes("db.collection.find"));
+  assert.ok(labels("db.users.find({})\n").includes("db.collection.find"));
+  // A parenthesis inside a string does not count as an open argument list.
+  assert.ok(labels('db.users.find({ name: "(" });\n').includes("db.collection.find"));
 });
 
 test("completes commands addressed to another database through getSiblingDB", () => {

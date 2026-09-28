@@ -1467,6 +1467,7 @@ dependencies = [
  "bytes",
  "dbx-platform",
  "dbx-types",
+ "glob",
  "portpicker",
  "reqwest",
  "russh",
@@ -2372,6 +2373,12 @@ checksum = "2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5"
 dependencies = [
  "polyval 0.7.3",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "half"

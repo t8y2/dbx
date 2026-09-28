@@ -3,7 +3,6 @@
 import { createApp, defineComponent, h, ref, computed } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useDataGridColumnFilters, type DataGridColumnFilterState, type DataGridLocalFilterDraft } from "@/composables/useDataGridColumnFilters";
-import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import type { QueryResult } from "@/types/database";
 
@@ -17,11 +16,6 @@ function mountColumnFilters(rows: CellValue[][]) {
     localFilterOpenColumn: ref<number | null>(null),
     localFilterSearch: ref(""),
     localFilterDraft: ref<DataGridLocalFilterDraft | null>(null),
-    serverFilterLoading: ref(false),
-    serverFilterError: ref(""),
-    serverFilterOptions: ref<DataGridLocalFilterOption[]>([]),
-    serverFilterLimited: ref(false),
-    serverFilterValueByKey: ref(new Map()),
     serverColumnFilters: ref({}),
   };
   const result: QueryResult = { columns: ["status"], rows };
@@ -36,6 +30,7 @@ function mountColumnFilters(rows: CellValue[][]) {
           getConnectionId: () => undefined,
           getSchema: () => undefined,
           getExecutionDatabase: () => "",
+          scopeIdentity: computed(() => "test"),
           resolvedDatabaseType: computed(() => undefined),
           canUseWhereSearch: computed(() => false),
           canUseServerColumnFilter: computed(() => false),
@@ -44,6 +39,7 @@ function mountColumnFilters(rows: CellValue[][]) {
           whereFilterInput: ref(""),
           getConnectionConfig: () => undefined,
           getIdentifierQuote: () => undefined,
+          getGlobalQueryTimeoutSecs: () => undefined,
           getNewRows: () => [],
           getRowData: (row) => row,
           formatValue: (value) => String(value),

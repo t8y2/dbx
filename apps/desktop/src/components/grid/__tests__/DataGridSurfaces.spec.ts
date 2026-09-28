@@ -103,6 +103,7 @@ import DataGridCellDetailPanel from "@/components/grid/DataGridCellDetailPanel.v
 import DataGrid from "@/components/grid/DataGrid.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
+import DataGridDistinctValuePopover from "@/components/grid/DataGridDistinctValuePopover.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
@@ -1141,6 +1142,50 @@ describe("DataGridQueryControls", () => {
     expect(popoverContent.props["collision-padding"]).toBe(8);
   });
 
+  it("forwards database value suggestions in the quick filter popover", () => {
+    const openValueSuggestions = vi.fn();
+    const closeValueSuggestions = vi.fn();
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["status"],
+      conditionColumns: ["status"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      filteredColumns: ["status"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      valueSuggestions: { search: "", options: [], loading: false, error: "", limited: false, limit: 1000, selectedKeys: new Set<string>() },
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+      onOpenValueSuggestions: openValueSuggestions,
+      onCloseValueSuggestions: closeValueSuggestions,
+    });
+
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+    const suggestionPopover = findOne(mounted.root, (node) => node.props["data-stub"] === "Popover" && node.props.open === false);
+    const openHandler = suggestionPopover.props["onUpdate:open"];
+    for (const callback of Array.isArray(openHandler) ? openHandler : [openHandler]) callback(true);
+
+    expect(openValueSuggestions).toHaveBeenCalledWith("r1", "value");
+
+    const quickFilterPopover = findOne(mounted.root, (node) => node.props["data-stub"] === "Popover" && node.props.open === true);
+    const closeHandler = quickFilterPopover.props["onUpdate:open"];
+    for (const callback of Array.isArray(closeHandler) ? closeHandler : [closeHandler]) callback(false);
+    expect(closeValueSuggestions).toHaveBeenCalledOnce();
+  });
+
   it("keeps filter actions available in the popover", () => {
     const addRule = vi.fn();
     const clearFilters = vi.fn();
@@ -1252,7 +1297,121 @@ describe("DataGridQueryControls", () => {
   });
 });
 
+describe("DataGridDistinctValuePopover", () => {
+  it("renders counts and distinct loading, error, and limit states", async () => {
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options: [{ key: "str:open", label: "open", count: 12, value: "open" }],
+      loading: true,
+      error: "",
+      limited: false,
+      limit: 1000,
+    });
+    expect(hostText(mounted.root)).toContain("grid.loadingValues");
+    expect(hostText(mounted.root)).toContain("open");
+    expect(hostText(mounted.root)).toContain("12");
+
+    await mounted.setProps({ loading: false, error: "query failed", options: [] });
+    expect(hostText(mounted.root)).toContain("query failed");
+    expect(hostText(mounted.root)).not.toContain("grid.noSearchResults");
+
+    await mounted.setProps({ error: "", limited: true });
+    expect(hostText(mounted.root)).toContain("grid.serverValuesLimited");
+  });
+
+  it("selects all displayed candidates and matches the database-value filter checkbox state", async () => {
+    const toggleAll = vi.fn();
+    const options = [
+      { key: "str:open", label: "open", count: 12, value: "open" },
+      { key: "str:closed", label: "closed", count: 4, value: "closed" },
+    ];
+    const mounted = mountComponent(DataGridDistinctValuePopover, {
+      open: true,
+      search: "",
+      options,
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      multiple: true,
+      selectedKeys: new Set<string>(),
+      onToggleAll: toggleAll,
+    });
+    const findSelectAll = () => findOne(mounted.root, (node) => node.props["data-distinct-value-select-all"] === "");
+
+    expect(findSelectAll().props["aria-checked"]).toBe(false);
+    dispatch(findSelectAll(), "click");
+    expect(toggleAll).toHaveBeenCalledOnce();
+
+    await mounted.setProps({ selectedKeys: new Set(["str:open"]) });
+    expect(findSelectAll().props["aria-checked"]).toBe(false);
+
+    await mounted.setProps({ selectedKeys: new Set(options.map((option) => option.key)) });
+    expect(findSelectAll().props["aria-checked"]).toBe(true);
+  });
+});
+
 describe("DataGridFilterWorkbench", () => {
+  it("shows database value suggestions only for enabled value rules in the conditions panel", async () => {
+    const openSuggestions = vi.fn();
+    const valueSuggestions = {
+      ruleId: undefined,
+      target: undefined,
+      search: "",
+      options: [],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      selectedKeys: new Set<string>(),
+    };
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["status"],
+      filteredColumns: ["status"],
+      modeOptions: [
+        { value: "equals", labelKey: "equals" },
+        { value: "is-null", labelKey: "is-null" },
+      ],
+      columnSearch: "",
+      valueSuggestions,
+      onOpenValueSuggestions: openSuggestions,
+    });
+
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+    const openHandler = findOne(mounted.root, (node) => node.props["data-stub"] === "Popover").props["onUpdate:open"];
+    for (const callback of Array.isArray(openHandler) ? openHandler : [openHandler]) callback(true);
+    expect(openSuggestions).toHaveBeenCalledWith("r1", "value");
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND", disabled: true }] });
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(0);
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "is-null", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(0);
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "between", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(2);
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "in", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+  });
+
+  it("exposes value suggestions in the reusable popover builder when provided", () => {
+    const mounted = mountComponent(DataGridFilterBuilder, {
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["status"],
+      filteredColumns: ["status"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      layout: "popover",
+      valueSuggestions: { search: "", options: [], loading: false, error: "", limited: false, limit: 1000, selectedKeys: new Set<string>() },
+    });
+
+    expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+  });
+
   it("scrolls to the newest rule when a condition is added", async () => {
     const requestAnimationFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
       callback(0);
@@ -1378,6 +1537,57 @@ describe("DataGridFilterWorkbench", () => {
 });
 
 describe("DataGridTextFilterWorkbench", () => {
+  it("shows and forwards database value suggestions in the text filter panel", async () => {
+    const openValueSuggestions = vi.fn();
+    const closeValueSuggestions = vi.fn();
+    const valueSuggestions = {
+      ruleId: undefined,
+      target: undefined,
+      search: "",
+      options: [],
+      loading: false,
+      error: "",
+      limited: false,
+      limit: 1000,
+      selectedKeys: new Set<string>(),
+    };
+    const mounted = mountComponent(DataGridTextFilterWorkbench, {
+      height: 168,
+      sqlPreview: "",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
+      columns: ["status"],
+      filteredColumns: ["status"],
+      modeOptions: [
+        { value: "equals", labelKey: "equals" },
+        { value: "between", labelKey: "between" },
+        { value: "in", labelKey: "in" },
+      ],
+      columnSearch: "",
+      valueSuggestions,
+      onOpenValueSuggestions: openValueSuggestions,
+      onCloseValueSuggestions: closeValueSuggestions,
+    });
+
+    const suggestionButtons = () => findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter");
+    expect(suggestionButtons()).toHaveLength(1);
+    expect(String(suggestionButtons()[0].props.class)).toContain("h-6");
+
+    const suggestionPopover = findOne(mounted.root, (node) => node.props["data-stub"] === "Popover" && node.props.open === false);
+    const openHandler = suggestionPopover.props["onUpdate:open"];
+    for (const callback of Array.isArray(openHandler) ? openHandler : [openHandler]) callback(true);
+    expect(openValueSuggestions).toHaveBeenCalledWith("r1", "value");
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "between", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(suggestionButtons()).toHaveLength(2);
+
+    await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "in", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
+    expect(suggestionButtons()).toHaveLength(1);
+    expect(findAll(mounted.root, (node) => node.props["data-distinct-value-select-all"] === "")).toHaveLength(1);
+
+    mounted.unmount();
+    expect(closeValueSuggestions).toHaveBeenCalledOnce();
+  });
+
   it("exposes a persisted keyboard-resizable text filter panel", async () => {
     const ensureRule = vi.fn();
     const updateHeight = vi.fn();

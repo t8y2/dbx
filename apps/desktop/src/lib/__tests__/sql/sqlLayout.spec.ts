@@ -229,6 +229,45 @@ describe("sql layout", () => {
     expect(await format("SELECT a, b FROM t WHERE x = 1;", { indentStyle: "tabularLeft" })).toBe(lines("SELECT    a,", "          b", "FROM      t", "WHERE     x = 1;"));
   });
 
+  it("keeps every branch of a union whose operands are parenthesized (#10472)", async () => {
+    const sql = lines(
+      "SELECT a.id, a.starttime, t.name AS taskName",
+      "FROM ( (SELECT l.id, l.starttime FROM `log_1_4` l WHERE l.taskid = 'abc' ORDER BY l.starttime DESC LIMIT 0, 10)",
+      "UNION ALL (SELECT l.id, l.starttime FROM `log_2_4` l WHERE l.taskid = 'abc' ORDER BY l.starttime DESC LIMIT 0, 10)",
+      "UNION ALL (SELECT l.id, l.starttime FROM `log_3_4` l WHERE l.taskid = 'abc' ORDER BY l.starttime DESC LIMIT 0, 10) ) a",
+      "INNER JOIN task t ON a.taskid = t.id WHERE 1 = 1 ORDER BY a.starttime DESC LIMIT 0, 10",
+    );
+
+    // A bare `SELECT` after the operator becomes a sibling clause, but a
+    // parenthesized branch stays inside the set-operation node. Printing the
+    // keyword alone deleted every branch after the first one.
+    expect(await format(sql)).toBe(
+      lines(
+        "SELECT a.id, a.starttime, t.name AS taskName",
+        "FROM ((SELECT l.id, l.starttime FROM `log_1_4` l WHERE l.taskid = 'abc' ORDER BY l.starttime DESC LIMIT 0, 10)",
+        "      UNION ALL",
+        "      (SELECT l.id, l.starttime FROM `log_2_4` l WHERE l.taskid = 'abc' ORDER BY l.starttime DESC LIMIT 0, 10)",
+        "      UNION ALL",
+        "      (SELECT l.id, l.starttime FROM `log_3_4` l WHERE l.taskid = 'abc' ORDER BY l.starttime DESC LIMIT 0, 10)) a",
+        "    INNER JOIN task t ON a.taskid = t.id",
+        "WHERE 1 = 1",
+        "ORDER BY a.starttime DESC",
+        "LIMIT 0, 10",
+      ),
+    );
+  });
+
+  it("drops no branch of a long parenthesized union chain (#10472)", async () => {
+    const branches = Array.from({ length: 12 }, (_, index) => `SELECT l.id, l.payload FROM log_${index + 1}_4 l WHERE l.taskid = 'abc' AND l.ytenant_id = '0000MEJRT61ACN8QOZ0000' ORDER BY l.starttime DESC LIMIT 0, 10`);
+    const sql = `SELECT a.id FROM ( ${branches.map((branch) => `(${branch})`).join(" UNION ALL ")} ) a`;
+
+    const formatted = await format(sql);
+
+    for (let index = 0; index < branches.length; index += 1) expect(formatted).toContain(`log_${index + 1}_4`);
+    expect(formatted.match(/UNION ALL/g)).toHaveLength(branches.length - 1);
+    expect(formatted.match(/0000MEJRT61ACN8QOZ0000/g)).toHaveLength(branches.length);
+  });
+
   it("formats a dialect without its own grammar", async () => {
     expect(await format("select * from t where a = 1 and b = 2;", {}, "generic")).toBe("SELECT * FROM t WHERE a = 1 AND b = 2;");
   });

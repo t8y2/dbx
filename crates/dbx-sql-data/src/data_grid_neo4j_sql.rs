@@ -2,9 +2,11 @@ use serde_json::Value;
 
 use super::*;
 use crate::models::connection::DatabaseType;
+use crate::sql_dialect::{neo4j_element_id_function, NEO4J_LEGACY_ELEMENT_ID_FUNCTION};
 
 pub(super) fn build_neo4j_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Vec<String> {
     let label = quote_ident(Some(DatabaseType::Neo4j), &options.table_meta.table_name);
+    let element_id_function = neo4j_element_id_function(options.server_version.as_deref());
     let mut statements = Vec::new();
 
     for (row_index, changes) in &options.dirty_rows {
@@ -29,8 +31,10 @@ pub(super) fn build_neo4j_data_grid_save_statements(options: &DataGridSaveStatem
         if sets.is_empty() {
             continue;
         }
-        statements
-            .push(format!("MATCH (n:{label}) WHERE {} SET {sets};", neo4j_element_id_predicate(&options.columns, row)));
+        statements.push(format!(
+            "MATCH (n:{label}) WHERE {} SET {sets};",
+            neo4j_element_id_predicate(&options.columns, row, element_id_function)
+        ));
     }
 
     for row_index in &options.deleted_rows {
@@ -39,7 +43,7 @@ pub(super) fn build_neo4j_data_grid_save_statements(options: &DataGridSaveStatem
         };
         statements.push(format!(
             "MATCH (n:{label}) WHERE {} DETACH DELETE n;",
-            neo4j_element_id_predicate(&options.columns, row)
+            neo4j_element_id_predicate(&options.columns, row, element_id_function)
         ));
     }
 
@@ -74,6 +78,7 @@ pub(super) fn build_neo4j_data_grid_save_statements(options: &DataGridSaveStatem
 
 pub(super) fn build_neo4j_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -> Vec<String> {
     let label = quote_ident(Some(DatabaseType::Neo4j), &options.table_meta.table_name);
+    let element_id_function = neo4j_element_id_function(options.server_version.as_deref());
     let mut statements = Vec::new();
 
     for row in &options.new_rows {
@@ -140,19 +145,41 @@ pub(super) fn build_neo4j_data_grid_rollback_statements(options: &DataGridSaveSt
         if sets.is_empty() {
             continue;
         }
-        statements
-            .push(format!("MATCH (n:{label}) WHERE {} SET {sets};", neo4j_element_id_predicate(&options.columns, row)));
+        statements.push(format!(
+            "MATCH (n:{label}) WHERE {} SET {sets};",
+            neo4j_element_id_predicate(&options.columns, row, element_id_function)
+        ));
     }
 
     statements
 }
 
-fn neo4j_element_id_predicate(columns: &[String], row: &[Value]) -> String {
+fn neo4j_element_id_predicate(columns: &[String], row: &[Value], element_id_function: &str) -> String {
     let index = columns.iter().position(|column| column == DBX_NEO4J_ELEMENT_ID_COLUMN).unwrap_or(usize::MAX);
-    format!(
-        "elementId(n) = {}",
-        format_grid_sql_literal(row.get(index).unwrap_or(&Value::Null), Some(DatabaseType::Neo4j), None)
-    )
+    let value = row.get(index).unwrap_or(&Value::Null);
+    // The legacy `id()` returns an Integer while a grid cell always carries text. Comparing the two
+    // with a quoted literal matches nothing, so a user edit would quietly update zero rows; the
+    // identity has to be written as a number there. `elementId()` keeps its string form.
+    if element_id_function == NEO4J_LEGACY_ELEMENT_ID_FUNCTION {
+        if let Some(identity) = neo4j_legacy_element_id_literal(value) {
+            return format!("{element_id_function}(n) = {identity}");
+        }
+    }
+    format!("{element_id_function}(n) = {}", format_grid_sql_literal(value, Some(DatabaseType::Neo4j), None))
+}
+
+/// Renders a legacy `id()` value as a Cypher number so it matches the server's Integer. Anything
+/// that is not an integral id is left to the caller's normal literal formatting.
+fn neo4j_legacy_element_id_literal(value: &Value) -> Option<String> {
+    match value {
+        Value::Number(number) => number.as_i64().map(|identity| identity.to_string()),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty() && trimmed.chars().all(|character| character.is_ascii_digit()))
+                .then(|| trimmed.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn neo4j_row_property_where(columns: &[String], row: &[Value]) -> String {

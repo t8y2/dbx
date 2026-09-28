@@ -375,6 +375,7 @@ export function useSidebarDataOpenRuntime() {
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         driverProfile: config?.driver_profile,
+        serverVersion: connectionStore.getConfig(node.connectionId)?.database_info?.productVersion,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
         schema: tableSchema,
         database: node.database,

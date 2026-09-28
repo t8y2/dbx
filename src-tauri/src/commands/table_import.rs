@@ -51,8 +51,11 @@ async fn clear_cancelled(import_id: &str) {
 }
 
 #[tauri::command]
-pub async fn preview_table_import_file(request: TableImportPreviewRequest) -> Result<TableImportPreview, String> {
-    dbx_core::table_import::preview_table_import_file_with_request(request).await
+pub async fn preview_table_import_file(
+    state: State<'_, Arc<AppState>>,
+    request: TableImportPreviewRequest,
+) -> Result<TableImportPreview, String> {
+    dbx_core::table_import::preview_table_import_file_with_state(&state, request).await
 }
 
 #[tauri::command]

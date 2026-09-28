@@ -32,7 +32,9 @@ import {
   structurePreviewDdlStorageType,
 } from "@/components/sidebar/sidebarTreeDialogState";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
+import { uuid } from "@/lib/common/utils";
 
 type StructureCopyFormat = "tsv" | "markdown";
 
@@ -58,6 +60,8 @@ interface SidebarTableExportTarget {
   batchSize: number;
   rowLimit: number | null;
   csvQuoteMode: CsvQuoteMode;
+  /** 导出 CSV 时 NULL 的字面量；空串表示关闭（旧行为）。 */
+  nullLiteral: string;
   fileNameBase?: string;
 }
 
@@ -355,6 +359,8 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     try {
       await connectionStore.ensureConnected(connectionId);
       const queryColumns = config.db_type === "neo4j" ? (await api.getColumns(connectionId, database, target.metadataSchema, target.tableName, target.catalog)).map((column) => column.name) : undefined;
+      const useAgentCursor = config.db_type === "cassandra";
+      const clientSessionId = useAgentCursor ? `table-export:${uuid()}` : undefined;
       const result = await fetchTableDataForExport({
         databaseType: target.databaseType,
         identifierQuote: target.identifierQuote,
@@ -362,7 +368,17 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         tableName: target.tableName,
         tableType: target.tableType,
         columns: queryColumns,
-        executePage: (sql) => api.executeQuery(connectionId, database, sql),
+        useAgentCursor,
+        executePage: (sql, cursorOptions) => (cursorOptions ? api.executeQuery(connectionId, database, sql, undefined, undefined, { ...cursorOptions, clientSessionId, catalog: target.catalog, timeoutSecs: config.query_timeout_secs }) : api.executeQuery(connectionId, database, sql)),
+        closeCursor: useAgentCursor
+          ? async (sessionId) => {
+              try {
+                if (sessionId) await api.closeQuerySession(connectionId, database, sessionId, clientSessionId, target.catalog);
+              } finally {
+                await api.closeClientConnectionSession(connectionId, database, clientSessionId!, target.catalog);
+              }
+            }
+          : undefined,
       });
 
       const outputPath = await resolveTableExportOutputPath(target, "json", outputDirectory);
@@ -424,6 +440,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       batchSize: editorSettings.exportBatchSize,
       rowLimit: editorSettings.exportRowLimitEnabled ? editorSettings.exportRowLimit : null,
       csvQuoteMode: editorSettings.csvQuoteMode,
+      nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
     };
   }
 
@@ -459,7 +476,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           executePage: (sql) => api.executeQuery(connectionId, database, sql),
         });
         if (format === "csv") {
-          await api.exportQueryResultCsv(outputPath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), target.csvQuoteMode);
+          await api.exportQueryResultCsv(outputPath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), target.csvQuoteMode, target.nullLiteral);
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -490,6 +507,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         format,
         ...(format === "sql" ? { insertDialect } : {}),
         csvQuoteMode: target.csvQuoteMode,
+        nullLiteral: target.nullLiteral,
         columns: queryColumns,
         columnComments,
         autoFilter: format === "xlsx" ? autoFilter : undefined,

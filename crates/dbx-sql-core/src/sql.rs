@@ -2530,6 +2530,13 @@ struct OraclePlSqlBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OraclePlSqlToken {
     Word(String),
+    /// A double-quoted identifier (`"schema"."procedure"`). Kept as its own variant
+    /// instead of a [`Self::Word`]: the block detectors compare keywords, and a quoted
+    /// name must never satisfy `is_word` (a column called `"END"` is not the block end).
+    /// Dropping it entirely made `BEGIN "S"."P"(); END;` tokenize exactly like a
+    /// transaction `BEGIN;`, so the splitter cut the block at the inner semicolon and
+    /// the server rejected the truncated statement (#10434).
+    QuotedIdentifier,
     Semicolon,
 }
 
@@ -2742,6 +2749,7 @@ impl OraclePlSqlToken {
     fn from_sqlparser_token(token: Token) -> Option<Self> {
         match token {
             Token::Word(word) if word.quote_style.is_none() => Some(Self::Word(word.value.to_ascii_uppercase())),
+            Token::Word(_) => Some(Self::QuotedIdentifier),
             Token::SemiColon => Some(Self::Semicolon),
             _ => None,
         }
@@ -2754,7 +2762,7 @@ impl OraclePlSqlToken {
     fn as_word(&self) -> Option<&str> {
         match self {
             Self::Word(value) => Some(value),
-            Self::Semicolon => None,
+            Self::QuotedIdentifier | Self::Semicolon => None,
         }
     }
 
@@ -2834,6 +2842,7 @@ fn oracle_plsql_tokens_fallback(sql: &str) -> Vec<OraclePlSqlToken> {
                     break;
                 }
             }
+            tokens.push(OraclePlSqlToken::QuotedIdentifier);
             continue;
         }
 
@@ -3979,6 +3988,32 @@ END;";
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Dameng), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Gaussdb), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Xugu), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_quoted_identifier_block_together_per_issue_10434() {
+        // `BEGIN "SCHEMA"."PROCEDURE"(); END;` is what the DM (Dameng) routine dialog
+        // generates. The double-quoted name used to be dropped from the token stream, so the
+        // block tokenized exactly like a transaction `BEGIN;` and was cut at its inner
+        // semicolon — the server then rejected the fragment with 42000 + vendorCode -2007
+        // ("第 2 行, 第 32 列[]附近出现错误: 语法分析出错").
+        let sql = "BEGIN\n  \"DLJPLAT\".\"用户表脱敏\"();\nEND;";
+        for db_type in [DatabaseType::Dameng, DatabaseType::Oracle, DatabaseType::Xugu, DatabaseType::Gaussdb] {
+            assert_eq!(split_sql_statements_for_database(sql, db_type), vec![sql.to_string()], "{db_type:?}");
+        }
+
+        // A quoted identifier that spells a block keyword is a name, not a block boundary.
+        let keyword_named = "BEGIN\n  INSERT INTO \"END\" VALUES (1);\nEND;";
+        assert_eq!(
+            split_sql_statements_for_database(keyword_named, DatabaseType::Dameng),
+            vec![keyword_named.to_string()]
+        );
+
+        // `BEGIN;` stays a transaction statement and still splits at its own terminator.
+        assert_eq!(
+            split_sql_statements_for_database("BEGIN; INSERT INTO t VALUES (1); COMMIT;", DatabaseType::Dameng),
+            vec!["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]
+        );
     }
 
     #[test]

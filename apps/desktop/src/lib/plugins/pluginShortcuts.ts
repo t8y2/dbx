@@ -4,6 +4,7 @@ import type { PluginCommandContribution } from "@/types/database";
 export type PluginShortcutPosition = "left-top" | "left-bottom" | "right-top" | "right-bottom" | "sidebar-bottom" | "toolbar" | "plugin-center";
 export interface PluginShortcutSettings {
   enabled: boolean;
+  showSettingsEntry: boolean;
   position: PluginShortcutPosition;
   order: string[];
   hiddenPluginIds: string[];
@@ -17,6 +18,7 @@ export function normalizePluginShortcutSettings(value: unknown): PluginShortcutS
   const strings = (values: unknown): string[] => (Array.isArray(values) ? [...new Set(values.filter((id): id is string => typeof id === "string" && id.length > 0))] : []);
   return {
     enabled: typeof input.enabled === "boolean" ? input.enabled : true,
+    showSettingsEntry: typeof input.showSettingsEntry === "boolean" ? input.showSettingsEntry : true,
     position: position === "left" ? "left-top" : position === "left-top" || position === "left-bottom" || position === "right-bottom" || position === "sidebar-bottom" || position === "toolbar" || position === "plugin-center" ? position : "right-top",
     order: strings(input.order),
     hiddenPluginIds: strings(input.hiddenPluginIds),

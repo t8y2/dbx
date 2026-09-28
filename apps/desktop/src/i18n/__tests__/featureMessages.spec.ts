@@ -54,6 +54,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   },
   { feature: "offline Agent export", keys: ["driverStore.offlineExport*"] },
   { feature: "offline Agent import", keys: ["driverStore.offlineImport*", "driverStore.offlineJreImport*"] },
+  { feature: "driver runtime connection-owned message (#10412)", keys: ["driverStore.runtimeControlConnectionOwned"], translated: true },
   { feature: "multi-database execution and export progress", keys: ["multiDbExecute.*", "exportProgress.*"], locales: ["en", "zh-CN"] },
   { feature: "process list batch terminate", keys: under("processList", ["batchTerminate", "batchTerminateTitle", "batchTerminateConfirm", "batchTerminateRunning", "batchTerminateSummary"]) },
   { feature: "cached result fallback", keys: ["grid.cachedResultUnavailable", "grid.reexecuteQuery"] },

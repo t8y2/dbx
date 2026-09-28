@@ -127,6 +127,8 @@ async fn benchmark_file(
     let preview_started = Instant::now();
     let preview = preview_table_import_file_with_request(TableImportPreviewRequest {
         file_path: path_text.to_string(),
+        connection_id: None,
+        database: None,
         source_ref: None,
         source_format: Some(format),
         parse_options: parse_options.clone(),

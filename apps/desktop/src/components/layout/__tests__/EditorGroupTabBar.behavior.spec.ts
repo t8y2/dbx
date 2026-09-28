@@ -42,7 +42,9 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
 }));
 
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import type { ConnectionConfig } from "@/types/database";
 
 function createHost(): HTMLDivElement {
   const host = document.createElement("div");
@@ -84,6 +86,12 @@ function mountBar(
         en: {
           toolbar: { pluginCenter: "Plugin Center" },
           common: { close: "Close" },
+          connectionGroup: { ungroupedLabel: "Ungrouped" },
+          tabs: {
+            tooltipConnection: "Connection:",
+            tooltipGroup: "Group:",
+            tooltipDatabase: "Database:",
+          },
           contextMenu: {
             splitRight: "Split right",
             splitDown: "Split down",
@@ -244,7 +252,10 @@ describe("EditorGroupTabBar behavior", () => {
 
   it("keeps the tooltip for a connection-bound plugin tab", async () => {
     const store = useQueryStore();
-    const tabId = store.openPluginWorkbench("com.example.toolbox", "toolbox", { connectionId: "pg-1" });
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "plugin-1", name: "SSH server", db_type: "plugin" } as ConnectionConfig];
+    connectionStore.sidebarLayout = { groups: [], order: [{ type: "connection", id: "plugin-1" }] };
+    const tabId = store.openPluginWorkbench("com.example.toolbox", "toolbox", { connectionId: "plugin-1" });
     const mainGroup = store.groups[0];
     const { app, host } = mountBar(mainGroup.id, [tabId], tabId, pinia);
     await settle();
@@ -255,6 +266,8 @@ describe("EditorGroupTabBar behavior", () => {
 
     expect(tooltip.dataset.open).toBe("true");
     expect(host.querySelector("[data-plugin-title-tooltip]")).toBeNull();
+    expect(host.querySelector<HTMLElement>(".tooltip-content-stub")?.textContent).toContain("SSH server");
+    expect(host.querySelector<HTMLElement>(".tooltip-content-stub")?.textContent).not.toContain("Database:");
 
     app.unmount();
     host.remove();

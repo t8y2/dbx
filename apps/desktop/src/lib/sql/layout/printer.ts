@@ -1,4 +1,4 @@
-import type { AstNode, ClauseNode, LimitClauseNode, ParenthesisNode, StatementNode } from "sql-formatter/dist/esm/parser/ast.js";
+import type { AstNode, ClauseNode, LimitClauseNode, ParenthesisNode, SetOperationNode, StatementNode } from "sql-formatter/dist/esm/parser/ast.js";
 import { createTableLayout, isCreateTable } from "./ddl";
 import { clauseChildContext, collapsedContext, emitText, endsWithLineComment, isBodyNode, isCallParen, isJoinKeyword, isLineComment, isLogicalOperator, isParenthesis, keywordText, limitChildren, renderInline, splitByComma, splitLogicalOperands, Writer, type SqlLayoutContext } from "./primitives";
 
@@ -109,6 +109,52 @@ function measureParen(writer: Writer, nodes: AstNode[], index: number, ctx: SqlL
 }
 
 /**
+ * Emits a parenthesis group: inline while it fits — together with the rest of
+ * the join element it opens — and expanded, re-based on the `(`'s own column,
+ * when it does not.
+ */
+function writeParenthesis(writer: Writer, nodes: AstNode[], index: number, ctx: SqlLayoutContext): void {
+  const node = nodes[index] as ParenthesisNode;
+  const inner = measureParen(writer, nodes, index, ctx);
+  if (inner) {
+    writer.write(`${node.openParen}${inner}${node.closeParen}`);
+    return;
+  }
+  writer.write(node.openParen);
+  printBlock(writer, node.children, writer.column, ctx);
+  writer.write(node.closeParen);
+}
+
+/**
+ * Emits one set operation (`UNION ALL`, `INTERSECT`, ...).
+ *
+ * The parser only promotes a *bare* `SELECT` after the operator to a sibling
+ * clause of its own; every other branch — a parenthesized subquery, a `VALUES`
+ * list — stays in this node's `children`. Printing the keyword alone would
+ * therefore delete every branch after the first one (#10472), so the operand is
+ * written on the next line at the operator's column, which is where the
+ * sibling-clause form (`SELECT ... UNION ALL SELECT ...`) puts it as well.
+ */
+function printSetOperation(writer: Writer, node: SetOperationNode, baseColumn: number, ctx: SqlLayoutContext): void {
+  writer.write(keywordText(node.nameKw.text, ctx));
+  if (node.children.length === 0) return;
+  writer.newline(baseColumn);
+  printSetOperationOperand(writer, node.children, ctx);
+}
+
+/** Emits the operand a set operation carries inside its own node. */
+function printSetOperationOperand(writer: Writer, nodes: AstNode[], ctx: SqlLayoutContext): void {
+  if (nodes.length === 1 && isParenthesis(nodes[0])) {
+    writeParenthesis(writer, nodes, 0, ctx);
+    return;
+  }
+  // Anything the grammar did not turn into a clause of its own (a `VALUES`
+  // list, a dialect-specific operand): let sql-formatter lay it out, re-based
+  // on this column.
+  emitText(writer, ctx.renderers.block(nodes).trim(), writer.column, endsWithLineComment(nodes));
+}
+
+/**
  * Emits a condition that does not fit on one line, breaking it at its top-level
  * logical operators the way `logicalOperatorNewline` asks: `before` starts each
  * continuation line with the operator, `after` ends the previous line with it.
@@ -166,14 +212,7 @@ function printElement(writer: Writer, nodes: AstNode[], baseColumn: number, ctx:
 
     if (isParenthesis(node)) {
       if (!isCallParen(nodes, index, ctx)) writer.space();
-      const inner = measureParen(writer, nodes, index, ctx);
-      if (inner) {
-        writer.write(`${node.openParen}${inner}${node.closeParen}`);
-      } else {
-        writer.write(node.openParen);
-        printBlock(writer, node.children, writer.column, ctx);
-        writer.write(node.closeParen);
-      }
+      writeParenthesis(writer, nodes, index, ctx);
       index += 1;
       continue;
     }
@@ -232,8 +271,12 @@ function printBlock(writer: Writer, nodes: AstNode[], baseColumn: number, ctx: S
 /** Emits one clause / set operation / limit clause of a statement body. */
 function writeBodyNode(writer: Writer, node: AstNode, baseColumn: number, ctx: SqlLayoutContext): void {
   if (node.type === "clause") printClause(writer, node, baseColumn, ctx);
-  else if (node.type === "set_operation") writer.write(keywordText(node.nameKw.text, ctx));
+  else if (node.type === "set_operation") printSetOperation(writer, node, baseColumn, ctx);
   else if (node.type === "limit_clause") printLimitClause(writer, node, ctx);
+  // A parenthesized group that is not a clause (a set operation's branch, a
+  // statement wrapped in parentheses) is laid out like any other parenthesis so
+  // its contents stay in this style instead of dropping to the generic renderer.
+  else if (isParenthesis(node)) writeParenthesis(writer, [node], 0, ctx);
   else emitText(writer, ctx.renderers.block([node]).trim(), writer.column, isLineComment(node));
 }
 

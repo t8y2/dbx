@@ -1337,6 +1337,8 @@ async fn serve() {
             post(routes::cloud_sync::forget_webdav_sync_secrets_passphrase),
         )
         .route("/cloud-sync/webdav/upload", post(routes::cloud_sync::webdav_sync_upload))
+        .route("/cloud-sync/catalog/local", post(routes::cloud_sync::cloud_sync_local_catalog))
+        .route("/cloud-sync/webdav/inspect", post(routes::cloud_sync::webdav_sync_inspect))
         .route("/cloud-sync/webdav/download", post(routes::cloud_sync::webdav_sync_download))
         .route("/cloud-sync/snippet/test", post(routes::cloud_sync::snippet_sync_test))
         .route("/cloud-sync/snippet/token-status", post(routes::cloud_sync::snippet_token_status))
@@ -1346,6 +1348,7 @@ async fn serve() {
         .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
         .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
+        .route("/cloud-sync/snippet/inspect", post(routes::cloud_sync::snippet_sync_inspect))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 
     // Do not expose DuckDB-only handlers from builds that omit DuckDB sidecar support.

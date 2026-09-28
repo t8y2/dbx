@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use glob::{glob_with, MatchOptions};
 use serde::Serialize;
 
 use crate::models::connection::SshTunnelConfig;
@@ -24,16 +28,15 @@ pub struct SshConfigHostEntry {
     pub proxy_jump: Option<String>,
 }
 
-/// Reads and parses `~/.ssh/config`. Returns an empty list (not an error) if
-/// the file does not exist, since that's a normal state for users without
-/// an SSH config.
+/// Reads and parses `~/.ssh/config`, following `Include` directives the way
+/// OpenSSH does. Returns an empty list (not an error) if the file does not
+/// exist, since that's a normal state for users without an SSH config.
 pub fn list_hosts() -> Result<Vec<SshConfigHostEntry>, String> {
-    let path = expand_tilde("~/.ssh/config");
-    match std::fs::read_to_string(&path) {
-        Ok(content) => Ok(parse_ssh_config(&content)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(format!("Failed to read {path}: {err}")),
-    }
+    let path = PathBuf::from(expand_tilde("~/.ssh/config"));
+    let base_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(expand_tilde("~/.ssh")));
+    let mut loader = SshConfigLoader::new(base_dir);
+    loader.load_file(&path, 0, true)?;
+    Ok(loader.entries)
 }
 
 pub fn find_host(alias: &str) -> Option<SshConfigHostEntry> {
@@ -158,88 +161,166 @@ fn apply_host_entry(ssh: &SshTunnelConfig, entry: SshConfigHostEntry) -> SshTunn
     resolved
 }
 
-/// Parses a minimal subset of OpenSSH client config syntax: `Host`, `HostName`,
-/// `Port`, `User`, `IdentityFile`, `ProxyJump`. Wildcard host patterns
-/// (containing `*` or `?`) are skipped since they aren't usable as a literal
-/// alias in the host field. `Include` and other directives are not
-/// supported, and `ProxyJump`'s comma-separated multi-hop form is read as a
-/// single alias (its first hop).
-fn parse_ssh_config(content: &str) -> Vec<SshConfigHostEntry> {
-    let mut entries: Vec<SshConfigHostEntry> = Vec::new();
-    let mut current_aliases: Vec<String> = Vec::new();
+/// OpenSSH gives up after 16 nested `Include`s; mirror that so a config that
+/// includes itself can never recurse without bound.
+const MAX_INCLUDE_DEPTH: usize = 16;
 
-    for raw_line in content.lines() {
-        let line = strip_comment(raw_line).trim();
-        if line.is_empty() {
-            continue;
+/// Accumulates `Host` entries while walking a config file and, in place, the
+/// files its `Include` directives pull in — OpenSSH treats an include as text
+/// substitution at that exact position, so directive order (and therefore
+/// first-match-wins for duplicate aliases) is preserved.
+struct SshConfigLoader {
+    entries: Vec<SshConfigHostEntry>,
+    current_aliases: Vec<String>,
+    /// Canonical paths already parsed, so include cycles terminate.
+    visited: HashSet<PathBuf>,
+    /// Directory that relative `Include` patterns resolve against (`~/.ssh`).
+    base_dir: PathBuf,
+}
+
+impl SshConfigLoader {
+    fn new(base_dir: PathBuf) -> Self {
+        Self { entries: Vec::new(), current_aliases: Vec::new(), visited: HashSet::new(), base_dir }
+    }
+
+    /// Reads `path` and folds its directives into this loader's entries.
+    ///
+    /// `strict` propagates read failures (used for the top-level config, where
+    /// an unreadable file is a real error); included files follow OpenSSH and
+    /// are skipped silently when they are missing or unreadable.
+    fn load_file(&mut self, path: &Path, depth: usize, strict: bool) -> Result<(), String> {
+        let identity = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if !self.visited.insert(identity) {
+            return Ok(());
         }
-        let Some((keyword, value)) = split_directive(line) else {
-            continue;
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return if strict { Err(format!("Failed to read {}: {err}", path.display())) } else { Ok(()) };
+            }
         };
+        self.parse_lines(&content, true, depth)
+    }
 
-        match keyword.to_ascii_lowercase().as_str() {
-            "host" => {
-                current_aliases = value
-                    .split_whitespace()
-                    .filter(|alias| !alias.contains('*') && !alias.contains('?'))
-                    .map(str::to_string)
-                    .collect();
-                for alias in &current_aliases {
-                    entries.push(SshConfigHostEntry {
-                        alias: alias.clone(),
-                        host_name: None,
-                        port: None,
-                        user: None,
-                        identity_file: None,
-                        proxy_jump: None,
-                    });
-                }
+    /// Parses a minimal subset of OpenSSH client config syntax: `Host`,
+    /// `HostName`, `Port`, `User`, `IdentityFile`, `ProxyJump`, `Include`.
+    /// Wildcard host patterns (containing `*` or `?`) are skipped since they
+    /// aren't usable as a literal alias in the host field. `ProxyJump`'s
+    /// comma-separated multi-hop form is read as a single alias (its first
+    /// hop). Unknown directives are ignored.
+    fn parse_lines(&mut self, content: &str, follow_includes: bool, depth: usize) -> Result<(), String> {
+        for raw_line in content.lines() {
+            let line = strip_comment(raw_line).trim();
+            if line.is_empty() {
+                continue;
             }
-            "hostname" => set_current_field(&mut entries, &current_aliases, |entry| {
-                entry.host_name = Some(value.to_string());
-            }),
-            "port" => {
-                if let Ok(port) = value.parse::<u16>() {
-                    set_current_field(&mut entries, &current_aliases, |entry| {
-                        entry.port = Some(port);
-                    });
+            let Some((keyword, value)) = split_directive(line) else {
+                continue;
+            };
+
+            if keyword.eq_ignore_ascii_case("include") {
+                if follow_includes && depth < MAX_INCLUDE_DEPTH {
+                    for included in self.include_paths(value) {
+                        self.load_file(&included, depth + 1, false)?;
+                    }
                 }
+                continue;
             }
-            "user" => set_current_field(&mut entries, &current_aliases, |entry| {
-                entry.user = Some(value.to_string());
-            }),
-            "identityfile" => set_current_field(&mut entries, &current_aliases, |entry| {
-                entry.identity_file = Some(value.to_string());
-            }),
-            "proxyjump" => {
-                if let Some(first_hop) = value.split(',').next().map(str::trim).filter(|hop| !hop.is_empty()) {
-                    // A `user@host:port` jump target names an alias-incompatible
-                    // literal host; only a plain alias is resolvable here.
-                    if !first_hop.contains('@') && !first_hop.contains(':') {
-                        let first_hop = first_hop.to_string();
-                        set_current_field(&mut entries, &current_aliases, |entry| {
-                            entry.proxy_jump = Some(first_hop.clone());
+
+            match keyword.to_ascii_lowercase().as_str() {
+                "host" => {
+                    let aliases: Vec<String> = value
+                        .split_whitespace()
+                        .filter(|alias| !alias.contains('*') && !alias.contains('?'))
+                        .map(str::to_string)
+                        .collect();
+                    for alias in &aliases {
+                        self.entries.push(SshConfigHostEntry {
+                            alias: alias.clone(),
+                            host_name: None,
+                            port: None,
+                            user: None,
+                            identity_file: None,
+                            proxy_jump: None,
+                        });
+                    }
+                    self.current_aliases = aliases;
+                }
+                "hostname" => self.set_current_field(|entry| {
+                    entry.host_name = Some(value.to_string());
+                }),
+                "port" => {
+                    if let Ok(port) = value.parse::<u16>() {
+                        self.set_current_field(|entry| {
+                            entry.port = Some(port);
                         });
                     }
                 }
+                "user" => self.set_current_field(|entry| {
+                    entry.user = Some(value.to_string());
+                }),
+                "identityfile" => self.set_current_field(|entry| {
+                    entry.identity_file = Some(value.to_string());
+                }),
+                "proxyjump" => {
+                    if let Some(first_hop) = value.split(',').next().map(str::trim).filter(|hop| !hop.is_empty()) {
+                        // A `user@host:port` jump target names an alias-incompatible
+                        // literal host; only a plain alias is resolvable here.
+                        if !first_hop.contains('@') && !first_hop.contains(':') {
+                            let first_hop = first_hop.to_string();
+                            self.set_current_field(|entry| {
+                                entry.proxy_jump = Some(first_hop.clone());
+                            });
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
+        Ok(())
     }
 
-    entries
+    /// Expands one `Include` line into the files it names, mirroring OpenSSH:
+    /// `~` is expanded, relative patterns resolve against `base_dir`, glob
+    /// wildcards are honored, and patterns that match nothing (missing files)
+    /// are skipped instead of failing the whole config.
+    fn include_paths(&self, value: &str) -> Vec<PathBuf> {
+        let options = MatchOptions { require_literal_leading_dot: true, ..MatchOptions::default() };
+        let mut paths = Vec::new();
+        for pattern in value.split_whitespace() {
+            let expanded = expand_tilde(pattern);
+            let candidate =
+                if Path::new(&expanded).is_absolute() { PathBuf::from(expanded) } else { self.base_dir.join(expanded) };
+            let Ok(matches) = glob_with(&candidate.to_string_lossy(), options) else {
+                continue;
+            };
+            let mut files: Vec<PathBuf> = matches.filter_map(Result::ok).collect();
+            // glob order is filesystem-dependent; sorting keeps host ordering
+            // (and therefore duplicate-alias resolution) reproducible.
+            files.sort();
+            paths.extend(files);
+        }
+        paths
+    }
+
+    fn set_current_field(&mut self, apply: impl Fn(&mut SshConfigHostEntry)) {
+        let aliases = self.current_aliases.as_slice();
+        for entry in self.entries.iter_mut() {
+            if aliases.contains(&entry.alias) {
+                apply(entry);
+            }
+        }
+    }
 }
 
-fn set_current_field(
-    entries: &mut [SshConfigHostEntry],
-    current_aliases: &[String],
-    apply: impl Fn(&mut SshConfigHostEntry),
-) {
-    for entry in entries.iter_mut() {
-        if current_aliases.contains(&entry.alias) {
-            apply(entry);
-        }
-    }
+/// Parses config text that stands on its own (tests, snippets): `Include` is
+/// not followed because there is no file context to resolve it against.
+#[cfg(test)]
+fn parse_ssh_config(content: &str) -> Vec<SshConfigHostEntry> {
+    let mut loader = SshConfigLoader::new(PathBuf::new());
+    let _ = loader.parse_lines(content, false, 0);
+    loader.entries
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -494,5 +575,167 @@ mod tests {
         // detail of cycle detection, not a behavior callers rely on.
         assert!(chain.len() <= entries.len());
         assert_eq!(chain.last().unwrap().host, "1.1.1.1");
+    }
+}
+
+#[cfg(test)]
+mod include_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Writes `content` to `dir/relative`, creating parent directories.
+    fn write_config(dir: &Path, relative: &str, content: &str) -> PathBuf {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        std::fs::write(&path, content).expect("write config file");
+        path
+    }
+
+    /// Loads `path` with `base_dir` as the include root, exactly like
+    /// `list_hosts` does with `~/.ssh`.
+    fn hosts_from(path: &Path, base_dir: &Path) -> Vec<SshConfigHostEntry> {
+        let mut loader = SshConfigLoader::new(base_dir.to_path_buf());
+        loader.load_file(path, 0, true).expect("load config");
+        loader.entries
+    }
+
+    fn aliases(entries: &[SshConfigHostEntry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.alias.as_str()).collect()
+    }
+
+    #[test]
+    fn follows_relative_glob_includes_in_sorted_order() {
+        let dir = TempDir::new().unwrap();
+        let main = write_config(
+            dir.path(),
+            "config",
+            "Host direct\n  HostName 10.0.0.1\nInclude conf.d/*\nHost local\n  HostName 10.0.0.2\n",
+        );
+        write_config(
+            dir.path(),
+            "conf.d/10-proxy.conf",
+            "Host abc\n  HostName 10.0.1.1\n  User ops\n  ProxyCommand nc %h %p\n",
+        );
+        write_config(dir.path(), "conf.d/20-extra.conf", "Host zzz\n  HostName 10.0.1.2\n");
+
+        let entries = hosts_from(&main, dir.path());
+
+        // Includes are substituted in place, so hosts land between `direct`
+        // and `local`; glob results are sorted for reproducibility.
+        assert_eq!(aliases(&entries), vec!["direct", "abc", "zzz", "local"]);
+        let abc = &entries[1];
+        assert_eq!(abc.host_name, Some("10.0.1.1".to_string()));
+        assert_eq!(abc.user, Some("ops".to_string()));
+        // ProxyCommand is not a supported directive (issue #10454 tracks the
+        // missing host resolution, not this), so it must not leak into the
+        // resolved tunnel config.
+        assert_eq!(abc.proxy_jump, None);
+    }
+
+    #[test]
+    fn include_accepts_absolute_paths_and_multiple_patterns_on_one_line() {
+        let dir = TempDir::new().unwrap();
+        let sibling = write_config(dir.path(), "elsewhere/absolute.conf", "Host abs\n  HostName 10.0.2.1\n");
+        let main = write_config(
+            dir.path(),
+            "config",
+            &format!("Include conf.d/first.conf {}\nHost tail\n  HostName 10.0.2.9\n", sibling.display()),
+        );
+        write_config(dir.path(), "conf.d/first.conf", "Host rel\n  HostName 10.0.2.2\n");
+
+        let entries = hosts_from(&main, dir.path());
+
+        assert_eq!(aliases(&entries), vec!["rel", "abs", "tail"]);
+    }
+
+    #[test]
+    fn missing_include_targets_are_skipped_without_failing() {
+        let dir = TempDir::new().unwrap();
+        let main = write_config(dir.path(), "config", "Include conf.d/*\nHost only\n  HostName 10.0.3.1\n");
+
+        let entries = hosts_from(&main, dir.path());
+
+        assert_eq!(aliases(&entries), vec!["only"]);
+    }
+
+    #[test]
+    fn nested_includes_are_followed_recursively() {
+        let dir = TempDir::new().unwrap();
+        let main = write_config(dir.path(), "config", "Include conf.d/50-middle.conf\n");
+        write_config(
+            dir.path(),
+            "conf.d/50-middle.conf",
+            "Host middle\n  HostName 10.0.4.1\nInclude nested/60-leaf.conf\n",
+        );
+        write_config(dir.path(), "nested/60-leaf.conf", "Host leaf\n  HostName 10.0.4.2\n");
+
+        let entries = hosts_from(&main, dir.path());
+
+        assert_eq!(aliases(&entries), vec!["middle", "leaf"]);
+    }
+
+    #[test]
+    fn include_cycles_terminate() {
+        let dir = TempDir::new().unwrap();
+        let main = write_config(dir.path(), "config", "Include a.conf\n");
+        write_config(dir.path(), "a.conf", "Host a\n  HostName 10.0.5.1\nInclude b.conf\n");
+        write_config(dir.path(), "b.conf", "Host b\n  HostName 10.0.5.2\nInclude a.conf\n");
+
+        let entries = hosts_from(&main, dir.path());
+
+        // Each file is parsed once; the cycle back into a.conf is ignored.
+        assert_eq!(aliases(&entries), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn directives_after_an_include_bind_to_the_last_host_it_declared() {
+        // OpenSSH treats Include as text substitution at that exact position,
+        // so a keyword following it belongs to the most recent Host — which
+        // may have been declared inside the included file. Getting this wrong
+        // would misattribute values, so lock the behavior down.
+        let dir = TempDir::new().unwrap();
+        let main = write_config(
+            dir.path(),
+            "config",
+            "Host first\n  HostName 10.0.6.1\nInclude conf.d/inner.conf\n  User shared\n",
+        );
+        write_config(dir.path(), "conf.d/inner.conf", "Host second\n  HostName 10.0.6.2\n");
+
+        let entries = hosts_from(&main, dir.path());
+
+        assert_eq!(aliases(&entries), vec!["first", "second"]);
+        assert_eq!(entries[0].user, None);
+        assert_eq!(entries[1].user, Some("shared".to_string()));
+    }
+
+    #[test]
+    fn host_declared_in_an_included_file_keeps_receiving_later_directives() {
+        let dir = TempDir::new().unwrap();
+        let main = write_config(dir.path(), "config", "Include conf.d/inner.conf\n  Port 2200\n");
+        write_config(dir.path(), "conf.d/inner.conf", "Host included\n  HostName 10.0.7.1\n");
+
+        let entries = hosts_from(&main, dir.path());
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].port, Some(2200));
+    }
+
+    #[test]
+    fn tilde_prefixed_include_patterns_do_not_break_the_loader() {
+        // `~` resolution itself is covered by dbx-platform's path_utils tests;
+        // here we only assert the loader tolerates a home-relative pattern
+        // (e.g. `~/.ssh/conf.d/*`) that matches nothing on this machine.
+        let dir = TempDir::new().unwrap();
+        let main = write_config(
+            dir.path(),
+            "config",
+            "Include ~/.ssh/dbx-no-such-dir-xyz/*\nHost kept\n  HostName 10.0.8.1\n",
+        );
+
+        let entries = hosts_from(&main, dir.path());
+
+        assert_eq!(aliases(&entries), vec!["kept"]);
     }
 }

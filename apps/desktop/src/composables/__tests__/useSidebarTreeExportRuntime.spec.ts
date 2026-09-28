@@ -8,6 +8,8 @@ const addExportTaskMock = vi.hoisted(() => vi.fn());
 const updateTableExportTaskMock = vi.hoisted(() => vi.fn());
 const apiMock = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(async () => 'SELECT * FROM "main"."users" LIMIT 10000'),
+  closeClientConnectionSession: vi.fn(),
+  closeQuerySession: vi.fn(),
   executeQuery: vi.fn(),
   exportQueryResultCsv: vi.fn(),
   exportQueryResultJson: vi.fn(),
@@ -240,6 +242,70 @@ describe("useSidebarTreeExportRuntime", () => {
 
     expect(apiMock.executeQuery).toHaveBeenCalledOnce();
     expect(toastMock).toHaveBeenCalledWith("导出失败：上一个 DuckDB 查询仍在停止中，请稍后重试。", 5000);
+  });
+
+  it("isolates and advances Cassandra JSON export cursors", async () => {
+    apiMock.buildTableSelectSql.mockResolvedValue('SELECT * FROM "events";');
+    apiMock.executeQuery.mockResolvedValueOnce({ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-1", has_more: true }).mockResolvedValueOnce({ columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, has_more: false });
+    const activeNode = shallowRef({ id: "table-1", type: "table", label: "events", connectionId: "cassandra-1", database: "app", children: [] } as TreeNode);
+    const connectionStore = {
+      ensureConnected: vi.fn(),
+      getConfig: vi.fn(() => ({ db_type: "cassandra", query_timeout_secs: 30 })),
+      connectionIdentifierQuote: vi.fn(() => '"'),
+      treeNodes: [],
+      selectedTreeNodeIds: [],
+    };
+    const runtime = useSidebarTreeExportRuntime({
+      activeNode,
+      connectionStore: connectionStore as never,
+      settingsStore: exportSettings() as never,
+      acceptedSelectionIds: () => null,
+    });
+
+    await runtime.exportData("json");
+
+    const firstOptions = apiMock.executeQuery.mock.calls[0]?.[5];
+    const secondOptions = apiMock.executeQuery.mock.calls[1]?.[5];
+    expect(firstOptions).toMatchObject({ maxRows: 2_147_483_647, fetchSize: 10_000, pageSize: 10_000, resultSessionId: undefined, timeoutSecs: 30 });
+    expect(secondOptions).toMatchObject({ maxRows: 2_147_483_647, fetchSize: 10_000, pageSize: 10_000, resultSessionId: "cursor-1", clientSessionId: firstOptions.clientSessionId, timeoutSecs: 30 });
+    expect(firstOptions.clientSessionId).toMatch(/^table-export:/);
+    expect(apiMock.exportQueryResultJson).toHaveBeenCalledWith("events.json", ["id"], [[1], [2]]);
+    expect(apiMock.closeClientConnectionSession).toHaveBeenCalledWith("cassandra-1", "app", firstOptions.clientSessionId, undefined);
+  });
+
+  it("closes a failed Cassandra cursor before disposing its client session", async () => {
+    apiMock.buildTableSelectSql.mockResolvedValue('SELECT * FROM "events";');
+    apiMock.executeQuery.mockResolvedValueOnce({ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-1", has_more: true }).mockRejectedValueOnce(new Error("cursor lost"));
+    const closing = deferred<void>();
+    apiMock.closeQuerySession.mockReturnValueOnce(closing.promise);
+    const runtime = useSidebarTreeExportRuntime({
+      activeNode: shallowRef({ id: "table-1", type: "table", label: "events", connectionId: "cassandra-1", database: "app", children: [] } as TreeNode),
+      connectionStore: { ensureConnected: vi.fn(), getConfig: () => ({ db_type: "cassandra" }), connectionIdentifierQuote: () => '"', treeNodes: [], selectedTreeNodeIds: [] } as never,
+      settingsStore: exportSettings() as never,
+      acceptedSelectionIds: () => null,
+    });
+    const exported = runtime.exportData("json");
+    await vi.waitFor(() => expect(apiMock.closeQuerySession).toHaveBeenCalled());
+    expect(apiMock.closeClientConnectionSession).not.toHaveBeenCalled();
+    closing.reject(new Error("close failed"));
+    await exported;
+    expect(apiMock.closeClientConnectionSession).toHaveBeenCalledTimes(1);
+    expect(apiMock.exportQueryResultJson).not.toHaveBeenCalled();
+    expect(toastMock).toHaveBeenCalledWith("导出失败：cursor lost", 5000);
+  });
+
+  it("preserves SQL Server legacy JSON export without enabling a new cursor path", async () => {
+    apiMock.executeQuery.mockResolvedValueOnce({ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 });
+    const runtime = useSidebarTreeExportRuntime({
+      activeNode: shallowRef({ id: "table-1", type: "table", label: "events", connectionId: "sqlserver-1", database: "app", children: [] } as TreeNode),
+      connectionStore: { ensureConnected: vi.fn(), getConfig: () => ({ db_type: "sqlserver", driver_profile: "sqlserver-legacy" }), connectionIdentifierQuote: () => '"', treeNodes: [], selectedTreeNodeIds: [] } as never,
+      settingsStore: exportSettings() as never,
+      acceptedSelectionIds: () => null,
+    });
+    await runtime.exportData("json");
+    expect(apiMock.executeQuery.mock.calls[0]).toHaveLength(3);
+    expect(apiMock.closeClientConnectionSession).not.toHaveBeenCalled();
+    expect(apiMock.exportQueryResultJson).toHaveBeenCalledWith("events.json", ["id"], [[1]]);
   });
 
   it("exports a mongo collection through the save-file path without a setup dialog", async () => {

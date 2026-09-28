@@ -159,6 +159,10 @@ export function usesAgentCursorForQuery(dbType?: DatabaseType, driverProfile?: s
   return runtimeMode === "agent" || runtimeMode === "external";
 }
 
+export function usesAgentCursorForTableData(dbType?: DatabaseType, driverProfile?: string): boolean {
+  return dbType === "cassandra" || (dbType === "sqlserver" && driverProfile?.trim().toLowerCase() === "sqlserver-legacy");
+}
+
 function productCapabilities(overrides: Partial<DatabaseProductCapabilities>): DatabaseProductCapabilities {
   const capabilities = Object.fromEntries(DATABASE_PRODUCT_CAPABILITY_KEYS.map((key) => [key, false])) as DatabaseProductCapabilities;
   return { ...capabilities, ...overrides };

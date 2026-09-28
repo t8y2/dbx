@@ -431,6 +431,25 @@ describe("tab group presentation", () => {
     }
   });
 
+  it("shows a database row for plugin tabs only when the tab or connection has a database", () => {
+    const store = useConnectionStore();
+    store.sidebarLayout = {
+      groups: [],
+      order: [{ type: "connection", id: "conn-1" }],
+    };
+    store.connections = [{ id: "conn-1", name: "SSH server", db_type: "plugin" } as ConnectionConfig];
+
+    const tab = queryTab({ mode: "plugin-workbench", database: "" });
+    expect(tabTooltipLines(tab, translate)).toEqual([
+      { label: "Connection:", value: "SSH server" },
+      { label: "Group:", value: "Ungrouped" },
+    ]);
+
+    store.connections = [{ id: "conn-1", name: "Database plugin", db_type: "plugin", database: "analytics" } as ConnectionConfig];
+    expect(tabTooltipLines(tab, translate)).toContainEqual({ label: "Database:", value: "analytics" });
+    expect(tabTooltipLines(queryTab({ mode: "plugin-workbench", database: "reporting" }), translate)).toContainEqual({ label: "Database:", value: "reporting" });
+  });
+
   it("labels a top-level connection as ungrouped", () => {
     const store = useConnectionStore();
     store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", database: "app" } as ConnectionConfig];

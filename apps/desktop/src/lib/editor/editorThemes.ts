@@ -228,7 +228,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
   return [theme, syntaxHighlighting(highlightStyle)];
 }
 
-type IdeEditorThemeColors = {
+export type IdeEditorThemeColors = {
   dark: boolean;
   background: string;
   foreground: string;
@@ -263,7 +263,7 @@ type IdeEditorThemeColors = {
   numberBold?: boolean;
 };
 
-const IDE_EDITOR_THEMES = {
+export const IDE_EDITOR_THEMES = {
   ideaLight: {
     dark: false,
     background: "#ffffff",
@@ -398,7 +398,10 @@ const IDE_EDITOR_THEMES = {
     dark: false,
     background: "#fcfcfc",
     foreground: "#141414eb",
-    selection: "#1414141e",
+    // Cursor/VS Code light `editor.selectionBackground`. The previous translucent
+    // neutral (#1414141e) composited to a near-background #e1e1e1 on the #fcfcfc
+    // canvas, so a mouse selection was barely visible.
+    selection: "#add6ff",
     selectionMatch: "#14141411",
     cursor: "#141414eb",
     gutterBackground: "#fcfcfc",
@@ -429,7 +432,10 @@ const IDE_EDITOR_THEMES = {
     dark: true,
     background: "#181818",
     foreground: "#e4e4e4eb",
-    selection: "#40404099",
+    // Cursor/VS Code dark `editor.selectionBackground`. The previous translucent
+    // neutral (#40404099) composited to #303030 on the #181818 canvas — visually
+    // almost indistinguishable from the editor background.
+    selection: "#264f78",
     selectionMatch: "#404040cc",
     cursor: "#e4e4e4eb",
     gutterBackground: "#181818",

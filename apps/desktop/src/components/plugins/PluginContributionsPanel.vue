@@ -1049,7 +1049,7 @@ onBeforeUnmount(() => {
             <div class="mt-3 text-sm font-medium">{{ t("pluginPlatform.noMarketplacePlugins") }}</div>
             <div class="mt-1 text-xs text-muted-foreground">{{ t("pluginPlatform.noMarketplacePluginsDescription") }}</div>
           </div>
-          <TransitionGroup v-else-if="marketplaceViewMode === 'grid'" name="marketplace-cards" tag="div" class="grid w-full grid-cols-1 gap-3 md:grid-cols-3">
+          <TransitionGroup v-else-if="marketplaceViewMode === 'grid'" name="marketplace-cards" tag="div" class="grid w-full grid-cols-[repeat(auto-fill,minmax(min(100%,19rem),1fr))] gap-3">
             <article v-for="listing in sortedMarketplaceListings" :key="listing.key" class="group @container marketplace-card flex min-w-0 min-h-48 flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40">
               <div class="mb-3 flex min-w-0 items-start gap-3">
                 <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-11 shrink-0 rounded-xl border bg-background p-1.5" />

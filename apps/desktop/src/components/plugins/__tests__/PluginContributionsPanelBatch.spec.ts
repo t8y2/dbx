@@ -916,7 +916,8 @@ describe("PluginContributionsPanel marketplace card layout", () => {
       expect(versionBadge!.compareDocumentPosition(details!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
 
       if (view === "grid") {
-        expect(card?.parentElement?.classList.contains("md:grid-cols-3"), "desktop grid stays at three columns").toBe(true);
+        expect(card?.parentElement?.classList.contains("md:grid-cols-3"), "grid must not use the viewport breakpoint removed by #10444").toBe(false);
+        expect(card?.parentElement?.className, "grid tracks the panel width via auto-fill").toContain("auto-fill");
       }
     }
   });

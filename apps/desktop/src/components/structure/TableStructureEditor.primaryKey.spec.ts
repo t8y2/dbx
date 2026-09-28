@@ -750,6 +750,40 @@ describe("TableStructureEditor primary key editing", () => {
 });
 
 describe("TableStructureEditor data type options", () => {
+  it("preserves PostgreSQL time zone qualifiers when editing all three precision inputs", async () => {
+    const value = draftWithColumns(3);
+    const types = ["timestamp(6) with time zone", "timestamp(6) with time zone", "timestamp(6) without time zone"];
+    value.columns.forEach((column, index) => {
+      column.dataType = types[index]!;
+      column.original.data_type = types[index]!;
+    });
+    const root = await mountEditor("postgres", false, { database: "issue10518", draftOverride: value });
+    const expectedTypes = types.map((type) => type.replace("(6)", "(3)"));
+    mocks.buildTableStructureChangeSql.mockImplementation(async (options) => ({
+      statements: options.columns.map((column: { name: string; dataType: string }) => `ALTER TABLE "users" ALTER COLUMN "${column.name}" TYPE ${column.dataType} USING "${column.name}"::${column.dataType};`),
+      warnings: [],
+    }));
+    for (let index = 0; index < 3; index++) {
+      const row = root.querySelector<HTMLElement>(`[data-column-row-index="${index}"]`)!;
+      expect(row.querySelector<HTMLElement>("[data-searchable-select]")?.dataset.modelValue).toBe(types[index]!.replace("(6)", ""));
+      const precision = Array.from(row.querySelectorAll<HTMLInputElement>("input")).find((input) => input.value === "6")!;
+      expect(precision).toBeDefined();
+      precision.value = "";
+      precision.dispatchEvent(new Event("input", { bubbles: true }));
+      await nextTick();
+      precision.value = "3";
+      precision.dispatchEvent(new Event("input", { bubbles: true }));
+      await nextTick();
+    }
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ columns: expectedTypes.map((dataType) => expect.objectContaining({ dataType })) })));
+    await vi.waitFor(() => {
+      const preview = root.querySelector("pre")?.textContent ?? "";
+      for (const [index, type] of expectedTypes.entries()) {
+        expect(preview).toContain(`ALTER COLUMN "field_${index}" TYPE ${type} USING "field_${index}"::${type}`);
+      }
+    });
+  });
+
   it("keeps dynamic Dameng types first and deduplicates fallback types case-insensitively", async () => {
     const root = await mountEditor("dameng", false, {
       database: "dynamic-types-5275",

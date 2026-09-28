@@ -14,6 +14,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
 import com.mongodb.bulk.BulkWriteError;
@@ -2399,6 +2400,176 @@ class MongoAgentTest {
                 }
                 throw new UnsupportedOperationException(method.getName());
             }
+        );
+    }
+
+    @Test
+    void listDatabasesFallsBackToTheDatabasesTheAccountIsAuthorizedFor() {
+        List<String> calls = new ArrayList<>();
+        Document connectionStatus = new Document("ok", 1.0)
+            .append("authInfo", new Document("authenticatedUserRoles", List.of(
+                new Document("role", "readWrite").append("db", "shopdb")))
+                .append("authenticatedUserPrivileges", List.of(
+                    new Document("resource", new Document("db", "shopdb").append("collection", ""))
+                        .append("actions", List.of("find", "insert")),
+                    new Document("resource",
+                        new Document("db", "shopdb").append("collection", "system.js"))
+                        .append("actions", List.of("find")),
+                    new Document("resource", new Document("db", "reports").append("collection", ""))
+                        .append("actions", List.of("find")))));
+
+        MongoDatabase admin = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("runCommand".equals(method.getName())) {
+                    calls.add("connectionStatus");
+                    return connectionStatus;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("listDatabaseNames".equals(method.getName())) {
+                    throw mongoCommandError(
+                        13,
+                        "Unauthorized",
+                        "not authorized on admin to execute command { listDatabases: 1, nameOnly: true }"
+                    );
+                }
+                if ("getDatabase".equals(method.getName())) {
+                    calls.add("getDatabase:" + args[0]);
+                    return admin;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"list_databases\",\"params\":{}}", client);
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertFalse(json.has("error"), json.toString());
+        JsonArray databases = json.getAsJsonArray("result");
+        assertEquals(2, databases.size());
+        assertEquals("reports", databases.get(0).getAsJsonObject().get("name").getAsString());
+        assertEquals("shopdb", databases.get(1).getAsJsonObject().get("name").getAsString());
+        assertEquals(List.of("getDatabase:admin", "connectionStatus"), calls);
+    }
+
+    @Test
+    void listDatabasesKeepsTheUnauthorizedErrorWhenNoAuthorizedDatabaseIsKnown() {
+        List<String> calls = new ArrayList<>();
+        MongoDatabase admin = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("runCommand".equals(method.getName())) {
+                    calls.add("connectionStatus");
+                    return new Document("ok", 1.0).append("authInfo", new Document());
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("listDatabaseNames".equals(method.getName())) {
+                    throw mongoCommandError(
+                        13,
+                        "Unauthorized",
+                        "not authorized on admin to execute command { listDatabases: 1, nameOnly: true }"
+                    );
+                }
+                if ("getDatabase".equals(method.getName())) {
+                    return admin;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"list_databases\",\"params\":{}}", client);
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertTrue(json.getAsJsonObject("error").get("message").getAsString()
+            .contains("error 13 (Unauthorized)"), json.toString());
+        assertEquals(List.of("connectionStatus"), calls);
+    }
+
+    @Test
+    void listDatabasesDoesNotProbePrivilegesForUnrelatedFailures() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("listDatabaseNames".equals(method.getName())) {
+                    throw mongoCommandError(11600, "InterruptedAtShutdown", "operation was interrupted");
+                }
+                calls.add(method.getName());
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"list_databases\",\"params\":{}}", client);
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertTrue(json.getAsJsonObject("error").get("message").getAsString()
+            .contains("error 11600"), json.toString());
+        assertEquals(List.of(), calls);
+    }
+
+    @Test
+    void authorizedDatabaseNamesComeFromTheAccountsOwnPrivileges() {
+        Document status = new Document("authInfo", new Document("authenticatedUserPrivileges", List.of(
+            new Document("resource", new Document("db", "shopdb").append("collection", ""))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("db", "shopdb").append("collection", "orders"))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("db", "admin").append("collection", "system.users"))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("db", "").append("collection", ""))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("cluster", true))
+                .append("actions", List.of("listDatabases")),
+            new Document("resource", "not-a-resource"),
+            "not-a-privilege")));
+        assertEquals(List.of("admin", "shopdb"), MongoAgent.databaseNamesFromConnectionStatus(status));
+
+        assertEquals(List.of(), MongoAgent.databaseNamesFromConnectionStatus(new Document()));
+        assertEquals(List.of(), MongoAgent.databaseNamesFromConnectionStatus(null));
+    }
+
+    @Test
+    void listDatabasesAuthorizationFailureDetectionFollowsTheCauseChain() {
+        assertTrue(MongoAgent.isListDatabasesAuthorizationFailure(
+            new RuntimeException(
+                "wrapped",
+                mongoCommandError(13, "Unauthorized", "not authorized on admin")
+            )
+        ));
+        assertTrue(MongoAgent.isListDatabasesAuthorizationFailure(
+            mongoCommandError(0, "Unauthorized", "not authorized")
+        ));
+        assertFalse(MongoAgent.isListDatabasesAuthorizationFailure(
+            mongoCommandError(11600, "InterruptedAtShutdown", "operation was interrupted")
+        ));
+        assertFalse(MongoAgent.isListDatabasesAuthorizationFailure(
+            new IllegalStateException("Not connected")
+        ));
+    }
+
+    private static MongoCommandException mongoCommandError(int code, String codeName, String message) {
+        return new MongoCommandException(
+            BsonDocument.parse("{\"ok\": 0, \"errmsg\": \"" + message + "\", \"code\": " + code
+                + ", \"codeName\": \"" + codeName + "\"}"),
+            new ServerAddress("192.168.80.146", 27017)
         );
     }
 

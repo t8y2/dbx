@@ -2724,6 +2724,18 @@ export async function openPluginLocalFile(pluginId: string, path: string, write:
   return invoke("plugin_file_open", { pluginId, path, write });
 }
 
+// The native open/save dialogs run on the Rust side: the host never passes
+// paths into the plugin-file registry, it only receives handles for what the
+// user picked. Only the OS drop flow still goes through openPluginLocalFile,
+// and the Rust command accepts exactly the paths its own drop pipeline granted.
+export async function pickPluginLocalFiles(pluginId: string, multiple: boolean): Promise<PluginLocalFileHandle[]> {
+  return invoke("plugin_file_pick_files", { pluginId, multiple });
+}
+
+export async function savePluginLocalFileAs(pluginId: string, defaultFileName: string): Promise<PluginLocalFileHandle | null> {
+  return invoke("plugin_file_save_as", { pluginId, defaultFileName });
+}
+
 export async function readPluginLocalFileChunk(pluginId: string, handleId: string, offset: number, length?: number): Promise<PluginLocalFileChunk> {
   return invoke("plugin_file_read", { pluginId, handleId, offset, length });
 }

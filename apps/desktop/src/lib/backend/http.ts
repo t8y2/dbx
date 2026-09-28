@@ -5383,6 +5383,14 @@ export async function openPluginLocalFile(_pluginId: string, _path: string, _wri
   throw new Error("Plugin local file access is not available in the web backend");
 }
 
+export async function pickPluginLocalFiles(_pluginId: string, _multiple: boolean): Promise<PluginLocalFileHandle[]> {
+  throw new Error("Plugin local file access is not available in the web backend");
+}
+
+export async function savePluginLocalFileAs(_pluginId: string, _defaultFileName: string): Promise<PluginLocalFileHandle | null> {
+  throw new Error("Plugin local file access is not available in the web backend");
+}
+
 export async function readPluginLocalFileChunk(_pluginId: string, _handleId: string, _offset: number, _length?: number): Promise<PluginLocalFileChunk> {
   throw new Error("Plugin local file access is not available in the web backend");
 }

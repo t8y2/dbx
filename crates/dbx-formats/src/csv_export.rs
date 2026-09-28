@@ -32,9 +32,21 @@ pub fn default_csv_null_literal() -> String {
     DEFAULT_CSV_NULL_LITERAL.to_string()
 }
 
+/// Excel/Sheets 公式注入中和：以 `=`、`+`、`-`、`@`、Tab、CR 开头的文本在导出
+/// 时前置 `'`，避免 `=WEBSERVICE(...)` 类值被电子表格应用按公式执行（数据外泄）。
+/// 与 DBeaver/DataGrip 的既有做法一致；代价是这类单元格回导时会多出前缀。
+/// 数值列不受影响（Number 分支不走文本路径）。
+fn push_formula_guard(out: &mut String, value: &str) {
+    if matches!(value.as_bytes().first(), Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@') | Some(b'\t') | Some(b'\r'))
+    {
+        out.push('\'');
+    }
+}
+
 /// CSV 转义直写目标 buffer：包引号 + 内部 `"` 翻倍。值不含 `"` 时整段拷贝，
 /// 不做 replace 分配（逐批流式导出对每个单元格调用，是导出热路径）。
 fn push_csv_escaped_content(out: &mut String, value: &str) {
+    push_formula_guard(out, value);
     let mut rest = value;
     while let Some(pos) = rest.find('"') {
         out.push_str(&rest[..=pos]);
@@ -58,6 +70,7 @@ pub fn push_csv_field(out: &mut String, value: &str, quote_mode: CsvQuoteMode) {
     if quote_mode == CsvQuoteMode::All || csv_field_needs_quotes(value) {
         push_csv_escaped(out, value);
     } else {
+        push_formula_guard(out, value);
         out.push_str(value);
     }
 }
@@ -132,6 +145,7 @@ fn push_tsv_escaped(out: &mut String, value: &str) {
     if value.contains('\t') || value.contains('\n') || value.contains('\r') || value.contains('"') {
         push_csv_escaped(out, value);
     } else {
+        push_formula_guard(out, value);
         out.push_str(value);
     }
 }
@@ -481,11 +495,20 @@ mod tests {
     fn escape_tsv_matches_reference_semantics() {
         // TSV 仅在含 \t/\n/\r/引号时包引号；逗号不触发
         for input in ["", "plain", "with,comma", "tab\there", "line\nbreak", "cr\rhere", "quo\"te", "\t\"mix\""] {
+            // 公式中和前缀与转义正交：触发字符开头的文本无论是否包引号都带前缀
+            let guard = if matches!(
+                input.as_bytes().first(),
+                Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@') | Some(b'\t') | Some(b'\r')
+            ) {
+                "'"
+            } else {
+                ""
+            };
             let expected =
                 if input.contains('\t') || input.contains('\n') || input.contains('\r') || input.contains('"') {
-                    format!("\"{}\"", input.replace('"', "\"\""))
+                    format!("\"{guard}{}\"", input.replace('"', "\"\""))
                 } else {
-                    input.to_string()
+                    format!("{guard}{input}")
                 };
             assert_eq!(super::escape_tsv(input), expected, "input: {input:?}");
         }
@@ -630,6 +653,38 @@ mod tests {
         let mut tsv = String::new();
         super::push_tsv_row(&mut tsv, &row, None);
         assert_eq!(tsv, super::format_tsv_rows(&[row]));
+    }
+
+    #[test]
+    fn formula_like_text_cells_are_neutralized() {
+        let out = format_csv(
+            &["cmd".to_string()],
+            &[
+                vec![json!("=WEBSERVICE(\"https://evil\")")],
+                vec![json!("+2")],
+                vec![json!("-3")],
+                vec![json!("@x")],
+                vec![json!("\tlead")],
+                vec![json!("safe")],
+                vec![json!(-4)],
+            ],
+        );
+        assert_eq!(
+            out,
+            "\"cmd\"\n\"'=WEBSERVICE(\"\"https://evil\"\")\"\n\"'+2\"\n\"'-3\"\n\"'@x\"\n\"'\tlead\"\n\"safe\"\n\"-4\""
+        );
+    }
+
+    #[test]
+    fn formula_guard_covers_necessary_mode_raw_cells_and_tsv() {
+        let out = format_csv_with_quote_mode(
+            &["v".to_string()],
+            &[vec![json!("=sum")], vec![json!("x=y")]],
+            CsvQuoteMode::Necessary,
+        );
+        assert_eq!(out, "v\n'=sum\nx=y");
+        let tsv = format_tsv(&["v".to_string()], &[vec![json!("=sum")], vec![json!("plain")]]);
+        assert_eq!(tsv, "v\n'=sum\nplain");
     }
 
     use serde_json::Value;

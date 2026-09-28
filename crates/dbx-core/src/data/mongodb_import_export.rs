@@ -414,8 +414,25 @@ fn normalize_cell(value: &str, trim: bool) -> &str {
     }
 }
 
+/// 导出侧的公式中和（`dbx-formats` 的 push_formula_guard）会给以 `= + - @
+/// Tab CR` 开头的文本单元格前置 `'`；导入时对称地剥掉这个转义前缀，保证
+/// 圆整。单独的 `'`（后面不跟触发字符）是用户数据，原样保留。
+fn strip_formula_guard(value: &str) -> &str {
+    let guarded = value.as_bytes().first() == Some(&b'\'')
+        && matches!(
+            value.as_bytes().get(1),
+            Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@') | Some(b'\t') | Some(b'\r')
+        );
+    if guarded {
+        &value[1..]
+    } else {
+        value
+    }
+}
+
 fn csv_cell_text(value: &str, config: &CsvParseConfig) -> Option<String> {
     let value = normalize_cell(value, config.trim).trim_start_matches('\u{feff}');
+    let value = strip_formula_guard(value);
     if value.is_empty() {
         None
     } else {

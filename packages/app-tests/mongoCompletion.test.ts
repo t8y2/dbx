@@ -605,6 +605,8 @@ test("offers nothing rather than top-level snippets inside an unmodelled argumen
     'db.createCollection("x", { ',
     "use ",
     "use ord",
+    // A modelled call followed by `use` takes the scan-failure path, not the unmodelled-call one.
+    "db.users.find({}); use ",
   ]) {
     assert.deepEqual(labels(text, { fields, collections }), [], text);
   }

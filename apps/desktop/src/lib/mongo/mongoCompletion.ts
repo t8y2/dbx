@@ -309,7 +309,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) ? at("none") : at("root");
 
   const scan = scanMongoCallArguments(text, call.openParenIndex + 1, safeCursor);
-  if (!scan) return isInsideCallArguments(beforeCursor) ? at("none") : at("root");
+  if (!scan) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) ? at("none") : at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
   return {
@@ -1256,7 +1256,6 @@ function skipMongoStringOrComment(text: string, i: number, end: number): number 
   return i;
 }
 
-/** Blank out string/comment CONTENT (preserving length, so offsets stay valid) before pattern matching. */
 /**
  * Whether the cursor sits inside an unclosed `(` of the current command. Literals and comments
  * are masked first so a parenthesis inside a string does not count, and the depth resets at `;`
@@ -1278,6 +1277,7 @@ function isAfterUseKeyword(beforeCursor: string): boolean {
   return /(?:^|[\s;])use\s+[\w$-]*$/.test(maskMongoLiterals(beforeCursor));
 }
 
+/** Blank out string/comment CONTENT (preserving length, so offsets stay valid) before pattern matching. */
 function maskMongoLiterals(text: string): string {
   const chars = [...text];
   let i = 0;

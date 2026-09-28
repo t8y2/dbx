@@ -9444,13 +9444,13 @@ mod tests {
         let mut text = String::from("id\tnote\n");
         dbx_formats::csv_export::push_tsv_row(
             &mut text,
-            &vec![serde_json::json!(1), serde_json::Value::Null],
+            &[serde_json::json!(1), serde_json::Value::Null],
             Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL),
         );
         text.push('\n');
         dbx_formats::csv_export::push_tsv_row(
             &mut text,
-            &vec![serde_json::json!(2), serde_json::json!("")],
+            &[serde_json::json!(2), serde_json::json!("")],
             Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL),
         );
 

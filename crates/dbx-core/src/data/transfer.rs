@@ -9787,6 +9787,14 @@ where
     // A preexisting target also needs its columns read, even for a data-only
     // transfer: the write SQL has to address the target's declared column
     // names, which can differ from the source in case (#9320).
+    //
+    // SQL Server belongs to the always-read set for its identity flags, not just
+    // for a preexisting target: a freshly created target reuses the source DDL
+    // (`can_reuse`), which carries the source's `IDENTITY` clause, so the new
+    // target is an identity target too. `writes_identity_insert_columns` decides
+    // whether the batch needs the `SET IDENTITY_INSERT` wrapper, and without the
+    // target metadata it stays false — SQL Server then rejects the explicit
+    // identity values with 544.
     let needs_target_columns = default_rows_only
         || target_table_preexisting
         || (request.mode == TransferMode::Upsert
@@ -9799,7 +9807,10 @@ where
                     | DatabaseType::Argo
                     | DatabaseType::Transwarp
             ))
-        || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2);
+        || matches!(
+            target_db_type,
+            DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2 | DatabaseType::SqlServer
+        );
     let target_columns = if needs_target_columns {
         get_columns_for_transfer(
             state,

@@ -748,3 +748,117 @@ async fn live_sqlserver_keyset_uniqueidentifier_datetime2_composite_key() {
     cleanup.expect("drop typed databases");
     test_result.unwrap();
 }
+
+/// User report (SQL Server 数据同步 / issue #9734 family): transferring a SQL Server
+/// table into a **new** target database reuses the source `CREATE TABLE` DDL, so the
+/// created target keeps its `IDENTITY` column. The batched INSERT then writes explicit
+/// identity values and SQL Server rejects the batch with 544 unless the write is wrapped
+/// in `SET IDENTITY_INSERT`.
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at SQL Server"]
+async fn live_sqlserver_transfer_new_identity_target_keeps_explicit_identity_values() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_db = format!("dbx_identity_src_{}", &suffix[..12]);
+    let target_db = format!("dbx_identity_dst_{}", &suffix[..12]);
+    let connection_id = format!("live-sqlserver-identity-{suffix}");
+    let table = "daq_electest";
+
+    let mut master = sqlserver_connect("master").await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!("CREATE DATABASE [{source_db}]; CREATE DATABASE [{target_db}];"),
+    )
+    .await
+    .expect("create identity databases");
+
+    let mut source_client = sqlserver_connect(&source_db).await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut source_client,
+        &format!(
+            "CREATE TABLE dbo.[{table}] ( \
+                id INT IDENTITY(1,1) NOT NULL CONSTRAINT [PK_daq_electest] PRIMARY KEY, \
+                name NVARCHAR(64) NOT NULL); \
+             INSERT INTO dbo.[{table}] (name) VALUES (N'first'), (N'second');"
+        ),
+    )
+    .await
+    .expect("create identity source table");
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-identity-{suffix}"));
+    std::fs::create_dir_all(&dir).expect("create identity directory");
+    let storage =
+        dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.expect("open identity storage");
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(connection_id.clone(), live_sqlserver_config(&connection_id, &source_db));
+    let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_db)).await.expect("source pool");
+    let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_db)).await.expect("target pool");
+
+    let request = TransferRequest {
+        transfer_id: format!("live-sqlserver-identity-{suffix}"),
+        source_connection_id: connection_id.clone(),
+        source_database: source_db.clone(),
+        source_schema: "dbo".to_string(),
+        source_catalog: None,
+        target_connection_id: connection_id.clone(),
+        target_database: target_db.clone(),
+        target_schema: "dbo".to_string(),
+        target_catalog: None,
+        tables: vec![table.to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 1,
+    };
+
+    let test_result = async {
+        let transferred = transfer_table(
+            &state,
+            &request,
+            table,
+            0,
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            &source_pool_key,
+            &target_pool_key,
+            &HashMap::new(),
+            &mut Vec::new(),
+            None,
+            |_| {},
+        )
+        .await?;
+        assert_eq!(transferred, 2);
+
+        let mut target_client = sqlserver_connect(&target_db).await;
+        let rows = dbx_core::db::sqlserver::execute_query(
+            &mut target_client,
+            &format!("SELECT id, name FROM dbo.[{table}] ORDER BY id"),
+        )
+        .await
+        .map_err(|error| format!("read transferred rows: {error}"))?;
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(rows.rows[0][0].as_i64(), Some(1));
+        assert_eq!(rows.rows[1][0].as_i64(), Some(2));
+        assert_eq!(rows.rows[0][1].as_str(), Some("first"));
+        assert_eq!(rows.rows[1][1].as_str(), Some("second"));
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup = dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!(
+            "ALTER DATABASE [{source_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{source_db}]; \
+             ALTER DATABASE [{target_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{target_db}];"
+        ),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.expect("drop identity databases");
+    test_result.expect("transfer into a freshly created identity target must keep the source identity values");
+}

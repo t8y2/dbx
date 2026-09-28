@@ -25,6 +25,12 @@ use crate::state::WebState;
 
 const MAX_PLUGIN_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
 
+fn unsigned_plugins_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED
+        .get_or_init(|| matches!(std::env::var("DBX_ALLOW_UNSIGNED_PLUGINS").ok().as_deref(), Some("1") | Some("true")))
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct PluginInstallQuery {
     #[serde(default)]
@@ -285,8 +291,20 @@ pub async fn install_plugin(
         break;
     }
     let package = package.ok_or_else(|| AppError::bad_request("Missing plugin package field 'file'"))?;
-    let policy =
-        if query.allow_unsigned { PluginInstallPolicy::LocalDevelopment } else { PluginInstallPolicy::LocalSigned };
+    // An unsigned plugin sidecar is a native process on this host: over HTTP
+    // that is remote code execution for whoever holds the password. The
+    // desktop's local-development escape hatch does not carry to a server
+    // deployment — the operator must explicitly opt in per environment.
+    let policy = if query.allow_unsigned {
+        if !unsigned_plugins_enabled() {
+            return Err(AppError::bad_request(
+                "Installing unsigned plugins over the web API is disabled; set DBX_ALLOW_UNSIGNED_PLUGINS=1 on the server to allow it",
+            ));
+        }
+        PluginInstallPolicy::LocalDevelopment
+    } else {
+        PluginInstallPolicy::LocalSigned
+    };
     let root_dir = state.app.plugins.root_dir().to_path_buf();
     let app_version = state.app.plugins.app_version().to_string();
     let lifecycle = state.app.plugins.lifecycle();

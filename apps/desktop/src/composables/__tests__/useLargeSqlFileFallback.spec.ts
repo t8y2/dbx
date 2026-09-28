@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
   store: {
     connections: [] as { id: string; db_type: string }[],
-    sqlFileSource: null as { connectionId: string; database: string; filePath?: string } | null,
+    sqlFileSource: null as { connectionId: string; database: string; schema?: string; filePath?: string } | null,
     getConfig: vi.fn(),
   },
   queryStore: {
@@ -85,6 +85,7 @@ describe("useLargeSqlFileStreamingFallback", () => {
     expect(mocks.store.sqlFileSource).toEqual({
       connectionId: "postgres-1",
       database: "app",
+      schema: "reporting",
       filePath: "/tmp/dbx_export.sql",
     });
   });

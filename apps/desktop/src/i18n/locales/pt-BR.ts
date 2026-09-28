@@ -175,7 +175,7 @@ export default withEnglishFallback({
     dataAccessConsentTitle: "Solicitação de acesso a dados",
     aiTools: {
       title: "Ferramentas de IA integradas",
-      description: "Plugins com ferramentas são detectados automaticamente: o assistente de IA do DBX (modo Agent) pode usar as ferramentas deste plugin nas conexões abertas. Desligue o interruptor para revogar o acesso; ferramentas não somente leitura continuarão pedindo aprovação a cada chamada.",
+      description: "Desativado por padrão: o assistente de IA do DBX (modo Agent) só pode usar as ferramentas deste plugin nas conexões abertas enquanto o interruptor estiver ligado. Ferramentas não somente leitura continuarão pedindo aprovação a cada chamada.",
       preview: "Ver ferramentas",
       previewHint: "Inicia o plugin se ele não estiver em execução.",
       previewFailed: "Não foi possível listar as ferramentas: {message}",

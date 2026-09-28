@@ -97,7 +97,7 @@ export default withEnglishFallback({
     dataAccessConsentTitle: "数据访问请求",
     aiTools: {
       title: "内置 AI 工具",
-      description: "工具型插件会被自动识别：DBX AI 助手（Agent 模式）可以在你已打开的该插件连接上调用其工具。关闭此开关即可撤销访问；未声明为只读的工具每次调用前仍会请求你确认，工具输出会发送给你配置的 AI 模型。",
+      description: "默认关闭：仅在此开关开启期间，DBX AI 助手（Agent 模式）才能在你已打开的该插件连接上调用其工具。未声明为只读的工具每次调用前仍会请求你确认，工具输出会发送给你配置的 AI 模型。",
       preview: "查看工具",
       previewHint: "插件未运行时会先启动它。",
       previewFailed: "无法获取工具列表：{message}",

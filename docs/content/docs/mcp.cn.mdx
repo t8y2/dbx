@@ -154,7 +154,7 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 
 ## 插件工具
 
-实现了 `mcp/tools` 桥接协议的 DBX 插件 sidecar，其工具会被 `dbx` MCP 服务器**自动发现并合并**到 `tools/list`，无需在客户端逐个配置插件的 `--mcp` 进程。该机制对任意插件通用：所有已安装、兼容且带后端的插件（SSH、Files、Kafka、LDAP 等）默认参与，manifest 中的 `mcp` 贡献声明 `external_tools: false` 可选择退出：
+实现了 `mcp/tools` 桥接协议的 DBX 插件 sidecar，其工具可由 `dbx` MCP 服务器合并进 `tools/list`，无需在客户端逐个配置插件的 `--mcp` 进程。该机制按作者声明加入：只有 manifest 中声明了 `mcp` 贡献且 `external_tools: true` 的插件（SSH、Files、Kafka、LDAP 等均可）才会暴露工具：
 
 - 工具名为 `dbx_<插件前缀>__<工具名>`，前缀取插件 id 的最后一段：`io.dbx.ssh` → `dbx_ssh__sftp_list_dir`，`io.dbx.kafka` → `dbx_kafka__kafka_topics_list`；
 - 连接由宿主绑定：工具 schema 中的 `connectionId` / `connectionName` 会被移除，改由可选的 `dbx_connection` 参数选择该插件**已保存且被 MCP 设置放行**的连接；只有一个可用连接时省略该参数即可自动绑定；凭据由宿主从保存的连接生成 lifecycle 注入，永不经过模型或客户端；

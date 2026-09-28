@@ -1,6 +1,7 @@
 //! End-to-end external plugin-tools test against a real `.dbxp` package:
-//! install → detection-filtered discovery → merged `tools/list` → server
-//! dispatch of a connection-less tool through the real sidecar.
+//! install → opt-in-filtered discovery → merged `tools/list` → server
+//! dispatch of a connection-less tool through the real sidecar. The packaged
+//! plugin must declare `external_tools: true` to be exposed here.
 //!
 //! The mechanism under test is plugin-agnostic; the ssh plugin is only the
 //! concrete vehicle available here (mirroring `plugin_tools_bridge.rs`).
@@ -31,7 +32,7 @@ async fn ssh_package_tools_are_detected_listed_and_dispatched() {
     // No saved connections: every tool below must bind connection-less.
     let backend = LocalBackend::open_with_app_version(&database_path, "0.7.0").await.unwrap();
 
-    // 1. Detection-filtered discovery over the real sidecar.
+    // 1. Opt-in-filtered discovery over the real sidecar.
     let providers = backend.detect_plugin_tool_providers().await.expect("detect plugin tools");
     let ssh = providers.iter().find(|provider| provider.plugin_id == "io.dbx.ssh").expect("ssh detected");
     assert!(

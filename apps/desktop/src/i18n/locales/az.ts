@@ -86,7 +86,7 @@ export default withEnglishFallback({
     dataAccessConsentTitle: "Məlumat girişi sorğusu",
     aiTools: {
       title: "Daxili süni intellekt alətləri",
-      description: "Alət dəstəkli plaginlər avtomatik aşkarlanır: DBX süni intellekt köməkçisi (Agent rejimi) açıq plagin bağlantılarında bu plaginin alətlərini çağıra bilər. Girişi ləğv etmək üçün açarı söndürün; salt oxunan olmayan alətlər hər çağrıda təsdiq istəyir.",
+      description: "Standart olaraq söndürüldü: DBX süni intellekt köməkçisi (Agent rejimi) yalnız bu açar yanık olduqda açıq plagin bağlantılarında bu plaginin alətlərini çağıra bilər. Salt oxunan olmayan alətlər hər çağrıda təsdiq istəyir.",
       preview: "Alətləri göstər",
       previewHint: "Plagin işləmirsə, onu başladır.",
       previewFailed: "Alətlərin siyahısı alınmadı: {message}",

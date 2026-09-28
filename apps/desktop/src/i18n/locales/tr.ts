@@ -88,7 +88,7 @@ export default withEnglishFallback({
     dataAccessConsentTitle: "Veri Erişim İsteği",
     aiTools: {
       title: "Yerleşik yapay zekâ araçları",
-      description: "Araç destekli eklentiler otomatik olarak algılanır: DBX yapay zekâ asistanı (Agent modu), açık eklenti bağlantılarında bu eklentinin araçlarını çağırabilir. Erişimi iptal etmek için düğmeyi kapatın; salt okunur olmayan araçlar her çağrıda onay ister.",
+      description: "Varsayılan olarak kapalıdır: DBX yapay zekâ asistanı (Agent modu), yalnızca bu düğme açıkken açık eklenti bağlantılarında bu eklentinin araçlarını çağırabilir. Salt okunur olmayan araçlar her çağrıda onay ister.",
       preview: "Araçları göster",
       previewHint: "Eklenti çalışmıyorsa başlatılır.",
       previewFailed: "Araçlar listelenemedi: {message}",

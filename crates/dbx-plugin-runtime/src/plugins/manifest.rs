@@ -272,16 +272,17 @@ impl PluginContribution {
 /// bridge (`mcp/tools` + `mcp/call`, see `plugins/README.md` "Tools for the
 /// built-in AI assistant").
 ///
-/// Detection is the default: every installed, compatible plugin with a
-/// backend has its tools discovered automatically, on the built-in AI agent
-/// and on the external `dbx` MCP server alike — implementing the optional
-/// bridge methods is the author's declaration of intent. This contribution is
-/// only needed to *narrow* that default: `ai_tools: false` keeps the tools
-/// off the built-in AI agent, `external_tools: false` keeps them off the
-/// external `dbx` MCP server. The Plugin Center switch and the global MCP
-/// policy still override either surface per user. Note that declaring this
-/// contribution makes the manifest unreadable to hosts that predate it, so
-/// plugins that must install on older hosts should not declare it.
+/// Neither surface is exposed by install alone: the built-in AI agent only
+/// sees a plugin after the user enabled it in the Plugin Center, and the
+/// external `dbx` MCP server only sees plugins that declare
+/// `external_tools: true` here. This contribution narrows or widens those
+/// surfaces per author: `ai_tools: false` keeps the tools off the built-in AI
+/// agent even when the user opts in, and `external_tools` (default `false`)
+/// opts the tools into the external `dbx` MCP server. The Plugin Center
+/// switch and the global MCP policy still override either surface per user.
+/// Note that declaring this contribution makes the manifest unreadable to
+/// hosts that predate it, so plugins that must install on older hosts should
+/// not declare it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginMcpContribution {
@@ -289,12 +290,12 @@ pub struct PluginMcpContribution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Keep the tools on the built-in AI agent. Defaults to `true`; set to
-    /// `false` to opt out of the detection default for this surface.
+    /// `false` to keep them off that surface even when the user opts in.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub ai_tools: bool,
-    /// Keep the tools on the external `dbx` MCP server. Defaults to `true`;
-    /// set to `false` to opt out of the detection default for this surface.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    /// Expose the tools on the external `dbx` MCP server. Defaults to
+    /// `false`; set to `true` to opt in to that surface.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub external_tools: bool,
 }
 
@@ -1041,14 +1042,15 @@ impl PluginManifest {
     }
 
     /// Whether the optional `mcp` declaration keeps the sidecar tools off the
-    /// built-in AI agent (`ai_tools: false`). Without the declaration the
-    /// detection default applies: the tools participate.
+    /// built-in AI agent (`ai_tools: false`) even when the user opts in via
+    /// the Plugin Center. Without it the tools participate once opted in.
     pub fn ai_tools_excluded(&self) -> bool {
         self.mcp_contribution().is_some_and(|mcp| !mcp.ai_tools)
     }
 
-    /// Whether the optional `mcp` declaration keeps the sidecar tools off the
-    /// external `dbx` MCP server (`external_tools: false`).
+    /// Whether the optional `mcp` declaration does not opt the sidecar tools
+    /// into the external `dbx` MCP server. `external_tools` defaults to
+    /// `false`, so only an explicit `true` exposes them there.
     pub fn external_tools_excluded(&self) -> bool {
         self.mcp_contribution().is_some_and(|mcp| !mcp.external_tools)
     }
@@ -2067,8 +2069,8 @@ mod tests {
 
     #[test]
     fn mcp_contribution_parses_the_frozen_contract() {
-        // Defaults: both automatic surfaces participate (the declaration with
-        // no flags documents intent without narrowing anything).
+        // Defaults: the built-in AI surface participates (subject to the
+        // Plugin Center opt-in), the external `dbx` server does not.
         let mcp: PluginContribution = serde_json::from_value(serde_json::json!({
             "type": "mcp",
             "id": "io.dbx.example.mcp"
@@ -2076,17 +2078,17 @@ mod tests {
         .unwrap();
         let PluginContribution::Mcp(mcp) = mcp else { unreachable!("parsed as mcp above") };
         assert!(mcp.ai_tools);
-        assert!(mcp.external_tools);
+        assert!(!mcp.external_tools);
 
-        let narrowed: PluginContribution = serde_json::from_value(serde_json::json!({
+        let widened: PluginContribution = serde_json::from_value(serde_json::json!({
             "type": "mcp",
             "id": "io.dbx.example.mcp",
-            "external_tools": false
+            "external_tools": true
         }))
         .unwrap();
-        let PluginContribution::Mcp(narrowed) = narrowed else { unreachable!() };
-        assert!(narrowed.ai_tools);
-        assert!(!narrowed.external_tools);
+        let PluginContribution::Mcp(widened) = widened else { unreachable!() };
+        assert!(widened.ai_tools);
+        assert!(widened.external_tools);
 
         // Unknown fields inside the contribution reject (frozen contract).
         assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({
@@ -2134,13 +2136,12 @@ mod tests {
             "entrypoints": { "backend": { "executable": "bin/example" } },
             "contributions": [{
                 "type": "mcp",
-                "id": "io.dbx.example.mcp",
-                "external_tools": false
+                "id": "io.dbx.example.mcp"
             }]
         }))
         .unwrap();
         assert!(!manifest.ai_tools_excluded(), "ai_tools defaults to participating");
-        assert!(manifest.external_tools_excluded());
+        assert!(manifest.external_tools_excluded(), "external_tools defaults to off");
         let compatibility = manifest.compatibility(dir.path(), "0.6.0");
         assert!(compatibility.compatible, "{:?}", compatibility.errors);
     }

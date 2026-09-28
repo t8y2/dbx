@@ -175,7 +175,7 @@ export default withEnglishFallback({
     dataAccessConsentTitle: "資料存取請求",
     aiTools: {
       title: "內建 AI 工具",
-      description: "工具型外掛會被自動識別：DBX AI 助理（Agent 模式）可以在你已開啟的此外掛連線上呼叫其工具。關閉此開關即可撤銷存取；未宣告為唯讀的工具每次呼叫前仍會請求你確認，工具輸出會傳送給你設定的 AI 模型。",
+      description: "預設關閉：僅在此開關開啟期間，DBX AI 助理（Agent 模式）才能在你已開啟的此外掛連線上呼叫其工具。未宣告為唯讀的工具每次呼叫前仍會請求你確認，工具輸出會傳送給你設定的 AI 模型。",
       preview: "檢視工具",
       previewHint: "外掛未執行時會先啟動它。",
       previewFailed: "無法取得工具清單：{message}",

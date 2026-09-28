@@ -172,7 +172,7 @@ export default {
     dataAccessConsentTitle: "Data Access Request",
     aiTools: {
       title: "Built-in AI tools",
-      description: "Tool-capable plugins are detected automatically: the DBX AI assistant (Agent mode) can call this plugin's tools on its open connections. Turn this off to revoke access. Tools that are not declared read-only still ask for your approval before every call.",
+      description: "Off by default: the DBX AI assistant (Agent mode) can call this plugin's tools on its open connections only while this switch is on. Tools that are not declared read-only still ask for your approval before every call.",
       preview: "Show tools",
       previewHint: "Starts the plugin if it is not running.",
       previewFailed: "Could not list tools: {message}",

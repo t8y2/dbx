@@ -174,8 +174,7 @@ export default withEnglishFallback({
     dataAccessConsentTitle: "Richiesta di accesso ai dati",
     aiTools: {
       title: "Strumenti IA integrati",
-      description:
-        "I plugin con strumenti vengono rilevati automaticamente: l'assistente IA di DBX (modalità Agent) può usare gli strumenti di questo plugin sulle connessioni aperte. Spegni l'interruttore per revocare l'accesso; gli strumenti non di sola lettura chiederanno comunque approvazione a ogni chiamata.",
+      description: "Disattivato per impostazione predefinita: l'assistente IA di DBX (modalità Agent) può usare gli strumenti di questo plugin sulle connessioni aperte solo con l'interruttore acceso. Gli strumenti non di sola lettura chiederanno comunque approvazione a ogni chiamata.",
       preview: "Mostra strumenti",
       previewHint: "Avvia il plugin se non è in esecuzione.",
       previewFailed: "Impossibile elencare gli strumenti: {message}",

@@ -259,16 +259,24 @@ impl PluginToolBinding {
 
 /// Plugin ids whose sidecar tools the built-in AI agent may use.
 ///
-/// Detection-first: every installed, compatible plugin with a backend
-/// contributes — implementing the optional `mcp/tools` bridge is the author's
-/// declaration of intent. Two subtractions apply: a manifest `mcp`
-/// contribution with `ai_tools: false` keeps a plugin off this surface, and
-/// the ids the user explicitly turned off in the Plugin Center always win
-/// (over detection and over the declaration). If the plugin registry cannot
-/// be read, discovery degrades to the legacy Plugin Center opt-in list so a
-/// transient IO failure does not silently widen or narrow anything.
+/// Opt-in only: the Plugin Center list is the single source — a plugin
+/// contributes AI tools only after the user enabled it there, so installing
+/// alone never puts anything in front of the model. A manifest `mcp`
+/// contribution with `ai_tools: false` keeps a plugin off this surface even
+/// when opted in, the ids the user explicitly turned off always win, and an
+/// opted-in plugin must still be installed, compatible, and backend-capable.
+/// If the setting or the plugin registry cannot be read, the surface degrades
+/// to empty so a transient failure never widens exposure.
 pub async fn effective_ai_tool_plugin_ids(state: &AppState) -> HashSet<String> {
-    let detected = match state.plugins.list_installed() {
+    let opted_in: HashSet<String> = match state.storage.load_ai_plugin_tool_plugin_ids().await {
+        Ok(ids) if !ids.is_empty() => ids.into_iter().collect(),
+        Ok(_) => return HashSet::new(),
+        Err(error) => {
+            log::warn!("[agent][plugin-tools] cannot read AI plugin tool settings: {error}");
+            return HashSet::new();
+        }
+    };
+    let installed = match state.plugins.list_installed() {
         Ok(plugins) => plugins
             .iter()
             .filter(|plugin| {
@@ -279,8 +287,8 @@ pub async fn effective_ai_tool_plugin_ids(state: &AppState) -> HashSet<String> {
             .map(|plugin| plugin.manifest.id.clone())
             .collect::<HashSet<_>>(),
         Err(error) => {
-            log::warn!("[agent][plugin-tools] cannot apply AI tool detection: {error}");
-            state.storage.load_ai_plugin_tool_plugin_ids().await.unwrap_or_default().into_iter().collect()
+            log::warn!("[agent][plugin-tools] cannot list installed plugins: {error}");
+            return HashSet::new();
         }
     };
     let disabled: HashSet<String> = state
@@ -293,7 +301,7 @@ pub async fn effective_ai_tool_plugin_ids(state: &AppState) -> HashSet<String> {
         })
         .into_iter()
         .collect();
-    detected.into_iter().filter(|plugin_id| !disabled.contains(plugin_id)).collect()
+    opted_in.into_iter().filter(|plugin_id| installed.contains(plugin_id) && !disabled.contains(plugin_id)).collect()
 }
 
 /// Collects the plugin tools the built-in agent may use right now. Any
@@ -1273,7 +1281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detection_enables_installed_plugins_and_opt_outs_win() {
+    async fn opt_in_gates_ai_tools_and_opt_outs_win() {
         let root = tempfile::tempdir().unwrap();
         let storage = crate::persistence::test_storage::open(&root.path().join("dbx.db")).await.unwrap();
         let plugins_dir = root.path().join("plugins");
@@ -1289,12 +1297,23 @@ mod tests {
         std::fs::remove_file(&backend).unwrap();
 
         let state = Arc::new(AppState::new_with_plugin_dir(storage, plugins_dir));
+        // Installing alone exposes nothing: the Plugin Center opt-in gates the AI surface.
         let ids = effective_ai_tool_plugin_ids(&state).await;
-        assert!(ids.contains("io.test.ssh"), "detection includes tool-capable plugins");
-        assert!(!ids.contains("io.test.quiet"), "ai_tools:false excludes the AI surface");
+        assert!(ids.is_empty(), "nothing is exposed before the user opts in");
+
+        // Opting in enables a tool-capable plugin.
+        state.storage.set_ai_plugin_tool_plugin_enabled("io.test.ssh", true).await.unwrap();
+        let ids = effective_ai_tool_plugin_ids(&state).await;
+        assert!(ids.contains("io.test.ssh"), "the opt-in enables the tool-capable plugin");
+
+        // The manifest declaration and the backend guard still bind opted-in plugins.
+        state.storage.set_ai_plugin_tool_plugin_enabled("io.test.quiet", true).await.unwrap();
+        state.storage.set_ai_plugin_tool_plugin_enabled("io.test.ui_only", true).await.unwrap();
+        let ids = effective_ai_tool_plugin_ids(&state).await;
+        assert!(!ids.contains("io.test.quiet"), "ai_tools:false excludes the AI surface even when opted in");
         assert!(!ids.contains("io.test.ui_only"), "plugins without a backend stay invisible");
 
-        // The Plugin Center opt-out always wins over detection.
+        // The Plugin Center opt-out always wins over the opt-in.
         state.storage.set_ai_plugin_tool_plugin_enabled("io.test.ssh", false).await.unwrap();
         let ids = effective_ai_tool_plugin_ids(&state).await;
         assert!(!ids.contains("io.test.ssh"));

@@ -60,13 +60,13 @@ const MAX_RETRIES_KEY: &str = "max_retries";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
 const MCP_HISTORY_RETENTION_LIMIT_KEY: &str = "mcp_history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
-/// Plugin ids whose MCP tools the built-in AI agent may call. Legacy opt-in
-/// list: tool-capable plugins are detected automatically now, so this only
-/// matters when the plugin registry itself cannot be read.
+/// Plugin ids whose MCP tools the built-in AI agent may call. The opt-in
+/// list is the single source: a plugin contributes AI tools only after the
+/// user enabled it in the Plugin Center.
 const AI_PLUGIN_TOOL_PLUGINS_KEY: &str = "ai_plugin_tool_plugins";
-/// Plugin ids the user explicitly turned off in the Plugin Center. AI tool
-/// plugins are detected automatically, so the explicit opt-out is what makes
-/// a revocation survive restarts and plugin updates.
+/// Plugin ids the user explicitly turned off in the Plugin Center; they stay
+/// excluded even if they reappear on the opt-in list, so a revocation
+/// survives restarts and plugin updates.
 const AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY: &str = "ai_plugin_tool_disabled_plugins";
 /// `{ pluginId: [connectionId, ...] }` — connections a plugin may read through
 /// the `host.data:read` Host API. Written only after an explicit user consent.

@@ -1,11 +1,11 @@
 //! External exposure of plugin MCP tools on the `dbx` MCP server.
 //!
-//! Detection-first: every installed, compatible plugin with a backend (and
-//! without a manifest `external_tools: false` override) contributes its
-//! `mcp/tools` listing under `dbx_<prefix>__<tool>` names. Naming, parsing,
-//! and schema reduction are shared with the built-in AI agent
+//! Author opt-in: installed, compatible plugins with a backend contribute
+//! their `mcp/tools` listing under `dbx_<prefix>__<tool>` names only when the
+//! manifest declares `external_tools: true`. Naming, parsing, and schema
+//! reduction are shared with the built-in AI agent
 //! (`dbx_core::ai::plugin_tools`) so one plugin tool surfaces under the same
-//! exposed name on both automatic surfaces.
+//! exposed name on both surfaces.
 //!
 //! Calls stay host-bound: the caller picks among the plugin's saved
 //! connections that the global MCP policy allows through `dbx_connection`

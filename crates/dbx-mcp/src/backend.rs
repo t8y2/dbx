@@ -425,10 +425,10 @@ pub trait DbxBackend: Send + Sync {
         Err("Documentation snapshots are not supported by this backend.".to_string())
     }
     /// Tool-capable plugins for the external `dbx` MCP surface, with their
-    /// discovered `mcp/tools` listings. Detection: installed + compatible +
-    /// backend entrypoint, minus a manifest `external_tools: false` override.
-    /// An error means "no plugin tools on this backend" (e.g. the web
-    /// backend); the server degrades to the static tools.
+    /// discovered `mcp/tools` listings. Author opt-in: installed +
+    /// compatible + backend entrypoint + a manifest `external_tools: true`
+    /// declaration. An error means "no plugin tools on this backend" (e.g.
+    /// the web backend); the server degrades to the static tools.
     async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
         let _ = self;
         Err("Plugin tools are not supported by this backend.".to_string())
@@ -872,10 +872,10 @@ impl LocalBackend {
             .await
     }
 
-    /// Detection-filtered, parallel `mcp/tools` discovery for the external
-    /// surface: installed + compatible + backend plugins, minus a manifest
-    /// `external_tools: false` override. A plugin that fails to list skips
-    /// itself (with a warning) instead of failing the whole `tools/list`.
+    /// Opt-in, parallel `mcp/tools` discovery for the external surface:
+    /// installed + compatible + backend plugins whose manifest declares
+    /// `external_tools: true`. A plugin that fails to list skips itself
+    /// (with a warning) instead of failing the whole `tools/list`.
     pub async fn detect_plugin_tool_providers(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
         let plugins = self.state.plugins.list_installed()?;
         let candidates: Vec<(String, String)> = plugins

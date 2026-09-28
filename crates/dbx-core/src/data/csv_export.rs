@@ -430,7 +430,7 @@ mod tests {
         options.null_literal = dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL.to_string();
         let mut pages = vec![result_with_a_null_and_an_empty_string()].into_iter();
         let mut output = Vec::new();
-        write_table_csv_pages(&mut output, DatabaseType::Postgres, &options, None, |_, _| {
+        write_table_csv_pages(&mut output, DatabaseType::Postgres, None, &options, None, |_, _| {
             std::future::ready(Ok(pages.next().expect("single page")))
         })
         .await
@@ -441,7 +441,7 @@ mod tests {
         options.null_literal = String::new();
         let mut pages = vec![result_with_a_null_and_an_empty_string()].into_iter();
         let mut output = Vec::new();
-        write_table_csv_pages(&mut output, DatabaseType::Postgres, &options, None, |_, _| {
+        write_table_csv_pages(&mut output, DatabaseType::Postgres, None, &options, None, |_, _| {
             std::future::ready(Ok(pages.next().expect("single page")))
         })
         .await
@@ -479,12 +479,13 @@ mod tests {
         options.null_literal = dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL.to_string();
 
         let mut exported_bytes = "\u{FEFF}".as_bytes().to_vec();
-        let exported = write_table_csv_pages(&mut exported_bytes, DatabaseType::Sqlite, &options, None, |sql, _| {
-            let sqlite = sqlite.clone();
-            async move { crate::db::sqlite::execute_query(&sqlite, &sql).await.map_err(|error| error.to_string()) }
-        })
-        .await
-        .unwrap();
+        let exported =
+            write_table_csv_pages(&mut exported_bytes, DatabaseType::Sqlite, None, &options, None, |sql, _| {
+                let sqlite = sqlite.clone();
+                async move { crate::db::sqlite::execute_query(&sqlite, &sql).await.map_err(|error| error.to_string()) }
+            })
+            .await
+            .unwrap();
         assert_eq!(exported, 2);
         // 导出的 NULL 与空串必须已经可区分：空串 `""`、NULL 裸写 `\N`
         assert_eq!(

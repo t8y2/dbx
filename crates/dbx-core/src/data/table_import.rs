@@ -4579,8 +4579,8 @@ fn effective_import_batch_size(db_type: &DatabaseType, requested: usize) -> usiz
     // Some backends impose stricter limits than the UI batch setting; clamp here so every
     // import path, including streaming producers, uses the same safe value.
     let max_rows = match db_type {
-        DatabaseType::Oracle => MAX_ORACLE_IMPORT_BATCH_ROWS,
-        DatabaseType::OceanbaseOracle | DatabaseType::Iris => 1,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_IMPORT_BATCH_ROWS,
+        DatabaseType::Iris => 1,
         DatabaseType::CloudflareD1 => 100,
         DatabaseType::SqlServer => 1000,
         DatabaseType::Sqlite => SQLITE_APPEND_COMMIT_ROWS,
@@ -11734,9 +11734,61 @@ mod tests {
     }
 
     #[test]
+    fn oceanbase_oracle_import_batches_rows_through_insert_all() {
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "id".to_string(),
+            target_column: "id".to_string(),
+            target_data_type: None,
+        }];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string()],
+            rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)], vec![serde_json::json!(3)]],
+            total_rows: 3,
+            effective_encoding: None,
+        };
+
+        let batches =
+            build_import_insert_batches(&data, &mappings, &[], "items", "SQLUSER", &DatabaseType::OceanbaseOracle, 100)
+                .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].sql,
+            "INSERT ALL\nINTO \"SQLUSER\".\"items\" (\"id\") VALUES (1)\nINTO \"SQLUSER\".\"items\" (\"id\") VALUES (2)\nINTO \"SQLUSER\".\"items\" (\"id\") VALUES (3)\nSELECT 1 FROM dual"
+        );
+        assert_eq!(batches[0].row_count, 3);
+    }
+
+    #[test]
+    fn oceanbase_oracle_import_keeps_single_row_values_statement() {
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "id".to_string(),
+            target_column: "id".to_string(),
+            target_data_type: None,
+        }];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string()],
+            rows: vec![vec![serde_json::json!(1)]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+
+        let batches =
+            build_import_insert_batches(&data, &mappings, &[], "items", "SQLUSER", &DatabaseType::OceanbaseOracle, 100)
+                .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].sql, "INSERT INTO \"SQLUSER\".\"items\" (\"id\") VALUES\n(1)");
+        assert_eq!(batches[0].row_count, 1);
+    }
+
+    #[test]
     fn import_batch_row_limits_match_database_dialects() {
         assert_eq!(effective_import_batch_size(&DatabaseType::Oracle, 1000), 500);
-        assert_eq!(effective_import_batch_size(&DatabaseType::OceanbaseOracle, 1000), 1);
+        // OceanBase's Oracle mode shares the INSERT ALL template with Oracle, so the
+        // importer may batch rows instead of issuing one INSERT per row.
+        assert_eq!(effective_import_batch_size(&DatabaseType::OceanbaseOracle, 1000), 500);
+        assert_eq!(effective_import_batch_size(&DatabaseType::OceanbaseOracle, 1), 1);
         assert_eq!(effective_import_batch_size(&DatabaseType::Iris, 1000), 1);
         assert_eq!(effective_import_batch_size(&DatabaseType::CloudflareD1, 1000), 100);
         assert_eq!(effective_import_batch_size(&DatabaseType::SqlServer, 1001), 1000);

@@ -120,7 +120,7 @@ impl SqlBatchLimits {
     pub(crate) fn for_database(db_type: &DatabaseType, requested_max_rows: usize) -> Self {
         let max_rows = requested_max_rows.max(1).min(match db_type {
             DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-            DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
             _ => usize::MAX,
         });
         let target_sql_bytes = match db_type {
@@ -3893,7 +3893,12 @@ impl InsertSqlTemplate {
             };
         Self {
             standard_prefix: format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n"),
-            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle)
+            // OceanBase's Oracle mode rejects the comma-separated multi-row VALUES form
+            // just like Oracle itself, but it does implement Oracle's multi-table
+            // `INSERT ALL ... SELECT 1 FROM dual` syntax, so it shares this template.
+            // Without it the importer falls back to single-row INSERTs (one network
+            // round trip per row), which makes CSV imports orders of magnitude slower.
+            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
                 .then(|| format!("INTO {full_table} ({col_list}) VALUES ")),
             // Xugu accepts consecutive row constructors (`VALUES (...) (...)`) but rejects
             // the comma-separated multi-row form emitted by the generic template.
@@ -4369,6 +4374,9 @@ fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
         (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo, _) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
+        // The INSERT ALL template is shared with OceanBase's Oracle mode, so its
+        // append/overwrite batches must clamp to the same per-statement row count.
+        (DatabaseType::OceanbaseOracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
@@ -4787,7 +4795,7 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
 
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -4968,7 +4976,7 @@ fn generate_insert_sql_batches_from_value_rows(
 
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -16718,6 +16726,74 @@ INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (1, 'Ada')
 INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (2, 'O''Brien')
 SELECT 1 FROM dual"#
         );
+    }
+
+    #[test]
+    fn oceanbase_oracle_multi_row_insert_uses_insert_all() {
+        // OceanBase's Oracle mode rejects multi-row VALUES but implements Oracle's
+        // INSERT ALL, so the import/transfer generators must batch through it instead
+        // of degrading to one INSERT per row.
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Brien")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT ALL
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (1, 'Ada')
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (2, 'O''Brien')
+SELECT 1 FROM dual"#
+        );
+        assert!(!sql.contains("),\n("));
+    }
+
+    #[test]
+    fn oceanbase_oracle_single_row_insert_keeps_values_shape() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES
+(1, 'Ada')"#
+        );
+    }
+
+    #[test]
+    fn oceanbase_oracle_transfer_write_batches_limit_insert_all_rows() {
+        let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("id")],
+            &[Some(String::from("number"))],
+            &rows,
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            &[],
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].matches("\nINTO ").count(), MAX_ORACLE_INSERT_ALL_ROWS);
+        assert!(statements[0].starts_with("INSERT ALL\nINTO "));
+        assert!(statements[0].ends_with("SELECT 1 FROM dual"));
     }
 
     #[test]

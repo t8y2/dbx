@@ -1049,43 +1049,24 @@ onBeforeUnmount(() => {
             <div class="mt-3 text-sm font-medium">{{ t("pluginPlatform.noMarketplacePlugins") }}</div>
             <div class="mt-1 text-xs text-muted-foreground">{{ t("pluginPlatform.noMarketplacePluginsDescription") }}</div>
           </div>
-          <!-- 列数交给面板实际宽度（容器内 auto-fill），不再跟随窗口断点；TransitionGroup 提供过滤/排序的 FLIP 连续性 -->
-          <TransitionGroup v-else-if="marketplaceViewMode === 'grid'" name="marketplace-cards" tag="div" class="grid w-full grid-cols-[repeat(auto-fill,minmax(min(100%,19rem),1fr))] gap-3">
+          <TransitionGroup v-else-if="marketplaceViewMode === 'grid'" name="marketplace-cards" tag="div" class="grid w-full grid-cols-1 gap-3 md:grid-cols-3">
             <article v-for="listing in sortedMarketplaceListings" :key="listing.key" class="group @container marketplace-card flex min-w-0 min-h-48 flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40">
-              <div class="flex flex-wrap items-start gap-3">
-                <button
-                  v-if="batchMode && isBatchSelectableListing(listing.status)"
-                  type="button"
-                  class="mt-1 inline-flex size-4 shrink-0 items-center justify-center rounded border transition-colors"
-                  :class="isListingSelected(listing) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40 bg-background'"
-                  :aria-pressed="isListingSelected(listing)"
-                  :aria-label="listing.name"
-                  :disabled="batchRunning"
-                  @click.stop="toggleListingSelection(listing)"
-                >
-                  <Check v-if="isListingSelected(listing)" class="size-3" />
-                </button>
-                <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-11 rounded-xl border bg-background p-1.5" />
+              <div class="mb-3 flex min-w-0 items-start gap-3">
+                <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-11 shrink-0 rounded-xl border bg-background p-1.5" />
                 <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-1.5">
-                    <span class="truncate text-sm font-semibold">{{ listing.name }}</span>
+                  <div class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</div>
+                  <div class="mt-1 flex min-w-0 items-center">
+                    <Badge variant="outline" class="h-auto min-h-5 min-w-0 max-w-full shrink px-1.5 py-0.5 text-[10px] leading-tight whitespace-normal break-all" :title="`v${listing.plugin.latestVersion}`">v{{ listing.plugin.latestVersion }}</Badge>
                   </div>
                   <div class="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
                     <BadgeCheck v-if="listingRepositoryCanVerify(listing.repository)" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
                     <span class="truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
                   </div>
-                  <!-- 发布信息行（紧凑档专属）：日期+版本降为身份块的第三行纯文本，与标签行的
-                       内容/风险元数据分类；纯文本而非徽标，形态本身完成信息类别区分 -->
-                  <div class="mt-0.5 hidden truncate text-[10px] leading-3.5 text-muted-foreground @max-[21rem]:block">
-                    v{{ listing.plugin.latestVersion }}<span v-if="listing.latestVersionReleasedAt"> · {{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
-                  </div>
-                </div>
-                <div class="flex shrink-0 items-center gap-1.5 @max-[21rem]:gap-0.5">
-                  <span class="inline-flex items-center gap-1">
+                  <div class="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-muted-foreground">
                     <button
                       v-if="listing.plugin.source"
                       type="button"
-                      class="rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
+                      class="shrink-0 rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
                       :title="t('pluginPlatform.sourceRepository')"
                       :aria-label="t('pluginPlatform.sourceRepository')"
                       @click.stop="openExternal(listing.plugin.source)"
@@ -1095,24 +1076,28 @@ onBeforeUnmount(() => {
                     <button
                       v-if="marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage)"
                       type="button"
-                      class="rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
+                      class="shrink-0 rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
                       :title="t('pluginPlatform.pluginHomepage')"
                       :aria-label="t('pluginPlatform.pluginHomepage')"
                       @click.stop="openExternal(marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage))"
                     >
                       <Globe class="size-3.5" />
                     </button>
-                  </span>
-                  <!-- 头部元数据芯片（日期+版本）：标准档显示在这里；紧凑档（卡宽 <21rem）隐藏，
-                       由标题块下方的发布信息行接管 —— 纯 CSS 无法跨容器移动元素，双份渲染按档位二选一 -->
-                  <span v-if="listing.latestVersionReleasedAt" class="hidden shrink-0 items-center gap-1 @min-[21rem]:flex">
-                    <span class="shrink-0 text-[10px] text-muted-foreground">{{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
-                    <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
-                  </span>
-                  <span v-else class="hidden shrink-0 items-center @min-[21rem]:flex">
-                    <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
-                  </span>
+                    <span v-if="listing.latestVersionReleasedAt" class="shrink-0 text-[10px] text-muted-foreground">{{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
+                  </div>
                 </div>
+                <button
+                  v-if="batchMode && isBatchSelectableListing(listing.status)"
+                  type="button"
+                  class="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded border transition-colors"
+                  :class="isListingSelected(listing) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40 bg-background'"
+                  :aria-pressed="isListingSelected(listing)"
+                  :aria-label="listing.name"
+                  :disabled="batchRunning"
+                  @click.stop="toggleListingSelection(listing)"
+                >
+                  <Check v-if="isListingSelected(listing)" class="size-3" />
+                </button>
               </div>
               <div class="marketplace-tags mt-3 flex min-w-0 flex-wrap items-center gap-1.5 @max-[21rem]:mt-2.5">
                 <!-- 紧凑档（卡宽 <21rem）只露第 1 个标签 + "+N" 折叠；标准档由下方 t-extra 全显 -->
@@ -1194,7 +1179,7 @@ onBeforeUnmount(() => {
             </article>
           </TransitionGroup>
           <TransitionGroup v-else name="marketplace-cards" tag="div" class="flex w-full flex-col gap-2">
-            <article v-for="listing in sortedMarketplaceListings" :key="listing.key" class="flex items-center gap-3 rounded-xl border bg-card p-3 transition-colors hover:border-primary/40">
+            <article v-for="listing in sortedMarketplaceListings" :key="listing.key" class="flex min-w-0 flex-wrap items-center gap-3 rounded-xl border bg-card p-3 transition-colors hover:border-primary/40">
               <button
                 v-if="batchMode && isBatchSelectableListing(listing.status)"
                 type="button"
@@ -1207,10 +1192,17 @@ onBeforeUnmount(() => {
               >
                 <Check v-if="isListingSelected(listing)" class="size-3" />
               </button>
-              <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-10 rounded-lg border bg-background p-1.5" />
+              <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-10 shrink-0 rounded-lg border bg-background p-1.5" />
               <div class="min-w-0 flex-1">
-                <div class="flex min-w-0 items-center gap-2">
-                  <span class="truncate text-sm font-semibold">{{ listing.name }}</span>
+                <div class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</div>
+                <div class="mt-1 flex min-w-0 items-center">
+                  <Badge variant="outline" class="h-auto min-h-5 min-w-0 max-w-full shrink px-1.5 py-0.5 text-[10px] leading-tight whitespace-normal break-all" :title="`v${listing.plugin.latestVersion}`">v{{ listing.plugin.latestVersion }}</Badge>
+                </div>
+                <div class="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                  <BadgeCheck v-if="listingRepositoryCanVerify(listing.repository)" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
+                  <span class="min-w-0 truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
+                </div>
+                <div class="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-muted-foreground">
                   <button
                     v-if="listing.plugin.source"
                     type="button"
@@ -1231,12 +1223,7 @@ onBeforeUnmount(() => {
                   >
                     <Globe class="size-3.5" />
                   </button>
-                  <span v-if="listing.latestVersionReleasedAt" class="shrink-0 text-[10px] text-muted-foreground @max-[38.75rem]:hidden">{{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
-                  <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
-                </div>
-                <div class="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-                  <BadgeCheck v-if="listingRepositoryCanVerify(listing.repository)" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
-                  <span class="truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
+                  <span v-if="listing.latestVersionReleasedAt" class="shrink-0 text-[10px] text-muted-foreground">{{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
                 </div>
                 <Tooltip :delay-duration="700">
                   <TooltipTrigger as-child>

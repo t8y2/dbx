@@ -886,24 +886,39 @@ describe("PluginContributionsPanel marketplace sort", () => {
 });
 
 describe("PluginContributionsPanel marketplace card layout", () => {
-  it("wraps the grid card header and pins the version badge so it never clips in a narrow panel", async () => {
+  it("keeps the three-column grid and shows full names and versions in both views", async () => {
     state.batchMode = false;
-    state.marketplaceViewMode = "grid";
-    await nextTick();
+    const longName = "Database Schema Explorer Marketplace Plugin With Deliberately Long Name";
+    const versionValue = "3.0.0-preview.10483";
+    const plugin = state.catalogResults[0].catalog!.plugins.find((entry) => entry.id === "a")!;
+    plugin.name = longName;
+    plugin.latestVersion = versionValue;
+    plugin.versions[0].version = versionValue;
+    await flushUi();
 
-    const card = host.querySelector("article");
-    expect(card, "a marketplace grid card should render").not.toBeNull();
+    for (const view of ["grid", "list"] as const) {
+      state.marketplaceViewMode = view;
+      await nextTick();
 
-    // The header row (icon + name + github/globe/date/version cluster) must be allowed to wrap,
-    // otherwise the non-shrinkable right cluster overflows the narrow column and the version
-    // badge is clipped (e.g. "v0.1.C") when the plugin center shares width with the AI panel.
-    const header = card!.querySelector(":scope > div");
-    expect(header?.classList.contains("flex-wrap"), "grid card header row should wrap").toBe(true);
+      const cards = [...host.querySelectorAll("article")];
+      const pluginName = cards.flatMap((card) => [...card.querySelectorAll<HTMLElement>("[title]")]).find((element) => element.title === longName);
+      expect(pluginName?.textContent?.trim(), `${view}: full plugin name`).toBe(longName);
+      expect(pluginName?.classList.contains("truncate"), `${view}: long name truncates visually`).toBe(true);
+      expect(pluginName?.classList.contains("text-sm"), `${view}: name size stays fixed`).toBe(true);
 
-    // The version badge must not shrink, so it is never squished even when it stays on one line.
-    const versionBadge = [...host.querySelectorAll<HTMLElement>("[data-stub='Badge']")].find((element) => element.textContent?.trim() === "v3.0.0");
-    expect(versionBadge, "version badge should render").toBeDefined();
-    expect(versionBadge!.classList.contains("shrink-0"), "version badge should be shrink-0").toBe(true);
+      const card = pluginName?.closest("article");
+      const versionBadge = [...(card?.querySelectorAll<HTMLElement>("[data-stub='Badge']") ?? [])].find((element) => element.textContent?.trim() === `v${versionValue}`);
+      expect(versionBadge?.textContent?.trim(), `${view}: full version`).toBe(`v${versionValue}`);
+      expect(versionBadge?.classList.contains("max-w-full"), `${view}: version fits the available width`).toBe(true);
+
+      const details = [...(card?.querySelectorAll<HTMLElement>("span") ?? [])].find((element) => element.textContent?.trim() === "DBX · first");
+      expect(details, `${view}: publisher and repository details render`).toBeDefined();
+      expect(versionBadge!.compareDocumentPosition(details!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+
+      if (view === "grid") {
+        expect(card?.parentElement?.classList.contains("md:grid-cols-3"), "desktop grid stays at three columns").toBe(true);
+      }
+    }
   });
 });
 

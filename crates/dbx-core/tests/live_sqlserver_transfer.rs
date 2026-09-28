@@ -862,3 +862,138 @@ async fn live_sqlserver_transfer_new_identity_target_keeps_explicit_identity_val
     cleanup.expect("drop identity databases");
     test_result.expect("transfer into a freshly created identity target must keep the source identity values");
 }
+
+/// User report (issue #9729): DBX's **database export** emitted one `CONSTRAINT` line per
+/// column of a composite foreign key, all sharing the source constraint name. SQL Server
+/// requires constraint names to be unique in the schema, so replaying the exported script
+/// failed with 8168 (`名称不允许重复`) — the user hit it while importing `test1.sql`.
+///
+/// This drives the real export path against a real SQL Server and replays the produced
+/// script into a fresh database, which is exactly what the user did by hand.
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at SQL Server"]
+async fn live_sqlserver_database_export_replays_composite_foreign_keys() {
+    use dbx_core::data::database_export::{export_database_sql_core, DatabaseExportRequest};
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_db = format!("dbx_export_src_{}", &suffix[..12]);
+    let target_db = format!("dbx_export_dst_{}", &suffix[..12]);
+    let connection_id = format!("live-sqlserver-export-{suffix}");
+
+    let mut master = sqlserver_connect("master").await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!("CREATE DATABASE [{source_db}]; CREATE DATABASE [{target_db}];"),
+    )
+    .await
+    .expect("create export databases");
+
+    let mut source_client = sqlserver_connect(&source_db).await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut source_client,
+        "CREATE TABLE dbo.QRTZ_JOB_DETAILS ( \
+             sched_name NVARCHAR(100) NOT NULL, \
+             job_name NVARCHAR(170) NOT NULL, \
+             job_group NVARCHAR(170) NOT NULL, \
+             description NVARCHAR(250) NULL, \
+             CONSTRAINT PK_QRTZ_JOB_DETAILS PRIMARY KEY (sched_name, job_name, job_group)); \
+         CREATE TABLE dbo.QRTZ_TRIGGERS ( \
+             sched_name NVARCHAR(100) NOT NULL, \
+             trigger_name NVARCHAR(170) NOT NULL, \
+             trigger_group NVARCHAR(170) NOT NULL, \
+             job_name NVARCHAR(170) NOT NULL, \
+             job_group NVARCHAR(170) NOT NULL, \
+             description NVARCHAR(250) NULL, \
+             next_fire_time BIGINT NULL, \
+             PRIMARY KEY (sched_name, trigger_name, trigger_group), \
+             CONSTRAINT [FK_QRTRZ_TRIGGERS_JOB_DETAILS] FOREIGN KEY (sched_name, job_name, job_group) \
+                 REFERENCES dbo.QRTZ_JOB_DETAILS (sched_name, job_name, job_group)); \
+         INSERT INTO dbo.QRTZ_JOB_DETAILS (sched_name, job_name, job_group, description) \
+             VALUES (N'sched', N'job', N'group', N'quartz job'); \
+         INSERT INTO dbo.QRTZ_TRIGGERS (sched_name, trigger_name, trigger_group, job_name, job_group, next_fire_time) \
+             VALUES (N'sched', N'trigger', N'group', N'job', N'group', 1700000000000);",
+    )
+    .await
+    .expect("create QRTZ fixtures");
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-export-{suffix}"));
+    std::fs::create_dir_all(&dir).expect("create export directory");
+    let storage =
+        dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.expect("open export storage");
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(connection_id.clone(), live_sqlserver_config(&connection_id, &source_db));
+    let _ = state.get_or_create_pool(&connection_id, Some(&source_db)).await.expect("export source pool");
+
+    let export_path = dir.join("test1.sql");
+    let request = DatabaseExportRequest {
+        export_id: format!("live-sqlserver-export-{suffix}"),
+        connection_id: connection_id.clone(),
+        database: source_db.clone(),
+        schema: "dbo".to_string(),
+        file_path: export_path.to_string_lossy().into_owned(),
+        selected_tables: vec!["QRTZ_JOB_DETAILS".to_string(), "QRTZ_TRIGGERS".to_string()],
+        excluded_tables: Vec::new(),
+        include_structure: true,
+        include_data: true,
+        include_objects: false,
+        include_create_database: false,
+        drop_table_if_exists: false,
+        omit_auto_increment: false,
+        fail_on_error: false,
+        prevent_overwrite: false,
+        output_compression: Default::default(),
+        snapshot_session_id: None,
+        insert_dialect: Default::default(),
+        batch_size: 1000,
+        split_max_mb: None,
+    };
+
+    let test_result = async {
+        export_database_sql_core(&state, &request, |_| {}).await?;
+        let script = std::fs::read_to_string(&export_path).map_err(|error| format!("read export script: {error}"))?;
+
+        assert_eq!(
+            script.matches("CONSTRAINT [FK_QRTRZ_TRIGGERS_JOB_DETAILS]").count(),
+            1,
+            "a composite foreign key must be exported as one constraint, not one per column:\n{script}"
+        );
+        assert!(
+            script.contains(
+                "CONSTRAINT [FK_QRTRZ_TRIGGERS_JOB_DETAILS] FOREIGN KEY ([sched_name], [job_name], [job_group]) \
+                 REFERENCES [dbo].[QRTZ_JOB_DETAILS]([sched_name], [job_name], [job_group])"
+            ),
+            "composite foreign key columns must stay grouped:\n{script}"
+        );
+
+        // Replay: this is the step that used to fail with 8168.
+        let mut target_client = sqlserver_connect(&target_db).await;
+        for statement in script.split(";\n").map(str::trim).filter(|statement| !statement.is_empty()) {
+            dbx_core::db::sqlserver::execute_batch(&mut target_client, statement)
+                .await
+                .map_err(|error| format!("replay failed on `{statement}`: {error}"))?;
+        }
+
+        let rows = dbx_core::db::sqlserver::execute_query(
+            &mut target_client,
+            "SELECT COUNT(*) FROM dbo.QRTZ_TRIGGERS t JOIN dbo.QRTZ_JOB_DETAILS j \
+             ON t.sched_name = j.sched_name AND t.job_name = j.job_name AND t.job_group = j.job_group",
+        )
+        .await
+        .map_err(|error| format!("read replayed rows: {error}"))?;
+        assert_eq!(rows.rows[0][0].as_i64(), Some(1));
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup = dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!(
+            "ALTER DATABASE [{source_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{source_db}]; \
+             ALTER DATABASE [{target_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{target_db}];"
+        ),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.expect("drop export databases");
+    test_result.expect("database export must replay a composite foreign key without 8168");
+}

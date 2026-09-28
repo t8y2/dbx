@@ -2,6 +2,7 @@ import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRest
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+import type { PluginUiStorageItemRef, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/tauri";
 
 export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
   return post("/api/database-backups", command);
@@ -2443,6 +2444,8 @@ export interface WebDavSyncSummary {
   appVersion?: string;
 }
 
+export type { PluginUiStorageItemRef, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog };
+
 export interface WebDavDownloadResult {
   summary: WebDavSyncSummary;
   editorSettings?: unknown;
@@ -2528,17 +2531,26 @@ export async function forgetWebdavSyncSecretsPassphrase(): Promise<void> {
   return post("/api/cloud-sync/webdav/forget-sync-secrets-passphrase", {});
 }
 
-export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false): Promise<WebDavSyncSummary> {
+export async function cloudSyncLocalCatalog(editorSettings?: unknown): Promise<SyncSnapshotCatalog> {
+  return post("/api/cloud-sync/catalog/local", { editorSettings });
+}
+
+export async function webdavSyncInspect(config: WebDavConfig, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return post("/api/cloud-sync/webdav/inspect", { config, secretsPassphrase });
+}
+
+export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false, selection?: SyncSelection): Promise<WebDavSyncSummary> {
   return post("/api/cloud-sync/webdav/upload", {
     config,
     editorSettings,
     secretsPassphrase,
     includeSecrets,
+    selection,
   });
 }
 
-export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true): Promise<WebDavDownloadResult> {
-  return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase, restoreSecrets });
+export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true, selection?: SyncSelection): Promise<WebDavDownloadResult> {
+  return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase, restoreSecrets, selection });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {
@@ -2569,22 +2581,28 @@ export async function retrySnippetLegacyCleanup(config: SnippetSyncConfig): Prom
   return post("/api/cloud-sync/snippet/retry-legacy-cleanup", { config });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassphrase?: string, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return post("/api/cloud-sync/snippet/inspect", { config, snippetPassphrase, secretsPassphrase });
+}
+
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetSyncSummary> {
   return post("/api/cloud-sync/snippet/upload", {
     config,
     editorSettings,
     snippetPassphrase,
     includeSecrets,
     secretsPassphrase,
+    selection,
   });
 }
 
-export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
+export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetDownloadResult> {
   return post("/api/cloud-sync/snippet/download", {
     config,
     snippetPassphrase,
     restoreSecrets,
     secretsPassphrase,
+    selection,
   });
 }
 

@@ -389,6 +389,55 @@ export interface WebDavSyncSummary {
   appVersion?: string;
 }
 
+export interface SyncCatalogItem {
+  id: string;
+  label: string;
+}
+
+export interface PluginUiStorageItemRef {
+  pluginId: string;
+  key: string;
+  pluginName?: string;
+}
+
+export interface SyncSelection {
+  connections?: string[];
+  connectionSecrets?: string[];
+  tunnelProfiles?: string[];
+  tunnelSecrets?: string[];
+  savedSqlFolders?: string[];
+  savedSqlFiles?: string[];
+  desktopSettings?: string[];
+  editorSettings?: string[];
+  aiConfigs?: string[];
+  pluginUiStorage?: PluginUiStorageItemRef[];
+  sidebarLayout?: boolean;
+  pinnedTreeNodeIds?: boolean;
+  includeSecrets: boolean;
+  syncCredentials: boolean;
+}
+
+export interface SyncSnapshotCatalog {
+  exportedAt: string;
+  appVersion: string;
+  hasEncryptedSecrets: boolean;
+  connections: SyncCatalogItem[];
+  connectionSecrets: string[];
+  tunnelProfiles: SyncCatalogItem[];
+  tunnelSecrets: string[];
+  savedSqlFolders: SyncCatalogItem[];
+  savedSqlFiles: SyncCatalogItem[];
+  desktopSettings: SyncCatalogItem[];
+  editorSettings: SyncCatalogItem[];
+  aiConfigs: SyncCatalogItem[];
+  aiConfigsLocked: boolean;
+  pluginUiStorage: PluginUiStorageItemRef[];
+  pluginUiStorageLocked: boolean;
+  hasSidebarLayout: boolean;
+  hasPinnedTreeNodeIds: boolean;
+  selection?: SyncSelection;
+}
+
 export interface WebDavDownloadResult {
   summary: WebDavSyncSummary;
   editorSettings?: unknown;
@@ -1061,17 +1110,26 @@ export async function forgetWebdavSyncSecretsPassphrase(): Promise<void> {
   return invoke("forget_webdav_sync_secrets_passphrase");
 }
 
-export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false): Promise<WebDavSyncSummary> {
+export async function cloudSyncLocalCatalog(editorSettings?: unknown): Promise<SyncSnapshotCatalog> {
+  return invoke("cloud_sync_local_catalog", { editorSettings });
+}
+
+export async function webdavSyncInspect(config: WebDavConfig, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return invoke("webdav_sync_inspect", { config, secretsPassphrase });
+}
+
+export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false, selection?: SyncSelection): Promise<WebDavSyncSummary> {
   return invoke("webdav_sync_upload", {
     config,
     editorSettings,
     secretsPassphrase,
     includeSecrets,
+    selection,
   });
 }
 
-export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true): Promise<WebDavDownloadResult> {
-  return invoke("webdav_sync_download", { config, secretsPassphrase, restoreSecrets });
+export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true, selection?: SyncSelection): Promise<WebDavDownloadResult> {
+  return invoke("webdav_sync_download", { config, secretsPassphrase, restoreSecrets, selection });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {
@@ -1102,18 +1160,23 @@ export async function retrySnippetLegacyCleanup(config: SnippetSyncConfig): Prom
   return invoke("retry_snippet_legacy_cleanup", { config });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassphrase?: string, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return invoke("snippet_sync_inspect", { config, snippetPassphrase, secretsPassphrase });
+}
+
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
     snippetPassphrase,
     includeSecrets,
     secretsPassphrase,
+    selection,
   });
 }
 
-export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
-  return invoke("snippet_sync_download", { config, snippetPassphrase, restoreSecrets, secretsPassphrase });
+export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetDownloadResult> {
+  return invoke("snippet_sync_download", { config, snippetPassphrase, restoreSecrets, secretsPassphrase, selection });
 }
 
 export async function loadPinnedTreeNodeIds(): Promise<string[]> {

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use dbx_core::cloud_sync::{
-    apply_sync_snapshot, build_sync_snapshot_with_options, finalize_snippet_migration, forget_snippet_token,
+    apply_sync_snapshot_with_selection, build_sync_snapshot_with_selection, describe_local_sync_state,
+    describe_sync_snapshot, finalize_snippet_migration, forget_snippet_token,
     forget_webdav_password, forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase,
     resolve_snippet_token, resolve_webdav_password, resolve_webdav_sync_secrets_passphrase,
     retry_pending_snippet_cleanup, save_snippet_sync_id_for_instance as core_save_snippet_sync_id, save_snippet_token,
@@ -10,7 +11,7 @@ use dbx_core::cloud_sync::{
     webdav_saved_password_status, webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions,
     ApplySnapshotSummary, SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings,
     SnippetSyncSummary, SnippetTokenStatus, SyncExportOptions, WebDavClient, WebDavConfig, WebDavPasswordStatus,
-    WebDavSyncSecretsStatus, WebDavSyncSummary,
+    WebDavSyncSecretsStatus, WebDavSyncSummary, SyncSelection, SyncSnapshotCatalog,
 };
 use dbx_core::storage::DesktopSettings;
 use dbx_core::storage::{MigrationPreflight, MigrationReport};
@@ -121,6 +122,7 @@ pub async fn webdav_sync_upload(
     editor_settings: Option<serde_json::Value>,
     secrets_passphrase: Option<String>,
     include_secrets: bool,
+    selection: Option<SyncSelection>,
 ) -> Result<WebDavSyncSummary, String> {
     resolve_webdav_password(&state.storage, &mut config).await?;
     let explicit_passphrase = secrets_passphrase.as_deref().and_then(|value| {
@@ -133,7 +135,7 @@ pub async fn webdav_sync_upload(
         None
     };
     let passphrase = explicit_passphrase.or(saved_passphrase.as_deref());
-    let snapshot = build_sync_snapshot_with_options(
+    let snapshot = build_sync_snapshot_with_selection(
         &state.storage,
         env!("CARGO_PKG_VERSION"),
         editor_settings,
@@ -144,6 +146,8 @@ pub async fn webdav_sync_upload(
             include_tunnel_secrets: include_secrets,
             include_plugin_secrets: include_secrets,
         },
+        selection.as_ref(),
+        Some(&state.plugins),
     )
     .await?;
     WebDavClient::new(config).put_snapshot(&snapshot).await
@@ -155,6 +159,7 @@ pub async fn webdav_sync_download(
     mut config: WebDavConfig,
     secrets_passphrase: Option<String>,
     restore_secrets: bool,
+    selection: Option<SyncSelection>,
 ) -> Result<WebDavDownloadResult, String> {
     resolve_webdav_password(&state.storage, &mut config).await?;
     let (snapshot, summary) = WebDavClient::new(config).get_snapshot().await?;
@@ -164,21 +169,44 @@ pub async fn webdav_sync_download(
     } else {
         resolve_webdav_sync_secrets_passphrase(&state.storage).await?
     };
-    let apply_summary = apply_sync_snapshot(
+    let apply_summary = apply_sync_snapshot_with_selection(
         &state.storage,
         &snapshot,
         ApplySnapshotOptions {
             secrets_passphrase: explicit_passphrase.or(saved_passphrase.as_deref()),
             restore_secrets,
         },
+        selection.as_ref(),
+        Some(&state.plugins),
     )
     .await?;
     Ok(WebDavDownloadResult {
         summary,
-        editor_settings: snapshot.editor_settings,
-        desktop_settings: snapshot.desktop_settings,
+        editor_settings: state.storage.load_editor_settings().await?,
+        desktop_settings: state.storage.load_desktop_settings().await?,
         apply_summary,
     })
+}
+
+#[tauri::command]
+pub async fn cloud_sync_local_catalog(
+    state: State<'_, Arc<AppState>>,
+    editor_settings: Option<serde_json::Value>,
+) -> Result<SyncSnapshotCatalog, String> {
+    describe_local_sync_state(&state.storage, editor_settings, Some(&state.plugins)).await
+}
+
+#[tauri::command]
+pub async fn webdav_sync_inspect(
+    state: State<'_, Arc<AppState>>,
+    mut config: WebDavConfig,
+    secrets_passphrase: Option<String>,
+) -> Result<SyncSnapshotCatalog, String> {
+    resolve_webdav_password(&state.storage, &mut config).await?;
+    let (snapshot, _) = WebDavClient::new(config).get_snapshot().await?;
+    let explicit = secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let saved = if explicit.is_none() { resolve_webdav_sync_secrets_passphrase(&state.storage).await? } else { None };
+    describe_sync_snapshot(&snapshot, explicit.or(saved.as_deref()))
 }
 
 #[tauri::command]
@@ -250,6 +278,7 @@ pub async fn snippet_sync_upload(
     snippet_passphrase: Option<String>,
     include_secrets: bool,
     secrets_passphrase: Option<String>,
+    selection: Option<SyncSelection>,
 ) -> Result<SnippetSyncSummary, String> {
     resolve_snippet_token(&state.storage, &mut config).await?;
     let secrets_passphrase = if include_secrets {
@@ -263,7 +292,7 @@ pub async fn snippet_sync_upload(
     } else {
         None
     };
-    let snapshot = build_sync_snapshot_with_options(
+    let snapshot = build_sync_snapshot_with_selection(
         &state.storage,
         env!("CARGO_PKG_VERSION"),
         editor_settings,
@@ -274,6 +303,8 @@ pub async fn snippet_sync_upload(
             include_tunnel_secrets: include_secrets,
             include_plugin_secrets: include_secrets,
         },
+        selection.as_ref(),
+        Some(&state.plugins),
     )
     .await?;
     let client = SnippetSyncClient::new(config)?;
@@ -289,21 +320,38 @@ pub async fn snippet_sync_download(
     snippet_passphrase: Option<String>,
     restore_secrets: bool,
     secrets_passphrase: Option<String>,
+    selection: Option<SyncSelection>,
 ) -> Result<SnippetDownloadResult, String> {
     resolve_snippet_token(&state.storage, &mut config).await?;
     let (snapshot, summary) = SnippetSyncClient::new(config)?.get_snapshot(snippet_passphrase.as_deref()).await?;
-    let apply_summary = apply_sync_snapshot(
+    let apply_summary = apply_sync_snapshot_with_selection(
         &state.storage,
         &snapshot,
         ApplySnapshotOptions { secrets_passphrase: secrets_passphrase.as_deref(), restore_secrets },
+        selection.as_ref(),
+        Some(&state.plugins),
     )
     .await?;
     Ok(SnippetDownloadResult {
         summary,
-        editor_settings: snapshot.editor_settings,
-        desktop_settings: snapshot.desktop_settings,
+        editor_settings: state.storage.load_editor_settings().await?,
+        desktop_settings: state.storage.load_desktop_settings().await?,
         apply_summary,
     })
+}
+
+#[tauri::command]
+pub async fn snippet_sync_inspect(
+    state: State<'_, Arc<AppState>>,
+    mut config: SnippetSyncConfig,
+    snippet_passphrase: Option<String>,
+    secrets_passphrase: Option<String>,
+) -> Result<SyncSnapshotCatalog, String> {
+    resolve_snippet_token(&state.storage, &mut config).await?;
+    let (snapshot, _) = SnippetSyncClient::new(config)?.get_snapshot(snippet_passphrase.as_deref()).await?;
+    let explicit = secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let saved = if explicit.is_none() { resolve_webdav_sync_secrets_passphrase(&state.storage).await? } else { None };
+    describe_sync_snapshot(&snapshot, explicit.or(saved.as_deref()))
 }
 
 #[cfg(test)]

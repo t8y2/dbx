@@ -8,7 +8,8 @@ use chrono::Utc;
 use reqwest::{header, Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::ai::AiConfigItem;
@@ -21,13 +22,13 @@ use crate::connection_secrets::{
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
 use crate::storage::{
-    DesktopSettings, SnippetPendingCleanup, Storage, SyncImportCredential, SyncImportPlan, SyncImportSecret,
+    clear_ai_config_device_paths, DesktopSettings, SnippetPendingCleanup, Storage, SyncImportCredential,
+    SyncImportPlan, SyncImportSecret,
 };
 
-/// Version 2 introduces an explicit, versioned secrets transport payload.  We
-/// still accept version 1 snapshots on import so upgrading does not strand
-/// existing devices.
-const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// Version 2 introduced encrypted secret payloads; version 3 adds selective
+/// backup metadata. Older snapshots remain importable for compatibility.
+const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 const LEGACY_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const SENSITIVE_PAYLOAD_VERSION: u32 = 2;
 const SENSITIVE_PAYLOAD_TYPE: &str = "dbx-sync-secrets";
@@ -35,6 +36,7 @@ const ENCRYPTED_SNIPPET_SNAPSHOT_FORMAT: &str = "dbx-encrypted-sync-snapshot";
 const ENCRYPTED_SNIPPET_SNAPSHOT_VERSION: u32 = 1;
 const DEFAULT_REMOTE_PATH: &str = "DBX/sync/snapshot.json";
 const DEFAULT_SNIPPET_FILE_NAME: &str = "dbx-sync.json";
+const LEGACY_AI_CONFIG_SELECTION_ID: &str = "__legacy_ai_config__";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITEE_API_BASE: &str = "https://gitee.com/api/v5";
 const GITLAB_DEFAULT_INSTANCE: &str = "https://gitlab.com";
@@ -60,6 +62,26 @@ const SECRET_KEYS: &[&str] = &[
 ];
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
+const DESKTOP_DEVICE_LOCAL_SETTINGS: &[&str] = &[
+    "saved_sql_sync_dir",
+    "driver_store_dir",
+    "plugin_store_dir",
+    "agent_store_dir",
+    "custom_ai_skill_root_enabled",
+    "custom_ai_skill_root",
+];
+const NON_SYNCABLE_DESKTOP_SETTINGS: &[&str] = &["debug_logging_enabled"];
+const NON_SYNCABLE_EDITOR_SETTINGS: &[&str] = &[
+    "updateNotificationsEnabled",
+    "autoDownloadUpdates",
+    "autoUpdateApp",
+    "autoUpdateDrivers",
+    "autoUpdateJdbc",
+    "autoUpdateMcp",
+    "autoUpdatePlugins",
+    "updateDownloadSource",
+    "ignoredUpdateVersion",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,6 +166,236 @@ pub struct SyncSnapshot {
     pub desktop_settings: DesktopSettings,
     pub editor_settings: Option<serde_json::Value>,
     pub encrypted_secrets: Option<EncryptedSecretsBlob>,
+    /// Selection captured at export time. `None` means a legacy snapshot that
+    /// predates selective backup and therefore contains the complete dataset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SyncSelection>,
+}
+
+/// `None` for an item list means include the whole category. An explicit list
+/// can be empty, which is how a user chooses to omit a category.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_secrets: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_profiles: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_secrets: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_sql_folders: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_sql_files: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_settings: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_settings: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_configs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
+    pub plugin_ui_storage: Option<Vec<PluginUiStorageItemRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_layout: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_tree_node_ids: Option<bool>,
+    /// Sensitive values are never exported unless the user explicitly opts in.
+    #[serde(default)]
+    pub include_secrets: bool,
+    /// Saved WebDAV/snippet account passwords are a separate sensitive item.
+    #[serde(default = "default_selected")]
+    pub sync_credentials: bool,
+}
+
+fn default_selected() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUiStorageItemRef {
+    pub plugin_id: String,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUiStorageEntry {
+    pub plugin_id: String,
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncCatalogItem {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSnapshotCatalog {
+    pub exported_at: String,
+    pub app_version: String,
+    pub has_encrypted_secrets: bool,
+    pub connections: Vec<SyncCatalogItem>,
+    pub connection_secrets: Vec<String>,
+    pub tunnel_profiles: Vec<SyncCatalogItem>,
+    pub tunnel_secrets: Vec<String>,
+    pub saved_sql_folders: Vec<SyncCatalogItem>,
+    pub saved_sql_files: Vec<SyncCatalogItem>,
+    pub desktop_settings: Vec<SyncCatalogItem>,
+    pub editor_settings: Vec<SyncCatalogItem>,
+    pub ai_configs: Vec<SyncCatalogItem>,
+    pub ai_configs_locked: bool,
+    pub plugin_ui_storage: Vec<PluginUiStorageItemRef>,
+    pub plugin_ui_storage_locked: bool,
+    pub has_sidebar_layout: bool,
+    pub has_pinned_tree_node_ids: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SyncSelection>,
+}
+
+pub fn describe_sync_snapshot(
+    snapshot: &SyncSnapshot,
+    secrets_passphrase: Option<&str>,
+) -> Result<SyncSnapshotCatalog, String> {
+    let mut ai_configs = snapshot
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.ai_configs.as_ref())
+        .map(|ids| ids.iter().map(|id| SyncCatalogItem { id: id.clone(), label: id.clone() }).collect())
+        .unwrap_or_default();
+    let mut ai_configs_locked = snapshot.encrypted_secrets.is_some()
+        && normalized_passphrase(secrets_passphrase).is_none()
+        && snapshot.selection.as_ref().map_or(true, |selection| selection.ai_configs.is_none());
+    let mut plugin_ui_storage = Vec::new();
+    let mut plugin_ui_storage_locked = snapshot.encrypted_secrets.is_some() && normalized_passphrase(secrets_passphrase).is_none();
+    let mut connection_secrets = snapshot.selection.as_ref().and_then(|selection| selection.connection_secrets.clone())
+        .unwrap_or_else(|| snapshot.connections.iter().map(|config| config.id.clone()).collect());
+    let mut tunnel_secrets = snapshot.selection.as_ref().and_then(|selection| selection.tunnel_secrets.clone())
+        .unwrap_or_else(|| snapshot.tunnel_profiles.as_deref().unwrap_or_default().iter().map(|profile| profile.id().to_string()).collect());
+    if let (Some(blob), Some(passphrase)) = (&snapshot.encrypted_secrets, normalized_passphrase(secrets_passphrase)) {
+        let payload = decrypt_sensitive_payload(blob, passphrase)?;
+        ai_configs_locked = false;
+        plugin_ui_storage_locked = false;
+        connection_secrets = payload.connection_secrets.iter().map(|secret| secret.connection_id.clone()).collect::<HashSet<_>>().into_iter().collect();
+        tunnel_secrets = payload.tunnel_profiles.as_deref().unwrap_or_default().iter().map(|profile| profile.id().to_string()).collect();
+        ai_configs = match payload.ai_configs {
+            Some(configs) => configs.into_iter().map(|config| SyncCatalogItem { id: config.id, label: config.name }).collect(),
+            None => payload
+                .ai_config
+                .map(|config| vec![SyncCatalogItem { id: LEGACY_AI_CONFIG_SELECTION_ID.to_string(), label: config.provider.as_str().to_string() }])
+                .unwrap_or_default(),
+        };
+        plugin_ui_storage = payload.plugin_ui_storage.unwrap_or_default().into_iter().map(|entry| PluginUiStorageItemRef {
+            plugin_id: entry.plugin_id,
+            key: entry.key,
+            plugin_name: None,
+        }).collect();
+    }
+    let settings = serde_json::to_value(&snapshot.desktop_settings).map_err(|error| error.to_string())?;
+    let mut desktop_settings = settings
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.keys())
+        .filter(|key| !DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str()) && !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str()))
+        .map(|key| SyncCatalogItem { id: key.clone(), label: key.clone() })
+        .collect::<Vec<_>>();
+    let mut editor_settings = snapshot
+        .editor_settings
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|object| object.keys())
+        .filter(|key| !NON_SYNCABLE_EDITOR_SETTINGS.contains(&key.as_str()))
+        .map(|key| SyncCatalogItem { id: key.clone(), label: key.clone() })
+        .collect::<Vec<_>>();
+    if let Some(selection) = &snapshot.selection {
+        if let Some(keys) = &selection.desktop_settings {
+            desktop_settings.retain(|item| keys.contains(&item.id));
+        }
+        if let Some(keys) = &selection.editor_settings {
+            editor_settings.retain(|item| keys.contains(&item.id));
+        }
+    }
+    Ok(SyncSnapshotCatalog {
+        exported_at: snapshot.exported_at.clone(),
+        app_version: snapshot.app_version.clone(),
+        has_encrypted_secrets: snapshot.encrypted_secrets.is_some(),
+        connections: snapshot.connections.iter().map(|config| SyncCatalogItem { id: config.id.clone(), label: config.name.clone() }).collect(),
+        connection_secrets,
+        tunnel_profiles: snapshot.tunnel_profiles.as_deref().unwrap_or_default().iter().map(|profile| {
+            let label = match profile {
+                TransportLayerConfig::Ssh(config) => &config.name,
+                TransportLayerConfig::Proxy(config) => &config.name,
+                TransportLayerConfig::HttpTunnel(config) => &config.name,
+            };
+            SyncCatalogItem { id: profile.id().to_string(), label: label.clone() }
+        }).collect(),
+        tunnel_secrets,
+        saved_sql_folders: snapshot.saved_sql.folders.iter().map(|folder| SyncCatalogItem { id: folder.id.clone(), label: folder.name.clone() }).collect(),
+        saved_sql_files: snapshot.saved_sql.files.iter().map(|file| SyncCatalogItem { id: file.id.clone(), label: file.name.clone() }).collect(),
+        desktop_settings,
+        editor_settings,
+        ai_configs,
+        ai_configs_locked,
+        plugin_ui_storage,
+        plugin_ui_storage_locked,
+        has_sidebar_layout: snapshot.sidebar_layout.is_some(),
+        has_pinned_tree_node_ids: snapshot.selection.as_ref().and_then(|selection| selection.pinned_tree_node_ids).unwrap_or(!snapshot.pinned_tree_node_ids.is_empty()),
+        selection: snapshot.selection.clone().map(|mut selection| {
+            if let Some(keys) = selection.desktop_settings.as_mut() {
+                keys.retain(|key| !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str()));
+            }
+            if let Some(keys) = selection.editor_settings.as_mut() {
+                keys.retain(|key| !NON_SYNCABLE_EDITOR_SETTINGS.contains(&key.as_str()));
+            }
+            selection
+        }),
+    })
+}
+
+pub async fn describe_local_sync_state(
+    storage: &Storage,
+    editor_settings: Option<serde_json::Value>,
+    plugin_registry: Option<&crate::plugins::PluginRegistry>,
+) -> Result<SyncSnapshotCatalog, String> {
+    let snapshot = build_sync_snapshot_with_selection(
+        storage,
+        env!("CARGO_PKG_VERSION"),
+        editor_settings,
+        SyncExportOptions::default(),
+        None,
+        None,
+    )
+    .await?;
+    let mut catalog = describe_sync_snapshot(&snapshot, None)?;
+    catalog.connection_secrets = catalog.connections.iter().map(|item| item.id.clone()).collect();
+    catalog.tunnel_secrets = catalog.tunnel_profiles.iter().map(|item| item.id.clone()).collect();
+    catalog.ai_configs = storage
+        .load_ai_configs()
+        .await?
+        .into_iter()
+        .map(|config| SyncCatalogItem { id: config.id, label: config.name })
+        .collect();
+    catalog.ai_configs_locked = false;
+    catalog.plugin_ui_storage = plugin_registry.map(load_plugin_ui_storage).transpose()?.unwrap_or_default().into_iter().map(|entry| {
+        PluginUiStorageItemRef {
+            plugin_id: entry.plugin_id.clone(),
+            key: entry.key,
+            plugin_name: plugin_registry_name(plugin_registry, &entry.plugin_id),
+        }
+    }).collect();
+    catalog.plugin_ui_storage_locked = false;
+    catalog.has_encrypted_secrets = false;
+    Ok(catalog)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +474,10 @@ pub struct SensitiveSyncPayload {
     /// Full tunnel profiles including their secrets.
     #[serde(default)]
     pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
+    /// Plugin UI data is always protected by the sync passphrase because
+    /// plugins may store credentials alongside ordinary preferences.
+    #[serde(default)]
+    pub plugin_ui_storage: Option<Vec<PluginUiStorageEntry>>,
 }
 
 fn default_plugin_secrets_included() -> bool {
@@ -263,6 +519,153 @@ pub struct SyncExportOptions<'a> {
     pub include_ai_secrets: bool,
     pub include_tunnel_secrets: bool,
     pub include_plugin_secrets: bool,
+}
+
+fn select_by_id<T: Clone>(items: &[T], selected: Option<&Vec<String>>, id: impl Fn(&T) -> String) -> Vec<T> {
+    let Some(selected) = selected else { return items.to_vec() };
+    let selected = selected.iter().map(String::as_str).collect::<HashSet<_>>();
+    items.iter().filter(|item| selected.contains(id(item).as_str())).cloned().collect()
+}
+
+fn select_saved_sql_library(
+    library: &SavedSqlLibrary,
+    selected_folders: Option<&Vec<String>>,
+    selected_files: Option<&Vec<String>>,
+) -> SavedSqlLibrary {
+    let mut folders = select_by_id(&library.folders, selected_folders, |folder| folder.id.clone());
+    let files = select_by_id(&library.files, selected_files, |file| file.id.clone());
+    let mut folder_ids = folders.iter().map(|folder| folder.id.clone()).collect::<HashSet<_>>();
+    let folder_by_id = library.folders.iter().map(|folder| (folder.id.as_str(), folder)).collect::<HashMap<_, _>>();
+    let required_parents = folders
+        .iter()
+        .filter_map(|folder| folder.parent_folder_id.clone())
+        .chain(files.iter().filter_map(|file| file.folder_id.clone()))
+        .collect::<Vec<_>>();
+    for mut parent in required_parents.into_iter().map(Some) {
+        while let Some(parent_id) = parent {
+            if !folder_ids.insert(parent_id.clone()) {
+                break;
+            }
+            let Some(folder) = folder_by_id.get(parent_id.as_str()) else { break };
+            folders.push((*folder).clone());
+            parent = folder.parent_folder_id.clone();
+        }
+    }
+    SavedSqlLibrary { folders, files }
+}
+
+fn plugin_registry_name(registry: Option<&crate::plugins::PluginRegistry>, plugin_id: &str) -> Option<String> {
+    registry?.list_installed().ok()?.into_iter().find(|plugin| plugin.manifest.id == plugin_id).map(|plugin| plugin.manifest.name)
+}
+
+fn valid_plugin_storage_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && value.len() <= 128
+        && chars.all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '.' | '_' | '-'))
+}
+
+fn valid_plugin_storage_key(value: &str) -> bool {
+    !value.is_empty() && value.chars().count() <= 256 && !value.chars().any(char::is_control)
+}
+
+fn load_plugin_ui_storage(registry: &crate::plugins::PluginRegistry) -> Result<Vec<PluginUiStorageEntry>, String> {
+    let plugins = registry.list_installed()?;
+    let mut entries = Vec::new();
+    for plugin in plugins {
+        let plugin_id = plugin.manifest.id;
+        if !valid_plugin_storage_id(&plugin_id) { continue; }
+        let path = registry.plugin_data_dir(&plugin_id).join("ui-storage.json");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata,
+            Ok(_) => return Err(format!("plugin UI storage is not a regular file: {}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("cannot inspect plugin UI storage: {error}")),
+        };
+        if metadata.len() > 1024 * 1024 {
+            return Err(format!("plugin UI storage exceeds 1048576 bytes: {}", path.display()));
+        }
+        let contents = fs::read(&path).map_err(|error| format!("cannot read plugin UI storage: {error}"))?;
+        let map = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&contents)
+            .map_err(|error| format!("cannot parse plugin UI storage {}: {error}", path.display()))?;
+        for (key, value) in map {
+            let encoded = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+            if !valid_plugin_storage_key(&key) || encoded.len() > 256 * 1024 {
+                return Err(format!("plugin UI storage contains an invalid or oversized entry: {plugin_id}/{key}"));
+            }
+            entries.push(PluginUiStorageEntry { plugin_id: plugin_id.clone(), key, value });
+        }
+    }
+    Ok(entries)
+}
+
+fn select_plugin_ui_storage(
+    entries: &[PluginUiStorageEntry],
+    selected: Option<&Vec<PluginUiStorageItemRef>>,
+) -> Vec<PluginUiStorageEntry> {
+    let Some(selected) = selected else { return entries.to_vec() };
+    let selected = selected.iter().map(|entry| (entry.plugin_id.as_str(), entry.key.as_str())).collect::<HashSet<_>>();
+    entries
+        .iter()
+        .filter(|entry| selected.contains(&(entry.plugin_id.as_str(), entry.key.as_str())))
+        .cloned()
+        .collect()
+}
+
+fn prepare_plugin_ui_storage_restore(
+    registry: &crate::plugins::PluginRegistry,
+    entries: &[PluginUiStorageEntry],
+) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, String> {
+    let mut by_plugin = HashMap::<String, HashMap<String, serde_json::Value>>::new();
+    for entry in entries {
+        if !valid_plugin_storage_id(&entry.plugin_id) || !valid_plugin_storage_key(&entry.key) {
+            return Err("sync snapshot contains an invalid plugin UI storage identifier".to_string());
+        }
+        let encoded = serde_json::to_vec(&entry.value).map_err(|error| error.to_string())?;
+        if encoded.len() > 256 * 1024 {
+            return Err(format!("plugin UI storage value exceeds 262144 bytes: {}/{}", entry.plugin_id, entry.key));
+        }
+        by_plugin.entry(entry.plugin_id.clone()).or_default().insert(entry.key.clone(), entry.value.clone());
+    }
+    let mut prepared = Vec::with_capacity(by_plugin.len());
+    for (plugin_id, selected) in by_plugin {
+        let dir = registry.plugin_data_dir(&plugin_id);
+        let path = dir.join("ui-storage.json");
+        let mut current = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(
+                    &fs::read(&path).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| format!("cannot parse local plugin UI storage {}: {error}", path.display()))?
+            }
+            Ok(_) => return Err(format!("plugin UI storage is not a regular file: {}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+            Err(error) => return Err(format!("cannot inspect plugin UI storage: {error}")),
+        };
+        current.extend(selected);
+        let bytes = serde_json::to_vec(&current).map_err(|error| error.to_string())?;
+        if current.len() > 1024 || bytes.len() > 1024 * 1024 {
+            return Err(format!("plugin UI storage exceeds its configured size limit: {}", path.display()));
+        }
+        prepared.push((path, bytes));
+    }
+    Ok(prepared)
+}
+
+fn write_plugin_ui_storage_restore(prepared: Vec<(std::path::PathBuf, Vec<u8>)>) -> Result<(), String> {
+    for (path, bytes) in prepared {
+        let dir = path.parent().ok_or_else(|| "plugin UI storage has no parent directory".to_string())?;
+        fs::create_dir_all(dir).map_err(|error| format!("cannot create plugin data directory: {error}"))?;
+        let temp = path.with_extension("json.sync-tmp");
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&temp).map_err(|error| format!("cannot create plugin UI storage temp file: {error}"))?;
+            file.write_all(&bytes).map_err(|error| format!("cannot write plugin UI storage: {error}"))?;
+            file.sync_all().map_err(|error| format!("cannot flush plugin UI storage: {error}"))?;
+        }
+        fs::rename(&temp, &path).map_err(|error| format!("cannot replace plugin UI storage: {error}"))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -332,12 +735,99 @@ pub async fn build_sync_snapshot_with_options(
     editor_settings: Option<serde_json::Value>,
     options: SyncExportOptions<'_>,
 ) -> Result<SyncSnapshot, String> {
-    let mut connections = storage.load_connections().await?;
-    let mut tunnel_profiles = storage.load_tunnel_profiles().await?;
-    let encrypted_secrets = if options.include_secrets {
+    build_sync_snapshot_with_selection(storage, app_version, editor_settings, options, None, None).await
+}
+
+pub async fn build_sync_snapshot_with_selection(
+    storage: &Storage,
+    app_version: impl Into<String>,
+    editor_settings: Option<serde_json::Value>,
+    options: SyncExportOptions<'_>,
+    selection: Option<&SyncSelection>,
+    plugin_registry: Option<&crate::plugins::PluginRegistry>,
+) -> Result<SyncSnapshot, String> {
+    let source_connections = storage.load_connections().await?;
+    let source_tunnel_profiles = storage.load_tunnel_profiles().await?;
+    let source_saved_sql = storage.load_saved_sql_library().await?;
+    let mut connections = select_by_id(&source_connections, selection.and_then(|selection| selection.connections.as_ref()), |item| item.id.clone());
+    let mut tunnel_profiles = select_by_id(
+        &source_tunnel_profiles,
+        selection.and_then(|selection| selection.tunnel_profiles.as_ref()),
+        |profile| profile.id().to_string(),
+    );
+    for config in &mut connections {
+        clear_device_local_connection_paths(config);
+    }
+    let saved_sql = select_saved_sql_library(
+        &source_saved_sql,
+        selection.and_then(|selection| selection.saved_sql_folders.as_ref()),
+        selection.and_then(|selection| selection.saved_sql_files.as_ref()),
+    );
+    let plugin_ui_storage = match plugin_registry {
+        Some(registry) => load_plugin_ui_storage(registry)?,
+        None => Vec::new(),
+    };
+    let plugin_ui_storage = select_plugin_ui_storage(
+        &plugin_ui_storage,
+        selection.and_then(|selection| selection.plugin_ui_storage.as_ref()),
+    );
+    let include_secrets = options.include_secrets && selection.map_or(true, |selection| selection.include_secrets);
+    let mut included_selection = selection.cloned();
+    if let Some(selection) = included_selection.as_mut() {
+        if let Some(keys) = selection.desktop_settings.as_mut() {
+            keys.retain(|key| !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str()));
+        }
+        if let Some(keys) = selection.editor_settings.as_mut() {
+            keys.retain(|key| !NON_SYNCABLE_EDITOR_SETTINGS.contains(&key.as_str()));
+        }
+        if selection.saved_sql_folders.is_some() {
+            selection.saved_sql_folders = Some(saved_sql.folders.iter().map(|folder| folder.id.clone()).collect());
+        }
+        selection.include_secrets = include_secrets;
+        if !include_secrets {
+            selection.connection_secrets = Some(Vec::new());
+            selection.tunnel_secrets = Some(Vec::new());
+            selection.ai_configs = Some(Vec::new());
+            selection.sync_credentials = false;
+        }
+        selection.plugin_ui_storage = None;
+        if !include_secrets {
+            selection.plugin_ui_storage = Some(Vec::new());
+        }
+    }
+    let encrypted_secrets = if include_secrets {
         let passphrase = normalized_passphrase(options.sync_passphrase)
             .ok_or_else(|| "A sync password is required when including synced secrets.".to_string())?;
-        let payload = build_sensitive_payload_with_options(storage, &connections, &tunnel_profiles, options).await?;
+        let mut payload = build_sensitive_payload_with_options(storage, &connections, &tunnel_profiles, options).await?;
+        if let Some(profiles) = payload.tunnel_profiles.as_mut() {
+            for profile in profiles {
+                clear_device_local_tunnel_path(profile);
+            }
+        }
+        if selection.is_some_and(|selection| !selection.sync_credentials) {
+            payload.sync_credentials = None;
+        }
+        payload.plugin_ui_storage = Some(plugin_ui_storage);
+        if let Some(selection) = selection {
+            if let Some(ids) = &selection.connection_secrets {
+                let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+                let metadata_ids = connections.iter().map(|config| config.id.as_str()).collect::<HashSet<_>>();
+                payload.connection_secrets.retain(|secret| ids.contains(secret.connection_id.as_str()) && metadata_ids.contains(secret.connection_id.as_str()));
+            }
+            if let Some(ids) = &selection.tunnel_secrets {
+                let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+                let metadata_ids = tunnel_profiles.iter().map(|profile| profile.id()).collect::<HashSet<_>>();
+                if let Some(profiles) = payload.tunnel_profiles.as_mut() {
+                    profiles.retain(|profile| ids.contains(profile.id()) && metadata_ids.contains(profile.id()));
+                }
+            }
+            if let Some(ids) = &selection.ai_configs {
+                let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+                if let Some(configs) = payload.ai_configs.as_mut() {
+                    configs.retain(|item| ids.contains(item.id.as_str()));
+                }
+            }
+        }
         Some(encrypt_sensitive_payload(&payload, passphrase)?)
     } else {
         None
@@ -347,6 +837,7 @@ pub async fn build_sync_snapshot_with_options(
         scrub_connection_secrets(config);
     }
     for profile in &mut tunnel_profiles {
+        clear_device_local_tunnel_path(profile);
         profile.scrub_secrets();
     }
 
@@ -357,13 +848,187 @@ pub async fn build_sync_snapshot_with_options(
         connections,
         mqtt_subscriptions,
         tunnel_profiles: Some(tunnel_profiles),
-        sidebar_layout: storage.load_sidebar_layout().await?,
-        pinned_tree_node_ids: storage.load_pinned_tree_node_ids().await?,
-        saved_sql: storage.load_saved_sql_library().await?,
-        desktop_settings: storage.load_desktop_settings().await?,
-        editor_settings,
+        sidebar_layout: if selection.and_then(|selection| selection.sidebar_layout) == Some(false) {
+            None
+        } else {
+            storage.load_sidebar_layout().await?
+        },
+        pinned_tree_node_ids: if selection.and_then(|selection| selection.pinned_tree_node_ids) == Some(false) {
+            Vec::new()
+        } else {
+            storage.load_pinned_tree_node_ids().await?
+        },
+        saved_sql,
+        desktop_settings: select_syncable_desktop_settings(
+            storage.load_desktop_settings().await?,
+            selection.and_then(|selection| selection.desktop_settings.as_ref()),
+        )?,
+        editor_settings: select_syncable_editor_settings(
+            editor_settings,
+            selection.and_then(|selection| selection.editor_settings.as_ref()),
+        ),
         encrypted_secrets,
+        selection: included_selection,
     })
+}
+
+fn syncable_desktop_settings(mut settings: DesktopSettings) -> DesktopSettings {
+    settings.saved_sql_sync_dir = None;
+    settings.driver_store_dir = None;
+    settings.plugin_store_dir = None;
+    settings.agent_store_dir = None;
+    settings.custom_ai_skill_root_enabled = false;
+    settings.custom_ai_skill_root = None;
+    settings.debug_logging_enabled = false;
+    settings
+}
+
+fn select_syncable_desktop_settings(
+    settings: DesktopSettings,
+    selected: Option<&Vec<String>>,
+) -> Result<DesktopSettings, String> {
+    let settings = syncable_desktop_settings(settings);
+    let Some(selected) = selected else { return Ok(settings) };
+    let source = serde_json::to_value(settings).map_err(|error| error.to_string())?;
+    let mut filtered = serde_json::to_value(DesktopSettings::default()).map_err(|error| error.to_string())?;
+    let (Some(source), Some(filtered)) = (source.as_object(), filtered.as_object_mut()) else {
+        return Err("desktop settings must serialize as an object".to_string());
+    };
+    for key in selected {
+        if DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str()) || NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str()) {
+            continue;
+        }
+        if let Some(value) = source.get(key) {
+            filtered.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(filtered.clone())).map_err(|error| error.to_string())
+}
+
+fn select_syncable_editor_settings(value: Option<serde_json::Value>, selected: Option<&Vec<String>>) -> Option<serde_json::Value> {
+    let value = value?;
+    let Some(mut object) = value.as_object().cloned() else { return Some(value) };
+    let selected = selected.map(|keys| keys.iter().map(String::as_str).collect::<HashSet<_>>());
+    object.retain(|key, _| {
+        !NON_SYNCABLE_EDITOR_SETTINGS.contains(&key.as_str()) && selected.as_ref().is_none_or(|keys| keys.contains(key.as_str()))
+    });
+    Some(serde_json::Value::Object(object))
+}
+
+fn clear_device_local_connection_paths(config: &mut ConnectionConfig) {
+    match config.db_type {
+        DatabaseType::Sqlite | DatabaseType::DuckDb if config.host.trim() != ":memory:" => config.host.clear(),
+        DatabaseType::Access => config.host.clear(),
+        DatabaseType::H2 if config.port == 0 => {
+            config.host.clear();
+            config.connection_string = None;
+        }
+        _ => {}
+    }
+    config.docs_notes_path = None;
+    config.ca_cert_path.clear();
+    config.client_cert_path.clear();
+    config.client_key_path.clear();
+    config.jdbc_driver_paths.clear();
+    for attached_database in &mut config.attached_databases {
+        attached_database.path.clear();
+    }
+    for layer in &mut config.transport_layers {
+        if let TransportLayerConfig::Ssh(ssh) = layer {
+            ssh.key_path.clear();
+            ssh.ssh_agent_sock_path.clear();
+        }
+    }
+    match config.db_type {
+        DatabaseType::Mqtt => clear_external_config_path_fields(config, "auth", &["caCertPath", "clientCertPath", "clientKeyPath"]),
+        DatabaseType::Cassandra => clear_external_config_path_fields(config, "tls", &["truststore_path", "keystore_path"]),
+        _ => {}
+    }
+}
+
+fn clear_external_config_path_fields(config: &mut ConnectionConfig, section: &str, fields: &[&str]) {
+    let Some(section) = config
+        .external_config
+        .as_mut()
+        .and_then(|external| external.get_mut(section))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    for field in fields {
+        section.remove(*field);
+    }
+}
+
+fn preserve_external_config_path_fields(remote: &mut ConnectionConfig, local: &ConnectionConfig, section: &str, fields: &[&str]) {
+    let Some(local_section) = local
+        .external_config
+        .as_ref()
+        .and_then(|external| external.get(section))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return;
+    };
+    let Some(remote_section) = remote
+        .external_config
+        .as_mut()
+        .and_then(|external| external.get_mut(section))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if section == "auth" && remote_section.get("kind") != local_section.get("kind") {
+        return;
+    }
+    for field in fields {
+        if let Some(value) = local_section.get(*field) {
+            remote_section.insert((*field).to_string(), value.clone());
+        }
+    }
+}
+
+fn clear_device_local_tunnel_path(profile: &mut TransportLayerConfig) {
+    if let TransportLayerConfig::Ssh(ssh) = profile {
+        ssh.key_path.clear();
+        ssh.ssh_agent_sock_path.clear();
+    }
+}
+
+fn preserve_local_transport_paths(remote: &mut ConnectionConfig, local: &ConnectionConfig) {
+    if remote.db_type == local.db_type {
+        match remote.db_type {
+            DatabaseType::Sqlite | DatabaseType::DuckDb | DatabaseType::Access => remote.host.clone_from(&local.host),
+            DatabaseType::H2 if remote.port == 0 && local.port == 0 => {
+                remote.host.clone_from(&local.host);
+                remote.connection_string.clone_from(&local.connection_string);
+            }
+            _ => {}
+        }
+        remote.docs_notes_path.clone_from(&local.docs_notes_path);
+        remote.ca_cert_path.clone_from(&local.ca_cert_path);
+        remote.client_cert_path.clone_from(&local.client_cert_path);
+        remote.client_key_path.clone_from(&local.client_key_path);
+        remote.jdbc_driver_paths.clone_from(&local.jdbc_driver_paths);
+        for attached_database in &mut remote.attached_databases {
+            if let Some(local_database) = local.attached_databases.iter().find(|candidate| candidate.name == attached_database.name) {
+                attached_database.path.clone_from(&local_database.path);
+            }
+        }
+        match remote.db_type {
+            DatabaseType::Mqtt => preserve_external_config_path_fields(remote, local, "auth", &["caCertPath", "clientCertPath", "clientKeyPath"]),
+            DatabaseType::Cassandra => preserve_external_config_path_fields(remote, local, "tls", &["truststore_path", "keystore_path"]),
+            _ => {}
+        }
+    }
+    for layer in &mut remote.transport_layers {
+        let Some(local_layer) = local.transport_layers.iter().find(|candidate| candidate.id() == layer.id() && candidate.same_type_as(layer)) else {
+            continue;
+        };
+        if let (TransportLayerConfig::Ssh(remote), TransportLayerConfig::Ssh(local)) = (layer, local_layer) {
+            remote.key_path.clone_from(&local.key_path);
+            remote.ssh_agent_sock_path.clone_from(&local.ssh_agent_sock_path);
+        }
+    }
 }
 
 pub async fn build_sync_snapshot_with_saved_secrets(
@@ -412,14 +1077,44 @@ pub async fn apply_sync_snapshot(
     snapshot: &SyncSnapshot,
     options: ApplySnapshotOptions<'_>,
 ) -> Result<ApplySnapshotSummary, String> {
-    if !matches!(snapshot.schema_version, LEGACY_SNAPSHOT_SCHEMA_VERSION | SNAPSHOT_SCHEMA_VERSION) {
+    apply_sync_snapshot_with_selection(storage, snapshot, options, None, None).await
+}
+
+pub async fn apply_sync_snapshot_with_selection(
+    storage: &Storage,
+    snapshot: &SyncSnapshot,
+    options: ApplySnapshotOptions<'_>,
+    restore_selection: Option<&SyncSelection>,
+    plugin_registry: Option<&crate::plugins::PluginRegistry>,
+) -> Result<ApplySnapshotSummary, String> {
+    const INTERMEDIATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+    if !matches!(snapshot.schema_version, LEGACY_SNAPSHOT_SCHEMA_VERSION | INTERMEDIATE_SNAPSHOT_SCHEMA_VERSION | SNAPSHOT_SCHEMA_VERSION) {
         return Err(format!("Unsupported sync snapshot schema version: {}", snapshot.schema_version));
     }
     validate_sync_snapshot_metadata(snapshot)?;
 
+    let selection = restore_selection.or(snapshot.selection.as_ref());
+    let merge_selected_items = selection.is_some();
+    let selected_connections = select_by_id(
+        &snapshot.connections,
+        selection.and_then(|selection| selection.connections.as_ref()),
+        |item| item.id.clone(),
+    );
+    let selected_tunnel_profiles = snapshot.tunnel_profiles.as_ref().map(|profiles| {
+        select_by_id(profiles, selection.and_then(|selection| selection.tunnel_profiles.as_ref()), |profile| {
+            profile.id().to_string()
+        })
+    });
+    let selected_saved_sql = select_saved_sql_library(
+        &snapshot.saved_sql,
+        selection.and_then(|selection| selection.saved_sql_folders.as_ref()),
+        selection.and_then(|selection| selection.saved_sql_files.as_ref()),
+    );
+    let include_selected_secrets = selection.map_or(true, |selection| selection.include_secrets);
+
     let encrypted_secrets_present = snapshot.encrypted_secrets.is_some();
     let mut sensitive_payload =
-        match (options.restore_secrets, &snapshot.encrypted_secrets, normalized_passphrase(options.secrets_passphrase))
+        match (options.restore_secrets && include_selected_secrets, &snapshot.encrypted_secrets, normalized_passphrase(options.secrets_passphrase))
         {
             (true, Some(blob), Some(passphrase)) => Some(decrypt_sensitive_payload(blob, passphrase)?),
             // Restore intent is explicit. Do not silently leave a user with a
@@ -433,9 +1128,9 @@ pub async fn apply_sync_snapshot(
     // send them through the same destination SecretStore transaction used by
     // modern encrypted payloads.  With restore disabled, metadata still
     // imports but legacy plaintext credentials are discarded.
-    if sensitive_payload.is_none() && options.restore_secrets && snapshot.encrypted_secrets.is_none() {
-        let tunnel_profiles = snapshot.tunnel_profiles.clone().unwrap_or_default();
-        let has_legacy_secrets = snapshot.connections.iter().any(connection_has_inline_secrets)
+    if sensitive_payload.is_none() && options.restore_secrets && include_selected_secrets && snapshot.encrypted_secrets.is_none() {
+        let tunnel_profiles = selected_tunnel_profiles.clone().unwrap_or_default();
+        let has_legacy_secrets = selected_connections.iter().any(connection_has_inline_secrets)
             || tunnel_profiles.iter().any(|profile| {
                 let mut scrubbed = profile.clone();
                 scrubbed.scrub_secrets();
@@ -445,7 +1140,7 @@ pub async fn apply_sync_snapshot(
             sensitive_payload = Some(
                 build_sensitive_payload_with_options(
                     storage,
-                    &snapshot.connections,
+                    &selected_connections,
                     &tunnel_profiles,
                     SyncExportOptions {
                         include_secrets: false,
@@ -459,8 +1154,49 @@ pub async fn apply_sync_snapshot(
             );
         }
     }
+    if let Some(payload) = sensitive_payload.as_mut() {
+        if let Some(ids) = selection.and_then(|selection| selection.connections.as_ref()) {
+            let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+            payload.connection_secrets.retain(|secret| ids.contains(secret.connection_id.as_str()));
+        }
+        if let Some(ids) = selection.and_then(|selection| selection.connection_secrets.as_ref()) {
+            let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+            let metadata_ids = selected_connections.iter().map(|config| config.id.as_str()).collect::<HashSet<_>>();
+            payload.connection_secrets.retain(|secret| ids.contains(secret.connection_id.as_str()) && metadata_ids.contains(secret.connection_id.as_str()));
+        }
+        if let Some(ids) = selection.and_then(|selection| selection.tunnel_secrets.as_ref()) {
+            let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+            let metadata_ids = selected_tunnel_profiles.as_deref().unwrap_or_default().iter().map(|profile| profile.id()).collect::<HashSet<_>>();
+            if let Some(profiles) = payload.tunnel_profiles.as_mut() {
+                profiles.retain(|profile| ids.contains(profile.id()) && metadata_ids.contains(profile.id()));
+            }
+        }
+        if let Some(ids) = selection.and_then(|selection| selection.tunnel_profiles.as_ref()) {
+            let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+            if let Some(profiles) = payload.tunnel_profiles.as_mut() {
+                profiles.retain(|profile| ids.contains(profile.id()));
+            }
+        }
+        if let Some(ids) = selection.and_then(|selection| selection.ai_configs.as_ref()) {
+            let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+            if let Some(configs) = payload.ai_configs.as_mut() {
+                configs.retain(|item| ids.contains(item.id.as_str()));
+            }
+            if !ids.contains(LEGACY_AI_CONFIG_SELECTION_ID) {
+                payload.ai_config = None;
+            }
+        }
+        if let Some(items) = selection.and_then(|selection| selection.plugin_ui_storage.as_ref()) {
+            payload.plugin_ui_storage = payload.plugin_ui_storage.take().map(|entries| {
+                select_plugin_ui_storage(&entries, Some(items))
+            });
+        }
+        if selection.is_some_and(|selection| !selection.sync_credentials) {
+            payload.sync_credentials = None;
+        }
+    }
     if let Some(payload) = &sensitive_payload {
-        validate_sensitive_payload_targets(payload, &snapshot.connections, snapshot.tunnel_profiles.as_deref())?;
+        validate_sensitive_payload_targets(payload, &selected_connections, selected_tunnel_profiles.as_deref())?;
     }
     if let Some(payload) = &sensitive_payload {
         // Validate the complete decrypted payload before touching metadata or
@@ -469,9 +1205,20 @@ pub async fn apply_sync_snapshot(
         validate_sensitive_payload(payload)?;
     }
 
-    let mut connections = snapshot.connections.clone();
+    let mut connections = selected_connections;
+    for config in &mut connections {
+        clear_device_local_connection_paths(config);
+    }
+    preserve_local_connection_paths(storage, &mut connections).await?;
+    let preserve_local_connection_strings = connections
+        .iter()
+        .filter(|config| config.db_type == DatabaseType::H2 && config.port == 0 && config.connection_string.is_some())
+        .map(|config| config.id.clone())
+        .collect::<Vec<_>>();
     if let Some(mqtt_subscriptions) = &snapshot.mqtt_subscriptions {
-        apply_mqtt_subscriptions(&mut connections, mqtt_subscriptions)?;
+        let selected_ids = connections.iter().map(|config| config.id.as_str()).collect::<HashSet<_>>();
+        let subscriptions = mqtt_subscriptions.iter().filter(|entry| selected_ids.contains(entry.connection_id.as_str())).cloned().collect::<Vec<_>>();
+        apply_mqtt_subscriptions(&mut connections, &subscriptions)?;
     } else {
         // Snapshots created before MQTT subscription sync may still contain a
         // stale `savedTopics` value inside `externalConfig`. Preserve the
@@ -483,7 +1230,7 @@ pub async fn apply_sync_snapshot(
         scrub_connection_secrets(config);
     }
 
-    let (connection_secrets, preserve_plugin_secrets, ai_configs, tunnel_secret_profiles, sync_payload_credentials) =
+    let (mut connection_secrets, preserve_plugin_secrets, ai_configs, mut tunnel_secret_profiles, sync_payload_credentials) =
         if let Some(payload) = &sensitive_payload {
             let ai_configs = if let Some(configs) = &payload.ai_configs {
                 Some(configs.clone())
@@ -515,7 +1262,7 @@ pub async fn apply_sync_snapshot(
                             key: secret.key.clone(),
                             secret: secret.secret.clone(),
                         })
-                        .collect(),
+                        .collect::<Vec<_>>(),
                 ),
                 !payload.plugin_secrets_included,
                 ai_configs,
@@ -544,7 +1291,12 @@ pub async fn apply_sync_snapshot(
     } else {
         None
     };
-    let sync_tunnel_profiles = snapshot.tunnel_profiles.clone().or_else(|| {
+    if let Some(profiles) = tunnel_secret_profiles.as_mut() {
+        for profile in profiles {
+            clear_device_local_tunnel_path(profile);
+        }
+    }
+    let mut sync_tunnel_profiles = selected_tunnel_profiles.clone().or_else(|| {
         tunnel_secret_profiles.as_ref().map(|profiles| {
             profiles
                 .iter()
@@ -556,22 +1308,94 @@ pub async fn apply_sync_snapshot(
                 .collect()
         })
     });
+    if let Some(profiles) = sync_tunnel_profiles.as_mut() {
+        for profile in profiles {
+            clear_device_local_tunnel_path(profile);
+        }
+    }
+    let selected_connection_ids = connections.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
+    let h2_file_connection_ids = connections
+        .iter()
+        .filter(|config| config.db_type == DatabaseType::H2 && config.port == 0)
+        .map(|config| config.id.clone())
+        .collect::<HashSet<_>>();
+    if let Some(secrets) = connection_secrets.as_mut() {
+        secrets.retain(|secret| {
+            secret.key != "connection_string" || !h2_file_connection_ids.contains(&secret.connection_id)
+        });
+    }
+    let connection_secret_ids = sensitive_payload.as_ref().map(|_| {
+        selection
+            .and_then(|selection| selection.connection_secrets.as_ref())
+            .map(|ids| ids.iter().filter(|id| selected_connection_ids.contains(*id)).cloned().collect())
+            .unwrap_or_else(|| selected_connection_ids.iter().cloned().collect())
+    });
+    let available_desktop_settings = serde_json::to_value(&snapshot.desktop_settings)
+        .map_err(|error| error.to_string())?
+        .as_object()
+        .map(|settings| {
+            settings
+                .keys()
+                .filter(|key| {
+                    !DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str()) && !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str())
+                })
+                .cloned()
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let desktop_settings_keys = Some(
+        selection
+            .and_then(|selection| selection.desktop_settings.as_ref())
+            .cloned()
+            .unwrap_or_else(|| available_desktop_settings.iter().cloned().collect())
+            .into_iter()
+            .filter(|key| {
+                available_desktop_settings.contains(key)
+                    && !DESKTOP_DEVICE_LOCAL_SETTINGS.contains(&key.as_str())
+                    && !NON_SYNCABLE_DESKTOP_SETTINGS.contains(&key.as_str())
+            })
+            .collect(),
+    );
+    let plugin_ui_storage_restore = match sensitive_payload.as_ref().and_then(|payload| payload.plugin_ui_storage.as_ref()) {
+        Some(entries) if !entries.is_empty() => {
+            let registry = plugin_registry.ok_or_else(|| "plugin storage is unavailable for restoring plugin settings".to_string())?;
+            prepare_plugin_ui_storage_restore(registry, entries)?
+        }
+        _ => Vec::new(),
+    };
     storage
         .apply_sync_import_transaction(SyncImportPlan {
             connections,
+            merge_connections: merge_selected_items,
             tunnel_profiles: sync_tunnel_profiles,
             tunnel_secret_profiles,
-            sidebar_layout: snapshot.sidebar_layout.clone(),
-            pinned_tree_node_ids: snapshot.pinned_tree_node_ids.clone(),
-            saved_sql: snapshot.saved_sql.clone(),
+            merge_tunnel_profiles: merge_selected_items,
+            sidebar_layout: if selection.and_then(|selection| selection.sidebar_layout) == Some(false) { None } else { snapshot.sidebar_layout.clone() },
+            pinned_tree_node_ids: if selection.and_then(|selection| selection.pinned_tree_node_ids) == Some(false) {
+                None
+            } else {
+                Some(snapshot.pinned_tree_node_ids.clone())
+            },
+            saved_sql: selected_saved_sql,
+            merge_saved_sql: merge_selected_items,
             desktop_settings: snapshot.desktop_settings.clone(),
-            editor_settings: snapshot.editor_settings.clone(),
+            desktop_settings_keys,
+            editor_settings: select_syncable_editor_settings(
+                snapshot.editor_settings.clone(),
+                selection.and_then(|selection| selection.editor_settings.as_ref()),
+            ),
+            merge_editor_settings: true,
+            editor_settings_keys: selection.and_then(|selection| selection.editor_settings.clone()),
             connection_secrets,
+            connection_secret_ids,
+            preserve_local_connection_strings,
             preserve_plugin_secrets,
             sync_credentials,
             ai_configs,
+            merge_ai_configs: merge_selected_items,
         })
         .await?;
+    write_plugin_ui_storage_restore(plugin_ui_storage_restore)?;
     Ok(ApplySnapshotSummary { encrypted_secrets_present, secrets_applied: sensitive_payload.is_some() })
 }
 
@@ -1273,6 +2097,16 @@ async fn preserve_local_mqtt_subscriptions_for_legacy_snapshot(
     Ok(())
 }
 
+async fn preserve_local_connection_paths(storage: &Storage, connections: &mut [ConnectionConfig]) -> Result<(), String> {
+    let local_connections = storage.load_connections().await?;
+    for remote in connections {
+        if let Some(local) = local_connections.iter().find(|connection| connection.id == remote.id) {
+            preserve_local_transport_paths(remote, local);
+        }
+    }
+    Ok(())
+}
+
 fn validate_mqtt_subscriptions(
     config: &ConnectionConfig,
     subscriptions: &[MqttSubscriptionSyncTopic],
@@ -1476,7 +2310,15 @@ async fn build_sensitive_payload_with_options(
     // provider/decryption failure must abort the export: treating it as an
     // empty list would produce a valid-looking snapshot that clears AI
     // configurations on the destination during restore.
-    let ai_configs = if options.include_ai_secrets { Some(storage.load_ai_configs().await?) } else { None };
+    let ai_configs = if options.include_ai_secrets {
+        let mut configs = storage.load_ai_configs().await?;
+        for item in &mut configs {
+            clear_ai_config_device_paths(&mut item.config);
+        }
+        Some(configs)
+    } else {
+        None
+    };
     let sync_credentials = if options.include_secrets { Some(load_sync_credentials(storage).await?) } else { None };
     Ok(SensitiveSyncPayload {
         connection_secrets,
@@ -1485,6 +2327,7 @@ async fn build_sensitive_payload_with_options(
         ai_configs,
         ai_config: None,
         tunnel_profiles: options.include_tunnel_secrets.then(|| tunnel_profiles.to_vec()),
+        plugin_ui_storage: None,
     })
 }
 
@@ -2939,6 +3782,7 @@ mod tests {
     fn encrypted_sensitive_payload_round_trips() {
         let payload = SensitiveSyncPayload {
             tunnel_profiles: None,
+            plugin_ui_storage: None,
             plugin_secrets_included: true,
             connection_secrets: vec![
                 ConnectionSecretSnapshot {
@@ -2967,6 +3811,7 @@ mod tests {
     fn encrypted_sensitive_payload_rejects_wrong_passphrase() {
         let payload = SensitiveSyncPayload {
             tunnel_profiles: None,
+            plugin_ui_storage: None,
             plugin_secrets_included: true,
             connection_secrets: vec![ConnectionSecretSnapshot {
                 connection_id: "c1".to_string(),
@@ -2985,6 +3830,7 @@ mod tests {
     fn encrypted_sensitive_payload_keeps_v1_compatibility() {
         let payload = SensitiveSyncPayload {
             tunnel_profiles: None,
+            plugin_ui_storage: None,
             plugin_secrets_included: true,
             connection_secrets: vec![ConnectionSecretSnapshot {
                 connection_id: "legacy".to_string(),
@@ -4151,6 +4997,7 @@ mod tests {
         }));
 
         let legacy_payload = SensitiveSyncPayload {
+            plugin_ui_storage: None,
             plugin_secrets_included: true,
             connection_secrets: vec![
                 ConnectionSecretSnapshot {
@@ -4224,6 +5071,7 @@ mod tests {
 
         // No ai_configs in payload — fall through to ai_config (legacy) branch
         let payload = SensitiveSyncPayload {
+            plugin_ui_storage: None,
             plugin_secrets_included: true,
             connection_secrets: vec![],
             sync_credentials: Some(vec![]),
@@ -4246,6 +5094,7 @@ mod tests {
 
         // Some([]) — explicit clear
         let payload = SensitiveSyncPayload {
+            plugin_ui_storage: None,
             plugin_secrets_included: true,
             connection_secrets: vec![],
             sync_credentials: Some(vec![]),
@@ -4273,6 +5122,7 @@ mod tests {
         cursor_cfg.config.cursor_cli_path = Some("~/.local/bin/agent".to_string());
         cursor_cfg.config.cursor_cli_env.insert("NO_PROXY".to_string(), "localhost".to_string());
         let payload = SensitiveSyncPayload {
+            plugin_ui_storage: None,
             plugin_secrets_included: true,
             connection_secrets: vec![],
             sync_credentials: Some(vec![]),
@@ -4307,6 +5157,7 @@ mod tests {
         let mut legacy_config = make_test_config("unused", true).config;
         legacy_config.model = "snapshot-model".to_string();
         let payload = SensitiveSyncPayload {
+            plugin_ui_storage: None,
             plugin_secrets_included: true,
             connection_secrets: vec![],
             sync_credentials: Some(vec![]),

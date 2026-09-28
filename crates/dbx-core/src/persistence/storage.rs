@@ -319,19 +319,28 @@ pub struct MigrationReport {
 /// re-encryption inside the storage boundary.
 pub(crate) struct SyncImportPlan {
     pub connections: Vec<ConnectionConfig>,
+    pub merge_connections: bool,
     pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
     pub tunnel_secret_profiles: Option<Vec<TransportLayerConfig>>,
+    pub merge_tunnel_profiles: bool,
     pub sidebar_layout: Option<serde_json::Value>,
-    pub pinned_tree_node_ids: Vec<String>,
+    pub pinned_tree_node_ids: Option<Vec<String>>,
     pub saved_sql: SavedSqlLibrary,
+    pub merge_saved_sql: bool,
     pub desktop_settings: DesktopSettings,
+    pub desktop_settings_keys: Option<Vec<String>>,
     pub editor_settings: Option<serde_json::Value>,
+    pub merge_editor_settings: bool,
+    pub editor_settings_keys: Option<Vec<String>>,
     pub connection_secrets: Option<Vec<SyncImportSecret>>,
+    pub connection_secret_ids: Option<Vec<String>>,
+    pub preserve_local_connection_strings: Vec<String>,
     /// Keep destination plugin credentials when the transport payload
     /// intentionally omitted plugin secrets.
     pub preserve_plugin_secrets: bool,
     pub sync_credentials: Option<Vec<SyncImportCredential>>,
     pub ai_configs: Option<Vec<AiConfigItem>>,
+    pub merge_ai_configs: bool,
 }
 
 pub(crate) struct SyncImportSecret {
@@ -5924,25 +5933,45 @@ impl Storage {
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
 
-            apply_sync_connections_in_tx(&tx, &codec, &plan.connections)?;
+            apply_sync_connections_in_tx(&tx, &codec, &plan.connections, plan.merge_connections)?;
             if let Some(profiles) = &plan.tunnel_profiles {
-                apply_sync_tunnel_profiles_in_tx(&tx, &codec, profiles, plan.tunnel_secret_profiles.as_deref())?;
+                apply_sync_tunnel_profiles_in_tx(
+                    &tx,
+                    &codec,
+                    profiles,
+                    plan.tunnel_secret_profiles.as_deref(),
+                    plan.merge_tunnel_profiles,
+                )?;
             }
             if let Some(layout) = &plan.sidebar_layout {
                 let json = serde_json::to_string(layout).map_err(|e| e.to_string())?;
                 tx.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
                     .map_err(|e| e.to_string())?;
             }
-            let pinned = serde_json::to_string(&plan.pinned_tree_node_ids).map_err(|e| e.to_string())?;
-            update_app_settings_key_in_tx(
-                &tx,
-                "pinned_tree_node_ids",
-                serde_json::from_str(&pinned).map_err(|e| e.to_string())?,
-            )?;
-            apply_saved_sql_in_tx(&tx, &plan.saved_sql)?;
-            apply_desktop_settings_in_tx(&tx, &plan.desktop_settings)?;
+            if let Some(pinned_tree_node_ids) = &plan.pinned_tree_node_ids {
+                let pinned = serde_json::to_string(pinned_tree_node_ids).map_err(|e| e.to_string())?;
+                update_app_settings_key_in_tx(
+                    &tx,
+                    "pinned_tree_node_ids",
+                    serde_json::from_str(&pinned).map_err(|e| e.to_string())?,
+                )?;
+            }
+            apply_saved_sql_in_tx(&tx, &plan.saved_sql, plan.merge_saved_sql)?;
+            apply_desktop_settings_in_tx(&tx, &plan.desktop_settings, plan.desktop_settings_keys.as_deref())?;
             if let Some(editor_settings) = &plan.editor_settings {
-                let value = serde_json::to_string(editor_settings).map_err(|e| e.to_string())?;
+                let mut value = editor_settings.clone();
+                if plan.merge_editor_settings {
+                    let current = tx
+                        .query_row("SELECT value_json FROM app_state WHERE key = ?1", [APP_STATE_EDITOR_SETTINGS_KEY], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .optional()
+                        .map_err(|e| e.to_string())?
+                        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    value = merge_json_object_fields(current, value, plan.editor_settings_keys.as_deref());
+                }
+                let value = serde_json::to_string(&value).map_err(|e| e.to_string())?;
                 tx.execute(
                     "INSERT OR REPLACE INTO app_state (key, value_json) VALUES (?1, ?2)",
                     params![APP_STATE_EDITOR_SETTINGS_KEY, value],
@@ -5950,10 +5979,15 @@ impl Storage {
                 .map_err(|e| e.to_string())?;
             }
             if let Some(ai_configs) = &plan.ai_configs {
-                apply_ai_configs_in_tx(&tx, &codec, ai_configs)?;
+                apply_ai_configs_in_tx(&tx, &codec, ai_configs, plan.merge_ai_configs)?;
             }
             if let Some(secrets) = &plan.connection_secrets {
-                clear_sync_connection_secrets_in_tx(&tx, &plan.connections, plan.preserve_plugin_secrets)?;
+                clear_sync_connection_secrets_in_tx(
+                    &tx,
+                    plan.connection_secret_ids.as_deref().unwrap_or(&[]),
+                    &plan.preserve_local_connection_strings,
+                    plan.preserve_plugin_secrets,
+                )?;
                 for secret in secrets {
                     if secret.secret.is_empty() {
                         continue;
@@ -7949,12 +7983,17 @@ fn apply_sync_connections_in_tx(
     tx: &Transaction<'_>,
     codec: &SecretCodec,
     configs: &[ConnectionConfig],
+    merge_existing: bool,
 ) -> Result<(), String> {
-    let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
-    let mut retained_ids = preserve_unreadable_connections_for_replacement(tx, &replacement_ids)?;
+    let mut retained_ids = if merge_existing {
+        Vec::new()
+    } else {
+        let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
+        preserve_unreadable_connections_for_replacement(tx, &replacement_ids)?
+    };
     for config in configs {
         let config = config.canonicalized();
-        if !config.save_password {
+        if !config.save_password && !merge_existing {
             persist_secret_in_tx(tx, codec, &config.id, "password", "")?;
             delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
         }
@@ -7965,29 +8004,47 @@ fn apply_sync_connections_in_tx(
         }
         let sanitized = sanitized_connection_config(&config);
         let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config.id, json])
+        tx.execute("INSERT OR REPLACE INTO connections (id, config_json) VALUES (?1, ?2)", params![config.id, json])
             .map_err(|e| e.to_string())?;
     }
     retained_ids.extend(configs.iter().map(|config| config.id.clone()));
-    delete_unreferenced_connection_secrets_in_tx(tx, &retained_ids)
+    if merge_existing { Ok(()) } else { delete_unreferenced_connection_secrets_in_tx(tx, &retained_ids) }
 }
 
 fn clear_sync_connection_secrets_in_tx(
     tx: &Transaction<'_>,
-    configs: &[ConnectionConfig],
+    connection_ids: &[String],
+    preserve_connection_strings: &[String],
     preserve_plugin_secrets: bool,
 ) -> Result<(), String> {
-    for config in configs {
-        if preserve_plugin_secrets {
+    let preserve_connection_strings = preserve_connection_strings.iter().map(String::as_str).collect::<HashSet<_>>();
+    for connection_id in connection_ids {
+        let preserve_connection_string = preserve_connection_strings.contains(connection_id.as_str());
+        if preserve_plugin_secrets && preserve_connection_string {
+            tx.execute(
+                "DELETE FROM connection_secrets
+                 WHERE connection_id = ?1
+                   AND key NOT LIKE 'plugin_connection.%'
+                   AND key <> 'connection_string'",
+                [connection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else if preserve_plugin_secrets {
             tx.execute(
                 "DELETE FROM connection_secrets
                  WHERE connection_id = ?1
                    AND key NOT LIKE 'plugin_connection.%'",
-                [&config.id],
+                [connection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else if preserve_connection_string {
+            tx.execute(
+                "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key <> 'connection_string'",
+                [connection_id],
             )
             .map_err(|e| e.to_string())?;
         } else {
-            tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [&config.id])
+            tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [connection_id])
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -7999,6 +8056,7 @@ fn apply_sync_tunnel_profiles_in_tx(
     codec: &SecretCodec,
     profiles: &[TransportLayerConfig],
     secret_profiles: Option<&[TransportLayerConfig]>,
+    merge_existing: bool,
 ) -> Result<(), String> {
     let mut existing = HashMap::<String, TransportLayerConfig>::new();
     let mut statement = tx.prepare("SELECT id, config_json FROM tunnel_profiles").map_err(|e| e.to_string())?;
@@ -8029,6 +8087,9 @@ fn apply_sync_tunnel_profiles_in_tx(
             Some(profile) => (profile, true),
             None => (profile.clone(), false),
         };
+        if let Some(previous) = existing.get(profile.id()) {
+            preserve_tunnel_profile_local_paths(&mut profile, previous);
+        }
         if !has_synced_secrets {
             if let Some(previous) = existing.get(profile.id()) {
                 merge_missing_tunnel_profile_secrets(&mut profile, previous);
@@ -8037,10 +8098,19 @@ fn apply_sync_tunnel_profiles_in_tx(
         effective.push(profile);
     }
 
-    tx.execute("DELETE FROM tunnel_profiles", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'tunnel_profile.%'", [])
-        .map_err(|e| e.to_string())?;
+    if !merge_existing {
+        tx.execute("DELETE FROM tunnel_profiles", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'tunnel_profile.%'", [])
+            .map_err(|e| e.to_string())?;
+    }
     for profile in effective {
+        if merge_existing {
+            tx.execute(
+                "DELETE FROM connection_secrets WHERE connection_id = ?1",
+                [format!("{TUNNEL_SECRET_NAMESPACE_PREFIX}{}", profile.id())],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         let mut sanitized = profile.clone();
         sanitized.scrub_secrets();
         let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
@@ -8059,14 +8129,65 @@ fn apply_sync_tunnel_profiles_in_tx(
     Ok(())
 }
 
-fn apply_ai_configs_in_tx(tx: &Transaction<'_>, codec: &SecretCodec, configs: &[AiConfigItem]) -> Result<(), String> {
-    tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM ai_config", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM ai_provider_configs", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'ai_config.%'", [])
-        .map_err(|e| e.to_string())?;
+fn preserve_tunnel_profile_local_paths(remote: &mut TransportLayerConfig, local: &TransportLayerConfig) {
+    if let (TransportLayerConfig::Ssh(remote), TransportLayerConfig::Ssh(local)) = (remote, local) {
+        if remote.key_path.is_empty() {
+            remote.key_path.clone_from(&local.key_path);
+        }
+        if remote.ssh_agent_sock_path.is_empty() {
+            remote.ssh_agent_sock_path.clone_from(&local.ssh_agent_sock_path);
+        }
+    }
+}
+
+fn apply_ai_configs_in_tx(
+    tx: &Transaction<'_>,
+    codec: &SecretCodec,
+    configs: &[AiConfigItem],
+    merge_existing: bool,
+) -> Result<(), String> {
+    let existing_configs = {
+        let mut statement = tx.prepare("SELECT id, config_json FROM ai_configs").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let mut existing = HashMap::with_capacity(rows.len());
+        for (id, json) in rows {
+            let config: AiConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            existing.insert(id, config);
+        }
+        existing
+    };
+    if !merge_existing {
+        tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM ai_config", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM ai_provider_configs", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'ai_config.%'", [])
+            .map_err(|e| e.to_string())?;
+    }
     for item in configs {
-        let (sanitized, secrets) = split_ai_config_secrets(&item.config)?;
+        if merge_existing {
+            tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [format!("ai_config.{}", item.id)])
+                .map_err(|e| e.to_string())?;
+            if item.is_default {
+                tx.execute("UPDATE ai_configs SET is_default = 0", []).map_err(|e| e.to_string())?;
+            }
+        }
+        let mut config = item.config.clone();
+        clear_ai_config_device_paths(&mut config);
+        let local = existing_configs.get(&item.id).or_else(|| {
+            let mut matching_provider = existing_configs
+                .values()
+                .filter(|local| local.provider.as_str() == config.provider.as_str());
+            let candidate = matching_provider.next()?;
+            matching_provider.next().is_none().then_some(candidate)
+        });
+        if let Some(local) = local {
+            preserve_ai_config_device_paths(&mut config, local);
+        }
+        let (sanitized, secrets) = split_ai_config_secrets(&config)?;
         let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
         let models_json = serde_json::to_string(&sanitized.models).map_err(|e| e.to_string())?;
         tx.execute(
@@ -8085,6 +8206,37 @@ fn apply_ai_configs_in_tx(tx: &Transaction<'_>, codec: &SecretCodec, configs: &[
         }
     }
     Ok(())
+}
+
+pub(crate) fn clear_ai_config_device_paths(config: &mut AiConfig) {
+    config.codex_cli_path = None;
+    config.claude_code_cli_path = None;
+    config.pi_agent_cli_path = None;
+    config.opencode_cli_path = None;
+    config.cursor_cli_path = None;
+    config.grok_cli_path = None;
+    config.codebuddy_cli_path = None;
+    config.qoder_cli_path = None;
+}
+
+fn preserve_ai_config_device_paths(remote: &mut AiConfig, local: &AiConfig) {
+    match (&remote.provider, &local.provider) {
+        (AiProvider::CodexCli, AiProvider::CodexCli) => remote.codex_cli_path.clone_from(&local.codex_cli_path),
+        (AiProvider::ClaudeCodeCli, AiProvider::ClaudeCodeCli) => {
+            remote.claude_code_cli_path.clone_from(&local.claude_code_cli_path)
+        }
+        (AiProvider::PiAgentCli, AiProvider::PiAgentCli) => remote.pi_agent_cli_path.clone_from(&local.pi_agent_cli_path),
+        (AiProvider::OpenCodeCli, AiProvider::OpenCodeCli) => {
+            remote.opencode_cli_path.clone_from(&local.opencode_cli_path)
+        }
+        (AiProvider::CursorCli, AiProvider::CursorCli) => remote.cursor_cli_path.clone_from(&local.cursor_cli_path),
+        (AiProvider::GrokCli, AiProvider::GrokCli) => remote.grok_cli_path.clone_from(&local.grok_cli_path),
+        (AiProvider::CodeBuddyCli, AiProvider::CodeBuddyCli) => {
+            remote.codebuddy_cli_path.clone_from(&local.codebuddy_cli_path)
+        }
+        (AiProvider::QoderCli, AiProvider::QoderCli) => remote.qoder_cli_path.clone_from(&local.qoder_cli_path),
+        _ => {}
+    }
 }
 
 fn update_app_settings_key_in_tx(tx: &Transaction<'_>, key: &str, value: serde_json::Value) -> Result<(), String> {
@@ -8107,7 +8259,27 @@ fn update_app_settings_key_in_tx(tx: &Transaction<'_>, key: &str, value: serde_j
     .map_err(|e| e.to_string())
 }
 
-fn apply_desktop_settings_in_tx(tx: &Transaction<'_>, settings: &DesktopSettings) -> Result<(), String> {
+fn merge_json_object_fields(
+    local: serde_json::Value,
+    remote: serde_json::Value,
+    selected_keys: Option<&[String]>,
+) -> serde_json::Value {
+    let Some(remote) = remote.as_object() else { return remote };
+    let mut merged = local.as_object().cloned().unwrap_or_default();
+    for (key, value) in remote {
+        if selected_keys.is_some_and(|keys| !keys.iter().any(|selected| selected == key)) {
+            continue;
+        }
+        merged.insert(key.clone(), value.clone());
+    }
+    serde_json::Value::Object(merged)
+}
+
+fn apply_desktop_settings_in_tx(
+    tx: &Transaction<'_>,
+    settings: &DesktopSettings,
+    selected_keys: Option<&[String]>,
+) -> Result<(), String> {
     let mut values = serde_json::Map::new();
     values.insert("show_tray_icon".to_string(), serde_json::Value::Bool(settings.show_tray_icon));
     values.insert("icon_theme".to_string(), serde_json::to_value(settings.icon_theme).map_err(|e| e.to_string())?);
@@ -8158,6 +8330,9 @@ fn apply_desktop_settings_in_tx(tx: &Transaction<'_>, settings: &DesktopSettings
         .transpose()?
         .unwrap_or_default();
     for (key, value) in values {
+        if selected_keys.is_some_and(|keys| !keys.iter().any(|selected| selected == &key)) {
+            continue;
+        }
         merged.insert(key, value);
     }
     tx.execute(
@@ -8168,19 +8343,21 @@ fn apply_desktop_settings_in_tx(tx: &Transaction<'_>, settings: &DesktopSettings
     .map_err(|e| e.to_string())
 }
 
-fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary) -> Result<(), String> {
-    tx.execute("DELETE FROM saved_sql_files", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM saved_sql_folders", []).map_err(|e| e.to_string())?;
+fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary, merge_existing: bool) -> Result<(), String> {
+    if !merge_existing {
+        tx.execute("DELETE FROM saved_sql_files", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM saved_sql_folders", []).map_err(|e| e.to_string())?;
+    }
     for folder in &library.folders {
         tx.execute(
-            "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![folder.id, folder.connection_id, folder.parent_folder_id, folder.name, folder.order_index, folder.created_at, folder.updated_at],
         )
         .map_err(|e| e.to_string())?;
     }
     for file in &library.files {
         tx.execute(
-            "INSERT INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![file.id, file.connection_id, file.folder_id, file.name, file.database, file.catalog, file.schema, file.sql, file.order_index, file.open_count, file.opened_at, file.created_at, file.updated_at],
         )
         .map_err(|e| e.to_string())?;
@@ -13402,10 +13579,12 @@ mod tests {
         incoming.url_params = Some("applicationName=dbx&sslmode=require".to_string());
         let plan = SyncImportPlan {
             connections: vec![incoming],
+            merge_connections: false,
             tunnel_profiles: Some(Vec::new()),
             tunnel_secret_profiles: None,
+            merge_tunnel_profiles: false,
             sidebar_layout: None,
-            pinned_tree_node_ids: Vec::new(),
+            pinned_tree_node_ids: Some(Vec::new()),
             saved_sql: SavedSqlLibrary {
                 folders: vec![
                     SavedSqlFolder {
@@ -13429,12 +13608,19 @@ mod tests {
                 ],
                 files: Vec::new(),
             },
+            merge_saved_sql: false,
             desktop_settings: settings,
+            desktop_settings_keys: None,
             editor_settings: None,
+            merge_editor_settings: false,
+            editor_settings_keys: None,
             connection_secrets: None,
+            connection_secret_ids: None,
+            preserve_local_connection_strings: Vec::new(),
             preserve_plugin_secrets: false,
             sync_credentials: None,
             ai_configs: None,
+            merge_ai_configs: false,
         };
         assert!(storage.apply_sync_import_transaction(plan).await.is_err());
         let connections = storage.load_connections().await.unwrap();

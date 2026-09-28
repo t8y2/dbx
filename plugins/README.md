@@ -491,6 +491,30 @@ For legacy entries without `action`, clicking a connection item dispatches `cont
 
 For a declarative `open-workbench` action, DBX passes the current connection summary as Workbench context for `menu: "connection"`, and the stable `TableContext` object above directly as Workbench context for `menu: "table"` (without the backend `table` envelope). Connection context includes only `id`, `dbType`, `name`, and `database`; the host may also provide the standard `connectionId` for tab association. Neither path includes `host`, `port`, `username`, `password`, a connection string, or raw connection configuration. Reopening the same Workbench refreshes it with the latest invocation context.
 
+#### Declarative launch options (`options_action`)
+
+An `open-workbench` action (on dock `command` contributions and context-menu entries) may declare `options_action: "<sidecar method>"`. Before offering launch targets, the host invokes that method with the current UI locale so labels arrive localized:
+
+```json
+{ "locale": "zh-CN" }
+```
+
+The sidecar answers:
+
+```json
+{
+  "entries": [
+    { "label": "Local terminal", "description": "Default shell: /bin/zsh", "context": {} },
+    { "label": "zsh", "description": "/bin/zsh", "context": { "shell": "zsh" }, "group": "Local shell" }
+  ]
+}
+```
+
+- `context` is opaque plugin payload: it is merged into the host-authored Workbench context of the panel opened for that entry, and the host never interprets it.
+- `group` (optional, plugin-localized) folds entries sharing the label into one collapsible picker section — collapsed by default; hosts without grouping support render the entries flat.
+- A command declaring `options_action` owns the picker: the host's generic replay item hides while entries are available and falls back in when the sidecar fetch fails or returns nothing.
+- Plugins ignore the `locale` field safely if they do not localize.
+
 A backend entrypoint is required only for legacy context-menu entries without a declarative action. Their `{ "message": "..." }` result continues to surface as a toast.
 
 ### `filesystem-provider`

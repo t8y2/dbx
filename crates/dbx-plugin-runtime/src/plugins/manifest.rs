@@ -870,11 +870,14 @@ pub struct PluginOpenWorkbenchAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<serde_json::Value>,
     /// Generic launch-options extension point: a sidecar method the host calls
-    /// (POST-less invoke, empty params) to fetch dynamic launch entries —
-    /// `{ "entries": [{ "label": string, "description"?: string, "context"?: object }] }`.
-    /// The host renders them as picker items and opens one panel per selection
-    /// with the returned context merged into the host-authored context; the
-    /// host never interprets the entries' business meaning.
+    /// (POST-less invoke, `{ "locale": "en" }` — the current DBX UI locale, so
+    /// entries can be labeled in the user's language) to fetch dynamic launch
+    /// entries — `{ "entries": [{ "label": string, "description"?: string,
+    /// "context"?: object, "group"?: string }] }`. Entries sharing a `group`
+    /// label render under one collapsible picker section. The host renders the
+    /// entries as picker items and opens one panel per selection with the
+    /// returned context merged into the host-authored context; the host never
+    /// interprets the entries' business meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_action: Option<String>,
     /// When true, the host also offers the plugin's own saved connections

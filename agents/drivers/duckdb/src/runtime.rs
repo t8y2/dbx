@@ -201,7 +201,7 @@ fn execute_with_preserved_insertion_order(
     params: &DuckDbWorkerExecuteParams,
 ) -> Result<db::QueryResult, String> {
     let current: String = connection
-        .query_row("SELECT current_setting('preserve_insertion_order')", [], |row| row.get(0))
+        .query_row("SELECT CAST(current_setting('preserve_insertion_order') AS VARCHAR)", [], |row| row.get(0))
         .map_err(|error| format!("Failed to read DuckDB preserve_insertion_order setting: {error}"))?;
     let was_enabled = current
         .parse::<bool>()
@@ -579,7 +579,7 @@ mod tests {
                 preserve_insertion_order: false,
             })
             .expect("read initial setting");
-        assert_eq!(disabled.rows, vec![vec![serde_json::json!("false")]]);
+        assert_eq!(disabled.rows, vec![vec![serde_json::json!(false)]]);
 
         let preserved = session
             .execute(DuckDbWorkerExecuteParams {
@@ -589,7 +589,7 @@ mod tests {
                 preserve_insertion_order: true,
             })
             .expect("execute with order preservation");
-        assert_eq!(preserved.rows, vec![vec![serde_json::json!("true")]]);
+        assert_eq!(preserved.rows, vec![vec![serde_json::json!(true)]]);
 
         session
             .execute(DuckDbWorkerExecuteParams {
@@ -608,7 +608,7 @@ mod tests {
                 preserve_insertion_order: false,
             })
             .expect("read restored setting");
-        assert_eq!(restored.rows, vec![vec![serde_json::json!("false")]]);
+        assert_eq!(restored.rows, vec![vec![serde_json::json!(false)]]);
     }
 
     #[test]

@@ -4478,9 +4478,7 @@ async fn parse_import_file_with_options_and_text_columns(
             .await
             .map_err(|e| e.to_string())?
         }
-        TableImportSourceFormat::Parquet => {
-            return Err("Parquet import requires a DuckDB connection".to_string());
-        }
+        TableImportSourceFormat::Parquet => Err("Parquet import requires a DuckDB connection".to_string()),
     }
 }
 

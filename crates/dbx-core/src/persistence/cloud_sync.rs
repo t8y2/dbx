@@ -274,7 +274,7 @@ pub fn describe_sync_snapshot(
         .unwrap_or_default();
     let mut ai_configs_locked = snapshot.encrypted_secrets.is_some()
         && normalized_passphrase(secrets_passphrase).is_none()
-        && snapshot.selection.as_ref().map_or(true, |selection| selection.ai_configs.is_none());
+        && snapshot.selection.as_ref().is_none_or(|selection| selection.ai_configs.is_none());
     let mut plugin_ui_storage = Vec::new();
     let mut plugin_ui_storage_locked =
         snapshot.encrypted_secrets.is_some() && normalized_passphrase(secrets_passphrase).is_none();
@@ -843,7 +843,7 @@ pub async fn build_sync_snapshot_with_selection(
         &plugin_ui_storage,
         selection.and_then(|selection| selection.plugin_ui_storage.as_ref()),
     );
-    let include_secrets = options.include_secrets && selection.map_or(true, |selection| selection.include_secrets);
+    let include_secrets = options.include_secrets && selection.is_none_or(|selection| selection.include_secrets);
     let mut included_selection = selection.cloned();
     if let Some(selection) = included_selection.as_mut() {
         if let Some(keys) = selection.desktop_settings.as_mut() {
@@ -1215,7 +1215,7 @@ pub async fn apply_sync_snapshot_with_selection(
         selection.and_then(|selection| selection.saved_sql_folders.as_ref()),
         selection.and_then(|selection| selection.saved_sql_files.as_ref()),
     );
-    let include_selected_secrets = selection.map_or(true, |selection| selection.include_secrets);
+    let include_selected_secrets = selection.is_none_or(|selection| selection.include_secrets);
 
     let encrypted_secrets_present = snapshot.encrypted_secrets.is_some();
     let mut sensitive_payload = match (

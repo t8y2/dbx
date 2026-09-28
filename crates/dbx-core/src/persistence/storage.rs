@@ -8351,6 +8351,19 @@ fn apply_desktop_settings_in_tx(
 }
 
 fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary, merge_existing: bool) -> Result<(), String> {
+    let mut folder_ids = HashSet::with_capacity(library.folders.len());
+    for folder in &library.folders {
+        if !folder_ids.insert(folder.id.as_str()) {
+            return Err(format!("duplicate saved SQL folder id: {}", folder.id));
+        }
+    }
+    let mut file_ids = HashSet::with_capacity(library.files.len());
+    for file in &library.files {
+        if !file_ids.insert(file.id.as_str()) {
+            return Err(format!("duplicate saved SQL file id: {}", file.id));
+        }
+    }
+
     if !merge_existing {
         tx.execute("DELETE FROM saved_sql_files", []).map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM saved_sql_folders", []).map_err(|e| e.to_string())?;

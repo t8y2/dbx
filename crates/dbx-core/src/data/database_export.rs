@@ -628,6 +628,11 @@ fn format_export_sql_literal_typed(
             }
         }
     }
+    if is_sqlserver_binary_export_column(database_type, column_type) {
+        if let Some(literal) = format_sqlserver_binary_export_literal(value) {
+            return literal;
+        }
+    }
     if let Some(arr) = value.as_array() {
         if matches!(database_type, Some(DatabaseType::ClickHouse) | Some(DatabaseType::Databend)) {
             return format_ch_array_sql_literal(arr);
@@ -678,6 +683,34 @@ fn quote_export_sql_string(text: &str) -> String {
 
 fn quote_standard_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
+}
+
+/// SQL Server binary column types. The driver exposes their values as
+/// `0x`-prefixed hex text, and T-SQL only accepts that text as an unquoted
+/// binary literal: exporting it as a quoted string makes the import fail with
+/// SQL Server error 257 ("Implicit conversion from data type varchar to
+/// varbinary(max) is not allowed. Use the CONVERT function to run this query.").
+fn is_sqlserver_binary_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
+    if database_type != Some(DatabaseType::SqlServer) {
+        return false;
+    }
+    column_type.is_some_and(|column_type| {
+        let normalized = column_type.trim().to_ascii_lowercase();
+        let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim();
+        matches!(base, "binary" | "varbinary" | "image" | "timestamp" | "rowversion")
+    })
+}
+
+/// Renders a SQL Server binary value as a T-SQL binary literal (`0x..`). Values
+/// that are not `0x`-prefixed hex text keep the previous string quoting, so an
+/// unexpected driver encoding is not silently reinterpreted.
+fn format_sqlserver_binary_export_literal(value: &Value) -> Option<String> {
+    let text = value.as_str()?.trim();
+    let hex = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))?;
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("0x{hex}"))
 }
 
 fn is_sqlserver_unicode_export_type(column_type: &str) -> bool {
@@ -5395,6 +5428,76 @@ mod tests {
                 "INSERT INTO [dbo].[people] ([name], [code], [legacy_note], [alias_name], [plain_text], [missing]) VALUES (N'张''三', N'中文', N'旧文本', N'别名', 'plain', NULL);"
             ]
         );
+    }
+
+    #[test]
+    fn sqlserver_export_keeps_binary_values_as_hex_literals() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: Some("dbo".to_string()),
+            table_name: Some("bin_probe".to_string()),
+            qualified_table_name: None,
+            columns: vec!["id".to_string(), "payload".to_string(), "label".to_string(), "empty_payload".to_string()],
+            column_types: vec![
+                Some("int".to_string()),
+                Some("varbinary(max)".to_string()),
+                Some("nvarchar(50)".to_string()),
+                Some("binary(8)".to_string()),
+            ],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![
+                vec![json!(1), json!("0x0011FFEE"), json!("中文"), json!("0x")],
+                vec![json!(2), Value::Null, json!("plain"), json!("0XABcd")],
+                vec![json!(3), json!("0xzz"), json!("text"), json!("not-hex")],
+            ],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO [dbo].[bin_probe] ([id], [payload], [label], [empty_payload]) VALUES\n(1, 0x0011FFEE, N'中文', 0x),\n(2, NULL, N'plain', 0xABcd),\n(3, '0xzz', N'text', 'not-hex');"
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_database_export_keeps_binary_values_as_hex_literals() {
+        let sql = build_database_sql_export(BuildDatabaseSqlExportOptions {
+            database_name: "dbx10411".to_string(),
+            exported_at: Some("2026-09-28T00:00:00.000Z".to_string()),
+            tables: vec![ExportedTableSql {
+                display_name: "test.dbo.bin_probe".to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+                identifier_quote: None,
+                schema: Some("dbo".to_string()),
+                table_name: Some("bin_probe".to_string()),
+                qualified_table_name: None,
+                ddl: None,
+                columns: vec!["id".to_string(), "payload".to_string()],
+                column_types: vec![Some("int".to_string()), Some("varbinary(max)".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1), json!("0x0011ffee")], vec![json!(2), Value::Null]],
+                truncated: false,
+            }],
+            row_limit_per_table: None,
+            insert_batch_size: None,
+            insert_dialect: SqlInsertDialect::Source,
+            connection_id: None,
+            database: None,
+            schema: None,
+            omit_auto_increment: false,
+        })
+        .expect("build SQL Server database export");
+
+        assert!(sql.contains("(1, 0x0011ffee)"), "binary literal missing from export: {sql}");
+        assert!(!sql.contains("'0x0011ffee'"), "binary values must not be exported as strings: {sql}");
     }
 
     #[test]

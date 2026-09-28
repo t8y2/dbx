@@ -538,7 +538,7 @@ const {
 const hoverContent = createQueryEditorHoverContent({ isDark, t, toast });
 const { resolveSqlHoverTooltip } = useQueryEditorHover({ props, contextMenuOpen, settingsStore, connectionStore, metadata: completionMetadata, createHoverDom: hoverContent.createHoverDom, semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED, maxCompletionTables: MAX_COMPLETION_TABLES });
 const pointerInteractions = useQueryEditorPointer({ props, clearTableNavigationHover: () => clearTableNavigationHover(), emit });
-const { registerEditorScrollbarPointerGuard, startEditorSelectionDrag } = pointerInteractions;
+const { registerEditorScrollbarPointerGuard, registerEditorNativeSelectionDragGuard, startEditorSelectionDrag } = pointerInteractions;
 const tableDrop = useQueryEditorTableDrop({ props, view, editorRef, settingsStore });
 const { hasDroppedTableReference, insertDroppedTableReference, queryEditorDropCaret, queryEditorDropCaretStyle, showQueryEditorDropCaretAt, hideQueryEditorDropCaret, registerTableReferenceDropListener, unregisterTableReferenceDropListener } = tableDrop;
 const objectNavigation = useQueryEditorObjectNavigation({
@@ -2124,6 +2124,13 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         batchSelection.attach(view.value, tooltipParent);
         postCompositionKeyGuardCleanup = postCompositionKeyGuard.attach(view.value.contentDOM);
         registerEditorScrollbarPointerGuard(view.value);
+        // `clipboardLineEndings` is what the editor registers as its
+        // `clipboardOutputFilter`; the drag park needs it for the same reason
+        // the context-menu park does, so a Cmd+C during a long drag is byte
+        // identical to one taken with the selection live. It is resolved when
+        // such a copy happens rather than here, because that is the only moment
+        // the normalizer is used.
+        registerEditorNativeSelectionDragGuard(view.value, { finalizeClipboardText: (text) => clipboardLineEndings(text) });
         view.value.scrollDOM.addEventListener("scroll", scheduleEditorViewportEmit, {
           passive: true,
         });

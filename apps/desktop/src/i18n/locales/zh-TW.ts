@@ -3388,6 +3388,7 @@ export default withEnglishFallback({
         getSampleData: "取得範例資料",
         listCollections: "列出集合",
         browseCollection: "瀏覽集合",
+        executeRedisCommand: "執行 Redis 命令",
       },
     },
     proxy: "代理伺服器",

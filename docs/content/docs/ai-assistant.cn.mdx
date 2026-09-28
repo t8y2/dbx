@@ -147,6 +147,8 @@ AI Agent 的执行边界是后端强制的，不只是提示词：
 
 连接只读保护、生产保护和数据库账号权限仍是上限。即使用户确认，目标变化、SQL 变化、空确认或后端风险分类不通过都会使授权失效。
 
+Redis 连接改用只读命令工具，而不是 SQL。助手可以执行 DBX 判定为只读的命令（`SCAN`、`GET`、`TYPE`、`TTL`、`HGET` 等）并基于结果回答。写命令或被拦截的命令（`SET`、`DEL`、`EXPIRE`、`EVAL`、`KEYS`、`CONFIG` 等）AI Agent 永不执行：它会把命令作为代码块返回，由你在 Redis 控制台中执行，控制台会先要求确认。`SELECT` 同样不可用，逻辑数据库通过工具的 `db` 参数选择。
+
 <Callout type="info">AI Agent 不会获得“以后都可以写”的授权，也不会绕过 MCP 策略、连接只读保护或数据库权限。更多边界见 [生产环境安全](/cn/docs/production-safety)。</Callout>
 
 ## 推理强度和 Thinking

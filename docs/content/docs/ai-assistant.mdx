@@ -149,6 +149,8 @@ AI Agent execution boundaries are enforced by the backend, not only by prompting
 
 Connection read-only protection, production protection, and database credentials remain upper bounds. A target change, SQL change, empty confirmation, or failed backend risk classification voids the grant.
 
+Redis connections use a read-only command tool instead of SQL. The assistant can run commands DBX classifies as read-only (`SCAN`, `GET`, `TYPE`, `TTL`, `HGET`, …) and answer from their results. Commands that write or that are blocked (`SET`, `DEL`, `EXPIRE`, `EVAL`, `KEYS`, `CONFIG`, …) are never executed by the agent: it returns the command as a fenced code block for you to run in the Redis console, which asks for confirmation first. `SELECT` is not available either — the logical database is chosen with the tool's `db` argument.
+
 <Callout type="info">AI Agent never receives “write from now on” permission and cannot bypass MCP policy, connection read-only protection, or database privileges. See [Production Safety](/en/docs/production-safety) for the complete boundary.</Callout>
 
 ## Reasoning Effort and Thinking

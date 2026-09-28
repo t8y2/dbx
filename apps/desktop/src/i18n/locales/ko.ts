@@ -3218,6 +3218,7 @@ export default withEnglishFallback({
         getSampleData: "샘플 데이터 가져오기",
         listCollections: "컬렉션 나열",
         browseCollection: "컬렉션 탐색",
+        executeRedisCommand: "Redis 명령 실행",
       },
     },
     proxy: "프록시",

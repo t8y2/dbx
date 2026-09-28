@@ -3420,6 +3420,7 @@ export default withEnglishFallback({
         getSampleData: "获取样例数据",
         listCollections: "列出集合",
         browseCollection: "浏览集合",
+        executeRedisCommand: "执行 Redis 命令",
       },
     },
     proxy: "代理",

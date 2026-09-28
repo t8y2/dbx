@@ -3555,6 +3555,7 @@ export default withEnglishFallback({
         getSampleData: "サンプルデータを取得",
         listCollections: "コレクション一覧",
         browseCollection: "コレクションを閲覧",
+        executeRedisCommand: "Redis コマンドを実行",
       },
     },
     proxy: "プロキシ",

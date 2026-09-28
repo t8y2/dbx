@@ -3363,6 +3363,7 @@ export default withEnglishFallback({
         getSampleData: "Получить образец данных",
         listCollections: "Список коллекций",
         browseCollection: "Просмотр коллекции",
+        executeRedisCommand: "Выполнить команду Redis",
       },
     },
     proxy: "Прокси",

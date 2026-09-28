@@ -1298,6 +1298,13 @@ export function splitDataType(raw: string): { baseType: string; params: string }
 }
 
 function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
+  if (dbType === "postgres") {
+    // PostgreSQL places the precision before the time zone qualifier.
+    const match = raw.trim().match(/^(TIME|TIMESTAMP)\s*\(([^()]*)\)\s+(WITH(?:OUT)?\s+TIME\s+ZONE)$/i);
+    if (match) {
+      return { baseType: `${match[1]} ${match[3]!.replace(/\s+/g, " ")}`, params: match[2]!.trim() };
+    }
+  }
   if (dbType === "duckdb") {
     const parsed = splitDuckdbScalarDataType(raw);
     if (parsed) return parsed;
@@ -1462,6 +1469,10 @@ function normalizeDuckdbDataType(raw: string): string {
 }
 
 function combineQualifiedTemporalType(baseType: string, params: string, dbType: DatabaseType | undefined): string | null {
+  if (dbType === "postgres") {
+    const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+(WITH(?:OUT)?\s+TIME\s+ZONE)$/i);
+    return match ? (params ? `${match[1]}(${params}) ${match[2]!.replace(/\s+/g, " ")}` : baseType.trim()) : null;
+  }
   if (dbType === "duckdb") {
     const match = baseType.trim().match(/^(TIMESTAMP)\s+WITHOUT\s+TIME\s+ZONE$/i);
     return match ? (params ? `${match[1]}(${params}) WITHOUT TIME ZONE` : baseType.trim()) : null;

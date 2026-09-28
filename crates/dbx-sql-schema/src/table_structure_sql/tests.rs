@@ -703,6 +703,70 @@ fn builds_xugu_type_change_with_native_syntax() {
 }
 
 #[test]
+fn postgres_temporal_precision_changes_preserve_time_zone_qualifiers() {
+    for (original_type, target_type) in [
+        ("timestamp(6) with time zone", "timestamp(3) with time zone"),
+        ("timestamp(6) with time zone", "timestamp(0) with time zone"),
+        ("timestamp(6) with time zone", "timestamp with time zone"),
+        ("timestamp(6) without time zone", "timestamp(3) without time zone"),
+        ("time(6) with time zone", "time(3) with time zone"),
+        ("time(6) without time zone", "time(3) without time zone"),
+        ("timestamptz(6)", "timestamptz(3)"),
+    ] {
+        let mut ts = column("ts_tz");
+        ts.data_type = target_type.to_string();
+        ts.original = Some(ColumnInfo {
+            name: ts.name.clone(),
+            data_type: original_type.to_string(),
+            is_nullable: true,
+            ..Default::default()
+        });
+        let result = build_table_structure_change_sql(structure_change_options(
+            DatabaseType::Postgres,
+            Some("public"),
+            "issue10518_timestamptz",
+            vec![ts],
+        ));
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert_eq!(
+            result.statements,
+            vec![format!(
+                "ALTER TABLE \"public\".\"issue10518_timestamptz\" ALTER COLUMN \"ts_tz\" TYPE {target_type} USING \"ts_tz\"::{target_type};"
+            )]
+        );
+    }
+}
+
+#[test]
+fn postgres_temporal_unchanged_type_does_not_generate_alter_type() {
+    let mut ts = column("ts_tz");
+    ts.data_type = "timestamp(6) with time zone".to_string();
+    ts.original = Some(ColumnInfo {
+        name: ts.name.clone(),
+        data_type: ts.data_type.clone(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    for comment in ["", "Updated description"] {
+        ts.comment = comment.to_string();
+        let result = build_table_structure_change_sql(structure_change_options(
+            DatabaseType::Postgres,
+            Some("public"),
+            "issue10518_timestamptz",
+            vec![ts.clone()],
+        ));
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let expected = if comment.is_empty() {
+            Vec::<String>::new()
+        } else {
+            vec!["COMMENT ON COLUMN \"public\".\"issue10518_timestamptz\".\"ts_tz\" IS 'Updated description';"
+                .to_string()]
+        };
+        assert_eq!(result.statements, expected);
+    }
+}
+
+#[test]
 fn builds_postgres_explicit_type_cast_for_renamed_column() {
     let mut code = column("new code");
     code.data_type = "bigint".to_string();

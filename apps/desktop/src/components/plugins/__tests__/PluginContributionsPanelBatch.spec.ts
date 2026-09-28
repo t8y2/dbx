@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App, type ComponentPublicInstance } from "vue";
+import { createApp, h, ref, nextTick, type App, type ComponentPublicInstance } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
 import { formatMarketplaceReleasedDate, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
@@ -65,6 +65,7 @@ vi.mock("@/components/plugins/PluginShortcutSettings.vue", async () => ({ defaul
 import PluginContributionsPanel from "@/components/plugins/PluginContributionsPanel.vue";
 
 type PanelState = {
+  activeSection: "marketplace" | "installed" | "settings";
   batchRunning: boolean;
   batchMode: boolean;
   marketplaceViewMode: "grid" | "list";
@@ -937,5 +938,51 @@ describe("PluginContributionsPanel single uninstall outcomes", () => {
 
     expect(mocks.toast).toHaveBeenLastCalledWith("denied", 5000);
     expect(state.error).toBe('pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}');
+  });
+});
+
+describe("PluginContributionsPanel settings navigation", () => {
+  it.each(["marketplace", "installed"] as const)("preserves navigation to %s while the initial refresh is pending", async (section) => {
+    app.unmount();
+    const pending = deferred<InstalledPlugin[]>();
+    mocks.listPlugins.mockReturnValue(pending.promise);
+    app = createApp(PluginContributionsPanel, { focusTarget: { section: "settings" } });
+    const instance = app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } };
+    const current = instance.$.setupState;
+    expect(current.activeSection).toBe("settings");
+    current.activeSection = section;
+    await nextTick();
+    pending.resolve([installed("a")]);
+    await flushUi();
+    expect(current.activeSection).toBe(section);
+  });
+
+  it.each(["empty", "installed", "load-failure"])("opens and reopens settings without depending on plugin loading (%s)", async (scenario) => {
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    if (scenario === "load-failure") mocks.listPlugins.mockRejectedValue(new Error("unavailable"));
+    else mocks.listPlugins.mockResolvedValue(scenario === "empty" ? [] : [installed("a")]);
+    const focus = ref<{ section: "settings" }>({ section: "settings" });
+    let panel!: ComponentPublicInstance;
+    app = createApp({
+      render: () =>
+        h(PluginContributionsPanel, {
+          focusTarget: focus.value,
+          ref: (value) => {
+            panel = value as ComponentPublicInstance;
+          },
+        }),
+    });
+    app.mount(host);
+    const current = (panel as ComponentPublicInstance & { $: { setupState: PanelState } }).$.setupState;
+    expect(current.activeSection).toBe("settings");
+    await flushUi();
+    expect(current.activeSection).toBe("settings");
+    current.activeSection = "marketplace";
+    focus.value = { section: "settings" };
+    await nextTick();
+    expect(current.activeSection).toBe("settings");
   });
 });

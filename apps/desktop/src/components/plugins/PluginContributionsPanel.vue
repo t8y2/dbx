@@ -232,7 +232,9 @@ async function refresh(preferredPluginId = props.focusTarget?.pluginId || select
   try {
     [installedPlugins.value, trustedKeys.value, repositories.value] = await Promise.all([api.listPlugins(), api.listPluginTrustedKeys(), api.listPluginRepositories()]);
     await refreshMarketplace();
-    if (props.focusTarget) applyFocusTarget(props.focusTarget);
+    // Settings navigation is handled immediately by the watcher; replaying it
+    // after loading would overwrite any subsequent navigation by the user.
+    if (props.focusTarget && props.focusTarget.section !== "settings") applyFocusTarget(props.focusTarget);
     else selectFirstProvider(preferredPluginId);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
@@ -258,6 +260,10 @@ async function refreshMarketplace() {
 }
 
 function applyFocusTarget(focus: PluginCenterFocus) {
+  if (focus.section === "settings") {
+    activeSection.value = "settings";
+    return;
+  }
   activeSection.value = "installed";
   if (!focus.pluginId) return selectFirstProvider();
   const provider = connectionProviders.value.find((entry) => entry.plugin.manifest.id === focus.pluginId && (!focus.providerId || entry.contribution.id === focus.providerId));
@@ -886,9 +892,9 @@ watch(providerConnections, (connections) => {
 watch(
   () => props.focusTarget,
   (focus) => {
-    if (focus && installedPlugins.value.length) applyFocusTarget(focus);
+    if (focus && (focus.section === "settings" || installedPlugins.value.length)) applyFocusTarget(focus);
   },
-  { deep: true },
+  { deep: true, immediate: true },
 );
 let lastHandledInstallRequestId = 0;
 watch(

@@ -389,7 +389,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(String::from_utf8(output).unwrap(), "\"name\",\"note\"\n\"a\",\"\\N\"\n\"b\",\"\"");
+        assert_eq!(String::from_utf8(output).unwrap(), "\"name\",\"note\"\n\"a\",\\N\n\"b\",\"\"");
 
         // 关闭字面量（旧行为）：NULL 与空串都写空字段，二者在文件里已无法区分
         options.null_literal = String::new();
@@ -440,10 +440,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(exported, 2);
-        // 导出的 NULL 与空串必须已经可区分：空串 `""`、NULL `"\N"`
+        // 导出的 NULL 与空串必须已经可区分：空串 `""`、NULL 裸写 `\N`
         assert_eq!(
             String::from_utf8(exported_bytes.clone()).unwrap(),
-            "\u{FEFF}\"id\",\"name\",\"note\"\n\"1\",\"\",\"\\N\"\n\"2\",\"Ada\",\"x\""
+            "\u{FEFF}\"id\",\"name\",\"note\"\n\"1\",\"\",\\N\n\"2\",\"Ada\",\"x\""
         );
 
         let csv_path = directory.path().join("contacts.csv");

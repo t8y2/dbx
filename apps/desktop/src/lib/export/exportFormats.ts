@@ -1,6 +1,7 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
-import { DEFAULT_CSV_NULL_LITERAL, escapeCsvField, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import { escapeCsvField, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import { DEFAULT_CSV_NULL_LITERAL } from "@/lib/export/csvNullMode";
 import type { SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
 export type ExportCellValue = string | number | boolean | null;
@@ -9,7 +10,11 @@ export function formatCsv(columns: string[], rows: ExportCellValue[][], quoteMod
   const header = columns.map((column) => escapeCsvField(column, quoteMode)).join(",");
   // NULL 写成独立字面量、空字符串写成空字段，否则导入端无法把两者区分开
   // （写回 NOT NULL DEFAULT '' 的列时会把空字符串还原成 NULL）。
-  const nullField = nullLiteral ? escapeCsvField(nullLiteral, quoteMode) : "";
+  //
+  // 字面量裸写：PostgreSQL 的 COPY ... FORMAT csv 不认带引号的 NULL（`"\N"` 是普通字符串，
+  // 整数列直接报错），ClickHouse 的 CSV 读取在引号内遇到 `\N` 会解析失败；只有裸 `\N` 是
+  // 它们与 MySQL 共同识别的 NULL。字面量自身含分隔符/引号/换行时才加引号。
+  const nullField = nullLiteral ? escapeCsvField(nullLiteral, "necessary") : "";
   const body = rows.map((row) => row.map((cell) => (cell === null ? nullField : escapeCsvField(String(cell), quoteMode))).join(",")).join("\n");
   return `${header}\n${body}`;
 }

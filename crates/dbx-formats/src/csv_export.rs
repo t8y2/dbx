@@ -98,8 +98,13 @@ fn push_csv_value_with_quote_mode(
     if value.is_null() {
         // 配置了 NULL 字面量时，NULL 写成该字面量；空字符串仍然写成 `""`。
         // 两者不再互相冒充，导出→导入才能无损往返。
+        //
+        // 字面量必须尽量裸写：PostgreSQL 的 COPY ... FORMAT csv 从不把带引号的值当成 NULL
+        // （`"\N"` 是普通字符串，整数列直接报错），ClickHouse 的 CSV 读取更是在引号内遇到
+        // `\N` 就解析失败；只有裸 `\N` 才是这两者与 MySQL 共同识别的 NULL。字面量自身含
+        // 分隔符/引号/换行时才加引号（此时它本来也不再是标准 NULL 标记）。
         if let Some(literal) = null_literal {
-            push_csv_field(out, literal, quote_mode);
+            push_csv_field(out, literal, CsvQuoteMode::Necessary);
             return;
         }
     }
@@ -525,7 +530,8 @@ mod tests {
             "\"a\",\"b\"\n,\"\""
         );
 
-        // 配置字面量后：NULL 写成字面量，空串写成 `""`
+        // 配置字面量后：NULL 写成裸字面量，空串写成 `""`；即使 quote mode = All 也不给
+        // 字面量加引号，否则 PostgreSQL/ClickHouse 的 CSV 读取不认它是 NULL
         assert_eq!(
             format_csv_with_options(
                 &columns,
@@ -533,7 +539,7 @@ mod tests {
                 CsvQuoteMode::All,
                 Some(DEFAULT_CSV_NULL_LITERAL)
             ),
-            "\"a\",\"b\"\n\"\\N\",\"\""
+            "\"a\",\"b\"\n\\N,\"\""
         );
         // Necessary 模式：空串裸写为空字段，但 NULL 有独立字面量，仍然可区分
         assert_eq!(
@@ -548,12 +554,29 @@ mod tests {
     }
 
     #[test]
+    fn null_literal_is_quoted_only_when_it_needs_quoting() {
+        let columns = vec!["a".to_string()];
+        let row = vec![Value::Null];
+
+        // 标准字面量裸写（PostgreSQL/ClickHouse/MySQL 共同识别的 NULL 写法）
+        assert_eq!(
+            format_csv_with_options(&columns, std::slice::from_ref(&row), CsvQuoteMode::All, Some("\\N")),
+            "\"a\"\n\\N"
+        );
+        // 自定义字面量含分隔符时无法裸写，只能退化成带引号的普通字段
+        assert_eq!(
+            format_csv_with_options(&columns, std::slice::from_ref(&row), CsvQuoteMode::All, Some("a,b")),
+            "\"a\"\n\"a,b\""
+        );
+    }
+
+    #[test]
     fn null_literal_applies_to_streaming_row_writers_too() {
         let row = vec![Value::Null, json!("NULL"), json!("")];
 
         let mut table = String::new();
         super::push_table_csv_row_with_options(&mut table, &row, CsvQuoteMode::All, Some(DEFAULT_CSV_NULL_LITERAL));
-        assert_eq!(table, "\"\\N\",\"NULL\",\"\"");
+        assert_eq!(table, "\\N,\"NULL\",\"\"");
 
         let mut query = String::new();
         super::push_query_result_csv_row_with_options(
@@ -562,12 +585,12 @@ mod tests {
             CsvQuoteMode::All,
             Some(DEFAULT_CSV_NULL_LITERAL),
         );
-        assert_eq!(query, "\"\\N\",\"NULL\",\"\"");
+        assert_eq!(query, "\\N,\"NULL\",\"\"");
 
         let mut written = Vec::new();
         super::write_csv_value_row_with_options(&mut written, row, CsvQuoteMode::All, Some(DEFAULT_CSV_NULL_LITERAL))
             .unwrap();
-        assert_eq!(String::from_utf8(written).unwrap(), "\"\\N\",\"NULL\",\"\"");
+        assert_eq!(String::from_utf8(written).unwrap(), "\\N,\"NULL\",\"\"");
     }
 
     #[test]

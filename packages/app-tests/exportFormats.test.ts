@@ -14,7 +14,7 @@ test("formatCsv writes database null as the shared NULL literal and keeps empty 
         [3, "NULL"],
       ],
     ),
-    '"id","note"\n"1","\\N"\n"2",""\n"3","NULL"',
+    '"id","note"\n"1",\\N\n"2",""\n"3","NULL"',
   );
 });
 

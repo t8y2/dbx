@@ -1080,7 +1080,34 @@ mod tests {
     }
 
     #[test]
-    fn databricks_table_select_uses_backtick_identifiers() {
+    fn databricks_table_select_uses_unity_catalog_three_part_name() {
+        let explicit_catalog = TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Databricks),
+            catalog: Some("analytics".to_string()),
+            database: Some("ignored_tree_catalog".to_string()),
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_table_data_select_sql(explicit_catalog),
+            "SELECT * FROM `analytics`.`sales`.`orders` LIMIT 100;"
+        );
+
+        let tree_catalog = TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Databricks),
+            database: Some("analytics".to_string()),
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(build_table_data_select_sql(tree_catalog), "SELECT * FROM `analytics`.`sales`.`orders` LIMIT 100;");
+    }
+
+    #[test]
+    fn databricks_table_select_without_catalog_keeps_two_part_name() {
         assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {
                 database_type: Some(DatabaseType::Databricks),
@@ -1225,13 +1252,19 @@ mod tests {
     }
 
     #[test]
-    fn external_catalog_is_ignored_for_non_doris_engines() {
+    fn catalog_qualification_does_not_change_other_dialects() {
         // Postgres does not support the 3-part catalog naming; the catalog
         // must be ignored to avoid emitting an invalid qualified name.
-        let sql =
-            build_table_data_select_sql(opts(DatabaseType::Postgres, Some("iceberg_catalog"), Some("sales"), "orders"));
-        assert!(!sql.contains("iceberg_catalog"), "sql was: {sql}");
-        assert!(sql.contains("orders"), "sql was: {sql}");
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            catalog: Some("analytics".to_string()),
+            database: Some("warehouse".to_string()),
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            limit: Some(10),
+            ..Default::default()
+        });
+        assert_eq!(sql, "SELECT * FROM \"sales\".\"orders\" LIMIT 10;");
     }
 
     #[test]

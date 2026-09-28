@@ -4,13 +4,14 @@ use mysql_async::consts::{ColumnFlags, ColumnType, StatusFlags};
 use mysql_async::prelude::*;
 use percent_encoding::percent_decode_str;
 use rust_decimal::Decimal;
-use sqlparser::ast::{AlterTableOperation, ObjectNamePart, Statement};
+use sqlparser::ast::{AlterTableOperation, Expr, ObjectNamePart, Statement, TableFactor, Visit, Visitor};
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::future::Future;
+use std::ops::ControlFlow;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -24,10 +25,10 @@ use crate::models::connection::{
 };
 use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
 use crate::types::{
-    ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
-    CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
-    CompletionAssistantResponse, DatabaseInfo, ForeignKeyInfo, IndexInfo, LargeValueCell, ObjectInfo, ObjectStatistics,
-    QueryMessage, QueryResult, SpatialColumnBuilder, TableInfo, TriggerInfo,
+    is_opaque_aggregate_state_type, ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate,
+    CompletionAssistantCandidateKind, CompletionAssistantMatchMode, CompletionAssistantObjectKind,
+    CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo, ForeignKeyInfo, IndexInfo, LargeValueCell,
+    ObjectInfo, ObjectStatistics, QueryMessage, QueryResult, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 use dbx_types::metadata_filter::{table_name_filter_matches, TableNameFilter};
 
@@ -278,6 +279,7 @@ pub fn mysql_catalog_dialect(db_type: DatabaseType, driver_profile: Option<&str>
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MySqlQueryDialect {
     supports_admin_show_results: bool,
+    is_doris: bool,
 }
 
 #[derive(Debug)]
@@ -352,8 +354,229 @@ impl MySqlQueryDialect {
                 || super::starrocks::is_profile(&db_type, driver_profile)
                 || super::manticoresearch::is_profile(&db_type, driver_profile)
                 || super::tidb::is_profile(&db_type, driver_profile),
+            is_doris: super::doris::is_native_profile(&db_type, driver_profile),
         }
     }
+}
+
+type DorisOpaqueColumnTypes = HashMap<(Vec<u8>, Vec<u8>, Vec<u8>), String>;
+type DorisOpaqueColumnKey = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+fn insert_doris_opaque_column_type(
+    resolved: &mut DorisOpaqueColumnTypes,
+    ambiguous: &mut HashSet<DorisOpaqueColumnKey>,
+    key: DorisOpaqueColumnKey,
+    data_type: String,
+) {
+    if ambiguous.contains(&key) || resolved.insert(key.clone(), data_type).is_some() {
+        resolved.remove(&key);
+        ambiguous.insert(key);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DorisSourceTable {
+    database: Option<String>,
+    table: String,
+}
+
+#[derive(Default)]
+struct DorisPreflightVisitor {
+    cte_names: HashSet<String>,
+    sources: HashSet<DorisSourceTable>,
+    unsupported: bool,
+}
+
+impl Visitor for DorisPreflightVisitor {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &sqlparser::ast::Query) -> ControlFlow<()> {
+        if let Some(with) = &query.with {
+            for cte in &with.cte_tables {
+                if !self.cte_names.insert(cte.alias.name.value.to_ascii_lowercase()) {
+                    self.unsupported = true;
+                    return ControlFlow::Break(());
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+        if let Expr::Function(function) = expr {
+            if function
+                .name
+                .0
+                .last()
+                .and_then(ObjectNamePart::as_ident)
+                .is_some_and(|name| name.value.eq_ignore_ascii_case("LAST_QUERY_ID"))
+            {
+                self.unsupported = true;
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<()> {
+        let TableFactor::Table { name, args: None, .. } = factor else {
+            if !matches!(factor, TableFactor::Derived { .. } | TableFactor::NestedJoin { .. }) {
+                self.unsupported = true;
+                return ControlFlow::Break(());
+            }
+            return ControlFlow::Continue(());
+        };
+        let parts = name.0.iter().map(ObjectNamePart::as_ident).collect::<Option<Vec<_>>>();
+        let Some(parts) = parts else {
+            self.unsupported = true;
+            return ControlFlow::Break(());
+        };
+        match parts.as_slice() {
+            [table] if !self.cte_names.contains(&table.value.to_ascii_lowercase()) => {
+                self.sources.insert(DorisSourceTable { database: None, table: table.value.clone() });
+            }
+            [database, table] => {
+                self.sources
+                    .insert(DorisSourceTable { database: Some(database.value.clone()), table: table.value.clone() });
+            }
+            [_cte] => {}
+            _ => {
+                self.unsupported = true;
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn doris_preflight_sources(sql: &str, dialect: MySqlQueryDialect) -> Option<Vec<DorisSourceTable>> {
+    if !dialect.is_doris {
+        return None;
+    }
+    let statements = Parser::parse_sql(&MySqlDialect {}, sql).ok()?;
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return None;
+    };
+    let mut visitor = DorisPreflightVisitor::default();
+    let _ = query.visit(&mut visitor);
+    if visitor.unsupported || visitor.sources.is_empty() {
+        return None;
+    }
+    Some(visitor.sources.into_iter().collect())
+}
+
+async fn resolve_doris_opaque_column_types(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    dialect: MySqlQueryDialect,
+) -> DorisOpaqueColumnTypes {
+    let Some(mut sources) = doris_preflight_sources(sql, dialect) else {
+        return HashMap::new();
+    };
+    if sources.iter().any(|source| source.database.is_none()) {
+        let current_database = conn
+            .query_first::<String, _>("SELECT DATABASE()")
+            .await
+            .ok()
+            .flatten()
+            .filter(|database| !database.is_empty());
+        let Some(current_database) = current_database else {
+            return HashMap::new();
+        };
+        for source in &mut sources {
+            if source.database.is_none() {
+                source.database = Some(current_database.clone());
+            }
+        }
+    }
+    sources.sort_by(|left, right| (&left.database, &left.table).cmp(&(&right.database, &right.table)));
+    sources.dedup();
+
+    let mut resolved = HashMap::new();
+    let mut ambiguous = HashSet::new();
+    for source in sources {
+        let Some(database) = source.database else { continue };
+        match fetch_columns_show(conn, &database, &source.table).await {
+            Ok(columns) => {
+                for column in columns {
+                    if is_opaque_aggregate_state_type(&column.data_type) {
+                        let key = (
+                            database.as_bytes().to_vec(),
+                            source.table.as_bytes().to_vec(),
+                            column.name.as_bytes().to_vec(),
+                        );
+                        insert_doris_opaque_column_type(&mut resolved, &mut ambiguous, key, column.data_type);
+                    }
+                }
+            }
+            Err(error) => log::debug!(
+                "Failed to resolve Doris aggregate-state columns for `{database}`.`{}`: {error}",
+                source.table
+            ),
+        }
+    }
+    resolved
+}
+
+fn effective_mysql_column_types(columns: &[mysql_async::Column], opaque_types: &DorisOpaqueColumnTypes) -> Vec<String> {
+    columns
+        .iter()
+        .map(|column| {
+            opaque_types
+                .get(&(column.schema_ref().to_vec(), column.org_table_ref().to_vec(), column.org_name_ref().to_vec()))
+                .filter(|_| {
+                    !column.schema_ref().is_empty()
+                        && !column.org_table_ref().is_empty()
+                        && !column.org_name_ref().is_empty()
+                        && matches!(
+                            column.column_type(),
+                            ColumnType::MYSQL_TYPE_STRING
+                                | ColumnType::MYSQL_TYPE_VAR_STRING
+                                | ColumnType::MYSQL_TYPE_VARCHAR
+                                | ColumnType::MYSQL_TYPE_BLOB
+                                | ColumnType::MYSQL_TYPE_LONG_BLOB
+                                | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                                | ColumnType::MYSQL_TYPE_TINY_BLOB
+                        )
+                })
+                .cloned()
+                .unwrap_or_else(|| mysql_column_type_name(column))
+        })
+        .collect()
+}
+
+fn mysql_value_to_json_with_effective_type(
+    row: &mysql_async::Row,
+    index: usize,
+    effective_type: Option<&str>,
+) -> serde_json::Value {
+    if effective_type.is_some_and(is_opaque_aggregate_state_type) {
+        return match row.as_ref(index) {
+            None | Some(mysql_async::Value::NULL) => serde_json::Value::Null,
+            Some(mysql_async::Value::Bytes(bytes)) => super::binary_value_to_json(bytes),
+            _ => mysql_value_to_json(row, index),
+        };
+    }
+    mysql_value_to_json(row, index)
+}
+
+fn ensure_doris_opaque_cells_fit_budget(
+    row: &mysql_async::Row,
+    effective_types: &[String],
+    max_result_bytes: Option<usize>,
+) -> Result<(), String> {
+    let Some(max_result_bytes) = max_result_bytes else { return Ok(()) };
+    for (index, effective_type) in effective_types.iter().enumerate() {
+        if is_opaque_aggregate_state_type(effective_type)
+            && matches!(row.as_ref(index), Some(mysql_async::Value::Bytes(bytes)) if bytes.len().saturating_mul(2).saturating_add(2) > max_result_bytes)
+        {
+            return Err(format!(
+                "Doris aggregate-state value in column {} exceeds the interactive byte budget; use a streaming representation export to preserve the complete bytes",
+                index + 1
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub enum MySqlQueryStreamItem {
@@ -989,6 +1212,7 @@ fn mysql_result_protected_column_indexes(
 fn mysql_row_to_json_with_srids(
     row: &mysql_async::Row,
     spatial_columns: &mut SpatialColumnBuilder,
+    effective_types: &[String],
 ) -> (Vec<serde_json::Value>, Vec<Option<u32>>) {
     let mut srids = vec![None; row.len()];
     let values = (0..row.len())
@@ -998,7 +1222,7 @@ fn mysql_row_to_json_with_srids(
                 .get(idx)
                 .is_some_and(|column| column.column_type() == ColumnType::MYSQL_TYPE_GEOMETRY);
             if !is_geometry {
-                return mysql_value_to_json(row, idx);
+                return mysql_value_to_json_with_effective_type(row, idx, effective_types.get(idx).map(String::as_str));
             }
             let Some(bytes) = row_get::<Vec<u8>, _>(row, idx) else {
                 spatial_columns.observe(idx, None);
@@ -1026,6 +1250,7 @@ fn mysql_row_to_json_with_srids_and_previews(
     row_index: usize,
     preview_bytes: Option<usize>,
     protected_indexes: &HashSet<usize>,
+    effective_types: &[String],
 ) -> (Vec<serde_json::Value>, Vec<Option<u32>>, Vec<LargeValueCell>) {
     let mut srids = vec![None; row.len()];
     let mut large_value_cells = Vec::new();
@@ -1053,13 +1278,20 @@ fn mysql_row_to_json_with_srids_and_previews(
                 };
             }
 
+            if effective_types.get(index).is_some_and(|column_type| is_opaque_aggregate_state_type(column_type)) {
+                return mysql_value_to_json_with_effective_type(
+                    row,
+                    index,
+                    effective_types.get(index).map(String::as_str),
+                );
+            }
             if let Some((preview, original_bytes)) =
                 preview_bytes.and_then(|limit| mysql_bounded_value_preview(row, index, limit, protected_indexes))
             {
                 large_value_cells.push(LargeValueCell { row_index, column_index: index, original_bytes });
                 return preview;
             }
-            mysql_value_to_json(row, index)
+            mysql_value_to_json_with_effective_type(row, index, effective_types.get(index).map(String::as_str))
         })
         .collect();
     (values, srids, large_value_cells)
@@ -4533,6 +4765,25 @@ fn mysql_column_name(raw: String) -> Option<String> {
     }
 }
 
+fn needs_mysql_column_type_enrichment(columns: &[ColumnInfo]) -> bool {
+    columns.iter().any(|column| column.data_type.eq_ignore_ascii_case("unknown"))
+}
+
+fn enrich_unknown_mysql_column_types(columns: &mut [ColumnInfo], show_columns: &[ColumnInfo]) {
+    for column in columns {
+        if !column.data_type.eq_ignore_ascii_case("unknown") {
+            continue;
+        }
+        let Some(show_column) = show_columns.iter().find(|show_column| show_column.name == column.name) else {
+            continue;
+        };
+        let show_type = show_column.data_type.trim();
+        if !show_type.is_empty() && !show_type.eq_ignore_ascii_case("unknown") {
+            column.data_type.clone_from(&show_column.data_type);
+        }
+    }
+}
+
 fn parse_mysql_enum_values(column_type: &str) -> Option<Vec<String>> {
     let trimmed = column_type.trim();
     if !trimmed.get(..5)?.eq_ignore_ascii_case("enum(") || !trimmed.ends_with(')') {
@@ -4653,6 +4904,17 @@ where
         return get_columns_show(pool, database, table).await;
     }
 
+    if needs_mysql_column_type_enrichment(&columns) {
+        match fetch_columns_show(&mut conn, database, table).await {
+            Ok(show_columns) => enrich_unknown_mysql_column_types(&mut columns, &show_columns),
+            Err(error) => {
+                log::debug!(
+                    "Failed to enrich unknown MySQL column types for `{database}`.`{table}` from SHOW COLUMNS: {error}"
+                );
+            }
+        }
+    }
+
     enrich_mysql_generated_column_expressions(&mut conn, database, table, &mut columns).await;
     Ok(columns)
 }
@@ -4661,8 +4923,18 @@ pub async fn get_columns_show<P>(pool: &P, database: &str, table: &str) -> Resul
 where
     P: MySqlPoolAccess + ?Sized,
 {
-    let sql = show_columns_sql(database, table, true);
     let mut conn = get_conn_with_health_check(pool).await?;
+    let mut columns = fetch_columns_show(&mut conn, database, table).await?;
+    enrich_mysql_generated_column_expressions(&mut conn, database, table, &mut columns).await;
+    Ok(columns)
+}
+
+async fn fetch_columns_show(
+    conn: &mut mysql_async::Conn,
+    database: &str,
+    table: &str,
+) -> Result<Vec<ColumnInfo>, String> {
+    let sql = show_columns_sql(database, table, true);
     let rows: Vec<mysql_async::Row> = match conn.query_iter(&sql).await {
         Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
         Err(_) => {
@@ -4671,7 +4943,7 @@ where
             result.collect_and_drop().await.map_err(|e| e.to_string())?
         }
     };
-    let mut columns: Vec<ColumnInfo> = rows
+    let columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
             let name = mysql_column_name(get_str_by_name(row, "Field"))?;
@@ -4702,7 +4974,6 @@ where
             })
         })
         .collect();
-    enrich_mysql_generated_column_expressions(&mut conn, database, table, &mut columns).await;
     Ok(columns)
 }
 
@@ -5100,6 +5371,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
     diagnostic_trace_id: Option<&str>,
     start: Instant,
     progress_clock: Option<&crate::execution::StreamProgressClock>,
+    opaque_types: &DorisOpaqueColumnTypes,
 ) -> Result<MySqlQueryResult, String> {
     let diagnostics_enabled = diagnostic_trace_id.is_some() && log::log_enabled!(log::Level::Info);
     let dispatch_started_at = diagnostics_enabled.then(Instant::now);
@@ -5130,7 +5402,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
         }));
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
+    let column_types = effective_mysql_column_types(result.columns_ref(), opaque_types);
     let mut spatial_columns = mysql_spatial_column_builder(result.columns_ref());
     let preview_bytes =
         max_result_bytes.map(|max_bytes| mysql_result_cell_preview_bytes(max_bytes, row_limit, result.columns_ref()));
@@ -5149,7 +5421,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             .iter()
             .take(row_limit)
             .map(|row| {
-                let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns);
+                let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns, &column_types);
                 spatial_values.push(srids);
                 values
             })
@@ -5195,6 +5467,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
         }
         let Some(row) = next_row else { break };
         let row = row.map_err(|e| e.to_string())?;
+        ensure_doris_opaque_cells_fit_budget(&row, &column_types, max_result_bytes)?;
         if let Some(progress_clock) = progress_clock {
             progress_clock.mark();
         }
@@ -5210,6 +5483,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             row_index,
             preview_bytes,
             &protected_indexes,
+            &column_types,
         );
         result_rows.push(values);
         spatial_values.push(srids);
@@ -5281,6 +5555,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
     result_key_columns: &[String],
     diagnostic_trace_id: Option<&str>,
     start: Instant,
+    opaque_types: &DorisOpaqueColumnTypes,
 ) -> Result<Vec<MySqlQueryResult>, String> {
     // Per-set warnings/info read after each `collect()` are only accurate when
     // the connection negotiated CLIENT_DEPRECATE_EOF: with legacy EOF packets
@@ -5304,7 +5579,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
 
     while advance_to_result_set_with_columns(&mut result).await? {
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-        let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
+        let column_types = effective_mysql_column_types(result.columns_ref(), opaque_types);
         let mut spatial_columns = mysql_spatial_column_builder(result.columns_ref());
         let mut spatial_values = Vec::new();
         let mut large_value_cells = Vec::new();
@@ -5325,7 +5600,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
                 .iter()
                 .take(row_limit)
                 .map(|row| {
-                    let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns);
+                    let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns, &column_types);
                     spatial_values.push(srids);
                     values
                 })
@@ -5351,6 +5626,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
                 let Some(row) = next_row else { break };
                 let row = row.map_err(|e| e.to_string())?;
                 if rows.len() < row_limit {
+                    ensure_doris_opaque_cells_fit_budget(&row, &column_types, max_result_bytes)?;
                     let row_index = rows.len();
                     let convert_started_at = diagnostics_enabled.then(Instant::now);
                     let (values, srids, mut row_large_values) = mysql_row_to_json_with_srids_and_previews(
@@ -5359,6 +5635,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
                         row_index,
                         preview_bytes,
                         &protected_indexes,
+                        &column_types,
                     );
                     rows.push(values);
                     spatial_values.push(srids);
@@ -5506,13 +5783,14 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     diagnostic_trace_id: Option<&str>,
     start: Instant,
     progress_clock: Option<&crate::execution::StreamProgressClock>,
+    opaque_types: &DorisOpaqueColumnTypes,
 ) -> Result<MySqlQueryResult, String> {
     let diagnostics_enabled = diagnostic_trace_id.is_some() && log::log_enabled!(log::Level::Info);
     let dispatch_started_at = diagnostics_enabled.then(Instant::now);
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
     let dispatch_ms = dispatch_started_at.map_or(0, |started_at| started_at.elapsed().as_millis());
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
+    let column_types = effective_mysql_column_types(result.columns_ref(), opaque_types);
     let mut spatial_columns = mysql_spatial_column_builder(result.columns_ref());
     let preview_bytes =
         max_result_bytes.map(|max_bytes| mysql_result_cell_preview_bytes(max_bytes, row_limit, result.columns_ref()));
@@ -5538,6 +5816,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
         }
         let Some(row) = next_row else { break };
         let row = row.map_err(|e| e.to_string())?;
+        ensure_doris_opaque_cells_fit_budget(&row, &column_types, max_result_bytes)?;
         if let Some(progress_clock) = progress_clock {
             progress_clock.mark();
         }
@@ -5553,6 +5832,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
             row_index,
             preview_bytes,
             &protected_indexes,
+            &column_types,
         );
         result_rows.push(values);
         spatial_values.push(srids);
@@ -5732,14 +6012,18 @@ pub async fn stream_query_result_on_conn(
     mut on_item: impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let row_limit = max_rows.unwrap_or(usize::MAX);
+    let opaque_types = resolve_doris_opaque_column_types(conn, sql, dialect).await;
 
     if bare || prefers_text_protocol_query(sql, dialect) {
-        stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &mut on_item).await
+        stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &opaque_types, &mut on_item).await
     } else {
-        match stream_query_result_prepared(conn, sql, row_limit, cancelled, spatial_as_wkb, &mut on_item).await {
+        match stream_query_result_prepared(conn, sql, row_limit, cancelled, spatial_as_wkb, &opaque_types, &mut on_item)
+            .await
+        {
             Ok(rows) => Ok(rows),
             Err(err) if mysql_error_should_retry_with_text_protocol(&err) => {
-                stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &mut on_item).await
+                stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &opaque_types, &mut on_item)
+                    .await
             }
             Err(err) => Err(err),
         }
@@ -5752,6 +6036,7 @@ async fn stream_query_result_text(
     row_limit: usize,
     cancelled: &AtomicBool,
     spatial_as_wkb: bool,
+    opaque_types: &DorisOpaqueColumnTypes,
     on_item: &mut impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
@@ -5759,8 +6044,8 @@ async fn stream_query_result_text(
         return Ok(0);
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
-    on_item(MySqlQueryStreamItem::Columns { columns, column_types })?;
+    let column_types = effective_mysql_column_types(result.columns_ref(), opaque_types);
+    on_item(MySqlQueryStreamItem::Columns { columns, column_types: column_types.clone() })?;
 
     let mut stream = result
         .stream::<mysql_async::Row>()
@@ -5778,7 +6063,13 @@ async fn stream_query_result_text(
         }
         let row = row.map_err(|e| e.to_string())?;
         let values: Vec<serde_json::Value> = (0..row.len())
-            .map(|i| mysql_value_to_json_for_export(&row, i, spatial_as_wkb))
+            .map(|i| {
+                if column_types.get(i).is_some_and(|column_type| is_opaque_aggregate_state_type(column_type)) {
+                    Ok(mysql_value_to_json_with_effective_type(&row, i, column_types.get(i).map(String::as_str)))
+                } else {
+                    mysql_value_to_json_for_export(&row, i, spatial_as_wkb)
+                }
+            })
             .collect::<Result<_, _>>()?;
         on_item(MySqlQueryStreamItem::Row(values))?;
         rows_exported += 1;
@@ -5793,6 +6084,7 @@ async fn stream_query_result_prepared(
     row_limit: usize,
     cancelled: &AtomicBool,
     spatial_as_wkb: bool,
+    opaque_types: &DorisOpaqueColumnTypes,
     on_item: &mut impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
@@ -5800,8 +6092,8 @@ async fn stream_query_result_prepared(
     if columns.is_empty() {
         return Ok(0);
     }
-    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
-    on_item(MySqlQueryStreamItem::Columns { columns, column_types })?;
+    let column_types = effective_mysql_column_types(result.columns_ref(), opaque_types);
+    on_item(MySqlQueryStreamItem::Columns { columns, column_types: column_types.clone() })?;
 
     let mut stream = result
         .stream::<mysql_async::Row>()
@@ -5819,7 +6111,13 @@ async fn stream_query_result_prepared(
         }
         let row = row.map_err(|e| e.to_string())?;
         let values: Vec<serde_json::Value> = (0..row.len())
-            .map(|i| mysql_value_to_json_for_export(&row, i, spatial_as_wkb))
+            .map(|i| {
+                if column_types.get(i).is_some_and(|column_type| is_opaque_aggregate_state_type(column_type)) {
+                    Ok(mysql_value_to_json_with_effective_type(&row, i, column_types.get(i).map(String::as_str)))
+                } else {
+                    mysql_value_to_json_for_export(&row, i, spatial_as_wkb)
+                }
+            })
             .collect::<Result<_, _>>()?;
         on_item(MySqlQueryStreamItem::Row(values))?;
         rows_exported += 1;
@@ -5942,7 +6240,7 @@ pub async fn execute_transaction_statement_on_conn(
         let mut truncated = false;
         while let Some(row) = query.next().await.map_err(transaction_error_from_mysql_error)? {
             if rows.len() < row_limit {
-                let (values, srids) = mysql_row_to_json_with_srids(&row, &mut spatial_columns);
+                let (values, srids) = mysql_row_to_json_with_srids(&row, &mut spatial_columns, &column_types);
                 spatial_values.push(srids);
                 rows.push(values);
             } else {
@@ -6017,6 +6315,34 @@ pub async fn execute_query_on_conn_with_limits_progress(
     diagnostic_trace_id: Option<&str>,
     progress_clock: Option<&crate::execution::StreamProgressClock>,
 ) -> Result<MySqlQueryResult, String> {
+    let opaque_types = resolve_doris_opaque_column_types(conn, sql, dialect).await;
+    execute_query_on_conn_with_limits_progress_resolved(
+        conn,
+        sql,
+        bare,
+        max_rows,
+        max_result_bytes,
+        result_key_columns,
+        dialect,
+        diagnostic_trace_id,
+        progress_clock,
+        &opaque_types,
+    )
+    .await
+}
+
+async fn execute_query_on_conn_with_limits_progress_resolved(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: &[String],
+    dialect: MySqlQueryDialect,
+    diagnostic_trace_id: Option<&str>,
+    progress_clock: Option<&crate::execution::StreamProgressClock>,
+    opaque_types: &DorisOpaqueColumnTypes,
+) -> Result<MySqlQueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
@@ -6032,6 +6358,7 @@ pub async fn execute_query_on_conn_with_limits_progress(
                 diagnostic_trace_id,
                 start,
                 progress_clock,
+                opaque_types,
             )
             .await
         } else {
@@ -6044,6 +6371,7 @@ pub async fn execute_query_on_conn_with_limits_progress(
                 diagnostic_trace_id,
                 start,
                 progress_clock,
+                opaque_types,
             )
             .await
             {
@@ -6059,6 +6387,7 @@ pub async fn execute_query_on_conn_with_limits_progress(
                         diagnostic_trace_id,
                         start,
                         progress_clock,
+                        opaque_types,
                     )
                     .await
                 }
@@ -6157,6 +6486,7 @@ pub async fn execute_query_results_on_conn_with_limits(
     dialect: MySqlQueryDialect,
     diagnostic_trace_id: Option<&str>,
 ) -> Result<Vec<MySqlQueryResult>, String> {
+    let opaque_types = resolve_doris_opaque_column_types(conn, sql, dialect).await;
     if is_result_set_query(sql, dialect) && (bare || prefers_text_protocol_query(sql, dialect)) {
         let start = Instant::now();
         execute_result_sets_with_text_protocol_on_conn(
@@ -6168,10 +6498,11 @@ pub async fn execute_query_results_on_conn_with_limits(
             result_key_columns,
             diagnostic_trace_id,
             start,
+            &opaque_types,
         )
         .await
     } else {
-        execute_query_on_conn_with_limits(
+        execute_query_on_conn_with_limits_progress_resolved(
             conn,
             sql,
             bare,
@@ -6180,6 +6511,8 @@ pub async fn execute_query_results_on_conn_with_limits(
             result_key_columns,
             dialect,
             diagnostic_trace_id,
+            None,
+            &opaque_types,
         )
         .await
         .map(|result| vec![result])
@@ -8306,6 +8639,197 @@ mod tests {
     }
 
     #[test]
+    fn mysql_unknown_column_type_enrichment_preserves_information_schema_metadata() {
+        let mut columns = vec![ColumnInfo {
+            name: " state value".to_string(),
+            data_type: "unknown".to_string(),
+            resolved_schema: Some("analytics".to_string()),
+            is_nullable: true,
+            column_default: Some("seed".to_string()),
+            is_primary_key: true,
+            is_unique: true,
+            extra: Some("EXTRA".to_string()),
+            comment: Some("aggregate state".to_string()),
+            numeric_precision: Some(38),
+            numeric_scale: Some(4),
+            character_maximum_length: Some(512),
+            enum_values: Some(vec!["one".to_string()]),
+            character_set: Some("utf8mb4".to_string()),
+            collation: Some("utf8mb4_bin".to_string()),
+            metadata_capabilities: Some(ColumnMetadataCapabilities::all_supported()),
+        }];
+        let original = columns[0].clone();
+        let show_columns = vec![ColumnInfo {
+            name: " state value".to_string(),
+            data_type: "agg_state<group_concat(string)>".to_string(),
+            ..Default::default()
+        }];
+
+        enrich_unknown_mysql_column_types(&mut columns, &show_columns);
+
+        assert_eq!(columns[0].data_type, "agg_state<group_concat(string)>");
+        let mut expected = original;
+        expected.data_type = "agg_state<group_concat(string)>".to_string();
+        assert_eq!(serde_json::to_value(&columns[0]).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert_eq!(columns[0].metadata_capabilities, expected.metadata_capabilities);
+    }
+
+    #[test]
+    fn mysql_unknown_column_type_enrichment_is_exact_and_conservative() {
+        let mut columns = vec![
+            ColumnInfo { name: "known".to_string(), data_type: "varchar(20)".to_string(), ..Default::default() },
+            ColumnInfo { name: " missing".to_string(), data_type: "unknown".to_string(), ..Default::default() },
+            ColumnInfo { name: "blank".to_string(), data_type: "unknown".to_string(), ..Default::default() },
+            ColumnInfo { name: "still_unknown".to_string(), data_type: "unknown".to_string(), ..Default::default() },
+            ColumnInfo { name: " spaced".to_string(), data_type: "unknown".to_string(), ..Default::default() },
+        ];
+        let show_columns = vec![
+            ColumnInfo { name: "known".to_string(), data_type: "bigint".to_string(), ..Default::default() },
+            ColumnInfo { name: "missing".to_string(), data_type: "decimal(10,2)".to_string(), ..Default::default() },
+            ColumnInfo { name: "blank".to_string(), data_type: "   ".to_string(), ..Default::default() },
+            ColumnInfo { name: "still_unknown".to_string(), data_type: "UNKNOWN".to_string(), ..Default::default() },
+            ColumnInfo {
+                name: " spaced".to_string(),
+                data_type: "agg_state<sum(int)>".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        assert!(needs_mysql_column_type_enrichment(&columns));
+        enrich_unknown_mysql_column_types(&mut columns, &show_columns);
+
+        assert_eq!(columns[0].data_type, "varchar(20)");
+        assert_eq!(columns[1].data_type, "unknown");
+        assert_eq!(columns[2].data_type, "unknown");
+        assert_eq!(columns[3].data_type, "unknown");
+        assert_eq!(columns[4].data_type, "agg_state<sum(int)>");
+        assert!(!needs_mysql_column_type_enrichment(&[ColumnInfo {
+            name: "known".to_string(),
+            data_type: "varchar(20)".to_string(),
+            ..Default::default()
+        }]));
+    }
+
+    #[test]
+    fn doris_preflight_collects_static_sources_and_filters_ctes() {
+        let dialect = MySqlQueryDialect { is_doris: true, ..Default::default() };
+        let mut sources = doris_preflight_sources(
+            "WITH recent AS (SELECT * FROM analytics.events) SELECT * FROM recent JOIN `raw`.`states` s ON 1=1",
+            dialect,
+        )
+        .unwrap();
+        sources.sort_by(|left, right| (&left.database, &left.table).cmp(&(&right.database, &right.table)));
+        assert_eq!(
+            sources,
+            vec![
+                DorisSourceTable { database: Some("analytics".to_string()), table: "events".to_string() },
+                DorisSourceTable { database: Some("raw".to_string()), table: "states".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn doris_preflight_rejects_unsafe_or_observer_queries() {
+        let dialect = MySqlQueryDialect { is_doris: true, ..Default::default() };
+        for sql in [
+            "SELECT * FROM catalog.db.states",
+            "SELECT * FROM TABLE(generate_series(1, 2))",
+            "SELECT LAST_QUERY_ID() FROM states",
+            "SELECT sys.LAST_QUERY_ID() FROM states",
+            "WITH nested AS (SELECT LAST_QUERY_ID() FROM states) SELECT * FROM nested",
+            "WITH same_name AS (SELECT * FROM states) SELECT * FROM (WITH same_name AS (SELECT * FROM other_states) SELECT * FROM same_name) nested",
+            "SELECT * FROM states; SELECT * FROM other_states",
+        ] {
+            assert_eq!(doris_preflight_sources(sql, dialect), None, "{sql}");
+        }
+        assert_eq!(doris_preflight_sources("SELECT * FROM states", MySqlQueryDialect::default()), None);
+    }
+
+    #[test]
+    fn doris_query_enrichment_profile_is_narrow() {
+        assert!(MySqlQueryDialect::for_connection(DatabaseType::Doris, None).is_doris);
+        assert!(MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some("doris")).is_doris);
+        assert!(!MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some("selectdb")).is_doris);
+        assert!(!MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some("starrocks")).is_doris);
+        assert!(!MySqlQueryDialect::for_connection(DatabaseType::Mysql, None).is_doris);
+    }
+
+    #[test]
+    fn doris_effective_type_requires_complete_exact_origin() {
+        let direct = Column::new(ColumnType::MYSQL_TYPE_STRING)
+            .with_schema(b"analytics")
+            .with_org_table(b"states")
+            .with_name(b"renamed")
+            .with_org_name(b"v2")
+            .with_character_set(33);
+        let expression = Column::new(ColumnType::MYSQL_TYPE_STRING).with_name(b"v2").with_character_set(33);
+        let wrong_origin = Column::new(ColumnType::MYSQL_TYPE_STRING)
+            .with_schema(b"analytics")
+            .with_org_table(b"states")
+            .with_name(b"v2")
+            .with_org_name(b"ordinary_text")
+            .with_character_set(33);
+        let incompatible_wire = Column::new(ColumnType::MYSQL_TYPE_LONG)
+            .with_schema(b"analytics")
+            .with_org_table(b"states")
+            .with_name(b"v2")
+            .with_org_name(b"v2");
+        let opaque_types = HashMap::from([(
+            (b"analytics".to_vec(), b"states".to_vec(), b"v2".to_vec()),
+            "agg_state<group_concat(text)>".to_string(),
+        )]);
+
+        assert_eq!(
+            effective_mysql_column_types(&[direct, expression, wrong_origin, incompatible_wire], &opaque_types),
+            vec!["agg_state<group_concat(text)>", "char", "char", "int"]
+        );
+    }
+
+    #[test]
+    fn doris_duplicate_show_column_names_are_ambiguous() {
+        let key = (b"analytics".to_vec(), b"states".to_vec(), b"v2".to_vec());
+        let mut resolved = HashMap::new();
+        let mut ambiguous = HashSet::new();
+        insert_doris_opaque_column_type(&mut resolved, &mut ambiguous, key.clone(), "agg_state<sum(int)>".to_string());
+        insert_doris_opaque_column_type(&mut resolved, &mut ambiguous, key.clone(), "agg_state<max(int)>".to_string());
+        insert_doris_opaque_column_type(&mut resolved, &mut ambiguous, key.clone(), "agg_state<min(int)>".to_string());
+        assert!(!resolved.contains_key(&key));
+        assert!(ambiguous.contains(&key));
+    }
+
+    #[test]
+    fn doris_opaque_values_preserve_invalid_utf8_and_null() {
+        let column = Column::new(ColumnType::MYSQL_TYPE_STRING).with_name(b"v2").with_character_set(33);
+        let row = mysql_test_row_with_columns(vec![Value::Bytes(vec![0x00, 0xff, 0x01])], vec![column.clone()]);
+        assert_eq!(
+            mysql_value_to_json_with_effective_type(&row, 0, Some("agg_state<sum(int)>")),
+            serde_json::json!("0x00ff01")
+        );
+        assert!(ensure_doris_opaque_cells_fit_budget(&row, &["agg_state<sum(int)>".to_string()], Some(7))
+            .unwrap_err()
+            .contains("interactive byte budget"));
+
+        let modest = mysql_test_row_with_columns(vec![Value::Bytes(vec![0xff; 9 * 1024])], vec![column.clone()]);
+        assert!(ensure_doris_opaque_cells_fit_budget(&modest, &["agg_state<sum(int)>".to_string()], Some(20 * 1024),)
+            .is_ok());
+        assert!(ensure_doris_opaque_cells_fit_budget(&modest, &["agg_state<sum(int)>".to_string()], Some(18 * 1024),)
+            .is_err());
+
+        let null_row = mysql_test_row_with_columns(vec![Value::NULL], vec![column]);
+        assert_eq!(
+            mysql_value_to_json_with_effective_type(&null_row, 0, Some("agg_state<sum(int)>")),
+            serde_json::Value::Null
+        );
+
+        let unexpected =
+            mysql_test_row_with_columns(vec![Value::Int(42)], vec![Column::new(ColumnType::MYSQL_TYPE_LONG)]);
+        assert_eq!(
+            mysql_value_to_json_with_effective_type(&unexpected, 0, Some("agg_state<sum(int)>")),
+            serde_json::json!(42)
+        );
+    }
+
+    #[test]
     fn parse_mysql_enum_values_preserves_mysql_literal_edges() {
         assert_eq!(
             parse_mysql_enum_values("enum('pending','active','archived')"),
@@ -8416,7 +8940,7 @@ mod tests {
         let mut spatial_columns = mysql_spatial_column_builder(row.columns_ref());
 
         let (values, _srids, cells) =
-            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 7, Some(1024), &protected);
+            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 7, Some(1024), &protected, &[]);
 
         assert_eq!(values[0], serde_json::json!("k".repeat(2048)));
         assert_eq!(values[1].as_str().map(str::len), Some(1027));
@@ -8443,7 +8967,7 @@ mod tests {
         let mut spatial_columns = mysql_spatial_column_builder(row.columns_ref());
 
         let (values, _srids, cells) =
-            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(512), &protected);
+            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(512), &protected, &[]);
 
         assert_eq!(values[0], serde_json::json!("k".repeat(2048)));
         assert_eq!(cells, vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 4096 }]);
@@ -8480,7 +9004,7 @@ mod tests {
         let mut spatial_columns = mysql_spatial_column_builder(row.columns_ref());
 
         let (values, _srids, cells) =
-            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(256), &protected);
+            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(256), &protected, &[]);
 
         assert_eq!(values[0].as_str().map(str::len), Some(500));
         assert!(values[1].as_str().is_some_and(|value| value.ends_with("...")));
@@ -8500,7 +9024,7 @@ mod tests {
         let mut spatial_columns = mysql_spatial_column_builder(row.columns_ref());
 
         let (values, _srids, cells) =
-            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(512), &HashSet::new());
+            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(512), &HashSet::new(), &[]);
 
         let preview = values[0].as_str().unwrap();
         assert!(preview.starts_with("0xabab"));

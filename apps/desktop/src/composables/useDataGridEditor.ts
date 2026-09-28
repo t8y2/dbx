@@ -6,6 +6,7 @@ import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
 import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
+import { isOpaqueAggregateStateColumnType } from "@/lib/dataGrid/binaryCellDownload";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import type { GridNewRowMeta, GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
 import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
@@ -107,7 +108,7 @@ export interface DataGridSaveConfirmationRequest {
 }
 
 export interface UseDataGridEditorOptions {
-  result: ComputedRef<{ columns: string[]; rows: CellValue[][] }>;
+  result: ComputedRef<{ columns: string[]; rows: CellValue[][]; column_types?: string[] }>;
   editable: ComputedRef<boolean | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   connectionId: ComputedRef<string | undefined>;
@@ -1331,7 +1332,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return (columnIndex: number) => {
       const columnName = sourceColumns.value?.[columnIndex] ?? result.value.columns[columnIndex];
       if (columnName === undefined) return false;
-      return shouldClearClonedColumn(columnName, columnInfoByName.get(columnName.toLowerCase()));
+      const columnInfo = columnInfoByName.get(columnName.toLowerCase());
+      const resultType = result.value.column_types?.[columnIndex]?.trim();
+      if (isOpaqueAggregateStateColumnType(resultType || columnInfo?.data_type)) return true;
+      return shouldClearClonedColumn(columnName, columnInfo);
     };
   }
 

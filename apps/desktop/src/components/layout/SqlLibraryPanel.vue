@@ -2,10 +2,12 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, ChevronsDownUp, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, Loader2, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
+import { ArrowDownWideNarrow, ArrowRightLeft, ChevronsDownUp, Database, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Layers, Library, Loader2, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { useToast } from "@/composables/useToast";
@@ -20,7 +22,7 @@ import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
-import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
+import { savedSqlBatchErrorMessage, savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
@@ -28,6 +30,9 @@ import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/l
 import { uniqueSavedSqlExportFileName, exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent } from "@/lib/selection/orderedListSelection";
 import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { catalogDatabaseOptionsKey, normalizedQueryTabCatalog, queryCatalogSelectorVisible, useDatabaseOptions } from "@/composables/useDatabaseOptions";
+import { formatDatabaseLabel } from "@/lib/database/defaultDatabase";
+import { sqlExecutionTargetCapabilities, targetDefaultDatabase, targetUsesConnectionOnlyScope } from "@/lib/database/sqlExecutionTargetCapabilities";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 
 const { t } = useI18n();
@@ -36,6 +41,7 @@ const savedSqlStore = useSavedSqlStore();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 
 const emit = defineEmits<{
   close: [];
@@ -516,6 +522,140 @@ const allSelectableItems = computed(() => {
 
 const hasSelection = computed(() => selectedFileIds.value.size > 0 || selectedFolderIds.value.size > 0);
 const selectedCount = computed(() => selectedFileIds.value.size + selectedFolderIds.value.size);
+const showChangeTargetDialog = ref(false);
+const changeTargetFileIds = ref<string[]>([]);
+const changeTargetConnectionId = ref("");
+const changeTargetCatalog = ref("");
+const changeTargetDatabase = ref("");
+const changingTarget = ref(false);
+
+const changeTargetConnections = computed(() => connectionStore.connections.filter((connection) => !!sqlExecutionTargetCapabilities(connection)));
+const changeTargetConnection = computed(() => changeTargetConnections.value.find((connection) => connection.id === changeTargetConnectionId.value));
+const changeTargetCapabilities = computed(() => sqlExecutionTargetCapabilities(changeTargetConnection.value));
+const changeTargetCatalogs = computed(() => catalogOptions.value[changeTargetConnectionId.value] ?? []);
+const normalizedChangeTargetCatalog = computed(() => normalizedQueryTabCatalog(changeTargetCatalogs.value, changeTargetCatalog.value));
+const showChangeTargetCatalog = computed(() => {
+  if (!changeTargetCapabilities.value?.supportsCatalog) return false;
+  return changeTargetCatalogs.value.length === 0 || queryCatalogSelectorVisible(changeTargetCatalogs.value);
+});
+const changeTargetCatalogNames = computed(() => {
+  const names = changeTargetCatalogs.value.map((catalog) => catalog.name);
+  return changeTargetCatalog.value && !names.includes(changeTargetCatalog.value) ? [changeTargetCatalog.value, ...names] : names;
+});
+const changeTargetDatabaseCacheKey = computed(() => (normalizedChangeTargetCatalog.value ? catalogDatabaseOptionsKey(changeTargetConnectionId.value, normalizedChangeTargetCatalog.value) : changeTargetConnectionId.value));
+const changeTargetDatabaseNames = computed(() => {
+  const names = normalizedChangeTargetCatalog.value ? (catalogDatabaseOptions.value[changeTargetDatabaseCacheKey.value] ?? []) : (databaseOptions.value[changeTargetConnectionId.value] ?? []);
+  return changeTargetDatabase.value && !names.includes(changeTargetDatabase.value) ? [changeTargetDatabase.value, ...names] : names;
+});
+const changeTargetDatabaseLoading = computed(() => (normalizedChangeTargetCatalog.value ? (loadingCatalogDatabaseOptions.value[changeTargetDatabaseCacheKey.value] ?? false) : (loadingDatabaseOptions.value[changeTargetConnectionId.value] ?? false)));
+const showChangeTargetDatabase = computed(() => !!changeTargetCapabilities.value?.supportsDatabase && !targetUsesConnectionOnlyScope(changeTargetConnection.value));
+const canConfirmChangeTarget = computed(() => {
+  if (changingTarget.value || changeTargetFileIds.value.length === 0 || !changeTargetConnection.value || !changeTargetCapabilities.value) return false;
+  return !changeTargetCapabilities.value.databaseRequired || !!changeTargetDatabase.value;
+});
+
+function resetChangeTargetConnection(connectionId: string) {
+  const connection = changeTargetConnections.value.find((candidate) => candidate.id === connectionId);
+  changeTargetConnectionId.value = connection?.id ?? "";
+  changeTargetCatalog.value = "";
+  changeTargetDatabase.value = connection && !targetUsesConnectionOnlyScope(connection) ? targetDefaultDatabase(connection) : "";
+}
+
+function openChangeTarget(fileIds: readonly string[]) {
+  const selectedFiles = [...new Set(fileIds)].map((id) => savedSqlStore.getFile(id)).filter((file): file is SavedSqlFile => Boolean(file));
+  if (selectedFiles.length === 0) return;
+  changeTargetFileIds.value = selectedFiles.map((file) => file.id);
+
+  const first = selectedFiles[0]!;
+  const commonConnectionId = selectedFiles.every((file) => file.connectionId === first.connectionId) && changeTargetConnections.value.some((connection) => connection.id === first.connectionId) ? first.connectionId : "";
+  const fallbackConnectionId = [connectionStore.activeConnectionId, changeTargetConnections.value[0]?.id].find((id) => !!id && changeTargetConnections.value.some((connection) => connection.id === id)) ?? "";
+  resetChangeTargetConnection(commonConnectionId || fallbackConnectionId);
+
+  if (commonConnectionId) {
+    if (selectedFiles.every((file) => (file.catalog || "") === (first.catalog || ""))) changeTargetCatalog.value = first.catalog || "";
+    if (selectedFiles.every((file) => file.database === first.database)) changeTargetDatabase.value = first.database;
+  }
+  showChangeTargetDialog.value = true;
+}
+
+function cancelChangeTarget() {
+  if (changingTarget.value) return;
+  showChangeTargetDialog.value = false;
+  changeTargetFileIds.value = [];
+}
+
+async function loadChangeTargetCatalogs() {
+  if (!changeTargetConnection.value || !changeTargetCapabilities.value?.supportsCatalog) return;
+  try {
+    await loadCatalogOptions(changeTargetConnection.value.id);
+  } catch (error) {
+    toast(t("sqlLibrary.changeTargetLoadFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+  }
+}
+
+async function loadChangeTargetDatabases() {
+  const connection = changeTargetConnection.value;
+  if (!connection || targetUsesConnectionOnlyScope(connection)) return;
+  try {
+    if (normalizedChangeTargetCatalog.value) await loadCatalogDatabaseOptions(connection.id, normalizedChangeTargetCatalog.value);
+    else await loadDatabaseOptions(connection.id);
+  } catch (error) {
+    toast(t("sqlLibrary.changeTargetLoadFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+  }
+}
+
+function selectChangeTargetCatalog(catalog: string) {
+  if (changeTargetCatalog.value === catalog) return;
+  changeTargetCatalog.value = catalog;
+  changeTargetDatabase.value = "";
+}
+
+function changeTargetDatabaseLabel(database: string) {
+  return formatDatabaseLabel(changeTargetConnection.value, database, {
+    defaultDatabase: t("editor.defaultDatabase"),
+    noDatabase: t("editor.noDatabase"),
+  });
+}
+
+async function executeChangeTarget() {
+  if (!canConfirmChangeTarget.value) return;
+  const connection = changeTargetConnection.value;
+  if (!connection || !connectionStore.getConfig(connection.id)) {
+    cancelChangeTarget();
+    return;
+  }
+
+  changingTarget.value = true;
+  try {
+    const result = await savedSqlStore.updateFilesExecutionTarget(changeTargetFileIds.value, {
+      connectionId: connection.id,
+      database: targetUsesConnectionOnlyScope(connection) ? "" : changeTargetDatabase.value,
+      catalog: changeTargetCapabilities.value?.supportsCatalog ? normalizedChangeTargetCatalog.value : undefined,
+    });
+    showChangeTargetDialog.value = false;
+    changeTargetFileIds.value = [];
+
+    if (result.failures.length === 0) {
+      if (result.succeeded.length === 0) return;
+      clearSelection();
+      toast(t("sqlLibrary.changeTargetSuccess", { count: result.succeeded.length }), 2500);
+      return;
+    }
+
+    selectedFileIds.value = new Set(result.failures.map((failure) => failure.fileId));
+    selectedFolderIds.value = new Set();
+    const message = savedSqlBatchErrorMessage(result.failures, t);
+    if (result.succeeded.length > 0) {
+      toast(t("sqlLibrary.changeTargetPartial", { count: result.succeeded.length, failed: result.failures.length, message }), 8000);
+    } else {
+      toast(t("sqlLibrary.changeTargetFailed", { message }), 8000);
+    }
+  } catch (error) {
+    toast(t("sqlLibrary.changeTargetFailed", { message: savedSqlErrorMessage(error, t) }), 8000);
+  } finally {
+    changingTarget.value = false;
+  }
+}
 
 function clearSelection() {
   selectedFileIds.value = new Set();
@@ -861,6 +1001,12 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     const selectedFiles = Array.from(selectedFileIds.value);
     return [
       {
+        label: t("sqlLibrary.changeTarget", { count: selectedFiles.length }),
+        action: () => openChangeTarget(selectedFiles),
+        icon: ArrowRightLeft,
+        visible: selectedFiles.length > 0,
+      },
+      {
         label: t("sqlLibrary.moveSelectedToFolder", { count: selectedFiles.length }),
         icon: FolderClosed,
         children: folderMoveMenuItems(selectedFiles),
@@ -904,6 +1050,7 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
         icon: Play,
         disabled: !hasCurrentSavedSqlExecutionTarget.value,
       },
+      { label: t("sqlLibrary.changeTarget", { count: 1 }), action: () => openChangeTarget([target.id]), icon: ArrowRightLeft },
       { label: t("sqlLibrary.exportFile"), action: () => exportSingleFile(target), icon: Upload },
       { label: t("sqlLibrary.moveToFolder"), icon: FolderClosed, children: folderMoveMenuItems([target.id]) },
       { label: "", separator: true },
@@ -1475,6 +1622,81 @@ function showDropInside(targetId: string) {
         <DialogFooter>
           <Button variant="outline" size="sm" @click="showDeleteConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
           <Button variant="destructive" size="sm" @click="executeDelete">{{ t("dangerDialog.deleteConfirm") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog :open="showChangeTargetDialog" @update:open="(open) => (open ? (showChangeTargetDialog = true) : cancelChangeTarget())">
+      <DialogContent class="sm:max-w-[460px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("sqlLibrary.changeTargetTitle") }}</DialogTitle>
+          <DialogDescription>{{ t("sqlLibrary.changeTargetDescription", { count: changeTargetFileIds.length }) }}</DialogDescription>
+        </DialogHeader>
+        <div v-if="changeTargetConnections.length" class="space-y-4 py-2">
+          <div class="space-y-1.5">
+            <label class="text-sm font-medium">{{ t("sqlLibrary.targetConnection") }}</label>
+            <ConnectionTreeSelect
+              :model-value="changeTargetConnectionId"
+              :connections="changeTargetConnections"
+              :layout="connectionStore.sidebarLayout"
+              :placeholder="t('editor.selectConnection')"
+              :search-placeholder="t('editor.searchConnection')"
+              :empty-text="t('grid.noSearchResults')"
+              :disabled="changingTarget"
+              trigger-class="h-8 w-full max-w-none justify-between border border-input bg-background px-2.5 text-sm"
+              list-class="w-[410px] max-w-[calc(100vw-2rem)]"
+              @update:model-value="resetChangeTargetConnection"
+            />
+          </div>
+          <div v-if="showChangeTargetCatalog" class="space-y-1.5">
+            <label class="text-sm font-medium">{{ t("sqlLibrary.targetCatalog") }}</label>
+            <SearchableSelect
+              :model-value="changeTargetCatalog"
+              :options="changeTargetCatalogNames"
+              :placeholder="t('editor.selectCatalog')"
+              :search-placeholder="t('editor.searchCatalog')"
+              :empty-text="t('grid.noSearchResults')"
+              :loading-text="t('common.loading')"
+              :loading="loadingCatalogOptions[changeTargetConnectionId] || false"
+              :disabled="changingTarget"
+              @update:model-value="selectChangeTargetCatalog"
+              @update:open="(open: boolean) => open && loadChangeTargetCatalogs()"
+            >
+              <template #trigger-label="{ label, loading }">
+                <Layers class="h-3.5 w-3.5 shrink-0" />
+                <span class="truncate">{{ loading ? t("common.loading") : label }}</span>
+              </template>
+            </SearchableSelect>
+          </div>
+          <div v-if="showChangeTargetDatabase" class="space-y-1.5">
+            <label class="text-sm font-medium">{{ t("sqlLibrary.targetDatabase") }}</label>
+            <SearchableSelect
+              :model-value="changeTargetDatabase"
+              :options="changeTargetDatabaseNames"
+              :placeholder="t('editor.selectDatabase')"
+              :search-placeholder="t('editor.searchDatabase')"
+              :empty-text="t('grid.noSearchResults')"
+              :loading-text="t('common.loading')"
+              :loading="changeTargetDatabaseLoading"
+              :disabled="changingTarget || !changeTargetConnection"
+              :display-name="changeTargetDatabaseLabel"
+              @update:model-value="(database) => (changeTargetDatabase = database)"
+              @update:open="(open: boolean) => open && loadChangeTargetDatabases()"
+            >
+              <template #trigger-label="{ label, loading }">
+                <Database class="h-3.5 w-3.5 shrink-0" />
+                <span class="truncate">{{ loading ? t("common.loading") : label }}</span>
+              </template>
+            </SearchableSelect>
+          </div>
+        </div>
+        <p v-else class="py-4 text-sm text-muted-foreground">{{ t("sqlLibrary.noTargetConnection") }}</p>
+        <DialogFooter>
+          <Button variant="outline" size="sm" :disabled="changingTarget" @click="cancelChangeTarget">{{ t("dangerDialog.cancel") }}</Button>
+          <Button size="sm" :disabled="!canConfirmChangeTarget" @click="executeChangeTarget">
+            <Loader2 v-if="changingTarget" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            {{ t("sqlLibrary.changeTargetConfirm") }}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

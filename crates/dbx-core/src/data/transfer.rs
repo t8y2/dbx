@@ -43,6 +43,58 @@ static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::
 static MYSQL_COLLATE_CLAUSE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"(?i)\bCOLLATE\s*=?\s*([A-Za-z0-9_]+)\b").expect("valid MySQL COLLATE clause regex")
 });
+
+pub async fn ensure_transfer_source_types_supported(
+    state: &AppState,
+    request: &TransferRequest,
+    source_pool_key: &str,
+) -> Result<(), String> {
+    if matches!(request.content, TransferContent::StructureOnly) {
+        return Ok(());
+    }
+    let is_doris = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&request.source_connection_id)
+            .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
+    };
+    if !is_doris {
+        return Ok(());
+    }
+    for table in &request.tables {
+        let columns = get_columns_for_transfer(
+            state,
+            source_pool_key,
+            &request.source_connection_id,
+            &request.source_database,
+            &request.source_schema,
+            table,
+            request.source_catalog.as_deref(),
+        )
+        .await?;
+        ensure_transfer_columns_supported(request, true, table, &columns)?;
+    }
+    Ok(())
+}
+
+fn ensure_transfer_columns_supported(
+    request: &TransferRequest,
+    is_doris_source: bool,
+    table: &str,
+    columns: &[db::ColumnInfo],
+) -> Result<(), String> {
+    if matches!(request.content, TransferContent::StructureOnly) || !is_doris_source {
+        return Ok(());
+    }
+    if let Some(column) = columns.iter().find(|column| crate::types::is_opaque_aggregate_state_type(&column.data_type))
+    {
+        return Err(format!(
+            "Data transfer does not support Doris aggregate-state column `{}` in table `{table}`; export a representation format or use explicit Doris state functions instead",
+            column.name
+        ));
+    }
+    Ok(())
+}
 // An inline FK constraint *definition line*: an optional `CONSTRAINT <name>`
 // prefix followed by `FOREIGN KEY (`. Anchored to the line start so column
 // definitions whose COMMENT/DEFAULT strings mention "foreign key" never match.
@@ -68,7 +120,7 @@ impl SqlBatchLimits {
     pub(crate) fn for_database(db_type: &DatabaseType, requested_max_rows: usize) -> Self {
         let max_rows = requested_max_rows.max(1).min(match db_type {
             DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-            DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
             _ => usize::MAX,
         });
         let target_sql_bytes = match db_type {
@@ -2887,6 +2939,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
         }
         serde_json::Value::String(s) => {
+            if let Some(json_array_literal) = format_starrocks_json_array_sql_literal(s, db_type, column_type) {
+                return json_array_literal;
+            }
             if let Some(integer_literal) = normalize_integer_literal(s, db_type, column_type) {
                 return integer_literal;
             }
@@ -2954,6 +3009,30 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
         }
     }
+}
+
+fn format_starrocks_json_array_sql_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if *db_type != DatabaseType::StarRocks || !column_type.is_some_and(is_starrocks_json_array_type) {
+        return None;
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(value.trim()).ok()?;
+    if !parsed.is_array() {
+        return None;
+    }
+    let json = parsed.to_string().replace('\\', "\\\\").replace('\'', "''");
+    Some(format!("CAST(PARSE_JSON('{json}') AS ARRAY<JSON>)"))
+}
+
+fn is_starrocks_json_array_type(column_type: &str) -> bool {
+    column_type
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>()
+        .eq_ignore_ascii_case("array<json>")
 }
 
 fn is_mysql_bit_type(column_type: &str) -> bool {
@@ -3841,7 +3920,12 @@ impl InsertSqlTemplate {
             };
         Self {
             standard_prefix: format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n"),
-            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle)
+            // OceanBase's Oracle mode rejects the comma-separated multi-row VALUES form
+            // just like Oracle itself, but it does implement Oracle's multi-table
+            // `INSERT ALL ... SELECT 1 FROM dual` syntax, so it shares this template.
+            // Without it the importer falls back to single-row INSERTs (one network
+            // round trip per row), which makes CSV imports orders of magnitude slower.
+            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
                 .then(|| format!("INTO {full_table} ({col_list}) VALUES ")),
             // Xugu accepts consecutive row constructors (`VALUES (...) (...)`) but rejects
             // the comma-separated multi-row form emitted by the generic template.
@@ -4317,6 +4401,9 @@ fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
         (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo, _) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
+        // The INSERT ALL template is shared with OceanBase's Oracle mode, so its
+        // append/overwrite batches must clamp to the same per-statement row count.
+        (DatabaseType::OceanbaseOracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
@@ -4735,7 +4822,7 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
 
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -4916,7 +5003,7 @@ fn generate_insert_sql_batches_from_value_rows(
 
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -6206,6 +6293,22 @@ fn transfer_pool_error_action(
     }
 }
 
+/// A structured Agent quarantine makes the current logical session unusable, but
+/// does not authorize replaying the operation whose outcome is unknown. Prepare a
+/// replacement only for later transfer work. Keep legacy/untyped failures and
+/// runtime replacement on their existing, more conservative paths.
+fn should_prepare_fresh_agent_transfer_session(db_type: Option<DatabaseType>, error: &str) -> bool {
+    if !db_type.is_some_and(|db_type| crate::database_capabilities::is_agent_type(&db_type)) {
+        return false;
+    }
+    matches!(
+        crate::db::agent_driver::try_agent_error_from_legacy(error),
+        Some(crate::db::agent_driver::AgentCallError::Structured { context, .. })
+            if context.session_disposition
+                == crate::db::agent_driver::AgentSessionDisposition::Quarantine
+    )
+}
+
 async fn transfer_pool_context(
     state: &AppState,
     pool_key: &str,
@@ -6264,17 +6367,36 @@ async fn execute_on_pool_with_options(
                 // caller isn't handed a known-dead connection; this never retries
                 // the failed statement above, only prepares the pool for
                 // whichever statement runs next.
-                if pool_error_action(db_type, error) == PoolErrorAction::ReconnectAndRetry {
+                let prepare_agent_session = should_prepare_fresh_agent_transfer_session(db_type, error);
+                if pool_error_action(db_type, error) == PoolErrorAction::ReconnectAndRetry || prepare_agent_session {
                     if let Some(connection_id) = connection_id.as_deref() {
                         let catalog = catalog_from_pool_key(&current_pool_key).map(str::to_string);
-                        let _ = state
-                            .reconnect_pool_for_session_with_catalog(
-                                connection_id,
-                                database.as_deref(),
-                                catalog.as_deref(),
-                                client_session_id.as_deref(),
-                            )
-                            .await;
+                        let recovery = if prepare_agent_session {
+                            state
+                                .get_or_create_pool_for_session_with_catalog(
+                                    connection_id,
+                                    database.as_deref(),
+                                    catalog.as_deref(),
+                                    client_session_id.as_deref(),
+                                )
+                                .await
+                        } else {
+                            state
+                                .reconnect_pool_for_session_with_catalog(
+                                    connection_id,
+                                    database.as_deref(),
+                                    catalog.as_deref(),
+                                    client_session_id.as_deref(),
+                                )
+                                .await
+                        };
+                        if let Err(reconnect_error) = recovery {
+                            // Preserve the failed operation's original error and unknown
+                            // outcome. The replacement is only for later transfer work.
+                            log::warn!(
+                                "[transfer] failed to prepare a fresh pool after discarding '{current_pool_key}': {reconnect_error}"
+                            );
+                        }
                     }
                 }
                 return result;
@@ -8840,6 +8962,14 @@ pub async fn rename_tables_to_backup<F>(
 where
     F: FnMut(TransferProgress),
 {
+    let source_pool_key = ensure_transfer_pool(
+        state,
+        &request.source_connection_id,
+        &request.source_database,
+        request.source_catalog.as_deref(),
+    )
+    .await?;
+    ensure_transfer_source_types_supported(state, request, &source_pool_key).await?;
     let total_tables = tables.len();
 
     // Resolve target names first so the fail-fast check below sees the names that will
@@ -9418,6 +9548,14 @@ where
     if columns.is_empty() {
         return Err(format!("No columns found for table {table}"));
     }
+
+    let is_doris_source = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&request.source_connection_id)
+            .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
+    };
+    ensure_transfer_columns_supported(request, is_doris_source, table, &columns)?;
 
     let writable_columns = writable_transfer_columns(&columns, source_db_type, target_db_type);
     let default_rows_only = mysql_generated_only_transfer(&columns, source_db_type, target_db_type);
@@ -10826,6 +10964,319 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn fake_transfer_agent_state(
+        error_category: &str,
+        error_message: &str,
+        vendor_code: i32,
+        fail_reopen: bool,
+    ) -> (AppState, std::path::PathBuf, std::path::PathBuf, String) {
+        fake_transfer_agent_state_with_proxy(error_category, error_message, vendor_code, fail_reopen, false).await
+    }
+
+    async fn fake_transfer_agent_state_with_proxy(
+        error_category: &str,
+        error_message: &str,
+        vendor_code: i32,
+        fail_reopen: bool,
+        use_proxy: bool,
+    ) -> (AppState, std::path::PathBuf, std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("dbx-transfer-agent-recovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            dir.join("plugins"),
+            dir.join("agents"),
+            "0.0.0-test",
+        );
+        let script_path = dir.join("agent.py");
+        let trace_path = dir.join("trace.jsonl");
+        let trace_json = serde_json::to_string(&trace_path.to_string_lossy()).unwrap();
+        let category_json = serde_json::to_string(error_category).unwrap();
+        let message_json = serde_json::to_string(error_message).unwrap();
+        let fail_reopen = if fail_reopen { "True" } else { "False" };
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import json, pathlib, sys
+trace = pathlib.Path({trace_json})
+category = {category_json}
+message = {message_json}
+vendor_code = {vendor_code}
+fail_reopen = {fail_reopen}
+open_count = 0
+execute_count = 0
+
+def record(req):
+    with trace.open('a', encoding='utf-8') as output:
+        output.write(json.dumps({{
+            'method': req['method'],
+            'session': req.get('params', {{}}).get('agentSessionId'),
+            'sql': req.get('params', {{}}).get('sql')
+        }}) + '\n')
+
+def structured_error(req, *, error_category, error_message, error_vendor_code, disposition, stage, outcome, retryable):
+    return {{
+        'jsonrpc': '2.0',
+        'id': req['id'],
+        'error': {{
+            'code': -1,
+            'message': error_message,
+            'data': {{
+                'contractVersion': 1,
+                'category': error_category,
+                'retryable': retryable,
+                'sessionDisposition': disposition,
+                'stage': stage,
+                'operationOutcome': outcome,
+                'agentSessionId': req.get('params', {{}}).get('agentSessionId'),
+                'sqlState': 'HY000',
+                'vendorCode': error_vendor_code,
+                'exceptionClass': 'java.sql.SQLTransientConnectionException'
+            }}
+        }}
+    }}
+
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    record(req)
+    method = req['method']
+    if method == 'handshake':
+        response = {{
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'result': {{
+                'protocolVersion': 2,
+                'agentProtocolVersion': 2,
+                'capabilities': ['multi_session', 'structured_error_v1', 'query']
+            }}
+        }}
+    elif method == 'open_session':
+        open_count += 1
+        if fail_reopen and open_count > 1:
+            response = structured_error(
+                req,
+                error_category='connection',
+                error_message='injected replacement open failure',
+                error_vendor_code=0,
+                disposition='keep',
+                stage='connect',
+                outcome='not_started',
+                retryable=True
+            )
+        else:
+            response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': {{'ok': True}}}}
+    elif method == 'execute_query':
+        execute_count += 1
+        if execute_count == 1:
+            response = structured_error(
+                req,
+                error_category=category,
+                error_message=message,
+                error_vendor_code=vendor_code,
+                disposition='quarantine' if category != 'sql' else 'keep',
+                stage='execute',
+                outcome='unknown',
+                retryable=False
+            )
+        else:
+            response = {{
+                'jsonrpc': '2.0',
+                'id': req['id'],
+                'result': {{
+                    'columns': [], 'column_types': [], 'column_sortables': [], 'rows': [],
+                    'affected_rows': 1, 'execution_time_ms': 1, 'truncated': False,
+                    'session_id': None, 'has_more': False
+                }}
+            }}
+    else:
+        response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': {{'ok': True}}}}
+    print(json.dumps(response), flush=True)
+"#
+            ),
+        )
+        .unwrap();
+
+        let launch_config = state.agent_manager.driver_launch_config_path("oceanbase-oracle");
+        std::fs::create_dir_all(launch_config.parent().unwrap()).unwrap();
+        std::fs::write(
+            launch_config,
+            serde_json::to_vec(&json!({
+                "command": if cfg!(windows) { "python" } else { "python3" },
+                "args": [script_path.to_string_lossy()],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut config = jdbc_transfer_config(
+            "jdbc:oceanbase://127.0.0.1:2883/tenant",
+            "com.oceanbase.jdbc.Driver",
+            "oceanbase-oracle",
+        );
+        config.id = "ob-transfer".to_string();
+        config.db_type = DatabaseType::OceanbaseOracle;
+        config.host = "127.0.0.1".to_string();
+        config.port = 2883;
+        config.database = Some("tenant".to_string());
+        config.keepalive_interval_secs = 0;
+        if use_proxy {
+            config.transport_layers = vec![crate::models::connection::TransportLayerConfig::Proxy(
+                crate::models::connection::ProxyTunnelConfig {
+                    profile_id: String::new(),
+                    id: "transfer-proxy".to_string(),
+                    name: String::new(),
+                    enabled: true,
+                    proxy_type: crate::models::connection::ProxyType::Socks5,
+                    host: "127.0.0.1".to_string(),
+                    port: 65000,
+                    username: String::new(),
+                    password: String::new(),
+                    test_target: None,
+                },
+            )];
+        }
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let pool_key =
+            state.get_or_create_pool_for_session("ob-transfer", Some("tenant"), Some("transfer-client")).await.unwrap();
+        assert!(pool_key.contains(":session:transfer-client"), "{pool_key}");
+        (state, dir, trace_path, pool_key)
+    }
+
+    fn fake_transfer_agent_trace(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn structured_agent_quarantine_prepares_a_fresh_session_without_replaying_the_failed_write() {
+        for (category, message, vendor_code) in [
+            ("connection", "OBE-01843: not a valid month", 1843),
+            (
+                "timeout",
+                "OBE-00600: internal error code, arguments: -4012, Timeout, query has reached the maximum query timeout",
+                600,
+            ),
+            ("canceled", "Query canceled", 0),
+        ] {
+            let (state, dir, trace_path, pool_key) =
+                fake_transfer_agent_state(category, message, vendor_code, false).await;
+
+            let first_sql = "INSERT INTO target_table VALUES (1)";
+            let first_error = execute_on_pool(&state, &pool_key, first_sql).await.unwrap_err();
+            let replacement_present = state.pool_handle(&pool_key).await.is_some();
+            let second_sql = "CREATE TABLE next_table (id NUMBER)";
+            let second_result = execute_on_pool(&state, &pool_key, second_sql).await;
+            let trace = fake_transfer_agent_trace(&trace_path);
+
+            state.shutdown(std::time::Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(first_error.contains(message), "{first_error}");
+            assert!(first_error.contains("\"sqlState\":\"HY000\""), "{first_error}");
+            assert!(first_error.contains(&format!("\"vendorCode\":{vendor_code}")), "{first_error}");
+            assert!(replacement_present, "replacement was not published under {pool_key}");
+            assert!(second_result.is_ok(), "next transfer operation did not get a fresh session: {second_result:?}");
+            let opens = trace.iter().filter(|entry| entry["method"] == "open_session").collect::<Vec<_>>();
+            let closes = trace.iter().filter(|entry| entry["method"] == "close_session").collect::<Vec<_>>();
+            let executes = trace.iter().filter(|entry| entry["method"] == "execute_query").collect::<Vec<_>>();
+            assert_eq!(opens.len(), 2, "trace: {trace:?}");
+            assert_eq!(closes.len(), 1, "trace: {trace:?}");
+            assert_eq!(executes.len(), 2, "trace: {trace:?}");
+            assert_eq!(executes.iter().filter(|entry| entry["sql"] == first_sql).count(), 1, "trace: {trace:?}");
+            assert_eq!(executes.iter().filter(|entry| entry["sql"] == second_sql).count(), 1, "trace: {trace:?}");
+            assert_eq!(closes[0]["session"], executes[0]["session"], "trace: {trace:?}");
+            assert_ne!(executes[0]["session"], executes[1]["session"], "trace: {trace:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_agent_quarantine_preserves_shared_transport_and_manual_session() {
+        let (state, dir, trace_path, pool_key) =
+            fake_transfer_agent_state_with_proxy("connection", "OBE-01843: not a valid month", 1843, false, true).await;
+        let transport_key = "ob-transfer:transport:0";
+        let initial_port = state.proxy_tunnels.local_port(transport_key).await.unwrap();
+        let manual_pool_key = state
+            .get_or_create_pool_for_session("ob-transfer", Some("tenant"), Some("manual-txn-protected"))
+            .await
+            .unwrap();
+        let manual_pool = state.pool_handle(&manual_pool_key).await.unwrap();
+        let PoolKind::Agent(manual_client) = manual_pool else {
+            panic!("expected manual Agent session");
+        };
+        manual_client.lock().await.begin_manual_transaction::<serde_json::Value>(None).await.unwrap();
+
+        let failed_sql = "INSERT INTO target_table VALUES (1)";
+        let failed_result = execute_on_pool(&state, &pool_key, failed_sql).await;
+        let manual_still_routed = state.pool_handle(&manual_pool_key).await.is_some();
+        let retained_port = state.proxy_tunnels.local_port(transport_key).await;
+        let next_result = execute_on_pool(&state, &pool_key, "CREATE TABLE next_table (id NUMBER)").await;
+        let rollback_result = manual_client.lock().await.rollback_manual_transaction::<serde_json::Value>().await;
+        let trace = fake_transfer_agent_trace(&trace_path);
+
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(failed_result.unwrap_err().contains("OBE-01843"));
+        assert!(manual_still_routed, "recovery removed a sibling manual-transaction pool");
+        assert_eq!(retained_port, Some(initial_port), "recovery reset the shared transport");
+        assert!(next_result.is_ok(), "next transfer operation failed: {next_result:?}");
+        assert!(rollback_result.is_ok(), "manual transaction was lost: {rollback_result:?}");
+        let manual_session =
+            &trace.iter().find(|entry| entry["method"] == "begin_manual_transaction").unwrap()["session"];
+        assert!(trace.iter().all(|entry| entry["method"] != "close_session" || &entry["session"] != manual_session));
+        assert_eq!(
+            trace.iter().filter(|entry| entry["method"] == "execute_query" && entry["sql"] == failed_sql).count(),
+            1,
+            "failed write was replayed: {trace:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_agent_sql_keep_reuses_the_session() {
+        let (state, dir, trace_path, pool_key) = fake_transfer_agent_state("sql", "syntax error", 900, false).await;
+
+        let first_sql = "INSERT INTO target_table VALUES (1)";
+        let first_error = execute_on_pool(&state, &pool_key, first_sql).await.unwrap_err();
+        let second_sql = "CREATE TABLE next_table (id NUMBER)";
+        let second_result = execute_on_pool(&state, &pool_key, second_sql).await;
+        let trace = fake_transfer_agent_trace(&trace_path);
+
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(first_error.contains("syntax error"), "{first_error}");
+        assert!(second_result.is_ok(), "{second_result:?}");
+        let opens = trace.iter().filter(|entry| entry["method"] == "open_session").collect::<Vec<_>>();
+        let closes = trace.iter().filter(|entry| entry["method"] == "close_session").collect::<Vec<_>>();
+        let executes = trace.iter().filter(|entry| entry["method"] == "execute_query").collect::<Vec<_>>();
+        assert_eq!(opens.len(), 1, "trace: {trace:?}");
+        assert!(closes.is_empty(), "trace: {trace:?}");
+        assert_eq!(executes.len(), 2, "trace: {trace:?}");
+        assert_eq!(executes[0]["session"], executes[1]["session"], "trace: {trace:?}");
+    }
+
+    #[tokio::test]
+    async fn structured_agent_quarantine_recreation_failure_preserves_the_original_error() {
+        let original_message = "OBE-01843: not a valid month";
+        let (state, dir, trace_path, pool_key) =
+            fake_transfer_agent_state("connection", original_message, 1843, true).await;
+
+        let first_error = execute_on_pool(&state, &pool_key, "INSERT INTO target_table VALUES (1)").await.unwrap_err();
+        let trace = fake_transfer_agent_trace(&trace_path);
+        let pool_missing = state.pool_handle(&pool_key).await.is_none();
+
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(first_error.contains(original_message), "{first_error}");
+        assert!(!first_error.contains("injected replacement open failure"), "{first_error}");
+        assert_eq!(trace.iter().filter(|entry| entry["method"] == "execute_query").count(), 1, "trace: {trace:?}");
+        assert_eq!(trace.iter().filter(|entry| entry["method"] == "open_session").count(), 2, "trace: {trace:?}");
+        assert!(pool_missing);
+    }
 
     #[test]
     fn transfer_query_timeout_errors_are_classified() {
@@ -12619,6 +13070,36 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             drop_target_before_create: false,
             drop_target_confirmed: false,
         }
+    }
+
+    #[test]
+    fn transfer_column_validation_rejects_opaque_state_for_actual_doris_table() {
+        let request = test_transfer_request(vec!["first_state", "actual_state"]);
+        let columns = vec![test_column("id", "int"), test_column("v2", "agg_state<group_concat(text)>")];
+
+        let error = ensure_transfer_columns_supported(&request, true, "actual_state", &columns).unwrap_err();
+
+        assert!(error.contains("`v2`"), "{error}");
+        assert!(error.contains("`actual_state`"), "{error}");
+        assert!(!error.contains("first_state"), "{error}");
+    }
+
+    #[test]
+    fn transfer_column_validation_is_doris_data_only_and_structure_aware() {
+        let columns = vec![test_column("v2", "AGG_STATE<SUM(INT)>")];
+        let data_request = test_transfer_request(vec!["states"]);
+        assert!(ensure_transfer_columns_supported(&data_request, false, "states", &columns).is_ok());
+
+        let structure_request = TransferRequest { content: TransferContent::StructureOnly, ..data_request };
+        assert!(ensure_transfer_columns_supported(&structure_request, true, "states", &columns).is_ok());
+    }
+
+    #[test]
+    fn transfer_column_validation_allows_regular_doris_columns() {
+        let request = test_transfer_request(vec!["items"]);
+        let columns = vec![test_column("id", "bigint"), test_column("name", "varchar(64)")];
+
+        assert!(ensure_transfer_columns_supported(&request, true, "items", &columns).is_ok());
     }
 
     #[test]
@@ -16275,6 +16756,74 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn oceanbase_oracle_multi_row_insert_uses_insert_all() {
+        // OceanBase's Oracle mode rejects multi-row VALUES but implements Oracle's
+        // INSERT ALL, so the import/transfer generators must batch through it instead
+        // of degrading to one INSERT per row.
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Brien")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT ALL
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (1, 'Ada')
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (2, 'O''Brien')
+SELECT 1 FROM dual"#
+        );
+        assert!(!sql.contains("),\n("));
+    }
+
+    #[test]
+    fn oceanbase_oracle_single_row_insert_keeps_values_shape() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES
+(1, 'Ada')"#
+        );
+    }
+
+    #[test]
+    fn oceanbase_oracle_transfer_write_batches_limit_insert_all_rows() {
+        let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("id")],
+            &[Some(String::from("number"))],
+            &rows,
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            &[],
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].matches("\nINTO ").count(), MAX_ORACLE_INSERT_ALL_ROWS);
+        assert!(statements[0].starts_with("INSERT ALL\nINTO "));
+        assert!(statements[0].ends_with("SELECT 1 FROM dual"));
+    }
+
+    #[test]
     fn oracle_transfer_write_batches_limit_insert_all_rows() {
         let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
         let statements = generate_transfer_write_sql_batches(
@@ -16939,6 +17488,23 @@ SELECT 1 FROM dual"#
             ),
             PoolErrorAction::Discard
         );
+    }
+
+    #[test]
+    fn fresh_transfer_session_preparation_is_scoped_to_structured_agent_quarantine() {
+        let quarantine = "Agent RPC error (-1): lost\nDBX_AGENT_ERROR_DATA:{\"contractVersion\":1,\"category\":\"connection\",\"retryable\":false,\"sessionDisposition\":\"quarantine\",\"stage\":\"execute\",\"operationOutcome\":\"unknown\"}";
+        let keep = "Agent RPC error (-1): syntax error\nDBX_AGENT_ERROR_DATA:{\"contractVersion\":1,\"category\":\"sql\",\"retryable\":false,\"sessionDisposition\":\"keep\",\"stage\":\"execute\",\"operationOutcome\":\"unknown\"}";
+        let replace_runtime = "Agent RPC error (-1): exhausted\nDBX_AGENT_ERROR_DATA:{\"contractVersion\":1,\"category\":\"resource\",\"retryable\":false,\"sessionDisposition\":\"replace_runtime\",\"stage\":\"execute\",\"operationOutcome\":\"unknown\"}";
+
+        assert!(should_prepare_fresh_agent_transfer_session(Some(DatabaseType::OceanbaseOracle), quarantine));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::Jdbc), quarantine));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::Postgres), quarantine));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::OceanbaseOracle), keep));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::OceanbaseOracle), replace_runtime));
+        assert!(!should_prepare_fresh_agent_transfer_session(
+            Some(DatabaseType::OceanbaseOracle),
+            "Agent RPC error (-1): legacy connection error"
+        ));
     }
 
     #[test]

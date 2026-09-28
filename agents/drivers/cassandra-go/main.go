@@ -365,7 +365,12 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_object_source":
-		return nil, false, errors.New("object source is not supported by Cassandra")
+		result, err := s.getObjectSource(
+			firstNonEmpty(stringParam(params, "schema"), stringParam(params, "database"), s.defaultKeyspace()),
+			firstNonEmpty(stringParam(params, "name"), stringParam(params, "table")),
+			stringParam(params, "object_type"),
+		)
+		return result, false, err
 	case "get_table_ddl":
 		result, err := s.getTableDDL(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err

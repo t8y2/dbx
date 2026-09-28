@@ -2,6 +2,7 @@ package com.dbx.agent.dameng;
 
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.DatabaseInfo;
+import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
@@ -188,17 +189,25 @@ class DamengAgentMetadataTest {
     }
 
     @Test
-    void disablesParallelExecutionForIndexMetadataQuery() {
+    void usesBoundedSystemCatalogForIndexMetadata() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
 
         agent.listIndexes("APP", "USERS");
 
         String indexesSql = JdbcMetadataSqlFake.statements.stream()
-            .filter(sql -> sql.contains("ALL_INDEXES"))
+            .filter(sql -> sql.contains("SYS.SYSINDEXES"))
             .findFirst()
             .orElseThrow();
         Assertions.assertTrue(indexesSql.startsWith("SELECT /*+ PARALLEL(1) */"), indexesSql);
+        Assertions.assertTrue(indexesSql.contains("schema_object.NAME = ?"), indexesSql);
+        Assertions.assertTrue(indexesSql.contains("table_object.NAME = ?"), indexesSql);
+        Assertions.assertTrue(indexesSql.contains("SF_COL_IS_IDX_KEY"), indexesSql);
+        Assertions.assertTrue(indexesSql.contains("SF_GET_INDEX_KEY_SEQ"), indexesSql);
+        Assertions.assertTrue(
+            JdbcMetadataSqlFake.statements.stream().noneMatch(sql -> sql.contains("ALL_INDEXES")),
+            String.join("\n", JdbcMetadataSqlFake.statements)
+        );
     }
 
     @Test
@@ -209,12 +218,15 @@ class DamengAgentMetadataTest {
         agent.listIndexes("APP", "USERS");
 
         String indexesSql = JdbcMetadataSqlFake.statements.stream()
-            .filter(sql -> sql.contains("ALL_INDEXES") && sql.contains("ALL_CONSTRAINTS"))
+            .filter(sql -> sql.contains("SYS.SYSINDEXES") && sql.contains("SYS.SYSCONS"))
             .findFirst()
             .orElseThrow();
-        Assertions.assertTrue(indexesSql.contains("AND c.CONSTRAINT_TYPE IN ('P', 'U')"), indexesSql);
+        Assertions.assertTrue(indexesSql.contains("constraint_metadata.TYPE$ IN ('P', 'U')"), indexesSql);
         Assertions.assertTrue(indexesSql.contains("AS CONSTRAINT_BACKED"), indexesSql);
-        Assertions.assertTrue(indexesSql.contains("CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK"), indexesSql);
+        Assertions.assertTrue(
+            indexesSql.contains("MAX(CASE WHEN constraint_metadata.TYPE$ = 'P' THEN 1 ELSE 0 END) AS IS_PK"),
+            indexesSql
+        );
     }
 
     @Test
@@ -222,10 +234,10 @@ class DamengAgentMetadataTest {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, indexMetadataConnection(List.of(
             // UNIQUE constraint (虚索引) / standalone CREATE UNIQUE INDEX (实索引) / plain index.
-            Arrays.asList("UX_USERS_EMAIL", "EMAIL", "UNIQUE", "0", "NORMAL", "1"),
-            Arrays.asList("UX_USERS_CODE", "CODE", "UNIQUE", "0", "NORMAL", "0"),
-            Arrays.asList("IDX_USERS_NAME", "NAME", "NONUNIQUE", "0", "NORMAL", "0"),
-            Arrays.asList("PK_USERS", "ID", "UNIQUE", "1", "NORMAL", "1")
+            Arrays.asList("UX_USERS_EMAIL", "EMAIL", "Y", "0", "BT", "1", 0),
+            Arrays.asList("UX_USERS_CODE", "CODE", "Y", "0", "BT", "0", 0),
+            Arrays.asList("IDX_USERS_NAME", "NAME", "N", "0", "BT", "0", 0),
+            Arrays.asList("PK_USERS", "ID", "Y", "1", "BT", "1", 4)
         )));
 
         List<IndexInfo> indexes = agent.listIndexes("APP", "USERS");
@@ -246,6 +258,142 @@ class DamengAgentMetadataTest {
             List.of(true, true, false, true),
             indexes.stream().map(IndexInfo::getIs_unique).toList()
         );
+        Assertions.assertEquals(
+            List.of("NORMAL", "NORMAL", "NORMAL", "NORMAL"),
+            indexes.stream().map(IndexInfo::getIndex_type).toList()
+        );
+    }
+
+    @Test
+    void fallsBackToDictionaryViewsForIndexMetadataWithoutSystemCatalogAccess() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, catalogFallbackConnection(
+            sqls,
+            "SYS.SYSINDEXES index_metadata",
+            List.of(),
+            new SQLException("no SYS index catalog privilege"),
+            "FROM ALL_INDEXES i",
+            List.of(Arrays.asList("IDX_USERS_NAME", "NAME", "NONUNIQUE", "0", "NORMAL", "0"))
+        ));
+
+        List<IndexInfo> indexes = agent.listIndexes("APP", "USERS");
+
+        Assertions.assertEquals(List.of("IDX_USERS_NAME"), indexes.stream().map(IndexInfo::getName).toList());
+        Assertions.assertTrue(indexOfSql(sqls, "SYS.SYSINDEXES") >= 0, String.join("\n", sqls));
+        Assertions.assertTrue(
+            indexOfSql(sqls, "ALL_INDEXES") > indexOfSql(sqls, "SYS.SYSINDEXES"),
+            String.join("\n", sqls)
+        );
+    }
+
+    @Test
+    void acceptsEmptySystemIndexMetadataWithoutRunningExpensiveFallback() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, catalogFallbackConnection(
+            sqls,
+            "SYS.SYSINDEXES index_metadata",
+            List.of(),
+            null,
+            "FROM ALL_INDEXES i",
+            List.of(Arrays.asList("SHOULD_NOT_LOAD", "ID", "NONUNIQUE", "0", "NORMAL", "0"))
+        ));
+
+        Assertions.assertTrue(agent.listIndexes("APP", "USERS").isEmpty());
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("ALL_INDEXES")), String.join("\n", sqls));
+    }
+
+    @Test
+    void usesBoundedSystemCatalogForForeignKeyMetadata() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, catalogFallbackConnection(
+            sqls,
+            "SYS.SYSCONS foreign_key",
+            List.of(
+                List.of("FK_ORDER_CUSTOMER", "TENANT_ID", "CUSTOMERS", "TENANT_ID"),
+                List.of("FK_ORDER_CUSTOMER", "CUSTOMER_ID", "CUSTOMERS", "ID")
+            ),
+            null,
+            "FROM ALL_CONSTRAINTS c",
+            List.of()
+        ));
+
+        List<ForeignKeyInfo> foreignKeys = agent.listForeignKeys("APP", "ORDERS");
+
+        Assertions.assertEquals(List.of("TENANT_ID", "CUSTOMER_ID"), foreignKeys.stream().map(ForeignKeyInfo::getColumn).toList());
+        Assertions.assertEquals(List.of("TENANT_ID", "ID"), foreignKeys.stream().map(ForeignKeyInfo::getRef_column).toList());
+        String sql = sqls.get(0);
+        Assertions.assertTrue(sql.contains("foreign_key.TABLEID = table_object.ID"), sql);
+        Assertions.assertTrue(sql.contains("foreign_key.FINDEXID"), sql);
+        Assertions.assertTrue(sql.contains("foreign_key.TYPE$ = 'F'"), sql);
+        Assertions.assertTrue(sql.contains("SF_GET_INDEX_KEY_SEQ"), sql);
+        Assertions.assertTrue(sql.contains("schema_object.NAME = ?"), sql);
+        Assertions.assertTrue(sql.contains("table_object.NAME = ?"), sql);
+        Assertions.assertTrue(sqls.stream().noneMatch(query -> query.contains("ALL_CONSTRAINTS")), String.join("\n", sqls));
+    }
+
+    @Test
+    void fallsBackToPositionMatchedDictionaryForeignKeysWithoutSystemCatalogAccess() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, catalogFallbackConnection(
+            sqls,
+            "SYS.SYSCONS foreign_key",
+            List.of(),
+            new SQLException("no SYS constraint catalog privilege"),
+            "FROM ALL_CONSTRAINTS c",
+            List.of(List.of("FK_ORDER_CUSTOMER", "CUSTOMER_ID", "CUSTOMERS", "ID"))
+        ));
+
+        List<ForeignKeyInfo> foreignKeys = agent.listForeignKeys("APP", "ORDERS");
+
+        Assertions.assertEquals(1, foreignKeys.size());
+        Assertions.assertEquals("FK_ORDER_CUSTOMER", foreignKeys.get(0).getName());
+        int systemQuery = indexOfSql(sqls, "SYS.SYSCONS foreign_key");
+        int fallbackQuery = indexOfSql(sqls, "ALL_CONSTRAINTS");
+        Assertions.assertTrue(fallbackQuery > systemQuery, String.join("\n", sqls));
+        Assertions.assertTrue(sqls.get(fallbackQuery).contains("cc.POSITION = rcc.POSITION"), sqls.get(fallbackQuery));
+    }
+
+    @Test
+    void acceptsEmptySystemForeignKeysWithoutRunningExpensiveFallback() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, catalogFallbackConnection(
+            sqls,
+            "SYS.SYSCONS foreign_key",
+            List.of(),
+            null,
+            "FROM ALL_CONSTRAINTS c",
+            List.of(List.of("SHOULD_NOT_LOAD", "ID", "PARENT", "ID"))
+        ));
+
+        Assertions.assertTrue(agent.listForeignKeys("APP", "ORDERS").isEmpty());
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("ALL_CONSTRAINTS")), String.join("\n", sqls));
+    }
+
+    @Test
+    void doesNotRetryForeignKeyCatalogAfterConnectionFailure() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, catalogFallbackConnection(
+            sqls,
+            "SYS.SYSCONS foreign_key",
+            List.of(),
+            new SQLNonTransientConnectionException("connection lost"),
+            "FROM ALL_CONSTRAINTS c",
+            List.of()
+        ));
+
+        RuntimeException error = Assertions.assertThrows(
+            RuntimeException.class,
+            () -> agent.listForeignKeys("APP", "ORDERS")
+        );
+
+        Assertions.assertEquals("connection lost", error.getCause().getMessage());
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("ALL_CONSTRAINTS")), String.join("\n", sqls));
     }
 
     @Test
@@ -2178,7 +2326,8 @@ class DamengAgentMetadataTest {
             List.of(
                 indexRow("IDX_USERS_NAME", "NAME", "N", "BT", 0),
                 indexRow("UX_USERS_EMAIL", "EMAIL", "Y", "BT", 0),
-                indexRow("IDX_USERS_GEO", "GEO", "N", "ST", 0)
+                indexRow("IDX_USERS_GEO", "GEO", "N", "ST", 0),
+                Arrays.asList("PK_USERS", "ID", "Y", "1", "BT", "1", 4)
             ),
             sqls
         );
@@ -2480,7 +2629,7 @@ class DamengAgentMetadataTest {
     }
 
     private static List<Object> indexRow(String name, String columns, String uniqueness, String indexType, int flags) {
-        return List.of(name, columns, uniqueness, indexType, flags);
+        return List.of(name, columns, uniqueness, "0", indexType, "0", flags);
     }
 
     private static List<List<Object>> dictionaryIndexRows(List<List<Object>> systemRows) {
@@ -2488,8 +2637,43 @@ class DamengAgentMetadataTest {
             row.get(0),
             row.get(1),
             "Y".equals(row.get(2)) ? "UNIQUE" : "NONUNIQUE",
-            "ST".equals(row.get(3)) ? "SPATIAL" : "NORMAL"
+            row.get(3),
+            "ST".equals(row.get(4)) ? "SPATIAL" : "NORMAL",
+            row.get(5)
         )).toList();
+    }
+
+    private static Connection catalogFallbackConnection(
+        List<String> sqls,
+        String systemQueryMarker,
+        List<List<Object>> systemRows,
+        SQLException systemError,
+        String fallbackQueryMarker,
+        List<List<Object>> fallbackRows
+    ) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                sqls.add(sql);
+                if (sql.contains(systemQueryMarker)) {
+                    return systemError == null
+                        ? metadataStatement(systemRows)
+                        : failingMetadataStatement(systemError);
+                }
+                if (sql.contains(fallbackQueryMarker)) {
+                    return metadataStatement(fallbackRows);
+                }
+                throw new AssertionError("Unexpected metadata query: " + sql);
+            }
+            if ("close".equals(name)) {
+                return null;
+            }
+            if ("isClosed".equals(name)) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
     }
 
     private static int indexOfSql(List<String> sqls, String fragment) {

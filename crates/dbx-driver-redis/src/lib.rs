@@ -43,7 +43,10 @@ const MAX_SAFE_INTEGER_CURSOR: u64 = (1 << 53) - 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisDatabaseInfo {
     pub db: u32,
-    pub keys: u64,
+    /// 该库的键数量。`None` 表示服务端无法给出可信数量：kvrocks 的 DBSIZE / INFO keyspace
+    /// 键数是异步统计的（要先执行 `DBSIZE SCAN`），未统计前一律返回 0，这里不把 0 当作事实。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,7 +302,30 @@ pub enum RedisValueData {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
     },
-    Unknown,
+    /// kvrocks 把位图实现成独立类型（`TYPE` 返回 `bitmap`），而 Redis 里 SETBIT 写入的
+    /// 就是普通字符串，所以这个分支只会在 kvrocks 一类兼容服务上出现。kvrocks 上
+    /// `GETRANGE`/`STRLEN` 对该类型会报 WRONGTYPE，只有 `GET` 能读到与 Redis 位序一致的
+    /// 原始字节，因此这里用 GET 取内容、用 BITCOUNT 取置位数量。
+    Bitmap {
+        content: RedisBlob,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+        /// `BITCOUNT` 得到的置位数量；命令不可用时为 None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        set_bits: Option<u64>,
+    },
+    /// kvrocks 的 HyperLogLog 独立类型（`TYPE` 返回 `hyperloglog`）：原始字节不可读，
+    /// 只能通过 `PFCOUNT` 展示基数估计。
+    #[serde(rename = "hyperloglog")]
+    HyperLogLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<u64>,
+    },
+    /// 服务端返回了 DBX 尚未支持的类型（如 kvrocks 的 `timeseries`/`TDIS-TYPE`）。
+    /// 带上原始类型名，前端据此给出明确提示，而不是渲染成空值。
+    Unknown { redis_type: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1284,15 +1310,15 @@ where
     let configured_count =
         redis::cmd("CONFIG").arg("GET").arg("databases").query_async(con).await.ok().and_then(parse_database_count);
 
-    let keyspace_dbs = list_keyspace_databases(con).await.unwrap_or_default();
+    let keyspace_db_infos = list_keyspace_databases(con).await.unwrap_or_default();
     let database_count = configured_count.unwrap_or(DEFAULT_REDIS_DATABASES);
-    let max_db = keyspace_dbs.iter().map(|db| db.db).max().map(|db| db + 1).unwrap_or(0);
+    let max_db = keyspace_db_infos.iter().map(|db| db.db).max().map(|db| db + 1).unwrap_or(0);
     let visible_count = database_count.max(max_db).max(1);
     let keyspace_counts =
-        keyspace_dbs.into_iter().map(|db| (db.db, db.keys)).collect::<std::collections::HashMap<_, _>>();
+        keyspace_db_infos.into_iter().map(|db| (db.db, db.keys)).collect::<std::collections::HashMap<_, _>>();
 
     Ok((0..visible_count)
-        .map(|db| RedisDatabaseInfo { db, keys: keyspace_counts.get(&db).copied().unwrap_or(0) })
+        .map(|db| RedisDatabaseInfo { db, keys: keyspace_counts.get(&db).copied().flatten() })
         .collect())
 }
 
@@ -1318,16 +1344,29 @@ where
 {
     let info: String = redis::cmd("INFO").arg("keyspace").query_async(con).await.map_err(|e| e.to_string())?;
 
+    // kvrocks 的键数是异步统计出来的（官方文档：需要先执行 `DBSIZE SCAN` 才会更新
+    // DBSIZE 与 INFO keyspace），未统计前它会把 dbN 的 keys 全部报成 0，并在 keyspace
+    // 段里带上 `last_dbsize_scan_timestamp:0`。识别到这个标记时不把 0 当成真实数量，
+    // 避免侧边栏显示 "db0 (0)" 这类误导信息。
+    let keyspace_counts_are_stale = info.lines().any(|line| {
+        line.split_once(':').is_some_and(|(key, value)| {
+            key.trim().eq_ignore_ascii_case("last_dbsize_scan_timestamp") && value.trim() == "0"
+        })
+    });
+
     let mut dbs = Vec::new();
     for line in info.lines() {
         if line.starts_with("db") {
             if let Some((db_part, stats_part)) = line.split_once(':') {
                 if let Some(num) = db_part.strip_prefix("db") {
                     if let Ok(db) = num.parse::<u32>() {
-                        let keys = stats_part
-                            .split(',')
-                            .find_map(|part| part.strip_prefix("keys=").and_then(|value| value.parse::<u64>().ok()))
-                            .unwrap_or(0);
+                        let keys = if keyspace_counts_are_stale {
+                            None
+                        } else {
+                            stats_part
+                                .split(',')
+                                .find_map(|part| part.strip_prefix("keys=").and_then(|value| value.parse::<u64>().ok()))
+                        };
                         dbs.push(RedisDatabaseInfo { db, keys });
                     }
                 }
@@ -1401,7 +1440,7 @@ pub fn decode_cluster_cursor(cursor: u64) -> (usize, u64) {
 pub async fn list_cluster_databases(pool: &RedisClusterPool) -> Result<Vec<RedisDatabaseInfo>, String> {
     let master_nodes = cluster_master_nodes(pool).await?;
     let keys = cluster_total_keys(pool, &master_nodes).await;
-    Ok(vec![RedisDatabaseInfo { db: 0, keys }])
+    Ok(vec![RedisDatabaseInfo { db: 0, keys: Some(keys) }])
 }
 
 pub async fn scan_cluster_keys_page(
@@ -2724,7 +2763,28 @@ where
                 redis::cmd("JSON.GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
             RedisValueData::Json { value: redis_json_raw_to_text(raw)? }
         }
-        _ => RedisValueData::Unknown,
+        // kvrocks 的位图/HLL 是独立类型，标准 Redis 类型表里没有它们；不处理就会落到
+        // Unknown，界面上表现为“能看到 Key、看不到值”（issue #10406）。
+        "bitmap" => {
+            // kvrocks 对位图类型只开放 GET（GETRANGE/STRLEN 会报 WRONGTYPE），
+            // 且 GET 返回的字节与 Redis 位序一致，可直接按字符串预览。
+            let raw: RedisRawValue = redis::cmd("GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+            let mut bytes = redis_value_to_bytes(raw).unwrap_or_default();
+            let truncated = bytes.len() > STRING_PREVIEW_MAX_BYTES;
+            if truncated {
+                bytes.truncate(STRING_PREVIEW_MAX_BYTES);
+            }
+            // 截断后拿不到准确长度（kvrocks 位图没有可用的 STRLEN），置空交给前端按未知处理
+            let total_bytes = (!truncated).then_some(bytes.len() as u64);
+            let set_bits: Option<u64> = redis::cmd("BITCOUNT").arg(key).query_async(con).await.ok();
+            RedisValueData::Bitmap { content: redis_blob_from_bytes(&bytes), total_bytes, truncated, set_bits }
+        }
+        "hyperloglog" => {
+            // HLL 原始字节不可读，基数估计是唯一可展示的数据
+            let count: Option<u64> = redis::cmd("PFCOUNT").arg(key).query_async(con).await.ok();
+            RedisValueData::HyperLogLog { count }
+        }
+        _ => RedisValueData::Unknown { redis_type: redis_type.clone() },
     };
 
     Ok(RedisValue {
@@ -2792,7 +2852,9 @@ fn redis_search_value_text(value: &RedisValueData) -> String {
             })
             .collect::<Vec<_>>()
             .join(" "),
-        RedisValueData::Unknown => String::new(),
+        RedisValueData::Bitmap { content, .. } => redis_blob_display_text(content),
+        RedisValueData::HyperLogLog { count } => count.map(|value| value.to_string()).unwrap_or_default(),
+        RedisValueData::Unknown { .. } => String::new(),
     }
 }
 
@@ -2821,7 +2883,14 @@ fn redis_search_value_size(value: &RedisValue) -> u64 {
         | RedisValueData::Hash { total, .. }
         | RedisValueData::Zset { total, .. } => *total,
         RedisValueData::Stream { entries, total, .. } => total.unwrap_or(entries.len() as u64),
-        RedisValueData::Unknown => 0,
+        RedisValueData::Bitmap { content, total_bytes, .. } => total_bytes.unwrap_or_else(|| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&content.raw_base64)
+                .map(|bytes| bytes.len() as u64)
+                .unwrap_or(0)
+        }),
+        RedisValueData::HyperLogLog { .. } => 0,
+        RedisValueData::Unknown { .. } => 0,
     }
 }
 

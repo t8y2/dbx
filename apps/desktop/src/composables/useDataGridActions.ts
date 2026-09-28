@@ -23,6 +23,7 @@ import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { continuousQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 import { sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
+import { usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 
 const DATA_TAB_METADATA_TTL_MS = TABLE_METADATA_CACHE_TTL_MS;
 
@@ -602,8 +603,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const expectedNextOffset = appendResult ? tab.result?.rows.length : (tab.resultPageOffset ?? 0) + (tab.resultPageLimit ?? limit);
     const continuesResultSession = offset === expectedNextOffset && limit === tab.resultPageLimit;
     const connection = useConnectionStore().getConfig(tab.connectionId);
-    const isSqlServerLegacy = connection?.db_type === "sqlserver" && connection.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
-    const sessionId = isSqlServerLegacy && tab.result?.has_more && tab.result.session_id && continuesResultSession ? tab.result.session_id : undefined;
+    const sessionId = usesAgentCursorForTableData(connection?.db_type, connection?.driver_profile) && tab.result?.has_more && tab.result.session_id && continuesResultSession ? tab.result.session_id : undefined;
     await queryStore.executeTabSql(tab.id, sql, {
       pagination: { offset, limit, sessionId, clientSessionId: sessionId ? tab.resultClientSessionId : undefined },
       ...appendOptions,

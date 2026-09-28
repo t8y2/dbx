@@ -2244,52 +2244,124 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 table
             );
         }
-        return unchecked(() -> {
-            List<IndexInfo> result = new ArrayList<>();
-            // The LEFT JOIN also matches 'U': a UNIQUE constraint owns its backing index the same
-            // way a primary key does, and neither can be altered with index-level DDL (#7959).
-            // The constraint type therefore drives two flags — IS_PK (only 'P') and
-            // CONSTRAINT_BACKED ('P' or 'U'), the same split `independentIndexes` already uses to
-            // keep constraint-backed indexes out of the generated table DDL. A unique index
-            // created with CREATE UNIQUE INDEX has no ALL_CONSTRAINTS row, so it stays false and
-            // keeps the index-level DDL path.
-            String sql = """
-                SELECT /*+ PARALLEL(1) */ i.INDEX_NAME,
-                    LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
-                    i.UNIQUENESS,
-                    CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK,
-                    i.INDEX_TYPE,
-                    CASE WHEN c.CONSTRAINT_TYPE IN ('P', 'U') THEN 1 ELSE 0 END AS CONSTRAINT_BACKED
-                FROM ALL_INDEXES i
-                JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
-                LEFT JOIN ALL_CONSTRAINTS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_OWNER = c.OWNER
-                    AND c.CONSTRAINT_TYPE IN ('P', 'U')
-                WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
-                GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE
-                ORDER BY i.INDEX_NAME
-                """.stripIndent().trim();
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-                stmt.setString(1, schema);
-                stmt.setString(2, table);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        IndexInfo index = new IndexInfo(
-                            rs.getString(1),
-                            splitNonEmpty(coalesce(rs.getString(2)), ","),
-                            "UNIQUE".equals(rs.getString(3)),
-                            "1".equals(rs.getString(4)),
-                            null,
-                            rs.getString(5),
-                            null,
-                            null
-                        );
-                        index.setConstraint_backed("1".equals(rs.getString(6)));
-                        result.add(index);
-                    }
+        return unchecked(() -> tableIndexes(schema, table));
+    }
+
+    private List<IndexInfo> tableIndexes(String schema, String table) throws Exception {
+        try {
+            return indexesFromSystemCatalog(schema, table);
+        } catch (Exception systemCatalogError) {
+            if (isDamengConnectionError(systemCatalogError)) {
+                throw systemCatalogError;
+            }
+            try {
+                return indexesFromDictionaryViews(schema, table);
+            } catch (Exception dictionaryViewError) {
+                dictionaryViewError.addSuppressed(systemCatalogError);
+                throw dictionaryViewError;
+            }
+        }
+    }
+
+    private List<IndexInfo> indexesFromSystemCatalog(String schema, String table) throws Exception {
+        List<IndexInfo> result = new ArrayList<>();
+        // ALL_INDEXES applies visibility checks across the complete catalog. Resolve the one table
+        // first, then inspect only its index children; the official catalog exposes key order via
+        // SF_GET_INDEX_KEY_SEQ and constraint ownership through SYSCONS.
+        String sql = """
+            SELECT /*+ PARALLEL(1) */ index_object.NAME,
+                LISTAGG(column_object.NAME, ',') WITHIN GROUP (
+                    ORDER BY SF_GET_INDEX_KEY_SEQ(index_metadata.KEYNUM, index_metadata.KEYINFO, column_object.COLID)
+                ) AS COLUMNS,
+                index_metadata.ISUNIQUE,
+                MAX(CASE WHEN constraint_metadata.TYPE$ = 'P' THEN 1 ELSE 0 END) AS IS_PK,
+                index_metadata.TYPE$,
+                MAX(CASE WHEN constraint_metadata.TYPE$ IN ('P', 'U') THEN 1 ELSE 0 END) AS CONSTRAINT_BACKED,
+                index_metadata.FLAG
+            FROM SYS.SYSOBJECTS schema_object
+            JOIN SYS.SYSOBJECTS table_object ON table_object.SCHID = schema_object.ID
+                AND table_object.TYPE$ = 'SCHOBJ' AND table_object.SUBTYPE$ = 'UTAB'
+            JOIN SYS.SYSOBJECTS index_object ON index_object.PID = table_object.ID
+                AND index_object.SUBTYPE$ = 'INDEX'
+            JOIN SYS.SYSINDEXES index_metadata ON index_metadata.ID = index_object.ID
+            JOIN SYS.SYSCOLUMNS column_object ON column_object.ID = table_object.ID
+                AND SF_COL_IS_IDX_KEY(
+                    index_metadata.KEYNUM,
+                    index_metadata.KEYINFO,
+                    column_object.COLID
+                ) = 1
+            LEFT JOIN SYS.SYSCONS constraint_metadata ON constraint_metadata.TABLEID = table_object.ID
+                AND constraint_metadata.INDEXID = index_metadata.ID
+                AND constraint_metadata.TYPE$ IN ('P', 'U')
+            WHERE schema_object.TYPE$ = 'SCH' AND schema_object.NAME = ? AND table_object.NAME = ?
+            GROUP BY index_object.NAME, index_metadata.ISUNIQUE, index_metadata.TYPE$, index_metadata.FLAG
+            ORDER BY index_object.NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    boolean isPrimary = "1".equals(rs.getString(4));
+                    boolean constraintBacked = "1".equals(rs.getString(6));
+                    IndexInfo index = new IndexInfo(
+                        rs.getString(1),
+                        splitNonEmpty(coalesce(rs.getString(2)), ","),
+                        "Y".equalsIgnoreCase(rs.getString(3)),
+                        isPrimary,
+                        null,
+                        damengSystemIndexType(rs.getString(5), rs.getInt(7), constraintBacked),
+                        null,
+                        null
+                    );
+                    index.setConstraint_backed(constraintBacked);
+                    result.add(index);
                 }
             }
-            return result;
-        });
+        }
+        return result;
+    }
+
+    private List<IndexInfo> indexesFromDictionaryViews(String schema, String table) throws Exception {
+        List<IndexInfo> result = new ArrayList<>();
+        // The LEFT JOIN also matches 'U': a UNIQUE constraint owns its backing index the same
+        // way a primary key does, and neither can be altered with index-level DDL (#7959).
+        String sql = """
+            SELECT /*+ PARALLEL(1) */ i.INDEX_NAME,
+                LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
+                i.UNIQUENESS,
+                CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK,
+                i.INDEX_TYPE,
+                CASE WHEN c.CONSTRAINT_TYPE IN ('P', 'U') THEN 1 ELSE 0 END AS CONSTRAINT_BACKED
+            FROM ALL_INDEXES i
+            JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
+            LEFT JOIN ALL_CONSTRAINTS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_OWNER = c.OWNER
+                AND c.CONSTRAINT_TYPE IN ('P', 'U')
+            WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
+            GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE
+            ORDER BY i.INDEX_NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    IndexInfo index = new IndexInfo(
+                        rs.getString(1),
+                        splitNonEmpty(coalesce(rs.getString(2)), ","),
+                        "UNIQUE".equals(rs.getString(3)),
+                        "1".equals(rs.getString(4)),
+                        null,
+                        rs.getString(5),
+                        null,
+                        null
+                    );
+                    index.setConstraint_backed("1".equals(rs.getString(6)));
+                    result.add(index);
+                }
+            }
+        }
+        return result;
     }
 
     @Override
@@ -2298,33 +2370,108 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (legacyJdbcMetadata) {
             return StandardJdbcMetadata.INSTANCE.listForeignKeys(requireConnected(), schema, table);
         }
-        return unchecked(() -> {
-            List<ForeignKeyInfo> result = new ArrayList<>();
-            String sql = """
-                SELECT c.CONSTRAINT_NAME, cc.COLUMN_NAME, rc.TABLE_NAME, rcc.COLUMN_NAME
-                FROM ALL_CONSTRAINTS c
-                JOIN ALL_CONS_COLUMNS cc ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME AND c.OWNER = cc.OWNER
-                JOIN ALL_CONSTRAINTS rc ON c.R_CONSTRAINT_NAME = rc.CONSTRAINT_NAME AND c.R_OWNER = rc.OWNER
-                JOIN ALL_CONS_COLUMNS rcc ON rc.CONSTRAINT_NAME = rcc.CONSTRAINT_NAME AND rc.OWNER = rcc.OWNER
-                WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER = ? AND c.TABLE_NAME = ?
-                ORDER BY c.CONSTRAINT_NAME
-                """.stripIndent().trim();
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-                stmt.setString(1, schema);
-                stmt.setString(2, table);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        result.add(new ForeignKeyInfo(
-                            rs.getString(1),
-                            rs.getString(2),
-                            rs.getString(3),
-                            rs.getString(4)
-                        ));
-                    }
+        return unchecked(() -> foreignKeys(schema, table));
+    }
+
+    private List<ForeignKeyInfo> foreignKeys(String schema, String table) throws Exception {
+        try {
+            return foreignKeysFromSystemCatalog(schema, table);
+        } catch (Exception systemCatalogError) {
+            if (isDamengConnectionError(systemCatalogError)) {
+                throw systemCatalogError;
+            }
+            try {
+                return foreignKeysFromDictionaryViews(schema, table);
+            } catch (Exception dictionaryViewError) {
+                dictionaryViewError.addSuppressed(systemCatalogError);
+                throw dictionaryViewError;
+            }
+        }
+    }
+
+    private List<ForeignKeyInfo> foreignKeysFromSystemCatalog(String schema, String table) throws Exception {
+        List<ForeignKeyInfo> result = new ArrayList<>();
+        String sql = """
+            SELECT /*+ MAX_OPT_N_TABLES(5) PARALLEL(1) */ constraint_object.NAME,
+                local_column.NAME,
+                referenced_table.NAME,
+                referenced_column.NAME
+            FROM SYS.SYSOBJECTS schema_object
+            JOIN SYS.SYSOBJECTS table_object ON table_object.SCHID = schema_object.ID
+                AND table_object.TYPE$ = 'SCHOBJ' AND table_object.SUBTYPE$ = 'UTAB'
+            JOIN SYS.SYSCONS foreign_key ON foreign_key.TABLEID = table_object.ID
+                AND foreign_key.TYPE$ = 'F'
+            JOIN SYS.SYSOBJECTS constraint_object ON constraint_object.ID = foreign_key.ID
+                AND constraint_object.PID = table_object.ID
+                AND constraint_object.SUBTYPE$ = 'CONS'
+            JOIN SYS.SYSINDEXES local_index ON local_index.ID = foreign_key.INDEXID
+            JOIN SYS.SYSCOLUMNS local_column ON local_column.ID = table_object.ID
+                AND SF_COL_IS_IDX_KEY(local_index.KEYNUM, local_index.KEYINFO, local_column.COLID) = 1
+            JOIN SYS.SYSOBJECTS referenced_index_object ON referenced_index_object.ID = foreign_key.FINDEXID
+                AND referenced_index_object.SUBTYPE$ = 'INDEX'
+            JOIN SYS.SYSINDEXES referenced_index ON referenced_index.ID = referenced_index_object.ID
+            JOIN SYS.SYSOBJECTS referenced_table ON referenced_table.ID = referenced_index_object.PID
+                AND referenced_table.TYPE$ = 'SCHOBJ' AND referenced_table.SUBTYPE$ = 'UTAB'
+            JOIN SYS.SYSCOLUMNS referenced_column ON referenced_column.ID = referenced_table.ID
+                AND SF_COL_IS_IDX_KEY(
+                    referenced_index.KEYNUM,
+                    referenced_index.KEYINFO,
+                    referenced_column.COLID
+                ) = 1
+                AND SF_GET_INDEX_KEY_SEQ(local_index.KEYNUM, local_index.KEYINFO, local_column.COLID)
+                    = SF_GET_INDEX_KEY_SEQ(
+                        referenced_index.KEYNUM,
+                        referenced_index.KEYINFO,
+                        referenced_column.COLID
+                    )
+            WHERE schema_object.TYPE$ = 'SCH' AND schema_object.NAME = ? AND table_object.NAME = ?
+            ORDER BY constraint_object.NAME,
+                SF_GET_INDEX_KEY_SEQ(local_index.KEYNUM, local_index.KEYINFO, local_column.COLID)
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new ForeignKeyInfo(
+                        rs.getString(1),
+                        rs.getString(2),
+                        rs.getString(3),
+                        rs.getString(4)
+                    ));
                 }
             }
-            return result;
-        });
+        }
+        return result;
+    }
+
+    private List<ForeignKeyInfo> foreignKeysFromDictionaryViews(String schema, String table) throws Exception {
+        List<ForeignKeyInfo> result = new ArrayList<>();
+        String sql = """
+            SELECT /*+ PARALLEL(1) */ c.CONSTRAINT_NAME, cc.COLUMN_NAME, rc.TABLE_NAME, rcc.COLUMN_NAME
+            FROM ALL_CONSTRAINTS c
+            JOIN ALL_CONS_COLUMNS cc ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME AND c.OWNER = cc.OWNER
+            JOIN ALL_CONSTRAINTS rc ON c.R_CONSTRAINT_NAME = rc.CONSTRAINT_NAME AND c.R_OWNER = rc.OWNER
+            JOIN ALL_CONS_COLUMNS rcc ON rc.CONSTRAINT_NAME = rcc.CONSTRAINT_NAME AND rc.OWNER = rcc.OWNER
+                AND cc.POSITION = rcc.POSITION
+            WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER = ? AND c.TABLE_NAME = ?
+            ORDER BY c.CONSTRAINT_NAME, cc.POSITION
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new ForeignKeyInfo(
+                        rs.getString(1),
+                        rs.getString(2),
+                        rs.getString(3),
+                        rs.getString(4)
+                    ));
+                }
+            }
+        }
+        return result;
     }
 
     @Override
@@ -2895,134 +3042,22 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private List<IndexInfo> independentIndexes(String schema, String table) throws Exception {
-        try {
-            return independentIndexesFromSystemCatalog(schema, table);
-        } catch (Exception systemCatalogError) {
-            if (isDamengConnectionError(systemCatalogError)) {
-                throw systemCatalogError;
-            }
-            try {
-                return independentIndexesFromDictionaryViews(schema, table);
-            } catch (Exception dictionaryViewError) {
-                dictionaryViewError.addSuppressed(systemCatalogError);
-                throw dictionaryViewError;
-            }
-        }
+        return tableIndexes(schema, table).stream()
+            .filter(index -> !index.getConstraint_backed())
+            .toList();
     }
 
-    private List<IndexInfo> independentIndexesFromSystemCatalog(String schema, String table) throws Exception {
-        List<IndexInfo> result = new ArrayList<>();
-        // DM's ALL_INDEXES view performs privilege filtering across the complete catalog and can
-        // take tens of seconds in installations with very large index dictionaries (#10075).
-        // The DM JDBC driver and DBeaver instead resolve the requested table id first and read its
-        // SYS index rows directly. Keep the ALL_* implementation below as a compatibility and
-        // permission fallback for deployments that do not expose these catalog tables.
-        String sql = """
-            SELECT /*+ PARALLEL(1) */ index_object.NAME,
-                LISTAGG(column_object.NAME, ',') WITHIN GROUP (
-                    ORDER BY SF_GET_INDEX_KEY_SEQ(index_metadata.KEYNUM, index_metadata.KEYINFO, column_object.COLID)
-                ) AS COLUMNS,
-                index_metadata.ISUNIQUE,
-                index_metadata.TYPE$,
-                index_metadata.FLAG
-            FROM SYS.SYSOBJECTS schema_object
-            JOIN SYS.SYSOBJECTS table_object ON table_object.SCHID = schema_object.ID
-                AND table_object.TYPE$ = 'SCHOBJ' AND table_object.SUBTYPE$ = 'UTAB'
-            JOIN SYS.SYSOBJECTS index_object ON index_object.PID = table_object.ID
-                AND index_object.SUBTYPE$ = 'INDEX'
-            JOIN SYS.SYSINDEXES index_metadata ON index_metadata.ID = index_object.ID
-            JOIN SYS.SYSCOLUMNS column_object ON column_object.ID = table_object.ID
-                AND SF_COL_IS_IDX_KEY(
-                    index_metadata.KEYNUM,
-                    index_metadata.KEYINFO,
-                    column_object.COLID
-                ) = 1
-            WHERE schema_object.TYPE$ = 'SCH' AND schema_object.NAME = ? AND table_object.NAME = ?
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM SYS.SYSCONS constraint_metadata
-                    WHERE constraint_metadata.TABLEID = table_object.ID
-                        AND constraint_metadata.INDEXID = index_metadata.ID
-                        AND constraint_metadata.TYPE$ IN ('P', 'U')
-                )
-            GROUP BY index_object.NAME, index_metadata.ISUNIQUE, index_metadata.TYPE$, index_metadata.FLAG
-            ORDER BY index_object.NAME
-            """.stripIndent().trim();
-        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-            stmt.setString(1, schema);
-            stmt.setString(2, table);
-            try (ResultSet rs = stmt.executeQuery()) {
-                while (rs.next()) {
-                    String indexName = rs.getString(1);
-                    if (notBlank(indexName)) {
-                        result.add(new IndexInfo(
-                            indexName,
-                            splitNonEmpty(coalesce(rs.getString(2)), ","),
-                            "Y".equalsIgnoreCase(rs.getString(3)),
-                            false,
-                            null,
-                            damengSystemIndexType(rs.getString(4), rs.getInt(5)),
-                            null,
-                            null
-                        ));
-                    }
-                }
-            }
-        }
-        return result;
-    }
-
-    private List<IndexInfo> independentIndexesFromDictionaryViews(String schema, String table) throws Exception {
-        List<IndexInfo> result = new ArrayList<>();
-        // Primary-key and unique-constraint backing indexes are already represented in table DDL.
-        String sql = """
-            SELECT /*+ PARALLEL(1) */ i.INDEX_NAME,
-                LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
-                i.UNIQUENESS,
-                i.INDEX_TYPE
-            FROM ALL_INDEXES i
-            JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
-            WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM ALL_CONSTRAINTS c
-                    WHERE c.OWNER = i.TABLE_OWNER
-                        AND c.TABLE_NAME = i.TABLE_NAME
-                        AND c.INDEX_NAME = i.INDEX_NAME
-                        AND c.CONSTRAINT_TYPE IN ('P', 'U')
-                )
-            GROUP BY i.INDEX_NAME, i.UNIQUENESS, i.INDEX_TYPE
-            ORDER BY i.INDEX_NAME
-            """.stripIndent().trim();
-        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-            stmt.setString(1, schema);
-            stmt.setString(2, table);
-            try (ResultSet rs = stmt.executeQuery()) {
-                while (rs.next()) {
-                    String indexName = rs.getString(1);
-                    if (notBlank(indexName)) {
-                        result.add(new IndexInfo(
-                            indexName,
-                            splitNonEmpty(coalesce(rs.getString(2)), ","),
-                            "UNIQUE".equals(rs.getString(3)),
-                            false,
-                            null,
-                            rs.getString(4),
-                            null,
-                            null
-                        ));
-                    }
-                }
-            }
-        }
-        return result;
-    }
-
-    private static String damengSystemIndexType(String catalogType, int flags) {
-        if ((flags & 3) != 0) {
+    private static String damengSystemIndexType(String catalogType, int flags, boolean constraintBacked) {
+        if ((flags & 1) != 0 || ((flags & 2) != 0 && !constraintBacked)) {
             return "INTERNAL";
         }
-        return "ST".equalsIgnoreCase(coalesce(catalogType).trim()) ? "SPATIAL" : catalogType;
+        String normalized = coalesce(catalogType).trim().toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "BT" -> "NORMAL";
+            case "BM" -> "BITMAP";
+            case "ST" -> "SPATIAL";
+            default -> catalogType;
+        };
     }
 
     static String indexDdl(String schema, String table, IndexInfo index) {

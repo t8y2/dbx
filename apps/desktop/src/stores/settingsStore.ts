@@ -2,6 +2,7 @@ import { normalizePluginShortcutSettings, type PluginShortcutSettings } from "@/
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
+import { AI_CONVERSATION_FONT_FAMILY_DEFAULT, AI_CONVERSATION_FONT_SIZE_DEFAULT, normalizeAiConversationFontFamily, normalizeAiConversationFontSize } from "@/lib/ai/aiTypography";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
 import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
@@ -35,6 +36,7 @@ import { normalizeTableHoverLookupMode, type TableHoverLookupMode } from "@/lib/
 import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION, normalizeSqlTableCompletionSchemaQualification, type SqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
 import { DEFAULT_CSV_QUOTE_MODE, normalizeCsvQuoteMode, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import { DEFAULT_CSV_NULL_MODE, normalizeCsvNullMode, type CsvNullMode } from "@/lib/export/csvNullMode";
 import { configureMetadataRuntimeCache, METADATA_CACHE_DEFAULT_MEMORY_MB, normalizeMetadataCacheMemoryMb } from "@/lib/metadata/metadataRuntimeCache";
 import type { AiApiStyle, AiAssistantMode, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiModelEffortPreference, AiProvider, AiReasoningLevel, AiTestConnectionResult } from "@/types/ai";
 import type { SqlShortcutAction, SqlSnippet, TableInfoTab } from "@/types/database";
@@ -52,6 +54,7 @@ export type {
   AiReasoningLevel,
   AiTestConnectionResult,
   CsvQuoteMode,
+  CsvNullMode,
   DataTabReuseMode,
   SavedSqlOpenTargetMode,
   SqlCompletionTriggerMode,
@@ -717,6 +720,9 @@ const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
 const DATA_GRID_ROW_NUMBER_MODES = ["view", "source"] as const;
 export type DataGridRowNumberMode = (typeof DATA_GRID_ROW_NUMBER_MODES)[number];
+/** How a double click inside a SQL string literal picks text: the whole string value, or just one word. */
+export const DOUBLE_CLICK_STRING_SELECTION_MODES = ["content", "word"] as const;
+export type DoubleClickStringSelectionMode = (typeof DOUBLE_CLICK_STRING_SELECTION_MODES)[number];
 export type DataGridFilterEditorView = "quick" | "conditions" | "text";
 export type DataGridToolbarLayout = "single" | "split";
 const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
@@ -827,6 +833,8 @@ export interface EditorSettings {
   fontFamily: string;
   fontSize: number;
   uiFontFamily: string;
+  aiFontFamily: string;
+  aiFontSize: number;
   uiScale: number;
   theme: EditorTheme;
   backgroundImage: BackgroundImageSettings;
@@ -861,6 +869,8 @@ export interface EditorSettings {
   refreshDdlOnOpen: boolean;
   excludeDdlStorage: boolean;
   vimModeEnabled: boolean;
+  /** Double click inside a string literal selects the whole value ("content") or a single word ("word"). */
+  doubleClickStringSelectionMode: DoubleClickStringSelectionMode;
   autoCloseBrackets: boolean;
   sqlSemanticDiagnosticsMode: SqlSemanticDiagnosticsMode;
   sqlSemanticDiagnosticsEnabled: boolean;
@@ -990,6 +1000,7 @@ export interface EditorSettings {
   tableColumnTemplateFields: string[];
   exportBatchSize: number;
   csvQuoteMode: CsvQuoteMode;
+  csvNullMode: CsvNullMode;
   /** Global Redis key-search templates; overridden by non-empty connection templates. */
   redisKeyTemplates: string[];
   /** Sidebar database-list cap for Redis connections; the rest are revealed via "load more". */
@@ -1113,6 +1124,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
   fontSize: 13,
   uiFontFamily: DEFAULT_UI_FONT_FAMILY,
+  aiFontFamily: AI_CONVERSATION_FONT_FAMILY_DEFAULT,
+  aiFontSize: AI_CONVERSATION_FONT_SIZE_DEFAULT,
   uiScale: 1,
   theme: "app",
   backgroundImage: defaultBackgroundImageSettings(),
@@ -1146,6 +1159,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   refreshDdlOnOpen: false,
   excludeDdlStorage: true,
   vimModeEnabled: false,
+  doubleClickStringSelectionMode: "content",
   autoCloseBrackets: true,
   sqlSemanticDiagnosticsMode: "auto",
   sqlSemanticDiagnosticsEnabled: SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED,
@@ -1186,7 +1200,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showIndexIndicatorsInHeader: true,
   compactColumnHeaderActions: true,
   columnWidthDensity: "standard",
-  dataGridColumnWidthMode: "fill",
+  dataGridColumnWidthMode: "content",
   dataGridQuickEntry: false,
   dataGridFilterEditorView: "quick",
   dataGridToolbarLayout: "single",
@@ -1268,6 +1282,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tableColumnTemplateFields: [...DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS],
   exportBatchSize: 2000,
   csvQuoteMode: DEFAULT_CSV_QUOTE_MODE,
+  csvNullMode: DEFAULT_CSV_NULL_MODE,
   redisKeyTemplates: [],
   redisDatabaseDisplayLimit: REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT,
   exportRowLimitEnabled: false,
@@ -1376,6 +1391,10 @@ function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
 
 function normalizeDataGridRowNumberMode(value: unknown): DataGridRowNumberMode {
   return DATA_GRID_ROW_NUMBER_MODES.includes(value as DataGridRowNumberMode) ? (value as DataGridRowNumberMode) : DEFAULT_EDITOR_SETTINGS.dataGridRowNumberMode;
+}
+
+function normalizeDoubleClickStringSelectionMode(value: unknown): DoubleClickStringSelectionMode {
+  return DOUBLE_CLICK_STRING_SELECTION_MODES.includes(value as DoubleClickStringSelectionMode) ? (value as DoubleClickStringSelectionMode) : DEFAULT_EDITOR_SETTINGS.doubleClickStringSelectionMode;
 }
 
 function normalizeDataGridFilterEditorView(value: unknown): DataGridFilterEditorView {
@@ -1642,6 +1661,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
     uiFontFamily: normalizeFontFamily(settings.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily),
+    aiFontFamily: normalizeAiConversationFontFamily(settings.aiFontFamily),
+    aiFontSize: normalizeAiConversationFontSize(settings.aiFontSize),
     uiScale: normalizeUiScale(settings.uiScale),
     theme: settings.theme && EDITOR_THEME_VALUES.has(settings.theme) ? settings.theme : DEFAULT_EDITOR_SETTINGS.theme,
     customThemeColors: {
@@ -1709,6 +1730,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     ddlOpenMode: settings.ddlOpenMode === "tab" ? "tab" : DEFAULT_EDITOR_SETTINGS.ddlOpenMode,
     refreshDdlOnOpen: typeof settings.refreshDdlOnOpen === "boolean" ? settings.refreshDdlOnOpen : DEFAULT_EDITOR_SETTINGS.refreshDdlOnOpen,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
+    doubleClickStringSelectionMode: normalizeDoubleClickStringSelectionMode(settings.doubleClickStringSelectionMode),
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
     sqlSemanticDiagnosticsMode,
     sqlSemanticDiagnosticsEnabled: sqlSemanticDiagnosticsEnabledForMode(sqlSemanticDiagnosticsMode),
@@ -1878,6 +1900,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tableColumnTemplateFields: normalizeTableColumnTemplateFields(settings.tableColumnTemplateFields),
     exportBatchSize: typeof settings.exportBatchSize === "number" && settings.exportBatchSize >= 100 && settings.exportBatchSize <= 100000 ? Math.round(settings.exportBatchSize) : DEFAULT_EDITOR_SETTINGS.exportBatchSize,
     csvQuoteMode: normalizeCsvQuoteMode(settings.csvQuoteMode),
+    csvNullMode: normalizeCsvNullMode(settings.csvNullMode),
     redisKeyTemplates: normalizeRedisKeyTemplates(settings.redisKeyTemplates),
     redisDatabaseDisplayLimit:
       typeof settings.redisDatabaseDisplayLimit === "number" && settings.redisDatabaseDisplayLimit >= REDIS_DATABASE_DISPLAY_LIMIT_MIN && settings.redisDatabaseDisplayLimit <= REDIS_DATABASE_DISPLAY_LIMIT_MAX
@@ -2486,6 +2509,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.fontFamily !== undefined) editorSettings.value.fontFamily = normalizeFontFamily(partial.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily);
     if (partial.fontSize !== undefined) editorSettings.value.fontSize = partial.fontSize;
     if (partial.uiFontFamily !== undefined) editorSettings.value.uiFontFamily = normalizeFontFamily(partial.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily);
+    if (partial.aiFontFamily !== undefined) editorSettings.value.aiFontFamily = normalizeAiConversationFontFamily(partial.aiFontFamily);
+    if (partial.aiFontSize !== undefined) editorSettings.value.aiFontSize = normalizeAiConversationFontSize(partial.aiFontSize);
     if (partial.uiScale !== undefined) editorSettings.value.uiScale = normalizeUiScale(partial.uiScale);
     if (partial.backgroundImage !== undefined) editorSettings.value.backgroundImage = normalizeBackgroundImageSettings(partial.backgroundImage);
     if (partial.theme !== undefined) editorSettings.value.theme = partial.theme;
@@ -2539,6 +2564,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.ddlOpenMode !== undefined) editorSettings.value.ddlOpenMode = partial.ddlOpenMode === "tab" ? "tab" : "dialog";
     if (partial.refreshDdlOnOpen !== undefined) editorSettings.value.refreshDdlOnOpen = partial.refreshDdlOnOpen === true;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
+    if (partial.doubleClickStringSelectionMode !== undefined) editorSettings.value.doubleClickStringSelectionMode = normalizeDoubleClickStringSelectionMode(partial.doubleClickStringSelectionMode);
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
     if (partial.sqlSemanticDiagnosticsMode !== undefined || partial.sqlSemanticDiagnosticsEnabled !== undefined) {
       const nextMode = normalizeSqlSemanticDiagnosticsMode(partial.sqlSemanticDiagnosticsMode, partial.sqlSemanticDiagnosticsEnabled);
@@ -2682,6 +2708,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tableColumnTemplateFields !== undefined) editorSettings.value.tableColumnTemplateFields = normalizeTableColumnTemplateFields(partial.tableColumnTemplateFields);
     if (partial.exportBatchSize !== undefined) editorSettings.value.exportBatchSize = Math.min(100000, Math.max(100, Math.round(partial.exportBatchSize)));
     if (partial.csvQuoteMode !== undefined) editorSettings.value.csvQuoteMode = normalizeCsvQuoteMode(partial.csvQuoteMode);
+    if (partial.csvNullMode !== undefined) editorSettings.value.csvNullMode = normalizeCsvNullMode(partial.csvNullMode);
     if (partial.redisKeyTemplates !== undefined) editorSettings.value.redisKeyTemplates = normalizeRedisKeyTemplates(partial.redisKeyTemplates);
     if (partial.redisDatabaseDisplayLimit !== undefined) editorSettings.value.redisDatabaseDisplayLimit = Math.min(REDIS_DATABASE_DISPLAY_LIMIT_MAX, Math.max(REDIS_DATABASE_DISPLAY_LIMIT_MIN, Math.round(partial.redisDatabaseDisplayLimit)));
     if (partial.exportRowLimitEnabled !== undefined) editorSettings.value.exportRowLimitEnabled = partial.exportRowLimitEnabled;

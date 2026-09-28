@@ -370,7 +370,10 @@ pub async fn ai_resolve_tool_approval(Json(body): Json<AiResolveToolApprovalRequ
 }
 
 pub async fn get_ai_plugin_tool_plugins(State(state): State<Arc<WebState>>) -> Result<Json<Vec<String>>, AppError> {
-    Ok(Json(state.app.storage.load_ai_plugin_tool_plugin_ids().await.map_err(AppError::from)?))
+    let mut ids =
+        dbx_core::ai::plugin_tools::effective_ai_tool_plugin_ids(&state.app).await.into_iter().collect::<Vec<_>>();
+    ids.sort();
+    Ok(Json(ids))
 }
 
 pub async fn set_ai_plugin_tool_plugin_enabled(

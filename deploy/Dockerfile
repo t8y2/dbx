@@ -58,6 +58,7 @@ COPY crates/dbx-sqlite-worker/Cargo.toml crates/dbx-sqlite-worker/
 COPY crates/dbx-web/Cargo.toml crates/dbx-web/
 COPY crates/dbx-mcp/Cargo.toml crates/dbx-mcp/
 COPY crates/dbx-cli/Cargo.toml crates/dbx-cli/
+COPY crates/dbx-tauri-consul/Cargo.toml crates/dbx-tauri-consul/
 COPY src-tauri/Cargo.toml src-tauri/
 # Copy every vendored crate: root Cargo.toml [patch.crates-io] points at
 # vendor/{ctor,rumqttc,dirs-sys,pageant,wry}; omitting any breaks the offline build.
@@ -65,7 +66,7 @@ COPY vendor/ vendor/
 RUN for crate in dbx-platform dbx-types dbx-sql dbx-sql-core dbx-sql-data dbx-sql-dialect dbx-sql-schema \
       dbx-formats dbx-ai-provider dbx-plugin-runtime dbx-driver-agent dbx-driver-support \
       dbx-driver-elasticsearch dbx-driver-mongodb dbx-driver-mysql dbx-driver-postgres \
-      dbx-driver-redis dbx-driver-sqlserver dbx-drivers dbx-sqlite-worker; do \
+      dbx-driver-redis dbx-driver-sqlserver dbx-drivers dbx-sqlite-worker dbx-tauri-consul; do \
       mkdir -p "crates/$crate/src" && printf "" > "crates/$crate/src/lib.rs"; \
     done \
     && echo 'fn main() {}' > crates/dbx-sqlite-worker/src/main.rs

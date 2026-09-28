@@ -80,12 +80,29 @@ describe("AI SQL dialect prompt", () => {
   it("gives Redis agents database and key-scan safety guidance", () => {
     const prompt = buildSystemPrompt("general", context({ connectionName: "Redis", databaseType: "redis", database: "8", selectedDatabases: ["8"] }), "agent");
 
-    expect(prompt).toContain("Use dbx_execute_redis_command");
+    // The built-in assistant can only call the in-process registry's tool. The
+    // MCP name belongs to the CLI-provider lane (issue #10425: the prompt used
+    // to promise `dbx_execute_redis_command` to a run that never had it).
+    expect(prompt).toContain("execute_redis_command");
+    expect(prompt).not.toContain("dbx_execute_redis_command");
     expect(prompt).toContain("db argument");
     expect(prompt).toContain("Never send the SELECT command");
     expect(prompt).toContain("Use SCAN, not KEYS");
+    expect(prompt).toContain("read-only");
     expect(prompt).not.toContain("execute_query tool");
     expect(prompt).not.toContain("Put SQL in a fenced");
+    // The built-in lane has no MCP authorization layer, so the prompt must not
+    // claim one applies.
+    expect(prompt).not.toContain("MCP authorization still applies");
+  });
+
+  it("keeps the MCP Redis tool name for CLI providers", () => {
+    const prompt = buildSystemPrompt("general", context({ connectionName: "Redis", databaseType: "redis", database: "8", selectedDatabases: ["8"] }), "agent", undefined, true);
+
+    // CLI providers drive the DBX MCP server, which does expose this tool.
+    expect(prompt).toContain("Use dbx_execute_redis_command");
+    expect(prompt).not.toContain("execute_redis_command (read-only)");
+    expect(prompt).toContain("MCP authorization still applies");
   });
 
   it("keeps Redis ask mode command-oriented", () => {

@@ -9,6 +9,7 @@ use crate::data_grid_sql::{
     is_grid_insert_omitted_column, is_non_identity_generated_column, supports_relational_copy_predicates,
     DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridTableMeta,
 };
+use dbx_types::types::is_opaque_aggregate_state_type;
 use serde_json::Value;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::io::Write;
@@ -61,6 +62,7 @@ pub(super) fn write_sql_inserts(
     output: &mut dyn Write,
 ) -> Result<WriteMetadata, DataGridExtractError> {
     ensure_sql_builder_budget(context)?;
+    reject_selected_opaque_aggregate_states(context)?;
     let data = sql_selected_data(context, false)?;
     let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
         database_type: context.request.database_type,
@@ -90,6 +92,7 @@ pub(super) fn write_sql_updates(
     output: &mut dyn Write,
 ) -> Result<WriteMetadata, DataGridExtractError> {
     ensure_sql_builder_budget(context)?;
+    reject_selected_opaque_aggregate_states(context)?;
     let table_meta = context.request.table_meta.as_ref().ok_or_else(|| {
         DataGridExtractError::new(
             DataGridExtractErrorCode::MissingTableMetadata,
@@ -131,6 +134,16 @@ pub(super) fn write_sql_updates(
     }
     write_bytes(output, statements.join("\n").as_bytes())?;
     Ok(sql_metadata(data.omitted_columns))
+}
+
+fn reject_selected_opaque_aggregate_states(context: &ExtractContext<'_>) -> Result<(), DataGridExtractError> {
+    if context.selected_column_info.iter().flatten().any(|info| is_opaque_aggregate_state_type(&info.data_type)) {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::NoWritableColumns,
+            "Doris aggregate-state columns are opaque and cannot be copied as automatic SQL; use an explicit Doris state function instead.",
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_sql_builder_budget(context: &ExtractContext<'_>) -> Result<(), DataGridExtractError> {

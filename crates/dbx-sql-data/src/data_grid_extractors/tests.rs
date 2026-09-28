@@ -1364,6 +1364,39 @@ fn sql_updates_require_table_primary_key_and_writable_columns() {
 }
 
 #[test]
+fn sql_copy_reports_selected_opaque_aggregate_states_before_generic_builder_errors() {
+    let opaque_column = DataGridColumnInfo {
+        name: "v2".to_string(),
+        data_type: "agg_state<sum(int)>".to_string(),
+        is_nullable: true,
+        is_primary_key: false,
+        column_default: None,
+        extra: None,
+    };
+    for extractor in [DataGridExtractorId::SqlInserts, DataGridExtractorId::SqlUpdates] {
+        let mut request = request(extractor);
+        request.columns = vec![column("v2", 0)];
+        request.selected_column_indexes = vec![0];
+        request.rows = vec![vec![json!("0x00ff")]];
+        request.table_meta = Some(DataGridTableMeta {
+            catalog: None,
+            database: None,
+            schema: None,
+            table_name: "states".to_string(),
+            primary_keys: Vec::new(),
+            columns: Some(vec![opaque_column.clone()]),
+        });
+
+        let error = extract_data_grid_selection(request).expect_err("opaque SQL copy must fail explicitly");
+        assert_eq!(error.code, DataGridExtractErrorCode::NoWritableColumns);
+        assert_eq!(
+            error.message,
+            "Doris aggregate-state columns are opaque and cannot be copied as automatic SQL; use an explicit Doris state function instead."
+        );
+    }
+}
+
+#[test]
 fn rejects_requests_that_exceed_the_column_budget() {
     let mut request = request(DataGridExtractorId::Csv);
     request.columns =

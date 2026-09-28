@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onScopeDispose, ref, watch } from "vue";
+import { computed, inject, nextTick, onScopeDispose, ref, watch } from "vue";
+import { OPEN_PLUGIN_SETTINGS } from "@/lib/plugins/pluginCenterNavigation";
 import { useI18n } from "vue-i18n";
-import { ChevronDown } from "@lucide/vue";
+import { ChevronDown, Settings2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -9,6 +10,7 @@ import PluginIcon from "./PluginIcon.vue";
 import { usePluginShortcuts } from "@/composables/usePluginShortcuts";
 import { usePluginShortcutPreferences } from "@/composables/usePluginShortcutPreferences";
 import { usePluginShortcutSort } from "@/composables/usePluginShortcutSort";
+import { useCursorFloatingPosition } from "@/composables/useCursorFloatingPosition";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { movePluginShortcut, pluginShortcutToolbarCount, pluginShortcutToolbarWidth, type PluginShortcutEntry } from "@/lib/plugins/pluginShortcuts";
@@ -17,6 +19,8 @@ const props = defineProps<{ dropdownOnly?: boolean; menuAnchor?: HTMLElement | n
 const emit = defineEmits<{ "layout-change": [] }>();
 const { t } = useI18n();
 const settings = useSettingsStore();
+const openSettings = inject(OPEN_PLUGIN_SETTINGS, () => {});
+const showSettingsEntry = computed(() => settings.editorSettings.pluginShortcuts.showSettingsEntry);
 const { toast } = useToast();
 const { entries, open, isActive } = usePluginShortcuts();
 const { update, saving } = usePluginShortcutPreferences();
@@ -26,10 +30,11 @@ const moreTrigger = ref<HTMLElement | null>(null);
 const menuOpen = ref(false);
 const measuredWidth = ref<number | null>(null);
 const requested = computed(() => (props.dropdownOnly ? 0 : settings.editorSettings.pluginShortcuts.toolbarCount));
-const preferredWidth = computed(() => pluginShortcutToolbarWidth(entries.value.length, requested.value));
-const count = computed(() => pluginShortcutToolbarCount(entries.value.length, requested.value, measuredWidth.value ?? preferredWidth.value));
+const preferredWidth = computed(() => pluginShortcutToolbarWidth(entries.value.length, requested.value) + (showSettingsEntry.value && entries.value.length <= requested.value ? (entries.value.length ? 30 : 34) : 0));
+const count = computed(() => Math.min(entries.value.length, requested.value, pluginShortcutToolbarCount(entries.value.length + Number(showSettingsEntry.value), requested.value + Number(showSettingsEntry.value), measuredWidth.value ?? preferredWidth.value)));
 const inlineEntries = computed(() => entries.value.slice(0, count.value));
 const overflowEntries = computed(() => entries.value.slice(count.value));
+const hasMenu = computed(() => entries.value.length > 0 && (overflowEntries.value.length > 0 || (props.dropdownOnly && showSettingsEntry.value)));
 const ids = computed(() => entries.value.map((entry) => entry.id));
 const sorting = usePluginShortcutSort({
   container: root,
@@ -46,6 +51,8 @@ const sorting = usePluginShortcutSort({
   },
 });
 const { drag } = sorting;
+const preview = ref<HTMLElement | null>(null);
+const previewStyle = useCursorFloatingPosition(preview, drag);
 const draggedEntry = computed(() => entries.value.find((entry) => entry.id === drag.source));
 let observer: ResizeObserver | null = null;
 let hoverTimer: ReturnType<typeof setTimeout> | null = null;
@@ -70,8 +77,8 @@ watch(
   { flush: "post" },
 );
 watch(preferredWidth, () => void nextTick(measure));
-watch(overflowEntries, (entries) => {
-  if (!entries.length) menuOpen.value = false;
+watch(hasMenu, (visible) => {
+  if (!visible) menuOpen.value = false;
 });
 watch(menuOpen, (open) => {
   if (!open) sorting.cancel();
@@ -111,6 +118,14 @@ function activate(entry: PluginShortcutEntry, event?: Event) {
     toast(String(error), 5000);
   }
 }
+function activateSettings(event?: Event) {
+  if (sorting.suppressClick()) {
+    event?.preventDefault();
+    return;
+  }
+  menuOpen.value = false;
+  openSettings();
+}
 onScopeDispose(() => {
   observer?.disconnect();
   clearHoverTimer();
@@ -119,7 +134,7 @@ onScopeDispose(() => {
 
 <template>
   <nav
-    v-if="settings.isEditorSettingsLoaded && entries.length"
+    v-if="settings.isEditorSettingsLoaded && settings.editorSettings.pluginShortcuts.enabled && entries.length"
     ref="root"
     data-plugin-shortcut-toolbar
     :aria-label="t('pluginPlatform.shortcutsTitle')"
@@ -141,10 +156,16 @@ onScopeDispose(() => {
         </Button>
       </span>
     </LightTooltip>
-    <DropdownMenu v-if="overflowEntries.length" v-model:open="menuOpen" :modal="false">
+    <DropdownMenu v-if="hasMenu" v-model:open="menuOpen" :modal="false">
       <span ref="moreTrigger" class="flex shrink-0">
         <DropdownMenuTrigger as-child>
-          <Button variant="ghost" size="icon" class="shortcut-toolbar-button shrink-0" :class="[dropdownOnly ? 'h-8 w-7 rounded-l-none' : 'size-7', { 'bg-accent text-accent-foreground': menuOpen }]" :aria-label="t('pluginPlatform.shortcutsMore', { count: overflowEntries.length })">
+          <Button
+            variant="ghost"
+            size="icon"
+            class="shortcut-toolbar-button shrink-0"
+            :class="[dropdownOnly ? 'h-8 w-7 rounded-l-none' : 'size-7', { 'bg-accent text-accent-foreground': menuOpen }]"
+            :aria-label="overflowEntries.length ? t('pluginPlatform.shortcutsMore', { count: overflowEntries.length }) : t('pluginPlatform.shortcutsSettings')"
+          >
             <ChevronDown class="size-3.5 transition-transform" :class="{ 'rotate-180': menuOpen }" />
           </Button>
         </DropdownMenuTrigger>
@@ -166,15 +187,28 @@ onScopeDispose(() => {
             <span class="min-w-0 flex-1 truncate" :title="entry.label">{{ entry.label }}</span>
             <span v-if="isActive(entry)" class="size-1.5 shrink-0 rounded-full bg-green-500" aria-hidden="true" />
           </DropdownMenuItem>
+          <DropdownMenuItem v-if="showSettingsEntry" data-plugin-shortcut-settings :text-value="t('pluginPlatform.shortcutsSettings')" class="relative min-h-8 gap-2 rounded-sm text-xs" @select="activateSettings">
+            <span v-if="overflowEntries.length" class="pointer-events-none absolute inset-x-2 top-0 h-px bg-border/60" aria-hidden="true" />
+            <Settings2 class="size-4 shrink-0 text-foreground" />
+            <span class="min-w-0 flex-1 truncate">{{ t("pluginPlatform.shortcutsSettings") }}</span>
+          </DropdownMenuItem>
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
+    <LightTooltip v-if="showSettingsEntry && !hasMenu" :text="t('pluginPlatform.shortcutsSettings')" :disabled="drag.active" side="bottom" content-class="shortcut-toolbar-tooltip">
+      <Button variant="ghost" size="icon" data-plugin-shortcut-settings class="shortcut-toolbar-button relative size-7 shrink-0" :aria-label="t('pluginPlatform.shortcutsSettings')" @click="activateSettings">
+        <span v-if="inlineEntries.length" class="pointer-events-none absolute -left-0.5 inset-y-1 w-px bg-border/60" aria-hidden="true" />
+        <Settings2 class="size-4 text-foreground" />
+      </Button>
+    </LightTooltip>
     <Teleport to="body">
       <div v-if="drag.active" class="fixed inset-0 z-[2147483646] cursor-grabbing touch-none select-none" aria-hidden="true" />
       <div
         v-if="drag.active && draggedEntry"
-        class="pointer-events-none fixed z-[2147483647] flex max-w-xs items-center gap-2 rounded-md border border-primary/50 bg-popover px-2 py-1.5 text-xs text-popover-foreground shadow-md"
-        :style="{ left: `${drag.x + 12}px`, top: `${drag.y + 12}px` }"
+        ref="preview"
+        data-shortcut-drag-preview
+        class="pointer-events-none fixed z-[2147483647] flex w-max max-w-xs overflow-hidden items-center gap-2 rounded-md border border-primary/50 bg-popover px-2 py-1.5 text-xs text-popover-foreground shadow-md"
+        :style="previewStyle"
         aria-hidden="true"
       >
         <PluginIcon :plugin-id="draggedEntry.pluginId" :icon="draggedEntry.icon" class="size-4 [&_svg]:text-current" />

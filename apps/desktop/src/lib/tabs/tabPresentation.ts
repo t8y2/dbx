@@ -263,10 +263,13 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   const connName = connectionDisplayName(tab.connectionId);
   const groupName = connectionGroupDisplayName(tab.connectionId, t);
   const connection = useConnectionStore().getConfig(tab.connectionId);
+  const isPluginTab = tab.mode === "plugin-workbench" || tab.mode === "plugin-filesystem";
+  const database = isPluginTab ? tab.database || connection?.database || "" : tab.database;
+  const showDatabase = (!connection || supportsConnectionDatabaseInfo(connection.db_type)) && (!isPluginTab || Boolean(database.trim()));
   const lines: { label: string; value: string }[] = [
     { label: t("tabs.tooltipConnection"), value: connName },
     ...(groupName ? [{ label: t("tabs.tooltipGroup"), value: groupName }] : []),
-    ...(!connection || supportsConnectionDatabaseInfo(connection.db_type) ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, tab.database, t) }] : []),
+    ...(showDatabase ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, database, t) }] : []),
   ];
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });

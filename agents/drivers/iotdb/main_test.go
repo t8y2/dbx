@@ -290,6 +290,31 @@ func TestDecodeQueryOptions(t *testing.T) {
 	}
 }
 
+func TestIsQueryStatementRecognizesListStatements(t *testing.T) {
+	tests := []struct {
+		sql  string
+		want bool
+	}{
+		{sql: "LIST USER", want: true},
+		{sql: "list role", want: true},
+		{sql: "  LiSt PRIVILEGES OF USER root;  ", want: true},
+		{sql: "\tLIST PRIVILEGES OF ROLE dbx7359_role\n", want: true},
+		{sql: "SHOW VERSION", want: true},
+		{sql: "SELECT * FROM root.dbx_7359.d", want: true},
+		{sql: ""},
+		{sql: "   ;   "},
+		{sql: "INSERT INTO root.dbx_7359.d(time,s) VALUES(1,1)"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.sql, func(t *testing.T) {
+			if got := isQueryStatement(trimStatementSQL(test.sql)); got != test.want {
+				t.Fatalf("isQueryStatement(%q) = %t, want %t", test.sql, got, test.want)
+			}
+		})
+	}
+}
+
 func TestCancelActiveOperationInvalidatesClient(t *testing.T) {
 	blocking := &blockingIoTDBSession{closed: make(chan struct{})}
 	connected := &sessionClient{session: blocking, dialect: client.TreeSqlDialect}

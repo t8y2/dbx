@@ -27,11 +27,34 @@ fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
     let driver_class = config.jdbc_driver_class.as_deref().unwrap_or("");
     if (config.db_type == DatabaseType::H2 && !h2_uses_custom_driver(config))
         || (config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana"))
+        || (config.db_type == DatabaseType::Db2 && !looks_like_jdbc_driver_class_name(driver_class))
     {
         ""
     } else {
         driver_class
     }
+}
+
+/// DBeaver and other importers store their own driver-registry id (for example
+/// `db2` or `mysql8`) in `jdbc_driver_class`. DB2 bundles its driver in the
+/// agent, so such an id can only fail as `Class.forName("db2")`; forward the
+/// value only when it is a package-qualified class name.
+fn looks_like_jdbc_driver_class_name(value: &str) -> bool {
+    let mut segments = 0;
+    for segment in value.trim().split('.') {
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+            return false;
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 2
 }
 
 fn agent_jdbc_driver_paths(config: &ConnectionConfig) -> &[String] {
@@ -1384,6 +1407,40 @@ mod tests {
         let params = agent_connect_params(&cfg, "jdbc.example.com", 1234, "test").unwrap();
 
         assert_eq!(params["jdbc_driver_class"], "com.example.CustomDriver");
+    }
+
+    #[test]
+    fn db2_agent_connect_params_ignore_driver_registry_ids() {
+        for registry_id in ["db2", "DB2", " db2 ", "db2_zos", "db2i"] {
+            let mut cfg = config(DatabaseType::Db2, Some("geofuy"));
+            cfg.jdbc_driver_class = Some(registry_id.to_string());
+
+            let params = agent_connect_params(&cfg, "db2.example.com", 50000, "geofuy").unwrap();
+
+            assert_eq!(params["jdbc_driver_class"], "", "registry id {registry_id:?} must be dropped");
+        }
+    }
+
+    #[test]
+    fn db2_agent_connect_params_preserve_custom_driver_class() {
+        let mut cfg = config(DatabaseType::Db2, Some("geofuy"));
+        cfg.jdbc_driver_class = Some("com.ibm.db2.jcc.DB2Driver".to_string());
+
+        let params = agent_connect_params(&cfg, "db2.example.com", 50000, "geofuy").unwrap();
+
+        assert_eq!(params["jdbc_driver_class"], "com.ibm.db2.jcc.DB2Driver");
+    }
+
+    #[test]
+    fn other_agent_connect_params_preserve_db2_driver_alias() {
+        let mut cfg = config(DatabaseType::Mysql, Some("test"));
+        cfg.jdbc_driver_class = Some("db2".to_string());
+        cfg.jdbc_driver_paths = vec!["/tmp/custom-driver.jar".to_string()];
+
+        let params = agent_connect_params(&cfg, "mysql.example.com", 3306, "test").unwrap();
+
+        assert_eq!(params["jdbc_driver_class"], "db2");
+        assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/custom-driver.jar"]));
     }
 
     #[test]

@@ -182,6 +182,12 @@ pub async fn start_transfer(
             }
         };
 
+        if let Err(e) = transfer::ensure_transfer_source_types_supported(&app, &req, &source_pool_key).await {
+            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+            finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+            return;
+        }
+
         let tables = req.tables.clone();
         // Sort by FK dependency so referenced tables are transferred first, and
         // keep the foreign key metadata fetched along the way — MySQL-family

@@ -2791,6 +2791,79 @@ describe("connectionStore metadata loading", () => {
     expect(dbNode.isLoading).toBe(false);
   });
 
+  it("finishes an expanding database when the connection refresh adds siblings", async () => {
+    let resolveSchemas!: (schemas: { name: string; comment: null }[]) => void;
+    const listSchemaInfos = vi.fn(
+      () =>
+        new Promise<{ name: string; comment: null }[]>((resolve) => {
+          resolveSchemas = resolve;
+        }),
+    );
+    const listDatabases = vi.fn().mockResolvedValue([
+      { name: "app", comment: null },
+      { name: "postgres", comment: null },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listSchemaInfos,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    const databaseNode: TreeNode = {
+      id: `${connection.id}:app`,
+      label: "app",
+      type: "database",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      isLoading: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [databaseNode],
+      },
+    ];
+    const liveDatabaseNode = store.treeNodes[0]!.children![0]!;
+
+    const schemaLoad = store.loadSchemas(connection.id, "app");
+    await vi.waitFor(() => expect(listSchemaInfos).toHaveBeenCalledTimes(1));
+    expect(liveDatabaseNode.isLoading).toBe(true);
+
+    await store.loadDatabases(connection.id, { connectedOnly: true });
+
+    const databaseDuringRefresh = store.treeNodes[0]?.children?.find((child) => child.id === databaseNode.id);
+    expect(databaseDuringRefresh).toBe(liveDatabaseNode);
+    expect(databaseDuringRefresh?.isLoading).toBe(true);
+
+    resolveSchemas([{ name: "public", comment: null }]);
+    await schemaLoad;
+
+    const loadedDatabase = store.treeNodes[0]?.children?.find((child) => child.id === databaseNode.id);
+    expect(loadedDatabase).toBe(liveDatabaseNode);
+    expect(loadedDatabase?.isLoading).toBe(false);
+    expect(loadedDatabase?.isExpanded).toBe(true);
+    expect(loadedDatabase?.children?.map((child) => child.label)).toContain("public");
+  });
+
   it("clears sticky subtree loading when health-check reconnect bumps revision", async () => {
     let resolveTables!: (tables: TableInfo[]) => void;
     const listTables = vi.fn(

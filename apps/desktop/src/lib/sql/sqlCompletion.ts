@@ -1474,6 +1474,7 @@ export interface SqlCompletionContext {
   prefix: string;
   replacementRange?: { start: number; end: number };
   preferredValueKeywords?: string[];
+  localVariables?: string[];
   qualifier?: string;
   qualifierParts?: string[];
   suggestTables: boolean;
@@ -1702,6 +1703,7 @@ class SqlCompletionProvider {
 
     const preferReferencedColumns = hasMatchingReferencedColumnPrefix(context, this.input.columnsByTable);
     this.items.push(...customSnippetItems);
+    this.items.push(...buildSqlServerLocalVariableItems(context));
     if (!pendingJoinKeyword && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
       if (!preferReferencedColumns) {
         this.items.push(...buildSnippetItems(context.prefix, snippets.filter(shouldFormatBuiltinSnippet), this.input.keywordCase, this.databaseType));
@@ -1816,7 +1818,7 @@ class SqlCompletionProvider {
   }
 }
 
-export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}): boolean {
+export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}, precomputedContext?: SqlCompletionContext): boolean {
   if (getPostgresSequenceLiteralCompletionContext(sql, cursor, options.databaseType)) return true;
   if (isSqlCompletionSuppressedContext(sql, cursor, options)) return false;
   const previousChar = sql[cursor - 1];
@@ -1830,7 +1832,7 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
   if (/\bon\s+$/i.test(beforeCursor)) return true;
   if (isAfterJoinModifierContext(beforeCursor, options.databaseType)) return true;
   if (/\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(beforeCursor)) return true;
-  const context = getSqlCompletionContext(sql, cursor, options);
+  const context = precomputedContext ?? getSqlCompletionContext(sql, cursor, options);
   if (previousChar === "(" && (context.insertTable || context.preferredValueKeywords?.length)) return true;
   if (/[,;()[\]]/.test(previousChar)) return false;
   if (context.exclusiveTableSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
@@ -2569,6 +2571,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const selectListWildcardAfterCursor = isStandaloneSelectWildcard(rawStatement, cursor - statementSpan.start, selectListColumnContext, statementKind, resolveSqlDialectId(options));
   const dataTypeContext = isCreateTableColumnTypeContext(beforeToken, options.databaseType);
   const preferredValueKeywords = sqlServerDatepartCompletionValues(beforeCursor, options.databaseType);
+  const localVariables = prefix.startsWith("@") ? collectSqlServerLocalVariables(sql, cursor, options) : undefined;
   const preferredKeywords = qualifier ? [] : preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo, options.databaseType);
   const contextKind = detectCompletionContextKind({
     qualifier,
@@ -2588,6 +2591,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   return {
     prefix,
     preferredValueKeywords,
+    localVariables,
     qualifier: insertInfo ? undefined : qualifier,
     qualifierParts: insertInfo ? undefined : qualifierParts,
     suggestTables: insertInfo ? false : afterTableTrigger,
@@ -2623,6 +2627,66 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     contextKind,
     dataTypeContext,
   };
+}
+
+const SQLSERVER_DECLARATION_BOUNDARY_KEYWORDS = new Set(["alter", "begin", "create", "declare", "delete", "drop", "end", "exec", "execute", "go", "if", "insert", "merge", "print", "raiserror", "return", "select", "set", "throw", "update", "while", "with"]);
+
+function collectSqlServerLocalVariables(sql: string, cursor: number, options: SqlSemanticBuildOptions): string[] | undefined {
+  if (resolveSqlDialectId(options) !== "sqlserver") return undefined;
+  const beforeCursor = sql.slice(0, Math.max(0, Math.min(cursor, sql.length)));
+  const allTokens = tokenizeSqlSemantic(beforeCursor, "sqlserver");
+  let batchStart = 0;
+  for (const token of allTokens) {
+    if (token.kind !== "word" || token.normalized !== "go") continue;
+    const lineStart = beforeCursor.lastIndexOf("\n", token.span.start - 1) + 1;
+    const lineEndIndex = beforeCursor.indexOf("\n", token.span.end);
+    const lineEnd = lineEndIndex < 0 ? beforeCursor.length : lineEndIndex;
+    if (/^\s*go(?:\s+\d+)?\s*$/i.test(beforeCursor.slice(lineStart, lineEnd))) {
+      batchStart = lineEndIndex < 0 ? lineEnd : lineEnd + 1;
+    }
+  }
+
+  const batchSql = beforeCursor.slice(batchStart);
+  const tokens = tokenizeSqlSemantic(batchSql, "sqlserver").filter((token) => token.kind !== "comment" && token.kind !== "string");
+  const variables: string[] = [];
+  const seen = new Set<string>();
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const declare = tokens[index];
+    if (declare?.kind !== "word" || declare.normalized !== "declare") continue;
+    const declarationDepth = declare.depth;
+    let expectVariable = true;
+
+    for (let declarationIndex = index + 1; declarationIndex < tokens.length; declarationIndex += 1) {
+      const token = tokens[declarationIndex]!;
+      if (token.depth < declarationDepth || (token.depth === declarationDepth && token.text === ";")) break;
+      if (token.depth === declarationDepth && token.kind === "word" && SQLSERVER_DECLARATION_BOUNDARY_KEYWORDS.has(token.normalized) && sqlTokenStartsLine(batchSql, token.span.start)) {
+        break;
+      }
+      if (expectVariable) {
+        if (token.kind === "word" && /^@[A-Za-z_@$#][\w@$#]*$/u.test(token.text) && !token.text.startsWith("@@")) {
+          const next = tokens[declarationIndex + 1];
+          if (next && next.text !== "," && next.text !== ";") {
+            const key = token.text.toLowerCase();
+            if (!seen.has(key)) {
+              seen.add(key);
+              variables.push(token.text);
+            }
+          }
+          expectVariable = false;
+        }
+      } else if (token.depth === declarationDepth && token.text === ",") {
+        expectVariable = true;
+      }
+    }
+  }
+
+  return variables;
+}
+
+function sqlTokenStartsLine(sql: string, position: number): boolean {
+  const lineStart = sql.lastIndexOf("\n", Math.max(0, position - 1)) + 1;
+  return sql.slice(lineStart, position).trim().length === 0;
 }
 
 function sqlServerDatepartCompletionValues(beforeCursor: string, databaseType?: DatabaseType): string[] | undefined {
@@ -4279,6 +4343,17 @@ function buildPreferredKeywordItems(prefix: string, keywords: string[], keywordC
       label: applySqlKeywordCase(keyword, keywordCase),
       type: "keyword" as const,
       boost: computeBoost(keyword, prefix) + 6200 - index,
+    }));
+}
+
+function buildSqlServerLocalVariableItems(context: SqlCompletionContext): SqlCompletionItem[] {
+  return (context.localVariables ?? [])
+    .filter((variable) => matchesPrefix(variable, context.prefix))
+    .map((variable) => ({
+      label: variable,
+      type: "variable" as const,
+      detail: "local variable",
+      boost: computeBoost(variable, context.prefix) + 4_000,
     }));
 }
 

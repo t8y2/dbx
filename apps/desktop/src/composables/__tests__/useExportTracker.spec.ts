@@ -169,14 +169,17 @@ describe("data transfer task duration", () => {
     });
     const tracker = useExportTracker();
     const onStarted = vi.fn();
+    const onOpen = vi.fn();
     const request = { ...transferRequest(`start-${_flow}`), ...overrides };
 
-    const task = tracker.startDataTransferTask(request, _flow, { onStarted });
+    const task = tracker.startDataTransferTask(request, _flow, { onStarted, onOpen });
 
     expect(task.status).toBe("Running");
     expect(api.startTransfer).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.startTransfer).mock.calls[0]?.[0]).toMatchObject(overrides);
     expect(onStarted).toHaveBeenCalledTimes(1);
+    task.onOpen?.();
+    expect(onOpen).toHaveBeenCalledTimes(1);
 
     finishTransfer();
     await Promise.resolve();

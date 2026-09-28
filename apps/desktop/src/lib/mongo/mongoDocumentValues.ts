@@ -1,4 +1,5 @@
 import type { CellValue } from "@/lib/dataGrid/cellValue";
+import { applyColumnFormatter, type ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 
 export type MongoInputValue = string | number | boolean | null;
 
@@ -11,6 +12,7 @@ const MONGO_INTEGER_PATTERN = /^-?\d+$/;
 // before entering the grid and restored before being saved.
 const MONGO_DOCUMENT_GRID_PREFIX = "\u0000dbx:mongo-document-grid:";
 const MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX = `${MONGO_DOCUMENT_GRID_PREFIX}string:`;
+const MONGO_DOCUMENT_GRID_JSON_PREFIX = `${MONGO_DOCUMENT_GRID_PREFIX}json:`;
 export const MONGO_DOCUMENT_GRID_NULL = `${MONGO_DOCUMENT_GRID_PREFIX}null`;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_BSON_INT64 = -9223372036854775808n;
@@ -65,14 +67,32 @@ function mongoDocumentNumericValueType(value: unknown): string | undefined {
   return typeof object[key] === "string" ? MONGO_EXTENDED_JSON_NUMERIC_TYPES.get(key) : undefined;
 }
 
+type MongoDateTimeFormatter = Extract<ColumnFormatterConfig, { kind: "datetime" }>;
+
+function mongoExtendedJsonDateValue(value: unknown): string | number | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const object = value as Record<string, unknown>;
+  if (Object.keys(object).length !== 1 || !("$date" in object)) return undefined;
+  const date = object.$date;
+  if (typeof date === "string" || typeof date === "number") return date;
+  if (!date || typeof date !== "object" || Array.isArray(date)) return undefined;
+  const canonical = date as Record<string, unknown>;
+  return Object.keys(canonical).length === 1 && typeof canonical.$numberLong === "string" ? canonical.$numberLong : undefined;
+}
+
 export function mongoDocumentGridColumnTypes(documents: readonly Record<string, unknown>[], columns: readonly string[]): string[] {
   return columns.map((column) => {
     let inferredType: string | undefined;
     for (const document of documents) {
       const value = document[column];
       if (value === undefined || value === null) continue;
+      if (mongoExtendedJsonDateValue(value) !== undefined) {
+        if (inferredType && inferredType !== "datetime") return "";
+        inferredType = "datetime";
+        continue;
+      }
       const numericType = mongoDocumentNumericValueType(value);
-      if (!numericType) return "";
+      if (!numericType || inferredType === "datetime") return "";
       inferredType = inferredType && inferredType !== numericType ? "number" : numericType;
     }
     return inferredType ?? "";
@@ -136,11 +156,16 @@ export function mongoDocumentDisplayValue(value: unknown): unknown {
 export function mongoDocumentGridValue(value: unknown): unknown {
   if (value === null) return MONGO_DOCUMENT_GRID_NULL;
   if (typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_PREFIX)) return `${MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX}${value}`;
-  return mongoDocumentDisplayValue(value);
+  const displayValue = mongoDocumentDisplayValue(value);
+  return displayValue && typeof displayValue === "object" ? `${MONGO_DOCUMENT_GRID_JSON_PREFIX}${JSON.stringify(displayValue)}` : displayValue;
 }
 
 function mongoDocumentGridEscapedString(value: unknown): string | undefined {
   return typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX) ? value.slice(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX.length) : undefined;
+}
+
+function mongoDocumentGridJson(value: unknown): string | undefined {
+  return typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_JSON_PREFIX) ? value.slice(MONGO_DOCUMENT_GRID_JSON_PREFIX.length) : undefined;
 }
 
 /** Returns the text presented in a collection-grid editor, when customized. */
@@ -148,6 +173,8 @@ export function mongoDocumentGridEditorText(value: unknown): string | undefined 
   // An existing BSON null is represented as NULL in the grid, but editing it
   // starts with an empty input. The private marker must never be user-facing.
   if (value === MONGO_DOCUMENT_GRID_NULL) return "";
+  const json = mongoDocumentGridJson(value);
+  if (json !== undefined) return json;
   return mongoDocumentGridEscapedString(value);
 }
 
@@ -158,16 +185,65 @@ export function mongoDocumentGridClipboardText(value: unknown): string | undefin
 }
 
 /** Returns the custom display text required by collection-grid BSON values. */
-export function mongoDocumentGridDisplayText(value: unknown): string | undefined {
+export function mongoDocumentGridDisplayText(value: unknown, formatter?: ColumnFormatterConfig): string | undefined {
   if (value === MONGO_DOCUMENT_GRID_NULL) return "NULL";
   const escapedString = mongoDocumentGridEscapedString(value);
   if (escapedString !== undefined) return JSON.stringify(escapedString);
+  const json = mongoDocumentGridJson(value);
+  if (json !== undefined) return formatMongoDocumentGridJson(json, formatter);
   return value === "NULL" ? JSON.stringify(value) : undefined;
+}
+
+function formatMongoDocumentGridJson(json: string, formatter: ColumnFormatterConfig | undefined): string {
+  if (formatter?.kind !== "datetime" || !validMongoDisplayTimeZone(formatter.timezone)) return json;
+  try {
+    const transformed = formatMongoDocumentDates(JSON.parse(json), formatter);
+    if (!transformed.changed) return json;
+    return typeof transformed.value === "string" ? transformed.value : JSON.stringify(transformed.value);
+  } catch {
+    return json;
+  }
+}
+
+function validMongoDisplayTimeZone(timeZone: string | undefined): boolean {
+  if (!timeZone) return true;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone }).format(0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function formatMongoDocumentDates(value: unknown, formatter: MongoDateTimeFormatter): { value: unknown; changed: boolean } {
+  const date = mongoExtendedJsonDateValue(value);
+  if (date !== undefined) return { value: applyColumnFormatter(date, formatter), changed: true };
+  if (Array.isArray(value)) {
+    let changed = false;
+    const items = value.map((item) => {
+      const transformed = formatMongoDocumentDates(item, formatter);
+      changed ||= transformed.changed;
+      return transformed.value;
+    });
+    return { value: changed ? items : value, changed };
+  }
+  if (!value || typeof value !== "object") return { value, changed: false };
+  let changed = false;
+  const object = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, item]) => {
+      const transformed = formatMongoDocumentDates(item, formatter);
+      changed ||= transformed.changed;
+      return [key, transformed.value];
+    }),
+  );
+  return { value: changed ? object : value, changed };
 }
 
 /** Restores a collection-grid value before it leaves the grid externally. */
 export function mongoDocumentGridExternalValue(value: CellValue): CellValue {
   if (value === MONGO_DOCUMENT_GRID_NULL) return null;
+  const json = mongoDocumentGridJson(value);
+  if (json !== undefined) return json;
   const escapedString = mongoDocumentGridEscapedString(value);
   return escapedString === undefined ? value : escapedString;
 }

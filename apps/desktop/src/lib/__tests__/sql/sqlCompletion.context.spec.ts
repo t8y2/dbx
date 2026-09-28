@@ -124,6 +124,62 @@ describe("SQL Server datepart completion", () => {
   });
 });
 
+describe("SQL Server local variable completion", () => {
+  const completionItems = (sql: string, cursor = sql.length) =>
+    buildSqlCompletionItems(sql, cursor, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "sqlserver",
+      dialect: "sqlserver",
+    });
+
+  it("suggests variables declared earlier in the current batch", () => {
+    const sql = `CREATE OR ALTER PROCEDURE dbo.find_customer AS
+BEGIN
+  DECLARE @customer_id INT = 1,
+          @customer_name NVARCHAR(100);
+  SELECT @customer_`;
+
+    expect(completionItems(sql)).toEqual(expect.arrayContaining([expect.objectContaining({ label: "@customer_id", type: "variable" }), expect.objectContaining({ label: "@customer_name", type: "variable" })]));
+  });
+
+  it("ignores later declarations and declarations inside comments or strings", () => {
+    const sql = `DECLARE @visible INT;
+-- DECLARE @commented INT;
+SELECT 'DECLARE @string_value INT';
+SELECT @|
+DECLARE @later INT;`;
+    const cursor = sql.indexOf("|");
+    const variables = completionItems(sql.replace("|", ""), cursor)
+      .filter((item) => item.type === "variable")
+      .map((item) => item.label);
+
+    expect(variables).toContain("@visible");
+    expect(variables).not.toContain("@commented");
+    expect(variables).not.toContain("@string_value");
+    expect(variables).not.toContain("@later");
+  });
+
+  it("does not leak variables across GO batch boundaries", () => {
+    const sql = `DECLARE @old_batch INT;
+GO
+DECLARE @current_batch INT;
+SELECT @`;
+    const variables = completionItems(sql)
+      .filter((item) => item.type === "variable")
+      .map((item) => item.label);
+
+    expect(variables).toContain("@current_batch");
+    expect(variables).not.toContain("@old_batch");
+  });
+
+  it("preserves SQL Server system variable completion", () => {
+    const sql = "DECLARE @row_id INT; SELECT @@row";
+
+    expect(completionItems(sql)).toEqual(expect.arrayContaining([expect.objectContaining({ label: "@@ROWCOUNT", type: "keyword" })]));
+  });
+});
+
 describe("MySQL DESCRIBE table completion", () => {
   it.each(["DESC", "DESCRIBE"])("treats %s as a table-name context", (keyword) => {
     const sql = `${keyword} ord`;

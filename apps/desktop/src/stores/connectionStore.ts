@@ -1966,8 +1966,6 @@ export const useConnectionStore = defineStore("connection", () => {
     children = dedupeTreeNodeChildrenById(children);
     if (shouldClearDescendantLoadedMarkers(parent, children)) {
       clearDescendantLoadedChildrenMarkers(parent.id);
-      // Parent load may still be current; only supersede descendant generations.
-      treeNodeLoads.invalidateDescendants(parent.id);
     }
     if (parent.children && parent.children.length > 0) {
       const oldMap = new Map(parent.children.map((c) => [c.id, c] as const));

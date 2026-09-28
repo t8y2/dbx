@@ -1035,7 +1035,7 @@ jobs:
     # Keep the release as a draft until every release-blocking platform job passes.
     # Nix packaging and the Windows 7 static-browser build are advisory and
     # upload their release assets independently of publication.
-    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, static-browser]
+    needs: [cleanup-release-signatures, docker-manifest, fnos-package, jdbc-plugin, static-browser]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release
@@ -1233,3 +1233,24 @@ jobs:
             -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
             -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
             $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)
+
+  fnos-package:
+    name: Build fnOS package
+    needs: [release-ready, docker-manifest]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build versioned fnOS package
+        env:
+          DBX_FNOS_VERSION: ${{ github.ref_name }}
+        run: |
+          DBX_FNOS_VERSION="${DBX_FNOS_VERSION#v}" ./deploy/fnos/build.sh
+
+      - name: Upload fnOS release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/fnos/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

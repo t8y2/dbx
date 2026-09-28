@@ -9,6 +9,7 @@ import {
   PUSH_MODIFIERS,
   BULK_WRITE_OPERATION_FIELDS,
   BULK_WRITE_OPERATIONS,
+  KEY_MAP_VALUES,
   METHOD_OPTION_KEYS,
   STAGE_OPTION_KEYS,
   TOP_LEVEL_QUERY_OPERATORS,
@@ -52,7 +53,8 @@ export type MongoCompletionMode =
   | "stageOption"
   | "methodOption"
   | "bulkWriteOperation"
-  | "bulkWriteField";
+  | "bulkWriteField"
+  | "keyMapValue";
 
 export interface MongoCompletionField {
   name: string;
@@ -78,12 +80,16 @@ export interface MongoCompletionContext {
   replaceClosingQuote?: '"' | "'";
   /** Collection the cursor's command targets, used to load field metadata. */
   collection?: string;
+  /** Database the cursor's command targets when reached through `db.getSiblingDB(…)`, used instead of the editor's active database. */
+  database?: string;
   /** Enclosing aggregation stage (`$lookup`, `$group`, …), when inside one. */
   stage?: string;
   /** Collection method whose options object the cursor sits in. */
   method?: string;
   /** bulkWrite operation (`updateOne`, `deleteMany`, …) whose body the cursor sits in. */
   bulkWriteOperation?: string;
+  /** Which field-to-value map the cursor sits in: `sort`, `projection` or `index`. */
+  keyMap?: string;
 }
 
 export interface MongoCompletionInput {
@@ -257,13 +263,14 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const beforeCursor = text.slice(0, safeCursor);
   const collection = extractActiveCollection(text, safeCursor);
+  const database = extractActiveDatabase(text, safeCursor);
   const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
   const replaceClosingQuote = closingQuoteAtCursor(prefix, text, safeCursor);
-  const at = (mode: MongoCompletionMode, stage?: string, method?: string, bulkWriteOperation?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage, method, bulkWriteOperation });
+  const at = (mode: MongoCompletionMode, stage?: string, method?: string, bulkWriteOperation?: string, keyMap?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, database, stage, method, bulkWriteOperation, keyMap });
 
   if (isInsideMongoComment(text, safeCursor)) return { mode: "none", prefix: "", from: safeCursor };
 
-  if (beforeCursor.endsWith("db.")) return { mode: "collection", prefix: "", from: safeCursor, collection };
+  if (endsAtDbRootDot(beforeCursor)) return { mode: "collection", prefix: "", from: safeCursor, collection, database };
 
   const getCollectionPrefix = matchGetCollectionPrefix(beforeCursor);
   if (getCollectionPrefix) {
@@ -273,6 +280,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
       from: getCollectionPrefix.from,
       replaceClosingQuote: closingQuoteAtCursor(getCollectionPrefix.prefix, text, safeCursor),
       collection,
+      database,
     };
   }
 
@@ -283,29 +291,33 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
       prefix: collectionPrefix.prefix,
       from: collectionPrefix.from,
       collection,
+      database,
     };
   }
 
   if (isAfterCollectionDot(beforeCursor)) {
     const methodPrefix = readMethodPrefix(beforeCursor);
-    return { mode: "method", prefix: methodPrefix.prefix, from: methodPrefix.from, collection };
+    return { mode: "method", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, database };
   }
 
   const cursorChain = matchCursorMethodDot(beforeCursor);
   if (cursorChain) {
     const methodPrefix = readMethodPrefix(beforeCursor);
-    return { mode: "cursorMethod", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, stage: cursorChain.countable ? "countable" : undefined };
+    return { mode: "cursorMethod", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, database, stage: cursorChain.countable ? "countable" : undefined };
   }
 
   const call = findInnermostMongoCall(beforeCursor);
-  if (!call) return at("root");
+  // Top-level snippets belong at the start of a command. Inside an argument list — of a method
+  // this engine does not model (`limit(`, `drop(`, `dropIndex("`, `runCommand({`, …) or after a
+  // `use` — they are noise: `db.collection.find` is not something you can type there.
+  if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) ? at("none") : at("root");
 
   const scan = scanMongoCallArguments(text, call.openParenIndex + 1, safeCursor);
-  if (!scan) return at("root");
+  if (!scan) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) ? at("none") : at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
   return {
-    ...at(classified.mode, classified.stage, classified.method, classified.bulkWriteOperation),
+    ...at(classified.mode, classified.stage, classified.method, classified.bulkWriteOperation, classified.keyMap),
     collection: classified.collection ?? collection,
   };
 }
@@ -328,7 +340,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = rootItems(prefix);
       break;
     case "collection":
-      items = collectionItems(prefix, collections);
+      items = collectionItems(prefix, collections, context.database !== undefined);
       break;
     case "collectionOrMethod":
       items = collectionOrMethodItems(prefix, collections);
@@ -389,6 +401,9 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "bulkWriteOperation":
       items = specItems(BULK_WRITE_OPERATIONS, prefix, "bulkWrite operation", 100);
+      break;
+    case "keyMapValue":
+      items = specItems(KEY_MAP_VALUES[context.keyMap ?? ""] ?? [], prefix, `${context.keyMap} value`, 100);
       break;
     case "bulkWriteField":
       items = specItems(BULK_WRITE_OPERATION_FIELDS[context.bulkWriteOperation ?? ""] ?? [], prefix, `${context.bulkWriteOperation} field`, 100);
@@ -453,11 +468,11 @@ export function getMongoDocumentQueryCompletionContext(text: string, cursor: num
   const scan = scanMongoCallArguments(text, 0, safeCursor);
   if (!scan) return nothing;
 
-  const mode = kind === "filter" ? classifyFilter(scan, 0) : classifyKeyMap(scan, 0);
-  if (mode === "none") return nothing;
+  const classified = kind === "filter" ? { mode: classifyFilter(scan, 0) } : classifyKeyMap(scan, 0, "sort");
+  if (classified.mode === "none") return nothing;
 
   const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
-  return { mode, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor) };
+  return { ...classified, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor) };
 }
 
 /** Text to splice into a plain input for a chosen completion, and where to leave the selection. */
@@ -571,6 +586,7 @@ interface MongoCursorClass {
   collection?: string;
   method?: string;
   bulkWriteOperation?: string;
+  keyMap?: string;
 }
 
 /**
@@ -663,9 +679,11 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
     case "documents":
       return { mode: classifyDocument(scan, 1) };
     case "projection":
+      return classifyKeyMap(scan, 0, "projection");
     case "keys":
+      return classifyKeyMap(scan, 0, "index");
     case "sortKeys":
-      return { mode: classifyKeyMap(scan, 0) };
+      return classifyKeyMap(scan, 0, "sort");
     // A bare string argument naming a field, e.g. distinct("category").
     case "fieldName":
       return { mode: scan.stack.length === 0 ? "fieldPath" : "none" };
@@ -737,11 +755,15 @@ function classifyDocument(scan: MongoCallScan, rootIndex: number): MongoCompleti
   return inner.kind === "object" ? "field" : "none";
 }
 
-function classifyKeyMap(scan: MongoCallScan, rootIndex: number): MongoCompletionMode {
+/**
+ * A field-to-value map: `sort({ field: -1 })`, `createIndex({ field: "text" })`, a projection.
+ * Keys are field names; values are the small fixed set `keyMap` names.
+ */
+function classifyKeyMap(scan: MongoCallScan, rootIndex: number, keyMap: string): MongoCursorClass {
   const inner = innermost(scan);
-  if (!inner || scan.inValue) return "none";
-  if (inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return "none";
-  return "field";
+  if (!inner || inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return { mode: "none" };
+  if (scan.inValue) return { mode: scan.inString ? "none" : "keyMapValue", keyMap };
+  return { mode: "field" };
 }
 
 /** Option keys whose value is a field-to-value map, so the cursor completes field names there. */
@@ -754,7 +776,8 @@ function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursor
 
   // `{ sort: { … } }` and `{ projection: { … } }` are field maps one level in.
   if (depth === 1 && inner.kind === "object" && FIELD_MAP_OPTION_KEYS.has(inner.key ?? "")) {
-    return { mode: scan.inValue ? "none" : "field", method };
+    if (!scan.inValue) return { mode: "field", method };
+    return { mode: scan.inString ? "none" : "keyMapValue", method, keyMap: inner.key ?? "" };
   }
   if (depth !== 0 || scan.inValue) return { mode: "none" };
   return { mode: inner.kind === "object" ? "methodOption" : "none", method };
@@ -847,7 +870,7 @@ function stageStringValueMode(stage: string): MongoCompletionMode {
 function classifyStageBody(stage: string, scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
   if (stage === "$match") return { mode: classifyFilter(scan, bodyIndex), stage };
   if (stage === "$group") return { mode: classifyGroup(scan, bodyIndex), stage };
-  if (stage === "$sort") return { mode: classifyKeyMap(scan, bodyIndex), stage };
+  if (stage === "$sort") return { ...classifyKeyMap(scan, bodyIndex, "sort"), stage };
   if (stage === "$unset") return { mode: innermost(scan)?.kind === "array" ? "fieldPath" : "none", stage };
   if (OPTION_STAGES.has(stage)) return classifyStageOptions(stage, scan, bodyIndex);
   // `$project`-shaped stages and anything unmodelled: keys are field names, values are expressions.
@@ -918,9 +941,9 @@ function rootItems(prefix: string): MongoCompletionItem[] {
   return dedupeAndSort([...snippets, ...methods]);
 }
 
-function collectionItems(prefix: string, collections: string[]): MongoCompletionItem[] {
+function collectionItems(prefix: string, collections: string[], siblingRoot = false): MongoCompletionItem[] {
   const names = collectionNameItems(prefix, collections);
-  const methods = DATABASE_METHODS.filter((method) => matchesFuzzyPrefix(method.label, prefix)).map((method) => ({
+  const methods = DATABASE_METHODS.filter((method) => (siblingRoot ? method.label !== "getSiblingDB" : true) && matchesFuzzyPrefix(method.label, prefix)).map((method) => ({
     label: method.label,
     type: "function" as const,
     detail: method.detail,
@@ -1147,22 +1170,35 @@ function readMethodPrefix(beforeCursor: string): { prefix: string; from: number 
   return { prefix: beforeCursor.slice(from), from };
 }
 
+/**
+ * The database a command is addressed to: `db`, or another database through
+ * `db.getSiblingDB("other")`. The commands are otherwise identical, so every matcher below
+ * accepts either root rather than only a literal `db.`.
+ */
+const DB_ROOT = String.raw`db(?:\s*\.\s*getSiblingDB\s*\(\s*(?:"[^"]*"|'[^']*')\s*\))?`;
+const COLLECTION_REF = String.raw`(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+["']\))`;
+
+/** `db.` or `db.getSiblingDB("other").` immediately before the cursor. */
+function endsAtDbRootDot(beforeCursor: string): boolean {
+  return new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\s*\.$`).test(beforeCursor);
+}
+
 function matchDbCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
-  const match = /(?:^|[\s;(])db\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$/.exec(beforeCursor);
+  const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`).exec(beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
 }
 
 function matchGetCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
-  const match = /(?:^|[\s;(])db\.getCollection\(\s*(["'][^"'\\]*)$/.exec(beforeCursor);
+  const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.getCollection\(\s*(["'][^"'\\]*)$`).exec(beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
 }
 
 function isAfterCollectionDot(beforeCursor: string): boolean {
-  return /(?:^|[\s;(])db\.(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+["']\))\.[\w$-]*$/.test(beforeCursor);
+  return new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.[\w$-]*$`).test(beforeCursor);
 }
 
 /**
@@ -1170,7 +1206,7 @@ function isAfterCollectionDot(beforeCursor: string): boolean {
  * is while no other cursor method has been chained on.
  */
 function matchCursorMethodDot(beforeCursor: string): { countable: boolean } | null {
-  const collectionCall = /(?:^|[\s;(])db\.(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+["']\))\.(find|aggregate)\s*\(/g;
+  const collectionCall = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.(find|aggregate)\s*\(`, "g");
   let lastMatch: RegExpExecArray | null = null;
   let match: RegExpExecArray | null;
   while ((match = collectionCall.exec(beforeCursor))) lastMatch = match;
@@ -1233,6 +1269,27 @@ function skipMongoStringOrComment(text: string, i: number, end: number): number 
     return close < 0 || close + 2 > end ? end : close + 2;
   }
   return i;
+}
+
+/**
+ * Whether the cursor sits inside an unclosed `(` of the current command. Literals and comments
+ * are masked first so a parenthesis inside a string does not count, and the depth resets at `;`
+ * because an unclosed call cannot span two commands.
+ */
+function isInsideCallArguments(beforeCursor: string): boolean {
+  const masked = maskMongoLiterals(beforeCursor);
+  let depth = 0;
+  for (const char of masked) {
+    if (char === "(") depth++;
+    else if (char === ")") depth = Math.max(0, depth - 1);
+    else if (char === ";") depth = 0;
+  }
+  return depth > 0;
+}
+
+/** `use <database>` takes a database name, which this engine has no list of, so it stays quiet. */
+function isAfterUseKeyword(beforeCursor: string): boolean {
+  return /(?:^|[\s;])use\s+[\w$-]*$/.test(maskMongoLiterals(beforeCursor));
 }
 
 /** Blank out string/comment CONTENT (preserving length, so offsets stay valid) before pattern matching. */
@@ -1301,14 +1358,25 @@ function isInsideMongoComment(text: string, cursor: number): boolean {
 
 function extractActiveCollection(text: string, cursor: number): string | undefined {
   const before = text.slice(0, cursor);
-  const getCollectionMatches = [...before.matchAll(/db\.getCollection\(["']([^"']+)["']\)/g)];
-  const directMatches = [...before.matchAll(/db\.([A-Za-z_][\w$-]*)\s*\./g)].filter((match) => match[1] !== "getCollection");
+  const getCollectionMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.getCollection\(["']([^"']+)["']\)`, "g"))];
+  const directMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.([A-Za-z_][\w$-]*)\s*\.`, "g"))].filter((match) => match[1] !== "getCollection");
   const lastGetCollection = getCollectionMatches[getCollectionMatches.length - 1];
   const lastDirect = directMatches[directMatches.length - 1];
   const getCollectionIndex = lastGetCollection?.index ?? -1;
   const directIndex = lastDirect?.index ?? -1;
   if (getCollectionIndex > directIndex) return lastGetCollection?.[1];
   return lastDirect?.[1];
+}
+
+/**
+ * The last `db.getSiblingDB("name")` before the cursor decides which database the
+ * command targets; plain `db.` references leave it unset so the editor's active
+ * database keeps applying.
+ */
+function extractActiveDatabase(text: string, cursor: number): string | undefined {
+  const before = text.slice(0, cursor);
+  const matches = [...before.matchAll(new RegExp(String.raw`(?:^|[\s;(])db\s*\.\s*getSiblingDB\s*\(\s*(["'])([^"']*)\1\s*\)`, "g"))];
+  return matches[matches.length - 1]?.[2] || undefined;
 }
 
 function collectFieldTypes(value: unknown, prefix: string, out: Map<string, Set<string>>, depth: number) {

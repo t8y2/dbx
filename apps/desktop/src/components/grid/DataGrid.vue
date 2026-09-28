@@ -166,8 +166,11 @@ import {
   downloadBinaryCellPayload,
   formatBinaryCellByteSize,
   binaryCellUtf8Text,
+  hasUnsafeOpaqueAggregateStatePredicate,
   isBlobCellColumnType,
   isBinaryCellColumnType,
+  isOpaqueAggregateStateColumnType,
+  mergeOpaqueReadonlyColumnIndexes,
   openBinaryCellFile,
   parseBinaryCellBytes,
   retainBinaryCellDownloadMenuForHover,
@@ -250,6 +253,8 @@ import {
   buildColumnValueFilterCondition,
   buildColumnValuesFilterCondition,
   combineWhereInputs,
+  formatFilterRawValue,
+  formatFilterRawValues,
   filterModeHasCompleteValue,
   filterModeIsSupportedForDatabase,
   filterModeNeedsValue,
@@ -326,6 +331,8 @@ import { useDataGridResultLifecycle } from "@/composables/useDataGridResultLifec
 import { useDataGridAutoRefresh } from "@/composables/useDataGridAutoRefresh";
 import { useDataGridAsyncSurface } from "@/composables/useDataGridAsyncSurface";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
+import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
+import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
@@ -639,6 +646,10 @@ const transposeRowIndex = ref<number | null>(null);
 const showTranspose = ref(false);
 const preserveTransposeOnNextResult = ref(false);
 let preservedSelectionOnNextResult: {
+  selection: PersistedDataGridSelection;
+  sourceResult: QueryResult;
+} | null = null;
+let preservedTransposeRecordOnNextResult: {
   selection: PersistedDataGridSelection;
   sourceResult: QueryResult;
 } | null = null;
@@ -1114,8 +1125,6 @@ const conditionHistoryScope = computed(() => ({
   tableName: props.tableMeta?.tableName,
 }));
 type LocalFilterMode = "local" | "server";
-type LocalFilterOption = DataGridLocalFilterOption;
-
 type LocalColumnFilterDraft = {
   columnIndex: number;
   values: Set<string>;
@@ -1161,11 +1170,6 @@ let localFilterResizeStartWidth = LOCAL_FILTER_POPOVER_DEFAULT_WIDTH;
 let localFilterResizeStartOffsetX = 0;
 let localFilterResizeStartLeft = 0;
 let localFilterResizeStartRight = 0;
-const serverFilterLoading = ref(false);
-const serverFilterError = ref("");
-const serverFilterOptions = ref<LocalFilterOption[]>([]);
-const serverFilterLimited = ref(false);
-const serverFilterValueByKey = ref<Map<string, CellValue>>(new Map());
 const serverColumnFilters = ref<Record<number, DataGridCachedServerColumnFilter>>({});
 let getGridNewRows: () => readonly (readonly CellValue[])[] = () => [];
 let getGridRowData: (row: CellValue[], sourceIndex: number) => readonly CellValue[] = (row) => row;
@@ -1269,6 +1273,34 @@ const filterBuilderOpen = filterBuilder.open;
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
 const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
 const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
+const filterValueSuggestionRuleId = ref<string>();
+const filterValueSuggestionTarget = ref<DataGridDistinctValueSuggestionTarget>();
+const filterValueSuggestionSearch = ref("");
+const filterValueSuggestionDraftValues = ref(new Map<string, CellValue>());
+const filterValueSuggestionLoader = useDataGridDistinctValueLoader({
+  scopeIdentity: structuredFilterScopeKey,
+  getConnectionId: () => props.connectionId,
+  getExecutionDatabase: () => props.executionDatabase ?? props.database ?? "",
+  getSchema: () => props.schema,
+  getDatabaseType: () => resolvedDatabaseType.value,
+  getConnectionConfig: () => (props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined),
+  getIdentifierQuote: () => connectionStore.connectionIdentifierQuote?.(props.connectionId),
+  getGlobalQueryTimeoutSecs: () => settingsStore.editorSettings.globalQueryTimeoutSecs,
+  waitForTableMeta,
+  formatValue: (value, columnIndex) => formatCellCached(value, columnIndex),
+  keyForValue: dataGridDistinctValueKey,
+});
+const filterValueSuggestionState = computed<DataGridDistinctValueSuggestionState>(() => ({
+  ruleId: filterValueSuggestionRuleId.value,
+  target: filterValueSuggestionTarget.value,
+  search: filterValueSuggestionSearch.value,
+  options: filterValueSuggestionLoader.options.value,
+  loading: filterValueSuggestionLoader.loading.value,
+  error: filterValueSuggestionLoader.error.value,
+  limited: filterValueSuggestionLoader.limited.value,
+  limit: DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT,
+  selectedKeys: new Set(filterValueSuggestionDraftValues.value.keys()),
+}));
 // Structured filter rules are restored asynchronously. A tab-switch snapshot's
 // probe includes the applied condition, so restoring before this hydration
 // settles would reject an otherwise valid snapshot and never retry it.
@@ -1301,11 +1333,6 @@ const localColumnFilterRuntime = useDataGridColumnFilters({
     localFilterOpenColumn,
     localFilterSearch,
     localFilterDraft,
-    serverFilterLoading,
-    serverFilterError,
-    serverFilterOptions,
-    serverFilterLimited,
-    serverFilterValueByKey,
     serverColumnFilters,
   },
   getResult: () => props.result,
@@ -1313,6 +1340,7 @@ const localColumnFilterRuntime = useDataGridColumnFilters({
   getConnectionId: () => props.connectionId,
   getSchema: () => props.schema,
   getExecutionDatabase: () => props.executionDatabase ?? props.database ?? "",
+  scopeIdentity: structuredFilterScopeKey,
   resolvedDatabaseType,
   canUseWhereSearch,
   canUseServerColumnFilter,
@@ -1321,6 +1349,7 @@ const localColumnFilterRuntime = useDataGridColumnFilters({
   whereFilterInput,
   getConnectionConfig: () => (props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined),
   getIdentifierQuote: () => connectionStore.connectionIdentifierQuote?.(props.connectionId),
+  getGlobalQueryTimeoutSecs: () => settingsStore.editorSettings.globalQueryTimeoutSecs,
   getNewRows: () => getGridNewRows(),
   getRowData: (row, sourceIndex) => getGridRowData(row, sourceIndex),
   formatValue: formatCellCached,
@@ -1352,6 +1381,10 @@ const {
   toggleLocalFilterSort,
   localFilterTypedValue,
   canApplyTypedLocalFilterValue,
+  serverFilterLoading,
+  serverFilterError,
+  serverFilterLimited,
+  resetDistinctValueCache,
   openLocalFilter,
   closeLocalFilter,
   toggleLocalFilterValue,
@@ -1525,6 +1558,89 @@ async function buildStructuredWhereFromRules(rules: StructuredFilterRule[]): Pro
   );
 }
 
+function closeFilterValueSuggestions() {
+  filterValueSuggestionRuleId.value = undefined;
+  filterValueSuggestionTarget.value = undefined;
+  filterValueSuggestionSearch.value = "";
+  filterValueSuggestionDraftValues.value = new Map();
+  filterValueSuggestionLoader.reset();
+}
+
+function filterValueSuggestionRule(): StructuredFilterRule | undefined {
+  return structuredFilterRules.value.find((rule) => rule.id === filterValueSuggestionRuleId.value);
+}
+
+function filterValueSuggestionColumnIndex(columnName: string): number {
+  const exact = props.result.columns.indexOf(columnName);
+  if (exact >= 0) return exact;
+  const normalized = columnName.toLowerCase();
+  return props.result.columns.findIndex((column) => column.toLowerCase() === normalized);
+}
+
+function filterValueSuggestionRequest(searchValue = filterValueSuggestionSearch.value) {
+  const rule = filterValueSuggestionRule();
+  if (!rule) return undefined;
+  const columnIndex = filterValueSuggestionColumnIndex(rule.columnName);
+  if (columnIndex < 0) return undefined;
+  return {
+    columnIndex,
+    columnName: rule.columnName,
+    searchValue,
+    limit: DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT,
+    includeCounts: true,
+  };
+}
+
+async function openFilterValueSuggestions(ruleId: string, target: DataGridDistinctValueSuggestionTarget) {
+  const rule = structuredFilterRules.value.find((item) => item.id === ruleId);
+  if (!rule || rule.disabled || !rule.columnName || !filterModeNeedsValue(rule.mode)) return;
+  const columnInfo = filterBuilderColumns.value.find((column) => column.name === rule.columnName)?.columnInfo;
+  const currentValues = filterModeUsesList(rule.mode) ? parseFilterValues(rule.rawValue, columnInfo, resolvedDatabaseType.value) : [];
+  filterValueSuggestionRuleId.value = ruleId;
+  filterValueSuggestionTarget.value = target;
+  filterValueSuggestionSearch.value = "";
+  filterValueSuggestionDraftValues.value = new Map(currentValues.filter((value) => value === null || typeof value !== "object").map((value): [string, CellValue] => [dataGridDistinctValueKey(value, columnInfo), value]));
+  filterValueSuggestionLoader.reset();
+  const request = filterValueSuggestionRequest();
+  if (request) await filterValueSuggestionLoader.load(request);
+}
+
+function updateFilterValueSuggestionSearch(value: string) {
+  filterValueSuggestionSearch.value = value;
+  const request = filterValueSuggestionRequest(value);
+  if (request) filterValueSuggestionLoader.schedule(request);
+}
+
+function selectFilterValueSuggestion(option: DataGridLocalFilterOption) {
+  const rule = filterValueSuggestionRule();
+  const target = filterValueSuggestionTarget.value;
+  if (!rule || !target) return;
+  if (option.value === null) {
+    filterBuilder.updateRule(rule.id, { mode: dataGridNullSuggestionFilterMode(rule.mode), rawValue: "", rawEndValue: "" });
+  } else {
+    filterBuilder.updateRule(rule.id, target === "end" ? { rawEndValue: formatFilterRawValue(option.value) } : { rawValue: formatFilterRawValue(option.value) });
+  }
+  closeFilterValueSuggestions();
+}
+
+function toggleFilterValueSuggestion(option: DataGridLocalFilterOption) {
+  const next = new Map(filterValueSuggestionDraftValues.value);
+  if (next.has(option.key)) next.delete(option.key);
+  else next.set(option.key, option.value);
+  filterValueSuggestionDraftValues.value = next;
+}
+
+function toggleAllFilterValueSuggestions() {
+  filterValueSuggestionDraftValues.value = toggleAllDataGridDistinctValueOptions(filterValueSuggestionDraftValues.value, filterValueSuggestionLoader.options.value);
+}
+
+function applyFilterValueSuggestions() {
+  const rule = filterValueSuggestionRule();
+  if (!rule || !filterModeUsesList(rule.mode)) return;
+  filterBuilder.updateRule(rule.id, { rawValue: formatFilterRawValues([...filterValueSuggestionDraftValues.value.values()]) });
+  closeFilterValueSuggestions();
+}
+
 function persistStructuredFilterState() {
   saveDataGridStructuredFilterState(structuredFilterCacheKey.value, {
     scopeKey: structuredFilterScopeKey.value,
@@ -1584,10 +1700,12 @@ function addStructuredFilterRule() {
 }
 
 function removeStructuredFilterRule(ruleId: string) {
+  if (filterValueSuggestionRuleId.value === ruleId) closeFilterValueSuggestions();
   filterBuilder.removeRule(ruleId);
 }
 
 function updateStructuredFilterRule(ruleId: string, patch: Partial<StructuredFilterRule>) {
+  if (filterValueSuggestionRuleId.value === ruleId) closeFilterValueSuggestions();
   filterBuilder.updateRule(ruleId, patch);
 }
 
@@ -1600,6 +1718,7 @@ function updateTextFilterPanelHeight(height: number) {
 }
 
 function resetStructuredFilters() {
+  closeFilterValueSuggestions();
   filterBuilder.reset();
 }
 
@@ -1707,6 +1826,7 @@ function copyFilterSqlPreview() {
 watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
 
 watch(filterEditorView, (view) => {
+  closeFilterValueSuggestions();
   filterBuilderOpen.value = (view === "conditions" || view === "text") && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
   if (view === "conditions" || view === "text") ensureStructuredFilterRule();
 });
@@ -2266,7 +2386,7 @@ function scrollToColumnIndex(columnIndex: number) {
 
 // --- Column resize composable ---
 const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWidthDensity);
-const columnWidthMode = computed(() => settingsStore.editorSettings.dataGridColumnWidthMode ?? "fill");
+const columnWidthMode = computed(() => settingsStore.editorSettings.dataGridColumnWidthMode ?? "content");
 const tableFontFamily = computed(() => settingsStore.editorSettings.tableFontFamily);
 const columnWidthCacheKey = computed(() => props.columnWidthCacheKey?.trim() || props.cacheKey?.trim() || undefined);
 const columnStructureSignature = computed(() => createDataGridColumnStructureSignature(props.result.columns, props.result.column_types));
@@ -3878,7 +3998,7 @@ const editor = useDataGridEditor({
   tableMeta: computed(() => props.tableMeta),
   sourceColumns: computed(() => props.sourceColumns),
   joinedWriteTargets: computed(() => props.joinedWriteTargets),
-  readonlyColumnIndexes: computed(() => (props.readonlyColumnIndexes ? new Set(props.readonlyColumnIndexes) : undefined)),
+  readonlyColumnIndexes: computed(() => mergeOpaqueReadonlyColumnIndexes(props.readonlyColumnIndexes, allColumnTypes.value)),
   canEditExistingRows,
   onExecuteSql: computed(() => props.onExecuteSql),
   customSaveHandler: computed(() => props.customSaveHandler),
@@ -4088,6 +4208,7 @@ function canEditRowItem(item: RowItem | undefined): boolean {
 
 function canEditCellItem(item: RowItem | undefined, columnIndex: number): boolean {
   if (!canEditRowItem(item) || !item || !canEditColumn(columnIndex)) return false;
+  if (isOpaqueAggregateStateColumnType(allColumnTypes.value[columnIndex])) return false;
   if (!item.isNew && !item.isDraft && !canUpdateExistingRows.value) return false;
   if (isSavingNewRow(item)) return false;
   const column = props.result.columns[columnIndex] ?? "";
@@ -4351,6 +4472,7 @@ function isDecimalColumnType(dataType: string): boolean {
 
 function canDeleteRowItem(item: RowItem | undefined): boolean {
   if (!item) return false;
+  if (!item.isNew && canUseKeylessRowPredicate(props.databaseType, props.tableMeta?.primaryKeys ?? []) && hasUnsafeOpaqueAggregateStatePredicate(allColumnTypes.value, item.data)) return false;
   const canDelete = canDeleteGridRowItem({
     editable: !!props.editable && canDeleteRows.value,
     isDraft: !!item.isDraft,
@@ -5329,6 +5451,20 @@ function restoreSelectionAfterRefresh(snapshot: PersistedDataGridSelection) {
   });
 }
 
+function restoreTransposeRecordAfterRefresh(snapshot: PersistedDataGridSelection) {
+  const restored = restoreDataGridSelection({
+    snapshot,
+    columns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    rows: props.result.rows,
+    visibleColumnIndexes: visibleColumnIndexes.value,
+    displayItems: displayItems.value,
+  });
+  if (restored?.kind !== "rows") return;
+  transposeRowIndex.value = restored.scrollRowIndex;
+  nextTick(() => scrollTransposeRecordIntoView(restored.scrollRowIndex));
+}
+
 /** Bounded settling envelope for a replayed tab-switch viewport. */
 const MAX_VIEW_SNAPSHOT_RESTORE_FRAMES = 8;
 let viewSnapshotRestoreFrame = 0;
@@ -6292,6 +6428,14 @@ function applyColumnSort(column: string, columnIndex: number, direction: "asc" |
     toast(t("grid.largeValueLocalSortUnavailable"), 5000);
     return;
   }
+  if (showTranspose.value) {
+    const selection = captureCurrentSelectionForRefresh();
+    preservedSelectionOnNextResult = selection ? { selection, sourceResult: props.result } : null;
+    const activeRecord = transposeRowIndex.value === null ? undefined : displayItemAt(transposeRowIndex.value);
+    const activeRecordSelection = captureRowTargetForRefresh(activeRecord?.id ?? null);
+    preservedTransposeRecordOnNextResult = activeRecordSelection ? { selection: activeRecordSelection, sourceResult: props.result } : null;
+    preserveTransposeOnNextResult.value = true;
+  }
   if (mode === "database" && (infiniteScrollEnabled.value || loadAllRowsActive.value)) {
     resetInfiniteScrollState();
   } else {
@@ -6507,11 +6651,11 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
 }
 
 function formatCell(value: CellValue, columnIndex?: number, originalBytes?: number, limitDisplay = true): string {
+  const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
   if (props.mongoCollectionGrid) {
-    const documentGridText = mongoDocumentGridDisplayText(value);
+    const documentGridText = mongoDocumentGridDisplayText(value, formatter);
     if (documentGridText !== undefined) return documentGridText;
   }
-  const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
   if (formatter?.kind === "foreign-key-display" && columnIndex !== undefined) {
     const display = formatForeignKeyCellDisplay(value, columnIndex);
     return limitDisplay ? limitDataGridCellDisplay(display, resolvedDatabaseType.value === "sqlserver" ? SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH : undefined) : display;
@@ -10145,6 +10289,8 @@ watch(
     // check has to run before the markers are consumed below.
     const inPlaceRefreshPending = preservedSelectionOnNextResult !== null || preservedViewportAnchorOnNextResult !== null || preservedDetailsOnNextResult !== null || preserveTransposeOnNextResult.value;
     preservedSelectionOnNextResult = null;
+    const transposeRecordSnapshot = preservedTransposeRecordOnNextResult?.selection;
+    preservedTransposeRecordOnNextResult = null;
     const viewportAnchorSnapshot = preservedViewportAnchorOnNextResult?.anchor;
     preservedViewportAnchorOnNextResult = null;
     const detailsSnapshot = preservedDetailsOnNextResult;
@@ -10174,6 +10320,8 @@ watch(
       }
       return;
     }
+    resetDistinctValueCache();
+    filterValueSuggestionLoader.reset({ clearCache: true });
     // A non-append result replaces the whole data set, so a running "load all" is over.
     loadAllRowsActive.value = false;
     // The replacement also invalidates the all-loaded marker: a filter change or
@@ -10206,6 +10354,7 @@ watch(
     }
     exitTransaction();
     if (selectionSnapshot) restoreSelectionAfterRefresh(selectionSnapshot);
+    if (transposeRecordSnapshot) restoreTransposeRecordAfterRefresh(transposeRecordSnapshot);
     if (detailsSnapshot) restoreDetailsAfterRefresh(detailsSnapshot);
     if (viewportAnchorSnapshot) restoreViewportAnchorAfterRefresh(viewportAnchorSnapshot);
   },
@@ -10242,7 +10391,7 @@ function openCopyColumnNamesDialog(names: string[]) {
 }
 
 function openCopyAllColumnNamesDialog() {
-  openCopyColumnNamesDialog(columnNamesForCopy(props.result.columns, visibleColumns.value, "all"));
+  openCopyColumnNamesDialog(columnNamesForCopy({ allColumnNames: props.result.columns, displayableIndexes: displayableColumnIndexes.value, visibleColumnNames: visibleColumns.value, scope: "all" }));
 }
 
 function copyHeaderColumnOrSelected() {
@@ -12247,6 +12396,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :filtered-columns="filteredFilterBuilderColumnOptions"
                   :mode-options="filterModeOptions"
                   :column-search="filterBuilderColumnSearch"
+                  :value-suggestions="canUseServerColumnFilter ? filterValueSuggestionState : undefined"
                   :apply-where="applyWhereFilter"
                   :apply-order-by="applyOrderBySearch"
                   :clear-order-by="clearOrderByInput"
@@ -12262,6 +12412,13 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   @move-rule="moveStructuredFilterRule"
                   @update-rule="updateStructuredFilterRule"
                   @clear-local-filter="clearLocalFilter"
+                  @open-value-suggestions="openFilterValueSuggestions"
+                  @close-value-suggestions="closeFilterValueSuggestions"
+                  @update-value-suggestion-search="updateFilterValueSuggestionSearch"
+                  @select-value-suggestion="selectFilterValueSuggestion"
+                  @toggle-value-suggestion="toggleFilterValueSuggestion"
+                  @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
+                  @apply-value-suggestions="applyFilterValueSuggestions"
                 />
               </template>
 
@@ -12412,6 +12569,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @add-rule="addStructuredFilterRule"
           @apply="applyStructuredFilters"
           :apply-only-busy="applyingOnlyStructuredFilter || isApplyingWhere"
+          :value-suggestions="canUseServerColumnFilter ? filterValueSuggestionState : undefined"
           @apply-only="applyOnlyStructuredFilter"
           @reset="resetStructuredFilters"
           @clear="clearAllFilters"
@@ -12419,6 +12577,13 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @remove-rule="removeStructuredFilterRule"
           @move-rule="moveStructuredFilterRule"
           @update-rule="updateStructuredFilterRule"
+          @open-value-suggestions="openFilterValueSuggestions"
+          @close-value-suggestions="closeFilterValueSuggestions"
+          @update-value-suggestion-search="updateFilterValueSuggestionSearch"
+          @select-value-suggestion="selectFilterValueSuggestion"
+          @toggle-value-suggestion="toggleFilterValueSuggestion"
+          @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
+          @apply-value-suggestions="applyFilterValueSuggestions"
         />
         <DataGridTextFilterWorkbench
           v-if="canUseWhereSearch && filterEditorView === 'text' && filterBuilderOpen"
@@ -12430,6 +12595,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           :mode-options="filterModeOptions"
           :column-search="filterBuilderColumnSearch"
           :disabled="!canUseWhereSearch"
+          :value-suggestions="canUseServerColumnFilter ? filterValueSuggestionState : undefined"
           @update:height="updateTextFilterPanelHeight"
           @update:column-search="filterBuilderColumnSearch = $event"
           @ensure-rule="ensureStructuredFilterRule"
@@ -12443,6 +12609,13 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @remove-rule="removeStructuredFilterRule"
           @move-rule="moveStructuredFilterRule"
           @update-rule="updateStructuredFilterRule"
+          @open-value-suggestions="openFilterValueSuggestions"
+          @close-value-suggestions="closeFilterValueSuggestions"
+          @update-value-suggestion-search="updateFilterValueSuggestionSearch"
+          @select-value-suggestion="selectFilterValueSuggestion"
+          @toggle-value-suggestion="toggleFilterValueSuggestion"
+          @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
+          @apply-value-suggestions="applyFilterValueSuggestions"
         />
         <!-- Truncation warning banner -->
         <div v-if="showTruncationWarning" class="shrink-0 px-3 py-1 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
@@ -12532,6 +12705,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     <div
                       v-for="recordIndex in activeTransposeRecordIndexes"
                       :key="`transpose-head-${recordIndex}`"
+                      data-grid-transpose-record-header
+                      :data-grid-transpose-record-index="recordIndex"
                       class="shrink-0 border-r border-border px-2 py-1.5 text-left tabular-nums relative"
                       :class="{
                         'transpose-record-header-selected text-primary font-semibold': transposeRecordUsesFramedHeader(recordIndex),
@@ -12562,6 +12737,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     <LightTooltip :text="transposeFieldTitle(item)" side="right" :side-offset="6" :delay="250" :open-on-focus="false" surface="popover">
                       <div
                         data-native-clipboard
+                        :data-grid-transpose-column-index="visibleColumnIndexes[index]"
                         class="sticky left-0 z-10 flex shrink-0 flex-col items-start justify-center overflow-hidden border-r border-border bg-background px-3 py-0"
                         :class="{
                           'ring-2 ring-inset ring-primary': highlightedColumnIndex === visibleColumnIndexes[index],
@@ -12570,11 +12746,43 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         }"
                         :style="{ width: `${transposePinnedWidth}px` }"
                       >
-                        <span class="flex min-w-0 items-center gap-1 overflow-hidden">
+                        <span class="flex w-full min-w-0 items-center gap-1 overflow-hidden pr-5">
                           <KeyRound v-if="transposeColumnIndexKind(item.column) === 'primary'" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass('primary')" :title="transposeColumnIndexText('primary')" />
                           <Hash v-else-if="transposeColumnIndexKind(item.column)" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass(transposeColumnIndexKind(item.column)!)" :title="transposeColumnIndexText(transposeColumnIndexKind(item.column)!)" />
                           <span class="min-w-0 flex-1 truncate font-medium leading-4">{{ item.column }}</span>
                         </span>
+                        <LightDropdownMenu
+                          v-if="headerColumnSortable(visibleColumnIndexes[index])"
+                          :items="sortMenuItems(item.column, visibleColumnIndexes[index])"
+                          :open="headerSortMenuOpenColumn === visibleColumnIndexes[index]"
+                          :selected-value="selectedSortMenuValue(item.column, visibleColumnIndexes[index])"
+                          check-position="none"
+                          align="end"
+                          content-class="w-max min-w-28 p-0.5"
+                          item-class="gap-1 rounded-none px-1.5 py-0.5 text-xs"
+                          item-icon-class="h-3 w-3"
+                          :match-trigger-width="false"
+                          @update:open="(value: boolean) => (headerSortMenuOpenColumn = value ? visibleColumnIndexes[index] : null)"
+                          @select="(value: string) => selectHeaderSort(value, item.column, visibleColumnIndexes[index])"
+                        >
+                          <template #trigger="{ open, toggle }">
+                            <button
+                              data-grid-transpose-sort
+                              type="button"
+                              class="absolute right-1 top-1 flex h-4 w-4 shrink-0 items-center justify-center rounded"
+                              :class="columnIsSorted(item.column, visibleColumnIndexes[index]) ? 'bg-primary text-primary-foreground opacity-100 shadow-sm hover:bg-primary/90' : 'text-muted-foreground opacity-80 hover:bg-accent hover:text-foreground'"
+                              :title="t('grid.sort')"
+                              :aria-label="`${t('grid.sort')}: ${item.column}`"
+                              :aria-expanded="open"
+                              @mousedown.stop
+                              @click.stop="toggle"
+                            >
+                              <ArrowUp v-if="columnIsSorted(item.column, visibleColumnIndexes[index]) && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
+                              <ArrowDown v-else-if="columnIsSorted(item.column, visibleColumnIndexes[index]) && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
+                              <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
+                            </button>
+                          </template>
+                        </LightDropdownMenu>
                         <template v-if="showTransposeFieldMetadata && showColumnTypesInHeader && item.type">
                           <span data-grid-transpose-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 select-none" :class="typeColorClass(item.type)" :title="item.type">
                             {{ item.type }}
@@ -12608,6 +12816,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     <div
                       v-for="cell in item.values"
                       :key="`${item.id}:${cell.recordIndex}`"
+                      data-grid-transpose-cell
+                      :data-grid-transpose-record-index="cell.recordIndex"
                       class="relative flex shrink-0 items-center border-r border-border/70 px-2 py-0"
                       :class="[
                         transposeCellTextColorClass(cell.recordIndex, cell.valueIndex),

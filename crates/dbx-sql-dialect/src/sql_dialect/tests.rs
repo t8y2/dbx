@@ -199,6 +199,15 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Questdb)), TablePaginationStrategy::QuestDbLimit);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oracle)), TablePaginationStrategy::Rownum);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Cassandra)), TablePaginationStrategy::AgentMaxRows);
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Cassandra), PaginationContext::BoundedRead),
+        TablePaginationStrategy::LimitOffset
+    );
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Cassandra), PaginationContext::UserQuery),
+        TablePaginationStrategy::AgentMaxRows
+    );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::BoundedRead),
         TablePaginationStrategy::Rownum
@@ -219,6 +228,22 @@ fn maps_table_pagination_strategy_by_database_type() {
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
+}
+
+#[test]
+fn cassandra_table_data_pagination_uses_the_agent_cursor() {
+    for offset in [0, 100, 200] {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Cassandra),
+                table_name: "paged_rows".to_string(),
+                limit: Some(100),
+                offset: Some(offset),
+                ..Default::default()
+            }),
+            "SELECT * FROM \"paged_rows\";"
+        );
+    }
 }
 
 #[test]

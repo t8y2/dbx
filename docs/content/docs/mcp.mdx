@@ -152,6 +152,20 @@ DBX MCP provides the following tools (availability depends on build features and
 
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
 
+## Plugin tools
+
+DBX plugins whose sidecar implements the `mcp/tools` bridge can be served by the `dbx` MCP server and merged into `tools/list` — no per-plugin `--mcp` process configuration in your client. Exposure is author opt-in: a plugin's tools appear only when its manifest declares an `mcp` contribution with `external_tools: true` (SSH, Files, Kafka, LDAP, ... any plugin can do it):
+
+- Tools are exposed as `dbx_<prefix>__<tool>`, with the prefix derived from the plugin id's last segment: `io.dbx.ssh` → `dbx_ssh__sftp_list_dir`, `io.dbx.kafka` → `dbx_kafka__kafka_topics_list`.
+- Connections stay host-bound: the plugin schema's `connectionId` / `connectionName` are removed and replaced by an optional `dbx_connection` argument that selects among the plugin's **saved connections allowed by the DBX MCP settings**. With exactly one allowed connection you can omit it. The host generates the lifecycle payload (credentials, runtime endpoint) from the saved connection — credentials never reach the model or client.
+- Scoped sessions (`DBX_MCP_SCOPE_*`), the global tool allowlist, and the connection allowlist constrain plugin tools exactly like the `dbx_*` tools.
+- The tool allowlist matches exact names: after enabling plugin tools, add each `dbx_<prefix>__<tool>` you want exposed (or clear the allowlist to allow everything).
+- The Web / Docker backend does not serve plugin tools.
+
+### Lazy discovery (`DBX_MCP_PLUGIN_TOOLS`)
+
+With many plugins, one flat `tools/list` spends a lot of context on argument schemas. Set `DBX_MCP_PLUGIN_TOOLS=lazy` to expose only three meta tools — `dbx_plugin_list` (filterable plugin catalog), `dbx_plugin_tools` (one plugin's tools and schemas), and `dbx_plugin_call` (call by **plugin id** + tool) — so schemas enter the context on demand. `both` advertises the flat tools and the meta tools at once. The default stays `flat`.
+
 ## Resources
 
 Clients that support MCP Resources can read the connection catalog and expand templates for database metadata:

@@ -5,7 +5,7 @@ import { useSettingsStore, type DataGridColumnWidthMode } from "@/stores/setting
 
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
-const columnWidthMode = computed(() => settingsStore.editorSettings.dataGridColumnWidthMode ?? "fill");
+const columnWidthMode = computed(() => settingsStore.editorSettings.dataGridColumnWidthMode ?? "content");
 
 function setColumnWidthMode(value: DataGridColumnWidthMode) {
   settingsStore.updateEditorSettings({ dataGridColumnWidthMode: value });

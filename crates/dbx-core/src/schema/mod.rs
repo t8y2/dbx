@@ -1760,53 +1760,15 @@ fn oracle_object_statistics_rows_only_sql(schema: &str) -> String {
     )
 }
 
-fn dameng_object_statistics_dba_segments_sql(schema: &str) -> String {
+fn dameng_object_statistics_sql(schema: &str) -> String {
+    // DM exposes a table-scoped size estimator. It avoids joining the global
+    // segment and index dictionaries, which can exhaust memory on large catalogs.
     format!(
-        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, NVL(s.BYTES, 0) AS TOTAL_BYTES \
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, \
+                NVL(TABLE_USED_PAGES(t.OWNER, t.TABLE_NAME) * PAGE, 0) AS TOTAL_BYTES \
          FROM ALL_TABLES t \
-         LEFT JOIN ( \
-           SELECT owner, table_name, SUM(bytes) AS BYTES \
-           FROM ( \
-             SELECT s.OWNER, s.SEGMENT_NAME AS TABLE_NAME, s.BYTES \
-             FROM DBA_SEGMENTS s \
-             WHERE s.OWNER = {} AND s.SEGMENT_TYPE IN ('TABLE','TABLE PARTITION','TABLE SUBPARTITION') \
-             UNION ALL \
-             SELECT i.TABLE_OWNER AS OWNER, i.TABLE_NAME, s.BYTES \
-             FROM ALL_INDEXES i \
-             JOIN DBA_SEGMENTS s ON s.OWNER = i.OWNER AND s.SEGMENT_NAME = i.INDEX_NAME \
-             WHERE i.TABLE_OWNER = {} AND s.SEGMENT_TYPE IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION') \
-           ) \
-           GROUP BY owner, table_name \
-         ) s ON s.OWNER = t.OWNER AND s.TABLE_NAME = t.TABLE_NAME \
          WHERE t.OWNER = {} AND (t.NESTED IS NULL OR t.NESTED = 'NO') \
          ORDER BY t.TABLE_NAME",
-        oracle_owner_filter(schema),
-        oracle_owner_filter(schema),
-        oracle_owner_filter(schema),
-    )
-}
-
-fn dameng_object_statistics_user_segments_sql(schema: &str) -> String {
-    format!(
-        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, NVL(s.BYTES, 0) AS TOTAL_BYTES \
-         FROM ALL_TABLES t \
-         LEFT JOIN ( \
-           SELECT table_name, SUM(bytes) AS BYTES \
-           FROM ( \
-             SELECT s.SEGMENT_NAME AS TABLE_NAME, s.BYTES \
-             FROM USER_SEGMENTS s \
-             WHERE s.SEGMENT_TYPE IN ('TABLE','TABLE PARTITION','TABLE SUBPARTITION') \
-             UNION ALL \
-             SELECT i.TABLE_NAME, s.BYTES \
-             FROM ALL_INDEXES i \
-             JOIN USER_SEGMENTS s ON s.SEGMENT_NAME = i.INDEX_NAME \
-             WHERE i.TABLE_OWNER = {} AND s.SEGMENT_TYPE IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION') \
-           ) \
-           GROUP BY table_name \
-         ) s ON s.TABLE_NAME = t.TABLE_NAME \
-         WHERE t.OWNER = {} AND t.OWNER = USER AND (t.NESTED IS NULL OR t.NESTED = 'NO') \
-         ORDER BY t.TABLE_NAME",
-        oracle_owner_filter(schema),
         oracle_owner_filter(schema),
     )
 }
@@ -1837,8 +1799,7 @@ fn oracle_object_statistics_query_plan(schema: &str) -> Vec<ObjectStatisticsAtte
 
 fn dameng_object_statistics_query_plan(schema: &str) -> Vec<ObjectStatisticsAttempt> {
     vec![
-        ("dba-segments", dameng_object_statistics_dba_segments_sql(schema), true),
-        ("user-segments", dameng_object_statistics_user_segments_sql(schema), false),
+        ("table-used-pages", dameng_object_statistics_sql(schema), true),
         ("rows-only", dameng_object_statistics_rows_only_sql(schema), true),
     ]
 }
@@ -3127,26 +3088,26 @@ mod tests {
     use super::agent_postgres_extension_fallback_config;
     use super::db;
     use super::{
-        clickhouse_metadata_database, dameng_object_statistics_dba_segments_sql,
-        dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
-        ephemeral_agent_metadata_session_id, external_driver_statistics_dialect, external_driver_statistics_query_plan,
-        external_driver_uses_generic_ddl, external_driver_uses_mysql_ddl, filter_mongodb_agent_collections,
-        filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
-        finalize_object_source, gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql,
-        is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config, is_oracle_external_driver_config,
-        is_retryable_metadata_error, metadata_error_action, metadata_name_or_comment_matches,
-        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
-        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
-        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
-        oracle_current_schema_from_query_result, oracle_object_statistics_dba_segments_sql,
-        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
-        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
-        oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_from_query_result,
-        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
-        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
-        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
-        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        clickhouse_metadata_database, dameng_object_statistics_rows_only_sql, dameng_object_statistics_sql,
+        deduplicate_column_infos, ephemeral_agent_metadata_session_id, external_driver_statistics_dialect,
+        external_driver_statistics_query_plan, external_driver_uses_generic_ddl, external_driver_uses_mysql_ddl,
+        filter_mongodb_agent_collections, filter_mysql_system_databases_for_config, filter_object_infos,
+        filter_table_infos, filter_visible_schema_names, finalize_object_source, gaussdb_m_view_object_source_sql,
+        gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config,
+        is_oracle_external_driver_config, is_retryable_metadata_error, metadata_error_action,
+        metadata_name_or_comment_matches, mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result,
+        mysql_external_driver_ddl_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
+        mysql_table_list_source_for_config, mysql_table_metadata_catalog, normalize_information_schema_table_type,
+        oracle_columns_from_query_result, oracle_columns_sql, oracle_columns_sql_for_resolved_owner,
+        oracle_completion_synonyms_sql, oracle_current_schema_from_query_result,
+        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
+        oracle_object_statistics_user_segments_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
+        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_sql,
+        presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
+        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
+        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
+        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
         table_comments_from_query_result, table_name_filter_matches, tdengine_table_comment_like_pattern,
         tdengine_table_comment_sql, tdengine_table_comments_sql, uses_mongodb_agent_collection_listing,
         visible_schema_filter, ExternalDriverStatisticsDialect, MetadataErrorAction, MysqlTableListSource,
@@ -4223,7 +4184,12 @@ done
         assert!(oracle[0].1.contains("t.OWNER = 'DBX_TEST'"));
 
         let dameng = external_driver_statistics_query_plan(ExternalDriverStatisticsDialect::Dameng, "dbx_test");
-        assert_eq!(dameng[0].1, dameng_object_statistics_dba_segments_sql("dbx_test"));
+        assert_eq!(
+            dameng.iter().map(|(source, ..)| *source).collect::<Vec<_>>(),
+            vec!["table-used-pages", "rows-only"]
+        );
+        assert_eq!(dameng[0].1, dameng_object_statistics_sql("dbx_test"));
+        assert!(dameng.iter().all(|(_, _, accept_empty)| *accept_empty));
 
         let kingbase = external_driver_statistics_query_plan(ExternalDriverStatisticsDialect::Kingbase, "public");
         assert_eq!(kingbase.len(), 1);
@@ -6180,22 +6146,104 @@ done
     }
 
     #[test]
-    fn dameng_object_statistics_sql_uses_available_segment_views() {
-        let dba_sql = dameng_object_statistics_dba_segments_sql("app's");
-        assert!(dba_sql.contains("DBA_SEGMENTS"));
-        assert!(dba_sql.contains("ALL_INDEXES"));
-        assert!(!dba_sql.contains("ALL_SEGMENTS"));
-        assert!(!dba_sql.contains("ALL_LOBS"));
-        assert!(dba_sql.contains("OWNER = 'APP''S'"));
-        assert!(dba_sql.contains("t.NESTED IS NULL OR t.NESTED = 'NO'"));
-
-        let user_sql = dameng_object_statistics_user_segments_sql("app's");
-        assert!(user_sql.contains("USER_SEGMENTS"));
-        assert!(user_sql.contains("t.OWNER = USER"));
+    fn dameng_object_statistics_sql_uses_bounded_table_size_function() {
+        let sql = dameng_object_statistics_sql("app's");
+        assert!(sql.contains("TABLE_USED_PAGES(t.OWNER, t.TABLE_NAME) * PAGE"));
+        assert!(sql.contains("OWNER = 'APP''S'"));
+        assert!(sql.contains("t.NESTED IS NULL OR t.NESTED = 'NO'"));
+        assert!(!sql.contains("SEGMENTS"));
+        assert!(!sql.contains("ALL_INDEXES"));
 
         let rows_only_sql = dameng_object_statistics_rows_only_sql("app's");
         assert!(rows_only_sql.contains("CAST(NULL AS NUMBER) AS TOTAL_BYTES"));
         assert!(!rows_only_sql.contains("SEGMENTS"));
+    }
+
+    fn statistics_query_result(rows: Vec<Vec<serde_json::Value>>) -> db::QueryResult {
+        db::QueryResult {
+            columns: vec![
+                "TABLE_NAME".to_string(),
+                "OWNER".to_string(),
+                "NUM_ROWS".to_string(),
+                "TOTAL_BYTES".to_string(),
+            ],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows,
+            affected_rows: 0,
+            execution_time_ms: 0,
+            server_execute_time_us: None,
+            query_timings_ms: None,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dameng_object_statistics_falls_back_to_rows_when_size_lookup_fails() {
+        let sqls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_sqls = sqls.clone();
+
+        let stats = super::object_statistics_from_query_plan(
+            "Dameng",
+            "APP",
+            super::dameng_object_statistics_query_plan("APP"),
+            move |sql| {
+                let recorded_sqls = recorded_sqls.clone();
+                async move {
+                    recorded_sqls.lock().unwrap().push(sql.clone());
+                    if sql.contains("TABLE_USED_PAGES") {
+                        Err("insufficient privilege".to_string())
+                    } else {
+                        Ok(statistics_query_result(vec![vec![
+                            serde_json::json!("ORDERS"),
+                            serde_json::json!("APP"),
+                            serde_json::Value::Null,
+                            serde_json::Value::Null,
+                        ]]))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let sqls = sqls.lock().unwrap();
+        assert_eq!(sqls.len(), 2);
+        assert!(sqls[0].contains("TABLE_USED_PAGES"));
+        assert!(sqls[1].contains("CAST(NULL AS NUMBER) AS TOTAL_BYTES"));
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].estimated_rows, None);
+        assert_eq!(stats[0].total_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn dameng_object_statistics_accepts_an_empty_size_result() {
+        let sqls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_sqls = sqls.clone();
+
+        let stats = super::object_statistics_from_query_plan(
+            "Dameng",
+            "EMPTY",
+            super::dameng_object_statistics_query_plan("EMPTY"),
+            move |sql| {
+                let recorded_sqls = recorded_sqls.clone();
+                async move {
+                    recorded_sqls.lock().unwrap().push(sql);
+                    Ok(statistics_query_result(Vec::new()))
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(stats.is_empty());
+        assert_eq!(sqls.lock().unwrap().len(), 1);
     }
 
     #[test]

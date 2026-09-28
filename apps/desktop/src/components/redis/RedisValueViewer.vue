@@ -441,13 +441,25 @@ async function toggleZsetSort() {
 
 const redisKind = computed(() => data.value?.data.kind ?? "unknown");
 const isStringLikeKind = computed(() => redisKind.value === "string");
+/** kvrocks 的位图类型：取值链路与字符串一致，但不可编辑（SET 会把它变成字符串）。 */
+const isBitmapKind = computed(() => redisKind.value === "bitmap");
+const bitmapSetBits = computed(() => (data.value?.data.kind === "bitmap" ? data.value.data.set_bits : undefined));
+const bitmapByteLength = computed(() => (data.value?.data.kind === "bitmap" ? data.value.data.total_bytes : undefined));
+const hyperLogLogCount = computed(() => (data.value?.data.kind === "hyperloglog" ? data.value.data.count : undefined));
+const unsupportedRedisType = computed(() => (data.value?.data.kind === "unknown" ? data.value.data.redis_type : ""));
 const stringBlob = computed<RedisBlob | null>(() => {
   const value = data.value;
   if (!value) return null;
-  return value.data.kind === "string" ? value.data.content : null;
+  if (value.data.kind === "string") return value.data.content;
+  // kvrocks 位图用 GET 取到的字节与字符串完全一致，直接复用字符串预览链路
+  return value.data.kind === "bitmap" ? value.data.content : null;
 });
-const isStringValueTruncated = computed(() => data.value?.data.kind === "string" && Boolean(data.value.data.truncated));
-const stringValueDetail = computed(() => (stringBlob.value ? formatRedisMemberDetail(stringBlob.value, { allowJsonText: true }) : null));
+const isStringValueTruncated = computed(() => {
+  const value = data.value;
+  if (!value) return false;
+  return (value.data.kind === "string" || value.data.kind === "bitmap") && Boolean(value.data.truncated);
+});
+const stringValueDetail = computed(() => (stringBlob.value ? formatRedisMemberDetail(stringBlob.value, { allowJsonText: !isBitmapKind.value }) : null));
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value, { allowJsonText: true }));
 
 // Decompression depends on the value/codec refs above, so these watchers and
@@ -577,7 +589,8 @@ const memberCopyText = computed(() => memberDecodedText.value ?? detailTextForFo
 const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
-const canEditCurrentStringFormat = computed(() => !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
+// kvrocks 位图不是字符串，写回会成为字符串，因此位图详情只读
+const canEditCurrentStringFormat = computed(() => !isBitmapKind.value && !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
 const showStringEditActions = computed(() => canEditCurrentStringFormat.value);
 const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
 const stringJsonRawBaseline = ref("");
@@ -654,7 +667,8 @@ const metadataSizeLabel = computed(() => {
 const largeStringPreviewHint = computed(() => {
   const value = data.value;
   const loaded = stringValueDetail.value?.byteCount ?? 0;
-  if (!value || value.data.kind !== "string" || !value.data.truncated) return "";
+  // kvrocks 位图复用字符串截断横幅；截断时后端拿不到准确长度（total_bytes 为空），走未知总量文案
+  if (!value || (value.data.kind !== "string" && value.data.kind !== "bitmap") || !value.data.truncated) return "";
   if (value.data.total_bytes != null) {
     return t("redis.largeStringPreviewHint", { loaded: formatBytes(loaded), total: formatBytes(value.data.total_bytes) });
   }
@@ -1572,10 +1586,13 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
       memberDraftFormat.value = null;
     }
 
-    if (loadedValue.data.kind === "string") {
+    if (loadedValue.data.kind === "string" || loadedValue.data.kind === "bitmap") {
+      // kvrocks 位图复用字符串的预览/编码渲染链路；位图不允许 JSON 视图与编辑，
+      // 因为它并不是字符串（写回会改变服务端类型）。
+      const allowJsonText = loadedValue.data.kind === "string";
       if (loadedValue.data.truncated) stringValueCodec.value = "none";
-      const detail = formatRedisMemberDetail(loadedValue.data.content, { allowJsonText: true });
-      stringValueView.value = preferredRedisValueFormat(loadedValue.data.content, readPreferredRedisValueFormat(), { allowJsonText: true });
+      const detail = formatRedisMemberDetail(loadedValue.data.content, { allowJsonText });
+      stringValueView.value = preferredRedisValueFormat(loadedValue.data.content, readPreferredRedisValueFormat(), { allowJsonText });
       stringJsonRawBaseline.value = detail.json?.formattedText ?? "";
       stringJsonDraftBaseline.value = jsonDraftBaseline(stringJsonRawBaseline.value, redisJsonDecoded.value);
       editValue.value = stringValueView.value === "json" && detail.json ? stringJsonDraftBaseline.value : detail.rawText;
@@ -2811,8 +2828,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
         </div>
       </div>
 
-      <!-- String -->
-      <div v-if="isStringLikeKind && stringValueDetail" class="flex-1 flex flex-col overflow-hidden">
+      <!-- String / kvrocks Bitmap（位图同样按字节预览，但只读） -->
+      <div v-if="(isStringLikeKind || isBitmapKind) && stringValueDetail" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
           <span class="shrink-0 text-muted-foreground">{{ t("redis.codecRowLabel") }}</span>
           <RedisHorizontalScrollbar>
@@ -2941,10 +2958,20 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
         <div v-else-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
           {{ t("redis.binaryStringReadonlyHint") }}
         </div>
+        <!-- kvrocks 位图：补充置位数等 kvrocks 专有的位图信息 -->
+        <div v-if="isBitmapKind" data-redis-bitmap-info class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
+          {{ t("redis.bitmapInfo", { bits: bitmapSetBits ?? "-", bytes: bitmapByteLength ?? "-" }) }}
+        </div>
         <div v-if="showStringEditActions" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
           <Button variant="ghost" size="sm" :disabled="savingString || !stringValueChanged" @click="discardStringEdit">{{ t("grid.discard") }}</Button>
           <Button size="sm" :disabled="savingString || !stringValueChanged" @click="saveString"><Loader2 v-if="savingString" class="w-3 h-3 mr-1 animate-spin" /><Save v-else class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
         </div>
+      </div>
+
+      <!-- kvrocks HyperLogLog：原始字节不可读，只展示 PFCOUNT 得到的基数估计 -->
+      <div v-else-if="redisKind === 'hyperloglog'" class="flex-1 flex flex-col items-center justify-center gap-2 p-6 text-center">
+        <div class="dbx-editor-font-family text-2xl font-semibold">{{ hyperLogLogCount ?? "-" }}</div>
+        <div class="text-xs text-muted-foreground">{{ t("redis.hyperLogLogHint") }}</div>
       </div>
 
       <!-- Redis JSON -->
@@ -3512,9 +3539,11 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
         </Tabs>
       </div>
 
-      <!-- Unknown -->
-      <div v-else class="flex-1 overflow-auto p-4">
-        <pre class="dbx-editor-font-family text-sm whitespace-pre-wrap">{{ formatValue(data.data) }}</pre>
+      <!-- Unknown：服务端返回了 DBX 暂不支持的类型（如 kvrocks 的 timeseries / TDIS-TYPE），
+           明确提示类型名，避免只显示空值让人以为键里没有内容（issue #10406）。 -->
+      <div v-else class="flex-1 flex flex-col items-center justify-center gap-2 p-6 text-center">
+        <div class="text-sm">{{ t("redis.unsupportedValueType", { type: unsupportedRedisType || "?" }) }}</div>
+        <div class="text-xs text-muted-foreground">{{ t("redis.unsupportedValueTypeHint") }}</div>
       </div>
     </template>
 

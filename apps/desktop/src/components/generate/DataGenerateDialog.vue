@@ -1,39 +1,25 @@
 <script setup lang="ts">
-import { reactive, ref, computed, onMounted, watch, type ComponentPublicInstance } from "vue";
+import { reactive, ref, computed, watch, type ComponentPublicInstance } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
-import type { ColumnGenerateConfig, GenerateResult, TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
-import {
-  createTableGenerateState,
-  defaultGeneratorParams,
-  displayGeneratedValue,
-  findGeneratorKey,
-  formatGeneratedRowValues,
-  formatGeneratedValue,
-  generateInsertBatches,
-  generateTableData,
-  generateTableRowsChunk,
-  splitValueRowsByByteBudget,
-  supportsGeneratedMultiRowValues,
-  UniqueValueGenerationError,
-} from "@/lib/dataGrid/dataGenerate";
-import { errorMessage, isQueryCanceledError, summarizeBatchResults } from "@/lib/dataGrid/generateInsertAccounting";
+import type { ColumnGenerateConfig, TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
+import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, supportsGeneratedMultiRowValues, UniqueValueGenerationError } from "@/lib/dataGrid/dataGenerate";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { uniqueConstraintColumns } from "@/lib/table/uniqueConstraintColumns";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import GeneratorParamsPanel from "./params/GeneratorParamsPanel.vue";
-import type { ColumnInfo, QueryResult, TableInfo } from "@/types/database";
+import type { ColumnInfo, TableInfo } from "@/types/database";
+import { cancelDataGenerateSession, getDataGenerateSession, startDataGenerateSession, type DataGenerateTarget } from "@/composables/useDataGenerateSession";
 
 import { Dialog, DialogHeader, DialogTitle, DialogScrollContent, DialogContent, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Database, Table, Columns, Loader2, Save, Upload, Settings, ChevronRight, X, AlertCircle, ArrowUp, ArrowDown } from "@lucide/vue";
+import { Database, Table, Columns, Loader2, Save, Upload, Settings, ChevronRight, X, AlertCircle, ArrowUp, ArrowDown, Minimize2 } from "@lucide/vue";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { uuid } from "@/lib/common/utils";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -45,6 +31,7 @@ const props = defineProps<{
   prefillDatabase?: string;
   prefillSchema?: string;
   prefillTable?: string;
+  sessionId?: string | null;
 }>();
 
 // Left tree state
@@ -72,15 +59,7 @@ const panelColumnName = ref<string | null>(null);
 
 // Step state: config -> preview
 const currentStep = ref<"config" | "preview" | "result">("config");
-interface GeneratedTableResult extends GenerateResult {
-  tableName: string;
-  schema: string;
-  /** Rows that will actually be inserted. `rows` only holds a preview sample. */
-  targetRowCount: number;
-  isSample: boolean;
-  /** Column config after auto-increment start values have been resolved. */
-  resolvedColumns: ColumnGenerateConfig[];
-}
+type GeneratedTableResult = DataGenerateTarget;
 const generatedResults = ref<GeneratedTableResult[]>([]);
 const generationError = ref("");
 
@@ -92,12 +71,6 @@ const generationError = ref("");
 const PREVIEW_SAMPLE_ROWS = 50;
 const MAX_ROW_COUNT = 100_000_000;
 const DEFAULT_BATCH_ROWS = 1000;
-/**
- * Conservative per-statement budget. The backend clamps MySQL batches at 4MB
- * and derives a `max_allowed_packet` margin, so staying near 1MB keeps the
- * common 4MB / 16MB / 64MB server settings safe without extra round trips.
- */
-const MAX_BATCH_BYTES = 1024 * 1024;
 const LARGE_ROW_COUNT_HINT = 100_000;
 
 function normalizeRowCount(value: number): number {
@@ -432,6 +405,7 @@ const currentPreview = computed<GeneratedTableResult>(
     generatedResults.value[previewTableIndex.value] ?? {
       tableName: "",
       schema: "",
+      database: "",
       columns: [],
       rows: [],
       sql: "",
@@ -475,6 +449,8 @@ function buildSampleResult(cfg: TableGenerateConfig, columns: ColumnGenerateConf
   return {
     tableName: cfg.tableName,
     schema: cfg.schema,
+    database: cfg.database,
+    tableType: cfg.tableType,
     targetRowCount,
     isSample: targetRowCount > sampleCount,
     resolvedColumns: columns,
@@ -557,17 +533,10 @@ function copySampleSql() {
   void navigator.clipboard.writeText(allSql);
 }
 
-const executing = ref(false);
-
-interface TableResult {
-  table: string;
-  total: number;
-  ok: number;
-  err: number;
-  error?: string;
-  cancelled?: boolean;
-}
-const executeResults = ref<TableResult[]>([]);
+const activeSessionId = ref<string | null>(props.sessionId ?? null);
+const activeSession = computed(() => getDataGenerateSession(activeSessionId.value));
+const executing = computed(() => activeSession.value?.status === "running" || activeSession.value?.status === "cancelling");
+const executeResults = computed(() => activeSession.value?.results ?? []);
 
 const generateOptions = reactive({
   continueOnError: false,
@@ -589,17 +558,7 @@ watch(
 
 const optionsDialogOpen = ref(false);
 
-interface InsertProgress {
-  tableName: string;
-  tableIndex: number;
-  tableCount: number;
-  insertedRows: number;
-  totalRows: number;
-  elapsedMs: number;
-}
-const insertProgress = ref<InsertProgress | null>(null);
-const insertCancelled = ref(false);
-let activeExecutionId: string | null = null;
+const insertProgress = computed(() => activeSession.value?.progress ?? null);
 
 const insertPercent = computed(() => {
   const p = insertProgress.value;
@@ -608,9 +567,8 @@ const insertPercent = computed(() => {
 });
 
 function cancelInsert() {
-  if (!executing.value) return;
-  insertCancelled.value = true;
-  if (activeExecutionId) void api.cancelQuery(activeExecutionId);
+  if (!executing.value || !activeSessionId.value) return;
+  void cancelDataGenerateSession(activeSessionId.value);
 }
 
 function normalizeTimeoutSecs(value: number): number {
@@ -643,119 +601,6 @@ function allSqlStatements(): string[] {
   return generatedResults.value.flatMap((r) => sqlStatementsForTable(r));
 }
 
-/**
- * Streams one table: generate a chunk, insert it, drop the references, repeat.
- *
- * Peak memory stays proportional to `batchRows` instead of the requested row
- * count, and each awaited round trip gives the main thread a chance to paint
- * the progress bar.
- */
-async function streamInsertTable(cid: string, db: string, r: GeneratedTableResult, executionId: string, onRows: (insertedRows: number) => void): Promise<{ ok: number; attempted: number; error: string; cancelled: boolean }> {
-  const cfg = configs[tableKey(r.schema, r.tableName)];
-  const genCfg: TableGenerateConfig = {
-    tableName: r.tableName,
-    schema: r.schema,
-    database: props.prefillDatabase ?? cfg?.database ?? "",
-    tableType: cfg?.tableType,
-    rowCount: r.targetRowCount,
-    columns: r.resolvedColumns,
-  };
-  const state = createTableGenerateState(genCfg, dbType.value);
-  const schema = r.schema || props.prefillSchema;
-  const forceSingleRow = !generateOptions.extendedInsert;
-  const timeoutSecs = normalizeTimeoutSecs(generateOptions.timeoutSecs);
-  const batchRows = Math.max(1, Math.floor(generateOptions.batchRows) || DEFAULT_BATCH_ROWS);
-  let ok = 0;
-  let attempted = 0;
-  let lastError = "";
-  let cancelled = false;
-
-  const run = (sql: string): Promise<QueryResult[]> =>
-    api.executeMultiWithProgress(cid, db, sql, () => {}, schema, {
-      timeoutSecs,
-      useTransaction: generateOptions.useTransaction,
-      continueOnError: generateOptions.continueOnError,
-      executionId,
-    });
-
-  /**
-   * Executes one statement batch and folds the outcome into the running totals.
-   * Returns false when the caller has to stop the table.
-   *
-   * The returned per-statement results are inspected instead of trusting the
-   * `await`: several backend paths report a failed statement inside the result
-   * array while still resolving, so counting rows on the await alone would
-   * report failed batches as inserted.
-   */
-  const executeBatch = async (statements: string[], rowsPerStatement: number[]): Promise<boolean> => {
-    const expectedRows = rowsPerStatement.reduce((sum, rows) => sum + rows, 0);
-    attempted += expectedRows;
-    try {
-      const results = await run(statements.join("\n"));
-      // A row-carrying batch that comes back without per-statement results is
-      // unconfirmed; counting it would over-report inserts.
-      if (expectedRows > 0 && (!results || results.length === 0)) {
-        if (!lastError) lastError = "Backend returned no result for the batch";
-        return generateOptions.continueOnError;
-      }
-      const outcome = summarizeBatchResults(results, rowsPerStatement);
-      ok += outcome.insertedRows;
-      if (!outcome.failed) return true;
-      if (!lastError) lastError = outcome.error ?? "Statement failed";
-      console.error("[startInsert] SQL error:", lastError);
-      return generateOptions.continueOnError;
-    } catch (e: unknown) {
-      // Cancelling a transaction or a single-statement round trip surfaces as
-      // an error, so it has to be told apart from a real failure.
-      if (insertCancelled.value || isQueryCanceledError(e)) {
-        cancelled = true;
-        return false;
-      }
-      const msg = errorMessage(e);
-      console.error("[startInsert] SQL error:", msg);
-      if (!lastError) lastError = msg;
-      return generateOptions.continueOnError;
-    }
-  };
-
-  const finish = () => ({ ok, attempted, error: cancelled ? "" : lastError, cancelled });
-
-  if (generateOptions.truncate) {
-    const targetTable = qualifiedTableName({ databaseType: dbType.value, schema: r.schema, tableName: r.tableName, database: props.prefillDatabase });
-    // TRUNCATE carries no generated rows, so it only gates the rest of the run.
-    const truncateOk = await executeBatch([`TRUNCATE TABLE ${targetTable};`], [0]);
-    if (!truncateOk) return finish();
-  }
-
-  while (state.nextIndex < r.targetRowCount && !insertCancelled.value) {
-    let valueRows: string[];
-    try {
-      const chunkRows = generateTableRowsChunk(genCfg, state, batchRows);
-      if (chunkRows.length === 0) break;
-      valueRows = chunkRows.map((row) => formatGeneratedRowValues(genCfg, dbType.value, state, row));
-    } catch (e: unknown) {
-      // Generation failures (unique space exhausted at row 500k, say) must not
-      // discard the rows that earlier chunks already inserted.
-      if (!lastError) lastError = generationErrorMessage(e);
-      return finish();
-    }
-
-    for (const group of splitValueRowsByByteBudget(state, valueRows, MAX_BATCH_BYTES)) {
-      const { statements, rowsPerStatement } = generateInsertBatches(dbType.value, state, group, forceSingleRow);
-      if (statements.length === 0) continue;
-      const keepGoing = await executeBatch(statements, rowsPerStatement);
-      onRows(ok);
-      if (!keepGoing) return finish();
-    }
-    onRows(ok);
-    // Yield so the progress bar repaints between chunks.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-
-  if (insertCancelled.value) cancelled = true;
-  return finish();
-}
-
 async function startInsert() {
   if (executing.value || generationError.value) return;
   const cid = props.prefillConnectionId;
@@ -771,65 +616,44 @@ async function startInsert() {
       sql: guardSql,
       source: t("production.sourceDataGenerate"),
       execute: async () => {
-        executing.value = true;
-        insertCancelled.value = false;
-        const executionId = uuid();
-        activeExecutionId = executionId;
-        const startedAt = performance.now();
-        const perTable: TableResult[] = [];
-        let stopAll = false;
-        try {
-          for (let ti = 0; ti < targets.length && !stopAll; ti++) {
-            const r = targets[ti];
-            insertProgress.value = {
-              tableName: r.tableName,
-              tableIndex: ti + 1,
-              tableCount: targets.length,
-              insertedRows: 0,
-              totalRows: r.targetRowCount,
-              elapsedMs: 0,
-            };
-            let outcome: { ok: number; attempted: number; error: string; cancelled: boolean };
-            let insertedSoFar = 0;
-            try {
-              outcome = await streamInsertTable(cid, db, r, executionId, (insertedRows) => {
-                insertedSoFar = insertedRows;
-                if (insertProgress.value) {
-                  insertProgress.value = { ...insertProgress.value, insertedRows, elapsedMs: Math.round(performance.now() - startedAt) };
-                }
-              });
-            } catch (e: unknown) {
-              // Safety net: even an unexpected throw must not hide the rows that
-              // earlier batches already inserted.
-              const wasCancelled = insertCancelled.value || isQueryCanceledError(e);
-              outcome = { ok: insertedSoFar, attempted: insertedSoFar, error: wasCancelled ? "" : errorMessage(e), cancelled: wasCancelled };
-            }
-            const failedRows = Math.max(0, Math.max(outcome.attempted, outcome.ok) - outcome.ok);
-            perTable.push({
-              table: r.tableName,
-              total: r.targetRowCount,
-              ok: outcome.ok,
-              err: failedRows,
-              error: outcome.error || undefined,
-              cancelled: outcome.cancelled || undefined,
-            });
-            if (outcome.ok > 0) {
-              store.invalidateMetadataCache(cid, db, r.schema || props.prefillSchema || undefined, r.tableName);
-            }
-            if ((outcome.error && !generateOptions.continueOnError) || outcome.cancelled) stopAll = true;
-          }
-        } finally {
-          activeExecutionId = null;
-        }
-        executeResults.value = perTable;
-        currentStep.value = "result";
+        const session = startDataGenerateSession(
+          {
+            connectionId: cid,
+            database: db,
+            prefillSchema: props.prefillSchema,
+            databaseType: dbType.value,
+            label: targets.length === 1 ? `${db}.${targets[0].tableName}` : `${db} (${targets.length})`,
+            targets,
+            options: {
+              continueOnError: generateOptions.continueOnError,
+              truncate: generateOptions.truncate,
+              useTransaction: generateOptions.useTransaction,
+              extendedInsert: generateOptions.extendedInsert,
+              timeoutSecs: normalizeTimeoutSecs(generateOptions.timeoutSecs),
+              batchRows: Math.max(1, Math.floor(generateOptions.batchRows) || DEFAULT_BATCH_ROWS),
+            },
+          },
+          {
+            invalidateMetadataCache: (connectionId, database, schema, table) => store.invalidateMetadataCache(connectionId, database, schema, table),
+            formatGenerationError: generationErrorMessage,
+          },
+        );
+        activeSessionId.value = session.id;
+        applyDataGenerateSession(session);
         return true;
       },
     });
-  } finally {
-    executing.value = false;
-    insertProgress.value = null;
+  } catch (error) {
+    generationError.value = generationErrorMessage(error);
   }
+}
+
+function applyDataGenerateSession(session = activeSession.value) {
+  if (!session) return;
+  generatedResults.value = session.config.targets;
+  generationError.value = session.error ?? "";
+  previewTableIndex.value = Math.min(previewTableIndex.value, Math.max(0, generatedResults.value.length - 1));
+  currentStep.value = session.status === "running" || session.status === "cancelling" ? "preview" : "result";
 }
 
 const orderDialogOpen = ref(false);
@@ -892,15 +716,29 @@ watch(
   { deep: true, flush: "post" },
 );
 
-onMounted(() => {
-  void loadSchemas();
-});
-
-watch(open, (val) => {
-  if (val) {
+watch(
+  [() => open.value, () => props.sessionId],
+  ([isOpen, sessionId]) => {
+    if (!isOpen) return;
+    const session = getDataGenerateSession(sessionId);
+    if (session) {
+      activeSessionId.value = session.id;
+      applyDataGenerateSession(session);
+      return;
+    }
+    activeSessionId.value = null;
     void loadSchemas();
-  }
-});
+  },
+  { immediate: true },
+);
+
+watch(
+  () => {
+    const session = getDataGenerateSession(activeSessionId.value);
+    return session ? `${session.id}:${session.version}` : "";
+  },
+  () => applyDataGenerateSession(),
+);
 
 interface GenerateProfileJson {
   version: 1;
@@ -1296,8 +1134,9 @@ async function onFileSelected(event: Event) {
         </div>
         <div class="flex items-center gap-2">
           <Button variant="outline" size="sm" class="h-7 text-xs" @click="open = false">
-            <X class="mr-1 h-3 w-3" />
-            {{ t("dangerDialog.cancel") }}
+            <Minimize2 v-if="executing" class="mr-1 h-3 w-3" />
+            <X v-else class="mr-1 h-3 w-3" />
+            {{ executing ? t("exportProgress.minimize") : t("dangerDialog.cancel") }}
           </Button>
           <template v-if="currentStep === 'config'">
             <Button variant="default" size="sm" class="h-7 text-xs" :disabled="!hasSelectedTables" @click="doGenerate">

@@ -21,6 +21,7 @@ import type { TransferContent, TransferObjectKind, TransferTableNameCase } from 
 import { crossFamilyTransferableKinds, isSameTransferFamily, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
 import ObjectSelectionTree from "@/components/transfer/ObjectSelectionTree.vue";
 import TransferTaskTree from "@/components/transfer/TransferTaskTree.vue";
+import DataTransferProgressDialog from "@/components/transfer/DataTransferProgressDialog.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import type { DatabaseType } from "@/types/database";
 import type { TransferTask, TransferTaskConfig } from "@/types/database";
@@ -31,13 +32,14 @@ import { decodeTransferDatabaseOption, encodeTransferDatabaseOptions, formatTran
 import { formatDatabaseLabel } from "@/lib/database/defaultDatabase";
 import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
+import { openDataTransferTask } from "@/composables/useDialogSources";
 import { useTransferTaskStore, TransferTaskNameConflictError, nextTransferTaskCopyName } from "@/stores/transferTaskStore";
 import { useToast } from "@/composables/useToast";
 import type { CatalogInfo } from "@/types/database";
 import { ArrowRightLeft, ArrowLeftRight, Loader2 } from "@lucide/vue";
 
 const { t } = useI18n();
-const { startDataTransferTask } = useExportTracker();
+const { tasks, startDataTransferTask } = useExportTracker();
 const { toast } = useToast();
 const taskStore = useTransferTaskStore();
 const productionSafetyStore = useProductionSafetyStore();
@@ -52,7 +54,13 @@ const props = defineProps<{
   prefillTargetConnectionId?: string;
   prefillTargetDatabase?: string;
   prefillTargetSchema?: string;
+  taskId?: string | null;
 }>();
+
+const trackedTransferTask = computed(() => {
+  if (!props.taskId) return undefined;
+  return tasks.value.find((task) => task.exportId === props.taskId && task.kind === "data-transfer");
+});
 
 const transferDialogStyle = {
   width: "min(1120px, calc(100vw - 2rem))",
@@ -609,9 +617,9 @@ watch(targetDatabase, async (db) => {
 });
 
 watch(
-  open,
-  async (val) => {
-    if (val) {
+  [open, () => props.taskId],
+  async ([val, taskId]) => {
+    if (val && !taskId) {
       void taskStore.initFromStorage();
       resetState();
       pendingSourceSchemaPrefill.value = props.prefillSchema ?? "";
@@ -816,6 +824,7 @@ function runTransfer(request: api.TransferRequest, shouldRefreshTargetTree: bool
   startDataTransferTask(request, `${request.sourceDatabase} → ${request.targetDatabase}`, {
     formatOverlapError: (tables) => t("transfer.targetTableBusy", { tables: tables.join(", ") }),
     onStarted: () => toast(t("transfer.backgroundStarted")),
+    onOpen: () => openDataTransferTask(request.transferId),
     onDone: async () => {
       if (shouldRefreshTargetTree) {
         await store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog);
@@ -1155,7 +1164,8 @@ async function saveConfigTask() {
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <DataTransferProgressDialog v-if="trackedTransferTask" v-model:open="open" :task="trackedTransferTask" />
+  <Dialog v-else v-model:open="open">
     <DialogContent class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden resize" :style="transferDialogStyle" @interact-outside.prevent>
       <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">

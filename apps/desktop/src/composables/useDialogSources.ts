@@ -9,6 +9,7 @@ import type { ConnectionConfigBundle } from "@/lib/connection/connectionConfigTr
 import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
 const showTransferDialog = ref(false);
+const transferTaskId = ref<string | null>(null);
 const showSchemaDiffDialog = ref(false);
 const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
@@ -22,6 +23,7 @@ const mongoDatabaseDumpPrefillConnectionId = ref("");
 const mongoDatabaseDumpPrefillDatabase = ref("");
 const mongoDatabaseDumpMode = ref<"dump" | "restore">("dump");
 const showTableDataGenerateDialog = ref(false);
+const tableDataGenerateSessionId = ref<string | null>(null);
 const showFieldLineageDialog = ref(false);
 const showDatabaseSearchDialog = ref(false);
 const showDatabaseExportDialog = ref(false);
@@ -125,6 +127,20 @@ export function openDataCompareSession(sessionId: string): void {
   showDataCompareDialog.value = true;
 }
 
+export function openDataTransferTask(taskId: string): void {
+  transferTaskId.value = taskId;
+  showTransferDialog.value = true;
+}
+
+export function openDataGenerateSession(sessionId: string, target: { connectionId: string; database: string; schema?: string; tableName?: string }): void {
+  tableDataGenerateSessionId.value = sessionId;
+  tableDataGeneratePrefillConnectionId.value = target.connectionId;
+  tableDataGeneratePrefillDatabase.value = target.database;
+  tableDataGeneratePrefillSchema.value = target.schema ?? "";
+  tableDataGeneratePrefillTable.value = target.tableName ?? "";
+  showTableDataGenerateDialog.value = true;
+}
+
 export function useDialogSources() {
   const { t } = useI18n();
   const connectionStore = useConnectionStore();
@@ -138,6 +154,7 @@ export function useDialogSources() {
       () => connectionStore.transferSource,
       (v) => {
         if (v) {
+          transferTaskId.value = null;
           transferPrefillConnectionId.value = v.connectionId;
           transferPrefillDatabase.value = v.database;
           transferPrefillCatalog.value = v.catalog ?? "";
@@ -153,7 +170,10 @@ export function useDialogSources() {
     );
 
     watch(showTransferDialog, (open) => {
-      if (!open) clearTransferPrefill();
+      if (!open) {
+        transferTaskId.value = null;
+        clearTransferPrefill();
+      }
     });
 
     watch(
@@ -308,6 +328,7 @@ export function useDialogSources() {
       () => connectionStore.tableDataGenerateSource,
       (v) => {
         if (v) {
+          tableDataGenerateSessionId.value = null;
           tableDataGeneratePrefillConnectionId.value = v.connectionId;
           tableDataGeneratePrefillDatabase.value = v.database;
           tableDataGeneratePrefillSchema.value = v.schema ?? "";
@@ -317,6 +338,10 @@ export function useDialogSources() {
         }
       },
     );
+
+    watch(showTableDataGenerateDialog, (open) => {
+      if (!open) tableDataGenerateSessionId.value = null;
+    });
 
     watch(
       () => connectionStore.fieldLineageSource,
@@ -553,6 +578,7 @@ export function useDialogSources() {
 
   return {
     showTransferDialog,
+    transferTaskId,
     showSchemaDiffDialog,
     showDataCompareDialog,
     showSqlFileDialog,
@@ -566,6 +592,7 @@ export function useDialogSources() {
     mongoDatabaseDumpPrefillDatabase,
     mongoDatabaseDumpMode,
     showTableDataGenerateDialog,
+    tableDataGenerateSessionId,
     showFieldLineageDialog,
     showDatabaseSearchDialog,
     showDatabaseExportDialog,

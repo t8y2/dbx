@@ -5493,7 +5493,10 @@ function exportDataSubmenu(includeSqlInsert = true): ContextMenuItem {
     { label: "CSV", action: () => exportData("csv") },
     { label: "JSON", action: () => exportData("json") },
   ];
-  if (includeSqlInsert) children.push({ label: "SQL INSERT", action: () => exportData("sql") });
+  if (includeSqlInsert) {
+    children.push({ label: "SQL INSERT", action: () => exportData("sql", "source") });
+    children.push({ label: t("contextMenu.standardSqlInsert"), action: () => exportData("sql", "standard") });
+  }
   children.push({ label: "XLSX", action: () => exportDataXlsx() });
   return {
     label: count > 1 ? t("contextMenu.exportDataMultiple", { count }) : t("contextMenu.exportData"),

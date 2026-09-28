@@ -4,7 +4,7 @@ import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import { uuid } from "@/lib/common/utils";
 import { formatQueryDuration } from "@/lib/format/duration";
 
-export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "multi-db-execution" | "schema-diff" | "data-compare";
+export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
@@ -127,6 +127,16 @@ export interface MultiDbExecutionTaskProgress {
   elapsedMs?: number;
   currentTarget?: { connectionId: string; catalog?: string; database: string; schema?: string };
   errorMessage?: string;
+}
+
+export interface DataGenerationTaskProgress {
+  status: BackgroundTaskStatus;
+  tableIndex: number;
+  totalTables: number;
+  currentTable: string;
+  rowsGenerated: number;
+  totalRows: number;
+  errorMessage?: string | null;
 }
 
 export const MAX_TRANSFER_FAILURE_DETAILS = 100;
@@ -505,6 +515,29 @@ export function useExportTracker() {
     return task;
   }
 
+  function addDataGenerationTask(executionId: string, label: string, totalRows: number, totalTables: number, onOpen?: () => void, onRemove?: () => void): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId: executionId,
+      kind: "data-generation",
+      tableName: label,
+      format: "generate",
+      filePath: "",
+      rowsExported: 0,
+      totalRows,
+      status: "Running",
+      errorMessage: null,
+      tableIndex: 0,
+      totalTables,
+      currentTable: "",
+      canCancel: true,
+      onOpen,
+      onRemove,
+      startedAt: Date.now(),
+    });
+    taskMap.set(executionId, task);
+    return task;
+  }
+
   function addCompareTask(kind: "schema-diff" | "data-compare", sessionId: string, label: string, onOpen?: () => void, onRemove?: () => void): ExportTask {
     const task = reactive<ExportTask>({
       exportId: sessionId,
@@ -584,11 +617,13 @@ export function useExportTracker() {
     options: {
       onStarted?: () => void;
       onDone?: () => void | Promise<void>;
+      onOpen?: () => void;
       formatOverlapError?: (tables: string[]) => string;
     } = {},
   ): ExportTask {
     const existingTask = taskMap.get(request.transferId);
     const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
+    task.onOpen = options.onOpen;
     task.startedAt ??= Date.now();
     task.targetConnectionId = request.targetConnectionId;
     task.targetCatalog = request.targetCatalog;
@@ -734,6 +769,19 @@ export function useExportTracker() {
     task.totalRows = progress.totalRows ?? task.totalRows;
   }
 
+  function updateDataGenerationTask(executionId: string, progress: DataGenerationTaskProgress): void {
+    const task = taskMap.get(executionId);
+    if (!task || task.kind !== "data-generation") return;
+    task.status = progress.status;
+    task.tableIndex = progress.tableIndex;
+    task.totalTables = progress.totalTables;
+    task.currentTable = progress.currentTable;
+    task.rowsExported = progress.rowsGenerated;
+    task.totalRows = progress.totalRows;
+    task.errorMessage = progress.errorMessage ?? null;
+    if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
+  }
+
   function updateCompareTask(sessionId: string, progress: CompareTaskProgress): void {
     const task = taskMap.get(sessionId);
     if (!task || (task.kind !== "schema-diff" && task.kind !== "data-compare")) return;
@@ -821,6 +869,7 @@ export function useExportTracker() {
     updateDataDictionaryTask,
     addSqlFileTask,
     addDataTransferTask,
+    addDataGenerationTask,
     addSchemaDiffTask,
     addDataCompareTask,
     addMultiDbExecutionTask,
@@ -832,6 +881,7 @@ export function useExportTracker() {
     restoreDatabaseExportTaskRunning,
     updateSqlFileTask,
     updateDataTransferTask,
+    updateDataGenerationTask,
     updateCompareTask,
     registerTaskCancelHandler,
     unregisterTaskCancelHandler,

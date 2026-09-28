@@ -50,7 +50,12 @@ vi.mock("@/components/ui/tooltip", () => ({
   TooltipContent: { name: "TooltipContentStub", template: `<span><slot /></span>` },
 }));
 vi.mock("@/components/ui/LightDropdown.vue", () => ({
-  default: { name: "LightDropdownStub", template: `<div />` },
+  default: {
+    name: "LightDropdownStub",
+    props: ["items"],
+    emits: ["update:modelValue"],
+    template: `<div data-light-dropdown><button v-for="item in items" :key="item.value" :data-toolbar-menu-item="item.value" :disabled="item.disabled" @click="$emit('update:modelValue', item.value)">{{ item.label }}</button></div>`,
+  },
 }));
 vi.mock("@/components/layout/WindowControls.vue", () => ({
   default: { name: "WindowControlsStub", template: `<div />` },
@@ -212,6 +217,32 @@ describe("always-on-top button visibility", () => {
     clickPin(host, PIN_OFF_LABEL);
     await vi.waitFor(() => expect(windowState.alwaysOnTop).toBe(false));
     await vi.waitFor(() => expect(pinButton(host, PIN_OFF_LABEL)).toBeNull());
+
+    unmount();
+  });
+
+  it("exposes backup and MCP shortcuts from the more menu", async () => {
+    const openBackups = vi.fn();
+    const openMcpSettings = vi.fn();
+    const { host, unmount } = mount(AppToolbar, {
+      ...toolbarProps,
+      onOpenBackups: openBackups,
+      onOpenMcpSettings: openMcpSettings,
+    });
+    await settled();
+    await nextTick();
+
+    const backupButton = host.querySelector<HTMLButtonElement>('[data-toolbar-menu-item="database-backups"]');
+    const mcpButton = host.querySelector<HTMLButtonElement>('[data-toolbar-menu-item="mcp-settings"]');
+
+    expect(backupButton).not.toBeNull();
+    expect(mcpButton).not.toBeNull();
+
+    backupButton?.click();
+    mcpButton?.click();
+
+    expect(openBackups).toHaveBeenCalledOnce();
+    expect(openMcpSettings).toHaveBeenCalledOnce();
 
     unmount();
   });

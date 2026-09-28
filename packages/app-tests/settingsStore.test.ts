@@ -141,11 +141,11 @@ test("table DDL wrapping defaults on and normalizes saved booleans independently
   assert.equal(settings.wordWrap, true);
 });
 
-test("data grid column width mode defaults to fill and normalizes saved values", () => {
-  assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridColumnWidthMode, "fill");
-  assert.equal(normalizeEditorSettings({}).dataGridColumnWidthMode, "fill");
+test("data grid column width mode defaults to content and normalizes saved values", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridColumnWidthMode, "content");
+  assert.equal(normalizeEditorSettings({}).dataGridColumnWidthMode, "content");
   assert.equal(normalizeEditorSettings({ dataGridColumnWidthMode: "content" }).dataGridColumnWidthMode, "content");
-  assert.equal(normalizeEditorSettings({ dataGridColumnWidthMode: "invalid" as any }).dataGridColumnWidthMode, "fill");
+  assert.equal(normalizeEditorSettings({ dataGridColumnWidthMode: "invalid" as any }).dataGridColumnWidthMode, "content");
 });
 
 test("updateEditorSettings persists the data grid column width mode", async () => {

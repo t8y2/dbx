@@ -34,6 +34,7 @@ use crate::sql_dialect::{
     uses_single_row_insert_statements, uses_synthetic_row_id, uses_xugu_row_id, TablePaginationStrategy,
 };
 use crate::value_literals::{format_ch_array_sql_literal, format_pg_array_sql_literal};
+use dbx_types::types::is_opaque_aggregate_state_type;
 
 const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
 pub const DBX_NEO4J_ELEMENT_ID_COLUMN: &str = "__DBX_ELEMENT_ID";
@@ -289,6 +290,8 @@ pub struct DataGridColumnDistinctValuesSqlOptions {
     pub limit: Option<usize>,
     #[serde(default)]
     pub include_counts: bool,
+    #[serde(default)]
+    pub exclude_nulls: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +444,14 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
     let primary_key_info =
         primary_keys.iter().map(|primary_key| column_info_for(column_info, primary_key)).collect::<Vec<_>>();
 
+    if writable_indexes
+        .iter()
+        .any(|(_, _, info)| info.is_some_and(|info| is_opaque_aggregate_state_type(&info.data_type)))
+        || primary_key_info.iter().any(|info| info.is_some_and(|info| is_opaque_aggregate_state_type(&info.data_type)))
+    {
+        return Vec::new();
+    }
+
     if writable_indexes.is_empty() {
         return Vec::new();
     }
@@ -540,6 +551,13 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
         })
         .cloned()
         .collect();
+
+    if insert_columns
+        .iter()
+        .any(|(_, _, info)| info.as_ref().is_some_and(|info| is_opaque_aggregate_state_type(&info.data_type)))
+    {
+        return None;
+    }
 
     if insert_columns.is_empty() || options.rows.is_empty() {
         return None;
@@ -1019,6 +1037,9 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
     if !predicate.is_empty() {
         predicates.push(format!("({predicate})"));
     }
+    if options.exclude_nulls {
+        predicates.push(format!("{column} IS NOT NULL"));
+    }
     if let Some(search_predicate) = data_grid_column_distinct_values_search_predicate(&options) {
         predicates.push(search_predicate);
     }
@@ -1179,6 +1200,9 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
     if !predicate.is_empty() {
         predicates.push(predicate);
     }
+    if options.exclude_nulls {
+        predicates.push(format!("{column} IS NOT NULL"));
+    }
     if let Some(search) = options.search_value.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         predicates.push(format!(
             "toString({column}) CONTAINS {}",
@@ -1199,6 +1223,9 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
 }
 
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if let Some(error) = validate_opaque_aggregate_state_write(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_salesforce_id_column(options) {
         return Some(error);
     }
@@ -1278,6 +1305,45 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
         }
     }
 
+    None
+}
+
+fn validate_opaque_aggregate_state_write(options: &DataGridSaveStatementOptions) -> Option<String> {
+    let save_columns = effective_columns(options);
+    let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let opaque_indexes = save_columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            let column = column.as_deref()?;
+            column_info_for(column_info, column)
+                .is_some_and(|info| is_opaque_aggregate_state_type(&info.data_type))
+                .then_some(index)
+        })
+        .collect::<HashSet<_>>();
+    if opaque_indexes.is_empty() {
+        return None;
+    }
+    if options.dirty_rows.iter().any(|(_, changes)| changes.iter().any(|(index, _)| opaque_indexes.contains(index)))
+        || options
+            .new_rows
+            .iter()
+            .any(|row| opaque_indexes.iter().any(|index| row.get(*index).is_some_and(|value| !value.is_null())))
+    {
+        return Some("Doris aggregate-state columns are opaque and cannot be written automatically; use an explicit Doris state function instead.".to_string());
+    }
+    if options.table_meta.primary_keys.is_empty()
+        && (!options.dirty_rows.is_empty() || !options.deleted_rows.is_empty())
+        && options.dirty_rows.iter().map(|(index, _)| *index).chain(options.deleted_rows.iter().copied()).any(
+            |row_index| {
+                options.rows.get(row_index).is_some_and(|row| {
+                    opaque_indexes.iter().any(|index| row.get(*index).is_some_and(|value| !value.is_null()))
+                })
+            },
+        )
+    {
+        return Some("Cannot safely update or delete a keyless row whose predicate would contain an opaque Doris aggregate-state value.".to_string());
+    }
     None
 }
 
@@ -5932,8 +5998,9 @@ mod tests {
                 search_value: Some("act".to_string()),
                 limit: None,
                 include_counts: true,
+                exclude_nulls: true,
             }),
-            "SELECT \"status\" AS dbx_value, COUNT(*) AS dbx_count FROM \"public\".\"users\" WHERE (deleted_at IS NULL) AND \"status\" LIKE '%act%' GROUP BY \"status\" ORDER BY dbx_count DESC, dbx_value LIMIT 1000"
+            "SELECT \"status\" AS dbx_value, COUNT(*) AS dbx_count FROM \"public\".\"users\" WHERE (deleted_at IS NULL) AND \"status\" IS NOT NULL AND \"status\" LIKE '%act%' GROUP BY \"status\" ORDER BY dbx_count DESC, dbx_value LIMIT 1000"
         );
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
@@ -5950,8 +6017,9 @@ mod tests {
                 search_value: None,
                 limit: Some(25),
                 include_counts: false,
+                exclude_nulls: true,
             }),
-            "SELECT TOP (25) [status] AS dbx_value FROM [users] GROUP BY [status] ORDER BY dbx_value"
+            "SELECT TOP (25) [status] AS dbx_value FROM [users] WHERE [status] IS NOT NULL GROUP BY [status] ORDER BY dbx_value"
         );
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
@@ -5968,6 +6036,7 @@ mod tests {
                 search_value: Some("42".to_string()),
                 limit: Some(25),
                 include_counts: true,
+                exclude_nulls: false,
             }),
             "SELECT TOP (25) [id] AS dbx_value, COUNT(*) AS dbx_count FROM [users] WHERE [id] = 42 GROUP BY [id] ORDER BY dbx_count DESC, dbx_value"
         );
@@ -5986,6 +6055,7 @@ mod tests {
                 search_value: None,
                 limit: Some(25),
                 include_counts: true,
+                exclude_nulls: false,
             }),
             "SELECT [status] AS dbx_value, COUNT(*) AS dbx_count FROM [users] GROUP BY [status] ORDER BY dbx_count DESC, dbx_value"
         );
@@ -6004,6 +6074,7 @@ mod tests {
                 search_value: None,
                 limit: Some(10),
                 include_counts: true,
+                exclude_nulls: false,
             }),
             "SELECT * FROM (SELECT \"KIND\" AS dbx_value, COUNT(*) AS dbx_count FROM \"APP\".\"EVENTS\" GROUP BY \"KIND\" ORDER BY dbx_count DESC, dbx_value) WHERE ROWNUM <= 10"
         );
@@ -6022,6 +6093,7 @@ mod tests {
                 search_value: None,
                 limit: Some(25),
                 include_counts: false,
+                exclude_nulls: false,
             }),
             "SELECT \"STATUS\" AS dbx_value FROM \"USERS\" WHERE (DELETED_AT IS NULL) GROUP BY \"STATUS\" ORDER BY dbx_value ROWS 25"
         );
@@ -6041,6 +6113,7 @@ mod tests {
                 search_value: None,
                 limit: Some(10),
                 include_counts: false,
+                exclude_nulls: false,
             }),
             "SELECT `status` AS dbx_value FROM `iceberg_catalog`.`sales`.`orders` GROUP BY `status` ORDER BY dbx_value LIMIT 10"
         );
@@ -6059,6 +6132,7 @@ mod tests {
                 search_value: None,
                 limit: Some(10),
                 include_counts: true,
+                exclude_nulls: false,
             }),
             "SELECT `status` AS dbx_value, COUNT(*) AS dbx_count FROM `hive_catalog`.`orders` GROUP BY `status` ORDER BY dbx_count DESC, dbx_value LIMIT 10"
         );
@@ -6078,8 +6152,28 @@ mod tests {
                 search_value: None,
                 limit: Some(10),
                 include_counts: false,
+                exclude_nulls: false,
             }),
             "SELECT `status` AS dbx_value FROM `orders` GROUP BY `status` ORDER BY dbx_value LIMIT 10"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "User".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "string", true, None)),
+                where_input: Some("n.active = true".to_string()),
+                search_value: None,
+                limit: Some(10),
+                include_counts: true,
+                exclude_nulls: true,
+            }),
+            "MATCH (n:`User`) WHERE n.active = true AND n.`status` IS NOT NULL RETURN n.`status` AS dbx_value, count(*) AS dbx_count ORDER BY dbx_count DESC, dbx_value LIMIT 10"
         );
     }
 
@@ -10154,5 +10248,62 @@ mod tests {
 
         assert_eq!(result.validation_error, Some(r#"Column "LogTime" does not allow NULL."#.to_string()));
         assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn opaque_aggregate_state_blocks_keyless_predicates_and_copy_sql() {
+        let table_meta = DataGridTableMeta {
+            catalog: None,
+            database: Some("analytics".to_string()),
+            schema: None,
+            table_name: "states".to_string(),
+            primary_keys: vec![],
+            columns: Some(vec![
+                column("name", "varchar", false, None),
+                column("v2", "agg_state<sum(int)>", false, None),
+            ]),
+        };
+        let save = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Doris),
+            identifier_quote: None,
+            table_meta: table_meta.clone(),
+            columns: vec!["name".to_string(), "v2".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("before"), json!("0x00ff")]],
+            dirty_rows: vec![(0, vec![(0, json!("after"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+        assert!(save.validation_error.as_deref().is_some_and(|error| error.contains("keyless row")));
+        assert!(save.statements.is_empty());
+
+        assert!(build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Doris),
+            identifier_quote: None,
+            table_meta: Some(table_meta.clone()),
+            columns: vec!["name".to_string(), "v2".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!("before"), json!("0x00ff")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        })
+        .is_none());
+
+        let mut keyed = table_meta;
+        keyed.primary_keys = vec!["name".to_string()];
+        assert!(build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Doris),
+            identifier_quote: None,
+            table_meta: keyed,
+            columns: vec!["name".to_string(), "v2".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("before"), json!("0x00ff")]],
+            include_database_name: true,
+        })
+        .is_empty());
     }
 }

@@ -339,6 +339,22 @@ mod tests {
     }
 
     #[test]
+    fn cassandra_bounded_search_keeps_its_limit() {
+        let query = build_database_search_sql(DatabaseSearchSqlOptions {
+            database_type: Some(DatabaseType::Cassandra),
+            driver_profile: None,
+            schema: Some("app".to_string()),
+            table_name: "events".to_string(),
+            columns: vec![col("id", "int", true)],
+            term: "42".to_string(),
+            limit: Some(17),
+        })
+        .unwrap();
+
+        assert!(query.sql.ends_with(" LIMIT 17;"), "sql was: {}", query.sql);
+    }
+
+    #[test]
     fn builds_oceanbase_oracle_search_query_with_rownum_limit() {
         let query = build_database_search_sql(DatabaseSearchSqlOptions {
             database_type: Some(DatabaseType::OceanbaseOracle),

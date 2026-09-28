@@ -16,13 +16,30 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import type { ConnectionConfig } from "@/types/database";
 import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
 
+const aiAssistantMountApi = vi.hoisted(() => ({
+  conversations: [] as Array<Record<string, unknown>>,
+  runAgentStream: undefined as undefined | ((onEvent: (event: { type: string; delta?: string }) => void) => Promise<string>),
+}));
+
+vi.mock("@/lib/ai/ai", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    runAgentStream: async (...args: unknown[]) => {
+      const onEvent = args[2] as (event: { type: string; delta?: string }) => void;
+      return aiAssistantMountApi.runAgentStream?.(onEvent) ?? "";
+    },
+  };
+});
+
 vi.mock("@/lib/backend/api", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   const empty = () => Promise.resolve([]);
   return {
     ...actual,
-    loadAiConversations: empty,
+    loadAiConversations: () => Promise.resolve(aiAssistantMountApi.conversations),
     loadAiRuns: empty,
+    saveAiConversation: () => Promise.resolve(),
     readUserSkills: empty,
     loadAiConfigs: empty,
     listPlugins: empty,
@@ -36,6 +53,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
 const cleanups: Array<() => void> = [];
 
 afterEach(() => {
+  aiAssistantMountApi.conversations = [];
+  aiAssistantMountApi.runAgentStream = undefined;
   while (cleanups.length) cleanups.pop()?.();
 });
 
@@ -64,6 +83,104 @@ async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig
 }
 
 describe("AiAssistant mount", () => {
+  it("applies custom typography to restored message content and the prompt only", async () => {
+    aiAssistantMountApi.conversations = [
+      {
+        id: "typography-conversation",
+        title: "Typography",
+        connectionName: "",
+        connectionId: "",
+        database: "",
+        messages: [
+          { role: "user", content: "User message" },
+          { role: "assistant", content: "### Heading\n\nInline `value`.\n\n```sql\nSELECT 1\n```" },
+        ],
+        createdAt: "2026-09-27T00:00:00.000Z",
+        updatedAt: "2026-09-27T00:00:00.000Z",
+      },
+    ];
+
+    const { container, errors } = await mountPanel(true, undefined, (settings) => {
+      settings.restoreLastConversation = true;
+      settings.editorSettings.aiFontFamily = "Georgia, serif";
+      settings.editorSettings.aiFontSize = 18;
+    });
+
+    const root = container.querySelector<HTMLElement>("[data-ai-assistant-root]");
+    expect(root?.style.getPropertyValue("--dbx-ai-content-font-family")).toBe("Georgia, serif");
+    expect(root?.style.getPropertyValue("--dbx-ai-content-font-size")).toBe("18px");
+    expect(root?.style.getPropertyValue("--dbx-ai-code-font-size")).toBe("18px");
+    expect(container.querySelector("[data-ai-user-message-content]")?.closest(".ai-conversation-text")).not.toBeNull();
+    expect(container.querySelector("[data-ai-assistant-message-content]")?.classList.contains("ai-conversation-text")).toBe(true);
+    expect(container.querySelector(".ai-markdown code")).not.toBeNull();
+    expect(container.querySelector(".ai-code-block")).not.toBeNull();
+    expect(container.querySelector("textarea.ai-conversation-text")).not.toBeNull();
+    expect(container.firstElementChild?.firstElementChild?.classList.contains("ai-conversation-text")).toBe(false);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps the same typography scope while an answer streams and after it completes", async () => {
+    let finishStream!: () => void;
+    const streamPending = new Promise<void>((resolve) => {
+      finishStream = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "text_delta", delta: "**Streaming answer**" });
+      await streamPending;
+      onEvent({ type: "agent_end" });
+      return "Streaming answer";
+    };
+
+    const recommendation = {
+      pluginId: "sample.plugin",
+      pluginName: "Sample",
+      contributionId: "workbench",
+      workbenchId: "cluster",
+      context: { connectionId: "plugin-connection" },
+      items: [{ id: "stream", label: "Stream answer", prompt: "Stream answer" }],
+    };
+    const { container, errors } = await mountPanel(
+      true,
+      { id: "plugin-connection", name: "Sample", db_type: "plugin", plugin_id: "sample.plugin", host: "localhost", port: 22, username: "", password: "" },
+      (settings) => {
+        settings.aiConfigs = [
+          {
+            id: "custom",
+            name: "Custom",
+            provider: "openai-compatible",
+            apiKey: "test-key",
+            authMethod: "api-key",
+            endpoint: "https://example.com/v1",
+            model: "test-model",
+            apiStyle: "completions",
+            isDefault: true,
+          },
+        ];
+        settings.activeModel = { configId: "custom", modelId: "test-model" };
+        settings.editorSettings.aiFontFamily = "Georgia, serif";
+        settings.editorSettings.aiFontSize = 18;
+      },
+      recommendation,
+    );
+
+    container.querySelector<HTMLButtonElement>('button[title="Stream answer"]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const streamingContent = container.querySelector<HTMLElement>("[data-ai-assistant-message-content]");
+    expect(streamingContent?.classList.contains("ai-conversation-text")).toBe(true);
+    expect(streamingContent?.textContent).toContain("Streaming answer");
+    expect(container.querySelector("[data-ai-generation-status]")).not.toBeNull();
+
+    finishStream();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const completedContent = container.querySelector<HTMLElement>("[data-ai-assistant-message-content]");
+    expect(completedContent?.classList.contains("ai-conversation-text")).toBe(true);
+    expect(completedContent?.textContent).toContain("Streaming answer");
+    expect(container.querySelector("[data-ai-generation-status]")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
   it("keeps the real Agent mode and an interactive picker after clicking a plugin recommendation", async () => {
     const { container, errors } = await mountPanel(
       true,

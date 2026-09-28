@@ -63,7 +63,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
     listElasticsearchCompletionFields: vi.fn(async () => []),
   };
   const connectionStore = store as unknown as Options["connectionStore"];
-  const settings = reactive({ editorSettings: { completionTriggerMode: "positional", snippets: [], sqlFormatter: { keywordCase: "upper", functionCase: "upper" }, autoAliasTables: false, generateSqlQuoteIdentifiers: false } });
+  const settings = reactive({ editorSettings: { completionTriggerMode: "positional", snippets: [], sqlFormatter: { keywordCase: "upper", functionCase: "upper" }, autoAliasTables: false, tableCompletionSchemaQualification: "collision", generateSqlQuoteIdentifiers: false } });
   const metadata = useQueryEditorCompletionMetadata({ props, view, connectionStore, sqlBehaviorDialect: () => props.dialect, remoteLatencyBudgetMs: 40, maxCompletionTables: 100, onDemandMinPrefix: 2, semanticCompletionEnabled: false });
   const startCompletion = vi.fn(() => true);
   const runtime: Options["runtime"] = { codeMirrorStartCompletion: startCompletion, codeMirrorInsertCompletionText: insertCompletionText, codeMirrorSnippetCompletion: snippetCompletion, codeMirrorCompletionStatus: () => null, imeCompositionActive: false };

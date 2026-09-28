@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, GitCompareArrows, ChevronRight, FolderOpen, Copy } from "@lucide/vue";
+import { Loader2, Check, CheckCircle2, XCircle, AlertCircle, X, FileDown, Database, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, GitCompareArrows, ChevronRight, FolderOpen, Copy } from "@lucide/vue";
 import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { dataTransferFailureCopyText, sqlFileFailureCopyText } from "@/components/export/failureDetailCopyText";
 import SqlFileProgressIndicator from "@/components/sql-file/SqlFileProgressIndicator.vue";
@@ -108,6 +108,7 @@ const taskTitle = (task: ExportTask) => {
   }
   if (task.kind === "sql-file") return t("exportProgress.sqlFileTitle", { name: task.tableName });
   if (task.kind === "data-transfer") return t("exportProgress.dataTransferTitle", { name: task.tableName });
+  if (task.kind === "data-generation") return t("exportProgress.dataGenerationTitle", { name: task.tableName });
   if (task.kind === "multi-db-execution") return t("exportProgress.multiDbExecutionTitle", { name: task.tableName });
   if (task.kind === "schema-diff") return t("exportProgress.schemaDiffTitle", { name: task.tableName });
   if (task.kind === "data-compare") return t("exportProgress.dataCompareTitle", { name: task.tableName });
@@ -187,6 +188,16 @@ const rowsText = (task: ExportTask) => {
     const durationText = t("exportProgress.elapsed", { duration: formatDataTransferDuration(finishedAt - (task.startedAt ?? finishedAt)) });
     return task.currentTable ? `${tableText} · ${task.currentTable} · ${rowText} · ${durationText}` : `${tableText} · ${durationText}`;
   }
+  if (task.kind === "data-generation") {
+    const tableText = task.totalTables
+      ? t("exportProgress.tablesCount", {
+          current: (task.tableIndex ?? 0).toLocaleString(),
+          total: task.totalTables.toLocaleString(),
+        })
+      : "";
+    const rowText = task.totalRows ? `${task.rowsExported.toLocaleString()} / ${task.totalRows.toLocaleString()} ${t("exportProgress.rowsShort")}` : `${task.rowsExported.toLocaleString()} ${t("exportProgress.rowsShort")}`;
+    return [tableText, task.currentTable, rowText].filter(Boolean).join(" · ");
+  }
   if (task.kind === "multi-db-execution") {
     return t("exportProgress.multiDbTargets", {
       completed: (task.multiDbCompleted ?? 0).toLocaleString(),
@@ -232,6 +243,7 @@ const statusIcon = (task: ExportTask) => {
     if (task.kind === "data-dictionary") return FileDown;
     if (task.kind === "sql-file") return FileCode2;
     if (task.kind === "data-transfer") return ArrowRightLeft;
+    if (task.kind === "data-generation") return Database;
     if (task.kind === "multi-db-execution") return Layers3;
     if (task.kind === "schema-diff" || task.kind === "data-compare") return GitCompareArrows;
   }

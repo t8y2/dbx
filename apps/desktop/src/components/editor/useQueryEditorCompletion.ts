@@ -573,7 +573,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
     if (props.database && mongoCompletionNeedsCollections(completionContext.mode)) {
       try {
-        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, props.database);
+        collections = await connectionStore.listMongoCompletionCollections(props.connectionId, completionContext.database ?? props.database);
       } catch {
         collections = [];
       }
@@ -581,7 +581,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
     if (props.database && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
       try {
-        fields = await connectionStore.listMongoCompletionFields(props.connectionId, props.database, completionContext.collection);
+        fields = await connectionStore.listMongoCompletionFields(props.connectionId, completionContext.database ?? props.database, completionContext.collection);
       } catch {
         fields = [];
       }
@@ -811,6 +811,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+          tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -873,6 +874,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+          tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -1194,6 +1196,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+      tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     });
 
@@ -1655,6 +1658,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+      tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     });
 

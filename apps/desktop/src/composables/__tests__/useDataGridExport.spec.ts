@@ -12,6 +12,7 @@ import { extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson }
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard } from "@/lib/dataGrid/dataGridClipboard";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridExternalValue } from "@/lib/mongo/mongoDocumentValues";
+import { saveTextFile } from "@/lib/export/saveTextFile";
 
 const toast = vi.fn();
 
@@ -50,6 +51,14 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     extractDataGridSelection: vi.fn(),
     exportQueryResultCsv: vi.fn(),
     exportQueryResultJson: vi.fn(),
+  };
+});
+
+vi.mock("@/lib/export/saveTextFile", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/export/saveTextFile")>();
+  return {
+    ...original,
+    saveTextFile: vi.fn(),
   };
 });
 
@@ -179,6 +188,7 @@ describe("useDataGridExport prepared row statements", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clearDataGridClipboardCopy();
+    vi.mocked(saveTextFile).mockResolvedValue(true);
   });
 
   it("disables row copy when the result has no rows", () => {
@@ -1153,6 +1163,81 @@ describe("useDataGridExport prepared row statements", () => {
     await expect(state.copyWithExtractor("json")).resolves.toBe(false);
     expect(extractDataGridSelection).not.toHaveBeenCalled();
     expect(toast).toHaveBeenCalledWith("grid.copyExtractorUnsupportedSelection", 5000);
+  });
+
+  it("saves exactly the same configured extractor output used by copy and preview", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: [
+        [1, "Ada"],
+        [2, "Grace"],
+      ],
+    };
+    const extractorOptions = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      dsv: {
+        ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.dsv,
+        columnSeparator: "::",
+        rowSeparator: "\r\n",
+        includeColumnHeader: true,
+      },
+    };
+    const text = "id::name\r\n1::Ada\r\n2::Grace";
+    vi.mocked(extractDataGridSelection).mockImplementation(async (request) => ({
+      text,
+      mimeType: "text/plain",
+      fileExtension: "txt",
+      rowCount: request.rows.length,
+      columnCount: request.selectedColumnIndexes.length,
+    }));
+    const state = createExportState(editableTable, ["id", "name"], matrix, undefined, undefined, matrix.rows, [], extractorOptions);
+
+    await expect(state.copyWithExtractor("dsv", extractorOptions)).resolves.toBe(true);
+    const preview = await state.previewWithExtractor("dsv", extractorOptions);
+    await expect(state.exportWithExtractor("dsv", extractorOptions)).resolves.toBe(true);
+
+    expect(copyToClipboard).toHaveBeenCalledWith(text);
+    expect(preview.text).toBe(text);
+    expect(saveTextFile).toHaveBeenCalledWith(text, expect.stringMatching(/^users_selected_\d{12}\.txt$/), "TXT", "txt", { operation: "selection-extractor-dsv" });
+    expect(vi.mocked(extractDataGridSelection).mock.calls.map(([request]) => request.options)).toEqual([extractorOptions, extractorOptions, extractorOptions]);
+  });
+
+  it("does not report success when an extractor export save is cancelled", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["Ada"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: '[{"name":"Ada"}]', mimeType: "application/json", fileExtension: "json", rowCount: 1, columnCount: 1 });
+    vi.mocked(saveTextFile).mockResolvedValueOnce(false);
+    const state = createExportState(editableTable, ["id", "name"], matrix, [1, "Ada"]);
+
+    await expect(state.exportWithExtractor("json")).resolves.toBe(false);
+
+    expect(saveTextFile).toHaveBeenCalledOnce();
+    expect(toast).not.toHaveBeenCalledWith("grid.exported");
+  });
+
+  it("does not save extractor output for an unsupported discrete selection", async () => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, undefined, {
+      columns: ["id", "name"],
+      rows: [[1], ["Grace"]],
+    });
+
+    expect(state.canCopyWithExtractor("json")).toBe(false);
+    await expect(state.exportWithExtractor("json")).resolves.toBe(false);
+
+    expect(extractDataGridSelection).not.toHaveBeenCalled();
+    expect(saveTextFile).not.toHaveBeenCalled();
+  });
+
+  it("reports extractor save failures through the existing export error path", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["Ada"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "Ada", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    vi.mocked(saveTextFile).mockRejectedValueOnce(new Error("disk full"));
+    const state = createExportState(editableTable, ["id", "name"], matrix, [1, "Ada"]);
+
+    await expect(state.exportWithExtractor("pretty")).resolves.toBe(false);
+
+    expect(toast).toHaveBeenCalledWith("grid.exportFailed: disk full", 5000);
   });
 
   it("uses the right-clicked cell for SQL predicates despite an irregular discrete selection", async () => {

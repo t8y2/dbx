@@ -31,6 +31,7 @@ async function waitForSession(session: { status: string }) {
 test("defaults enable tables and functions compare for common targets", () => {
   assert.equal(DEFAULT_MYSQL_OPTIONS.tables, true);
   assert.equal(DEFAULT_MYSQL_OPTIONS.functions, true);
+  assert.equal(DEFAULT_MYSQL_OPTIONS.compareCharset, true);
   assert.equal(getDefaultOptionsForDbType("oracle").tables, true);
   assert.equal(getDefaultOptionsForDbType("oracle").functions, true);
   assert.equal(getDefaultOptionsForDbType("mysql").tables, true);
@@ -82,10 +83,47 @@ test("runs a schema diff session after the dialog is closed and retains the prep
   assert.equal(trackerMock.updateCompareTask.mock.calls.at(-1)?.[1].status, "Done");
   // MySQL defaults now enable functions compare for same-dialect pairs.
   assert.equal(apiMock.listFunctions.mock.calls.length, 2);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls[0]?.[0]?.compareCharset, true);
 
   const onOpen = trackerMock.addSchemaDiffTask.mock.calls[0]?.[2] as (() => void) | undefined;
   onOpen?.();
   assert.equal(openMock.mock.calls.at(-1)?.[0], session.id);
+});
+
+test("forwards a disabled charset comparison to the backend", async () => {
+  apiMock.prepareSchemaDiff.mockClear();
+  apiMock.prepareSchemaDiff.mockResolvedValue({
+    diffs: [],
+    functionDiffs: [],
+    sequenceDiffs: [],
+    ruleDiffs: [],
+    ownerDiffs: [],
+    renameCandidates: [],
+    syncSql: "",
+    rollbackSyncSql: "",
+  });
+
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "source",
+      sourceDatabase: "app",
+      sourceSchema: "",
+      targetConnectionId: "target",
+      targetDatabase: "warehouse",
+      targetSchema: "",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: { compareCharset: false },
+      ignoreComments: false,
+      label: "charset disabled",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+
+  await waitForSession(session);
+
+  assert.equal(session.status, "completed");
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls[0]?.[0]?.compareCharset, false);
 });
 
 test("loads routines for mysql↔mysql when functions is enabled", async () => {

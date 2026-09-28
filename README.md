@@ -340,9 +340,12 @@ DBX also provides a dedicated CLI package for terminal, script, and Codex workfl
 npm install -g @dbx-app/cli
 # or via Homebrew
 brew tap t8y2/tap && brew install dbx-cli
+dbx agent setup
 dbx connections list --json
 dbx query local "select 1" --json
 ```
+
+The CLI includes the official DBX Agent Skill. `dbx agent setup` installs or updates it offline under `~/.agents/skills/dbx`, so shell-capable AI agents know how to use DBX CLI safely.
 
 See the [MCP server README](packages/mcp-server/README.md) and [CLI README](packages/cli/README.md) for details.
 

@@ -14,8 +14,11 @@ use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::agent_manager::{AgentManager, SQLITE_WORKER_DRIVER_KEY};
+use crate::db::http_tunnel::HttpTunnelManager;
+use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_prompt::{self, SshPromptAnswer, SshPromptKind, SshPromptRequest};
 use crate::db::ssh_tunnel::{self, SshClient, TunnelManager};
+use crate::db::transport_layer_tunnel;
 use crate::models::connection::{ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig};
 use crate::types::QueryResult;
 
@@ -49,8 +52,8 @@ pub enum SqliteWorkerPlacement {
     Preplaced,
 }
 
-pub fn sqlite_ssh_worker_requested(config: &ConnectionConfig) -> bool {
-    config.db_type == DatabaseType::Sqlite && config.has_effective_ssh_tunnels()
+pub fn sqlite_remote_worker_requested(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Sqlite && config.has_effective_transport_layers()
 }
 
 fn sqlite_worker_placement(config: &ConnectionConfig) -> SqliteWorkerPlacement {
@@ -327,6 +330,8 @@ async fn read_jsonl_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Stri
 
 pub async fn connect_sqlite_worker(
     tunnels: &TunnelManager,
+    proxy_tunnels: &ProxyTunnelManager,
+    http_tunnels: &HttpTunnelManager,
     agent_manager: &AgentManager,
     data_dir: &Path,
     connection_id: &str,
@@ -346,8 +351,8 @@ pub async fn connect_sqlite_worker(
         return Err("Remote SQLite over SSH does not support attached databases in v1".to_string());
     }
 
-    let hops = ssh_hops(transport_layers)?;
-    let chain_id = (hops.len() > 1).then(|| sqlite_worker_chain_id(connection_id));
+    let route = sqlite_worker_route(transport_layers)?;
+    let chain_id = (!route.prefix_layers.is_empty()).then(|| sqlite_worker_chain_id(connection_id));
     let db_path = config.host.trim();
     if db_path.is_empty() {
         return Err("Remote SQLite path is empty".to_string());
@@ -360,7 +365,15 @@ pub async fn connect_sqlite_worker(
     let placement = sqlite_worker_placement(config);
     let remove_remote_on_close = removes_remote_worker_on_disconnect(placement);
     let configured_path = sqlite_worker_remote_path(config);
-    let session = open_final_hop_session(tunnels, connection_id, &hops).await?;
+    let session = open_final_hop_session(
+        tunnels,
+        proxy_tunnels,
+        http_tunnels,
+        connection_id,
+        &route.prefix_layers,
+        &route.final_ssh,
+    )
+    .await?;
     let remote_home = ssh_capture(&session, "printf %s \"$HOME\"").await?;
     let expand_home = |path: &str| {
         if let Some(rest) = path.strip_prefix("~/") {
@@ -381,7 +394,7 @@ pub async fn connect_sqlite_worker(
     }
     let local_worker = resolve_local_worker(agent_manager, &platform).await?;
     let digest = local_worker.digest.clone();
-    let identity = hop_identity(hops.last().ok_or("SSH hop list is empty")?);
+    let identity = hop_identity(&route.final_ssh);
 
     let remote_path = match placement {
         SqliteWorkerPlacement::Preplaced => {
@@ -439,7 +452,7 @@ pub async fn connect_sqlite_worker(
                 remove_uploaded_session_worker(session.as_ref(), &remote_path).await;
             }
             if let Some(chain_id) = chain_id.as_deref() {
-                tunnels.stop_tunnel(chain_id).await;
+                stop_sqlite_transport_layers(chain_id, tunnels, proxy_tunnels, http_tunnels).await;
             }
             Err(error)
         }
@@ -534,53 +547,82 @@ fn remember_consent(data_dir: &Path, identity: &str, digest: &str) {
 
 async fn open_final_hop_session(
     tunnels: &TunnelManager,
+    proxy_tunnels: &ProxyTunnelManager,
+    http_tunnels: &HttpTunnelManager,
     connection_id: &str,
-    hops: &[SshTunnelConfig],
+    prefix_layers: &[TransportLayerConfig],
+    final_ssh: &SshTunnelConfig,
 ) -> Result<Handle<SshClient>, String> {
-    let last = hops.last().ok_or("SSH hop list is empty")?;
-    if hops.len() == 1 {
+    if prefix_layers.is_empty() {
         return ssh_tunnel::connect_and_authenticate(
-            &last.host,
-            last.port,
-            &last.host,
-            last.port,
-            &last.user,
-            &last.password,
-            &last.key_path,
-            &last.key_passphrase,
-            last.use_ssh_agent,
-            &last.ssh_agent_sock_path,
-            &last.auth_method,
-            ssh_tunnel::effective_hop_timeout(last),
+            &final_ssh.host,
+            final_ssh.port,
+            &final_ssh.host,
+            final_ssh.port,
+            &final_ssh.user,
+            &final_ssh.password,
+            &final_ssh.key_path,
+            &final_ssh.key_passphrase,
+            final_ssh.use_ssh_agent,
+            &final_ssh.ssh_agent_sock_path,
+            &final_ssh.auth_method,
+            ssh_tunnel::effective_hop_timeout(final_ssh),
             tunnels.known_hosts_path(),
         )
         .await;
     }
     let chain_id = sqlite_worker_chain_id(connection_id);
-    let local_port = tunnels.start_chain(&chain_id, &hops[..hops.len() - 1], &last.host, last.port).await?;
+    let local_port = match transport_layer_tunnel::start_transport_layers(
+        &chain_id,
+        prefix_layers,
+        &final_ssh.host,
+        final_ssh.port,
+        tunnels,
+        proxy_tunnels,
+        http_tunnels,
+    )
+    .await
+    {
+        Ok(local_port) => local_port,
+        Err(error) => {
+            stop_sqlite_transport_layers(&chain_id, tunnels, proxy_tunnels, http_tunnels).await;
+            return Err(error);
+        }
+    };
     match ssh_tunnel::connect_and_authenticate(
         "127.0.0.1",
         local_port,
-        &last.host,
-        last.port,
-        &last.user,
-        &last.password,
-        &last.key_path,
-        &last.key_passphrase,
-        last.use_ssh_agent,
-        &last.ssh_agent_sock_path,
-        &last.auth_method,
-        ssh_tunnel::effective_hop_timeout(last),
+        &final_ssh.host,
+        final_ssh.port,
+        &final_ssh.user,
+        &final_ssh.password,
+        &final_ssh.key_path,
+        &final_ssh.key_passphrase,
+        final_ssh.use_ssh_agent,
+        &final_ssh.ssh_agent_sock_path,
+        &final_ssh.auth_method,
+        ssh_tunnel::effective_hop_timeout(final_ssh),
         tunnels.known_hosts_path(),
     )
     .await
     {
         Ok(session) => Ok(session),
         Err(error) => {
-            tunnels.stop_tunnel(&chain_id).await;
+            stop_sqlite_transport_layers(&chain_id, tunnels, proxy_tunnels, http_tunnels).await;
             Err(error)
         }
     }
+}
+
+async fn stop_sqlite_transport_layers(
+    chain_id: &str,
+    tunnels: &TunnelManager,
+    proxy_tunnels: &ProxyTunnelManager,
+    http_tunnels: &HttpTunnelManager,
+) {
+    tunnels.stop_tunnels_with_prefix(chain_id).await;
+    proxy_tunnels.stop_tunnels_with_prefix(chain_id).await;
+    http_tunnels.stop_tunnels_with_prefix(chain_id).await;
 }
 
 async fn remote_linux_platform(session: &Handle<SshClient>) -> Result<String, String> {
@@ -789,24 +831,37 @@ async fn verify_remote_digest(session: &Handle<SshClient>, path: &str, digest: &
     Ok(())
 }
 
-fn ssh_hops(layers: &[TransportLayerConfig]) -> Result<Vec<SshTunnelConfig>, String> {
-    let hops = layers
-        .iter()
-        .map(|layer| match layer {
-            TransportLayerConfig::Ssh(ssh) => {
-                let ssh = crate::ssh_config::resolve_ssh_tunnel_config(ssh);
-                if ssh.host.trim().is_empty() {
-                    return Err("SSH host is required.".to_string());
-                }
-                Ok(ssh)
-            }
-            _ => Err("Remote SQLite over SSH does not support proxy or HTTP tunnel layers".to_string()),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if hops.is_empty() {
-        return Err("Remote SQLite requires at least one SSH hop".to_string());
+#[derive(Debug)]
+struct SqliteWorkerRoute {
+    prefix_layers: Vec<TransportLayerConfig>,
+    final_ssh: SshTunnelConfig,
+}
+
+fn sqlite_worker_route(layers: &[TransportLayerConfig]) -> Result<SqliteWorkerRoute, String> {
+    if layers.iter().any(|layer| matches!(layer, TransportLayerConfig::HttpTunnel(_))) {
+        return Err("Remote SQLite does not support HTTP tunnel layers".to_string());
     }
-    Ok(hops)
+    let Some((last, prefix_layers)) = layers.split_last() else {
+        return Err("Remote SQLite requires at least one SSH hop".to_string());
+    };
+    let TransportLayerConfig::Ssh(final_ssh) = last else {
+        return Err("Remote SQLite transport must end with an SSH hop".to_string());
+    };
+    let final_ssh = crate::ssh_config::resolve_ssh_tunnel_config(final_ssh);
+    if final_ssh.host.trim().is_empty() {
+        return Err("SSH host is required.".to_string());
+    }
+    let prefix_layers = prefix_layers
+        .iter()
+        .cloned()
+        .map(|mut layer| {
+            if let TransportLayerConfig::Ssh(ssh) = &mut layer {
+                ssh.expose_lan = false;
+            }
+            layer
+        })
+        .collect();
+    Ok(SqliteWorkerRoute { prefix_layers, final_ssh })
 }
 
 fn hop_identity(hop: &SshTunnelConfig) -> String {
@@ -943,37 +998,90 @@ mod tests {
     }
 
     #[test]
-    fn remote_sqlite_requires_ssh() {
+    fn remote_sqlite_requires_a_transport_layer() {
         let config = empty_config();
-        assert!(!sqlite_ssh_worker_requested(&config));
+        assert!(!sqlite_remote_worker_requested(&config));
     }
 
     #[test]
-    fn ssh_hops_uses_resolved_layers_instead_of_profile_stubs() {
-        let hops = ssh_hops(&[ssh_layer("203.0.113.10", "testuser")]).unwrap();
-        assert_eq!(hops.len(), 1);
-        assert_eq!(hops[0].host, "203.0.113.10");
-        assert_eq!(hops[0].user, "testuser");
+    fn sqlite_worker_route_uses_resolved_final_ssh() {
+        let layers = [ssh_layer("203.0.113.10", "testuser")];
+        let route = sqlite_worker_route(&layers).unwrap();
+        assert!(route.prefix_layers.is_empty());
+        assert_eq!(route.final_ssh.host, "203.0.113.10");
+        assert_eq!(route.final_ssh.user, "testuser");
     }
 
     #[test]
-    fn ssh_hops_rejects_unresolved_profile_stubs() {
-        let error = ssh_hops(&[ssh_layer("", "")]).unwrap_err();
+    fn sqlite_worker_route_rejects_unresolved_profile_stubs() {
+        let error = sqlite_worker_route(&[ssh_layer("", "")]).unwrap_err();
         assert!(error.contains("SSH host is required"), "{error}");
     }
 
     #[test]
-    fn ssh_hops_rejects_non_ssh_layers() {
+    fn sqlite_worker_route_accepts_proxy_before_final_ssh() {
+        let layers = [proxy_layer("proxy-1"), ssh_layer("203.0.113.10", "testuser")];
+        let route = sqlite_worker_route(&layers).unwrap();
+        assert_eq!(route.prefix_layers, layers[..1]);
+        assert_eq!(route.final_ssh.host, "203.0.113.10");
+    }
+
+    #[test]
+    fn sqlite_worker_route_keeps_earlier_ssh_hops_in_the_prefix() {
+        let mut jump = ssh_layer("203.0.113.10", "jump");
+        if let TransportLayerConfig::Ssh(ssh) = &mut jump {
+            ssh.expose_lan = true;
+        }
+        let layers = [jump, ssh_layer("203.0.113.11", "target")];
+        let route = sqlite_worker_route(&layers).unwrap();
+        assert_eq!(route.prefix_layers.len(), 1);
+        let TransportLayerConfig::Ssh(prefix) = &route.prefix_layers[0] else { panic!("expected SSH prefix") };
+        assert_eq!(prefix.host, "203.0.113.10");
+        assert!(!prefix.expose_lan);
+        assert_eq!(route.final_ssh.host, "203.0.113.11");
+    }
+
+    #[test]
+    fn sqlite_worker_route_rejects_proxy_only() {
+        let error = sqlite_worker_route(&[proxy_layer("proxy-1")]).unwrap_err();
+        assert!(error.contains("must end with an SSH hop"), "{error}");
+    }
+
+    #[test]
+    fn sqlite_worker_route_rejects_ssh_followed_by_proxy() {
+        let error = sqlite_worker_route(&[ssh_layer("203.0.113.10", "testuser"), proxy_layer("proxy-1")]).unwrap_err();
+        assert!(error.contains("must end with an SSH hop"), "{error}");
+    }
+
+    #[test]
+    fn sqlite_worker_route_rejects_http_tunnel_layers() {
         let layer = serde_json::from_value(serde_json::json!({
+            "type": "http_tunnel",
+            "id": "http-1",
+            "enabled": true,
+            "url": "https://example.com/tunnel.php"
+        }))
+        .unwrap();
+        let error = sqlite_worker_route(&[layer, ssh_layer("203.0.113.10", "testuser")]).unwrap_err();
+        assert!(error.contains("does not support HTTP tunnel"), "{error}");
+    }
+
+    #[test]
+    fn proxy_only_sqlite_uses_remote_worker_validation() {
+        let mut config = empty_config();
+        config.transport_layers = vec![proxy_layer("proxy-1")];
+        assert!(sqlite_remote_worker_requested(&config));
+    }
+
+    fn proxy_layer(id: &str) -> TransportLayerConfig {
+        serde_json::from_value(serde_json::json!({
             "type": "proxy",
-            "id": "proxy-1",
+            "id": id,
             "enabled": true,
             "host": "203.0.113.10",
             "port": 1080
         }))
-        .unwrap();
-        let error = ssh_hops(&[layer]).unwrap_err();
-        assert!(error.contains("proxy or HTTP"), "{error}");
+        .unwrap()
     }
 
     fn ssh_layer(host: &str, user: &str) -> TransportLayerConfig {

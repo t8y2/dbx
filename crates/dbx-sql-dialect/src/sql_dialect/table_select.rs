@@ -302,6 +302,7 @@ pub fn build_table_data_select_sql_with_database(
             database_type,
             &options.columns,
             tdengine_should_include_tbname(database_type, options.table_type.as_deref()),
+            options.identifier_quote.as_deref(),
         )
     };
     let rownum_select_columns = quoted_table_columns_or_star(database_type, &options.columns);
@@ -556,6 +557,9 @@ pub fn uses_connection_identifier_quote(database_type: Option<DatabaseType>, ide
         // Kingbase — when no quote was reported the callers fall back to
         // `quote_table_identifier`, whose static mapping is GoogleSQL-correct.
         || database_type == Some(DatabaseType::Spanner)
+        // Kyuubi normally uses Hive-family backticks, but a Trino-backed
+        // session reports the ANSI double quote through connection info.
+        || (database_type == Some(DatabaseType::Kyuubi) && identifier_quote.is_some())
         || (database_type == Some(DatabaseType::Informix) && identifier_quote.is_some())
         || (matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres))
             && identifier_quote.is_some())
@@ -734,6 +738,7 @@ pub(super) fn build_select_columns(
     database_type: Option<DatabaseType>,
     columns: &[String],
     include_tdengine_tbname: bool,
+    identifier_quote: Option<&str>,
 ) -> String {
     if columns.is_empty() {
         if database_type == Some(DatabaseType::Tdengine) && include_tdengine_tbname {
@@ -784,7 +789,11 @@ pub(super) fn build_select_columns(
     columns
         .iter()
         .map(|column| {
-            let ident = quote_table_identifier(database_type, column);
+            let ident = if database_type == Some(DatabaseType::Kyuubi) {
+                quote_table_data_identifier(database_type, column, identifier_quote)
+            } else {
+                quote_table_identifier(database_type, column)
+            };
             if database_type == Some(DatabaseType::Hive) {
                 format!("{ident} AS {ident}")
             } else {
@@ -1071,7 +1080,34 @@ mod tests {
     }
 
     #[test]
-    fn databricks_table_select_uses_backtick_identifiers() {
+    fn databricks_table_select_uses_unity_catalog_three_part_name() {
+        let explicit_catalog = TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Databricks),
+            catalog: Some("analytics".to_string()),
+            database: Some("ignored_tree_catalog".to_string()),
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_table_data_select_sql(explicit_catalog),
+            "SELECT * FROM `analytics`.`sales`.`orders` LIMIT 100;"
+        );
+
+        let tree_catalog = TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Databricks),
+            database: Some("analytics".to_string()),
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(build_table_data_select_sql(tree_catalog), "SELECT * FROM `analytics`.`sales`.`orders` LIMIT 100;");
+    }
+
+    #[test]
+    fn databricks_table_select_without_catalog_keeps_two_part_name() {
         assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {
                 database_type: Some(DatabaseType::Databricks),
@@ -1216,13 +1252,19 @@ mod tests {
     }
 
     #[test]
-    fn external_catalog_is_ignored_for_non_doris_engines() {
+    fn catalog_qualification_does_not_change_other_dialects() {
         // Postgres does not support the 3-part catalog naming; the catalog
         // must be ignored to avoid emitting an invalid qualified name.
-        let sql =
-            build_table_data_select_sql(opts(DatabaseType::Postgres, Some("iceberg_catalog"), Some("sales"), "orders"));
-        assert!(!sql.contains("iceberg_catalog"), "sql was: {sql}");
-        assert!(sql.contains("orders"), "sql was: {sql}");
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            catalog: Some("analytics".to_string()),
+            database: Some("warehouse".to_string()),
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            limit: Some(10),
+            ..Default::default()
+        });
+        assert_eq!(sql, "SELECT * FROM \"sales\".\"orders\" LIMIT 10;");
     }
 
     #[test]

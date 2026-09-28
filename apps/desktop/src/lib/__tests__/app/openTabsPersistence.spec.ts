@@ -22,9 +22,9 @@ function roundTrip(tabs: QueryTab[]) {
 
 describe("openTabsPersistence originalSql round-trip", () => {
   it("preserves per-tab output view state across a round-trip", () => {
-    const [restored] = roundTrip([queryTab({ uiState: { activeOutputView: "chart", resultPaneOpen: false } })]);
+    const [restored] = roundTrip([queryTab({ uiState: { activeOutputView: "chart", redisResultViewMode: "console", resultPaneOpen: false } })]);
 
-    expect(restored.uiState).toEqual({ activeOutputView: "chart", resultPaneOpen: false });
+    expect(restored.uiState).toEqual({ activeOutputView: "chart", redisResultViewMode: "console", resultPaneOpen: false });
   });
 
   it("preserves namespaced special-page state across a round-trip", () => {

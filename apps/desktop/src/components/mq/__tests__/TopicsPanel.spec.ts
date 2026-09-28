@@ -5,6 +5,7 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 
 const backend = vi.hoisted(() => ({
   mqListTopics: vi.fn(),
+  mqListTopicsPage: vi.fn(),
   mqCreateTopic: vi.fn(),
   mqDeleteTopic: vi.fn(),
   mqUpdatePartitions: vi.fn(),
@@ -99,42 +100,64 @@ async function mountRabbitMqAllVhostsPanel() {
   return root;
 }
 
+async function mountKafkaPanel() {
+  root = document.createElement("div");
+  document.body.appendChild(root);
+  app = createApp(TopicsPanel, {
+    connectionId: "kafka-1",
+    tenant: "_flat_mq",
+    namespace: "_flat_mq",
+    mqSystemKind: "kafka",
+    isFlatMqCluster: true,
+  });
+  app.mount(root);
+  await flushUi();
+  return root;
+}
+
 function rowNames(container: ParentNode): string[] {
   return [...container.querySelectorAll<HTMLElement>(".topic-name-text")].map((item) => item.textContent ?? "");
 }
 
 beforeEach(() => {
+  vi.useRealTimers();
   Object.values(backend).forEach((mock) => mock.mockReset());
-  backend.mqListTopics.mockResolvedValue([
-    {
-      name: "alpha",
-      shortName: "alpha",
-      partitioned: false,
-      persistent: true,
-      messageCount: 4,
-      messagesReady: 3,
-      messagesUnacked: 1,
-      queueType: "quorum",
-      state: "running",
-      autoDelete: true,
-      consumerCount: 2,
-      arguments: { "x-queue-type": "quorum", "x-message-ttl": 60000, "x-dead-letter-exchange": "dlx" },
-      publishRate: 12.5,
-      deliverRate: 11.8,
-      ackRate: 11.2,
-    },
-    {
-      name: "beta",
-      shortName: "beta",
-      partitioned: false,
-      persistent: true,
-      messageCount: 12,
-      messagesReady: 12,
-      messagesUnacked: 0,
-      // No queue type, no arguments, and no message_stats sample:
-      // type stays unknown, rates render as "-" (never fabricated zeros).
-    },
-  ]);
+  backend.mqListTopicsPage.mockResolvedValue({
+    items: [
+      {
+        name: "alpha",
+        shortName: "alpha",
+        partitioned: false,
+        persistent: true,
+        messageCount: 4,
+        messagesReady: 3,
+        messagesUnacked: 1,
+        queueType: "quorum",
+        state: "running",
+        autoDelete: true,
+        consumerCount: 2,
+        arguments: { "x-queue-type": "quorum", "x-message-ttl": 60000, "x-dead-letter-exchange": "dlx" },
+        publishRate: 12.5,
+        deliverRate: 11.8,
+        ackRate: 11.2,
+      },
+      {
+        name: "beta",
+        shortName: "beta",
+        partitioned: false,
+        persistent: true,
+        messageCount: 12,
+        messagesReady: 12,
+        messagesUnacked: 0,
+        // No queue type, no arguments, and no message_stats sample:
+        // type stays unknown, rates render as "-" (never fabricated zeros).
+      },
+    ],
+    page: 1,
+    pageSize: 100,
+    totalCount: 2,
+    hasMore: false,
+  });
 });
 
 afterEach(() => {
@@ -142,6 +165,7 @@ afterEach(() => {
   app = null;
   root?.remove();
   root = null;
+  vi.useRealTimers();
 });
 
 describe("TopicsPanel RabbitMQ queue messages", () => {
@@ -155,11 +179,12 @@ describe("TopicsPanel RabbitMQ queue messages", () => {
     if (!sortButton) throw new Error("RabbitMQ message sort button not found");
 
     sortButton.click();
-    await nextTick();
+    await flushUi();
     expect(rowNames(panel)).toEqual(["beta", "alpha"]);
+    expect(backend.mqListTopicsPage).toHaveBeenLastCalledWith("rabbit-1", { tenant: "_rabbitmq", namespace: "/" }, { includeNonPersistent: false }, expect.objectContaining({ page: 1, pageSize: 100, sort: "messagesReady", sortDescending: true }));
 
     sortButton.click();
-    await nextTick();
+    await flushUi();
     expect(rowNames(panel)).toEqual(["alpha", "beta"]);
   });
 
@@ -203,10 +228,16 @@ describe("TopicsPanel RabbitMQ queue messages", () => {
   });
 
   it("keeps per-queue vhosts separate in all-vhosts mode (#5984 regression guard)", async () => {
-    backend.mqListTopics.mockResolvedValue([
-      { name: "orders", shortName: "orders", partitioned: false, persistent: true, namespace: "/", messageCount: 3, messagesReady: 3 },
-      { name: "orders", shortName: "orders", partitioned: false, persistent: true, namespace: "/staging", messageCount: 7, messagesReady: 7 },
-    ]);
+    backend.mqListTopicsPage.mockResolvedValue({
+      items: [
+        { name: "orders", shortName: "orders", partitioned: false, persistent: true, namespace: "/", messageCount: 3, messagesReady: 3 },
+        { name: "orders", shortName: "orders", partitioned: false, persistent: true, namespace: "/staging", messageCount: 7, messagesReady: 7 },
+      ],
+      page: 1,
+      pageSize: 100,
+      totalCount: 2,
+      hasMore: false,
+    });
     const panel = await mountRabbitMqAllVhostsPanel();
 
     // Both rows are named "orders" but must stay distinct per virtual host;
@@ -215,5 +246,61 @@ describe("TopicsPanel RabbitMQ queue messages", () => {
     expect(namespaceCells).toEqual(["/", "/staging"]);
     const counts = [...panel.querySelectorAll<HTMLElement>('[data-testid="rabbitmq-message-count"]')].map((item) => item.textContent?.trim());
     expect(counts).toEqual(["3", "7"]);
+  });
+
+  it("loads only the requested RabbitMQ page and keeps the total visible", async () => {
+    backend.mqListTopicsPage
+      .mockResolvedValueOnce({
+        items: [{ name: "page-one", shortName: "page-one", partitioned: false, persistent: true }],
+        page: 1,
+        pageSize: 100,
+        totalCount: 101,
+        hasMore: true,
+      })
+      .mockResolvedValueOnce({
+        items: [{ name: "page-two", shortName: "page-two", partitioned: false, persistent: true }],
+        page: 2,
+        pageSize: 100,
+        totalCount: 101,
+        hasMore: false,
+      });
+    const panel = await mountRabbitMqPanel();
+
+    expect(rowNames(panel)).toEqual(["page-one"]);
+    expect(panel.querySelector(".topic-count")?.textContent?.replace(/\s+/g, " ").trim()).toBe("1 / 101");
+    const next = panel.querySelector<HTMLButtonElement>('[data-testid="mq-list-next"]');
+    if (!next) throw new Error("next page button not found");
+    next.click();
+    await flushUi();
+
+    expect(rowNames(panel)).toEqual(["page-two"]);
+    expect(backend.mqListTopicsPage).toHaveBeenLastCalledWith("rabbit-1", { tenant: "_rabbitmq", namespace: "/" }, { includeNonPersistent: false }, expect.objectContaining({ page: 2, pageSize: 100 }));
+  });
+
+  it("debounces queue search into the bounded backend request", async () => {
+    vi.useFakeTimers();
+    const panel = await mountRabbitMqPanel();
+    backend.mqListTopicsPage.mockClear();
+    backend.mqListTopicsPage.mockResolvedValue({ items: [], page: 1, pageSize: 100, totalCount: 0, hasMore: false });
+
+    const search = panel.querySelector<HTMLInputElement>(".topic-search");
+    if (!search) throw new Error("topic search not found");
+    search.value = "orders";
+    search.dispatchEvent(new Event("input"));
+    await nextTick();
+    expect(backend.mqListTopicsPage).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(250);
+    await flushUi();
+    expect(backend.mqListTopicsPage).toHaveBeenCalledWith("rabbit-1", { tenant: "_rabbitmq", namespace: "/" }, { includeNonPersistent: false }, expect.objectContaining({ page: 1, search: "orders" }));
+  });
+
+  it("keeps non-RabbitMQ providers on the legacy unbounded contract", async () => {
+    backend.mqListTopics.mockResolvedValue([{ name: "orders", shortName: "orders", partitioned: false, persistent: true }]);
+    const panel = await mountKafkaPanel();
+
+    expect(rowNames(panel)).toEqual(["orders"]);
+    expect(backend.mqListTopics).toHaveBeenCalledWith("kafka-1", { tenant: "_flat_mq", namespace: "_flat_mq" }, { includeNonPersistent: false });
+    expect(backend.mqListTopicsPage).not.toHaveBeenCalled();
   });
 });

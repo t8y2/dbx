@@ -1,7 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildMongoCompletionItems, getMongoCompletionContext, getMongoCompletionResultValidFor, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
-import { ACCUMULATORS, EXPRESSION_OPERATORS, EXTENDED_JSON_VALUES, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
+import { ACCUMULATORS, BULK_WRITE_OPERATION_FIELDS, BULK_WRITE_OPERATIONS, EXPRESSION_OPERATORS, EXTENDED_JSON_VALUES, METHOD_OPTION_KEYS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
+import { parseMongoCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 
 const collections = ["users", "user_events", "order-items", "audit.logs"];
 const fields = [
@@ -492,7 +493,8 @@ test("stays quiet inside string values, comments and unmodelled arguments", () =
   assert.deepEqual(labels('db.users.find({ name: "Ad', { fields }), []);
   assert.deepEqual(labels("// db.users.fi", { fields }), []);
   assert.deepEqual(labels('db.users.find({ _id: ObjectId("6a04', { fields }), []);
-  assert.deepEqual(labels("db.users.updateOne({}, { $set: {} }, { up", { fields }), []);
+  // An operation name bulkWrite() does not accept has no fields to offer.
+  assert.deepEqual(labels("db.users.bulkWrite([{ mapReduceOne: { ", { fields }), []);
 });
 
 test("suggests only helpers the shell parser accepts", () => {
@@ -511,6 +513,162 @@ test("suggests only helpers the shell parser accepts", () => {
   }
   // Cursor methods are not collection methods.
   assert.equal(methodLabels.includes("limit"), false);
+});
+
+test("suggests the option keys of methods that take an options argument", () => {
+  assert.deepEqual(labels("db.users.updateOne({}, {$set:{a:1}}, { "), ["arrayFilters", "upsert"]);
+  assert.deepEqual(labels("db.users.updateOne({}, {$set:{a:1}}, { ups"), ["upsert"]);
+  assert.deepEqual(labels("db.users.replaceOne({}, {}, { "), ["upsert"]);
+  assert.deepEqual(labels("db.users.findOneAndDelete({}, { "), ["projection", "sort"]);
+  assert.deepEqual(labels("db.users.bulkWrite([], { "), ["ordered"]);
+  assert.deepEqual(labels("db.users.findOne({}, {}, { "), ["sort"]);
+  assert.ok(labels("db.users.findOneAndUpdate({}, {$set:{a:1}}, { ").includes("returnDocument"));
+  assert.ok(labels("db.users.createIndex({a:1}, { ").includes("expireAfterSeconds"));
+  assert.ok(labels("db.users.aggregate([], { ").includes("allowDiskUse"));
+
+  // A `sort` or `projection` option holds field names.
+  assert.deepEqual(labels("db.users.findOneAndUpdate({}, {$set:{a:1}}, { sort: { na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.findOneAndDelete({}, { projection: { na", { fields }), ["name"]);
+});
+
+test("stays quiet in the trailing argument of methods that take no options", () => {
+  // Suggesting an option key here would hand the user a command the parser rejects.
+  for (const text of ["db.users.find({}, {}, { ", "db.users.insertOne({}, { ", "db.users.insertMany([], { ", "db.users.deleteOne({}, { ", "db.users.deleteMany({}, { ", "db.users.countDocuments({}, { "]) {
+    assert.deepEqual(labels(text, { fields, collections }), [], text);
+  }
+});
+
+test("every suggested option key parses on the method that offers it", () => {
+  // The option sets mirror the driver's own structs, most of which reject unknown fields, so a
+  // key that only exists in this table would complete into a command that fails at Run.
+  const values: Record<string, string> = {
+    upsert: "true",
+    arrayFilters: '[{ "e.f": 1 }]',
+    returnDocument: '"after"',
+    returnNewDocument: "true",
+    new: "true",
+    projection: "{ name: 1 }",
+    sort: "{ name: -1 }",
+    ordered: "false",
+    name: '"idx"',
+    unique: "true",
+    sparse: "true",
+    expireAfterSeconds: "3600",
+    partialFilterExpression: "{ name: { $exists: true } }",
+    collation: '{ locale: "en" }',
+    hidden: "true",
+    allowDiskUse: "true",
+    maxTimeMS: "5000",
+    hint: '"idx"',
+    comment: '"why"',
+    let: "{ n: 1 }",
+    explain: "true",
+  };
+  const callArgs: Record<string, string> = {
+    findOne: "{}, {}",
+    updateOne: "{}, {$set:{a:1}}",
+    updateMany: "{}, {$set:{a:1}}",
+    replaceOne: "{}, {b:1}",
+    findOneAndUpdate: "{}, {$set:{a:1}}",
+    findOneAndReplace: "{}, {b:1}",
+    findOneAndDelete: "{}",
+    bulkWrite: "[{ insertOne: { document: { a: 1 } } }]",
+    createIndex: "{a:1}",
+    aggregate: "[]",
+  };
+
+  for (const [method, options] of Object.entries(METHOD_OPTION_KEYS)) {
+    const args = callArgs[method];
+    assert.ok(args !== undefined, `${method} needs sample arguments in this test`);
+    for (const option of options) {
+      const value = values[option.label];
+      assert.ok(value !== undefined, `${option.label} needs a sample value in this test`);
+      const command = `db.users.${method}(${args}, { ${option.label}: ${value} })`;
+      assert.ok(parseMongoCommand(command), `${command} must parse`);
+    }
+  }
+});
+
+test("completes commands addressed to another database through getSiblingDB", () => {
+  // The parser accepts `db.getSiblingDB("x").coll.find(…)`, so the editor has to complete it the
+  // same way it completes `db.coll.find(…)` — including resolving the collection, which is what
+  // loads field names.
+  // Addressing another database offers what `db.` offers, except `getSiblingDB` itself — the
+  // parser rejects chaining it, and accepting that suggestion would produce a statement that
+  // cannot run.
+  const siblingRoot = labels('db.getSiblingDB("archive").', { collections });
+  assert.deepEqual(siblingRoot, labels("db.", { collections }).filter((label: string) => label !== "getSiblingDB"));
+  assert.ok(!siblingRoot.includes("getSiblingDB"));
+  assert.equal(getMongoCompletionContext('db.getSiblingDB("archive").', 'db.getSiblingDB("archive").'.length).database, "archive");
+  assert.deepEqual(labels('db.getSiblingDB("archive").user_ev', { collections }), ["user_events"]);
+
+  const methods = labels('db.getSiblingDB("archive").users.', { collections });
+  assert.ok(methods.includes("find") && methods.includes("updateOne"));
+  assert.equal(getMongoCompletionContext('db.getSiblingDB("archive").users.', 'db.getSiblingDB("archive").users.'.length).collection, "users");
+
+  assert.deepEqual(labels('db.getSiblingDB("archive").users.find({ na', { fields }), ["name"]);
+  assert.ok(labels('db.getSiblingDB("archive").users.find({}).', { fields }).includes("limit"));
+  assert.ok(labels("db.getSiblingDB('archive').users.updateOne({}, { $s", { fields }).includes("$set"));
+  assert.deepEqual(labels('db.getSiblingDB("archive").getCollection("user_ev', { collections }), ["user_events"]);
+  assert.equal(
+    getMongoCompletionContext('db.getSiblingDB("archive").getCollection("users").', 'db.getSiblingDB("archive").getCollection("users").'.length).collection,
+    "users",
+  );
+});
+
+test("completes bulkWrite operations, their fields, and the shapes inside them", () => {
+  assert.deepEqual(labels("db.users.bulkWrite([{ "), ["deleteMany", "deleteOne", "insertOne", "replaceOne", "updateMany", "updateOne"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ upd"), ["updateMany", "updateOne"]);
+
+  assert.deepEqual(labels("db.users.bulkWrite([{ insertOne: { "), ["document"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ deleteMany: { "), ["filter"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ replaceOne: { "), ["filter", "replacement", "upsert"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ updateOne: { "), ["arrayFilters", "filter", "update", "upsert"]);
+
+  // Inside a field the shapes are the ordinary ones.
+  assert.ok(labels("db.users.bulkWrite([{ updateOne: { filter: { ", { fields }).includes("$or"));
+  assert.deepEqual(labels("db.users.bulkWrite([{ updateOne: { filter: { na", { fields }), ["name"]);
+  assert.ok(labels("db.users.bulkWrite([{ updateOne: { filter: { age: { $g", { fields }).includes("$gte"));
+  assert.ok(labels("db.users.bulkWrite([{ updateOne: { update: { $s", { fields }).includes("$set"));
+  assert.deepEqual(labels("db.users.bulkWrite([{ updateOne: { update: { $set: { na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ insertOne: { document: { na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ replaceOne: { replacement: { na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.bulkWrite([{ updateOne: { arrayFilters: [{ na", { fields }), ["name"]);
+
+  // An operation the parser does not accept has nothing to offer.
+  assert.deepEqual(labels("db.users.bulkWrite([{ notAnOperation: { ", { fields }), []);
+});
+
+test("every suggested bulkWrite operation and field parses", () => {
+  // The parser rejects an unknown operation key and an unknown field inside one, so a suggestion
+  // that only exists in the table would complete into a command that fails at Run.
+  const fieldValues: Record<string, string> = {
+    document: "{ a: 1 }",
+    filter: "{ a: 1 }",
+    update: "{ $set: { b: 2 } }",
+    replacement: "{ b: 2 }",
+    upsert: "true",
+    arrayFilters: '[{ "e.f": 1 }]',
+  };
+
+  assert.deepEqual(
+    BULK_WRITE_OPERATIONS.map((operation) => operation.label).sort(),
+    Object.keys(BULK_WRITE_OPERATION_FIELDS).sort(),
+    "every offered operation needs a field list, and vice versa",
+  );
+
+  for (const [operation, fieldSpecs] of Object.entries(BULK_WRITE_OPERATION_FIELDS)) {
+    // Every field of an operation at once, so each one is exercised against the parser.
+    const body = fieldSpecs
+      .map((field) => {
+        const value = fieldValues[field.label];
+        assert.ok(value !== undefined, `${field.label} needs a sample value in this test`);
+        return `${field.label}: ${value}`;
+      })
+      .join(", ");
+    const command = `db.users.bulkWrite([{ ${operation}: { ${body} } }])`;
+    assert.ok(parseMongoCommand(command), `${command} must parse`);
+  }
 });
 
 test("completes both arguments of distinct", () => {

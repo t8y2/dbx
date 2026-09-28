@@ -43,6 +43,58 @@ static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::
 static MYSQL_COLLATE_CLAUSE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"(?i)\bCOLLATE\s*=?\s*([A-Za-z0-9_]+)\b").expect("valid MySQL COLLATE clause regex")
 });
+
+pub async fn ensure_transfer_source_types_supported(
+    state: &AppState,
+    request: &TransferRequest,
+    source_pool_key: &str,
+) -> Result<(), String> {
+    if matches!(request.content, TransferContent::StructureOnly) {
+        return Ok(());
+    }
+    let is_doris = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&request.source_connection_id)
+            .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
+    };
+    if !is_doris {
+        return Ok(());
+    }
+    for table in &request.tables {
+        let columns = get_columns_for_transfer(
+            state,
+            source_pool_key,
+            &request.source_connection_id,
+            &request.source_database,
+            &request.source_schema,
+            table,
+            request.source_catalog.as_deref(),
+        )
+        .await?;
+        ensure_transfer_columns_supported(request, true, table, &columns)?;
+    }
+    Ok(())
+}
+
+fn ensure_transfer_columns_supported(
+    request: &TransferRequest,
+    is_doris_source: bool,
+    table: &str,
+    columns: &[db::ColumnInfo],
+) -> Result<(), String> {
+    if matches!(request.content, TransferContent::StructureOnly) || !is_doris_source {
+        return Ok(());
+    }
+    if let Some(column) = columns.iter().find(|column| crate::types::is_opaque_aggregate_state_type(&column.data_type))
+    {
+        return Err(format!(
+            "Data transfer does not support Doris aggregate-state column `{}` in table `{table}`; export a representation format or use explicit Doris state functions instead",
+            column.name
+        ));
+    }
+    Ok(())
+}
 // An inline FK constraint *definition line*: an optional `CONSTRAINT <name>`
 // prefix followed by `FOREIGN KEY (`. Anchored to the line start so column
 // definitions whose COMMENT/DEFAULT strings mention "foreign key" never match.
@@ -3979,6 +4031,52 @@ pub fn generate_upsert_typed(
     )
 }
 
+fn generate_insert_ignore_duplicates_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    overrides_postgres_system_values: bool,
+    quote_target_column_names: bool,
+) -> String {
+    if value_rows.is_empty() || columns.is_empty() {
+        return String::new();
+    }
+
+    let full_table = qualified_table(table, schema, db_type, catalog);
+    let col_list = columns
+        .iter()
+        .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
+        " OVERRIDING SYSTEM VALUE"
+    } else {
+        ""
+    };
+
+    let mut sql = format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n{}", value_rows.join(",\n"));
+
+    match db_type {
+        db_type
+            if (is_postgres_transfer_dialect(db_type) && !matches!(db_type, DatabaseType::OpenGauss))
+                || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb) =>
+        {
+            sql.push_str("\nON CONFLICT DO NOTHING");
+        }
+        db_type if uses_mysql_style_upsert(db_type) => {
+            let first_column = transfer_column_identifier(&columns[0], db_type, quote_target_column_names);
+            sql.push_str(&format!("\nON DUPLICATE KEY UPDATE {first_column} = {first_column}"));
+        }
+        _ => {}
+    }
+
+    sql
+}
+
 /// Upsert targets that take the MySQL-style `INSERT ... ON DUPLICATE KEY UPDATE
 /// ... VALUES(col)` arm. openGauss belongs here instead of the PostgreSQL
 /// `ON CONFLICT` arm: its INSERT grammar has no `ON CONFLICT` clause, but it
@@ -3988,6 +4086,76 @@ pub fn generate_upsert_typed(
 /// double-quoted PostgreSQL-style names.
 fn uses_mysql_style_upsert(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::OpenGauss)
+}
+
+pub(crate) fn supports_primary_key_upsert(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Postgres
+            | DatabaseType::Kingbase
+            | DatabaseType::Sqlite
+            | DatabaseType::CloudflareD1
+            | DatabaseType::DuckDb
+            | DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::OpenGauss
+    )
+}
+
+fn primary_key_upsert_clause(
+    columns: &[String],
+    pk_columns: &[String],
+    db_type: &DatabaseType,
+    quote_target_column_names: bool,
+) -> Result<String, String> {
+    if pk_columns.is_empty() {
+        return Err("Update-existing import requires target primary-key metadata".to_string());
+    }
+    if pk_columns.iter().any(|primary_key| !columns.iter().any(|column| column.eq_ignore_ascii_case(primary_key))) {
+        return Err("Update-existing import requires every target primary-key column to be mapped".to_string());
+    }
+
+    let non_pk_columns = columns
+        .iter()
+        .filter(|column| !pk_columns.iter().any(|primary_key| column.eq_ignore_ascii_case(primary_key)))
+        .collect::<Vec<_>>();
+    if non_pk_columns.is_empty() {
+        return Err("Update-existing import requires at least one mapped non-primary-key column".to_string());
+    }
+
+    if (is_postgres_transfer_dialect(db_type) && !matches!(db_type, DatabaseType::OpenGauss))
+        || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb)
+    {
+        let primary_keys = pk_columns
+            .iter()
+            .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let updates = non_pk_columns
+            .iter()
+            .map(|column| {
+                let column = transfer_column_identifier(column, db_type, quote_target_column_names);
+                format!("{column} = EXCLUDED.{column}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!("\nON CONFLICT ({primary_keys}) DO UPDATE SET {updates}"));
+    }
+
+    if uses_mysql_style_upsert(db_type) {
+        let updates = non_pk_columns
+            .iter()
+            .map(|column| {
+                let column = transfer_column_identifier(column, db_type, quote_target_column_names);
+                format!("{column} = VALUES({column})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!("\nON DUPLICATE KEY UPDATE {updates}"));
+    }
+
+    Err(format!("Update-existing import conflict policy is not supported for {}", db_type.as_str()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4591,9 +4759,163 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
-    generate_insert_sql_batches_from_value_rows(
-        columns, value_rows, table, schema, db_type, catalog, limits, false, true,
+    generate_insert_typed_sql_batches_from_value_rows_with_options(
+        columns, value_rows, table, schema, db_type, catalog, limits, false,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    skip_duplicate_rows: bool,
+) -> Result<Vec<(String, usize)>, String> {
+    if !skip_duplicate_rows {
+        return generate_insert_sql_batches_from_value_rows(
+            columns, value_rows, table, schema, db_type, catalog, limits, false, true,
+        );
+    }
+
+    if value_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_rows = limits.max_rows.max(1).min(match db_type {
+        DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
+        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        _ => usize::MAX,
+    });
+    let target_sql_bytes = limits.target_sql_bytes.max(1);
+    let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
+
+    let template = InsertSqlTemplate::new_with_column_quoting(columns, table, schema, db_type, catalog, false, true);
+
+    let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
+
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+
+    while start < value_rows.len() {
+        let mut end = start;
+        let mut rows_bytes = 0usize;
+
+        while end < value_rows.len() && end - start < max_rows {
+            let single_row_bytes = template.statement_bytes(value_row_bytes[end], 1, db_type);
+
+            if let Some(hard_sql_bytes) = limits.hard_sql_bytes {
+                if single_row_bytes > hard_sql_bytes {
+                    return Err(format!(
+                        "SQL batch row {} requires {} bytes and exceeds the {} byte hard limit",
+                        end + 1,
+                        single_row_bytes,
+                        hard_sql_bytes
+                    ));
+                }
+            }
+
+            let candidate_rows_bytes = rows_bytes.saturating_add(value_row_bytes[end]);
+            let candidate_row_count = end - start + 1;
+            let candidate_bytes = template.statement_bytes(candidate_rows_bytes, candidate_row_count, db_type);
+
+            if candidate_row_count > 1 && candidate_bytes > batch_sql_bytes {
+                break;
+            }
+
+            rows_bytes = candidate_rows_bytes;
+            end += 1;
+        }
+
+        let value_rows_batch = &value_rows[start..end];
+
+        let mut sql = if matches!(
+            db_type,
+            DatabaseType::Postgres
+                | DatabaseType::Kingbase
+                | DatabaseType::Sqlite
+                | DatabaseType::CloudflareD1
+                | DatabaseType::DuckDb
+                | DatabaseType::Mysql
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::OpenGauss
+        ) {
+            generate_insert_ignore_duplicates_from_value_rows(
+                columns,
+                value_rows_batch,
+                table,
+                schema,
+                db_type,
+                catalog,
+                false,
+                true,
+            )
+        } else {
+            template.build(value_rows_batch)
+        };
+
+        if sql.is_empty() {
+            return Err("Generated empty SQL batch".to_string());
+        }
+
+        statements.push((std::mem::take(&mut sql), end - start));
+        start = end;
+    }
+
+    Ok(statements)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_primary_key_upsert_sql_batches_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    pk_columns: &[String],
+) -> Result<Vec<(String, usize)>, String> {
+    if !supports_primary_key_upsert(db_type) {
+        return Err(format!("Update-existing import conflict policy is not supported for {}", db_type.as_str()));
+    }
+
+    let clause = primary_key_upsert_clause(columns, pk_columns, db_type, true)?;
+    let clause_bytes = sql_text_bytes(&clause, db_type);
+    let adjusted_limits = SqlBatchLimits {
+        max_rows: limits.max_rows,
+        target_sql_bytes: limits.target_sql_bytes.saturating_sub(clause_bytes).max(1),
+        hard_sql_bytes: limits.hard_sql_bytes.map(|limit| limit.saturating_sub(clause_bytes).max(1)),
+    };
+    let batches = generate_insert_sql_batches_from_value_rows(
+        columns,
+        value_rows,
+        table,
+        schema,
+        db_type,
+        catalog,
+        adjusted_limits,
+        false,
+        true,
+    )?;
+
+    batches
+        .into_iter()
+        .map(|(mut sql, row_count)| {
+            sql.push_str(&clause);
+            if limits.hard_sql_bytes.is_some_and(|limit| sql_text_bytes(&sql, db_type) > limit) {
+                return Err(format!(
+                    "SQL batch with update-existing conflict handling exceeds the {} byte hard limit",
+                    limits.hard_sql_bytes.unwrap_or_default()
+                ));
+            }
+            Ok((sql, row_count))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6198,6 +6520,12 @@ pub async fn get_db_type(state: &AppState, connection_id: &str) -> Result<Databa
 fn effective_transfer_database_type(config: &ConnectionConfig) -> DatabaseType {
     if config.db_type != DatabaseType::Jdbc {
         return config.db_type;
+    }
+    // The OceanBase JDBC URL and driver class are shared by MySQL and Oracle
+    // compatibility modes, so neither is a safe mode discriminator. The
+    // connection form persists this explicit profile only for Oracle mode.
+    if config.driver_profile.as_deref().is_some_and(|profile| profile.trim().eq_ignore_ascii_case("oceanbase-oracle")) {
+        return DatabaseType::OceanbaseOracle;
     }
     if config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")) {
         return DatabaseType::Jdbc;
@@ -8564,6 +8892,14 @@ pub async fn rename_tables_to_backup<F>(
 where
     F: FnMut(TransferProgress),
 {
+    let source_pool_key = ensure_transfer_pool(
+        state,
+        &request.source_connection_id,
+        &request.source_database,
+        request.source_catalog.as_deref(),
+    )
+    .await?;
+    ensure_transfer_source_types_supported(state, request, &source_pool_key).await?;
     let total_tables = tables.len();
 
     // Resolve target names first so the fail-fast check below sees the names that will
@@ -9142,6 +9478,14 @@ where
     if columns.is_empty() {
         return Err(format!("No columns found for table {table}"));
     }
+
+    let is_doris_source = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&request.source_connection_id)
+            .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
+    };
+    ensure_transfer_columns_supported(request, is_doris_source, table, &columns)?;
 
     let writable_columns = writable_transfer_columns(&columns, source_db_type, target_db_type);
     let default_rows_only = mysql_generated_only_transfer(&columns, source_db_type, target_db_type);
@@ -10579,6 +10923,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -12342,6 +12687,36 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             drop_target_before_create: false,
             drop_target_confirmed: false,
         }
+    }
+
+    #[test]
+    fn transfer_column_validation_rejects_opaque_state_for_actual_doris_table() {
+        let request = test_transfer_request(vec!["first_state", "actual_state"]);
+        let columns = vec![test_column("id", "int"), test_column("v2", "agg_state<group_concat(text)>")];
+
+        let error = ensure_transfer_columns_supported(&request, true, "actual_state", &columns).unwrap_err();
+
+        assert!(error.contains("`v2`"), "{error}");
+        assert!(error.contains("`actual_state`"), "{error}");
+        assert!(!error.contains("first_state"), "{error}");
+    }
+
+    #[test]
+    fn transfer_column_validation_is_doris_data_only_and_structure_aware() {
+        let columns = vec![test_column("v2", "AGG_STATE<SUM(INT)>")];
+        let data_request = test_transfer_request(vec!["states"]);
+        assert!(ensure_transfer_columns_supported(&data_request, false, "states", &columns).is_ok());
+
+        let structure_request = TransferRequest { content: TransferContent::StructureOnly, ..data_request };
+        assert!(ensure_transfer_columns_supported(&structure_request, true, "states", &columns).is_ok());
+    }
+
+    #[test]
+    fn transfer_column_validation_allows_regular_doris_columns() {
+        let request = test_transfer_request(vec!["items"]);
+        let columns = vec![test_column("id", "bigint"), test_column("name", "varchar(64)")];
+
+        assert!(ensure_transfer_columns_supported(&request, true, "items", &columns).is_ok());
     }
 
     #[test]
@@ -16052,6 +16427,68 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn oceanbase_oracle_jdbc_profile_routes_create_table_through_oracle_mode() {
+        let config = jdbc_transfer_config(
+            "jdbc:oceanbase://localhost:2883/ORCL",
+            "com.oceanbase.jdbc.Driver",
+            "OceanBase-Oracle",
+        );
+        let target_db = effective_transfer_database_type(&config);
+
+        assert_eq!(target_db, DatabaseType::OceanbaseOracle);
+
+        let ddl = generate_create_table_ddl(
+            &[
+                test_column("INSUPROKEY", "VARCHAR2(36 BYTE)"),
+                test_column("PREMIUM", "NUMBER(14,2)"),
+                test_column("DETAIL", "CLOB"),
+            ],
+            "PRPDINSURANCEPLANPROM",
+            "CPRPALL",
+            "CPRPALL",
+            &target_db,
+            &DatabaseType::Oracle,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            ddl,
+            "CREATE TABLE \"CPRPALL\".\"PRPDINSURANCEPLANPROM\" (\n  \"INSUPROKEY\" VARCHAR(36 byte),\n  \"PREMIUM\" DECIMAL(14,2),\n  \"DETAIL\" CLOB\n)"
+        );
+    }
+
+    #[test]
+    fn oceanbase_jdbc_url_without_oracle_profile_stays_generic() {
+        for profile in ["", "oceanbase"] {
+            let config =
+                jdbc_transfer_config("jdbc:oceanbase://localhost:2883/test", "com.oceanbase.jdbc.Driver", profile);
+            let target_db = effective_transfer_database_type(&config);
+
+            assert_eq!(target_db, DatabaseType::Jdbc, "profile: {profile}");
+
+            let ddl = generate_create_table_ddl(
+                &[test_column("INSUPROKEY", "VARCHAR2(36 BYTE)"), test_column("PREMIUM", "NUMBER(14,2)")],
+                "PRPDINSURANCEPLANPROM",
+                "CPRPALL",
+                "CPRPALL",
+                &target_db,
+                &DatabaseType::Oracle,
+                None,
+                None,
+            );
+            assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS "), "profile {profile}: {ddl}");
+            assert!(ddl.contains("\"INSUPROKEY\" VARCHAR(36)"), "profile {profile}: {ddl}");
+            assert!(ddl.contains("\"PREMIUM\" NUMERIC"), "profile {profile}: {ddl}");
+        }
+
+        let mut mysql_mode =
+            jdbc_transfer_config("jdbc:oceanbase://localhost:2883/test", "com.oceanbase.jdbc.Driver", "oceanbase");
+        mysql_mode.db_type = DatabaseType::Mysql;
+        assert_eq!(effective_transfer_database_type(&mysql_mode), DatabaseType::Mysql);
+    }
+
+    #[test]
     fn non_oracle_jdbc_url_keeps_multi_row_values_insert() {
         let config = jdbc_transfer_config("jdbc:mysql://localhost:3306/dbx_test", "com.mysql.cj.jdbc.Driver", "");
         assert_eq!(effective_transfer_database_type(&config), DatabaseType::Jdbc);
@@ -16408,6 +16845,70 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn postgres_insert_can_skip_duplicate_rows() {
+        let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
+            &[String::from("id"), String::from("name")],
+            &[String::from("(42, 'Ada')"), String::from("(43, 'Bob')")],
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 2);
+        assert!(batches[0].0.contains("ON CONFLICT DO NOTHING"));
+        assert!(batches[0].0.contains("(42, 'Ada')"));
+        assert!(batches[0].0.contains("(43, 'Bob')"));
+    }
+
+    #[test]
+    fn mysql_insert_can_skip_duplicate_rows() {
+        let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
+            &[String::from("id"), String::from("name")],
+            &[String::from("(42, 'Ada')"), String::from("(43, 'Bob')")],
+            "users",
+            "public",
+            &DatabaseType::Mysql,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 2);
+        assert!(batches[0].0.contains("ON DUPLICATE KEY UPDATE"));
+        assert!(batches[0].0.contains("`id` = `id`"));
+        assert!(batches[0].0.contains("(42, 'Ada')"));
+        assert!(batches[0].0.contains("(43, 'Bob')"));
+    }
+
+    #[test]
+    fn sqlite_insert_can_skip_duplicate_rows() {
+        let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
+            &[String::from("id"), String::from("name")],
+            &[String::from("(42, 'Ada')"), String::from("(43, 'Bob')")],
+            "users",
+            "",
+            &DatabaseType::Sqlite,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 2);
+        assert!(batches[0].0.contains("ON CONFLICT DO NOTHING"));
+        assert!(batches[0].0.contains("(42, 'Ada')"));
+        assert!(batches[0].0.contains("(43, 'Bob')"));
+    }
+
+    #[test]
     fn database_from_pool_key_handles_session_scoped_keys() {
         assert_eq!(database_from_pool_key("conn:analytics"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn:analytics:session:editor-1"), Some("analytics"));
@@ -16452,6 +16953,7 @@ SELECT 1 FROM dual"#
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

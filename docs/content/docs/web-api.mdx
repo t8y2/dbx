@@ -115,6 +115,10 @@ Returns saved connection profiles. Secrets such as passwords are stored separate
 
 ### Save Connections
 
+Connections are upserted by `id`: connections the request does not mention are left untouched, so several
+clients can share one server without deleting each other's profiles. Deletions are explicit through the
+optional `removedIds` array.
+
 ```http
 POST /api/connection/save
 Content-Type: application/json
@@ -130,7 +134,8 @@ Cookie: dbx_session=...
       "username": "root",
       "database": "app"
     }
-  ]
+  ],
+  "removedIds": ["connection-to-delete"]
 }
 ```
 

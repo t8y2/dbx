@@ -379,6 +379,42 @@ test("clean saved SQL tabs persist without duplicating SQL text", async () => {
   }
 });
 
+test("clean saved SQL tabs hydrate after their tabs finish restoring", async () => {
+  const restoreStorage = installMemoryStorage();
+  const fullFile = {
+    id: "saved-startup-race",
+    connectionId: "conn-1",
+    name: "startup.sql",
+    database: "db",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-09-27T00:00:00.000Z",
+    updatedAt: "2026-09-27T00:00:00.000Z",
+  };
+  try {
+    setActivePinia(createPinia());
+    let store = useQueryStore();
+    store.openSavedSql(fullFile);
+    await store.flushPendingPersist();
+
+    disposePinia(getActivePinia()!);
+    setActivePinia(createPinia());
+    store = useQueryStore();
+    const savedSqlStore = useSavedSqlStore();
+    savedSqlStore.files = [fullFile];
+
+    await store.hydrateSavedSqlTabs();
+    await store.initOpenTabs();
+    await store.hydrateSavedSqlTabs();
+
+    const restored = store.tabs.find((tab) => tab.savedSqlId === fullFile.id);
+    assert.equal(restored?.sql, fullFile.sql);
+    assert.equal(restored?.originalSql, fullFile.sql);
+  } finally {
+    restoreStorage();
+  }
+});
+
 test("saved SQL opens with its saved execution target by default", async () => {
   const restoreStorage = installMemoryStorage();
   try {

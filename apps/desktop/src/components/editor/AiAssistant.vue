@@ -90,6 +90,7 @@ import {
   type AiAction,
   type AiActionSelection,
   type AiAssistantMode,
+  type AiContext,
   type AiContextTarget,
   type AiCsvFileContext,
   type AiTextAttachmentEncoding,
@@ -178,7 +179,7 @@ import { DBX_TABLE_REFERENCE_DROP_EVENT, clearActiveTableReferencePayload } from
 import { canSubmitAiPrompt, isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
 import { isActionableWriteProposalMessage, isActionableWriteSqlProposal, looksLikeActionProposal, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { classifyIntentByLlm, routeIntentByRules, type AiIntentRouteInput } from "@/lib/ai/aiIntentRouter";
-import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
+import { retryableUserMessageIndex, visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 import { saveTextFile } from "@/lib/export/saveTextFile";
 import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
@@ -187,7 +188,8 @@ import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from 
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
 import AiToolApprovalCard from "@/components/editor/AiToolApprovalCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
-import { buildPluginAiRequest, pluginContextFromMessages, pluginContextText, streamPluginAiConversation, type AiPluginContext, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
+import { buildPluginAiRequest, createPluginAiConversation, pluginComposerConnectionLabel, pluginContextConnectionId, pluginContextFromMessages, pluginContextText, streamPluginAiConversation, type AiPluginContext, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
+import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
 
 const { t } = useI18n();
 const AiChartRenderer = defineAsyncComponent({
@@ -291,6 +293,7 @@ const props = defineProps<{
   tab?: QueryTab;
   connection?: ConnectionConfig;
   maximized?: boolean;
+  pluginRecommendations?: PluginAiRecommendationHostUpdate;
 }>();
 
 // Every AI-initiated action carries the *target* it must run against: the
@@ -356,6 +359,27 @@ const boundConnectionId = computed(() => conversationBinding.value.connectionId)
 const boundConnection = computed(() => (boundConnectionId.value ? connectionStore.getConfig(boundConnectionId.value) : undefined));
 const boundDatabase = computed(() => conversationBinding.value.database);
 const boundSchema = computed(() => conversationBinding.value.schema);
+const pluginContextConnection = computed(() => {
+  const contextConnectionId = pluginContext.value ? pluginContextConnectionId(pluginContext.value) : undefined;
+  return boundConnection.value ?? (contextConnectionId ? connectionStore.getConfig(contextConnectionId) : undefined);
+});
+const pluginComposerConnectionName = computed(() => {
+  const context = pluginContext.value;
+  if (!context) return "";
+  return pluginComposerConnectionLabel(context, pluginContextConnection.value?.name, activeConversation.value?.connectionName);
+});
+
+function canUsePluginAgentMode(context = pluginContext.value, connection = boundConnection.value): boolean {
+  return !context || !!connection;
+}
+
+watch(
+  [pluginContext, boundConnection],
+  ([context, connection]) => {
+    if (context && !connection && assistantMode.value === "agent") assistantMode.value = "ask";
+  },
+  { immediate: true },
+);
 
 // `immediate` runs this during setup whenever the AI config finished loading
 // before the panel mounted (the usual case: the app loads it at startup), and
@@ -1663,6 +1687,7 @@ function openCodeSnapshot(seg: { content: string; lang: string }) {
 }
 
 const showActionButtons = computed(() => {
+  if (pluginContext.value) return false;
   if (!boundConnection.value) return true;
   return !isVectorDbType(boundConnection.value.db_type);
 });
@@ -1677,6 +1702,7 @@ const modeActionTriggerLabel = computed(() => {
 });
 
 function switchModeActionTab(mode: "ask" | "agent") {
+  if (mode === "agent" && !canUsePluginAgentMode()) return;
   activeAction.value = resolveDefaultActionSelection(mode);
   if (assistantMode.value !== mode) {
     // Set the mode after the action so the tab label and picker stay aligned.
@@ -3245,9 +3271,9 @@ async function send() {
   // database. When it still matches, dropping it would silently discard what
   // the user attached alongside the affirmative.
   const confirmationRetargets = !!confirmationTarget && !sameConversationBinding(runBinding, conversationBinding.value);
-  const connection = runPluginContext ? undefined : runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
+  const connection = runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
   const tab = runPluginContext ? undefined : aiContextTargetFor(runBinding, props.tab);
-  const runSourceName = runPluginContext?.pluginName ?? connection?.name ?? "";
+  const runSourceName = connection?.name ?? runPluginContext?.pluginName ?? "";
   if (!runPluginContext && (!connection || !tab)) {
     clearPendingWriteGrant();
     return;
@@ -3467,7 +3493,7 @@ async function send() {
   if (autoSendVisible) scrollToBottom({ force: true });
 
   const requestedSelection: AiActionSelection = auto ? auto.action : activeAction.value;
-  const requestedMode: AiAssistantMode = runPluginContext ? "ask" : auto ? auto.mode : assistantMode.value;
+  const requestedMode: AiAssistantMode = auto ? auto.mode : assistantMode.value;
   // A confirmed-write turn (the ✅ reply, or the segment that resumes an
   // `awaiting_write_confirmation` run) is a continuation of the pending proposal,
   // not a new user request: its reply text is component copy, so the Auto router
@@ -3482,8 +3508,8 @@ async function send() {
   // router entirely, so their behavior is unchanged (#9118).
   let requestedAction: AiAction;
   if (runPluginContext) {
-    // A plugin conversation carries its own data snapshot: the Auto router must
-    // not classify the prompt, and the task contract stays host-owned.
+    // Plugin requests use the general action; the Agent decides which live
+    // plugin tools are needed from their advertised definitions.
     requestedAction = "general";
   } else if (!isAutoActionSelection(requestedSelection)) {
     requestedAction = requestedSelection;
@@ -3741,7 +3767,36 @@ async function send() {
       }
       if (runIsVisible()) scrollToBottom();
     };
-    if (runPluginContext) {
+    if (runPluginContext && requestedMode === "agent" && connection) {
+      if (!generationCanContinue()) return;
+      if (runIsVisible()) generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
+      const context: AiContext = {
+        connectionId: connection.id,
+        connectionName: connection.name,
+        databaseType: "plugin",
+        database: "",
+        currentSql: "",
+        tables: [],
+        sqlFiles: [],
+        truncated: false,
+      };
+      const instruction = [text, `Plugin: ${runPluginContext.pluginName}`, `Recommendation context: ${runPluginContext.title}`, "Use the connected plugin tools to retrieve the current state before answering."].filter(Boolean).join("\n\n");
+      await runAgentStream(
+        {
+          config: activeConfig,
+          action: requestedAction,
+          mode: requestedMode,
+          instruction,
+          taskContractUserRequest: text,
+          context,
+          inlineImages: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })),
+        },
+        history,
+        onEvent,
+        sessionId,
+        customPromptContext,
+      );
+    } else if (runPluginContext) {
       if (!generationCanContinue()) return;
       if (runIsVisible()) generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
       const request = buildPluginAiRequest(
@@ -4285,6 +4340,37 @@ function canCopyMessage(msg: ChatMessage): boolean {
   return messageCopyText(msg) !== null;
 }
 
+/** Returns whether a user message can be submitted again. The helper accepts
+ * the following visible index so the same eligibility rules cover text,
+ * mentions, and attachment-only requests. */
+function canRetryUserMessage(visibleIndex: number): boolean {
+  return retryableUserMessageIndex(visibleMessages.value, visibleIndex + 1) === visibleIndex;
+}
+
+/** Re-runs a user request through the existing edit-and-resend path. This
+ * removes the selected turn and later replies before sending with the current
+ * AI configuration. */
+function retryUserMessage(visibleIndex: number) {
+  if (isGenerating.value) return;
+  if (!canRetryUserMessage(visibleIndex)) return;
+  startEditMessage(visibleIndex);
+  submitEdit(visibleIndex);
+}
+
+const retryConfirmMessageIndex = ref<number | null>(null);
+
+function cancelRetryUserMessage() {
+  retryConfirmMessageIndex.value = null;
+}
+
+function confirmRetryUserMessage() {
+  const visibleIndex = retryConfirmMessageIndex.value;
+  retryConfirmMessageIndex.value = null;
+  if (visibleIndex !== null) retryUserMessage(visibleIndex);
+}
+
+watch(conversationId, cancelRetryUserMessage);
+
 function messageCopyKey(index: number): string {
   return `message:${index}`;
 }
@@ -4694,7 +4780,7 @@ function selectConversation(conv: AiConversation) {
   const activeRun = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conv.id) : undefined;
   messages.value = activeRun?.messages ?? chatMessagesFromConversation(conv);
   if (pluginContext.value) {
-    assistantMode.value = "ask";
+    assistantMode.value = pluginContext.value.mode === "agent" && !boundConnection.value ? "ask" : (pluginContext.value.mode ?? "ask");
     activeAction.value = "general";
   }
   unreadConversations.delete(conv.id);
@@ -5235,10 +5321,19 @@ function openPluginConversation(request: AiPluginConversationRequest) {
   defaultModeInitialized = true;
   startNewChat();
   draftPluginContext.value = request.context;
-  assistantMode.value = "ask";
+  const pluginConnectionId = pluginContextConnectionId(request.context);
+  const pluginConnection = pluginConnectionId ? connectionStore.getConfig(pluginConnectionId) : undefined;
+  draftBinding.value = pluginConnection ? { connectionId: pluginConnection.id, connectionName: pluginConnection.name, database: "", schema: undefined } : null;
+  assistantMode.value = request.mode === "agent" && !pluginConnection ? "ask" : (request.mode ?? request.context.mode ?? "ask");
   activeAction.value = "general";
   setPrompt(request.prompt, true);
   if (request.send) void send();
+}
+
+function sendPluginRecommendation(item: { id: string; label: string; prompt: string }) {
+  const update = props.pluginRecommendations;
+  if (!update || !update.items.some((candidate) => candidate.id === item.id)) return;
+  openPluginConversation(createPluginAiConversation({ id: update.pluginId, name: update.pluginName }, { title: item.label, prompt: item.prompt, context: update.context, send: true, mode: "agent" }));
 }
 
 function setPrompt(text: string, fromPlugin = false) {
@@ -5465,10 +5560,34 @@ async function openExternalUrl(url: string) {
     <div v-if="messages.length === 0" class="flex-1 min-h-0 flex flex-col items-center justify-center text-center text-muted-foreground">
       <Bot class="h-10 w-10 mb-3 opacity-30" />
       <p class="text-sm">{{ t(pluginContext ? "ai.pluginWelcome" : "ai.welcome") }}</p>
+      <div v-if="pluginRecommendations?.items.length" class="mt-5 flex max-w-[95%] flex-wrap justify-center gap-2">
+        <button
+          v-for="recommendation in pluginRecommendations.items"
+          :key="recommendation.id"
+          type="button"
+          class="rounded-full border border-border/80 bg-background px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-foreground"
+          :title="recommendation.prompt"
+          @click="sendPluginRecommendation(recommendation)"
+        >
+          {{ recommendation.label }}
+        </button>
+      </div>
     </div>
-    <div v-else class="relative min-h-0 flex-1">
-      <ScrollArea ref="scrollRef" class="ai-message-scroll h-full overflow-hidden">
+    <div v-else class="relative flex min-h-0 flex-1 flex-col">
+      <ScrollArea ref="scrollRef" class="ai-message-scroll min-h-0 flex-1 overflow-hidden">
         <div class="flex flex-col gap-3 p-3">
+          <div v-if="pluginRecommendations?.items.length" class="flex shrink-0 flex-wrap justify-center gap-2 border-b border-border/60 px-3 py-2" data-ai-plugin-recommendations>
+            <button
+              v-for="recommendation in pluginRecommendations.items"
+              :key="`history:${recommendation.id}`"
+              type="button"
+              class="rounded-full border border-border/80 bg-background px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-foreground"
+              :title="recommendation.prompt"
+              @click="sendPluginRecommendation(recommendation)"
+            >
+              {{ recommendation.label }}
+            </button>
+          </div>
           <template v-for="(msg, i) in visibleMessages" :key="i">
             <div v-if="awayUpdatesBaselineIndex >= 0 && i === awayUpdatesBaselineIndex" class="mb-1 flex items-center gap-2 py-0.5" role="separator" :aria-label="t('ai.awayUpdatesDivider')">
               <span class="h-px flex-1 bg-primary/25" />
@@ -5620,8 +5739,26 @@ async function openExternalUrl(url: string) {
                         <span class="truncate">{{ t("ai.routing.chip", { action: actionLabelFor(routedActionOf(msg)) }) }}</span>
                       </button>
                     </div>
-                    <div v-if="canCopyMessage(msg)" class="mt-1 flex justify-end">
+                    <div v-if="canCopyMessage(msg) || (!isGenerating && canRetryUserMessage(i))" class="mt-1 flex justify-end gap-1">
+                      <Popover v-if="!isGenerating && canRetryUserMessage(i)" :open="retryConfirmMessageIndex === i" @update:open="(open: boolean) => (retryConfirmMessageIndex = open ? i : null)">
+                        <PopoverTrigger as-child>
+                          <button data-ai-message-retry="user" type="button" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.retryMessage')" :aria-label="t('ai.retryMessage')">
+                            <RefreshCw class="h-3.5 w-3.5" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent side="top" align="end" :side-offset="8" class="w-72 max-w-[calc(100vw-2rem)] gap-2 p-3" @click.stop>
+                          <p class="flex items-start gap-2 text-xs text-foreground">
+                            <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+                            <span>{{ t("ai.retryConfirmDescription") }}</span>
+                          </p>
+                          <div class="flex justify-end gap-2">
+                            <Button type="button" size="sm" variant="outline" class="h-7 px-2 text-xs" @click="cancelRetryUserMessage">{{ t("common.cancel") }}</Button>
+                            <Button type="button" size="sm" variant="destructive" class="h-7 px-2 text-xs" @click="confirmRetryUserMessage">{{ t("common.confirm") }}</Button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
                       <button
+                        v-if="canCopyMessage(msg)"
                         data-ai-message-copy="user"
                         type="button"
                         class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
@@ -5857,11 +5994,12 @@ async function openExternalUrl(url: string) {
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
           <div data-ai-composer-context-row :class="['ai-prompt-context-row mb-1 flex min-w-0 items-center gap-x-1 text-xs text-foreground/80', showAiSchemaSelector && 'ai-prompt-context-row--schema', compactContextControls && 'ai-prompt-context-row--compact']">
-            <details v-if="pluginContext" class="min-w-0 flex-1" data-ai-plugin-context>
-              <summary class="cursor-pointer truncate">{{ pluginContext.pluginName }} · {{ pluginContext.title }}</summary>
-              <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-all p-2 text-[11px]">{{ pluginContextText(pluginContext) }}</pre>
-            </details>
-            <template v-else-if="connectionStore.connections.length">
+            <div v-if="pluginContext && !connectionStore.connections.length" class="flex min-w-0 max-w-[14rem] items-center gap-1" data-ai-plugin-context :title="pluginContext.title">
+              <ConnectionIcon v-if="pluginContextConnection" :connection="pluginContextConnection" class="h-3 w-3 shrink-0" />
+              <Server v-else class="h-3 w-3 shrink-0" />
+              <span class="truncate">{{ pluginComposerConnectionName }}</span>
+            </div>
+            <template v-if="connectionStore.connections.length">
               <ConnectionIcon v-if="boundConnection" :connection="boundConnection" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
               <ConnectionTreeSelect
@@ -6223,12 +6361,7 @@ async function openExternalUrl(url: string) {
               </TooltipContent>
             </Tooltip>
             <!-- Combined mode + action selector -->
-            <span v-if="pluginContext" class="ai-mode-static-trigger flex shrink-0 items-center gap-1 text-xs text-muted-foreground" :title="t('ai.modes.ask')">
-              <MessageSquarePlus class="h-3 w-3" aria-hidden="true" />
-              <span class="ai-mode-action-label" aria-hidden="true">{{ t("ai.modes.ask") }}</span>
-              <span class="sr-only">{{ t("ai.modes.ask") }}</span>
-            </span>
-            <Popover v-else v-model:open="modeActionOpen">
+            <Popover v-model:open="modeActionOpen">
               <PopoverTrigger as-child>
                 <button type="button" class="ai-mode-action-trigger flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="modeActionTriggerLabel" :title="modeActionTriggerLabel">
                   <component :is="modeIcon" class="h-3 w-3" />

@@ -80,6 +80,42 @@ fn quotes_spanner_identifiers_by_connection_dialect() {
 }
 
 #[test]
+fn kyuubi_table_data_uses_connection_identifier_quote() {
+    let columns = vec!["id".to_string(), "order\"value".to_string()];
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Kyuubi),
+        schema: Some("sales\"daily".to_string()),
+        table_name: "event\"log".to_string(),
+        columns,
+        limit: Some(25),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            identifier_quote: Some("\"".to_string()),
+            ..base.clone()
+        }),
+        "SELECT \"id\", \"order\"\"value\" FROM \"sales\"\"daily\".\"event\"\"log\" LIMIT 25;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            identifier_quote: Some("`".to_string()),
+            ..base.clone()
+        }),
+        "SELECT `id`, `order\"value` FROM `sales\"daily`.`event\"log` LIMIT 25;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Hive),
+            identifier_quote: Some("\"".to_string()),
+            ..base
+        }),
+        "SELECT `id` AS `id`, `order\"value` AS `order\"value` FROM `sales\"daily`.`event\"log` LIMIT 25;"
+    );
+}
+
+#[test]
 fn quotes_gaussdb_jdbc_identifiers_selectively() {
     for (name, expected) in [
         ("schema_01", "schema_01"),

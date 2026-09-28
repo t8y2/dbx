@@ -255,7 +255,7 @@ Desktop can optionally host its own Streamable HTTP MCP endpoint. It is **off by
 To connect a local MCP client:
 
 1. Open **Settings → MCP → HTTP Service**, turn on **Streamable HTTP Service**, and keep the default loopback address unless another device genuinely needs access.
-2. Click **Save and start service**. Saving a changed address, port, or path applies the configuration by restarting the service.
+2. Click **Save and apply**. The button saves the configuration and starts, restarts, or stops the service according to the toggle; changing the address, port, or path restarts the service automatically.
 3. Copy the displayed service address and bearer token into the MCP client.
 
 Use the generated values in an HTTP-capable MCP client. The transport-specific field names differ between clients, but the essential configuration is:
@@ -383,7 +383,7 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
   <Accordion title="The optional platform package was not installed">Reinstall without `--no-optional`, then verify the platform with `node -p 'process.platform + "-" + process.arch'`. The current platform must appear in the supported platform table.</Accordion>
   <Accordion title="dbx.db cannot be found">Set `DBX_DATA_DIR` to the folder containing `dbx.db`. For Windows portable builds, this is normally the `data` folder beside `DBX.exe`.</Accordion>
   <Accordion title="DBX is not running">Only `dbx_open_table` and `dbx_execute_and_show` require the desktop app. Local query tools can run without DBX open.</Accordion>
-  <Accordion title="A Desktop HTTP client gets ERR_CONNECTION_REFUSED">In **Settings → MCP → HTTP Service**, turn on the service and click **Save and start service**. Confirm that the client uses the displayed address, path, and current bearer token. The default `127.0.0.1` address accepts connections only from the same computer.</Accordion>
+  <Accordion title="A Desktop HTTP client gets ERR_CONNECTION_REFUSED">In **Settings → MCP → HTTP Service**, turn on the service and click **Save and apply**. Confirm that the client uses the displayed address, path, and current bearer token. The default `127.0.0.1` address accepts connections only from the same computer.</Accordion>
   <Accordion title="Desktop says the HTTP address is already in use">Another process is listening on the selected address and port. Choose an unused port in **Settings → MCP → HTTP Service**, then save the configuration to restart the service. Do not run two DBX Desktop instances with the same HTTP endpoint.</Accordion>
   <Accordion title="A request returns DATABASE_OUT_OF_SCOPE">The connection is exposed, but the requested database is not in its MCP database scope. Add the exact database name in **Settings → MCP**, or change that connection's scope to all databases if appropriate. For a specified scope, call `dbx_list_databases` first and then use one of the returned names.</Accordion>
   <Accordion title="A previously visible tool is rejected">The tool is no longer selected in **Settings → MCP** or the current policy does not permit it. Refresh the MCP client's tool list after changing the allowlist; the server rejects stale tool calls as well.</Accordion>

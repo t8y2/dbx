@@ -1065,7 +1065,11 @@ fn migrate_legacy_container(container_dir: &Path) -> Result<(), String> {
     let migration = (|| {
         std::fs::create_dir_all(&versions_dir).map_err(|error| error.to_string())?;
         std::fs::create_dir_all(&activations_dir).map_err(|error| error.to_string())?;
-        std::fs::rename(&temporary, &version_dir).map_err(|error| error.to_string())?;
+        // Write the activation record before moving the payload into place:
+        // the rollback below wipes container_dir, so the container must only
+        // ever hold empty scaffolding while a step can still fail. The old
+        // order moved the payload first — a failed activation record then
+        // rolled back by deleting the only copy of the legacy plugin.
         write_activation_record(
             container_dir,
             &PluginActivationRecord {
@@ -1076,7 +1080,8 @@ fn migrate_legacy_container(container_dir: &Path) -> Result<(), String> {
                 activated_at: Utc::now().to_rfc3339(),
                 provenance: None,
             },
-        )
+        )?;
+        rename_with_transient_lock_retry(&temporary, &version_dir).map_err(|error| error.to_string())
     })();
     if let Err(error) = migration {
         let _ = std::fs::remove_dir_all(container_dir);
@@ -1111,10 +1116,11 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
     file.write_all(&serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|error| error.to_string())?;
-    }
-    std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+    // std::fs::rename atomically replaces an existing destination on POSIX
+    // and Windows alike. The previous remove-then-rename opened a window
+    // where a crash between the two calls lost the document (trust keys,
+    // repository metadata) entirely — exactly what "atomically" must not do.
+    rename_with_transient_lock_retry(&temporary, path).map_err(|error| error.to_string())?;
     sync_directory(parent)
 }
 
@@ -1135,7 +1141,7 @@ fn open_install_lock(root_dir: &Path) -> Result<File, String> {
 const TRANSIENT_LOCK_RETRY_DELAYS: [Duration; 3] =
     [Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
 
-fn rename_with_transient_lock_retry(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_with_transient_lock_retry(src: &Path, dst: &Path) -> std::io::Result<()> {
     retry_transient_lock(&TRANSIENT_LOCK_RETRY_DELAYS, || std::fs::rename(src, dst))
 }
 
@@ -1289,9 +1295,9 @@ mod tests {
 
     use super::{
         is_activation_record_file, read_install_identity, retry_transient_lock, sha256_hex,
-        validate_package_expectation, PluginInstallPolicy, PluginPackageExpectation, PluginPackageInstaller,
-        PluginSignatureStatus, PluginTrustStore, ACTIVATIONS_DIR, INSTALL_LOCK_FILE, PLUGIN_CHECKSUMS_FILE,
-        PLUGIN_SIGNATURE_FILE, PLUGIN_TRASH_DIR, VERSIONS_DIR,
+        validate_package_expectation, write_json_atomically, PluginInstallPolicy, PluginPackageExpectation,
+        PluginPackageInstaller, PluginSignatureStatus, PluginTrustStore, ACTIVATIONS_DIR, INSTALL_LOCK_FILE,
+        PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE, PLUGIN_TRASH_DIR, VERSIONS_DIR,
     };
     use crate::plugins::{PluginManifest, PluginRegistry};
 
@@ -1542,6 +1548,29 @@ mod tests {
         expected.sort();
         assert_eq!(versions, expected);
         assert!(container.join(VERSIONS_DIR).join(legacy_storage_version).join("manifest.json").is_file());
+    }
+
+    #[test]
+    fn atomic_json_writes_replace_in_place_without_temp_litter() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("nested").join("doc.json");
+
+        #[derive(serde::Serialize)]
+        struct Doc {
+            value: u32,
+        }
+
+        write_json_atomically(&path, &Doc { value: 1 }).unwrap();
+        write_json_atomically(&path, &Doc { value: 2 }).unwrap();
+
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["value"], 2);
+        let leftovers: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
     }
 
     #[test]

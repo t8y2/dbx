@@ -97,6 +97,20 @@ impl SqlInsertMode {
     }
 }
 
+/// SQL dialect used to render exported INSERT statements.
+///
+/// `Source` preserves the database-specific output used by existing exports.
+/// `Standard` emits portable SQL scalar literals and ANSI-delimited
+/// identifiers while retaining the source database type for metadata rules
+/// such as generated-column and synthetic-column omission.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SqlInsertDialect {
+    #[default]
+    Source,
+    Standard,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseExportRequest {
@@ -132,6 +146,8 @@ pub struct DatabaseExportRequest {
     pub prevent_overwrite: bool,
     #[serde(default)]
     pub output_compression: DatabaseExportOutputCompression,
+    #[serde(default)]
+    pub insert_dialect: SqlInsertDialect,
     #[serde(default)]
     pub snapshot_session_id: Option<String>,
     pub batch_size: usize,
@@ -501,6 +517,8 @@ pub struct BuildExportInsertStatementsOptions {
 pub struct BuildExportSqlInsertOptions {
     #[serde(flatten)]
     pub insert: BuildExportInsertStatementsOptions,
+    #[serde(default)]
+    pub insert_dialect: SqlInsertDialect,
     /// 生成 INSERT 时需要排除的列名（例如导出时不带主键），忽略大小写匹配。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude_columns: Vec<String>,
@@ -518,6 +536,8 @@ pub struct BuildDatabaseSqlExportOptions {
     pub row_limit_per_table: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insert_batch_size: Option<usize>,
+    #[serde(default)]
+    pub insert_dialect: SqlInsertDialect,
     /// Optional connection info for FK-aware table ordering.
     /// When set, the caller should sort tables by dependency before passing them
     /// to `build_database_sql_export`.
@@ -535,6 +555,21 @@ pub struct BuildDatabaseSqlExportOptions {
 
 pub fn format_export_sql_literal(value: &Value) -> String {
     format_export_sql_literal_for_database(value, None)
+}
+
+fn format_standard_sql_literal(value: &Value) -> String {
+    if value.is_null() {
+        return "NULL".to_string();
+    }
+    if let Some(number) = value.as_number() {
+        return number.to_string();
+    }
+    if let Some(value) = value.as_bool() {
+        return if value { "TRUE" } else { "FALSE" }.to_string();
+    }
+
+    let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    quote_standard_export_sql_string(&text)
 }
 
 fn format_export_sql_literal_for_database(value: &Value, database_type: Option<DatabaseType>) -> String {
@@ -641,9 +676,7 @@ fn quote_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
 }
 
-// OpenGauss exports use standard-conforming strings, so backslashes are
-// literal and only embedded single quotes need doubling.
-fn quote_opengauss_export_sql_string(text: &str) -> String {
+fn quote_standard_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
@@ -656,7 +689,7 @@ fn quote_export_sql_string_for_database(text: &str, database_type: Option<Databa
     match database_type {
         Some(DatabaseType::Dameng) => quote_dameng_export_sql_string(text),
         Some(DatabaseType::Postgres) => quote_postgres_string_literal(text),
-        Some(DatabaseType::OpenGauss) => quote_opengauss_export_sql_string(text),
+        Some(DatabaseType::OpenGauss) => quote_standard_export_sql_string(text),
         database_type if is_mysql_compatible_export_literal_target(database_type) => {
             quote_mysql_compatible_export_sql_string(text)
         }
@@ -1185,7 +1218,7 @@ fn is_export_numeric_literal(text: &str) -> bool {
 }
 
 pub fn build_export_insert_statements(options: BuildExportInsertStatementsOptions) -> Result<Vec<String>, String> {
-    build_export_insert_statements_excluding(options, &[])
+    build_export_insert_statements_excluding_with_dialect(options, &[], SqlInsertDialect::Source)
 }
 
 /// 与 [`build_export_insert_statements`] 行为一致，但可以额外按列名排除若干列
@@ -1197,10 +1230,17 @@ pub fn build_export_insert_statements_excluding(
     options: BuildExportInsertStatementsOptions,
     exclude_columns: &[String],
 ) -> Result<Vec<String>, String> {
+    build_export_insert_statements_excluding_with_dialect(options, exclude_columns, SqlInsertDialect::Source)
+}
+
+pub(crate) fn build_export_insert_statements_excluding_with_dialect(
+    options: BuildExportInsertStatementsOptions,
+    exclude_columns: &[String],
+    insert_dialect: SqlInsertDialect,
+) -> Result<Vec<String>, String> {
     if options.columns.is_empty() || options.rows.is_empty() {
         return Ok(Vec::new());
     }
-
     let excluded_names: HashSet<String> =
         exclude_columns.iter().map(|column| column.trim().to_ascii_uppercase()).collect();
     let table = export_qualified_table_name(
@@ -1209,6 +1249,7 @@ pub fn build_export_insert_statements_excluding(
         options.table_name.as_deref(),
         options.qualified_table_name.as_deref(),
         options.identifier_quote.as_deref(),
+        insert_dialect,
     )?;
     let spatial_columns =
         options.spatial_columns.iter().map(|column| (column.column_index, column.srid)).collect::<HashMap<_, _>>();
@@ -1232,6 +1273,18 @@ pub fn build_export_insert_statements_excluding(
                 })
         })
         .collect::<Vec<_>>();
+    if insert_columns.iter().any(|(index, _, _)| {
+        options
+            .column_types
+            .get(*index)
+            .and_then(|column_type| column_type.as_deref())
+            .is_some_and(crate::types::is_opaque_aggregate_state_type)
+    }) {
+        return Err(
+            "SQL INSERT export does not support Doris aggregate-state columns; use a representation export for canonical hex bytes"
+                .to_string(),
+        );
+    }
     if insert_columns.is_empty() {
         // Only fail when the exclusion itself removed the last insertable column;
         // emptiness caused by other omission rules (e.g. generated columns) keeps
@@ -1250,11 +1303,13 @@ pub fn build_export_insert_statements_excluding(
         }
         return Ok(Vec::new());
     }
-    let batch_size = if options.database_type.is_some_and(uses_single_row_insert_statements) {
+    let batch_size = if insert_dialect == SqlInsertDialect::Source
+        && options.database_type.is_some_and(uses_single_row_insert_statements)
+    {
         1
     } else {
         let requested = options.batch_size.unwrap_or(DATABASE_EXPORT_INSERT_BATCH_SIZE).max(1);
-        if options.database_type == Some(DatabaseType::SqlServer) {
+        if insert_dialect == SqlInsertDialect::Source && options.database_type == Some(DatabaseType::SqlServer) {
             requested.min(1000)
         } else {
             requested
@@ -1263,11 +1318,15 @@ pub fn build_export_insert_statements_excluding(
     let columns = insert_columns
         .iter()
         .map(|(_, column, _)| {
-            crate::sql_dialect::quote_table_data_identifier(
-                options.database_type,
-                column,
-                options.identifier_quote.as_deref(),
-            )
+            if insert_dialect == SqlInsertDialect::Standard {
+                crate::sql_dialect::quote_table_identifier(None, column)
+            } else {
+                crate::sql_dialect::quote_table_data_identifier(
+                    options.database_type,
+                    column,
+                    options.identifier_quote.as_deref(),
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -1275,11 +1334,11 @@ pub fn build_export_insert_statements_excluding(
     // Dameng and SQL Server both reject explicit values for identity columns
     // unless `SET IDENTITY_INSERT <table> ON` wraps the statement (SQL Server
     // error 544), so exported INSERTs must carry the wrapper.
-    let needs_identity_insert_wrapper =
-        matches!(options.database_type, Some(DatabaseType::Dameng) | Some(DatabaseType::SqlServer))
-            && insert_columns.iter().any(|(index, _, _)| {
-                is_identity_column_extra(options.column_extras.get(*index).and_then(|value| value.as_deref()))
-            });
+    let needs_identity_insert_wrapper = insert_dialect == SqlInsertDialect::Source
+        && matches!(options.database_type, Some(DatabaseType::Dameng) | Some(DatabaseType::SqlServer))
+        && insert_columns.iter().any(|(index, _, _)| {
+            is_identity_column_extra(options.column_extras.get(*index).and_then(|value| value.as_deref()))
+        });
 
     // Multi-row batches are written one tuple per line (issue #9814) so exported
     // `.sql` files stay readable in plain text editors. Statements that hold a
@@ -1287,9 +1346,10 @@ pub fn build_export_insert_statements_excluding(
     // the "one INSERT per row" output of the single-row insert mode.
     let statement_head = format!("INSERT INTO {table} ({columns}) VALUES");
     let statement_prefix = format!("{statement_head} ");
-    let statement_overhead_bytes = export_sql_statement_bytes(options.database_type, &statement_prefix) + 1;
+    let output_database_type = if insert_dialect == SqlInsertDialect::Source { options.database_type } else { None };
+    let statement_overhead_bytes = export_sql_statement_bytes(output_database_type, &statement_prefix) + 1;
     let target_statement_bytes = DATABASE_EXPORT_TARGET_STATEMENT_BYTES;
-    let separator_bytes = export_sql_statement_bytes(options.database_type, ",\n");
+    let separator_bytes = export_sql_statement_bytes(output_database_type, ",\n");
     let mut current_values = String::new();
     let mut current_values_bytes = 0usize;
     let mut current_row_count = 0usize;
@@ -1331,16 +1391,21 @@ pub fn build_export_insert_statements_excluding(
                 .copied()
                 .flatten()
                 .or_else(|| spatial_columns.get(index).copied().flatten());
-            rendered_row.push_str(&format_export_sql_literal_typed_with_spatial(
-                value,
-                options.database_type,
-                column_type,
-                *sqlserver_unicode_string,
-                spatial_srid,
-            ));
+            let literal = if insert_dialect == SqlInsertDialect::Standard {
+                format_standard_sql_literal(value)
+            } else {
+                format_export_sql_literal_typed_with_spatial(
+                    value,
+                    options.database_type,
+                    column_type,
+                    *sqlserver_unicode_string,
+                    spatial_srid,
+                )
+            };
+            rendered_row.push_str(&literal);
         }
         rendered_row.push(')');
-        let rendered_row_bytes = export_sql_statement_bytes(options.database_type, &rendered_row);
+        let rendered_row_bytes = export_sql_statement_bytes(output_database_type, &rendered_row);
         let candidate_bytes = statement_overhead_bytes
             + current_values_bytes
             + if current_row_count == 0 { 0 } else { separator_bytes }
@@ -1423,8 +1488,12 @@ fn is_postgres_bytea_export_column(database_type: Option<DatabaseType>, column_t
 }
 
 pub fn build_export_sql_insert(options: BuildExportSqlInsertOptions) -> Result<String, String> {
-    build_export_insert_statements_excluding(options.insert, &options.exclude_columns)
-        .map(|statements| statements.join("\n"))
+    build_export_insert_statements_excluding_with_dialect(
+        options.insert,
+        &options.exclude_columns,
+        options.insert_dialect,
+    )
+    .map(|statements| statements.join("\n"))
 }
 
 pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Result<String, String> {
@@ -1458,20 +1527,24 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
             lines.push(format!("-- Exported rows: {}", table.rows.len()));
         }
 
-        let inserts = build_export_insert_statements(BuildExportInsertStatementsOptions {
-            database_type: table.database_type,
-            identifier_quote: table.identifier_quote.clone(),
-            schema: table.schema,
-            table_name: table.table_name,
-            qualified_table_name: table.qualified_table_name,
-            columns: table.columns,
-            column_types: table.column_types,
-            column_extras: table.column_extras,
-            spatial_columns: table.spatial_columns,
-            spatial_values: table.spatial_values,
-            rows: table.rows,
-            batch_size: Some(insert_batch_size),
-        })?;
+        let inserts = build_export_insert_statements_excluding_with_dialect(
+            BuildExportInsertStatementsOptions {
+                database_type: table.database_type,
+                identifier_quote: table.identifier_quote.clone(),
+                schema: table.schema,
+                table_name: table.table_name,
+                qualified_table_name: table.qualified_table_name,
+                columns: table.columns,
+                column_types: table.column_types,
+                column_extras: table.column_extras,
+                spatial_columns: table.spatial_columns,
+                spatial_values: table.spatial_values,
+                rows: table.rows,
+                batch_size: Some(insert_batch_size),
+            },
+            &[],
+            options.insert_dialect,
+        )?;
         if inserts.is_empty() {
             lines.push("-- No rows".to_string());
         } else {
@@ -1489,7 +1562,19 @@ fn export_qualified_table_name(
     table_name: Option<&str>,
     qualified_name: Option<&str>,
     identifier_quote: Option<&str>,
+    insert_dialect: SqlInsertDialect,
 ) -> Result<String, String> {
+    if insert_dialect == SqlInsertDialect::Standard {
+        let table_name = table_name
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| "tableName is required for Standard SQL INSERT output".to_string())?;
+        let table = crate::sql_dialect::quote_table_identifier(None, table_name);
+        return Ok(schema
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(|schema| format!("{}.{}", crate::sql_dialect::quote_table_identifier(None, schema), table))
+            .unwrap_or(table));
+    }
     if let Some(name) = qualified_name.filter(|name| !name.trim().is_empty()) {
         return Ok(name.to_string());
     }
@@ -2244,6 +2329,7 @@ fn write_database_export_rows<W: Write>(
     table: &str,
     schema: &str,
     db_type: &DatabaseType,
+    insert_dialect: SqlInsertDialect,
 ) -> Result<(), String> {
     let insert_indices = columns
         .iter()
@@ -2293,20 +2379,24 @@ fn write_database_export_rows<W: Write>(
     // Batch database exports do not currently thread a per-connection identifier
     // quote through BuildDatabaseSqlExportOptions; Kingbase MySQL-compat users
     // should fall back to the single-table export path which carries the quote.
-    let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
-        database_type: Some(*db_type),
-        identifier_quote: None,
-        schema: (!schema.is_empty()).then(|| schema.to_string()),
-        table_name: Some(table.to_string()),
-        qualified_table_name: Some(qualified_table_name),
-        columns: insert_columns.to_vec(),
-        column_types: insert_column_types.to_vec(),
-        column_extras: insert_column_extras.to_vec(),
-        spatial_columns: Vec::new(),
-        spatial_values: Vec::new(),
-        rows: insert_rows.to_vec(),
-        batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
-    })?;
+    let statements = build_export_insert_statements_excluding_with_dialect(
+        BuildExportInsertStatementsOptions {
+            database_type: Some(*db_type),
+            identifier_quote: None,
+            schema: (!schema.is_empty()).then(|| schema.to_string()),
+            table_name: Some(table.to_string()),
+            qualified_table_name: Some(qualified_table_name),
+            columns: insert_columns.to_vec(),
+            column_types: insert_column_types.to_vec(),
+            column_extras: insert_column_extras.to_vec(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: insert_rows.to_vec(),
+            batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
+        },
+        &[],
+        insert_dialect,
+    )?;
     for statement in statements {
         writeln!(file, "{statement}\n").map_err(|error| format!("Failed to write file: {error}"))?;
     }
@@ -3688,6 +3778,7 @@ async fn export_database_sql_core_inner(
                                     table_name,
                                     &request.schema,
                                     &db_type,
+                                    request.insert_dialect,
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -3804,6 +3895,7 @@ async fn export_database_sql_core_inner(
                             table_name,
                             &request.schema,
                             &db_type,
+                            request.insert_dialect,
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
@@ -4195,8 +4287,9 @@ mod tests {
         sort_export_views_by_dependencies, split_postgres_export_table_triggers, write_database_export_rows,
         BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
         DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql,
-        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE,
-        DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
+        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect,
+        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
+        POSTGRES_EXPORT_SEQUENCES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -4396,10 +4489,36 @@ mod tests {
             fail_on_error: false,
             prevent_overwrite: false,
             output_compression: Default::default(),
+            insert_dialect: Default::default(),
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
         }
+    }
+
+    #[test]
+    fn database_export_request_defaults_to_source_insert_dialect_and_accepts_standard() {
+        let mut payload = json!({
+            "exportId": "export-1",
+            "connectionId": "connection-1",
+            "database": "app",
+            "schema": "dbo",
+            "filePath": "app.sql",
+            "includeStructure": false,
+            "includeData": true,
+            "includeObjects": false,
+            "batchSize": 1000
+        });
+
+        let legacy: DatabaseExportRequest =
+            serde_json::from_value(payload.clone()).expect("deserialize legacy database export request");
+        assert_eq!(legacy.insert_dialect, SqlInsertDialect::Source);
+
+        payload["insertDialect"] = json!("standard");
+        let standard: DatabaseExportRequest =
+            serde_json::from_value(payload).expect("deserialize Standard SQL database export request");
+        assert_eq!(standard.insert_dialect, SqlInsertDialect::Standard);
+        assert_eq!(serde_json::to_value(standard).unwrap()["insertDialect"], json!("standard"));
     }
 
     #[test]
@@ -6018,6 +6137,30 @@ mod tests {
     }
 
     #[test]
+    fn sql_insert_export_allows_explicitly_excluded_opaque_column() {
+        let statements = build_export_insert_statements_excluding(
+            BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::Doris),
+                identifier_quote: None,
+                schema: None,
+                table_name: Some("states".to_string()),
+                qualified_table_name: None,
+                columns: vec!["id".to_string(), "v2".to_string()],
+                column_types: vec![Some("integer".to_string()), Some("agg_state<sum(int)>".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1), json!("0x00ff")]],
+                batch_size: Some(10),
+            },
+            &["v2".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO `states` (`id`) VALUES (1);"]);
+    }
+
+    #[test]
     fn sql_insert_export_reports_error_when_excluding_leaves_no_columns() {
         let result = build_export_insert_statements_excluding(
             BuildExportInsertStatementsOptions {
@@ -6057,9 +6200,60 @@ mod tests {
         }))
         .expect("deserialize export insert payload");
 
+        assert_eq!(options.insert_dialect, SqlInsertDialect::Source);
+
         let sql = build_export_sql_insert(options).expect("build export sql insert");
 
         assert_eq!(sql, "INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');");
+    }
+
+    #[test]
+    fn standard_sql_insert_uses_ansi_identifiers_and_portable_scalar_literals() {
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "sqlserver",
+            "identifierQuote": "[",
+            "insertDialect": "standard",
+            "schema": "sales\"ops",
+            "tableName": "order]items",
+            "columns": ["id", "select", "full\"name", "payload"],
+            "columnTypes": ["int", "bit", "nvarchar(100)", "json"],
+            "columnExtras": ["identity(1,1)", null, null, null],
+            "rows": [
+                [1, true, "C:\\tmp\\O'Hara", ["x", 2]],
+                [2, false, "plain", null]
+            ],
+            "batchSize": 10
+        }))
+        .expect("deserialize Standard SQL INSERT payload");
+
+        let sql = build_export_sql_insert(options).expect("build Standard SQL INSERT");
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "sales""ops"."order]items" ("id", "select", "full""name", "payload") VALUES
+(1, TRUE, 'C:\tmp\O''Hara', '["x",2]'),
+(2, FALSE, 'plain', NULL);"#
+        );
+        assert!(!sql.contains("IDENTITY_INSERT"));
+        assert!(!sql.contains("N'"));
+    }
+
+    #[test]
+    fn standard_sql_insert_keeps_requested_batch_mode_for_oracle_sources() {
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "oracle",
+            "insertDialect": "standard",
+            "schema": "APP",
+            "tableName": "USERS",
+            "columns": ["ID"],
+            "rows": [[1], [2]],
+            "batchSize": 10
+        }))
+        .expect("deserialize Standard SQL INSERT payload");
+
+        let sql = build_export_sql_insert(options).expect("build Standard SQL INSERT");
+
+        assert_eq!(sql, "INSERT INTO \"APP\".\"USERS\" (\"ID\") VALUES\n(1),\n(2);");
     }
 
     #[test]
@@ -6107,6 +6301,7 @@ mod tests {
             }],
             row_limit_per_table: Some(DATABASE_EXPORT_ROW_LIMIT),
             insert_batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
+            insert_dialect: SqlInsertDialect::Source,
             connection_id: None,
             database: None,
             schema: None,
@@ -6146,6 +6341,7 @@ mod tests {
             "orders",
             "shop",
             &DatabaseType::Mysql,
+            SqlInsertDialect::Source,
         )
         .unwrap();
         drop(file);
@@ -6153,6 +6349,32 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
             "INSERT INTO `orders` (`id`, `quantity`, `created_at`) VALUES (7, 2, '2026-07-30 08:00:00');\n\n"
+        );
+    }
+
+    #[test]
+    fn database_row_writer_forwards_the_standard_insert_dialect() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        write_database_export_rows(
+            &mut file,
+            &[vec![json!(true), json!(r"C:\exports\O'Hara")]],
+            &["enabled".to_string(), "path".to_string()],
+            &[Some("bit".to_string()), Some("nvarchar(255)".to_string())],
+            &[None, None],
+            "event]log",
+            "dbo",
+            &DatabaseType::SqlServer,
+            SqlInsertDialect::Standard,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO \"dbo\".\"event]log\" (\"enabled\", \"path\") VALUES (TRUE, 'C:\\exports\\O''Hara');\n\n"
         );
     }
 
@@ -6182,6 +6404,7 @@ mod tests {
                 "orders",
                 "shop",
                 &DatabaseType::Postgres,
+                SqlInsertDialect::Source,
             )
             .unwrap();
         }
@@ -6364,6 +6587,7 @@ mod tests {
             }],
             row_limit_per_table: Some(DATABASE_EXPORT_ROW_LIMIT),
             insert_batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
+            insert_dialect: SqlInsertDialect::Source,
             connection_id: None,
             database: None,
             schema: None,

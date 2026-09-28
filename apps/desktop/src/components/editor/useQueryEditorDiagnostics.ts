@@ -8,6 +8,7 @@ import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
+import { editorRootSelection } from "@/lib/editor/queryEditorNativeSelection";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis } from "@/lib/sql/semantic/references";
 import { sqlServerUseDatabaseBeforeCursor } from "@/lib/sql/sqlCompletionLookupTarget";
@@ -69,6 +70,7 @@ interface QueryEditorDiagnosticsOptions {
   semanticCompletionEnabled: boolean;
   maxCompletionTables: number;
   unknownObjectHighlightEnabled: boolean;
+  fullFeaturesEnabled?: () => boolean;
   runtime: QueryEditorDiagnosticsRuntime;
   metadata: QueryEditorDiagnosticMetadata;
 }
@@ -136,15 +138,6 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       );
   }
 
-  // Mirrors CodeMirror's own root handling: shadow roots only expose
-  // `getSelection` on some browsers, otherwise the owner document holds it.
-  function editorRootSelection(currentView: EditorViewType): Selection | null {
-    const root = currentView.root as unknown as ShadowRoot & { getSelection?: () => Selection | null };
-    if (root.nodeType !== 11) return (root as unknown as Document).getSelection();
-    if (typeof root.getSelection === "function") return root.getSelection() ?? null;
-    return root.ownerDocument?.getSelection() ?? null;
-  }
-
   // See queryEditorDiagnosticCaretAnchor.ts for why the browser caret needs re-anchoring.
   function reanchorCaretAfterDiagnostics(currentView: EditorViewType) {
     const selection = currentView.state.selection;
@@ -200,7 +193,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
   }
 
   function shouldSkipSqlSemanticDiagnostics() {
-    return props.databaseType === "victoriametrics" || props.databaseType === "salesforce" || (props.databaseType !== "redis" && props.databaseType !== "mongodb" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
+    return options.fullFeaturesEnabled?.() === false || props.databaseType === "victoriametrics" || props.databaseType === "salesforce" || (props.databaseType !== "redis" && props.databaseType !== "mongodb" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
   }
 
   function rangesOverlap(left: { from: number; to: number }, right: { from: number; to: number }): boolean {

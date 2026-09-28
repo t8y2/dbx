@@ -211,10 +211,14 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
                 String normalized = message.toLowerCase(Locale.ROOT);
                 // mssql-jdbc rejects SQL Server 2000 (major version 8) during
                 // prelogin with "SQL Server version 8 is not supported by
-                // this driver." — the version word breaks a plain
-                // "sql server 8" substring match, so accept both shapes.
-                boolean version8Rejection = (normalized.contains("sql server 8") || normalized.contains("sql server version 8"))
-                    && (normalized.contains("not support") || normalized.contains("不支持"));
+                // this driver." Localized messages can translate the version
+                // and unsupported phrases, so accept those equivalent shapes.
+                boolean version8Rejection = (normalized.contains("sql server 8")
+                    || normalized.contains("sql server version 8")
+                    || normalized.contains("sql server 版本 8"))
+                    && (normalized.contains("not support")
+                        || normalized.contains("不支持")
+                        || normalized.contains("不支援"));
                 // Other driver wordings name the supported floor instead. The
                 // localized mssql-jdbc resource keeps "SQL Server 2005" in
                 // English while translating the "or later" suffix.

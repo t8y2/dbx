@@ -17,6 +17,14 @@ pub fn is_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool 
                 .is_some_and(|profile| matches!(profile.to_ascii_lowercase().as_str(), "doris" | "selectdb")))
 }
 
+/// Native Doris semantics only. SelectDB shares metadata/catalog handling but
+/// must not inherit Doris-specific query preflight or opaque-state safeguards.
+pub fn is_native_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
+    *db_type == DatabaseType::Doris
+        || (*db_type == DatabaseType::Mysql
+            && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("doris")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -28,5 +36,14 @@ mod tests {
         assert!(is_profile(&DatabaseType::Mysql, Some("selectdb")));
         assert!(!is_profile(&DatabaseType::Mysql, Some("starrocks")));
         assert!(!is_profile(&DatabaseType::Postgres, Some("doris")));
+    }
+
+    #[test]
+    fn native_profile_excludes_selectdb_and_other_mysql_profiles() {
+        assert!(is_native_profile(&DatabaseType::Doris, None));
+        assert!(is_native_profile(&DatabaseType::Mysql, Some("DORIS")));
+        assert!(!is_native_profile(&DatabaseType::Mysql, Some("selectdb")));
+        assert!(!is_native_profile(&DatabaseType::Mysql, Some("starrocks")));
+        assert!(!is_native_profile(&DatabaseType::Mysql, None));
     }
 }

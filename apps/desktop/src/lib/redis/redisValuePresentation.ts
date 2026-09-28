@@ -207,6 +207,24 @@ export function formatRedisCommandResult(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+export type RedisCommandResultPairKind = "field-value" | "member-score";
+
+const REDIS_KEY_VALUE_COMMANDS = new Set(["HGETALL"]);
+// Sorted-set commands whose WITHSCORES modifier returns member/score pairs.
+const REDIS_WITHSCORES_COMMANDS = new Set(["ZRANGE", "ZREVRANGE", "ZRANGEBYSCORE", "ZREVRANGEBYSCORE", "ZRANDMEMBER", "ZDIFF", "ZINTER", "ZUNION"]);
+const REDIS_WITHSCORES_MODIFIER = /\bWITHSCORES\b/i;
+
+function redisCommandHead(command: string | undefined): string {
+  return command?.trim().split(/\s+/, 1)[0]?.toUpperCase() ?? "";
+}
+
+export function redisCommandResultPairKind(command: string | undefined): RedisCommandResultPairKind | undefined {
+  const head = redisCommandHead(command);
+  if (REDIS_KEY_VALUE_COMMANDS.has(head)) return "field-value";
+  if (REDIS_WITHSCORES_COMMANDS.has(head) && command && REDIS_WITHSCORES_MODIFIER.test(command)) return "member-score";
+  return undefined;
+}
+
 /** RedisJSON source text stays out of JavaScript's numeric representation. */
 export function redisJsonValueText(value: { value: string }): string {
   return value.value;
@@ -222,6 +240,84 @@ function isRedisClusterInfoValue(value: unknown): value is [string, string][] {
   return Array.isArray(value) && value.length > 0 && (value as unknown[]).every((item) => Array.isArray(item) && item.length === 2 && typeof item[0] === "string" && typeof item[1] === "string" && item[1].startsWith("# "));
 }
 
+interface RedisMapEntry {
+  key: unknown;
+  value: unknown;
+}
+
+function isRedisMapEntry(value: unknown): value is RedisMapEntry {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, "key") && Object.prototype.hasOwnProperty.call(value, "value");
+}
+
+function isRedisPair(value: unknown): value is [unknown, unknown] {
+  return Array.isArray(value) && value.length === 2;
+}
+
+function quoteRedisString(value: string): string {
+  return JSON.stringify(formatRedisStringValue(value)) ?? '""';
+}
+
+function formatRedisConsoleScalar(value: unknown, nested: boolean): string {
+  if (value == null) return "(nil)";
+  if (typeof value === "string") {
+    const text = formatRedisStringValue(value);
+    if (nested) return quoteRedisString(value);
+    return text.length > 0 ? text : '""';
+  }
+  if (typeof value === "number") return Number.isInteger(value) ? `(integer) ${value}` : `(double) ${value}`;
+  if (typeof value === "bigint") return `(integer) ${value}`;
+  if (typeof value === "boolean") return value ? "(true)" : "(false)";
+  return String(value);
+}
+
+function prefixRedisConsoleLines(prefix: string, lines: string[]): string[] {
+  if (lines.length === 0) return [prefix.trimEnd()];
+  const padding = " ".repeat(prefix.length);
+  return [`${prefix}${lines[0]}`, ...lines.slice(1).map((line) => `${padding}${line}`)];
+}
+
+function formatRedisConsoleInline(value: unknown): string {
+  if (typeof value === "string") return quoteRedisString(value);
+  if (value == null || typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") return formatRedisConsoleScalar(value, true);
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function redisConsolePairs(value: unknown[], command: string | undefined): Array<[unknown, unknown]> | undefined {
+  if (value.length > 0 && value.every(isRedisMapEntry)) return (value as RedisMapEntry[]).map((entry): [unknown, unknown] => [entry.key, entry.value]);
+  if (!redisCommandResultPairKind(command)) return undefined;
+  if (value.length > 0 && value.every(isRedisPair)) return (value as Array<[unknown, unknown]>).map((entry): [unknown, unknown] => [entry[0], entry[1]]);
+  if (value.length % 2 !== 0) return undefined;
+  const pairs: Array<[unknown, unknown]> = [];
+  for (let index = 0; index < value.length; index += 2) pairs.push([value[index], value[index + 1]]);
+  return pairs;
+}
+
+function formatRedisConsolePairs(pairs: Array<[unknown, unknown]>): string[] {
+  if (pairs.length === 0) return ["(empty array)"];
+  return pairs.flatMap(([key, value], index) => prefixRedisConsoleLines(`${index + 1}) ${formatRedisConsoleInline(key)} => `, formatRedisConsoleLines(value, undefined, true)));
+}
+
+function formatRedisConsoleLines(value: unknown, command: string | undefined, nested: boolean): string[] {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return ["(empty array)"];
+    const pairs = redisConsolePairs(value, command);
+    if (pairs) return formatRedisConsolePairs(pairs);
+    return value.flatMap((entry, index) => prefixRedisConsoleLines(`${index + 1}) `, formatRedisConsoleLines(entry, undefined, true)));
+  }
+  if (typeof value === "object" && value !== null) {
+    try {
+      return (JSON.stringify(value, null, 2) ?? String(value)).split("\n");
+    } catch {
+      return [String(value)];
+    }
+  }
+  return [formatRedisConsoleScalar(value, nested)];
+}
+
 /**
  * Format a Redis command result for the **command console terminal** (RedisKeyBrowser.vue).
  * Unlike `formatRedisCommandResult` (used by the query result table UI), this function
@@ -230,14 +326,21 @@ function isRedisClusterInfoValue(value: unknown): value is [string, string][] {
  *
  * - Cluster INFO `[[addr, infoText], ...]` → `"{addr}\n{infoText}"` per node, joined by newlines.
  * - Plain string → passthrough (handles single-node INFO text correctly).
- * - Everything else → JSON.stringify (arrays, objects, etc.).
+ * - Arrays use redis-cli-style numbered items, including nested arrays.
+ * - RESP3 maps plus HGETALL/WITHSCORES responses use readable key/value pairs.
+ * - Integers, doubles, booleans and nil retain visible Redis-style type markers.
  */
-export function formatRedisConsoleValue(value: unknown): string {
+export function formatRedisConsoleValue(value: unknown, command?: string): string {
   if (isRedisClusterInfoValue(value)) {
     return value.map(([addr, info]) => `${addr}\n${info}`).join("\n");
   }
-  if (typeof value === "string") return formatRedisStringValue(value);
-  return JSON.stringify(value, null, 2);
+  return formatRedisConsoleLines(value, command, false).join("\n");
+}
+
+export function formatRedisConsoleError(message: unknown): string {
+  const text = formatRedisStringValue(message).trim();
+  if (/^\(error\)(?:\s|$)/i.test(text)) return text;
+  return `(error) ${text || "Unknown Redis error"}`;
 }
 
 export function parseRedisJsonDetail(value: unknown): RedisJsonDetail | null {

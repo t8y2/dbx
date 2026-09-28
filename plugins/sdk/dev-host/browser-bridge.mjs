@@ -114,6 +114,11 @@ function installBridge(channel) {
     request,
     invoke: (method, params, options = {}) => request("backend.invoke", { method, params, timeoutMs: options.timeoutMs }),
     stream,
+    ai: Object.freeze({
+      openConversation: (options) => request("host.ai.openConversation", options),
+      setRecommendations: (update) => request("host.ai.setRecommendations", update),
+      clearRecommendations: () => request("host.ai.clearRecommendations"),
+    }),
     notify: (method, params) => request("backend.notify", { method, params }),
     sendBinary: (channel, data) => request("backend.sendBinary", { channel, dataBase64: typeof data === "string" ? data : encode(data) }),
     readAsset: (path) => request("ui.readAsset", { path }),

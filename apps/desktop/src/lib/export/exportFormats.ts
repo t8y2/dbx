@@ -1,7 +1,7 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { escapeCsvField, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
-import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import type { SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
 export type ExportCellValue = string | number | boolean | null;
 
@@ -45,6 +45,7 @@ export interface FormatSqlInsertOptions {
   spatialValues?: QueryResult["spatial_values"];
   rows: ExportCellValue[][];
   insertMode?: SqlInsertMode;
+  insertDialect?: SqlInsertDialect;
   excludeColumns?: string[];
 }
 

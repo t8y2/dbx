@@ -32,6 +32,7 @@ import {
   structurePreviewDdlStorageType,
 } from "@/components/sidebar/sidebarTreeDialogState";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
 
 type StructureCopyFormat = "tsv" | "markdown";
 
@@ -90,6 +91,7 @@ interface ExportTableDataOptions {
   autoFilter?: boolean;
   outputDirectory?: string;
   suppressDoneToast?: boolean;
+  insertDialect?: SqlInsertDialect;
 }
 
 function joinExportFilePath(directory: string, fileName: string): string {
@@ -434,7 +436,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
   }
 
   async function exportTableData(target: SidebarTableExportTarget, format: "csv" | "xlsx" | "sql", exportOptions: ExportTableDataOptions = {}) {
-    const { columnInfos, headerMode = "name", autoFilter = true, outputDirectory, suppressDoneToast = false } = exportOptions;
+    const { columnInfos, headerMode = "name", autoFilter = true, outputDirectory, suppressDoneToast = false, insertDialect = "source" } = exportOptions;
     const { connectionId, database } = target;
 
     let task: ExportTask | null = null;
@@ -486,6 +488,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         tableName: target.tableName,
         filePath: outputPath,
         format,
+        ...(format === "sql" ? { insertDialect } : {}),
         csvQuoteMode: target.csvQuoteMode,
         columns: queryColumns,
         columnComments,
@@ -566,7 +569,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     }
   }
 
-  async function exportData(format: "csv" | "json" | "sql") {
+  async function exportData(format: "csv" | "json" | "sql", insertDialect: SqlInsertDialect = "source") {
     const targets = currentTableExportTargets();
     if (!targets.length) return;
 
@@ -584,7 +587,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
 
     let exported = 0;
     for (const target of targets) {
-      if (await exportTableData(target, format, { outputDirectory, suppressDoneToast: targets.length > 1 })) exported += 1;
+      if (await exportTableData(target, format, { outputDirectory, suppressDoneToast: targets.length > 1, insertDialect })) exported += 1;
     }
     if (targets.length > 1 && exported > 0) toast(t("contextMenu.exportDataMultipleSuccess", { count: exported }));
   }

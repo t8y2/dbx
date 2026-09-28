@@ -9,7 +9,7 @@ export function isHistoryRetentionLimit(value: unknown): value is number {
 }
 
 /** A server-owned setting: browser localStorage cannot configure MCP retention. */
-export function useHistoryRetentionSetting() {
+export function useHistoryRetentionSetting(loadLimit: () => Promise<number> = loadHistoryRetentionLimit, saveLimit: (limit: number) => Promise<void> = saveHistoryRetentionLimit) {
   const draft = ref(DEFAULT_HISTORY_RETENTION_LIMIT);
   const persisted = ref(DEFAULT_HISTORY_RETENTION_LIMIT);
   const loaded = ref(false);
@@ -26,7 +26,7 @@ export function useHistoryRetentionSetting() {
     loading.value = true;
     loadError.value = "";
     try {
-      const value = await loadHistoryRetentionLimit();
+      const value = await loadLimit();
       if (!isHistoryRetentionLimit(value)) throw new Error("Invalid query history retention limit");
       if (request !== generation) return;
       draft.value = persisted.value = value;
@@ -44,7 +44,7 @@ export function useHistoryRetentionSetting() {
     const value = draft.value;
     saving.value = true;
     try {
-      await saveHistoryRetentionLimit(value);
+      await saveLimit(value);
       persisted.value = value;
     } finally {
       saving.value = false;

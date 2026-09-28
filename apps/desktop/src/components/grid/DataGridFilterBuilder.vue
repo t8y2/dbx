@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Check, Eye, EyeOff, Focus, GripVertical, Plus, Search, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { filterModeNeedsValue, filterModeUsesList, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
@@ -710,16 +711,25 @@ function blurValueRule(id: string) {
             {{ t("grid.filterBuilderValueShortcutHint") }}
           </div>
           <div class="flex items-center gap-0.5" :class="props.layout === 'text' ? 'col-start-6 row-start-1' : usesExpandedLayout(rule.mode) ? 'col-start-5 row-start-1 row-span-2' : 'col-start-5 row-start-1'">
-            <Button v-if="props.showApplyOnly" variant="ghost" size="icon" class="h-7 w-7" :disabled="props.disabled || props.applyOnlyBusy" :title="t('grid.filterBuilderApplyOnly')" :aria-label="t('grid.filterBuilderApplyOnly')" @click="emit('applyOnly', rule.id)"
-              ><Focus class="h-3.5 w-3.5" />
-            </Button>
+            <LightTooltip v-if="props.showApplyOnly" :text="t('grid.filterBuilderApplyOnly')" side="top" :side-offset="4">
+              <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.disabled || props.applyOnlyBusy" :aria-label="t('grid.filterBuilderApplyOnly')" @click="emit('applyOnly', rule.id)">
+                <Focus class="h-3.5 w-3.5" />
+              </Button>
+            </LightTooltip>
             <template v-if="props.layout === 'text'">
               <Button variant="ghost" size="icon" class="h-6 w-6" :aria-label="t('grid.filterBuilderAddRule')" @click="emit('add')"><Plus class="h-3.5 w-3.5" /></Button>
-              <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="props.disabled" :aria-label="t('common.remove')" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
             </template>
             <template v-else>
-              <Button variant="ghost" size="icon" class="h-7 w-7" @click="emit('updateRule', rule.id, { disabled: !rule.disabled })"><EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" /><Eye v-else class="h-3.5 w-3.5" /></Button>
-              <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+              <LightTooltip :text="t(rule.disabled ? 'grid.filterBuilderEnableRule' : 'grid.filterBuilderDisableRule')" side="top" :side-offset="4">
+                <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.disabled" :aria-label="t(rule.disabled ? 'grid.filterBuilderEnableRule' : 'grid.filterBuilderDisableRule')" @click="emit('updateRule', rule.id, { disabled: !rule.disabled })">
+                  <EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" />
+                  <Eye v-else class="h-3.5 w-3.5" />
+                </Button>
+              </LightTooltip>
+              <LightTooltip :text="t('common.remove')" side="top" :side-offset="4">
+                <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.disabled" :aria-label="t('common.remove')" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+              </LightTooltip>
             </template>
           </div>
         </div>

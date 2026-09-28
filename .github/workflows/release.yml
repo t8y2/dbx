@@ -144,6 +144,9 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
+      # The GTK plugin wrapper removes these after its own deployment pass,
+      # while linuxdeploy must also exclude them from its later dependency pass.
+      LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-*.so*;libxkbcommon.so*;libxcb-randr.so*;libxcb-render.so*;libxcb-shm.so*;libXau.so*;libXdmcp.so*"
       # Keep releases working until the shared S3 secrets are configured.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
@@ -256,6 +259,15 @@ jobs:
           # instead of loading potentially incompatible modules from the host.
           sudo apt-get install -y fcitx5-frontend-gtk3 ibus-gtk3 libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev xdg-utils
 
+      - name: Prepare Wayland-capable AppImage bundler
+        if: startsWith(matrix.platform, 'ubuntu')
+        shell: bash
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/dbx-tauri-cache
+        run: |
+          echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> "$GITHUB_ENV"
+          ./.github/scripts/prepare-appimage-bundler.sh "${{ matrix.target }}"
+
       - name: Setup Tauri signing key
         shell: bash
         run: |
@@ -281,7 +293,7 @@ jobs:
           assetNamePattern: ${{ matrix.asset_pattern }}
           args: --target ${{ matrix.target }}
 
-      - name: Verify AppImage input methods
+      - name: Verify AppImage runtime bundle
         if: startsWith(matrix.platform, 'ubuntu')
         shell: bash
         run: ./.github/scripts/verify-appimage-input-methods.sh "target/${{ matrix.target }}/release/bundle/appimage"

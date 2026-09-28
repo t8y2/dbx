@@ -540,4 +540,35 @@ describe("useSidebarTreeExportRuntime", () => {
     expect(apiMock.startTableExport).toHaveBeenCalledOnce();
     expect(apiMock.startTableExport).toHaveBeenCalledWith(expect.objectContaining({ tableName: "users", filePath: "users.csv" }), expect.any(Function));
   });
+
+  it.each([
+    ["source", undefined],
+    ["standard", "standard"],
+  ] as const)("serializes the %s SQL INSERT dialect for a table export", async (expectedDialect, requestedDialect) => {
+    const activeNode = shallowRef({ id: "table-1", type: "table", label: "users", connectionId: "conn-1", database: "db", schema: "dbo", children: [] } as TreeNode);
+    const connectionStore = {
+      ensureConnected: vi.fn(),
+      getConfig: vi.fn(() => ({ db_type: "sqlserver" })),
+      connectionIdentifierQuote: vi.fn(() => "["),
+      treeNodes: [],
+      selectedTreeNodeIds: [],
+    };
+    const runtime = useSidebarTreeExportRuntime({
+      activeNode,
+      connectionStore: connectionStore as never,
+      settingsStore: exportSettings() as never,
+      acceptedSelectionIds: () => null,
+    });
+
+    await runtime.exportData("sql", requestedDialect);
+
+    expect(apiMock.startTableExport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format: "sql",
+        insertDialect: expectedDialect,
+        identifierQuote: "[",
+      }),
+      expect.any(Function),
+    );
+  });
 });

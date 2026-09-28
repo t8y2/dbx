@@ -1020,6 +1020,20 @@ pub(super) fn build_sqlite_existing_column_sql(
     statements
 }
 
+pub(super) fn build_duckdb_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    if column.name == original.name {
+        return Vec::new();
+    }
+    vec![format!(
+        "ALTER TABLE {table} RENAME COLUMN {} TO {};",
+        quote_ident(StructureDialect::DuckDb, &original.name),
+        quote_ident(StructureDialect::DuckDb, &column.name)
+    )]
+}
+
 pub(super) fn build_questdb_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
     let Some(original) = &column.original else {
         return Vec::new();

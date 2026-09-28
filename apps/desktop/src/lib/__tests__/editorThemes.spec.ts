@@ -222,6 +222,20 @@ describe("SQL builtin highlight tag", () => {
 });
 
 describe("editor gutters", () => {
+  it("does not let the gutter minimum height cycle against the scroller content height", () => {
+    const rules = buildEditorFontThemeRules();
+
+    // CodeMirror's base theme applies `min-height: 100%` to `.cm-gutter` while
+    // `.cm-gutters` is sized from the scroller content (`.cm-content`), so the
+    // percentage resolves against a height the gutter itself participates in.
+    // WebKit then re-runs layout for the whole gutter subtree whenever layout
+    // is forced, which macOS 27 does on every selection collapse: a 639 line
+    // query made right click / Esc / select-all freeze for ~180ms. The gutter
+    // spacers already span the full content height and `.cm-gutters` paints the
+    // background, so the cyclic minimum must stay at 0.
+    expect(rules[".cm-gutter"]).toMatchObject({ minHeight: "0" });
+  });
+
   it("keeps single line numbers vertically centered in the base rule", () => {
     const rules = buildEditorFontThemeRules();
 

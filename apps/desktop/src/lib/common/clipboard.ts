@@ -160,6 +160,46 @@ export async function readTextFromClipboard(env: ClipboardEnvironment = globalTh
   throw new Error("Clipboard API is not available");
 }
 
+export interface ClipboardImagePayload {
+  contentType: "image/png";
+  dataBase64: string;
+  width: number;
+  height: number;
+}
+
+export async function readImageFromClipboard(): Promise<ClipboardImagePayload> {
+  if (!isTauriRuntime()) throw new Error("Clipboard image reads require the desktop host");
+  const { readImage } = await import("@tauri-apps/plugin-clipboard-manager");
+  const image = await readImage();
+  try {
+    const [{ width, height }, rgba] = await Promise.all([image.size(), image.rgba()]);
+    if (!width || !height || rgba.byteLength !== width * height * 4) throw new Error("Clipboard does not contain a valid image");
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Clipboard image conversion is unavailable");
+    const pixels = new Uint8ClampedArray(rgba.byteLength);
+    pixels.set(rgba);
+    context.putImageData(new ImageData(pixels, width, height), 0, 0);
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((value) => (value ? resolve(value) : reject(new Error("Clipboard image conversion failed"))), "image/png");
+    });
+    return { contentType: "image/png", dataBase64: bytesToBase64(new Uint8Array(await blob.arrayBuffer())), width, height };
+  } finally {
+    await image.close();
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
 export async function copyToClipboard(text: string, env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<void> {
   text = clipboardLineEndings(text);
 

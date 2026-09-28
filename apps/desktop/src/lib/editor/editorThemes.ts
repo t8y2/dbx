@@ -824,6 +824,16 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     ".cm-trimmedSelection-bottomRight": {
       borderBottomRightRadius: "3px",
     },
+    // CodeMirror's base theme gives `.cm-gutter` `min-height: 100%` inside a
+    // `.cm-gutters` box that is itself sized by `height: 100%` of a scroller
+    // whose height comes from the content. That percentage cycle makes WebKit
+    // re-run layout for the whole gutter subtree on every layout pass, which
+    // costs ~160ms per collapse with a few hundred lines selected. The gutter's
+    // own spacers already span the full content height and the background is
+    // painted by `.cm-gutters`, so dropping the cyclic minimum is visually inert.
+    ".cm-gutter": {
+      minHeight: "0",
+    },
     ".cm-gutters": {
       borderRight: "0 !important",
       fontSize: `var(${EDITOR_FONT_SIZE_CSS_VAR}, ${defaults?.size ?? 13}px)`,

@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   removePluginTrustedKey: vi.fn(),
   toast: vi.fn(),
   isTauriRuntime: vi.fn(),
+  openExternal: vi.fn(),
   refreshPluginWorkbenches: vi.fn(),
 }));
 
@@ -31,6 +32,7 @@ vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connec
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => vi.fn()) }));
+vi.mock("@tauri-apps/plugin-shell", () => ({ open: mocks.openExternal }));
 vi.mock("vue-i18n", async () => {
   const { ref } = await import("vue");
   return { useI18n: () => ({ locale: ref("en"), t: (key: string, values = {}) => `${key}:${JSON.stringify(values)}` }) };
@@ -267,6 +269,33 @@ describe("PluginContributionsPanel batch source validation", () => {
       { repositoryId: "second", pluginId: "b", version },
     ]);
     expect(state.selectedListingKeys.size).toBe(0);
+  });
+});
+
+describe("PluginContributionsPanel external links", () => {
+  it("hands GitHub and homepage clicks to the desktop shell without selecting the card", async () => {
+    const linkedCatalog = catalog("first", ["linked"]);
+    Object.assign(linkedCatalog.catalog!.plugins[0], {
+      source: "https://github.com/dbxio/linked",
+      homepage: "https://dbxio.com/plugins/linked",
+    });
+    state.catalogResults = [linkedCatalog];
+    state.marketplaceViewMode = "grid";
+    mocks.isTauriRuntime.mockReturnValue(true);
+    await nextTick();
+
+    const sourceButton = host.querySelector<HTMLButtonElement>('[aria-label^="pluginPlatform.sourceRepository"]')!;
+    const homepageButton = host.querySelector<HTMLButtonElement>('[aria-label^="pluginPlatform.pluginHomepage"]')!;
+    const cardClick = vi.fn();
+    sourceButton.closest("article")!.addEventListener("click", cardClick);
+
+    sourceButton.click();
+    await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledTimes(1));
+    homepageButton.click();
+    await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledTimes(2));
+
+    expect(mocks.openExternal.mock.calls).toEqual([["https://github.com/dbxio/linked"], ["https://dbxio.com/plugins/linked"]]);
+    expect(cardClick).not.toHaveBeenCalled();
   });
 });
 

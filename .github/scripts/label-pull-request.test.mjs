@@ -53,6 +53,16 @@ test("labels documentation-only changes without a conventional title", () => {
   assert.deepEqual(result.labels, ["area/docs", "documentation"]);
 });
 
+test("labels the bundled DBX skill as CLI work", () => {
+  const result = evaluatePullRequestLabels({
+    title: "feat(cli): improve the bundled agent skill",
+    changedFiles: ["skills/dbx/SKILL.md", "skills/dbx/references/commands.md"],
+    knownDatabaseTypes,
+  });
+
+  assert.deepEqual(result.labels, ["area/cli", "enhancement"]);
+});
+
 test("maps agent and dialect paths to existing database types", () => {
   assert.deepEqual(
     inferDatabaseTypes([

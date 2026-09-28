@@ -8,13 +8,18 @@ import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
   store: {
-    connections: [] as { id: string }[],
+    connections: [] as { id: string; db_type: string }[],
     sqlFileSource: null as { connectionId: string; database: string; filePath?: string } | null,
     getConfig: vi.fn(),
+  },
+  queryStore: {
+    tabs: [] as Array<{ id: string; connectionId: string; database: string; catalog?: string; schema?: string }>,
+    activeTabId: null as string | null,
   },
 }));
 
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => mocks.store }));
+vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => mocks.queryStore }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 
 import { useLargeSqlFileStreamingFallback } from "@/composables/useLargeSqlFileFallback";
@@ -25,6 +30,8 @@ beforeEach(() => {
   mocks.store.connections = [];
   mocks.store.sqlFileSource = null;
   mocks.store.getConfig.mockReset().mockReturnValue(undefined);
+  mocks.queryStore.tabs = [];
+  mocks.queryStore.activeTabId = null;
   mocks.toast.mockReset();
 });
 
@@ -65,6 +72,21 @@ describe("useLargeSqlFileStreamingFallback", () => {
     });
     expect(mocks.toast).toHaveBeenCalledTimes(1);
     expect(String(mocks.toast.mock.calls[0][0])).toContain("100.0 MB");
+  });
+
+  it("passes the active SQL tab target to the streaming executor", () => {
+    mocks.queryStore.tabs = [{ id: "tab-1", connectionId: "postgres-1", database: "app", schema: "reporting" }];
+    mocks.queryStore.activeTabId = "tab-1";
+    mocks.store.getConfig.mockImplementation((connectionId: string) => (connectionId === "postgres-1" ? { id: connectionId, db_type: "postgres" } : undefined));
+
+    const outcome = withComposable((fallback) => fallback.openInStreamingExecutorOnTooLarge("/tmp/dbx_export.sql", new ExternalSqlFileTooLargeError(100 * 1024 * 1024, 64 * 1024 * 1024)));
+
+    expect(outcome).toBe(true);
+    expect(mocks.store.sqlFileSource).toEqual({
+      connectionId: "postgres-1",
+      database: "app",
+      filePath: "/tmp/dbx_export.sql",
+    });
   });
 
   it("keeps unrelated open failures as errors", () => {

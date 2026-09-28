@@ -333,9 +333,12 @@ DBX 也提供独立 CLI 包，适合终端、脚本和 Codex 工作流：
 npm install -g @dbx-app/cli
 # 或通过 Homebrew
 brew tap t8y2/tap && brew install dbx-cli
+dbx agent setup
 dbx connections list --json
 dbx query local "select 1" --json
 ```
+
+CLI 已内置官方 DBX Agent Skill；`dbx agent setup` 会离线安装或更新到 `~/.agents/skills/dbx`，让支持 Shell 的 AI Agent 知道如何安全调用 DBX CLI。
 
 详见 [MCP Server 说明](packages/mcp-server/README.md) 和 [CLI 说明](packages/cli/README.md)。
 

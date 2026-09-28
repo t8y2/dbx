@@ -2026,7 +2026,7 @@ async function runRedisCommand(command: string) {
   const entryId = appendCommandHistory({ prompt, command, output: "", error: false });
   try {
     const result = await api.redisExecuteCommand(props.connectionId, commandDb.value, command, !props.blockDangerousRedisCommands);
-    updateCommandHistory(entryId, { output: formatRedisConsoleValue(result.value), error: false });
+    updateCommandHistory(entryId, { output: formatRedisConsoleValue(result.value, command), error: false });
     // The db this command ran on — capture before nextRedisCommandDb() advances it.
     const executedDb = commandDb.value;
     commandDb.value = nextRedisCommandDb(commandDb.value, command, result.value);

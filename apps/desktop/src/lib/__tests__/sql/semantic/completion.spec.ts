@@ -30,6 +30,7 @@ function semanticCompletion(markedSql: string, input: Partial<SqlCompletionProvi
     databaseType: options.databaseType,
     keywordCase: input.keywordCase,
     autoAliasTables: input.autoAliasTables,
+    tableCompletionSchemaQualification: input.tableCompletionSchemaQualification,
   });
   return { sql, cursor, model, context, items };
 }

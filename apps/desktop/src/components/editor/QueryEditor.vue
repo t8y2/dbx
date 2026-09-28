@@ -55,10 +55,11 @@ import { createColumnReferencePayload, tableReferenceInsertText } from "@/lib/ed
 import { clearRememberedFocusedQueryEditorView, focusedQueryEditorView, queryEditorInsertContext, registerQueryEditorInsertContext, rememberFocusedQueryEditorView, unregisterQueryEditorInsertContext } from "@/lib/editor/focusedQueryEditorView";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { structurePeekPanelId } from "@/lib/editor/structurePeekPanel";
+import { parkEditorNativeSelection, type EditorNativeSelectionPark } from "@/lib/editor/queryEditorNativeSelection";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import QueryEditorContextMenu, { type QueryEditorContextMenuState, type QueryEditorContextMenuActions } from "./QueryEditorContextMenu.vue";
 
-import { readTextFromClipboard } from "@/lib/common/clipboard";
+import { clipboardLineEndings, readTextFromClipboard } from "@/lib/common/clipboard";
 
 import { resolveExecutableSql, type SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import { supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
@@ -112,6 +113,7 @@ import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, suppor
 import { sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createSqlUnknownObjectHighlights, refreshSqlUnknownObjectHighlights } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
+import { shouldUseQueryEditorLargeDocumentMode } from "@/lib/editor/queryEditorLargeDocument";
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 
@@ -190,6 +192,37 @@ useQueryEditorLayout(editorRef);
 const view = shallowRef<EditorViewType | null>(null);
 const contextMenuOpen = ref(false);
 let contextMenuPointerCleanup: (() => void) | null = null;
+
+// The editor's own context menu is a DOM overlay, so a long selection stays
+// live underneath it and macOS keeps asking the web view to serialize that
+// selection while the pointer moves over the menu. Parking the browser
+// selection for as long as the menu is up is what keeps right click usable on
+// a few hundred selected lines; see queryEditorNativeSelection.ts.
+let parkedNativeSelection: EditorNativeSelectionPark | null = null;
+
+function parkNativeSelectionUnderContextMenu() {
+  const currentView = view.value;
+  if (!currentView) return;
+  parkedNativeSelection?.release();
+  // `clipboardLineEndings` is what the editor registers as its
+  // `clipboardOutputFilter`; passing it here keeps Cmd+C working while the
+  // selection is parked and leaves the copied bytes unchanged.
+  parkedNativeSelection = parkEditorNativeSelection(currentView, { finalizeClipboardText: clipboardLineEndings });
+}
+
+function releaseParkedNativeSelection() {
+  parkedNativeSelection?.release();
+  parkedNativeSelection = null;
+}
+
+watch(
+  contextMenuOpen,
+  (open) => {
+    if (open) parkNativeSelectionUnderContextMenu();
+    else releaseParkedNativeSelection();
+  },
+  { flush: "sync" },
+);
 
 const executionViewportOwnership = createQueryEditorExecutionViewportOwnership();
 
@@ -437,6 +470,8 @@ interface EditorGestureEvent extends Event {
 }
 
 const codeMirrorRuntime = createQueryEditorCodeMirrorRuntime();
+const largeDocumentMode = shouldUseQueryEditorLargeDocumentMode(props.modelValue);
+const fullEditorFeaturesEnabled = () => !largeDocumentMode;
 
 let previewContextRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let editorIsActive = true;
@@ -447,6 +482,7 @@ const postCompositionKeyGuard = createQueryEditorPostCompositionKeyGuard();
 let postCompositionKeyGuardCleanup: (() => void) | null = null;
 
 function runStatementGutterExtension(): import("@codemirror/state").Extension {
+  if (!fullEditorFeaturesEnabled()) return [];
   const showRunButtons = !props.hideExecutionControls && settingsStore.editorSettings.showStatementRunButtons;
   return shouldShowStatementGutter(showRunButtons) ? (codeMirrorRuntime.buildRunStatementGutterExtension?.() ?? []) : [];
 }
@@ -776,7 +812,7 @@ function schedulePreviewContextRefresh(currentView: EditorViewType) {
 }
 
 function selectStarExpansionTargetForView(currentView: EditorViewType, position?: number): SelectStarExpansionTarget | null {
-  if (!props.connectionId || props.database == null || props.readOnly || !SEMANTIC_SQL_COMPLETION_ENABLED) return null;
+  if (!fullEditorFeaturesEnabled() || !props.connectionId || props.database == null || props.readOnly || !SEMANTIC_SQL_COMPLETION_ENABLED) return null;
 
   const sql = currentEditorDocText(currentView);
   const selection = currentView.state.selection.main;
@@ -863,6 +899,11 @@ function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEv
     return;
   }
 
+  if (!fullEditorFeaturesEnabled()) {
+    contextObjectTarget.value = null;
+    return;
+  }
+
   const sql = currentEditorDocText(currentView);
   if (!props.connectionId || props.database == null) {
     const candidate = queryTableCandidateAtSqlPosition({
@@ -928,6 +969,7 @@ function exportQueryFromContextMenu(format: "csv" | "xlsx" | "txt") {
 // 与「执行」使用同一套候选解析：选区优先，否则取 position（右键点击处）/ 光标处的单条语句。
 // 注意：不跟随 executeAllOnBlankLine 回退到“整篇文档”（那会包含多条语句）。
 function resolvePreviewDmlCandidate(position?: number): string {
+  if (!fullEditorFeaturesEnabled()) return "";
   const currentView = view.value;
   if (!currentView) return "";
   const selection = currentView.state.selection.main;
@@ -1510,6 +1552,7 @@ const { sqlErrorDecorationRange, sqlSemanticDecorationRanges, reconfigureDiagnos
     semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED,
     maxCompletionTables: MAX_COMPLETION_TABLES,
     unknownObjectHighlightEnabled: SQL_UNKNOWN_OBJECT_HIGHLIGHT_ENABLED,
+    fullFeaturesEnabled: fullEditorFeaturesEnabled,
     runtime: {
       get setSqlDiagnosticsEffect() {
         return codeMirrorRuntime.setSqlDiagnosticsEffect;
@@ -1739,7 +1782,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
   view,
   runtime: codeMirrorRuntime,
   beforeLoad() {
-    hoverContent.initializeHighlighter();
+    if (fullEditorFeaturesEnabled()) hoverContent.initializeHighlighter();
   },
   async prepare(modules) {
     const initializedRuntime = modules.runtime;
@@ -1796,6 +1839,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       currentExecutableStatementRange,
       executeSqlStatementFromGutter,
       signatureHelpWindowChars: SQL_SIGNATURE_HELP_WINDOW_CHARS,
+      fullFeaturesEnabled: fullEditorFeaturesEnabled,
     });
     const initialSettings = settingsStore.editorSettings;
     const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), getCurrentCustomThemeColors(), themePalette.value);
@@ -1829,21 +1873,23 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         initializedRuntime.runGutterComp.of(runStatementGutterExtension()),
         initializedRuntime.lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
         createQueryEditorLineNumberAlignmentExtension(ViewPlugin),
-        currentStatementFrameExtension,
+        fullEditorFeaturesEnabled() ? currentStatementFrameExtension : [],
         highlightActiveLineGutter(),
         highlightSpecialChars(),
         initializedRuntime.historyResetComp.of(history()),
-        foldGutter({
-          markerDOM(open: boolean) {
-            const span = document.createElement("span");
-            span.className = "cm-foldMarker-svg";
-            span.innerHTML = open
-              ? '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 6.5l3.5 3.5 3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-              : '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 4.5l3.5 3.5-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-            return span;
-          },
-        }),
-        sqlBlockFoldService,
+        fullEditorFeaturesEnabled()
+          ? foldGutter({
+              markerDOM(open: boolean) {
+                const span = document.createElement("span");
+                span.className = "cm-foldMarker-svg";
+                span.innerHTML = open
+                  ? '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 6.5l3.5 3.5 3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+                  : '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 4.5l3.5 3.5-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+                return span;
+              },
+            })
+          : [],
+        fullEditorFeaturesEnabled() ? sqlBlockFoldService : [],
         drawSelection(),
         editorClipboardLineEndingsExtension(EditorView),
         trimmedSelectionLayer(),
@@ -1862,8 +1908,8 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           ),
         ),
         EditorState.allowMultipleSelections.of(true),
-        indentOnInput(),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        fullEditorFeaturesEnabled() ? indentOnInput() : [],
+        fullEditorFeaturesEnabled() ? syntaxHighlighting(defaultHighlightStyle, { fallback: true }) : [],
         crosshairCursor(),
         activeLineHighlighter,
         // Vim must be mounted before DBX/default keymaps so normal-mode keys are handled first.
@@ -1873,12 +1919,14 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         Prec.highest(keymap.of([{ key: "Space", run: acceptSqlServerCompletionOnSpace }])),
         initializedRuntime.sqlLanguageComp.of(sqlExtensions.buildSqlLanguageExtension()),
         initializedRuntime.sqlSemanticHighlightComp.of(sqlExtensions.buildSqlSemanticHighlightExtension()),
-        createSqlUnknownObjectHighlights({
-          enabled: SQL_UNKNOWN_OBJECT_HIGHLIGHT_ENABLED,
-          load: loadSqlUnknownObjectSpans,
-          initialDelayMs: SQL_UNKNOWN_OBJECT_INITIAL_DELAY_MS,
-          debounceMs: SQL_UNKNOWN_OBJECT_DEBOUNCE_MS,
-        }),
+        fullEditorFeaturesEnabled()
+          ? createSqlUnknownObjectHighlights({
+              enabled: SQL_UNKNOWN_OBJECT_HIGHLIGHT_ENABLED,
+              load: loadSqlUnknownObjectSpans,
+              initialDelayMs: SQL_UNKNOWN_OBJECT_INITIAL_DELAY_MS,
+              debounceMs: SQL_UNKNOWN_OBJECT_DEBOUNCE_MS,
+            })
+          : [],
         tooltips({ parent: tooltipParent }),
         initializedRuntime.completionComp.of(sqlExtensions.buildSqlCompletionExtension()),
         sqlCompletionTheme(EditorView),
@@ -1905,15 +1953,17 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
             return true;
           }),
         ),
-        hoverTooltip((currentView, pos) => resolveSqlHoverTooltip(currentView, pos)),
+        fullEditorFeaturesEnabled() ? hoverTooltip((currentView, pos) => resolveSqlHoverTooltip(currentView, pos)) : [],
         initializedRuntime.sqlSignatureComp.of(sqlExtensions.buildSqlSignatureExtension()),
         initializedRuntime.diagnosticComp.of(sqlExtensions.buildSqlDiagnosticExtension()),
-        createInsertValueHintsExtension({
-          isEnabled: () => settingsStore.editorSettings.showInsertValueHints && supportsInsertValueHints(props.databaseType),
-          getTableColumns: getInsertValueHintTableColumns,
-          requestTableColumns: requestInsertValueHintTableColumns,
-          getDialectId: () => resolveSqlDialectId({ databaseType: props.databaseType, dialect: sqlBehaviorDialect() }),
-        }),
+        fullEditorFeaturesEnabled()
+          ? createInsertValueHintsExtension({
+              isEnabled: () => settingsStore.editorSettings.showInsertValueHints && supportsInsertValueHints(props.databaseType),
+              getTableColumns: getInsertValueHintTableColumns,
+              requestTableColumns: requestInsertValueHintTableColumns,
+              getDialectId: () => resolveSqlDialectId({ databaseType: props.databaseType, dialect: sqlBehaviorDialect() }),
+            })
+          : [],
         initializedRuntime.previewRangeComp.of(sqlExtensions.buildPreviewRangeExtension()),
         sqlExtensions.buildResultSourceRangeExtension(),
         Prec.highest(
@@ -2537,6 +2587,7 @@ onBeforeUnmount(() => {
   pointerInteractions.dispose();
   objectNavigation.dispose();
   contextMenuPointerCleanup?.();
+  releaseParkedNativeSelection();
   postCompositionKeyGuardCleanup?.();
   postCompositionKeyGuardCleanup = null;
   batchSelection.dispose();
@@ -2624,7 +2675,15 @@ defineExpose({
 </script>
 
 <template>
-  <div class="h-full w-full overflow-hidden relative" @wheel="recordExecutionViewportInteraction" @pointerdown="recordExecutionViewportInteraction" @gesturestart="onEditorGestureStart" @gesturechange="onEditorGestureChange" @gestureend="onEditorGestureEnd">
+  <div
+    class="h-full w-full overflow-hidden relative"
+    :data-large-document-mode="largeDocumentMode || undefined"
+    @wheel="recordExecutionViewportInteraction"
+    @pointerdown="recordExecutionViewportInteraction"
+    @gesturestart="onEditorGestureStart"
+    @gesturechange="onEditorGestureChange"
+    @gestureend="onEditorGestureEnd"
+  >
     <QueryEditorContextMenu :get-state="getContextMenuState" :actions="contextMenuActions" @close="contextMenuOpen = false" v-slot="{ onContextMenu }">
       <div
         ref="editorRef"

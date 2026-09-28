@@ -6,14 +6,17 @@
 //! the WebView2-mapped form (`http://dbx-plugin.localhost/...`) a single
 //! constant origin, which the sandbox CSP can allow without wildcard hosts.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
+use base64::Engine;
 use dbx_core::plugins::PluginRegistry;
 use percent_encoding::percent_decode_str;
+use serde::Deserialize;
 use tauri::http::{HeaderValue, Method, Response, StatusCode, Uri};
 use tauri::{Manager, Runtime, UriSchemeContext, UriSchemeResponder};
+use uuid::Uuid;
 
-use crate::commands::connection::AppState;
+use crate::commands::{connection::AppState, plugin_media::PluginMediaState};
 
 pub const PLUGIN_UI_SCHEME: &str = "dbx-plugin";
 
@@ -23,9 +26,24 @@ pub fn handle<R: Runtime>(
     request: tauri::http::Request<Vec<u8>>,
     responder: UriSchemeResponder,
 ) {
-    let registry = ctx.app_handle().try_state::<Arc<AppState>>().map(|state| state.plugins.clone());
     let method = request.method().clone();
     let uri = request.uri().clone();
+    if let Some((plugin_id, token)) = parse_plugin_media_uri(&uri) {
+        let app_state = ctx.app_handle().try_state::<Arc<AppState>>().map(|state| state.inner().clone());
+        let media_state = ctx.app_handle().try_state::<PluginMediaState>().map(|state| state.inner().clone());
+        let range = request.headers().get("range").and_then(|value| value.to_str().ok()).map(str::to_string);
+        tauri::async_runtime::spawn(async move {
+            let response = match (app_state, media_state) {
+                (Some(app_state), Some(media_state)) => {
+                    serve_plugin_media(&app_state, &media_state, &plugin_id, &token, &method, range).await
+                }
+                _ => error_response(StatusCode::SERVICE_UNAVAILABLE, "Plugin media service is unavailable"),
+            };
+            responder.respond(response);
+        });
+        return;
+    }
+    let registry = ctx.app_handle().try_state::<Arc<AppState>>().map(|state| state.plugins.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let response = match registry {
             Some(registry) => serve_plugin_ui_asset(&registry, &method, &uri),
@@ -33,6 +51,130 @@ pub fn handle<R: Runtime>(
         };
         responder.respond(response);
     });
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginMediaChunk {
+    #[serde(default)]
+    data_base64: String,
+    size: u64,
+    #[serde(default)]
+    offset: u64,
+    #[serde(default)]
+    length: u64,
+    #[serde(default)]
+    partial: bool,
+    #[serde(default)]
+    range_not_satisfiable: bool,
+    #[serde(default)]
+    content_type: String,
+    #[serde(default)]
+    etag: String,
+}
+
+async fn serve_plugin_media(
+    app_state: &Arc<AppState>,
+    media_state: &PluginMediaState,
+    plugin_id: &str,
+    token: &str,
+    method: &Method,
+    range: Option<String>,
+) -> Response<Vec<u8>> {
+    if method != Method::GET && method != Method::HEAD {
+        return error_response(StatusCode::METHOD_NOT_ALLOWED, "Plugin media only supports GET and HEAD");
+    }
+    let Some(source) = media_state.get(plugin_id, token) else {
+        return error_response(StatusCode::NOT_FOUND, "Plugin media URL expired or was closed");
+    };
+    let mut params = source.params;
+    let Some(values) = params.as_object_mut() else {
+        return error_response(StatusCode::BAD_REQUEST, "Plugin media parameters are invalid");
+    };
+    values.insert("head".to_string(), serde_json::Value::Bool(method == Method::HEAD));
+    if let Some(range) = range {
+        values.insert("range".to_string(), serde_json::Value::String(range));
+    }
+    let result = match app_state
+        .plugin_host
+        .invoke(plugin_id, &source.method, params, None, Some(Duration::from_secs(30)))
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log::warn!("[{PLUGIN_UI_SCHEME}] plugin media request failed for {plugin_id}: {error}");
+            return error_response(StatusCode::BAD_GATEWAY, "Plugin media request failed");
+        }
+    };
+    let chunk: PluginMediaChunk = match serde_json::from_value(result) {
+        Ok(chunk) => chunk,
+        Err(error) => {
+            log::warn!("[{PLUGIN_UI_SCHEME}] invalid plugin media response for {plugin_id}: {error}");
+            return error_response(StatusCode::BAD_GATEWAY, "Plugin media response was invalid");
+        }
+    };
+    if chunk.range_not_satisfiable {
+        let mut response =
+            error_response(StatusCode::RANGE_NOT_SATISFIABLE, "Requested media range is not satisfiable");
+        if let Ok(value) = HeaderValue::from_str(&format!("bytes */{}", chunk.size)) {
+            response.headers_mut().insert("content-range", value);
+        }
+        return response;
+    }
+    let bytes = if method == Method::HEAD {
+        Vec::new()
+    } else {
+        match base64::engine::general_purpose::STANDARD.decode(&chunk.data_base64) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                log::warn!("[{PLUGIN_UI_SCHEME}] invalid plugin media bytes for {plugin_id}: {error}");
+                return error_response(StatusCode::BAD_GATEWAY, "Plugin media bytes were invalid");
+            }
+        }
+    };
+    if method == Method::GET && bytes.len() as u64 != chunk.length {
+        return error_response(StatusCode::BAD_GATEWAY, "Plugin media response length was invalid");
+    }
+    media_response(chunk, bytes, method == Method::HEAD)
+}
+
+fn media_response(chunk: PluginMediaChunk, bytes: Vec<u8>, head: bool) -> Response<Vec<u8>> {
+    let partial = chunk.partial || (!head && chunk.length < chunk.size);
+    let mut response = Response::new(if head { Vec::new() } else { bytes });
+    *response.status_mut() = if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK };
+    let headers = response.headers_mut();
+    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
+    headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    let content_type = if chunk.content_type.is_empty() { "application/octet-stream" } else { &chunk.content_type };
+    headers.insert(
+        "content-type",
+        HeaderValue::from_str(content_type).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    let content_length = if head { chunk.size } else { chunk.length };
+    if let Ok(value) = HeaderValue::from_str(&content_length.to_string()) {
+        headers.insert("content-length", value);
+    }
+    if partial && chunk.length > 0 {
+        let end = chunk.offset + chunk.length - 1;
+        if let Ok(value) = HeaderValue::from_str(&format!("bytes {}-{end}/{}", chunk.offset, chunk.size)) {
+            headers.insert("content-range", value);
+        }
+    }
+    if !chunk.etag.is_empty() {
+        if let Ok(value) = HeaderValue::from_str(&chunk.etag) {
+            headers.insert("etag", value);
+        }
+    }
+    response
+}
+
+fn parse_plugin_media_uri(uri: &Uri) -> Option<(String, String)> {
+    let (plugin_id, asset_path) = parse_plugin_ui_uri(uri)?;
+    let token =
+        asset_path.strip_prefix("__media/").or_else(|| asset_path.rsplit_once("/__media/").map(|(_, token)| token))?;
+    Uuid::parse_str(token).ok()?;
+    Some((plugin_id, token.to_string()))
 }
 
 pub(crate) fn serve_plugin_ui_asset(registry: &PluginRegistry, method: &Method, uri: &Uri) -> Response<Vec<u8>> {
@@ -210,5 +352,41 @@ mod tests {
         assert!(parse_plugin_ui_uri(&uri("dbx-plugin://localhost/..hidden/ui/index.html")).is_none());
         assert!(parse_plugin_ui_uri(&uri("dbx-plugin://localhost/a%20b/ui/index.html")).is_none());
         assert!(parse_plugin_ui_uri(&uri("dbx-plugin://localhost/ok.id-1/ui/index.html")).is_some());
+    }
+
+    #[test]
+    fn media_urls_require_scoped_uuid_tokens() {
+        let parsed =
+            parse_plugin_media_uri(&uri("dbx-plugin://localhost/sample/__media/550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(parsed, Some(("sample".to_string(), "550e8400-e29b-41d4-a716-446655440000".to_string())));
+        let nested = parse_plugin_media_uri(&uri(
+            "dbx-plugin://localhost/sample/ui/__media/550e8400-e29b-41d4-a716-446655440000",
+        ));
+        assert_eq!(nested, parsed);
+        assert!(parse_plugin_media_uri(&uri("dbx-plugin://localhost/sample/__media/not-a-token")).is_none());
+        assert!(parse_plugin_media_uri(&uri("dbx-plugin://localhost/sample/ui/index.html")).is_none());
+    }
+
+    #[test]
+    fn media_response_sets_range_headers() {
+        let response = media_response(
+            PluginMediaChunk {
+                data_base64: String::new(),
+                size: 100,
+                offset: 10,
+                length: 20,
+                partial: true,
+                range_not_satisfiable: false,
+                content_type: "video/mp4".to_string(),
+                etag: "etag".to_string(),
+            },
+            vec![0; 20],
+            false,
+        );
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(response.headers()["content-range"], "bytes 10-29/100");
+        assert_eq!(response.headers()["content-length"], "20");
+        assert_eq!(response.body().len(), 20);
     }
 }

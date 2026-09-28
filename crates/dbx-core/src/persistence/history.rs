@@ -25,6 +25,16 @@ pub struct HistoryEntry {
     pub rollback_sql: Option<String>,
     #[serde(default)]
     pub details_json: Option<String>,
+    #[serde(default = "default_history_source")]
+    pub source: String,
+    #[serde(default)]
+    pub mcp_tool_name: Option<String>,
+    #[serde(default)]
+    pub mcp_request_json: Option<String>,
+    #[serde(default)]
+    pub mcp_response_json: Option<String>,
+    #[serde(default)]
+    pub mcp_session_id: Option<String>,
 }
 
 /// Matches current entries by connection ID and legacy entries by connection name.
@@ -69,6 +79,10 @@ pub struct HistorySearchRequest {
     pub cursor: Option<HistoryCursor>,
     #[serde(default)]
     pub limit: usize,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub mcp_tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +110,9 @@ pub fn validate_history_retention_limit(limit: u32) -> Result<(), String> {
 
 fn default_activity_kind() -> String {
     "query".to_string()
+}
+fn default_history_source() -> String {
+    "sql".to_string()
 }
 
 pub fn read_all(path: &Path) -> Result<Vec<HistoryEntry>, String> {

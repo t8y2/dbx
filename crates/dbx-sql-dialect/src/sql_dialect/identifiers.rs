@@ -72,9 +72,12 @@ pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<
 }
 
 /// Like `qualified_table_name`, but also supports 3-part names for SQL Server
-/// (`<database>.<schema>.<table>`) and Doris/StarRocks external catalogs
+/// (`<database>.<schema>.<table>`), Databricks Unity Catalog
+/// (`<catalog>.<schema>.<table>`), and Doris/StarRocks external catalogs
 /// (`<catalog>.<database>.<table>`). SQL parsing stores the first segment of a
 /// 3-part source in `catalog`; for SQL Server that segment is its database.
+/// The desktop metadata tree stores a Databricks JDBC catalog in `database`,
+/// so Databricks accepts that as a fallback when `catalog` is absent.
 /// Doris/StarRocks use `schema` as the middle segment when present, otherwise
 /// `database`, and ignore their built-in `internal` catalog.
 pub fn qualified_table_name_with_catalog(
@@ -85,6 +88,19 @@ pub fn qualified_table_name_with_catalog(
     table_name: &str,
 ) -> String {
     let catalog = catalog.map(str::trim).filter(|catalog| !catalog.is_empty());
+    if database_type == Some(DatabaseType::Databricks) {
+        let catalog = catalog.or_else(|| database.map(str::trim).filter(|database| !database.is_empty()));
+        let schema = schema.map(str::trim).filter(|schema| !schema.is_empty());
+        if let (Some(catalog), Some(schema)) = (catalog, schema) {
+            return format!(
+                "{}.{}.{}",
+                quote_table_identifier(database_type, catalog),
+                quote_table_identifier(database_type, schema),
+                quote_table_identifier(database_type, table_name)
+            );
+        }
+        return qualified_table_name(database_type, schema, table_name);
+    }
     match (catalog, database_type) {
         (Some(database), Some(DatabaseType::SqlServer)) => {
             let table = qualified_table_name(database_type, schema, table_name);

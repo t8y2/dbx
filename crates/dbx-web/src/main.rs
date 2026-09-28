@@ -1398,7 +1398,15 @@ async fn serve() {
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Defaults to all interfaces for container deployments; operators who
+    // expose the service through a local reverse proxy can pin the listener
+    // (DBX_BIND_ADDR=127.0.0.1) without a firewall change.
+    let addr = match std::env::var("DBX_BIND_ADDR").ok().as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            value.parse::<SocketAddr>().unwrap_or_else(|error| panic!("invalid DBX_BIND_ADDR \"{value}\": {error}"))
+        }
+        None => SocketAddr::from(([0, 0, 0, 0], port)),
+    };
 
     tracing::info!("DBX Web server starting on http://{}", addr);
     if public_base_path != "/" {

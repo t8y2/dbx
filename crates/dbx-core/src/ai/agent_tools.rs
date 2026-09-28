@@ -1172,7 +1172,8 @@ async fn execute_get_sample_data(
 
     // Reuse the table-data builder so identifier quoting and row limiting follow
     // the active database instead of assuming PostgreSQL syntax.
-    let sql = build_sample_data_sql(db_type, schema.as_deref(), table, limit);
+    let server_version = connection_server_version(state, connection_id).await;
+    let sql = build_sample_data_sql(db_type, server_version.as_deref(), schema.as_deref(), table, limit);
 
     // Delegate to execute_execute_query with a synthetic tool call
     let synthetic_call = ToolCall {
@@ -1193,9 +1194,28 @@ async fn execute_get_sample_data(
     .await
 }
 
-fn build_sample_data_sql(db_type: &DatabaseType, schema: Option<&str>, table: &str, limit: usize) -> String {
+/// The sample-data statement is produced by the shared dialect code, so it has to match the
+/// connected server too: Neo4j below 5 only accepts `id()` where 5+ uses `elementId()`.
+async fn connection_server_version(state: &Arc<AppState>, connection_id: &str) -> Option<String> {
+    state
+        .configs
+        .read()
+        .await
+        .get(connection_id)
+        .and_then(|config| config.database_info.as_ref())
+        .and_then(|info| info.product_version.clone())
+}
+
+fn build_sample_data_sql(
+    db_type: &DatabaseType,
+    server_version: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+    limit: usize,
+) -> String {
     build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(*db_type),
+        server_version: server_version.map(str::to_owned),
         schema: schema.map(str::to_owned),
         table_name: table.to_string(),
         limit: Some(limit),
@@ -2102,20 +2122,32 @@ for line in sys.stdin:
     #[test]
     fn sample_data_sql_uses_database_identifier_and_limit_syntax() {
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::Mysql, Some("app"), "sys_tenant", 20),
+            build_sample_data_sql(&DatabaseType::Mysql, None, Some("app"), "sys_tenant", 20),
             "SELECT * FROM `app`.`sys_tenant` LIMIT 20;"
         );
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::Postgres, Some("public"), "sys_tenant", 20),
+            build_sample_data_sql(&DatabaseType::Postgres, None, Some("public"), "sys_tenant", 20),
             "SELECT * FROM \"public\".\"sys_tenant\" LIMIT 20;"
         );
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::SqlServer, Some("dbo"), "sys_tenant", 20),
+            build_sample_data_sql(&DatabaseType::SqlServer, None, Some("dbo"), "sys_tenant", 20),
             "SELECT TOP (20) * FROM [dbo].[sys_tenant]"
         );
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::Oracle, Some("APP"), "SYS_TENANT", 20),
+            build_sample_data_sql(&DatabaseType::Oracle, None, Some("APP"), "SYS_TENANT", 20),
             "SELECT * FROM (SELECT * FROM \"APP\".\"SYS_TENANT\") WHERE ROWNUM <= 20"
+        );
+    }
+
+    #[test]
+    fn sample_data_sql_follows_the_connected_neo4j_identifier_function() {
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::Neo4j, Some("Neo4j/4.4.44"), None, "Person", 20),
+            "MATCH (n:`Person`) RETURN id(n) AS `__DBX_ELEMENT_ID`, n LIMIT 20;"
+        );
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::Neo4j, Some("Neo4j/5.26.0"), None, "Person", 20),
+            "MATCH (n:`Person`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n LIMIT 20;"
         );
     }
 

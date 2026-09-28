@@ -2870,6 +2870,8 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sourceRef: options.sourceRef,
+        connectionId: options.connectionId,
+        database: options.database,
         sourceFormat: options.sourceFormat,
         parseOptions: options.parseOptions,
         previewLimit: options.previewLimit,
@@ -2880,6 +2882,8 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
   }
   const formData = new FormData();
   formData.append("file", fileOrPath);
+  if (options.connectionId) formData.append("connectionId", options.connectionId);
+  if (options.database != null) formData.append("database", options.database);
   if (options.sourceFormat) formData.append("sourceFormat", options.sourceFormat);
   if (options.parseOptions) formData.append("parseOptions", JSON.stringify(options.parseOptions));
   if (options.previewLimit != null) formData.append("previewLimit", String(options.previewLimit));

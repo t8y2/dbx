@@ -27,6 +27,7 @@ vi.mock("@/stores/connectionStore", () => ({
       if (id === "connection-1") return { id, name: "SQLite", db_type: "sqlite" };
       if (id === "postgres-1") return { id, name: "PostgreSQL", db_type: "postgres" };
       if (id === "sqlserver-1") return { id, name: "SQL Server", db_type: "sqlserver" };
+      if (id === "duckdb-1") return { id, name: "DuckDB", db_type: "duckdb" };
       return undefined;
     },
     ensureConnected: mocks.ensureConnected,
@@ -198,7 +199,7 @@ async function flushAsyncUpdates() {
   }
 }
 
-async function mountDialog(files = [new File(["workbook"], "rows.xlsx")], connectionId = "connection-1") {
+async function mountSourceDialog(connectionId = "connection-1") {
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(defineComponent({ setup: () => () => h(TableImportDialog, { open: true, prefillConnectionId: connectionId, prefillDatabase: "main" }) }));
@@ -206,10 +207,18 @@ async function mountDialog(files = [new File(["workbook"], "rows.xlsx")], connec
   app.use(i18n);
   app.mount(container);
   await flushAsyncUpdates();
+}
+
+async function selectFiles(files: File[]) {
   const input = document.body.querySelector<HTMLInputElement>('input[type="file"]')!;
   Object.defineProperty(input, "files", { configurable: true, value: files });
   input.dispatchEvent(new Event("change", { bubbles: true }));
   await flushAsyncUpdates();
+}
+
+async function mountDialog(files = [new File(["workbook"], "rows.xlsx")], connectionId = "connection-1") {
+  await mountSourceDialog(connectionId);
+  await selectFiles(files);
 }
 
 function button(text: string) {
@@ -270,6 +279,26 @@ afterEach(() => {
 });
 
 describe("TableImportDialog batch selection", () => {
+  it("uses all desktop grid columns when Parquet is unavailable", async () => {
+    await mountSourceDialog();
+
+    const formats = document.body.querySelector<HTMLElement>('[data-testid="table-import-format-options"]');
+    expect(formats?.classList.contains("lg:grid-cols-6")).toBe(true);
+    expect(formats?.classList.contains("lg:grid-cols-7")).toBe(false);
+  });
+
+  it("offers Parquet for DuckDB and forwards the connection context to preview", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve({ ...delimitedPreview(), fileName: "rows.parquet", fileType: "parquet", sourceFingerprint: "rows-parquet" }));
+    await mountSourceDialog("duckdb-1");
+
+    const fileInput = document.body.querySelector<HTMLInputElement>('input[type="file"]');
+    const formats = document.body.querySelector<HTMLElement>('[data-testid="table-import-format-options"]');
+    expect(fileInput?.accept).toContain(".parquet");
+    expect(formats?.classList.contains("lg:grid-cols-7")).toBe(true);
+    await selectFiles([new File(["parquet"], "rows.parquet")]);
+    expect(mocks.previewTableImportFile).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({ connectionId: "duckdb-1", database: "main", sourceFormat: "parquet" }));
+  });
+
   it("lets the import setup dialog be minimized and restored before import starts", async () => {
     await mountDialog();
     expect(button("Next").disabled).toBe(false);

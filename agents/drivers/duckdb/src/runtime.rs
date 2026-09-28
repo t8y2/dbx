@@ -50,13 +50,17 @@ impl DuckDbWorkerSession {
     pub fn execute(&mut self, params: DuckDbWorkerExecuteParams) -> Result<db::QueryResult, String> {
         let connection = self.connection.as_ref().ok_or("DuckDB worker is not connected")?.clone();
         let locked = connection.lock().map_err(|e| e.to_string())?;
-        let result = crate::query::duckdb_execute_for_database(
-            &locked,
-            &self.attached_names,
-            params.database.as_deref(),
-            &params.sql,
-            params.max_rows,
-        )?;
+        let result = if params.preserve_insertion_order {
+            execute_with_preserved_insertion_order(&locked, &self.attached_names, &params)?
+        } else {
+            crate::query::duckdb_execute_for_database(
+                &locked,
+                &self.attached_names,
+                params.database.as_deref(),
+                &params.sql,
+                params.max_rows,
+            )?
+        };
         if let Some(name) = crate::sql::attached_name_from_attach_sql(&params.sql) {
             if !self.attached_names.iter().any(|attached| attached.eq_ignore_ascii_case(&name)) {
                 self.attached_names.push(name);
@@ -187,6 +191,53 @@ impl DuckDbWorkerSession {
                 Err(_) => false,
             },
             None => false,
+        }
+    }
+}
+
+fn execute_with_preserved_insertion_order(
+    connection: &duckdb::Connection,
+    attached_names: &[String],
+    params: &DuckDbWorkerExecuteParams,
+) -> Result<db::QueryResult, String> {
+    let current: String = connection
+        .query_row("SELECT current_setting('preserve_insertion_order')", [], |row| row.get(0))
+        .map_err(|error| format!("Failed to read DuckDB preserve_insertion_order setting: {error}"))?;
+    let was_enabled = current
+        .parse::<bool>()
+        .map_err(|error| format!("Invalid DuckDB preserve_insertion_order setting {current:?}: {error}"))?;
+    if was_enabled {
+        return crate::query::duckdb_execute_for_database(
+            connection,
+            attached_names,
+            params.database.as_deref(),
+            &params.sql,
+            params.max_rows,
+        );
+    }
+
+    // LIMIT/OFFSET Parquet pages are separate scans. Temporarily enabling this
+    // setting makes every page use the same source order without changing the
+    // user's connection-level setting after the request completes.
+    connection
+        .execute_batch("SET preserve_insertion_order = true")
+        .map_err(|error| format!("Failed to enable DuckDB insertion-order preservation: {error}"))?;
+    let result = crate::query::duckdb_execute_for_database(
+        connection,
+        attached_names,
+        params.database.as_deref(),
+        &params.sql,
+        params.max_rows,
+    );
+    let restore = connection.execute_batch("SET preserve_insertion_order = false");
+
+    match (result, restore) {
+        (result, Ok(())) => result,
+        (Ok(_), Err(error)) => {
+            Err(format!("DuckDB query succeeded but restoring preserve_insertion_order failed: {error}"))
+        }
+        (Err(query_error), Err(restore_error)) => {
+            Err(format!("{query_error}; restoring preserve_insertion_order also failed: {restore_error}"))
         }
     }
 }
@@ -497,11 +548,67 @@ mod tests {
             .expect("connect");
 
         let result = session
-            .execute(DuckDbWorkerExecuteParams { sql: "SELECT 1 AS value".to_string(), database: None, max_rows: None })
+            .execute(DuckDbWorkerExecuteParams {
+                sql: "SELECT 1 AS value".to_string(),
+                database: None,
+                max_rows: None,
+                preserve_insertion_order: false,
+            })
             .expect("execute");
 
         assert_eq!(result.columns, vec!["value"]);
         assert_eq!(result.rows, vec![vec![serde_json::json!(1)]]);
+    }
+
+    #[test]
+    fn worker_session_scopes_insertion_order_preservation() {
+        let mut session = DuckDbWorkerSession::default();
+        session
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: Some("SET preserve_insertion_order = false".to_string()),
+            })
+            .expect("connect");
+
+        let disabled = session
+            .execute(DuckDbWorkerExecuteParams {
+                sql: "SELECT current_setting('preserve_insertion_order') AS setting".to_string(),
+                database: None,
+                max_rows: None,
+                preserve_insertion_order: false,
+            })
+            .expect("read initial setting");
+        assert_eq!(disabled.rows, vec![vec![serde_json::json!("false")]]);
+
+        let preserved = session
+            .execute(DuckDbWorkerExecuteParams {
+                sql: "SELECT current_setting('preserve_insertion_order') AS setting".to_string(),
+                database: None,
+                max_rows: None,
+                preserve_insertion_order: true,
+            })
+            .expect("execute with order preservation");
+        assert_eq!(preserved.rows, vec![vec![serde_json::json!("true")]]);
+
+        session
+            .execute(DuckDbWorkerExecuteParams {
+                sql: "SELECT * FROM missing_table".to_string(),
+                database: None,
+                max_rows: None,
+                preserve_insertion_order: true,
+            })
+            .expect_err("missing table should fail");
+
+        let restored = session
+            .execute(DuckDbWorkerExecuteParams {
+                sql: "SELECT current_setting('preserve_insertion_order') AS setting".to_string(),
+                database: None,
+                max_rows: None,
+                preserve_insertion_order: false,
+            })
+            .expect("read restored setting");
+        assert_eq!(restored.rows, vec![vec![serde_json::json!("false")]]);
     }
 
     #[test]
@@ -522,6 +629,7 @@ mod tests {
                     .to_string(),
                 database: None,
                 max_rows: None,
+                preserve_insertion_order: false,
             })
             .expect("create table");
 
@@ -566,6 +674,7 @@ mod tests {
                 sql: "CREATE VIEW active_orders AS SELECT 1 AS id".to_string(),
                 database: None,
                 max_rows: None,
+                preserve_insertion_order: false,
             })
             .expect("create view");
 
@@ -713,6 +822,7 @@ mod tests {
                 sql: format!("ATTACH '{}' AS \"sales db\";", attached_path.to_string_lossy().replace('\'', "''")),
                 database: None,
                 max_rows: None,
+                preserve_insertion_order: false,
             })
             .expect("attach sql");
 

@@ -6173,6 +6173,7 @@ export default withEnglishFallback({
     lastDataRow: "Son veri satırı (sona kadar için 0)",
     trimValues: "Değerleri kırp",
     emptyStringAsNull: "Boş dizeyi NULL say",
+    emptyStringAsNullHint: "İşaretlendiğinde boş alanlar NULL olarak içe aktarılır; aksi halde boş dize olarak kalır.",
     jsonShape: "JSON satırları",
     jsonShapeAuto: "Otomatik algıla",
     jsonShapeObjects: "Nesneler",

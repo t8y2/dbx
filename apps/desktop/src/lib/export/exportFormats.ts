@@ -1,13 +1,16 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
-import { escapeCsvField, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import { DEFAULT_CSV_NULL_LITERAL, escapeCsvField, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import type { SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
 export type ExportCellValue = string | number | boolean | null;
 
-export function formatCsv(columns: string[], rows: ExportCellValue[][], quoteMode: CsvQuoteMode = "all"): string {
+export function formatCsv(columns: string[], rows: ExportCellValue[][], quoteMode: CsvQuoteMode = "all", nullLiteral: string = DEFAULT_CSV_NULL_LITERAL): string {
   const header = columns.map((column) => escapeCsvField(column, quoteMode)).join(",");
-  const body = rows.map((row) => row.map((cell) => (cell === null ? "" : escapeCsvField(String(cell), quoteMode))).join(",")).join("\n");
+  // NULL 写成独立字面量、空字符串写成空字段，否则导入端无法把两者区分开
+  // （写回 NOT NULL DEFAULT '' 的列时会把空字符串还原成 NULL）。
+  const nullField = nullLiteral ? escapeCsvField(nullLiteral, quoteMode) : "";
+  const body = rows.map((row) => row.map((cell) => (cell === null ? nullField : escapeCsvField(String(cell), quoteMode))).join(",")).join("\n");
   return `${header}\n${body}`;
 }
 

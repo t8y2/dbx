@@ -15,8 +15,8 @@ use crate::csv_export::format_csv;
 #[cfg(test)]
 use crate::csv_export::format_tsv_rows;
 use crate::csv_export::{
-    format_csv_with_quote_mode, format_tsv, push_table_csv_row, push_table_csv_row_with_quote_mode, push_tsv_row,
-    CsvQuoteMode,
+    csv_null_literal, format_csv_with_options, format_tsv, push_table_csv_row, push_table_csv_row_with_options,
+    push_tsv_row, CsvQuoteMode,
 };
 use crate::data_grid_sql::extra_is_auto_generated;
 pub use crate::database_export::ExportStatus;
@@ -87,6 +87,10 @@ pub struct TableExportRequest {
     pub insert_dialect: SqlInsertDialect,
     #[serde(default)]
     pub csv_quote_mode: CsvQuoteMode,
+    /// CSV 里 NULL 写成什么。默认 `\N`；空字符串表示关闭该字面量，
+    /// 退回「NULL 写成空字段」的旧行为（此时 NULL 与空字符串在文件里无法区分）。
+    #[serde(default = "dbx_formats::csv_export::default_csv_null_literal")]
+    pub null_literal: String,
     #[serde(default)]
     pub columns: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,11 +168,12 @@ fn write_table_text_row<W: Write>(
     row: &[Value],
     buffer: &mut String,
     csv_quote_mode: CsvQuoteMode,
+    null_literal: Option<&str>,
 ) -> Result<(), String> {
     buffer.clear();
     buffer.push('\n');
     if csv {
-        push_table_csv_row_with_quote_mode(buffer, row, csv_quote_mode);
+        push_table_csv_row_with_options(buffer, row, csv_quote_mode, null_literal);
     } else {
         push_tsv_row(buffer, row);
     }
@@ -181,12 +186,13 @@ fn write_table_text_rows<W: Write>(
     rows: &[Vec<Value>],
     buffer: &mut String,
     csv_quote_mode: CsvQuoteMode,
+    null_literal: Option<&str>,
 ) -> Result<(), String> {
     buffer.clear();
     for row in rows {
         buffer.push('\n');
         if csv {
-            push_table_csv_row_with_quote_mode(buffer, row, csv_quote_mode);
+            push_table_csv_row_with_options(buffer, row, csv_quote_mode, null_literal);
         } else {
             push_tsv_row(buffer, row);
         }
@@ -1128,7 +1134,12 @@ async fn try_export_native_table_stream(
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?,
             );
             file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
-            let header = format_csv_with_quote_mode(col_names, &[], request.csv_quote_mode);
+            let header = format_csv_with_options(
+                col_names,
+                &[],
+                request.csv_quote_mode,
+                csv_null_literal(&request.null_literal),
+            );
             let header = header.strip_suffix('\n').unwrap_or(&header);
             file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
             let mut row_buffer = String::new();
@@ -1147,7 +1158,14 @@ async fn try_export_native_table_stream(
                         column_types,
                         request.date_time_format.as_deref(),
                     );
-                    write_table_text_row(&mut file, true, formatted.as_ref(), &mut row_buffer, request.csv_quote_mode)?;
+                    write_table_text_row(
+                        &mut file,
+                        true,
+                        formatted.as_ref(),
+                        &mut row_buffer,
+                        request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
+                    )?;
                     rows_exported += 1;
                     if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
@@ -1197,6 +1215,7 @@ async fn try_export_native_table_stream(
                         formatted.as_ref(),
                         &mut row_buffer,
                         request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
                     )?;
                     rows_exported += 1;
                     if rows_exported.is_multiple_of(progress_interval) {
@@ -1780,8 +1799,12 @@ async fn export_table_data_core_inner(
 
                 if is_first_batch {
                     // First batch: write header + rows via format_csv
-                    let csv_content =
-                        format_csv_with_quote_mode(&col_names, formatted_rows.as_ref(), request.csv_quote_mode);
+                    let csv_content = format_csv_with_options(
+                        &col_names,
+                        formatted_rows.as_ref(),
+                        request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
+                    );
                     file.write_all(csv_content.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
                     is_first_batch = false;
                 } else {
@@ -1792,6 +1815,7 @@ async fn export_table_data_core_inner(
                         formatted_rows.as_ref(),
                         &mut text_buffer,
                         request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
                     )?;
                 }
 
@@ -1880,6 +1904,7 @@ async fn export_table_data_core_inner(
                         formatted_rows.as_ref(),
                         &mut text_buffer,
                         request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
                     )?;
                     is_first_batch = false;
                 } else {
@@ -1889,6 +1914,7 @@ async fn export_table_data_core_inner(
                         formatted_rows.as_ref(),
                         &mut text_buffer,
                         request.csv_quote_mode,
+                        csv_null_literal(&request.null_literal),
                     )?;
                 }
 
@@ -2476,6 +2502,7 @@ mod tests {
             row_limit,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -2631,6 +2658,7 @@ mod tests {
             insert_mode: Default::default(),
             insert_dialect: Default::default(),
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             exclude_primary_keys: false,
             columns: None,
             selected_columns: None,
@@ -2730,7 +2758,7 @@ mod tests {
         let mut output = Vec::new();
         let mut buffer = String::new();
 
-        write_table_text_row(&mut output, true, &row, &mut buffer, CsvQuoteMode::All).expect("write csv row");
+        write_table_text_row(&mut output, true, &row, &mut buffer, CsvQuoteMode::All, None).expect("write csv row");
         assert_eq!(String::from_utf8(output).expect("utf8 csv"), "\n\"\",\"\",\"line\n\"\"two\"\"\"");
     }
 
@@ -2813,6 +2841,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -2876,6 +2905,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -2917,6 +2947,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -2953,6 +2984,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -2997,6 +3029,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -3053,6 +3086,7 @@ mod tests {
             row_limit: Some(1000),
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -3103,6 +3137,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -3181,6 +3216,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -3241,6 +3277,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
@@ -3303,6 +3340,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,

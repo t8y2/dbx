@@ -769,7 +769,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
     loadingPreview.value = false;
     return;
   }
-  emptyStringAsNull.value = formats.length && formats.every((format) => format === formats[0]) ? defaultTableImportEmptyStringAsNull(formats[0]!) : true;
+  emptyStringAsNull.value = formats.length && formats.every((format) => format === formats[0]) ? defaultTableImportEmptyStringAsNull(formats[0]!) : defaultTableImportEmptyStringAsNull(formats[0] ?? "csv");
   try {
     for (const [index, source] of sources.entries()) {
       const format = formats[index]!;
@@ -1471,10 +1471,13 @@ watch(rawProgressPercent, (percent) => {
               <input v-model="trimValues" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
               {{ t("tableImport.trimValues") }}
             </label>
-            <label class="flex items-center gap-2 text-xs">
-              <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
-              {{ t("tableImport.emptyStringAsNull") }}
-            </label>
+            <div class="space-y-1">
+              <label class="flex items-center gap-2 text-xs">
+                <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
+                {{ t("tableImport.emptyStringAsNull") }}
+              </label>
+              <p class="text-[11px] text-muted-foreground">{{ t("tableImport.emptyStringAsNullHint") }}</p>
+            </div>
           </div>
 
           <div v-else-if="sourceFormat === 'sql'" class="grid grid-cols-5 gap-3 rounded-md border p-3">

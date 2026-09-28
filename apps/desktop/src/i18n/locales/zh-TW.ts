@@ -5557,6 +5557,7 @@ export default withEnglishFallback({
     hasHeader: "首列為標頭",
     trimValues: "裁剪空白",
     emptyStringAsNull: "空字串作為 NULL",
+    emptyStringAsNullHint: "勾選後空欄位一律以 NULL 匯入；不勾選則空欄位保留為空字串。",
     conflictPolicy: "主鍵衝突時",
     conflictError: "停止並回報錯誤",
     skipDuplicateRows: "略過重複列",

@@ -5981,6 +5981,7 @@ export default withEnglishFallback({
     lastDataRow: "마지막 데이터 행 (끝까지면 0)",
     trimValues: "값 양끝 공백 제거",
     emptyStringAsNull: "빈 문자열을 NULL로",
+    emptyStringAsNullHint: "체크하면 빈 필드를 NULL로 가져오고, 해제하면 빈 문자열로 유지합니다.",
     jsonShape: "JSON 행",
     jsonShapeAuto: "자동 감지",
     jsonShapeObjects: "객체",

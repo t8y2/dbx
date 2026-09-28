@@ -6267,6 +6267,7 @@ export default withEnglishFallback({
     hasHeader: "First row is header",
     trimValues: "Trim values",
     emptyStringAsNull: "Empty string as NULL",
+    emptyStringAsNullHint: "チェックすると空フィールドを NULL として取り込みます。チェックしない場合は空文字列のまま取り込みます。",
     jsonShape: "JSON rows",
     jsonShapeAuto: "Auto-detect",
     jsonShapeObjects: "Objects",

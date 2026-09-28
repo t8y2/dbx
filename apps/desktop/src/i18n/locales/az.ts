@@ -6291,6 +6291,7 @@ export default withEnglishFallback({
     lastDataRow: "Son məlumat sətri (sona qədər üçün 0)",
     trimValues: "Dəyərlərin əvvəlindəki və sonundakı boşluqları sil",
     emptyStringAsNull: "Boş sətri NULL kimi qəbul et",
+    emptyStringAsNullHint: "İşarələndikdə boş sahələr NULL kimi idxal olunur; əks halda boş sətir kimi qalır.",
     jsonShape: "JSON sətirləri",
     jsonShapeAuto: "Avtomatik müəyyən et",
     jsonShapeObjects: "Obyektlər",

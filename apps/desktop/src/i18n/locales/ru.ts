@@ -7418,6 +7418,7 @@ export default withEnglishFallback({
     lastDataRow: "Последняя строка данных (0 — до конца)",
     trimValues: "Обрезать значения",
     emptyStringAsNull: "Пустая строка как NULL",
+    emptyStringAsNullHint: "Если включено, пустые поля импортируются как NULL; иначе остаются пустыми строками.",
     jsonShape: "Строки JSON",
     jsonShapeAuto: "Автоопределение",
     jsonShapeObjects: "Объекты",

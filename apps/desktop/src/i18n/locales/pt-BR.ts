@@ -6250,6 +6250,7 @@ export default withEnglishFallback({
     hasHeader: "First row is header",
     trimValues: "Trim values",
     emptyStringAsNull: "Empty string as NULL",
+    emptyStringAsNullHint: "Quando marcado, campos vazios são importados como NULL; caso contrário, permanecem como strings vazias.",
     jsonShape: "JSON rows",
     jsonShapeAuto: "Auto-detect",
     jsonShapeObjects: "Objects",

@@ -6899,6 +6899,7 @@ export default {
     lastDataRow: "Last data row (0 for end)",
     trimValues: "Trim values",
     emptyStringAsNull: "Empty string as NULL",
+    emptyStringAsNullHint: "When checked, empty fields import as NULL; otherwise they stay as empty strings.",
     conflictPolicy: "On primary-key conflict",
     conflictError: "Stop with an error",
     skipDuplicateRows: "Skip duplicate rows",

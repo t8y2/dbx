@@ -6866,6 +6866,7 @@ export default withEnglishFallback({
     lastDataRow: "最后数据行（0 表示末尾）",
     trimValues: "裁剪空白",
     emptyStringAsNull: "空字符串作为 NULL",
+    emptyStringAsNullHint: "勾选后空字段一律按 NULL 导入；不勾选则空字段保留为空字符串。",
     conflictPolicy: "主键冲突时",
     conflictError: "停止并报错",
     skipDuplicateRows: "跳过重复行",

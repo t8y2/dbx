@@ -438,7 +438,7 @@
         "id": { "$ref": "#/$defs/identifier" },
         "description": { "type": "string" },
         "ai_tools": { "type": "boolean", "default": true, "description": "Set false to keep the tools off the built-in AI agent." },
-        "external_tools": { "type": "boolean", "default": true, "description": "Set false to keep the tools off the external dbx MCP server." }
+        "external_tools": { "type": "boolean", "default": false, "description": "Set true to expose the tools on the external dbx MCP server." }
       }
     },
     "menuItem": {

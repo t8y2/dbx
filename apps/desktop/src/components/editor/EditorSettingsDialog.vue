@@ -6056,7 +6056,7 @@ onUnmounted(() => {
           </button>
         </nav>
 
-        <div class="min-w-0 flex-1 overflow-visible pl-1 pr-0 flex flex-col">
+        <div class="min-w-0 min-h-0 flex-1 overflow-visible pl-1 pr-0 flex flex-col">
           <div class="shrink-0 px-2 pt-1 pb-3">
             <div ref="settingsSearchInputContainerRef" class="relative">
               <Search class="pointer-events-none absolute top-1/2 left-4 z-10 h-4 w-4 -translate-y-1/2 text-muted-foreground" />

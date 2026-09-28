@@ -136,7 +136,14 @@ fn push_tsv_escaped(out: &mut String, value: &str) {
     }
 }
 
-fn push_tsv_value(out: &mut String, value: &Value) {
+fn push_tsv_value(out: &mut String, value: &Value, null_literal: Option<&str>) {
+    if value.is_null() {
+        // 与 CSV 一致：NULL 写字面量、空字符串写空字段，导出→导入才能无损往返。
+        if let Some(literal) = null_literal {
+            push_tsv_escaped(out, literal);
+            return;
+        }
+    }
     match value {
         Value::Null => {}
         Value::String(v) => push_tsv_escaped(out, v),
@@ -148,12 +155,12 @@ fn push_tsv_value(out: &mut String, value: &Value) {
     }
 }
 
-pub fn push_tsv_row(out: &mut String, row: &[Value]) {
+pub fn push_tsv_row(out: &mut String, row: &[Value], null_literal: Option<&str>) {
     for (cell_index, cell) in row.iter().enumerate() {
         if cell_index > 0 {
             out.push('\t');
         }
-        push_tsv_value(out, cell);
+        push_tsv_value(out, cell, null_literal);
     }
 }
 
@@ -186,19 +193,19 @@ pub fn escape_tsv(value: &str) -> String {
     out
 }
 
-fn push_tsv_rows(out: &mut String, rows: &[Vec<Value>]) {
+fn push_tsv_rows(out: &mut String, rows: &[Vec<Value>], null_literal: Option<&str>) {
     for (row_index, row) in rows.iter().enumerate() {
         if row_index > 0 {
             out.push('\n');
         }
-        push_tsv_row(out, row);
+        push_tsv_row(out, row, null_literal);
     }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn format_tsv_rows(rows: &[Vec<Value>]) -> String {
     let mut out = String::with_capacity(estimated_rows_capacity(rows));
-    push_tsv_rows(&mut out, rows);
+    push_tsv_rows(&mut out, rows, None);
     out
 }
 
@@ -213,7 +220,7 @@ pub fn format_tsv(columns: &[String], rows: &[Vec<Value>]) -> String {
         push_tsv_escaped(&mut out, column);
     }
     out.push('\n');
-    push_tsv_rows(&mut out, rows);
+    push_tsv_rows(&mut out, rows, None);
     out
 }
 
@@ -519,6 +526,21 @@ mod tests {
     }
 
     #[test]
+    fn tsv_null_literal_separates_null_from_an_empty_string() {
+        let row = vec![Value::Null, json!("")];
+
+        // 未配置字面量（旧行为）：NULL 与空串都写空字段，二者在文件里无法区分
+        let mut out = String::new();
+        super::push_tsv_row(&mut out, &row, None);
+        assert_eq!(out, "\t");
+
+        // 配置字面量后：NULL 写成字面量，空字符串仍是空字段
+        let mut out = String::new();
+        super::push_tsv_row(&mut out, &row, Some(DEFAULT_CSV_NULL_LITERAL));
+        assert_eq!(out, "\\N\t");
+    }
+
+    #[test]
     fn null_literal_stops_null_from_impersonating_an_empty_string() {
         let columns = vec!["a".to_string(), "b".to_string()];
         let row = vec![Value::Null, json!("")];
@@ -606,7 +628,7 @@ mod tests {
         assert_eq!(table_csv, "\"\",\"NULL\",\"line\n\"\"two\"\"\",\"42\"");
 
         let mut tsv = String::new();
-        super::push_tsv_row(&mut tsv, &row);
+        super::push_tsv_row(&mut tsv, &row, None);
         assert_eq!(tsv, super::format_tsv_rows(&[row]));
     }
 

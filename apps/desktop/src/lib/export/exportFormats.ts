@@ -20,15 +20,16 @@ export function formatCsv(columns: string[], rows: ExportCellValue[][], quoteMod
 }
 
 // Tab-separated values with a header row, mirroring Navicat's "Text File (*.txt)"
-// export: fields are joined by a tab and NULL becomes empty. A field is wrapped
-// in double quotes only when it contains a tab or a line break - the characters
-// that would otherwise corrupt the TSV row/column shape. A field that merely
-// contains a double quote is emitted verbatim: TSV is parsed by splitting on the
-// tab alone (there is no quote state machine on paste-back), so quoting such a
-// value would corrupt it (e.g. a value of `"abc"` must not become `"""abc"""`).
-export function formatTsv(columns: string[], rows: ExportCellValue[][]): string {
+// export: fields are joined by a tab and NULL becomes the null literal. A field
+// is wrapped in double quotes only when it contains a tab or a line break - the
+// characters that would otherwise corrupt the TSV row/column shape. A field that
+// merely contains a double quote is emitted verbatim: TSV is parsed by splitting
+// on the tab alone (there is no quote state machine on paste-back), so quoting
+// such a value would corrupt it (e.g. a value of `"abc"` must not become `"""abc"""`).
+export function formatTsv(columns: string[], rows: ExportCellValue[][], nullLiteral: string = DEFAULT_CSV_NULL_LITERAL): string {
   const esc = (value: ExportCellValue) => {
-    const text = value === null ? "" : String(value);
+    // 与 CSV 一致：NULL 写字面量、空字符串写空字段，导出→导入才能无损往返
+    const text = value === null ? nullLiteral || "" : String(value);
     if (text.includes("\t") || text.includes("\n") || text.includes("\r")) {
       return `"${text.replace(/"/g, '""')}"`;
     }

@@ -9438,6 +9438,34 @@ mod tests {
     }
 
     #[test]
+    fn tsv_export_with_null_literal_round_trips_through_the_importer() {
+        // 导出端（push_tsv_row + 默认字面量）写出的 TSV，按 TSV 规则导入：
+        // NULL 仍是 NULL、空字符串仍是空字符串
+        let mut text = String::from("id\tnote\n");
+        dbx_formats::csv_export::push_tsv_row(
+            &mut text,
+            &vec![serde_json::json!(1), serde_json::Value::Null],
+            Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL),
+        );
+        text.push('\n');
+        dbx_formats::csv_export::push_tsv_row(
+            &mut text,
+            &vec![serde_json::json!(2), serde_json::json!("")],
+            Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL),
+        );
+
+        let parsed = parse_delimited_bytes_with_options(
+            text.as_bytes(),
+            TableImportSourceFormat::Tsv,
+            &TableImportParseOptions::default(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(parsed.rows[0][1], serde_json::Value::Null);
+        assert_eq!(parsed.rows[1][1], serde_json::json!(""));
+    }
+
+    #[test]
     fn csv_null_literal_can_be_replaced_or_disabled() {
         let custom =
             TableImportParseOptions { null_literal: Some("(null)".to_string()), ..TableImportParseOptions::default() };

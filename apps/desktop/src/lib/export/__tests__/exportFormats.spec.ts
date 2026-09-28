@@ -67,8 +67,20 @@ describe("formatTsv", () => {
     expect(output).toBe('v\n"a\tb"\n"c\nd"');
   });
 
-  it("renders NULL as an empty field without adding quotes", () => {
-    const output = formatTsv(["id", "name"], [[1, null]]);
+  it("renders NULL as the null literal and an empty string as an empty field", () => {
+    const output = formatTsv(
+      ["id", "name"],
+      [
+        [1, null],
+        [2, ""],
+      ],
+    );
+
+    expect(output).toBe("id\tname\n1\t\\N\n2\t");
+  });
+
+  it("falls back to an empty NULL field when the literal is disabled", () => {
+    const output = formatTsv(["id", "name"], [[1, null]], "");
 
     expect(output).toBe("id\tname\n1\t");
   });

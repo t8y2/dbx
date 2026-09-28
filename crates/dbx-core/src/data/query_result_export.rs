@@ -574,7 +574,7 @@ fn write_text_export_row<W: Write>(
     if format == "csv" {
         push_query_result_csv_row_with_options(buffer, row, csv_quote_mode, null_literal);
     } else {
-        push_tsv_row(buffer, row);
+        push_tsv_row(buffer, row, null_literal);
     }
     file.write_all(buffer.as_bytes()).map_err(|error| format!("Failed to write export rows: {error}"))
 }
@@ -593,7 +593,7 @@ fn write_text_export_rows<W: Write>(
         if format == "csv" {
             push_query_result_csv_row_with_options(buffer, row, csv_quote_mode, null_literal);
         } else {
-            push_tsv_row(buffer, row);
+            push_tsv_row(buffer, row, null_literal);
         }
     }
     file.write_all(buffer.as_bytes()).map_err(|error| format!("Failed to write export rows: {error}"))

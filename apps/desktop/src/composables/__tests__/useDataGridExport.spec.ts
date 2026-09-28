@@ -781,8 +781,8 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).toHaveBeenCalledWith("2020-12-02 15:18:29");
   });
 
-  it("copies all rows with empty fields for NULL cells", async () => {
-    const text = "id\tname\n1\t\n2\tAda";
+  it("copies all rows with the null literal for NULL cells", async () => {
+    const text = "id\tname\n1\t\\N\n2\tAda";
     const state = createExportState(editableTable, ["id", "name"], undefined, undefined, undefined, [
       [1, null],
       [2, "Ada"],
@@ -791,6 +791,7 @@ describe("useDataGridExport prepared row statements", () => {
     await state.copyAll();
 
     expect(copyToClipboard).toHaveBeenCalledWith(text);
+    // 内部剪贴板按文本全等匹配保留逻辑矩阵：粘贴回网格时 NULL 语义无损还原
     expect(parseDataGridClipboard(text)).toEqual([
       ["id", "name"],
       ["1", null],
@@ -1673,7 +1674,7 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     await state.copyAll();
-    expect(copyToClipboard).toHaveBeenCalledWith("_id\tnullable\n1\t");
+    expect(copyToClipboard).toHaveBeenCalledWith("_id\tnullable\n1\t\\N");
 
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "", mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 1, columnCount: 1 });
     await expect(state.copyWithExtractor("tsv")).resolves.toBe(true);

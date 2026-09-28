@@ -7650,7 +7650,7 @@ export default withEnglishFallback({
     ddlOpenModeTab: "新しいタブ",
     doubleClickStringSelectionMode: "文字列のダブルクリック",
     doubleClickStringSelectionModeDescription: "SQL エディターで文字列リテラルをダブルクリックしたとき、文字列全体を選択するか、カーソル位置の単語だけを選択するかを選びます",
-    doubleClickStringSelectionModeContent: "文字列全体を選択（既定）",
+    doubleClickStringSelectionModeContent: "文字列全体を選択",
     doubleClickStringSelectionModeWord: "単語だけを選択",
     vimMode: "Vimモード",
     vimModeDescription: "SQLエディタでVim形式のモーダル編集を使用します",

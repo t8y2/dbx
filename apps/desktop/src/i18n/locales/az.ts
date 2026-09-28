@@ -7696,7 +7696,7 @@ export default withEnglishFallback({
     ddlOpenModeTab: "Yeni vərəq",
     doubleClickStringSelectionMode: "Sətir daxilində ikiqat klik",
     doubleClickStringSelectionModeDescription: "Sətir literalı daxilində ikiqat klik edildikdə bütün dəyərin, yoxsa yalnız kursorun altındakı sözün seçiləcəyini təyin edir",
-    doubleClickStringSelectionModeContent: "Bütün dəyəri seç (standart)",
+    doubleClickStringSelectionModeContent: "Bütün dəyəri seç",
     doubleClickStringSelectionModeWord: "Yalnız sözü seç",
     vimMode: "Vim rejimi",
     vimModeDescription: "SQL redaktorunda Vim üslublu modal redaktədən istifadə et",

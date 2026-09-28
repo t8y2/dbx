@@ -8354,7 +8354,7 @@ export default withEnglishFallback({
     ddlOpenModeTab: "新标签",
     doubleClickStringSelectionMode: "双击字符串时选中",
     doubleClickStringSelectionModeDescription: "在 SQL 编辑器中双击字符串时，选择整段字符串内容，还是只选择双击处的单词",
-    doubleClickStringSelectionModeContent: "选中整段内容（默认）",
+    doubleClickStringSelectionModeContent: "选中整段内容",
     doubleClickStringSelectionModeWord: "只选中单词",
     vimMode: "Vim 模式",
     vimModeDescription: "在 SQL 编辑器中使用 Vim 风格的模态编辑",

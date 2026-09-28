@@ -6621,7 +6621,9 @@ onUnmounted(() => {
                     <p class="text-xs text-muted-foreground">{{ t("settings.doubleClickStringSelectionModeDescription") }}</p>
                   </div>
                   <Select :model-value="editDoubleClickStringSelectionMode" @update:model-value="setDoubleClickStringSelectionMode">
-                    <SelectTrigger id="editor-double-click-string" class="h-8 w-36 shrink-0">
+                    <!-- The option labels are long in several languages; let the trigger hug its value
+                         (bounded) instead of clipping it at a fixed width. -->
+                    <SelectTrigger id="editor-double-click-string" class="h-8 min-w-36 max-w-[13rem] shrink-0">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>

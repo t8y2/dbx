@@ -8894,7 +8894,7 @@ export default withEnglishFallback({
     autoCloseBracketsDescription: "Автоматически вставлять закрывающие скобки и кавычки при вводе открывающих",
     doubleClickStringSelectionMode: "Двойной щелчок внутри строки",
     doubleClickStringSelectionModeDescription: "Выберите, что выделять двойным щелчком внутри строкового литерала: всё значение целиком или только слово под курсором",
-    doubleClickStringSelectionModeContent: "Выделять всё значение (по умолчанию)",
+    doubleClickStringSelectionModeContent: "Выделять всё значение",
     doubleClickStringSelectionModeWord: "Выделять только слово",
     sqlCompletionSection: "Автодополнение SQL",
     insertSpaceAfterCompletion: "Вставлять пробел после автодополнения",

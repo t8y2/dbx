@@ -7635,7 +7635,7 @@ export default withEnglishFallback({
     ddlOpenModeTab: "Nova aba",
     doubleClickStringSelectionMode: "Duplo clique dentro de uma string",
     doubleClickStringSelectionModeDescription: "Escolha se o duplo clique dentro de um literal de string seleciona o valor inteiro ou apenas a palavra sob o cursor",
-    doubleClickStringSelectionModeContent: "Selecionar o valor inteiro (padrão)",
+    doubleClickStringSelectionModeContent: "Selecionar o valor inteiro",
     doubleClickStringSelectionModeWord: "Selecionar apenas a palavra",
     vimMode: "Modo Vim",
     vimModeDescription: "Usar edição modal no estilo Vim no editor SQL",

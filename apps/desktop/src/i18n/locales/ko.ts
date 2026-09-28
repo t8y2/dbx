@@ -7424,7 +7424,7 @@ export default withEnglishFallback({
     ddlOpenModeTab: "새 탭",
     doubleClickStringSelectionMode: "문자열 더블 클릭",
     doubleClickStringSelectionModeDescription: "SQL 편집기에서 문자열 리터럴을 더블 클릭했을 때 문자열 전체를 선택할지, 커서 위치의 단어만 선택할지 정합니다",
-    doubleClickStringSelectionModeContent: "전체 문자열 선택(기본)",
+    doubleClickStringSelectionModeContent: "전체 문자열 선택",
     doubleClickStringSelectionModeWord: "단어만 선택",
     vimMode: "Vim 모드",
     vimModeDescription: "SQL 편집기에서 Vim 스타일의 모달 편집을 사용합니다",

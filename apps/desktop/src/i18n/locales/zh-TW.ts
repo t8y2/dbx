@@ -6950,7 +6950,7 @@ export default withEnglishFallback({
     ddlOpenModeTab: "新標籤",
     doubleClickStringSelectionMode: "雙擊字串時選取",
     doubleClickStringSelectionModeDescription: "在 SQL 編輯器中雙擊字串時，要選取整段字串內容，還是只選取雙擊處的單詞",
-    doubleClickStringSelectionModeContent: "選取整段內容（預設）",
+    doubleClickStringSelectionModeContent: "選取整段內容",
     doubleClickStringSelectionModeWord: "只選取單詞",
     vimMode: "Vim 模式",
     vimModeDescription: "在 SQL 編輯器中使用 Vim 風格的模態編輯",

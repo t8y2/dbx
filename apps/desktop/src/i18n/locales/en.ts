@@ -8391,7 +8391,7 @@ export default {
     ddlOpenModeTab: "New tab",
     doubleClickStringSelectionMode: "Double-click inside a string",
     doubleClickStringSelectionModeDescription: "Choose whether double-clicking inside a string literal selects the whole string value or only the word under the cursor",
-    doubleClickStringSelectionModeContent: "Select whole value (default)",
+    doubleClickStringSelectionModeContent: "Select whole value",
     doubleClickStringSelectionModeWord: "Select single word",
     vimMode: "Vim mode",
     vimModeDescription: "Use Vim-style modal editing in the SQL editor",

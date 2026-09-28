@@ -589,6 +589,34 @@ test("every suggested option key parses on the method that offers it", () => {
   }
 });
 
+test("offers nothing rather than top-level snippets inside an unmodelled argument", () => {
+  // `db.collection.find` is not something that can be typed inside these parentheses, so the
+  // top-level snippets are noise there; the engine stays quiet until the argument is modelled.
+  for (const text of [
+    "db.users.find({}).limit(",
+    "db.users.find({}).skip(",
+    "db.users.find({}).explain(",
+    "db.users.find({}).collation({ ",
+    "db.users.drop(",
+    "db.users.renameCollection(",
+    'db.users.dropIndex("',
+    "db.users.estimatedDocumentCount(",
+    "db.runCommand({ ",
+    'db.createCollection("x", { ',
+    "use ",
+    "use ord",
+  ]) {
+    assert.deepEqual(labels(text, { fields, collections }), [], text);
+  }
+
+  // A command still starts with the top-level snippets, including after one has finished.
+  assert.ok(labels("").includes("db.collection.find"));
+  assert.ok(labels("db.users.find({});\n").includes("db.collection.find"));
+  assert.ok(labels("db.users.find({})\n").includes("db.collection.find"));
+  // A parenthesis inside a string does not count as an open argument list.
+  assert.ok(labels('db.users.find({ name: "(" });\n').includes("db.collection.find"));
+});
+
 test("completes commands addressed to another database through getSiblingDB", () => {
   // The parser accepts `db.getSiblingDB("x").coll.find(…)`, so the editor has to complete it the
   // same way it completes `db.coll.find(…)` — including resolving the collection, which is what

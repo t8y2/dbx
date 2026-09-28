@@ -303,10 +303,13 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   }
 
   const call = findInnermostMongoCall(beforeCursor);
-  if (!call) return at("root");
+  // Top-level snippets belong at the start of a command. Inside an argument list — of a method
+  // this engine does not model (`limit(`, `drop(`, `dropIndex("`, `runCommand({`, …) or after a
+  // `use` — they are noise: `db.collection.find` is not something you can type there.
+  if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) ? at("none") : at("root");
 
   const scan = scanMongoCallArguments(text, call.openParenIndex + 1, safeCursor);
-  if (!scan) return at("root");
+  if (!scan) return isInsideCallArguments(beforeCursor) ? at("none") : at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
   return {
@@ -1254,6 +1257,27 @@ function skipMongoStringOrComment(text: string, i: number, end: number): number 
 }
 
 /** Blank out string/comment CONTENT (preserving length, so offsets stay valid) before pattern matching. */
+/**
+ * Whether the cursor sits inside an unclosed `(` of the current command. Literals and comments
+ * are masked first so a parenthesis inside a string does not count, and the depth resets at `;`
+ * because an unclosed call cannot span two commands.
+ */
+function isInsideCallArguments(beforeCursor: string): boolean {
+  const masked = maskMongoLiterals(beforeCursor);
+  let depth = 0;
+  for (const char of masked) {
+    if (char === "(") depth++;
+    else if (char === ")") depth = Math.max(0, depth - 1);
+    else if (char === ";") depth = 0;
+  }
+  return depth > 0;
+}
+
+/** `use <database>` takes a database name, which this engine has no list of, so it stays quiet. */
+function isAfterUseKeyword(beforeCursor: string): boolean {
+  return /(?:^|[\s;])use\s+[\w$-]*$/.test(maskMongoLiterals(beforeCursor));
+}
+
 function maskMongoLiterals(text: string): string {
   const chars = [...text];
   let i = 0;

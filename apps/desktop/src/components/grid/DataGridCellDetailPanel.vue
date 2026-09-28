@@ -54,6 +54,7 @@ const emit = defineEmits<{
   copyValue: [];
   commit: [];
   cancel: [];
+  save: [];
   setNull: [];
   copyColumnName: [];
   copySqlCondition: [];
@@ -183,7 +184,7 @@ defineExpose({ openSearch });
         </div>
         <template v-if="editing"
           ><div class="dbx-data-grid-value-font min-h-0 min-w-0 flex-1" :style="editorStyle">
-            <TemporalCellEditor v-if="temporalEditorConfig" v-model="detailEditValue" :kind="temporalEditorConfig.kind" :fraction-precision="temporalEditorConfig.fractionPrecision" variant="inline" :commit-on-close="false" @cancel="emit('cancel')" @commit="emit('commit')" />
+            <TemporalCellEditor v-if="temporalEditorConfig" v-model="detailEditValue" :kind="temporalEditorConfig.kind" :fraction-precision="temporalEditorConfig.fractionPrecision" variant="inline" :commit-on-close="false" @cancel="emit('cancel')" @commit="emit('commit')" @save="emit('save')" />
             <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="min-h-0 h-full w-full rounded border overflow-hidden" />
           </div>
           <div v-if="!panelIsBottom" class="flex shrink-0 gap-1 py-0.5">

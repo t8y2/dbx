@@ -9371,6 +9371,14 @@ async function saveGridChangesFromShortcut() {
   return true;
 }
 
+/// datetime/date/time 单元格编辑器会吃掉自身按键，保存快捷键由它转发成 save 事件后在这里补上保存（#10515）。
+async function onTemporalCellEditorSave() {
+  await nextTick();
+  if (await saveGridChangesFromShortcut()) {
+    gridRef.value?.focus({ preventScroll: true });
+  }
+}
+
 async function onCellEditKeydown(event: KeyboardEvent) {
   if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
     event.preventDefault();
@@ -12865,6 +12873,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           cell-layout="transpose"
                           @cancel="cancelEdit"
                           @commit="commitGridEdit"
+                          @save="onTemporalCellEditorSave"
                         />
                         <EnumCellEditor
                           v-else-if="isBooleanGridCell(displayItems[cell.recordIndex], cell.valueIndex)"
@@ -13557,6 +13566,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           :normalize-value="(value) => normalizeTemporalCellEditorValue(value, canvasEditingCell!.actualColIdx)"
                           @cancel="cancelEdit"
                           @commit="commitGridEdit"
+                          @save="onTemporalCellEditorSave"
                         />
                         <EnumCellEditor
                           v-else-if="isBooleanGridCell(getRowItem(canvasEditingCell.rowId), canvasEditingCell.actualColIdx)"
@@ -13777,6 +13787,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               :normalize-value="(value) => normalizeTemporalCellEditorValue(value, col.actualColIdx)"
                               @cancel="cancelEdit"
                               @commit="commitGridEdit"
+                              @save="onTemporalCellEditorSave"
                             />
                             <EnumCellEditor
                               v-else-if="isBooleanGridCell(item, col.actualColIdx)"
@@ -14124,6 +14135,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 @copy-value="copyDetailCurrentValue"
                 @commit="commitDetailEdit"
                 @cancel="cancelDetailEdit"
+                @save="onTemporalCellEditorSave"
                 @set-null="setDetailNull"
                 @copy-column-name="copyDetailColumnName"
                 @copy-sql-condition="copyDetailSqlCondition"
@@ -14141,6 +14153,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :commit-on-close="false"
                     @cancel="cancelValueEditorEdit"
                     @commit="commitValueEditorEdit"
+                    @save="onTemporalCellEditorSave"
                   />
                   <div v-else ref="valueEditorContainer" data-cell-detail-editor-root class="min-h-0 min-w-0 flex-1 w-full rounded border overflow-auto" />
                 </div>

@@ -696,6 +696,9 @@ const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
 const DATA_GRID_ROW_NUMBER_MODES = ["view", "source"] as const;
 export type DataGridRowNumberMode = (typeof DATA_GRID_ROW_NUMBER_MODES)[number];
+/** How a double click inside a SQL string literal picks text: the whole string value, or just one word. */
+export const DOUBLE_CLICK_STRING_SELECTION_MODES = ["content", "word"] as const;
+export type DoubleClickStringSelectionMode = (typeof DOUBLE_CLICK_STRING_SELECTION_MODES)[number];
 export type DataGridFilterEditorView = "quick" | "conditions" | "text";
 export type DataGridToolbarLayout = "single" | "split";
 const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
@@ -839,6 +842,8 @@ export interface EditorSettings {
   refreshDdlOnOpen: boolean;
   excludeDdlStorage: boolean;
   vimModeEnabled: boolean;
+  /** Double click inside a string literal selects the whole value ("content") or a single word ("word"). */
+  doubleClickStringSelectionMode: DoubleClickStringSelectionMode;
   autoCloseBrackets: boolean;
   sqlSemanticDiagnosticsMode: SqlSemanticDiagnosticsMode;
   sqlSemanticDiagnosticsEnabled: boolean;
@@ -1122,6 +1127,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   refreshDdlOnOpen: false,
   excludeDdlStorage: true,
   vimModeEnabled: false,
+  doubleClickStringSelectionMode: "content",
   autoCloseBrackets: true,
   sqlSemanticDiagnosticsMode: "auto",
   sqlSemanticDiagnosticsEnabled: SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED,
@@ -1347,6 +1353,10 @@ function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
 
 function normalizeDataGridRowNumberMode(value: unknown): DataGridRowNumberMode {
   return DATA_GRID_ROW_NUMBER_MODES.includes(value as DataGridRowNumberMode) ? (value as DataGridRowNumberMode) : DEFAULT_EDITOR_SETTINGS.dataGridRowNumberMode;
+}
+
+function normalizeDoubleClickStringSelectionMode(value: unknown): DoubleClickStringSelectionMode {
+  return DOUBLE_CLICK_STRING_SELECTION_MODES.includes(value as DoubleClickStringSelectionMode) ? (value as DoubleClickStringSelectionMode) : DEFAULT_EDITOR_SETTINGS.doubleClickStringSelectionMode;
 }
 
 function normalizeDataGridFilterEditorView(value: unknown): DataGridFilterEditorView {
@@ -1679,6 +1689,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     ddlOpenMode: settings.ddlOpenMode === "tab" ? "tab" : DEFAULT_EDITOR_SETTINGS.ddlOpenMode,
     refreshDdlOnOpen: typeof settings.refreshDdlOnOpen === "boolean" ? settings.refreshDdlOnOpen : DEFAULT_EDITOR_SETTINGS.refreshDdlOnOpen,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
+    doubleClickStringSelectionMode: normalizeDoubleClickStringSelectionMode(settings.doubleClickStringSelectionMode),
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
     sqlSemanticDiagnosticsMode,
     sqlSemanticDiagnosticsEnabled: sqlSemanticDiagnosticsEnabledForMode(sqlSemanticDiagnosticsMode),
@@ -2507,6 +2518,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.ddlOpenMode !== undefined) editorSettings.value.ddlOpenMode = partial.ddlOpenMode === "tab" ? "tab" : "dialog";
     if (partial.refreshDdlOnOpen !== undefined) editorSettings.value.refreshDdlOnOpen = partial.refreshDdlOnOpen === true;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
+    if (partial.doubleClickStringSelectionMode !== undefined) editorSettings.value.doubleClickStringSelectionMode = normalizeDoubleClickStringSelectionMode(partial.doubleClickStringSelectionMode);
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
     if (partial.sqlSemanticDiagnosticsMode !== undefined || partial.sqlSemanticDiagnosticsEnabled !== undefined) {
       const nextMode = normalizeSqlSemanticDiagnosticsMode(partial.sqlSemanticDiagnosticsMode, partial.sqlSemanticDiagnosticsEnabled);

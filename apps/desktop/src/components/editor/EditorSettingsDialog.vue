@@ -641,6 +641,7 @@ const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editShowWhitespace = ref(settingsStore.editorSettings.showWhitespace);
 const editDdlOpenMode = ref<EditorSettings["ddlOpenMode"]>(settingsStore.editorSettings.ddlOpenMode);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
+const editDoubleClickStringSelectionMode = ref<EditorSettings["doubleClickStringSelectionMode"]>(settingsStore.editorSettings.doubleClickStringSelectionMode);
 const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
 const editSqlSemanticDiagnosticsMode = ref<SqlSemanticDiagnosticsMode>(settingsStore.editorSettings.sqlSemanticDiagnosticsMode);
 const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
@@ -1000,6 +1001,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showWhitespace: editShowWhitespace.value,
     ddlOpenMode: editDdlOpenMode.value,
     vimModeEnabled: editVimModeEnabled.value,
+    doubleClickStringSelectionMode: editDoubleClickStringSelectionMode.value,
     autoCloseBrackets: editAutoCloseBrackets.value,
     sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode.value,
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
@@ -1646,6 +1648,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowWhitespace.value = settingsStore.editorSettings.showWhitespace;
   editDdlOpenMode.value = settingsStore.editorSettings.ddlOpenMode;
   editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
+  editDoubleClickStringSelectionMode.value = settingsStore.editorSettings.doubleClickStringSelectionMode;
   editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
   editSqlSemanticDiagnosticsMode.value = settingsStore.editorSettings.sqlSemanticDiagnosticsMode;
   editSqlSemanticDiagnosticsEnabled.value = settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
@@ -1783,6 +1786,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showWhitespace: editShowWhitespace,
   ddlOpenMode: editDdlOpenMode,
   vimModeEnabled: editVimModeEnabled,
+  doubleClickStringSelectionMode: editDoubleClickStringSelectionMode,
   autoCloseBrackets: editAutoCloseBrackets,
   sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode,
   confirmDangerousSqlExecution: editConfirmDangerousSqlExecution,
@@ -2272,6 +2276,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
     editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+    editDoubleClickStringSelectionMode.value = DEFAULT_EDITOR_SETTINGS.doubleClickStringSelectionMode;
     editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
     editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
     editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
@@ -2429,6 +2434,7 @@ function resetAllDefaults() {
   editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
   editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
   editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+  editDoubleClickStringSelectionMode.value = DEFAULT_EDITOR_SETTINGS.doubleClickStringSelectionMode;
   editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
   editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
   editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
@@ -2782,6 +2788,10 @@ function setRoutineSourceOpenMode(value: "query-tab" | "dialog") {
 
 function setDdlOpenMode(value: unknown) {
   if (value === "dialog" || value === "tab") editDdlOpenMode.value = value;
+}
+
+function setDoubleClickStringSelectionMode(value: unknown) {
+  if (value === "content" || value === "word") editDoubleClickStringSelectionMode.value = value;
 }
 
 function setIconTheme(value: DesktopIconTheme) {
@@ -6496,6 +6506,22 @@ onUnmounted(() => {
                     <SelectContent>
                       <SelectItem value="dialog">{{ t("settings.ddlOpenModeDialog") }}</SelectItem>
                       <SelectItem value="tab">{{ t("settings.ddlOpenModeTab") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-double-click-string">{{ t("settings.doubleClickStringSelectionMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.doubleClickStringSelectionModeDescription") }}</p>
+                  </div>
+                  <Select :model-value="editDoubleClickStringSelectionMode" @update:model-value="setDoubleClickStringSelectionMode">
+                    <SelectTrigger id="editor-double-click-string" class="h-8 w-36 shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="content">{{ t("settings.doubleClickStringSelectionModeContent") }}</SelectItem>
+                      <SelectItem value="word">{{ t("settings.doubleClickStringSelectionModeWord") }}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

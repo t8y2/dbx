@@ -385,6 +385,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridSearchMode: "invalid" as any }).dataGridSearchMode).toBe("filter");
   });
 
+  it("defaults double-click inside a string to selecting the whole value and preserves word mode", () => {
+    expect(normalizeEditorSettings({}).doubleClickStringSelectionMode).toBe("content");
+    expect(normalizeEditorSettings({ doubleClickStringSelectionMode: "word" }).doubleClickStringSelectionMode).toBe("word");
+    expect(normalizeEditorSettings({ doubleClickStringSelectionMode: "invalid" as any }).doubleClickStringSelectionMode).toBe("content");
+  });
+
   it("defaults the data grid row number column to the view position and preserves original row numbers", () => {
     expect(normalizeEditorSettings({}).dataGridRowNumberMode).toBe("view");
     expect(normalizeEditorSettings({ dataGridRowNumberMode: "source" }).dataGridRowNumberMode).toBe("source");

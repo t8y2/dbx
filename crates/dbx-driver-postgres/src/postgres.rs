@@ -4862,6 +4862,10 @@ fn postgres_indexes_for_relations_query_tiers() -> [&'static str; 2] {
 // `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
 // expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
 // becomes invalid SQL (#9988).
+// `constraint_backed` must require the constraint to be owned by the index's own
+// relation: a FOREIGN KEY stores the referenced table's unique index in
+// `conindid`, so matching on `conindid` alone marked that standalone index as
+// constraint-backed and dropped it from generated DDL (#10484).
 fn postgres_indexes_for_relations_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
              array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
@@ -4875,7 +4879,7 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
              obj_description(i.oid, 'pg_class') AS index_comment, \
              array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
              array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options, \
-             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -4932,7 +4936,7 @@ fn postgres_indexes_for_relations_compat_sql() -> &'static str {
                ORDER BY pos.n \
              ) AS key_is_expression, \
              string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options, \
-             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -8976,6 +8980,10 @@ async fn execute_query_with_max_rows_inner(
 // `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
 // expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
 // becomes invalid SQL (#9988).
+// `constraint_backed` must require the constraint to be owned by the index's own
+// relation: a FOREIGN KEY stores the referenced table's unique index in
+// `conindid`, so matching on `conindid` alone marked that standalone index as
+// constraint-backed and dropped it from generated DDL (#10484).
 const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
              array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
@@ -8988,7 +8996,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
              array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
              array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options, \
-             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -9044,7 +9052,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
                ORDER BY pos.n \
              ) AS key_is_expression, \
              string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options, \
-             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -14152,7 +14160,12 @@ mod tests {
         ] {
             assert!(sql.contains("ix.indisunique AND ix.indisvalid"));
             assert!(sql.contains("AS constraint_backed"));
-            assert!(sql.contains("con.conindid = i.oid"));
+            // A foreign key's `conindid` is the referenced table's unique index, so the
+            // ownership check also requires the constraint to live on the same relation
+            // and to be an index-owning kind (#10484).
+            assert!(
+                sql.contains("con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')")
+            );
         }
     }
 

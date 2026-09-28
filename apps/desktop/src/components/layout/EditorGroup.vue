@@ -208,6 +208,7 @@ const groupExecutableSql = computed(() => {
         @dismiss-auto-commit-session-txn-rolled-back="activeTab && (activeTab.autoCommitSessionTxnRolledBack = false)"
         @execute-pointer-down="toolbar.captureExecutionSnapshot(activeTab.id)"
         @toolbar-execute="toolbar.toolbarExecute($event, activeTab.id)"
+        @toolbar-execute-in-new-result-tab="toolbar.toolbarExecuteInNewResultTab($event, activeTab.id)"
         @multi-execute="toolbar.multiExecute()"
         @preview-changes="activeTab && toolbar.previewChanges(activeTab.id)"
         @cancel="activeTab && toolbar.cancelExecution(activeTab.id)"

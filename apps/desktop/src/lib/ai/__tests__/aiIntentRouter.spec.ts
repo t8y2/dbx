@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import * as api from "@/lib/backend/api";
-import { AGENT_ACTIONS, ASK_ACTIONS, buildAgentRequest, isValidActionForMode, type AiAction, type AiContext } from "@/lib/ai/ai";
+import { AGENT_ACTIONS, ASK_ACTIONS, buildAgentRequest, buildSystemPrompt, isValidActionForMode, type AiAction, type AiContext } from "@/lib/ai/ai";
 import { INTENT_CLASSIFY_MAX_TEXT_CHARS, actionForIntent, classifyIntentByLlm, intentCandidatesForMode, parseClassifierAction, requestsExplicitExecution, routeIntent, routeIntentByRules, type AiIntent, type AiIntentRouteInput } from "@/lib/ai/aiIntentRouter";
 import type { AiConfig } from "@/stores/settingsStore";
 
@@ -428,6 +428,13 @@ describe("routeIntent (two-stage entry point)", () => {
 });
 
 describe("'auto' never reaches the transport layer", () => {
+  it("builds plugin Agent prompts that require live tools", () => {
+    const request = buildAgentRequest({ config, action: "general", mode: "agent", instruction: "检查当前集群", context: context({ databaseType: "plugin", connectionName: "orb", database: "" }) });
+    expect(request.messages[request.messages.length - 1]?.content).toBe("检查当前集群");
+    expect(buildSystemPrompt("general", context({ databaseType: "plugin", connectionName: "orb", database: "" }), "agent")).toContain("live data");
+    expect(buildSystemPrompt("general", context({ databaseType: "plugin", connectionName: "orb", database: "" }), "agent")).not.toContain("返回 SQL");
+  });
+
   it("keeps the concrete action tables free of 'auto'", () => {
     expect(ASK_ACTIONS).not.toContain("auto");
     expect(AGENT_ACTIONS).not.toContain("auto");

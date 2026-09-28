@@ -3,6 +3,7 @@ import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNa
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
+import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
@@ -104,6 +105,8 @@ export interface ConnectionConfig {
   visible_database_patterns?: string[];
   visible_schemas?: Record<string, string[]>;
   show_system_schemas?: boolean;
+  /** Load every page when the sidebar's Tables group is opened for this connection. */
+  sidebar_auto_load_all_tables?: boolean;
   attached_databases?: AttachedDatabaseConfig[];
   init_script?: string;
   color?: string;
@@ -359,7 +362,9 @@ export interface PluginFormField {
   default?: PluginFormFieldValue | null;
   options?: PluginFormFieldOption[];
   /** Plugin method returning `{ options: [{ value, label }] }` for dynamic
-   * select rendering; falls back to the declared type when unavailable. */
+   * select rendering; the host calls it with `{ locale }` (the current DBX UI
+   * locale) so plugins can localize the labels. Falls back to the declared
+   * type when unavailable. */
   options_action?: string;
   /** Host API 1.1: offer a local-file action on this field. */
   picker?: PluginFormFieldPicker;
@@ -418,6 +423,11 @@ export interface PluginWorkbenchContribution {
   label: string;
   description?: string;
   icon?: string;
+  ai?: PluginWorkbenchAiContribution;
+}
+
+export interface PluginWorkbenchAiContribution {
+  recommendations?: PluginAiRecommendation[];
 }
 
 export interface PluginFilesystemProviderContribution {
@@ -509,8 +519,10 @@ export interface PluginOpenWorkbenchAction extends PluginOpenWorkbenchTarget {
   /**
    * Generic launch-options extension point: sidecar method returning
    * `{ entries: [{ label, description?, context? }] }` for the dock "+" picker.
-   * The host renders labels and merges the chosen context into the
-   * host-authored panel context — never interpreting the business meaning.
+   * The host calls it with `{ locale }` (the current DBX UI locale, e.g.
+   * "en"/"zh-CN") so plugins can localize the returned labels, renders the
+   * labels and merges the chosen context into the host-authored panel
+   * context — never interpreting the business meaning.
    */
   options_action?: string;
   /** When true, the host also offers the plugin's own saved connections as launch targets. */
@@ -1302,6 +1314,8 @@ export interface QueryResult {
    *  this carries the raw HTTP response body so the UI can toggle between
    *  the tabular view and the original JSON. */
   elasticsearch_raw_body?: string;
+  /** Preformatted Redis command output retained alongside the default grid rows. */
+  redis_console_output?: string;
   sourceLabel?: string;
   /** 结果集来源的库名 / schema（与 sourceLabel 同时写入），供结果集页签按设置决定是否展示。 */
   sourceQualifier?: string;
@@ -1672,6 +1686,14 @@ export interface TreeNode {
     parentId: string;
     offset: number;
     pageSize: number;
+    /**
+     * Identity of the row that was expected to open this page: the peek row the
+     * previous page fetched but did not display. Offset paging is not snapshot
+     * consistent, so when objects are created or dropped above the window the
+     * same offset points at a different row; comparing against this anchor lets
+     * the page notice that and re-read the window instead of leaving a gap.
+     */
+    anchor?: string;
   };
 }
 
@@ -1806,11 +1828,15 @@ export interface QueryPageJumpProgress {
 
 export type TabOutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
 
+export type RedisResultViewMode = "grid" | "console";
+
 export type TabPageUiState = Record<string, unknown>;
 
 /** UI-only state that must survive an inactive tab's component being unmounted. */
 export interface TabUiState {
   activeOutputView?: TabOutputView;
+  /** Redis query results default to grid; a per-tab override selects command-line output. */
+  redisResultViewMode?: RedisResultViewMode;
   resultPaneOpen?: boolean;
   /** Small JSON-compatible snapshots owned by special-page components. */
   page?: Record<string, TabPageUiState>;

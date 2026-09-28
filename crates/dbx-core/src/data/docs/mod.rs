@@ -7,7 +7,7 @@ pub mod keys;
 pub mod relations;
 pub mod snapshot;
 
-pub use collector::{collect_snapshot, CollectOptions, CollectProgress};
+pub use collector::{collect_snapshot, collect_snapshot_with_concurrency, CollectOptions, CollectProgress};
 pub use color::hue_to_hex;
 pub use dbml::{to_dbml, DbmlOutput};
 pub use export::{to_standalone_html, EXPORT_LANGUAGES};

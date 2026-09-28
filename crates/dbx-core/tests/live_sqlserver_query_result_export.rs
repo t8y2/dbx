@@ -68,6 +68,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         is_production: false,
         production_databases: vec![],
         show_system_schemas: false,
+        sidebar_auto_load_all_tables: false,
         database_info: None,
     }
 }
@@ -130,6 +131,7 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         csv_quote_mode: Default::default(),
         export_table_name: None,
         export_column_types: None,
+        selected_columns: None,
         export_column_extras: None,
         column_comments: None,
         auto_filter: None,

@@ -193,6 +193,17 @@ describe("SqlParameterDialog raw parameter action", () => {
   });
 });
 
+describe("SqlParameterDialog surface", () => {
+  it("keeps the dialog background opaque while a wallpaper is active", async () => {
+    await mountDialog();
+    const content = document.body.querySelector('[data-slot="dialog-content"]');
+    expect(content).not.toBeNull();
+    const classes = content!.className;
+    expect(classes).toContain("bg-background-solid");
+    expect(classes).not.toMatch(/(^|\s)!bg-background(\s|$)/);
+  });
+});
+
 describe("SqlParameterDialog ignore parameter action", () => {
   it("closes the dialog and emits the original SQL without remembering or mutating values", async () => {
     const { state, onExecute } = await mountDialog();

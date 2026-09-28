@@ -686,10 +686,12 @@ fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_connection_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_connection_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-connection-links", links);
     }
-    let _ = app.emit("dbx-open-connection-links", links);
     show_main_window(app);
 }
 
@@ -697,10 +699,12 @@ fn open_ai_config_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_ai_config_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_ai_config_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-ai-config-links", links);
     }
-    let _ = app.emit("dbx-open-ai-config-links", links);
     show_main_window(app);
 }
 
@@ -708,10 +712,12 @@ fn open_plugin_install_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_plugin_install_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_plugin_install_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-plugin-install-links", links);
     }
-    let _ = app.emit("dbx-open-plugin-install-links", links);
     show_main_window(app);
 }
 
@@ -1545,6 +1551,7 @@ pub fn run() {
     builder
         .manage(CloseBehaviorState::new())
         .manage(commands::plugin_file::PluginFileState::new())
+        .manage(commands::plugin_media::PluginMediaState::new())
         .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
         .on_page_load(|webview, payload| {
@@ -1797,7 +1804,7 @@ pub fn run() {
                 request_app_close(app, "settings");
             }
         })
-        .invoke_handler(migration_gate::guard_handler(tauri::generate_handler![
+        .invoke_handler(migration_gate::guard_handler(dbx_tauri_consul::route(tauri::generate_handler![
             commands::ai::ai_complete,
             commands::ai::ai_stream,
             commands::ai::ai_agent_stream,
@@ -1839,6 +1846,8 @@ pub fn run() {
             commands::app_settings::save_max_agent_turns,
             commands::app_settings::load_history_retention_limit,
             commands::app_settings::save_history_retention_limit,
+            commands::app_settings::load_mcp_history_retention_limit,
+            commands::app_settings::save_mcp_history_retention_limit,
             commands::app_settings::load_max_retries,
             commands::app_settings::save_max_retries,
             commands::app_settings::set_app_locale,
@@ -1939,6 +1948,8 @@ pub fn run() {
             commands::plugin_file::plugin_file_read,
             commands::plugin_file::plugin_file_write,
             commands::plugin_file::plugin_file_close,
+            commands::plugin_media::plugin_media_open,
+            commands::plugin_media::plugin_media_close,
             commands::plugin_storage::plugin_ui_storage_get,
             commands::plugin_storage::plugin_ui_storage_set,
             commands::plugin_storage::plugin_ui_storage_delete,
@@ -2200,6 +2211,7 @@ pub fn run() {
             commands::redis_cmd::redis_set_keys_ttl,
             commands::redis_cmd::redis_set_keys_expire_at,
             commands::redis_cmd::redis_delete_keys,
+            commands::redis_cmd::redis_delete_keys_by_pattern,
             commands::redis_cmd::redis_flush_db,
             commands::redis_cmd::redis_execute_command,
             commands::redis_cmd::redis_load_more,
@@ -2228,109 +2240,6 @@ pub fn run() {
             commands::zookeeper_cmd::zookeeper_get,
             commands::zookeeper_cmd::zookeeper_put,
             commands::zookeeper_cmd::zookeeper_delete,
-            commands::consul_cmd::consul_capabilities,
-            commands::consul_cmd::consul_txn,
-            commands::consul_cmd::consul_rename_key,
-            commands::consul_cmd::consul_blocking_query,
-            commands::consul_cmd::consul_domain_watch,
-            commands::consul_cmd::consul_cancel_blocking,
-            commands::consul_cmd::consul_watch_start,
-            commands::consul_cmd::consul_list_prefix,
-            commands::consul_cmd::consul_list_recursive,
-            commands::consul_cmd::consul_search,
-            commands::consul_cmd::consul_search_progress,
-            commands::consul_cmd::consul_cancel_search,
-            commands::consul_cmd::consul_export_bundle,
-            commands::consul_cmd::consul_import_preview,
-            commands::consul_cmd::consul_import_execute,
-            commands::consul_cmd::consul_delete_prefix_preview,
-            commands::consul_cmd::consul_delete_prefix_execute,
-            commands::consul_cmd::consul_get,
-            commands::consul_cmd::consul_put,
-            commands::consul_cmd::consul_delete,
-            commands::consul_cmd::consul_prepared_query_list,
-            commands::consul_cmd::consul_prepared_query_read,
-            commands::consul_cmd::consul_prepared_query_create,
-            commands::consul_cmd::consul_prepared_query_update,
-            commands::consul_cmd::consul_prepared_query_delete,
-            commands::consul_cmd::consul_prepared_query_execute,
-            commands::consul_cmd::consul_prepared_query_explain,
-            commands::consul_cmd::consul_event_list,
-            commands::consul_cmd::consul_event_fire,
-            commands::consul_cmd::consul_coordinate_nodes,
-            commands::consul_cmd::consul_operator_read,
-            commands::consul_cmd::consul_snapshot_generate,
-            commands::consul_cmd::consul_snapshot_restore,
-            commands::consul_cmd::consul_autopilot_update,
-            commands::consul_cmd::consul_raft_transfer,
-            commands::consul_cmd::consul_raft_remove,
-            commands::consul_cmd::consul_keyring_write,
-            commands::consul_cmd::consul_license_write,
-            commands::consul_cmd::consul_status_leader,
-            commands::consul_cmd::consul_status_peers,
-            commands::consul_cmd::consul_agent_self,
-            commands::consul_cmd::consul_agent_members,
-            commands::consul_cmd::consul_agent_metrics,
-            commands::consul_cmd::consul_catalog_datacenters,
-            commands::consul_cmd::consul_catalog_nodes,
-            commands::consul_cmd::consul_catalog_services,
-            commands::consul_cmd::consul_catalog_service_nodes,
-            commands::consul_cmd::consul_catalog_node_services,
-            commands::consul_cmd::consul_health_node,
-            commands::consul_cmd::consul_health_checks,
-            commands::consul_cmd::consul_health_service,
-            commands::consul_cmd::consul_health_state,
-            commands::consul_cmd::consul_agent_services,
-            commands::consul_cmd::consul_agent_service,
-            commands::consul_cmd::consul_agent_checks,
-            commands::consul_cmd::consul_agent_register_service,
-            commands::consul_cmd::consul_agent_deregister_service,
-            commands::consul_cmd::consul_agent_service_maintenance,
-            commands::consul_cmd::consul_agent_register_check,
-            commands::consul_cmd::consul_agent_deregister_check,
-            commands::consul_cmd::consul_agent_update_ttl,
-            commands::consul_cmd::consul_sessions,
-            commands::consul_cmd::consul_node_sessions,
-            commands::consul_cmd::consul_session,
-            commands::consul_cmd::consul_session_keys,
-            commands::consul_cmd::consul_session_destroy_impact,
-            commands::consul_cmd::consul_create_session,
-            commands::consul_cmd::consul_renew_session,
-            commands::consul_cmd::consul_destroy_session,
-            commands::consul_cmd::consul_acquire_lock,
-            commands::consul_cmd::consul_release_lock,
-            commands::consul_cmd::consul_acl_list,
-            commands::consul_cmd::consul_acl_token_self,
-            commands::consul_cmd::consul_acl_token_clone,
-            commands::consul_cmd::consul_acl_get,
-            commands::consul_cmd::consul_acl_apply,
-            commands::consul_cmd::consul_acl_references,
-            commands::consul_cmd::consul_acl_delete,
-            commands::consul_cmd::consul_enterprise_list,
-            commands::consul_cmd::consul_enterprise_get,
-            commands::consul_cmd::consul_enterprise_apply,
-            commands::consul_cmd::consul_enterprise_impact,
-            commands::consul_cmd::consul_enterprise_delete,
-            commands::consul_cmd::consul_mesh_config_list,
-            commands::consul_cmd::consul_mesh_config_get,
-            commands::consul_cmd::consul_mesh_config_apply,
-            commands::consul_cmd::consul_mesh_config_delete,
-            commands::consul_cmd::consul_mesh_intentions_list,
-            commands::consul_cmd::consul_mesh_intention_get,
-            commands::consul_cmd::consul_mesh_intention_get_exact,
-            commands::consul_cmd::consul_mesh_intention_upsert,
-            commands::consul_cmd::consul_mesh_intention_delete,
-            commands::consul_cmd::consul_mesh_intention_delete_exact,
-            commands::consul_cmd::consul_mesh_intention_match,
-            commands::consul_cmd::consul_mesh_intention_check,
-            commands::consul_cmd::consul_mesh_discovery_chain,
-            commands::consul_cmd::consul_mesh_peering_list,
-            commands::consul_cmd::consul_mesh_peering_get,
-            commands::consul_cmd::consul_mesh_peering_generate_token,
-            commands::consul_cmd::consul_mesh_peering_establish,
-            commands::consul_cmd::consul_mesh_peering_delete,
-            commands::consul_cmd::consul_mesh_exported_services_list,
-            commands::consul_cmd::consul_mesh_exported_services_apply,
             commands::nacos_cmd::nacos_test_connection,
             commands::nacos_cmd::nacos_list_namespaces,
             commands::nacos_cmd::nacos_sidebar_snapshot,
@@ -2405,6 +2314,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_rename_collection,
             commands::mongo_cmd::mongo_clone_collection,
             commands::docs::docs_collect_snapshot,
+            commands::docs::docs_collect_snapshot_for_export,
             commands::docs::docs_load_annotations,
             commands::docs::docs_apply_annotations,
             commands::docs::docs_save_annotations,
@@ -2503,6 +2413,8 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_topics,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_topics_page,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_topic,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_delete_topic,
@@ -2514,6 +2426,8 @@ pub fn run() {
             commands::mq_cmd::mq_get_topic_internal_stats,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_exchanges,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_exchanges_page,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_exchange,
             #[cfg(feature = "mq-admin")]
@@ -2653,10 +2567,14 @@ pub fn run() {
             commands::history::search_history,
             commands::history::load_history_connection_options,
             commands::history::clear_history,
+            commands::history::clear_history_by_source,
+            commands::history::cleanup_mcp_history_retention,
             commands::history::delete_history_entry,
             commands::mcp::check_mcp_server_status,
             commands::mcp::install_mcp_server,
+            commands::mcp::install_native_mcp_server,
             commands::mcp::uninstall_mcp_server,
+            commands::mcp::uninstall_npm_mcp_server,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
             commands::update::get_system_proxy_url,
@@ -2719,7 +2637,7 @@ pub fn run() {
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
             commands::tunnel_profiles::test_tunnel_profile,
-        ]))
+        ])))
         .build(tauri::generate_context!())
         .inspect(|app| {
             append_startup_probe(format!("tauri application built after {:?}", startup_begin.elapsed()));

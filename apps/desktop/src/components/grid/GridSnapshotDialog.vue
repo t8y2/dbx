@@ -147,7 +147,7 @@ async function exportSnapshot(kind: "clipboard" | "file") {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[980px]">
+    <DialogContent class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[980px]">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2"><Camera class="h-5 w-5 text-primary" />{{ t("gridSnapshot.title") }}</DialogTitle>
       </DialogHeader>

@@ -79,6 +79,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         is_production: false,
         production_databases: vec![],
         show_system_schemas: false,
+        sidebar_auto_load_all_tables: false,
         database_info: None,
     }
 }
@@ -133,6 +134,8 @@ fn live_sqlserver_import_request(
         date_time_format: None,
         prepared_source: None,
         retain_source: false,
+        conflict_policy: None,
+        skip_duplicate_rows: false,
     }
 }
 
@@ -1214,6 +1217,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         csv_quote_mode: Default::default(),
         export_table_name: None,
         export_column_types: None,
+        selected_columns: None,
         export_column_extras: None,
         column_comments: None,
         auto_filter: None,

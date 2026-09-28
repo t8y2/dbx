@@ -74,6 +74,15 @@ export interface SqlLayoutContext {
 export class Writer {
   private lines: string[] = [""];
   private columns: number[] = [0];
+  /**
+   * Whether the text written last ends inside a `--` comment.
+   *
+   * A line comment consumes the rest of its line, so whatever the printer emits
+   * next — the separating comma, the closing parenthesis, the statement's `;` —
+   * would land inside the comment and disappear from the formatted SQL. The next
+   * `write`/`space` therefore continues on a new line first.
+   */
+  private lineCommentOpen = false;
 
   constructor(private readonly options: Pick<SqlLayoutOptions, "useTabs" | "indentWidth">) {}
 
@@ -84,17 +93,33 @@ export class Writer {
 
   /** Appends text verbatim. */
   write(text: string): void {
+    if (text.length === 0) return;
+    this.closeLineComment();
     this.lines[this.lines.length - 1] += text;
     this.columns[this.columns.length - 1] += text.length;
   }
 
   /** Appends a single separating space, unless one is already there. */
   space(): void {
+    if (this.lineCommentOpen) {
+      this.closeLineComment();
+      return;
+    }
     const line = this.lines[this.lines.length - 1];
     if (line.length > 0 && !line.endsWith(" ")) {
       this.lines[this.lines.length - 1] = `${line} `;
       this.columns[this.columns.length - 1] += 1;
     }
+  }
+
+  /**
+   * Records that the text written last ends inside a `--` comment, so the next
+   * `write`/`space` has to start a new line. Callers know this from the AST —
+   * see {@link endsWithLineComment} — because only they can tell a comment token
+   * apart from the same two dashes inside a string literal.
+   */
+  markLineComment(): void {
+    this.lineCommentOpen = true;
   }
 
   /** Starts a new line at `indent` columns, dropping trailing blanks first. */
@@ -104,6 +129,7 @@ export class Writer {
     const column = Math.max(0, indent);
     this.lines.push(this.indentation(column));
     this.columns.push(column);
+    this.lineCommentOpen = false;
   }
 
   toString(): string {
@@ -111,6 +137,28 @@ export class Writer {
       .map((line) => line.trimEnd())
       .join("\n")
       .trim();
+  }
+
+  /**
+   * Continues on a new line after a comment, keeping the indentation of the
+   * line the comment is on: the next column of a `SELECT` list lines up under
+   * the one the comment was written on.
+   */
+  private closeLineComment(): void {
+    if (!this.lineCommentOpen) return;
+    this.newline(this.lineIndent());
+  }
+
+  /** Display columns taken by the indentation of the current line. */
+  private lineIndent(): number {
+    const indentWidth = Math.max(1, this.options.indentWidth);
+    let columns = 0;
+    for (const character of this.lines[this.lines.length - 1]) {
+      if (character === "\t") columns += indentWidth;
+      else if (character === " ") columns += 1;
+      else break;
+    }
+    return columns;
   }
 
   /** The whitespace achieving `column` columns of indentation. */
@@ -123,6 +171,21 @@ export class Writer {
 
 export function isParenthesis(node: AstNode): node is ParenthesisNode {
   return node.type === "parenthesis";
+}
+
+/** Whether `node` is a `--` comment, which comments out the rest of its line. */
+export function isLineComment(node: AstNode | undefined): boolean {
+  return node?.type === "line_comment";
+}
+
+/**
+ * Whether `nodes` end with a `--` comment.
+ *
+ * The caller that renders such a run has to tell the {@link Writer} about it, so
+ * that the next token is not written into the comment.
+ */
+export function endsWithLineComment(nodes: AstNode[]): boolean {
+  return isLineComment(nodes[nodes.length - 1]);
 }
 
 /**
@@ -425,7 +488,7 @@ function renderLogicalJoin(ctx: SqlLayoutContext, nodes: AstNode[], width: numbe
  * column the block starts at. `text` is rendered relative to column 0, so its
  * own leading whitespace carries the nesting levels and only needs shifting.
  */
-export function emitText(writer: Writer, text: string, baseColumn: number): void {
+export function emitText(writer: Writer, text: string, baseColumn: number, endsWithComment = false): void {
   const lines = text.split("\n");
   writer.write(lines[0].trimEnd());
   for (let index = 1; index < lines.length; index++) {
@@ -437,4 +500,5 @@ export function emitText(writer: Writer, text: string, baseColumn: number): void
     writer.newline(baseColumn + line.length - line.trimStart().length);
     writer.write(line.trimStart());
   }
+  if (endsWithComment) writer.markLineComment();
 }

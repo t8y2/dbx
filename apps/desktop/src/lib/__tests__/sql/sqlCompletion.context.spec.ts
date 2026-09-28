@@ -124,6 +124,62 @@ describe("SQL Server datepart completion", () => {
   });
 });
 
+describe("SQL Server local variable completion", () => {
+  const completionItems = (sql: string, cursor = sql.length) =>
+    buildSqlCompletionItems(sql, cursor, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "sqlserver",
+      dialect: "sqlserver",
+    });
+
+  it("suggests variables declared earlier in the current batch", () => {
+    const sql = `CREATE OR ALTER PROCEDURE dbo.find_customer AS
+BEGIN
+  DECLARE @customer_id INT = 1,
+          @customer_name NVARCHAR(100);
+  SELECT @customer_`;
+
+    expect(completionItems(sql)).toEqual(expect.arrayContaining([expect.objectContaining({ label: "@customer_id", type: "variable" }), expect.objectContaining({ label: "@customer_name", type: "variable" })]));
+  });
+
+  it("ignores later declarations and declarations inside comments or strings", () => {
+    const sql = `DECLARE @visible INT;
+-- DECLARE @commented INT;
+SELECT 'DECLARE @string_value INT';
+SELECT @|
+DECLARE @later INT;`;
+    const cursor = sql.indexOf("|");
+    const variables = completionItems(sql.replace("|", ""), cursor)
+      .filter((item) => item.type === "variable")
+      .map((item) => item.label);
+
+    expect(variables).toContain("@visible");
+    expect(variables).not.toContain("@commented");
+    expect(variables).not.toContain("@string_value");
+    expect(variables).not.toContain("@later");
+  });
+
+  it("does not leak variables across GO batch boundaries", () => {
+    const sql = `DECLARE @old_batch INT;
+GO
+DECLARE @current_batch INT;
+SELECT @`;
+    const variables = completionItems(sql)
+      .filter((item) => item.type === "variable")
+      .map((item) => item.label);
+
+    expect(variables).toContain("@current_batch");
+    expect(variables).not.toContain("@old_batch");
+  });
+
+  it("preserves SQL Server system variable completion", () => {
+    const sql = "DECLARE @row_id INT; SELECT @@row";
+
+    expect(completionItems(sql)).toEqual(expect.arrayContaining([expect.objectContaining({ label: "@@ROWCOUNT", type: "keyword" })]));
+  });
+});
+
 describe("MySQL DESCRIBE table completion", () => {
   it.each(["DESC", "DESCRIBE"])("treats %s as a table-name context", (keyword) => {
     const sql = `${keyword} ord`;
@@ -1365,7 +1421,7 @@ describe("sqlCompletion scoped metadata ranking", () => {
     expect(items.findIndex((item) => item.label === "ORDERS_10K")).toBeLessThan(items.findIndex((item) => item.label === "TABLE"));
   });
 
-  it("qualifies same-name PostgreSQL tables from different schemas", () => {
+  it("uses on-collision qualification by default for same-name PostgreSQL tables", () => {
     const sql = "SELECT * FROM shared";
     const items = buildSqlCompletionItems(sql, sql.length, {
       databaseType: "postgres",
@@ -1379,6 +1435,86 @@ describe("sqlCompletion scoped metadata ranking", () => {
 
     expect(items).toHaveLength(2);
     expect(items.map((item) => item.apply).sort()).toEqual(["public.shared", "reporting.shared"]);
+  });
+
+  it("never qualifies table names while keeping colliding candidates distinct", () => {
+    const sql = "SELECT * FROM shared";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [
+        { name: "shared", schema: "public", type: "table", applyName: "public.shared" },
+        { name: "shared", schema: "reporting", type: "view", applyName: "reporting.shared" },
+      ],
+      columnsByTable: new Map(),
+      tableCompletionSchemaQualification: "never",
+    }).filter((item) => item.type === "table");
+
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.apply)).toEqual(["shared", "shared"]);
+    expect(items.map((item) => item.detail).sort()).toEqual(["public.shared", "reporting.shared"]);
+  });
+
+  it("always qualifies tables and views when schema metadata is available", () => {
+    const sql = "SELECT * FROM ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [
+        { name: "Order Details", schema: "Sales Data", type: "view" },
+        { name: "scratch", type: "table" },
+      ],
+      columnsByTable: new Map(),
+      tableCompletionSchemaQualification: "always",
+    }).filter((item) => item.type === "table");
+
+    expect(items.find((item) => item.label === "Order Details")?.apply).toBe('"Sales Data"."Order Details"');
+    expect(items.find((item) => item.label === "scratch")?.apply).toBe("scratch");
+  });
+
+  it.each([
+    ["never", "customers"],
+    ["always", "sales.customers"],
+  ] as const)("applies the %s policy to foreign-key table suggestions", (tableCompletionSchemaQualification, expectedApply) => {
+    const sql = "SELECT * FROM sales.orders o JOIN cus";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [
+        { name: "orders", schema: "sales", type: "table" },
+        { name: "customers", schema: "sales", type: "table" },
+      ],
+      columnsByTable: new Map(),
+      foreignKeysByTable: new Map([["sales.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_table: "customers", ref_schema: "sales", ref_column: "id" }]]]),
+      tableCompletionSchemaQualification,
+    });
+    const customers = items.filter((item) => item.type === "table" && item.label === "customers");
+
+    expect(customers).toHaveLength(1);
+    expect(customers[0]?.apply).toBe(expectedApply);
+    expect(customers[0]?.detail).toContain("related by");
+  });
+
+  it("does not repeat an already typed quoted schema or SQL Server database/schema qualifier", () => {
+    const postgresSql = 'SELECT * FROM "Sales Data".Ord';
+    const postgresItems = buildSqlCompletionItems(postgresSql, postgresSql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [{ name: "Order Details", schema: "Sales Data", type: "table" }],
+      columnsByTable: new Map(),
+      tableCompletionSchemaQualification: "always",
+    });
+    const sqlServerSql = "SELECT * FROM Reporting.dbo.Ord";
+    const sqlServerItems = buildSqlCompletionItems(sqlServerSql, sqlServerSql.length, {
+      databaseType: "sqlserver",
+      dialect: "sqlserver",
+      tables: [{ name: "Order Details", database: "Reporting", schema: "dbo", type: "table" }],
+      columnsByTable: new Map(),
+      tableCompletionSchemaQualification: "always",
+    });
+
+    expect(postgresItems.find((item) => item.label === "Order Details")?.apply).toBe('"Order Details"');
+    expect(sqlServerItems.find((item) => item.label === "Order Details")?.apply).toBe("[Order Details]");
   });
 
   it("qualifies same-name tables for generic metadata providers", () => {
@@ -1626,10 +1762,20 @@ describe("line block statement boundary", () => {
     expect(items.some((item) => item.label === "name")).toBe(true);
   });
 
-  it("still ends the block at a real blank line", () => {
+  it("still ends the block at a blank line before a new statement", () => {
+    // #10196 refined the blank-line rule: a blank line only ends the block when
+    // the next non-empty line opens a new top-level statement. A blank line
+    // before FROM/WHERE continues the same statement.
+    const sql = "select na from t1\n\nselect nb from t2";
+    const context = getSqlCompletionContext(sql, "select na from t1".length, { databaseType: "iris" });
+    expect(context.referencedTables.map((table) => table.name)).toEqual(["t1"]);
+  });
+
+  it("keeps FROM tables when the select list is separated from FROM by a blank line (#10196)", () => {
     const sql = "select na\n\nfrom users";
     const context = getSqlCompletionContext(sql, "select na".length, { databaseType: "iris" });
-    expect(context.referencedTables).toEqual([]);
+    expect(context.referencedTables.map((table) => table.name)).toEqual(["users"]);
+    expect(context.suggestColumns).toBe(true);
   });
 
   it("stops the active block at a top-level statement line without a semicolon", () => {

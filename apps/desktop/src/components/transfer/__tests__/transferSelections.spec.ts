@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { buildTransferObjectSelections, matchBulkObjectNames, parseBulkObjectNames } from "../transferSelections";
+import { buildTransferObjectSelections, countTransferObjects, matchBulkObjectNames, parseBulkObjectNames } from "../transferSelections";
 
 function setOf(names: string[]): Set<string> {
   return new Set(names);
 }
+
+describe("countTransferObjects", () => {
+  it("counts selected tables and non-table objects from their separate request fields", () => {
+    expect(
+      countTransferObjects({
+        tables: ["orders", "users"],
+        objects: [
+          { objectType: "VIEW", names: ["active_users"] },
+          { objectType: "SEQUENCE", names: ["order_id_seq"] },
+        ],
+      }),
+    ).toBe(4);
+  });
+
+  it("keeps a table-only multi-selection nonzero", () => {
+    expect(countTransferObjects({ tables: ["orders", "users"], objects: [] })).toBe(2);
+  });
+});
 
 describe("buildTransferObjectSelections", () => {
   it("serializes non-table selections in request order", () => {

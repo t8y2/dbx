@@ -10,6 +10,8 @@ import type { DataGridConditionColumnOption } from "@/composables/useDataGridCon
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import type { DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import type { DataGridFilterEditorView } from "@/stores/settingsStore";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 
@@ -42,6 +44,7 @@ const props = defineProps<{
   modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
   columnSearch: string;
   applyOnlyBusy?: boolean;
+  valueSuggestions?: DataGridDistinctValueSuggestionState;
   applyWhere: (value?: string) => void | boolean | Promise<void | boolean>;
   applyOrderBy: (value?: string) => void | boolean | Promise<void | boolean>;
   clearOrderBy: () => void | Promise<void>;
@@ -62,6 +65,13 @@ const emit = defineEmits<{
   moveRule: [id: string, targetIndex: number];
   updateRule: [id: string, patch: Partial<DataGridStructuredFilterRule>];
   clearLocalFilter: [columnIndex?: number];
+  openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
+  closeValueSuggestions: [];
+  updateValueSuggestionSearch: [value: string];
+  selectValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleAllValueSuggestions: [];
+  applyValueSuggestions: [];
 }>();
 
 const { t } = useI18n();
@@ -151,6 +161,11 @@ async function handleFilterButtonClick() {
   await openPendingFirstEmptyRuleColumnSearch();
 }
 
+function updateQuickFilterBuilderOpen(open: boolean) {
+  emit("update:filterBuilderOpen", open);
+  if (!open) emit("closeValueSuggestions");
+}
+
 watch([() => props.filterBuilderOpen, () => props.rules.map((rule) => `${rule.id}:${rule.columnName}:${rule.disabled ? "1" : "0"}`).join("\u0000"), filterBuilderRef], () => void openPendingFirstEmptyRuleColumnSearch(), { flush: "post" });
 
 onUnmounted(onResizeEnd);
@@ -160,7 +175,7 @@ onUnmounted(onResizeEnd);
   <div ref="containerRef" class="flex flex-1 min-w-0">
     <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': leadingBorder }" :style="wherePaneStyle">
       <template v-if="filterEditorView === 'quick'">
-        <Popover :open="filterBuilderOpen" @update:open="emit('update:filterBuilderOpen', $event)">
+        <Popover :open="filterBuilderOpen" @update:open="updateQuickFilterBuilderOpen">
           <PopoverTrigger as-child>
             <button
               type="button"
@@ -212,6 +227,7 @@ onUnmounted(onResizeEnd);
               :column-search="columnSearch"
               :disabled="!canUseWhereSearch"
               :show-header="false"
+              :value-suggestions="valueSuggestions"
               @add="emit('addRule')"
               @apply-only="emit('applyOnly', $event)"
               @apply="emit('applyFilters')"
@@ -221,6 +237,13 @@ onUnmounted(onResizeEnd);
               @move="(id, targetIndex) => emit('moveRule', id, targetIndex)"
               @update-rule="updateRule"
               @update:column-search="emit('update:columnSearch', $event)"
+              @open-value-suggestions="(id, target) => emit('openValueSuggestions', id, target)"
+              @close-value-suggestions="emit('closeValueSuggestions')"
+              @update-value-suggestion-search="emit('updateValueSuggestionSearch', $event)"
+              @select-value-suggestion="emit('selectValueSuggestion', $event)"
+              @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
+              @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"
+              @apply-value-suggestions="emit('applyValueSuggestions')"
             />
           </PopoverContent>
         </Popover>

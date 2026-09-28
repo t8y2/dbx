@@ -160,6 +160,10 @@ jobs:
       - name: GitHub script tests
         run: node --test .github/scripts/*.test.mjs
 
+      - name: PowerShell MCP installer tests
+        shell: pwsh
+        run: ./.github/scripts/install-mcp-powershell.test.ps1
+
   packages:
     needs: changes
     if: needs.changes.outputs.packages == 'true'
@@ -573,6 +577,122 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Measure dbx library command registry expansion
+        if: vars.WIN7_REGISTRY_AB == 'true'
+        shell: pwsh
+        run: |
+          $resultRoot = Join-Path $env:RUNNER_TEMP "dbx-lib-command-registry-ab"
+          $sourcePath = "src-tauri/src/lib.rs"
+          New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+
+          $results = @{}
+          function Measure-Registry([string] $name, [int] $commandCount) {
+            $outputDir = Join-Path $resultRoot $name
+            New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+            $timer = [System.Diagnostics.Stopwatch]::StartNew()
+            cargo rustc `
+              --locked `
+              --package dbx `
+              --release `
+              --lib `
+              --features custom-protocol `
+              --target x86_64-win7-windows-msvc `
+              -Z build-std=std,panic_abort `
+              -- `
+              "-Zdump-mono-stats=$outputDir" `
+              "-Zdump-mono-stats-format=json"
+            $exitCode = $LASTEXITCODE
+            $timer.Stop()
+            if ($exitCode -ne 0) {
+              throw "$name command registry compile failed with exit code $exitCode."
+            }
+
+            $monoFile = Get-ChildItem $outputDir -File -Filter "*.mono_items.json" |
+              Select-Object -First 1
+            if (!$monoFile) {
+              throw "$name command registry compile did not create mono statistics."
+            }
+            $monoItems = Get-Content $monoFile.FullName -Raw | ConvertFrom-Json
+            $results[$name] = @{
+              Commands = $commandCount
+              Definitions = $monoItems.Count
+              Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 2)
+              TotalEstimate = ($monoItems | Measure-Object -Property total_estimate -Sum).Sum
+            }
+          }
+
+          $savedWrapper = $env:RUSTC_WRAPPER
+          try {
+            $env:RUSTC_WRAPPER = ""
+            $sourceLines = Get-Content $sourcePath
+            $insideHandler = $false
+            $fullCommandCount = 0
+            foreach ($line in $sourceLines) {
+              if ($line -match 'tauri::generate_handler!\[') {
+                $insideHandler = $true
+                continue
+              }
+              if ($insideHandler -and $line -match '^\s*\]\)\)') {
+                break
+              }
+              if ($insideHandler -and $line -match '^\s+commands::') {
+                $fullCommandCount++
+              }
+            }
+            Measure-Registry "full" $fullCommandCount
+
+            $insideHandler = $false
+            $handlerCommandCount = 0
+            $keptCommandCount = 0
+            $reducedLines = foreach ($line in $sourceLines) {
+              if ($line -match 'tauri::generate_handler!\[') {
+                $insideHandler = $true
+                $line
+                continue
+              }
+              if ($insideHandler -and $line -match '^\s*\]\)\)') {
+                $insideHandler = $false
+                $line
+                continue
+              }
+              if ($insideHandler -and $line -match '^\s+commands::') {
+                $handlerCommandCount++
+                if ($handlerCommandCount % 2 -eq 0) {
+                  continue
+                }
+                $keptCommandCount++
+              }
+              $line
+            }
+            if ($handlerCommandCount -ne $fullCommandCount -or $keptCommandCount -eq $fullCommandCount) {
+              throw "Could not create the reduced command registry."
+            }
+            $reducedLines | Set-Content $sourcePath -Encoding utf8NoBOM
+            Measure-Registry "half" $keptCommandCount
+          } finally {
+            $env:RUSTC_WRAPPER = $savedWrapper
+            git restore --source=HEAD -- $sourcePath
+          }
+
+          @(
+            "### dbx library command registry A/B"
+            ""
+            "| Registry | Commands | Definitions | Estimated cost | Seconds |"
+            "| --- | ---: | ---: | ---: | ---: |"
+            "| Full | $($results['full'].Commands) | $($results['full'].Definitions) | $($results['full'].TotalEstimate) | $($results['full'].Seconds) |"
+            "| Half | $($results['half'].Commands) | $($results['half'].Definitions) | $($results['half'].TotalEstimate) | $($results['half'].Seconds) |"
+          ) | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload dbx library command registry A/B
+        if: always() && vars.WIN7_REGISTRY_AB == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: DBX-win7-dbx-lib-command-registry-ab
+          path: ${{ runner.temp }}/dbx-lib-command-registry-ab/
+          if-no-files-found: error
+          retention-days: 3
+
   duckdb-windows-driver:
     needs: changes
     if: needs.changes.outputs.duckdb_windows == 'true'
@@ -956,7 +1076,8 @@ jobs:
               - 'scripts/run-check.mjs'
               - 'crates/dbx-core/src/**'
               - 'crates/dbx-drivers/src/**'
-              - 'crates/dbx-sql/src/**'
+              - 'crates/dbx-driver-*/src/**'
+              - 'crates/dbx-sql*/src/**'
               - 'crates/dbx-formats/src/**'
               - 'crates/dbx-types/src/**'
               - 'crates/dbx-plugin-runtime/src/**'
@@ -968,6 +1089,7 @@ jobs:
               - 'packages/mcp-server/**'
               - 'crates/dbx-cli/**'
               - 'crates/dbx-mcp/**'
+              - 'skills/dbx/**'
               - 'scripts/verify-package-install.mjs'
               - 'package.json'
               - 'pnpm-lock.yaml'
@@ -998,7 +1120,7 @@ jobs:
               - '.github/workflows/ci.yml'
             agents:
               - 'agents/**'
-              - 'crates/dbx-drivers/assets/agent-protocol-v2.json'
+              - 'crates/dbx-driver-agent/assets/agent-protocol-v2.json'
               - 'crates/dbx-core/Cargo.toml'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -1041,6 +1163,7 @@ jobs:
               - 'src-tauri/src/commands/update.rs'
               - 'crates/dbx-core/Cargo.toml'
               - 'crates/dbx-drivers/**'
+              - 'crates/dbx-driver-*/**'
               - 'crates/dbx-platform/**'
               - 'crates/dbx-core/src/host/update.rs'
               - 'Cargo.toml'
@@ -1052,6 +1175,9 @@ jobs:
               - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
+              - 'docs/public/install-mcp*'
+              - '.github/workflows/mcp-release.yml'
+              - '.github/workflows/publish-packages.yml'
               - '.github/workflows/plugin-release-reusable.yml'
               - '.github/workflows/ci.yml'
               - 'apps/desktop/src/types/database.ts'

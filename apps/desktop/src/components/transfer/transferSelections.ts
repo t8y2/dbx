@@ -1,8 +1,13 @@
-import type { TransferObjectKind } from "@/lib/backend/api";
+import type { TransferObjectKind, TransferRequest } from "@/lib/backend/api";
 
 export interface TransferObjectSelectionPayload {
   objectType: TransferObjectKind;
   names: string[];
+}
+
+/** Counts table and non-table selections represented by a transfer request. */
+export function countTransferObjects(request: Pick<TransferRequest, "tables" | "objects">): number {
+  return request.tables.length + request.objects.reduce((total, selection) => total + selection.names.length, 0);
 }
 
 /**

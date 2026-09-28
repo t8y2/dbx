@@ -2,11 +2,16 @@ use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, ContentBlock, ErrorData, Implementation, ListResourceTemplatesResult, ListResourcesResult,
+        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
+        ServerCapabilities, ServerInfo,
+    },
     schemars, tool, tool_handler, tool_router, ServerHandler,
 };
 use serde::Deserialize;
 use serde_json::json;
+use url::Url;
 use uuid::Uuid;
 
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
@@ -35,6 +40,19 @@ use dbx_core::{
     },
     storage::{McpDatabaseScope, McpGlobalPolicy},
 };
+
+const CONNECTIONS_RESOURCE_URI: &str = "dbx://connections";
+const DATABASES_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/databases";
+const TABLES_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/tables{?database,schema}";
+const TABLE_SCHEMA_RESOURCE_TEMPLATE: &str = "dbx://connections/{connection_id}/table-schema{?database,schema,table}";
+
+#[derive(Debug, PartialEq, Eq)]
+enum DbxResourceRequest {
+    Connections,
+    Databases { connection_id: String },
+    Tables { connection_id: String, database: Option<String>, schema: Option<String> },
+    TableSchema { connection_id: String, database: Option<String>, schema: Option<String>, table: String },
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListConnectionsRequest {}
@@ -489,6 +507,157 @@ impl PendingSalesforceWrites {
     }
 }
 
+// One context per dispatched request; legacy SQL helpers enrich it instead of
+// writing duplicate rows. Direct internal calls retain their existing behavior.
+tokio::task_local! {
+    static CALL_HISTORY: std::sync::Mutex<HistoryEntry>;
+}
+
+struct CallHistoryGuard {
+    backend: Arc<dyn DbxBackend>,
+    fallback: Option<HistoryEntry>,
+    started: Instant,
+}
+
+impl Drop for CallHistoryGuard {
+    fn drop(&mut self) {
+        if let Some(mut entry) = self.fallback.take() {
+            entry.execution_time_ms = self.started.elapsed().as_millis();
+            entry.error = Some("MCP request cancelled or interrupted".into());
+            let backend = self.backend.clone();
+            // rmcp may drop the handler future on cancellation. Persist outside
+            // that future so the interruption still has an audit record.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    if let Err(error) = backend.save_history_entry(&entry).await {
+                        log::warn!("failed to save interrupted MCP history: {error}");
+                    }
+                });
+            }
+        }
+    }
+}
+
+fn history_request(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+    use serde_json::Value;
+    if depth > 8 {
+        return json!("[depth limit]");
+    }
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .take(64)
+                .map(|(key, value)| {
+                    let lower = key.to_ascii_lowercase();
+                    let secret = [
+                        "password",
+                        "passwd",
+                        "secret",
+                        "token",
+                        "credential",
+                        "authorization",
+                        "private_key",
+                        "apikey",
+                        "api_key",
+                        "connection_string",
+                        "url",
+                        "dsn",
+                    ]
+                    .iter()
+                    .any(|part| lower.contains(part));
+                    (
+                        key.chars().take(128).collect(),
+                        if secret { json!("[redacted]") } else { history_request(value, depth + 1) },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(values) => {
+            Value::Array(values.iter().take(16).map(|value| history_request(value, depth + 1)).collect())
+        }
+        Value::String(value) => json!(value.chars().take(1024).collect::<String>()),
+        value => value.clone(),
+    }
+}
+
+fn bounded_history_request(value: &serde_json::Value) -> String {
+    let sanitized = history_request(value, 0).to_string();
+    if sanitized.len() > 16 * 1024 {
+        json!({"truncated": true, "summary": "Request exceeds history size limit"}).to_string()
+    } else {
+        sanitized
+    }
+}
+
+// Response payloads need their own sanitizer: request summaries intentionally
+// shorten strings and arrays, which would silently discard query results.
+fn history_response(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+    use serde_json::Value;
+    if depth > 32 {
+        return json!({"truncated": true, "reason": "depth limit"});
+    }
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| {
+                    let lower = key.to_ascii_lowercase();
+                    let secret = [
+                        "password",
+                        "passwd",
+                        "secret",
+                        "token",
+                        "credential",
+                        "authorization",
+                        "private_key",
+                        "apikey",
+                        "api_key",
+                        "connection_string",
+                        "url",
+                        "dsn",
+                    ]
+                    .iter()
+                    .any(|part| lower.contains(part));
+                    let binary = key == "data"
+                        && fields
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| kind == "image" || kind == "audio")
+                        || key == "blob";
+                    (
+                        key.clone(),
+                        if secret || binary { json!("[redacted]") } else { history_response(value, depth + 1) },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.iter().map(|value| history_response(value, depth + 1)).collect()),
+        Value::String(text) => {
+            // MCP text blocks often contain JSON encoded inside a string.
+            // Sanitize that JSON too, while preserving the text-block shape.
+            if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                if parsed.is_object() || parsed.is_array() {
+                    return json!(history_response(&parsed, depth + 1).to_string());
+                }
+            }
+            value.clone()
+        }
+        _ => value.clone(),
+    }
+}
+
+fn bounded_history_response<T: serde::Serialize>(value: &T) -> String {
+    let value = serde_json::to_value(value).unwrap_or_else(|_| json!({"serialization_error": true}));
+    let sanitized = history_response(&value, 0).to_string();
+    if sanitized.len() > 64 * 1024 {
+        // A short preview leaves room for JSON escaping and metadata.
+        json!({"truncated": true, "summary": "Response exceeds 64 KiB history size limit", "original_bytes": sanitized.len(), "preview": sanitized.chars().take(4096).collect::<String>()}).to_string()
+    } else {
+        sanitized
+    }
+}
+
 #[derive(Clone)]
 pub struct DbxMcpServer {
     backend: Arc<dyn DbxBackend>,
@@ -675,6 +844,7 @@ impl DbxMcpServer {
     }
     async fn save_mcp_sql_history(
         &self,
+        tool_name: &str,
         connection: &ConnectionConfig,
         database: &str,
         sql: &str,
@@ -699,7 +869,27 @@ impl DbxMcpServer {
             affected_rows,
             rollback_sql: None,
             details_json: Some(r#"{"source":"mcp"}"#.to_string()),
+            source: "mcp".to_string(),
+            mcp_tool_name: Some(tool_name.to_string()),
+            mcp_request_json: None,
+            mcp_response_json: None,
+            mcp_session_id: None,
         };
+        if CALL_HISTORY
+            .try_with(|current| {
+                let mut current = current.lock().unwrap();
+                current.connection_id = entry.connection_id.clone();
+                current.connection_name = entry.connection_name.clone();
+                current.database = entry.database.clone();
+                current.sql = entry.sql.clone();
+                current.activity_kind = entry.activity_kind.clone();
+                current.operation = entry.operation.clone();
+                current.affected_rows = entry.affected_rows;
+            })
+            .is_ok()
+        {
+            return;
+        }
         if let Err(error) = self.backend.save_history_entry(&entry).await {
             log::warn!("failed to save MCP SQL history for connection {}: {error}", connection.id);
         }
@@ -1133,6 +1323,7 @@ impl DbxMcpServer {
                         })
                         .unwrap_or_else(|| format_query_result(&execution.result, max_rows as usize));
                     self.save_mcp_sql_history(
+                        "dbx_execute_query",
                         &refreshed.connection,
                         &session.database,
                         &history_sql,
@@ -1146,6 +1337,7 @@ impl DbxMcpServer {
                 }
                 Err(error) => {
                     self.save_mcp_sql_history(
+                        "dbx_execute_query",
                         &refreshed.connection,
                         &session.database,
                         &history_sql,
@@ -1186,7 +1378,17 @@ impl DbxMcpServer {
             self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
         let success = !result.is_error;
         let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
-        self.save_mcp_sql_history(connection, &database, &history_sql, started_at, success, error, None).await;
+        self.save_mcp_sql_history(
+            "dbx_execute_query",
+            connection,
+            &database,
+            &history_sql,
+            started_at,
+            success,
+            error,
+            None,
+        )
+        .await;
         agent_result(result)
     }
 
@@ -1457,6 +1659,7 @@ impl DbxMcpServer {
             }
             let status = owner.status();
             self.save_mcp_sql_history(
+                "dbx_execute_batch",
                 &refreshed.connection,
                 &session.database,
                 sql,
@@ -1537,6 +1740,7 @@ impl DbxMcpServer {
                     results.iter().map(|result| result.result.affected_rows).sum::<u64>().min(i64::MAX as u64) as i64
                 });
                 self.save_mcp_sql_history(
+                    "dbx_execute_batch",
                     connection,
                     &database,
                     sql,
@@ -1555,8 +1759,17 @@ impl DbxMcpServer {
                 tool_result
             }
             Err(error) => {
-                self.save_mcp_sql_history(connection, &database, sql, started_at, false, Some(error.clone()), None)
-                    .await;
+                self.save_mcp_sql_history(
+                    "dbx_execute_batch",
+                    connection,
+                    &database,
+                    sql,
+                    started_at,
+                    false,
+                    Some(error.clone()),
+                    None,
+                )
+                .await;
                 backend_tool_error("DBX_BATCH_EXECUTION_ERROR", error)
             }
         }
@@ -2560,8 +2773,17 @@ impl DbxMcpServer {
             .await;
         let success = !result.is_error;
         let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
-        self.save_mcp_sql_history(connection, &pending.database, &pending.statement, started_at, success, error, None)
-            .await;
+        self.save_mcp_sql_history(
+            "dbx_salesforce_apply_write",
+            connection,
+            &pending.database,
+            &pending.statement,
+            started_at,
+            success,
+            error,
+            None,
+        )
+        .await;
         if !success {
             return agent_result(result);
         }
@@ -2846,10 +3068,165 @@ impl DbxMcpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DbxMcpServer {
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
+        let args = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
+        let arg = |name: &str| args.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string();
+        let entry = HistoryEntry {
+            id: Uuid::new_v4().to_string(),
+            connection_id: arg("connection_id"),
+            connection_name: arg("connection_name"),
+            database: arg("database"),
+            sql: arg("sql"),
+            executed_at: chrono::Utc::now().to_rfc3339(),
+            execution_time_ms: 0,
+            success: false,
+            error: None,
+            activity_kind: "mcp".into(),
+            operation: request.name.to_string(),
+            target: arg("table"),
+            affected_rows: None,
+            rollback_sql: None,
+            details_json: Some(r#"{"source":"mcp"}"#.into()),
+            source: "mcp".into(),
+            mcp_tool_name: Some(request.name.to_string()),
+            mcp_request_json: Some(bounded_history_request(&args)),
+            mcp_response_json: None,
+            mcp_session_id: args.get("session_id").and_then(|v| v.as_str()).map(str::to_owned),
+        };
+        let mut guard = CallHistoryGuard { backend: self.backend.clone(), fallback: Some(entry.clone()), started };
+        CALL_HISTORY.scope(std::sync::Mutex::new(entry), async {
+            let cancellation = context.ct.clone();
+            let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+            let result = tokio::select! {
+                result = self.tool_router.call(tcc) => result,
+                _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.")),
+            };
+            let mut entry = CALL_HISTORY.with(|entry| entry.lock().unwrap().clone());
+            entry.execution_time_ms = started.elapsed().as_millis();
+            entry.success = result.as_ref().is_ok_and(|result| result.is_error != Some(true));
+            // Keep the complete response within a bounded, redacted payload so
+            // the history detail view can be used for troubleshooting without
+            // allowing a large result to grow the local database indefinitely.
+            entry.mcp_response_json = Some(match &result {
+                Ok(result) => bounded_history_response(result),
+                Err(error) => bounded_history_response(error),
+            });
+            if !entry.success {
+                entry.error = Some(if cancellation.is_cancelled() { "MCP request cancelled" } else { "MCP tool call failed (see response summary)" }.into());
+            }
+            // Persist in a separate task so cancellation during the write cannot
+            // lose the record or schedule a second write from the drop guard.
+            guard.fallback = None;
+            let backend = self.backend.clone();
+            let write = tokio::spawn(async move {
+                if let Err(error) = backend.save_history_entry(&entry).await {
+                    log::warn!("failed to save MCP call history: {error}");
+                }
+            });
+            let _ = write.await;
+            result
+        }).await
+    }
+
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
             .with_server_info(Implementation::new("dbx", env!("CARGO_PKG_VERSION")))
             .with_instructions("Use DBX connections to inspect schemas and query databases safely.")
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let tools = self.policy_filtered_tools().await;
+        let resources = tools
+            .iter()
+            .any(|tool| tool.name.as_ref() == "dbx_list_connections")
+            .then(|| {
+                Resource::new(CONNECTIONS_RESOURCE_URI, "dbx_connections")
+                    .with_title("DBX connections")
+                    .with_description("Database connections visible to the current DBX MCP scope")
+                    .with_mime_type("text/markdown")
+            })
+            .into_iter()
+            .collect();
+        Ok(ListResourcesResult { resources, meta: None, next_cursor: None })
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        let tools = self.policy_filtered_tools().await;
+        let has_tool = |name: &str| tools.iter().any(|tool| tool.name.as_ref() == name);
+        let mut resource_templates = Vec::new();
+        if has_tool("dbx_list_databases") {
+            resource_templates.push(
+                ResourceTemplate::new(DATABASES_RESOURCE_TEMPLATE, "dbx_connection_databases")
+                    .with_title("DBX connection databases")
+                    .with_description("Databases visible through a DBX connection")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        if has_tool("dbx_list_tables") {
+            resource_templates.push(
+                ResourceTemplate::new(TABLES_RESOURCE_TEMPLATE, "dbx_connection_tables")
+                    .with_title("DBX connection tables")
+                    .with_description("Tables and views visible through a DBX connection and optional database/schema")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        if has_tool("dbx_describe_table") {
+            resource_templates.push(
+                ResourceTemplate::new(TABLE_SCHEMA_RESOURCE_TEMPLATE, "dbx_table_schema")
+                    .with_title("DBX table schema")
+                    .with_description("Column definitions for a table visible through a DBX connection")
+                    .with_mime_type("text/markdown"),
+            );
+        }
+        Ok(ListResourceTemplatesResult { resource_templates, meta: None, next_cursor: None })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let uri = request.uri;
+        let result = match parse_dbx_resource_uri(&uri)? {
+            DbxResourceRequest::Connections => self.list_connections(Parameters(ListConnectionsRequest {})).await,
+            DbxResourceRequest::Databases { connection_id } => {
+                self.list_databases(Parameters(ListDatabasesRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                }))
+                .await
+            }
+            DbxResourceRequest::Tables { connection_id, database, schema } => {
+                self.list_tables(Parameters(ListTablesRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                    database,
+                    schema,
+                }))
+                .await
+            }
+            DbxResourceRequest::TableSchema { connection_id, database, schema, table } => {
+                self.describe_table(Parameters(DescribeTableRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection_id), connection_name: None },
+                    table,
+                    database,
+                    schema,
+                }))
+                .await
+            }
+        };
+        resource_result_from_tool(uri, result)
     }
 
     /// Hide tools the global policy disallows from the advertised list, the
@@ -2866,6 +3243,102 @@ impl ServerHandler for DbxMcpServer {
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult { tools: self.policy_filtered_tools().await, meta: None, next_cursor: None })
     }
+}
+
+fn parse_dbx_resource_uri(uri: &str) -> Result<DbxResourceRequest, ErrorData> {
+    let parsed = Url::parse(uri).map_err(|_| ErrorData::invalid_params("Invalid DBX resource URI.", None))?;
+    if parsed.scheme() != "dbx"
+        || parsed.host_str() != Some("connections")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ErrorData::resource_not_found(format!("Unknown DBX resource: {uri}"), None));
+    }
+
+    let path = parsed.path().trim_matches('/');
+    let segments = if path.is_empty() { Vec::new() } else { path.split('/').collect::<Vec<_>>() };
+    let mut query = HashMap::new();
+    for (key, value) in parsed.query_pairs() {
+        let key = key.into_owned();
+        if query.insert(key.clone(), value.into_owned()).is_some() {
+            return Err(ErrorData::invalid_params(format!("Duplicate DBX resource parameter: {key}"), None));
+        }
+    }
+
+    match segments.as_slice() {
+        [] => {
+            reject_resource_parameters(&query, &[])?;
+            Ok(DbxResourceRequest::Connections)
+        }
+        [connection_id, "databases"] => {
+            reject_resource_parameters(&query, &[])?;
+            Ok(DbxResourceRequest::Databases {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+            })
+        }
+        [connection_id, "tables"] => {
+            reject_resource_parameters(&query, &["database", "schema"])?;
+            Ok(DbxResourceRequest::Tables {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+                database: optional_resource_parameter(&query, "database"),
+                schema: optional_resource_parameter(&query, "schema"),
+            })
+        }
+        [connection_id, "table-schema"] => {
+            reject_resource_parameters(&query, &["database", "schema", "table"])?;
+            Ok(DbxResourceRequest::TableSchema {
+                connection_id: required_resource_value("connection_id", connection_id)?,
+                database: optional_resource_parameter(&query, "database"),
+                schema: optional_resource_parameter(&query, "schema"),
+                table: required_resource_parameter(&query, "table")?,
+            })
+        }
+        _ => Err(ErrorData::resource_not_found(format!("Unknown DBX resource: {uri}"), None)),
+    }
+}
+
+fn reject_resource_parameters(parameters: &HashMap<String, String>, allowed: &[&str]) -> Result<(), ErrorData> {
+    if let Some(name) = parameters.keys().find(|name| !allowed.contains(&name.as_str())) {
+        return Err(ErrorData::invalid_params(format!("Unknown DBX resource parameter: {name}"), None));
+    }
+    Ok(())
+}
+
+fn optional_resource_parameter(parameters: &HashMap<String, String>, name: &str) -> Option<String> {
+    parameters.get(name).map(|value| value.trim()).filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+fn required_resource_parameter(parameters: &HashMap<String, String>, name: &str) -> Result<String, ErrorData> {
+    optional_resource_parameter(parameters, name)
+        .ok_or_else(|| ErrorData::invalid_params(format!("Missing DBX resource parameter: {name}"), None))
+}
+
+fn required_resource_value(name: &str, value: &str) -> Result<String, ErrorData> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(ErrorData::invalid_params(format!("Missing DBX resource parameter: {name}"), None))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn resource_result_from_tool(uri: String, result: CallToolResult) -> Result<ReadResourceResult, ErrorData> {
+    let output = result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if result.is_error == Some(true) {
+        let message = if output.is_empty() { "DBX resource read failed.".to_string() } else { output };
+        return Err(ErrorData::invalid_params(message, Some(json!({ "uri": uri }))));
+    }
+    if output.is_empty() {
+        return Err(ErrorData::internal_error("DBX resource returned no text content.", Some(json!({ "uri": uri }))));
+    }
+    Ok(ReadResourceResult::new(vec![ResourceContents::text(output, uri).with_mime_type("text/markdown")]))
 }
 
 fn text(value: impl Into<String>) -> CallToolResult {
@@ -3103,6 +3576,11 @@ fn resolved_connection(
     connection: dbx_core::models::connection::ConnectionConfig,
     group_path: Option<&dbx_core::mcp_policy::McpConnectionGroupPath>,
 ) -> ResolvedConnection {
+    let _ = CALL_HISTORY.try_with(|entry| {
+        let mut entry = entry.lock().unwrap();
+        entry.connection_id = connection.id.clone();
+        entry.connection_name = connection.name.clone();
+    });
     let database_scope = database_scope_for_connection(&policy, &connection);
     let group_ids = group_path.map(|path| path.ids.clone()).unwrap_or_default();
     ResolvedConnection { connection, policy, database_scope, group_ids }
@@ -4004,6 +4482,25 @@ fn format_schema_context(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn history_response_keeps_long_text_and_all_rows() {
+        let value = serde_json::json!({"content": [{"type": "text", "text": "x".repeat(4000)}], "rows": (0..100).collect::<Vec<_>>()});
+        let stored: serde_json::Value = serde_json::from_str(&super::bounded_history_response(&value)).unwrap();
+        assert_eq!(stored, value);
+    }
+
+    #[test]
+    fn history_response_redacts_nested_json_and_marks_size_limit() {
+        let value =
+            serde_json::json!({"content": [{"type": "text", "text": r#"{"password":"secret-value","rows":[1,2]}"#}]});
+        let stored = super::bounded_history_response(&value);
+        assert!(!stored.contains("secret-value"));
+        assert!(stored.contains("[redacted]"));
+        let large = super::bounded_history_response(&serde_json::json!({"text": "中".repeat(70000)}));
+        assert!(large.len() <= 64 * 1024);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&large).unwrap()["truncated"], true);
+    }
+
     use super::*;
     use async_trait::async_trait;
     use dbx_core::models::connection::ConnectionConfig;
@@ -4013,6 +4510,34 @@ mod tests {
         ServiceExt,
     };
     use std::{collections::HashSet, sync::atomic::AtomicUsize, time::Duration};
+
+    #[test]
+    fn parses_dbx_resource_uris_and_decodes_query_values() {
+        assert_eq!(parse_dbx_resource_uri(CONNECTIONS_RESOURCE_URI).unwrap(), DbxResourceRequest::Connections);
+        assert_eq!(
+            parse_dbx_resource_uri("dbx://connections/connection-1/databases").unwrap(),
+            DbxResourceRequest::Databases { connection_id: "connection-1".to_string() }
+        );
+        assert_eq!(
+            parse_dbx_resource_uri(
+                "dbx://connections/connection-1/table-schema?database=sales%20data&schema=public&table=order%20items"
+            )
+            .unwrap(),
+            DbxResourceRequest::TableSchema {
+                connection_id: "connection-1".to_string(),
+                database: Some("sales data".to_string()),
+                schema: Some("public".to_string()),
+                table: "order items".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_dbx_resource_uris() {
+        assert!(parse_dbx_resource_uri("dbx://connections/connection-1/table-schema").is_err());
+        assert!(parse_dbx_resource_uri("dbx://connections/connection-1/tables?unknown=value").is_err());
+        assert!(parse_dbx_resource_uri("file:///tmp/connections").is_err());
+    }
 
     struct FakeTransactionIo {
         in_transaction: bool,

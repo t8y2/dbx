@@ -12,17 +12,20 @@ defineOptions({
   inheritAttrs: false,
 });
 
-const props = defineProps<DialogContentProps & { class?: HTMLAttributes["class"] }>();
+const props = withDefaults(defineProps<DialogContentProps & { class?: HTMLAttributes["class"]; showOverlay?: boolean; showCloseButton?: boolean }>(), {
+  showOverlay: true,
+  showCloseButton: true,
+});
 const emits = defineEmits<DialogContentEmits>();
 
-const delegatedProps = reactiveOmit(props, "class");
+const delegatedProps = reactiveOmit(props, "class", "showOverlay", "showCloseButton");
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
 </script>
 
 <template>
   <DialogPortal>
-    <DialogOverlay />
+    <DialogOverlay v-if="props.showOverlay" />
     <div data-slot="dialog-positioner" class="fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none">
       <DialogContent
         data-slot="dialog-content"
@@ -48,7 +51,7 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
 
         <slot />
 
-        <DialogClose class="absolute top-4 right-4 rounded-md p-0.5 transition-colors hover:bg-secondary">
+        <DialogClose v-if="props.showCloseButton" class="absolute top-4 right-4 rounded-md p-0.5 transition-colors hover:bg-secondary">
           <XIcon class="w-4 h-4" />
           <span class="sr-only">Close</span>
         </DialogClose>

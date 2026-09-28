@@ -642,6 +642,17 @@ impl WebBackend {
     }
 }
 
+/// Whether a sidecar error means "this plugin simply does not expose an MCP surface".
+///
+/// `mcp/tools` is an optional host↔plugin bridge method introduced after many plugins were
+/// published. A plugin that predates it answers with JSON-RPC `-32601` ("unknown method" /
+/// "method not found"), which is the correct response, not a failure. MCP tool discovery must
+/// skip such plugins instead of aborting the whole pass.
+fn plugin_lacks_mcp_surface(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("unknown method") || lower.contains("method not found") || lower.contains("-32601")
+}
+
 impl LocalBackend {
     fn spawn_connection_lifecycle_watcher(
         &self,
@@ -771,11 +782,21 @@ impl LocalBackend {
             if !plugin.compatibility.compatible || plugin.manifest.backend_entrypoint().is_none() {
                 continue;
             }
-            let tools: Value = self
+            let tools: Value = match self
                 .state
                 .plugin_host
                 .invoke(&plugin.manifest.id, "mcp/tools", json!({}), None, Some(std::time::Duration::from_secs(30)))
-                .await?;
+                .await
+            {
+                Ok(tools) => tools,
+                // A plugin that predates the optional `mcp/tools` bridge answers -32601; skip it
+                // instead of failing discovery for every other installed plugin.
+                Err(err) if plugin_lacks_mcp_surface(&err) => {
+                    log::debug!("[mcp] plugin {} exposes no MCP tool surface: {}", plugin.manifest.id, err);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             let tool_list = tools
                 .get("tools")
                 .cloned()
@@ -2704,6 +2725,19 @@ mod tests {
             group_policies: Vec::new(),
             query_timeout_secs: None,
         }
+    }
+
+    #[test]
+    fn plugin_lacks_mcp_surface_skips_unknown_method_but_keeps_real_errors() {
+        // The exact error a plugin that never implemented the optional mcp/tools bridge returns
+        // (e.g. com.yiqiui.leetcode-cn's JSON-RPC -32601 fallback). Discovery must skip these.
+        assert!(plugin_lacks_mcp_surface("unknown method: mcp/tools"));
+        assert!(plugin_lacks_mcp_surface("JSON-RPC error -32601: Method not found"));
+        assert!(plugin_lacks_mcp_surface("rpc error: code=-32601"));
+        // Genuine failures must still abort discovery, not be silently skipped.
+        assert!(!plugin_lacks_mcp_surface("connection refused"));
+        assert!(!plugin_lacks_mcp_surface("sidecar panicked"));
+        assert!(!plugin_lacks_mcp_surface(""));
     }
 
     #[test]

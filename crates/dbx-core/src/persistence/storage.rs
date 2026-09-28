@@ -5,7 +5,7 @@ pub use dbx_drivers::runtime_config::{
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
@@ -34,7 +34,9 @@ use crate::history::{
     HistorySearchRequest, HistorySearchResult, MAX_HISTORY,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
-use crate::persistence::secret_codec::{SecretCodec, SecretKeyPolicy, SecretKeyResolution, SecretKeySource};
+use crate::persistence::secret_codec::{
+    key_file_candidates, SecretCodec, SecretKeyPolicy, SecretKeyResolution, SecretKeySource,
+};
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
@@ -53,8 +55,10 @@ const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positio
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
+const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
+const MCP_HISTORY_RETENTION_LIMIT_KEY: &str = "mcp_history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
 /// Plugin ids whose MCP tools the built-in AI agent may call.
 const AI_PLUGIN_TOOL_PLUGINS_KEY: &str = "ai_plugin_tool_plugins";
@@ -192,6 +196,16 @@ pub struct Storage {
     /// Standalone CLI/MCP processes may use an existing key but must never
     /// provision one as a side effect of a write.
     secret_key_creation_allowed: bool,
+    /// Key material resolved for business reads and writes. Every resolution
+    /// round-trips to the OS credential store, so hydrating N stored secrets
+    /// used to mean N credential-store accesses on the startup path.
+    secret_codec_cache: Arc<Mutex<Option<CachedSecretCodec>>>,
+}
+
+/// Key material plus the digest of every key file it was resolved from.
+struct CachedSecretCodec {
+    codec: SecretCodec,
+    key_files: Vec<(PathBuf, Option<[u8; 32]>)>,
 }
 
 pub const SECRET_STORE_MIGRATION_ID: &str = "secret-store-v1";
@@ -531,6 +545,20 @@ pub struct McpHttpServerSettings {
     pub path: String,
     #[serde(default)]
     pub allow_remote: bool,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
+/// Configuration for the optional DBX Web MCP endpoint. The bearer token is
+/// deliberately kept out of this JSON and stored through the encrypted secret
+/// store instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebMcpSettings {
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
@@ -928,6 +956,11 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         affected_rows INTEGER,
         rollback_sql TEXT,
         details_json TEXT
+        ,source TEXT NOT NULL DEFAULT 'sql'
+        ,mcp_tool_name TEXT
+        ,mcp_request_json TEXT
+        ,mcp_response_json TEXT
+        ,mcp_session_id TEXT
     )",
     "CREATE TABLE IF NOT EXISTS ai_config (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1173,8 +1206,13 @@ impl Storage {
         let path = db_path.to_path_buf();
         let db_path = db_path.to_string_lossy().to_string();
         let db = connect_path_create_if_missing(&db_path).await?;
-        let storage =
-            Self { db, path, secret_key_policy: SecretKeyPolicy::PlatformDefault, secret_key_creation_allowed: true };
+        let storage = Self {
+            db,
+            path,
+            secret_key_policy: SecretKeyPolicy::PlatformDefault,
+            secret_key_creation_allowed: true,
+            secret_codec_cache: Arc::new(Mutex::new(None)),
+        };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
         // racing to open the same brand-new database file) must never stop
@@ -1214,8 +1252,61 @@ impl Storage {
         SecretCodec::resolve(self.secret_key_policy, self.data_dir(), allow_create)
     }
 
+    /// Resolution cost is dominated by the platform credential store, so the
+    /// codec is cached for the process. Key files are re-digested on every use,
+    /// and migration invalidates the cache, so no caller serves material that
+    /// the provider no longer agrees with. Callers that must observe a key
+    /// change immediately (status probes, migration) use `resolve_secret_key`.
     fn secret_codec(&self, allow_create: bool) -> Result<SecretCodec, String> {
-        self.resolve_secret_key(allow_create).map(|resolved| resolved.codec)
+        if let Some(cached) = self.cached_secret_codec() {
+            return Ok(cached);
+        }
+        let key_files = self.key_file_digests();
+        let codec = self.resolve_secret_key(allow_create).map(|resolved| resolved.codec)?;
+        // Pair the codec with the pre-resolve digests, and only when the key
+        // files are unchanged across the resolve. A pair taken after resolving
+        // could combine a stale codec with fresh digests, which the use-time
+        // digest check would then never reject.
+        if self.key_file_digests() == key_files {
+            self.cache_secret_codec(codec, key_files);
+        }
+        Ok(codec)
+    }
+
+    fn cached_secret_codec(&self) -> Option<SecretCodec> {
+        let mut cache = self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cached = cache.as_ref()?;
+        let codec = cached.codec;
+        let resolved_key_files = cached.key_files.clone();
+        if resolved_key_files != self.key_file_digests() {
+            // A key file was added, replaced, or removed after resolution.
+            *cache = None;
+            return None;
+        }
+        Some(codec)
+    }
+
+    fn cache_secret_codec(&self, codec: SecretCodec, key_files: Vec<(PathBuf, Option<[u8; 32]>)>) {
+        let entry = CachedSecretCodec { codec, key_files };
+        *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entry);
+    }
+
+    fn invalidate_secret_codec(&self) {
+        *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// Digest of every file that can supply key material on its own. Comparing
+    /// these on use costs a few small reads instead of a credential-store
+    /// round trip, and still catches a key file replaced outside DBX.
+    fn key_file_digests(&self) -> Vec<(PathBuf, Option<[u8; 32]>)> {
+        use sha2::Digest;
+        key_file_candidates(self.data_dir())
+            .into_iter()
+            .map(|path| {
+                let digest = std::fs::read(&path).ok().map(|contents| sha2::Sha256::digest(contents).into());
+                (path, digest)
+            })
+            .collect()
     }
 
     async fn secret_codec_for_write(&self, needs_key: bool) -> Result<SecretCodec, String> {
@@ -1388,9 +1479,16 @@ impl Storage {
                         let mut count = 0;
                         for row in rows {
                             let json = row.map_err(|e| e.to_string())?;
-                            let config: ConnectionConfig = serde_json::from_str(&json).map_err(|e| {
-                                format!("invalid connection configuration during migration preflight: {e}")
-                            })?;
+                            // Legacy rows saved by older app versions may carry a db_type the
+                            // current enum no longer knows (e.g. pre-plugin `s3`). load_connections
+                            // skips those at runtime, so they must not brick the migration either.
+                            let config: ConnectionConfig = match serde_json::from_str(&json) {
+                                Ok(config) => config,
+                                Err(error) => {
+                                    warn!("Skipping unreadable saved connection during migration preflight: {error}");
+                                    continue;
+                                }
+                            };
                             if connection_config_has_inline_secrets(&config) {
                                 count += 1;
                             }
@@ -1577,6 +1675,9 @@ impl Storage {
 
     pub async fn start_data_migration(&self) -> Result<MigrationReport, String> {
         let lock = DATA_MIGRATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+        // Migration may create or replace key material, so the codec resolved
+        // for earlier reads must not be reused here.
+        self.invalidate_secret_codec();
         let preflight = self.inspect_data_migration().await?;
         if preflight.is_ready() {
             return Ok(MigrationReport {
@@ -1925,7 +2026,15 @@ impl Storage {
             let mut configs = conn.prepare("SELECT config_json FROM connections").map_err(|e| e.to_string())?;
             for row in configs.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())? {
                 let json = row.map_err(|e| e.to_string())?;
-                let config: ConnectionConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+                // Rows skipped by the migrator (unreadable legacy db_type) keep their stored
+                // config_json; only readable rows are verified here.
+                let config: ConnectionConfig = match serde_json::from_str(&json) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        warn!("Skipping unreadable saved connection after migration: {error}");
+                        continue;
+                    }
+                };
                 if connection_config_has_inline_secrets(&config) {
                     return Err("plaintext connection configuration remains after migration".to_string());
                 }
@@ -2187,8 +2296,12 @@ fn migrate_legacy_connection_config_json_sync(conn: &mut Connection, codec: &Sec
     for (id, json) in rows {
         let config: ConnectionConfig = match serde_json::from_str(&json) {
             Ok(config) => config,
+            // load_connections skips unreadable rows at runtime; migration must not
+            // fail on them either. Their inline secrets stay as stored until the
+            // connection is repaired or removed (#10227).
             Err(error) => {
-                return Err(format!("Failed to parse legacy connection '{id}' during secret migration: {error}"))
+                warn!("Skipping unreadable saved connection '{id}' during secret migration: {error}");
+                continue;
             }
         };
         if connection_config_has_inline_secrets(&config) {
@@ -2655,6 +2768,11 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
         ("affected_rows", "INTEGER"),
         ("rollback_sql", "TEXT"),
         ("details_json", "TEXT"),
+        ("source", "TEXT NOT NULL DEFAULT 'sql'"),
+        ("mcp_tool_name", "TEXT"),
+        ("mcp_request_json", "TEXT"),
+        ("mcp_response_json", "TEXT"),
+        ("mcp_session_id", "TEXT"),
     ];
 
     let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('history')").map_err(|e| e.to_string())?;
@@ -2670,6 +2788,19 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
         }
         conn.execute(&format!("ALTER TABLE history ADD COLUMN {name} {definition}"), []).map_err(|e| e.to_string())?;
     }
+    // Older MCP SQL entries carried their source only in details_json. Guard
+    // malformed legacy JSON so opening the database cannot fail during upgrade.
+    conn.execute(
+        "UPDATE history SET source = 'mcp' WHERE source = 'sql' AND \
+         CASE WHEN json_valid(details_json) THEN json_extract(details_json, '$.source') = 'mcp' ELSE 0 END",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_source_time ON history(source, executed_at DESC, id DESC);
+         CREATE INDEX IF NOT EXISTS idx_history_mcp_tool_time ON history(mcp_tool_name, executed_at DESC);",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -3059,6 +3190,15 @@ fn history_search_predicate(request: &HistorySearchRequest) -> (String, Vec<Valu
     let mut values = Vec::new();
     append_history_scope_clause(&mut clauses, &mut values, &request.connections, &request.databases);
 
+    if let Some(source) = request.source.as_ref().filter(|value| !value.is_empty()) {
+        clauses.push("source = ?".to_string());
+        values.push(Value::Text(source.clone()));
+    }
+    if let Some(tool) = request.mcp_tool_name.as_ref().filter(|value| !value.is_empty()) {
+        clauses.push("mcp_tool_name = ?".to_string());
+        values.push(Value::Text(tool.clone()));
+    }
+
     if let Some(kind) = request.activity_kind.as_ref().filter(|kind| !kind.is_empty()) {
         clauses.push("activity_kind = ?".to_string());
         values.push(Value::Text(kind.clone()));
@@ -3079,7 +3219,7 @@ fn history_search_predicate(request: &HistorySearchRequest) -> (String, Vec<Valu
     let search_text = request.search_text.trim();
     if !search_text.is_empty() {
         let pattern = format!("%{}%", escape_history_like_pattern(search_text));
-        let fields = ["sql_text", "connection_name", "database", "operation", "target"];
+        let fields = ["sql_text", "connection_name", "database", "operation", "target", "mcp_tool_name"];
         clauses.push(format!(
             "({})",
             fields
@@ -3119,6 +3259,11 @@ fn map_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
         affected_rows: row.get(12)?,
         rollback_sql: row.get(13)?,
         details_json: row.get(14)?,
+        source: row.get::<_, String>(15).unwrap_or_else(|_| "sql".to_string()),
+        mcp_tool_name: row.get(16).ok(),
+        mcp_request_json: row.get(17).ok(),
+        mcp_response_json: row.get(18).ok(),
+        mcp_session_id: row.get(19).ok(),
     })
 }
 
@@ -3154,6 +3299,16 @@ fn app_settings_map_from_conn(conn: &Connection) -> Result<serde_json::Map<Strin
             .map_err(|e| format!("invalid app settings JSON: {e}")),
         None => Ok(serde_json::Map::new()),
     }
+}
+
+fn load_mcp_history_retention_limit_from_conn(conn: &Connection) -> Result<u32, String> {
+    let settings = app_settings_map_from_conn(conn)?;
+    Ok(settings
+        .get(MCP_HISTORY_RETENTION_LIMIT_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| crate::history::validate_history_retention_limit(*value).is_ok())
+        .unwrap_or(1000))
 }
 
 fn write_app_settings_map(
@@ -3200,12 +3355,17 @@ impl Storage {
         self.with_conn(move |conn| {
             let tx =
                 conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
-            let limit = load_history_retention_limit_from_conn(&tx)?;
+            let source = if entry.source.is_empty() { "sql" } else { entry.source.as_str() };
+            let limit = if source == "mcp" {
+                load_mcp_history_retention_limit_from_conn(&tx)?
+            } else {
+                load_history_retention_limit_from_conn(&tx)?
+            };
             tx.execute(
                 "INSERT OR REPLACE INTO history \
                  (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, error, \
-                  activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     entry.id,
                     entry.connection_name,
@@ -3221,16 +3381,17 @@ impl Storage {
                     entry.target,
                     entry.affected_rows,
                     entry.rollback_sql,
-                    entry.details_json
+                    entry.details_json,
+                    source, entry.mcp_tool_name, entry.mcp_request_json, entry.mcp_response_json, entry.mcp_session_id
                 ],
             )
             .map_err(|e| e.to_string())?;
 
             if limit != 0 {
                 tx.execute(
-                    "DELETE FROM history WHERE id NOT IN \
-                     (SELECT id FROM history ORDER BY executed_at DESC, id DESC LIMIT ?1)",
-                    [i64::from(limit)],
+                    "DELETE FROM history WHERE source = ?2 AND id NOT IN \
+                     (SELECT id FROM history WHERE source = ?2 ORDER BY executed_at DESC, id DESC LIMIT ?1)",
+                    rusqlite::params![i64::from(limit), source],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -3266,6 +3427,11 @@ impl Storage {
                     affected_rows: row.get(12)?,
                     rollback_sql: row.get(13)?,
                     details_json: row.get(14)?,
+                    source: row.get::<_, String>(15).unwrap_or_else(|_| "sql".to_string()),
+                    mcp_tool_name: row.get(16).ok(),
+                    mcp_request_json: row.get(17).ok(),
+                    mcp_response_json: row.get(18).ok(),
+                    mcp_session_id: row.get(19).ok(),
                 })
             };
 
@@ -3273,7 +3439,7 @@ impl Storage {
                 let mut stmt = conn
                     .prepare(
                         "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id \
                          FROM history WHERE activity_kind = ?1 ORDER BY executed_at DESC LIMIT ?2 OFFSET ?3",
                     )
                     .map_err(|e| e.to_string())?;
@@ -3285,7 +3451,7 @@ impl Storage {
                 let mut stmt = conn
                     .prepare(
                         "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id \
                          FROM history ORDER BY executed_at DESC LIMIT ?1 OFFSET ?2",
                     )
                     .map_err(|e| e.to_string())?;
@@ -3326,7 +3492,7 @@ impl Storage {
             let limit = if request.limit == 0 { 100 } else { request.limit.clamp(1, 200) };
             let sql = format!(
                 "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                 error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                 error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json, source, mcp_tool_name, mcp_request_json, mcp_response_json, mcp_session_id \
                  FROM history{page_predicate} ORDER BY executed_at DESC, id DESC LIMIT ?"
             );
             page_values.push(Value::Integer((limit + 1) as i64));
@@ -3390,6 +3556,34 @@ impl Storage {
 
     pub async fn clear_history(&self) -> Result<(), String> {
         self.with_conn(|conn| conn.execute("DELETE FROM history", []).map(|_| ()).map_err(|e| e.to_string())).await
+    }
+
+    pub async fn clear_history_by_source(&self, source: &str) -> Result<(), String> {
+        let source = source.trim().to_string();
+        if source.is_empty() {
+            return Err("History source is required".to_string());
+        }
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM history WHERE source = ?1", [source]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn cleanup_mcp_history_retention(&self) -> Result<u64, String> {
+        self.with_conn(|conn| {
+            let limit = load_mcp_history_retention_limit_from_conn(conn)?;
+            if limit == 0 {
+                return Ok(0);
+            }
+            conn.execute(
+                "DELETE FROM history WHERE source = 'mcp' AND id NOT IN \
+                 (SELECT id FROM history WHERE source = 'mcp' ORDER BY executed_at DESC, id DESC LIMIT ?1)",
+                [i64::from(limit)],
+            )
+            .map(|count| count as u64)
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn delete_history_entry(&self, id: &str) -> Result<(), String> {
@@ -4020,11 +4214,13 @@ impl Storage {
                 .map_err(|e| e.to_string())?;
             let dedicated_keys = [
                 MCP_GLOBAL_POLICY_KEY,
+                WEB_MCP_SETTINGS_KEY,
                 MAX_RETRIES_KEY,
                 SQL_FILE_UPLOAD_MAX_MB_KEY,
                 HISTORY_RETENTION_LIMIT_KEY,
                 AI_PLUGIN_TOOL_PLUGINS_KEY,
                 PLUGIN_DATA_GRANTS_KEY,
+                MCP_HISTORY_RETENTION_LIMIT_KEY,
             ];
             for key in dedicated_keys {
                 settings.remove(key);
@@ -4244,6 +4440,32 @@ impl Storage {
         let value = serde_json::to_value(settings).map_err(|error| error.to_string())?;
         app_settings.insert(MCP_HTTP_SERVER_SETTINGS_KEY.to_string(), value);
         self.save_app_settings_json(&app_settings).await
+    }
+
+    pub async fn load_web_mcp_settings(&self) -> Result<WebMcpSettings, String> {
+        let settings = self.load_app_settings_json().await?;
+        match settings.get(WEB_MCP_SETTINGS_KEY) {
+            Some(value) => {
+                serde_json::from_value(value.clone()).map_err(|error| format!("invalid Web MCP settings: {error}"))
+            }
+            None => Ok(WebMcpSettings::default()),
+        }
+    }
+
+    pub async fn save_web_mcp_credentials(&self, settings: &WebMcpSettings, token: Option<&str>) -> Result<(), String> {
+        let token = token.unwrap_or_default().to_string();
+        let codec = self.secret_codec_for_write(!token.is_empty()).await?;
+        let value = serde_json::to_value(settings).map_err(|error| error.to_string())?;
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let mut app_settings = app_settings_map_from_conn(&tx)?;
+            app_settings.insert(WEB_MCP_SETTINGS_KEY.to_string(), value);
+            persist_secret_in_tx(&tx, &codec, GLOBAL_SECRET_NAMESPACE, "web_mcp_token", &token)?;
+            write_app_settings_map(&tx, &app_settings)?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
     }
 
     pub async fn save_desktop_settings(&self, desktop_settings: &DesktopSettings) -> Result<(), String> {
@@ -4804,6 +5026,33 @@ impl Storage {
 
     pub async fn load_history_retention_limit(&self) -> Result<u32, String> {
         self.with_conn(|conn| load_history_retention_limit_from_conn(conn)).await
+    }
+
+    pub async fn load_mcp_history_retention_limit(&self) -> Result<u32, String> {
+        self.with_conn(|conn| load_mcp_history_retention_limit_from_conn(conn)).await
+    }
+
+    pub async fn save_mcp_history_retention_limit(&self, limit: u32) -> Result<(), String> {
+        crate::history::validate_history_retention_limit(limit)?;
+        self.with_conn(move |conn| {
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut settings = match current {
+                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            settings.insert(MCP_HISTORY_RETENTION_LIMIT_KEY.to_string(), serde_json::Value::from(limit));
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                [serde_json::Value::Object(settings).to_string()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn save_history_retention_limit(&self, limit: u32) -> Result<(), String> {
@@ -5786,22 +6035,47 @@ impl Storage {
         .await
     }
 
+    /// Insert or update exactly the given connections and leave every other saved
+    /// connection untouched.
+    ///
+    /// Multi-client deployments (the Web/Docker build serves several people from
+    /// one storage) must not replace the whole table: a client that saves a list
+    /// it loaded earlier would otherwise silently delete connections another
+    /// client created in the meantime. Removing a connection therefore has to go
+    /// through [`Storage::delete_connections`] with explicit ids.
     pub async fn save_connections(&self, configs: &[ConnectionConfig]) -> Result<(), String> {
         let configs = configs.to_vec();
         let needs_key = configs.iter().any(connection_config_has_inline_secrets);
         let codec = self.secret_codec_for_write(needs_key).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
-            let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
-            let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
-
             for config in &configs {
+                // `persist_connection_in_tx` uses a plain INSERT, so an update of
+                // an already saved connection has to drop the old row first.
+                tx.execute("DELETE FROM connections WHERE id = ?1", [&config.id]).map_err(|e| e.to_string())?;
                 persist_connection_in_tx(&tx, &codec, config)?;
             }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
 
-            retained_ids.extend(configs.iter().map(|config| config.id.clone()));
-            delete_unreferenced_connection_secrets_in_tx(&tx, &retained_ids)?;
-
+    /// Delete the given saved connections together with their stored secrets.
+    ///
+    /// This is the only removal path for saved connections; ids that no longer
+    /// exist are ignored so a stale client cannot fail the save.
+    pub async fn delete_connections(&self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ids = ids.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            for id in &ids {
+                tx.execute("DELETE FROM connections WHERE id = ?1", [id]).map_err(|e| e.to_string())?;
+                tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [id])
+                    .map_err(|e| e.to_string())?;
+            }
             tx.commit().map_err(|e| e.to_string())
         })
         .await
@@ -6070,6 +6344,32 @@ impl Storage {
             )
             .map(|updated| updated > 0)
             .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Counts the stored `connections` rows without decrypting secrets or
+    /// running the data-security upgrade. Diagnostics use it to report the
+    /// table state truthfully even when the store cannot be fully opened (for
+    /// example a headless CLI that cannot read the OS keychain key), so a
+    /// failed open is never misreported as a missing table. `None` means the
+    /// opened schema has no `connections` table at all.
+    pub async fn stored_connection_count(&self) -> Result<Option<u64>, String> {
+        self.with_conn(|conn| {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'connections')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !exists {
+                return Ok(None);
+            }
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            Ok(Some(count.max(0) as u64))
         })
         .await
     }
@@ -8284,7 +8584,7 @@ mod tests {
     use crate::models::connection::{
         ConnectionConfig, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,
     };
-    use crate::persistence::secret_codec::{managed_key_path, SecretKeyPolicy};
+    use crate::persistence::secret_codec::{managed_key_path, SecretCodec, SecretKeyPolicy};
     use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
     use rusqlite::{Connection, TransactionBehavior};
     use std::collections::BTreeMap;
@@ -8341,6 +8641,75 @@ mod tests {
         assert!(after.get("cachedScan").is_none());
         assert!(after.get("cachedScanFingerprint").is_none());
         assert!(!storage.inspect_data_migration().await.unwrap().needs_migration);
+    }
+
+    #[tokio::test]
+    async fn migration_tolerates_unreadable_legacy_connection_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                // A readable row carrying an inline password must keep counting…
+                let readable = serde_json::json!({
+                    "id": "conn-readable",
+                    "name": "Readable",
+                    "db_type": "mysql",
+                    "host": "127.0.0.1",
+                    "port": 3306,
+                    "username": "root",
+                    "password": "secret-password",
+                    "database": null
+                });
+                conn.execute(
+                    "INSERT INTO connections (id, config_json) VALUES ('conn-readable', ?1)",
+                    [readable.to_string()],
+                )
+                .unwrap();
+                // …while a pre-plugin row saved with a db_type the current enum no
+                // longer knows (legacy built-in s3) must not brick the scan (#10227).
+                let legacy = serde_json::json!({
+                    "id": "conn-legacy-s3",
+                    "name": "Legacy S3",
+                    "db_type": "s3",
+                    "host": "127.0.0.1",
+                    "port": 9000,
+                    "username": "minio",
+                    "password": "secret-s3",
+                    "database": null
+                });
+                conn.execute(
+                    "INSERT INTO connections (id, config_json) VALUES ('conn-legacy-s3', ?1)",
+                    [legacy.to_string()],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let preflight = storage.inspect_data_migration().await.unwrap();
+        assert_eq!(preflight.database_plaintext_count, 1);
+
+        storage.start_data_migration().await.unwrap();
+
+        // The unreadable row is preserved untouched; the readable row had its
+        // inline password moved into the encrypted secret store.
+        let (legacy_json, readable_json) = storage
+            .with_conn(|conn| {
+                let legacy: String = conn
+                    .query_row("SELECT config_json FROM connections WHERE id = 'conn-legacy-s3'", [], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                let readable: String = conn
+                    .query_row("SELECT config_json FROM connections WHERE id = 'conn-readable'", [], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                Ok((legacy, readable))
+            })
+            .await
+            .unwrap();
+        assert!(legacy_json.contains("\"s3\""), "legacy row must be preserved verbatim: {legacy_json}");
+        assert!(!readable_json.contains("secret-password"), "readable row must be scrubbed: {readable_json}");
+        let stored = storage.get_secret("conn-readable", "password").await.unwrap().unwrap_or_default();
+        assert_eq!(stored, "secret-password");
     }
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
@@ -8510,6 +8879,44 @@ mod tests {
         reopened.retry_data_migration().await.unwrap();
         assert!(reopened.inspect_data_migration().await.unwrap().is_ready());
         assert_eq!(reopened.get_secret("legacy", "password").await.unwrap().as_deref(), Some("secret"));
+    }
+
+    /// Reads through the same codec path business reads use, so a cached codec
+    /// has to produce the right plaintext for the assertion to hold.
+    fn open_with_resolved_codec(storage: &Storage, envelope: &str) -> Result<String, String> {
+        storage.secret_codec(false)?.decrypt("connection", "password", envelope)
+    }
+
+    #[tokio::test]
+    async fn resolved_secret_codec_is_cached_until_a_key_file_changes() {
+        // Hydrating stored secrets used to re-resolve key material per secret,
+        // which on the desktop means one OS credential-store round trip per
+        // secret on the startup path.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_unmigrated(&dir.path().join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+        let key_path = managed_key_path(dir.path());
+        std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+        std::fs::write(&key_path, "ab".repeat(32)).unwrap();
+        let file_codec = storage.secret_codec(false).unwrap();
+        let envelope = file_codec.encrypt("connection", "password", "secret").unwrap();
+
+        storage.cache_secret_codec(SecretCodec::new([7u8; 32]), storage.key_file_digests());
+        // Business reads answer from the cached codec instead of re-reading the
+        // key file, so an envelope sealed with the file key stays shut.
+        assert_eq!(open_with_resolved_codec(&storage, &envelope), Err("secret decryption failed".to_string()));
+
+        // Replacing the key file drops the cached codec, so the next read uses
+        // the material the provider now reports.
+        std::fs::write(&key_path, "cd".repeat(32)).unwrap();
+        assert!(storage.cached_secret_codec().is_none());
+        assert_eq!(open_with_resolved_codec(&storage, &envelope), Err("secret decryption failed".to_string()));
+
+        // Restoring the original material restores the working codec.
+        std::fs::write(&key_path, "ab".repeat(32)).unwrap();
+        assert_eq!(open_with_resolved_codec(&storage, &envelope).as_deref(), Ok("secret"));
     }
 
     #[tokio::test]
@@ -8783,6 +9190,11 @@ mod tests {
             affected_rows: None,
             rollback_sql: None,
             details_json: None,
+            source: "sql".to_string(),
+            mcp_tool_name: None,
+            mcp_request_json: None,
+            mcp_response_json: None,
+            mcp_session_id: None,
         }
     }
 
@@ -9205,6 +9617,121 @@ mod tests {
             }
             tx.commit().map_err(|error| error.to_string())
         }).await.unwrap();
+    }
+
+    async fn seed_mixed_history(storage: &Storage) {
+        seed_history_backlog(storage, 1001).await;
+        storage.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO history (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, source)
+                 SELECT 'mcp-' || id, connection_name, database, sql_text, executed_at, execution_time_ms, success, 'mcp' FROM history WHERE source = 'sql'",
+                [],
+            ).map(|_| ()).map_err(|e| e.to_string())
+        }).await.unwrap();
+    }
+
+    async fn source_count(storage: &Storage, source: &str) -> usize {
+        storage
+            .search_history_entries(HistorySearchRequest { source: Some(source.to_string()), ..Default::default() })
+            .await
+            .unwrap()
+            .total as usize
+    }
+
+    async fn write_source_history(storage: &Storage, source: &str) {
+        let mut entry =
+            history_entry(&format!("new-{source}"), "conn", "Main", "app", "select 2", "2026-07-19T00:00:00Z", true);
+        entry.source = source.to_string();
+        storage.save_history_entry(&entry).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_retention_sources_are_independent_and_unlimited() {
+        for (sql_limit, mcp_limit, sql_expected, mcp_expected) in [
+            (200, 1000, 200, 1000),
+            (1000, 200, 1000, 200),
+            (0, 200, 1002, 200),
+            (200, 0, 200, 1002),
+            (0, 0, 1002, 1002),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+            seed_mixed_history(&storage).await;
+            storage.save_history_retention_limit(sql_limit).await.unwrap();
+            storage.save_mcp_history_retention_limit(mcp_limit).await.unwrap();
+            assert_eq!(source_count(&storage, "sql").await, 1001);
+            assert_eq!(source_count(&storage, "mcp").await, 1001);
+            write_source_history(&storage, "mcp").await;
+            assert_eq!(source_count(&storage, "mcp").await, mcp_expected);
+            assert_eq!(source_count(&storage, "sql").await, 1001);
+            write_source_history(&storage, "sql").await;
+            assert_eq!(source_count(&storage, "sql").await, sql_expected);
+            assert_eq!(source_count(&storage, "mcp").await, mcp_expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_retention_mcp_defaults_and_preserves_saved_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        let storage = Storage::open(&path).await.unwrap();
+        assert_eq!(storage.load_mcp_history_retention_limit().await.unwrap(), 1000);
+        seed_mixed_history(&storage).await;
+        write_source_history(&storage, "mcp").await;
+        assert_eq!(source_count(&storage, "mcp").await, 1000);
+        assert_eq!(source_count(&storage, "sql").await, 1001);
+        let stale = storage.load_app_settings_json().await.unwrap();
+        storage.save_mcp_history_retention_limit(200).await.unwrap();
+        storage.save_app_settings_json(&stale).await.unwrap();
+        assert_eq!(storage.load_mcp_history_retention_limit().await.unwrap(), 200);
+        assert_eq!(source_count(&storage, "mcp").await, 1000);
+        write_source_history(&storage, "sql").await;
+        assert_eq!(source_count(&storage, "mcp").await, 1000);
+        write_source_history(&storage, "mcp").await;
+        assert_eq!(source_count(&storage, "mcp").await, 200);
+        assert!(storage.save_mcp_history_retention_limit(1).await.is_err());
+        drop(storage);
+        let reopened = Storage::open(&path).await.unwrap();
+        assert_eq!(reopened.load_mcp_history_retention_limit().await.unwrap(), 200);
+    }
+
+    #[tokio::test]
+    async fn history_retention_legacy_migration_recovers_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE history (id TEXT PRIMARY KEY, connection_name TEXT NOT NULL,
+                 database TEXT NOT NULL, sql_text TEXT NOT NULL, executed_at TEXT NOT NULL,
+                 execution_time_ms INTEGER NOT NULL, success INTEGER NOT NULL, error TEXT, details_json TEXT);
+                 INSERT INTO history VALUES ('sql', 'Main', 'app', 'select 1', '2026-07-18', 1, 1, NULL, NULL);
+                 INSERT INTO history VALUES ('mcp', 'Main', 'app', 'select 2', '2026-07-18', 1, 1, NULL, '{\"source\":\"mcp\"}');
+                 INSERT INTO history VALUES ('invalid', 'Main', 'app', 'select 3', '2026-07-18', 1, 1, NULL, 'invalid json');"
+            ).unwrap();
+        }
+        for _ in 0..2 {
+            let storage = Storage::open(&path).await.unwrap();
+            assert_eq!(source_count(&storage, "sql").await, 2);
+            assert_eq!(source_count(&storage, "mcp").await, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_source_clear_and_mcp_cleanup_are_isolated() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        seed_mixed_history(&storage).await;
+        storage.save_mcp_history_retention_limit(200).await.unwrap();
+
+        assert_eq!(storage.cleanup_mcp_history_retention().await.unwrap(), 801);
+        assert_eq!(source_count(&storage, "mcp").await, 200);
+        assert_eq!(source_count(&storage, "sql").await, 1001);
+
+        storage.clear_history_by_source("mcp").await.unwrap();
+        assert_eq!(source_count(&storage, "mcp").await, 0);
+        assert_eq!(source_count(&storage, "sql").await, 1001);
+        assert!(storage.clear_history_by_source(" ").await.is_err());
     }
 
     #[tokio::test]
@@ -9819,6 +10346,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -9893,6 +10421,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -10350,7 +10879,14 @@ mod tests {
         assert_eq!(raw_connection_json(&storage, "future").await, future_json);
         assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
 
+        // Saving a list no longer replaces the whole table: an empty save is a no-op, so
+        // rows the caller never saw (like the unreadable "future" row) survive it.
         storage.save_connections(&[]).await.unwrap();
+        assert_eq!(storage.load_connections().await.unwrap().len(), 1);
+        assert_eq!(raw_connection_json(&storage, "future").await, future_json);
+
+        // Deleting a connection is explicit now, and still only touches the given ids.
+        storage.delete_connections(&["known".to_string()]).await.unwrap();
         assert!(storage.load_connections().await.unwrap().is_empty());
         assert_eq!(raw_connection_json(&storage, "future").await, future_json);
         assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
@@ -10864,7 +11400,9 @@ mod tests {
 
         // Non-MCP callers remain governed by the ordinary DBX UI permissions.
         storage.save_connections(std::slice::from_ref(&kept)).await.unwrap();
-        assert_eq!(storage.load_connections().await.unwrap()[0].id, kept.id);
+        let after_plain_save = storage.load_connections().await.unwrap();
+        assert_eq!(after_plain_save.len(), 3);
+        assert!(after_plain_save.iter().any(|config| config.id == kept.id));
 
         let _ = std::fs::remove_file(path);
     }
@@ -12912,5 +13450,33 @@ mod tests {
         assert!(super::migration_backup_paths(&invalid).is_err());
         let valid = serde_json::json!({"backupPaths": ["/tmp/dbx-secret-migration-a"]});
         assert_eq!(super::migration_backup_paths(&valid).unwrap(), vec!["/tmp/dbx-secret-migration-a"]);
+    }
+
+    #[tokio::test]
+    async fn stored_connection_count_reads_the_table_without_loading_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), Some(0));
+
+        storage
+            .with_conn(|conn| {
+                conn.execute("INSERT INTO connections (id, config_json) VALUES ('a', '{}'), ('b', '{}')", [])
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), Some(2));
+
+        // `None` is what lets `dbx doctor` tell a missing table apart from a
+        // table it could not load.
+        storage
+            .with_conn(|conn| {
+                conn.execute("DROP TABLE connections", []).map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.stored_connection_count().await.unwrap(), None);
     }
 }

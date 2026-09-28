@@ -1567,6 +1567,30 @@ SELECT @value AS Message;`;
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1", skipRedisSafetyCheck: false });
   });
 
+  it("keeps an explicitly selected Redis console visible for multi-command execution", async () => {
+    const sql = "GET user:1\nDBSIZE";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("0"), sql, uiState: { redisResultViewMode: "console" } });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("redis"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("summary");
+    const queryStore = useQueryStore();
+    useSettingsStore().editorSettings.multiStatementDefaultView = "summary";
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["result"], rows: [["value"]], affected_rows: 0, execution_time_ms: 1, redis_console_output: "value" };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("result");
+  });
+
   it("distinguishes read-only and mutating Meilisearch REST requests", () => {
     expect(isDangerousSql("GET /health", "meilisearch")).toBe(false);
     expect(isDangerousSql('POST /indexes/movies/documents/fetch\n{"limit":10}', "meilisearch")).toBe(false);

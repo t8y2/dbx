@@ -32,6 +32,8 @@ import {
   structurePreviewDdlStorageType,
 } from "@/components/sidebar/sidebarTreeDialogState";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
+import { uuid } from "@/lib/common/utils";
 
 type StructureCopyFormat = "tsv" | "markdown";
 
@@ -90,6 +92,7 @@ interface ExportTableDataOptions {
   autoFilter?: boolean;
   outputDirectory?: string;
   suppressDoneToast?: boolean;
+  insertDialect?: SqlInsertDialect;
 }
 
 function joinExportFilePath(directory: string, fileName: string): string {
@@ -353,6 +356,8 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     try {
       await connectionStore.ensureConnected(connectionId);
       const queryColumns = config.db_type === "neo4j" ? (await api.getColumns(connectionId, database, target.metadataSchema, target.tableName, target.catalog)).map((column) => column.name) : undefined;
+      const useAgentCursor = config.db_type === "cassandra";
+      const clientSessionId = useAgentCursor ? `table-export:${uuid()}` : undefined;
       const result = await fetchTableDataForExport({
         databaseType: target.databaseType,
         identifierQuote: target.identifierQuote,
@@ -360,7 +365,17 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         tableName: target.tableName,
         tableType: target.tableType,
         columns: queryColumns,
-        executePage: (sql) => api.executeQuery(connectionId, database, sql),
+        useAgentCursor,
+        executePage: (sql, cursorOptions) => (cursorOptions ? api.executeQuery(connectionId, database, sql, undefined, undefined, { ...cursorOptions, clientSessionId, catalog: target.catalog, timeoutSecs: config.query_timeout_secs }) : api.executeQuery(connectionId, database, sql)),
+        closeCursor: useAgentCursor
+          ? async (sessionId) => {
+              try {
+                if (sessionId) await api.closeQuerySession(connectionId, database, sessionId, clientSessionId, target.catalog);
+              } finally {
+                await api.closeClientConnectionSession(connectionId, database, clientSessionId!, target.catalog);
+              }
+            }
+          : undefined,
       });
 
       const outputPath = await resolveTableExportOutputPath(target, "json", outputDirectory);
@@ -434,7 +449,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
   }
 
   async function exportTableData(target: SidebarTableExportTarget, format: "csv" | "xlsx" | "sql", exportOptions: ExportTableDataOptions = {}) {
-    const { columnInfos, headerMode = "name", autoFilter = true, outputDirectory, suppressDoneToast = false } = exportOptions;
+    const { columnInfos, headerMode = "name", autoFilter = true, outputDirectory, suppressDoneToast = false, insertDialect = "source" } = exportOptions;
     const { connectionId, database } = target;
 
     let task: ExportTask | null = null;
@@ -486,6 +501,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         tableName: target.tableName,
         filePath: outputPath,
         format,
+        ...(format === "sql" ? { insertDialect } : {}),
         csvQuoteMode: target.csvQuoteMode,
         columns: queryColumns,
         columnComments,
@@ -566,7 +582,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     }
   }
 
-  async function exportData(format: "csv" | "json" | "sql") {
+  async function exportData(format: "csv" | "json" | "sql", insertDialect: SqlInsertDialect = "source") {
     const targets = currentTableExportTargets();
     if (!targets.length) return;
 
@@ -584,7 +600,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
 
     let exported = 0;
     for (const target of targets) {
-      if (await exportTableData(target, format, { outputDirectory, suppressDoneToast: targets.length > 1 })) exported += 1;
+      if (await exportTableData(target, format, { outputDirectory, suppressDoneToast: targets.length > 1, insertDialect })) exported += 1;
     }
     if (targets.length > 1 && exported > 0) toast(t("contextMenu.exportDataMultipleSuccess", { count: exported }));
   }

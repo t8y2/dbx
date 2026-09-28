@@ -44,6 +44,7 @@ import type { NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementat
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
+import { insertSqliteRemoteTransportLayer, isSqliteRemoteTransportLayerType, sqliteRemoteTransportError } from "@/lib/connection/sqliteRemoteTransport";
 import { sanitizeConnectionCredentials } from "@/lib/connection/credentialSanitizer";
 import { applySshAuthMethod, inferSshAuthMethod } from "@/lib/connection/sshAuthMethod";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
@@ -101,6 +102,7 @@ import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage,
 import { consulAgentAddressesMatch } from "@/lib/consul/agentTarget";
 import { appendConnectionErrorHints, isJdbcMissingRuntimeDependencyError } from "@/lib/connection/connectionErrorHints";
 import { buildCassandraExternalConfig, cassandraTlsConfigFromExternalConfig, type CassandraTlsConfig } from "@/lib/connection/cassandraTlsOptions";
+import { savedMysqlTlsFormFields, supportsMysqlTlsOptions as mysqlTlsOptionsSupported, supportsMysqlTlsTab } from "@/lib/connection/mysqlTlsCapabilities";
 import { preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
 import { postgresLegacyTlsEnabled, postgresTlsModeForForm, setPostgresLegacyTlsEnabled } from "@/lib/connection/postgresTlsMode";
 import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, resolveMqKafkaConnectionSource, type MqKafkaConnectionSource } from "@/lib/connection/mqKafkaConnection";
@@ -146,7 +148,7 @@ import {
 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
-import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, isSingleDatabase, supportsDataDictionary } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
@@ -229,6 +231,7 @@ const DREMIO_ARROW_FLIGHT_SQL_JDBC_DRIVER_CLASS = "org.apache.arrow.driver.jdbc.
 const DREMIO_LEGACY_JDBC_URL = "jdbc:dremio:direct=127.0.0.1:31010";
 const DREMIO_LEGACY_JDBC_DRIVER_CLASS = "com.dremio.jdbc.Driver";
 const DEFAULT_SSH_USER = "root";
+const DIRECT_SIDEBAR_OBJECT_TYPES = new Set<DatabaseType>(["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "milvus", "qdrant", "weaviate", "chromadb", "mq", "mqtt", "nacos", "plugin"]);
 const ETCD_GRPC_MAX_INBOUND_DEFAULT_MIB = 32;
 const ETCD_GRPC_MAX_INBOUND_MIN_MIB = 1;
 const ETCD_GRPC_MAX_INBOUND_MAX_MIB = 256;
@@ -439,6 +442,7 @@ const defaultForm = (): ConnectionForm => ({
   docs_notes_path: undefined,
   read_only: false,
   show_system_schemas: false,
+  sidebar_auto_load_all_tables: false,
   is_production: false,
   production_databases: [],
   visible_databases: undefined,
@@ -630,6 +634,7 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const supportsAutomaticTableLoading = computed(() => supportsDataDictionary(form.value.db_type) && !DIRECT_SIDEBAR_OBJECT_TYPES.has(form.value.db_type));
 const redisKeyTemplatesText = ref("");
 const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const showGaussdbConnectionMode = computed(() => form.value.db_type === "gaussdb");
@@ -3066,7 +3071,7 @@ watch(
         db_type: oceanbasePatch?.db_type || profileConfig?.type || config.db_type,
         driver_profile: config.db_type === "plugin" ? "plugin" : oceanbasePatch?.driver_profile || config.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
-        url_params: config.url_params || "",
+        ...savedMysqlTlsFormFields(config),
         agent_java_options: config.agent_java_options || [],
         host: config.db_type === "h2" && h2FilePathFromJdbcUrl(config.connection_string) ? h2FilePathFromJdbcUrl(config.connection_string) : config.host,
         port: profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
@@ -3083,10 +3088,6 @@ watch(
         query_timeout_inherit: config.query_timeout_inherit === true,
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
         keepalive_interval_secs: config.keepalive_interval_secs ?? 30,
-        ssl: config.ssl || false,
-        ca_cert_path: config.ca_cert_path || "",
-        client_cert_path: config.client_cert_path || "",
-        client_key_path: config.client_key_path || "",
         sysdba: config.sysdba || isOracleSysUser(config),
         oracle_connection_type: config.oracle_connection_type || "service_name",
         connection_string: config.connection_string,
@@ -3112,6 +3113,7 @@ watch(
         docs_notes_path: config.docs_notes_path,
         read_only: config.read_only || false,
         show_system_schemas: config.show_system_schemas || false,
+        sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
         visible_databases: config.visible_databases,
@@ -3304,8 +3306,8 @@ const selectedHttpTunnelLayer = computed(() => (selectedTransportLayer.value?.ty
 
 const tunnelProfiles = computed(() => {
   const profiles = tunnelProfileStore.profiles;
-  if (!sqliteSshOnlyTransport.value) return profiles;
-  return profiles.filter((profile) => profile.type === "ssh");
+  if (!sqliteRemoteTransportRestricted.value) return profiles;
+  return profiles.filter((profile) => isSqliteRemoteTransportLayerType(profile.type));
 });
 const selectedLayerProfileId = computed(() => selectedTransportLayer.value?.profile_id || "");
 const selectedLayerProfile = computed(() => tunnelProfileStore.profileById(selectedLayerProfileId.value));
@@ -3646,12 +3648,12 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
   "cassandra",
   "zookeeper",
 ]);
-const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
+const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type) || supportsMysqlTlsTab(form.value.db_type, selectedType.value));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase");
 const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" || form.value.db_type === "doris" || form.value.db_type === "starrocks");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
-const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
+const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
 const supportsDoltSystemTables = computed(() => isDoltDriverProfile(form.value.driver_profile));
 const showDoltSystemTables = computed({
@@ -3795,7 +3797,7 @@ const canUseTransportLayers = computed(() => {
   }
   return true;
 });
-const sqliteSshOnlyTransport = computed(() => form.value.db_type === "sqlite");
+const sqliteRemoteTransportRestricted = computed(() => form.value.db_type === "sqlite");
 const sqliteUsesSsh = computed(() => form.value.db_type === "sqlite" && connectionUsesSsh(form.value));
 const sqliteWorkerPlacement = computed({
   get: () => getUrlParam(form.value.url_params, "dbx_sqlite_worker") || "session",
@@ -5027,6 +5029,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.db_type !== "etcd" &&
     config.db_type !== "consul" &&
     config.db_type !== "starrocks" &&
+    config.db_type !== "doris" &&
     config.db_type !== "mongodb" &&
     config.db_type !== "victoriametrics" &&
     config.db_type !== "zookeeper" &&
@@ -5142,6 +5145,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.visible_databases = Array.isArray(config.visible_databases) && config.visible_databases.length > 0 ? config.visible_databases : undefined;
   }
   if (!config.show_system_schemas) config.show_system_schemas = undefined;
+  if (!config.sidebar_auto_load_all_tables) config.sidebar_auto_load_all_tables = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
   // Pasted credentials may carry invisible characters that trim() keeps (#9043).
@@ -6151,10 +6155,10 @@ watch(canUseTransportLayers, (value) => {
   }
 });
 
-watch(sqliteSshOnlyTransport, (sshOnly) => {
-  if (!sshOnly) return;
+watch(sqliteRemoteTransportRestricted, (restricted) => {
+  if (!restricted) return;
   const layers = form.value.transport_layers || [];
-  const next = layers.filter((layer) => layer.type === "ssh");
+  const next = layers.filter((layer) => isSqliteRemoteTransportLayerType(layer.type));
   if (next.length === layers.length) return;
   form.value.transport_layers = next;
   selectedTransportLayerId.value = next[0]?.id || null;
@@ -6181,16 +6185,15 @@ function addSshTunnel() {
 }
 
 function addProxyTunnel() {
-  if (sqliteSshOnlyTransport.value) return;
   const next: TransportLayerConfig = { type: "proxy", ...defaultProxyTunnel() };
   next.name = `Proxy ${transportLayers.value.length + 1}`;
-  form.value.transport_layers = [...transportLayers.value, next];
+  form.value.transport_layers = sqliteRemoteTransportRestricted.value ? insertSqliteRemoteTransportLayer(transportLayers.value, next) : [...transportLayers.value, next];
   selectedTransportLayerId.value = next.id;
   resetTestState();
 }
 
 function addHttpTunnel() {
-  if (sqliteSshOnlyTransport.value) return;
+  if (sqliteRemoteTransportRestricted.value) return;
   const next: TransportLayerConfig = { type: "http_tunnel", ...defaultHttpTunnel() };
   next.name = t("connection.httpTunnelDefaultName", { index: 1 });
   form.value.transport_layers = [next, ...transportLayers.value];
@@ -6199,9 +6202,9 @@ function addHttpTunnel() {
 }
 
 function duplicateTransportLayer(layer: TransportLayerConfig) {
-  if (sqliteSshOnlyTransport.value && layer.type !== "ssh") return;
+  if (sqliteRemoteTransportRestricted.value && !isSqliteRemoteTransportLayerType(layer.type)) return;
   const next = normalizeTransportLayer({ ...layer, id: uuid(), name: layer.name ? `${layer.name} copy` : "" });
-  form.value.transport_layers = [...transportLayers.value, next];
+  form.value.transport_layers = sqliteRemoteTransportRestricted.value ? insertSqliteRemoteTransportLayer(transportLayers.value, next) : [...transportLayers.value, next];
   selectedTransportLayerId.value = next.id;
   resetTestState();
 }
@@ -6239,7 +6242,7 @@ function dropTransportLayer(targetId: string) {
 function changeSelectedTransportLayerType(type: "ssh" | "proxy" | "http_tunnel") {
   const selected = selectedTransportLayer.value;
   if (!selected || selected.type === type) return;
-  if (sqliteSshOnlyTransport.value && type !== "ssh") return;
+  if (sqliteRemoteTransportRestricted.value && !isSqliteRemoteTransportLayerType(type)) return;
   const replacement: TransportLayerConfig =
     type === "proxy" ? { type: "proxy", ...defaultProxyTunnel(), id: selected.id, name: selected.name } : type === "http_tunnel" ? { type: "http_tunnel", ...defaultHttpTunnel(), id: selected.id, name: selected.name } : { type: "ssh", ...defaultSshTunnel(), id: selected.id, name: selected.name };
   form.value.transport_layers = transportLayers.value.map((layer) => (layer.id === selected.id ? replacement : layer));
@@ -6262,7 +6265,7 @@ function updateSelectedSshAuthMethod(value: unknown) {
 
 function validateTransportLayers(config: LegacyConnectionConfig) {
   const layers = config.transport_layers || [];
-  if (config.db_type === "sqlite" && layers.some((layer) => layer.enabled !== false && layer.type !== "ssh")) {
+  if (config.db_type === "sqlite" && sqliteRemoteTransportError(layers)) {
     throw new Error(t("connection.sqliteTransportSshOnly"));
   }
   layers.forEach((layer, index) => {
@@ -9880,6 +9883,16 @@ function openExternalUrl(url: string) {
                     <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
                   </label>
                 </div>
+                <div v-if="supportsAutomaticTableLoading" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.tableLoading") }}</Label>
+                  <div class="col-span-3 grid gap-1.5">
+                    <label class="flex cursor-pointer items-center gap-2">
+                      <Switch v-model="form.sidebar_auto_load_all_tables" />
+                      <span class="text-sm font-medium">{{ t("connection.autoLoadAllTables") }}</span>
+                    </label>
+                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.autoLoadAllTablesHint") }}</p>
+                  </div>
+                </div>
                 <!-- Documentation notes are a relational-only feature, so this
                      follows the same isSchemaAware gate as the row above. -->
                 <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-start gap-4">
@@ -9996,11 +10009,11 @@ function openExternalUrl(url: string) {
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.sshHopAdd") }}
                       </Button>
-                      <Button v-if="!sqliteSshOnlyTransport" type="button" variant="outline" size="sm" @click="addProxyTunnel">
+                      <Button type="button" variant="outline" size="sm" @click="addProxyTunnel">
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.proxy") }}
                       </Button>
-                      <Button v-if="!sqliteSshOnlyTransport" type="button" variant="outline" size="sm" @click="addHttpTunnel">
+                      <Button v-if="!sqliteRemoteTransportRestricted" type="button" variant="outline" size="sm" @click="addHttpTunnel">
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.httpTunnelAdd") }}
                       </Button>
@@ -10049,7 +10062,7 @@ function openExternalUrl(url: string) {
                       <span v-else class="text-red-500">{{ t("connection.tunnelProfileMissing") }}</span>
                     </div>
                   </div>
-                  <div v-if="!selectedLayerProfileId && !sqliteSshOnlyTransport" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="!selectedLayerProfileId" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">Type</Label>
                     <Select :model-value="selectedTransportLayer.type" @update:model-value="(value: any) => changeSelectedTransportLayerType(value)">
                       <SelectTrigger class="col-span-3 h-9">
@@ -10058,7 +10071,7 @@ function openExternalUrl(url: string) {
                       <SelectContent>
                         <SelectItem value="ssh">SSH</SelectItem>
                         <SelectItem value="proxy">Proxy</SelectItem>
-                        <SelectItem value="http_tunnel">{{ t("connection.httpTunnel") }}</SelectItem>
+                        <SelectItem v-if="!sqliteRemoteTransportRestricted" value="http_tunnel">{{ t("connection.httpTunnel") }}</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>

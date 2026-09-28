@@ -16,15 +16,18 @@ import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
-import { grantsFromQueryResult, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
+import { grantsFromQueryResult, normalizeStarrocksCatalog, resolveDatabaseUserAdminProviderForConnection, type DatabaseTablePrivilegeGrant, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
 import {
   authorizationPlanSql,
   authorizationPlanStatus,
+  authorizationPresetPrivileges,
   authorizationPrivileges,
   buildCreateUserAuthorizationPlan,
   buildGrantAuthorizationPlan,
+  databaseAuthorizationsFromTableGrants,
   executeAuthorizationPlan,
   type AuthorizationAccountType,
+  type AuthorizationDatabaseOption,
   type AuthorizationPlan,
   type AuthorizationStepResult,
   type DatabaseAuthorizationSelection,
@@ -88,12 +91,19 @@ const grantOption = ref(restoredUiState.grantOption ?? false);
 const selectedPrivileges = ref<string[]>(restoredUiState.selectedPrivileges ?? ["SELECT"]);
 const createCanLogin = ref(true);
 const createAccountType = ref<AuthorizationAccountType>("standard");
-const createDatabases = ref<string[]>([]);
+const createDatabases = ref<AuthorizationDatabaseOption[]>([]);
 const createDatabasesLoading = ref(false);
+const createDatabasesLoadError = ref("");
 const createDatabaseAuthorizations = ref<DatabaseAuthorizationSelection[]>([]);
-// 权限编辑面板的授权范围选择（MySQL 表级授权场景），与新增用户弹窗复用同一个范围编辑器
+// 权限编辑面板的授权范围选择，与新增用户弹窗复用同一个范围编辑器
 const privilegeAuthorizations = ref<DatabaseAuthorizationSelection[]>([]);
+const currentTableGrants = ref<DatabaseTablePrivilegeGrant[]>([]);
+const currentTableGrantsLoaded = ref(false);
+const currentTableGrantsLoading = ref(false);
+const tableGrantLoadError = ref("");
 let createPlanRequestId = 0;
+let tableGrantRequestId = 0;
+let databaseLoadPromise: Promise<void> | undefined;
 let preserveRestoredPrivilegeSelection = restoredUiState.selectedPrivileges !== undefined || restoredUiState.grantOption !== undefined;
 
 trackUiState(() => ({
@@ -139,9 +149,9 @@ const grantsSqlText = computed(() => grants.value.join("\n") || t("userAdmin.noG
 const highlightedGrantsSql = computed(() => highlight(grantsSqlText.value));
 const highlightedPendingSql = computed(() => highlight(pendingSql.value));
 const createDatabaseAuthorizationsValid = computed(() => authorizationSelectionsValid(createDatabaseAuthorizations.value));
-// MySQL 表级授权场景下，权限编辑面板复用与新增用户一致的授权范围编辑器
-const usePrivilegeScopeEditor = computed(() => canEditPrivileges.value && supportsCreateTableGrants.value && privilegeScope.value !== "role");
+const usePrivilegeScopeEditor = computed(() => canEditPrivileges.value && supportsCreateTableGrants.value && privilegeScope.value !== "role" && (provider.value?.authorizationModel !== "postgres" || privilegeScope.value === "table"));
 const privilegeAuthorizationsValid = computed(() => authorizationSelectionsValid(privilegeAuthorizations.value));
+const tableGrantDiffReady = computed(() => provider.value?.authorizationModel === "mysql" || currentTableGrantsLoaded.value);
 const pendingStatus = computed(() => (pendingResults.value.length > 0 ? authorizationPlanStatus(pendingResults.value) : undefined));
 const canPreviewHostChange = computed(() => {
   const host = newHost.value.trim();
@@ -221,21 +231,92 @@ async function loadGrants() {
   loadingGrants.value = true;
   grantsLoaded.value = false;
   grantError.value = "";
+  if (userProvider.authorizationModel !== "mysql") {
+    currentTableGrants.value = [];
+    currentTableGrantsLoaded.value = false;
+    currentTableGrantsLoading.value = false;
+    tableGrantLoadError.value = "";
+  }
   try {
     const result = await api.executeQuery(props.connection.id, "", userProvider.showGrantsSql(user), undefined, undefined, {
       maxRows: 1000,
     });
     grants.value = (userProvider.parseGrants ?? grantsFromQueryResult)(result);
     grantsLoaded.value = true;
+    if (userProvider.tableGrantsFromShowGrants && userProvider.parseTableGrants) {
+      currentTableGrants.value = userProvider.parseTableGrants(result);
+      currentTableGrantsLoaded.value = true;
+      tableGrantLoadError.value = "";
+      syncAuthorizationSelectionsFromTableGrants();
+    }
     // Existing-user editing reflects the exact SHOW GRANTS scope; create-user defaults stay independent.
     syncPrivilegeSelectionFromGrants();
+    if (userProvider.authorizationModel === "postgres" && usePrivilegeScopeEditor.value) await loadCurrentTableGrants();
   } catch (error: any) {
     grantError.value = error?.message || String(error);
     grants.value = [];
     grantsLoaded.value = false;
+    currentTableGrants.value = [];
+    currentTableGrantsLoaded.value = false;
   } finally {
     loadingGrants.value = false;
   }
+}
+
+async function loadCurrentTableGrants() {
+  const user = selectedUser.value;
+  const userProvider = provider.value;
+  if (!user || !userProvider?.tableGrantsSql || !userProvider.parseTableGrants || currentTableGrantsLoading.value) return;
+  const requestId = ++tableGrantRequestId;
+  const selectedKey = userKey(user);
+  currentTableGrantsLoading.value = true;
+  currentTableGrantsLoaded.value = false;
+  tableGrantLoadError.value = "";
+  try {
+    if (createDatabases.value.length === 0) await loadDatabases();
+    if (createDatabasesLoadError.value) throw new Error(createDatabasesLoadError.value);
+    const grantsByDatabase = await Promise.all(
+      createDatabases.value.map(async ({ database }) => {
+        const result = await api.executeQuery(props.connection.id, database, userProvider.tableGrantsSql!(user), undefined, undefined, { maxRows: 10000 });
+        return userProvider.parseTableGrants!(result, { database });
+      }),
+    );
+    if (requestId !== tableGrantRequestId || selectedUserKey.value !== selectedKey) return;
+    currentTableGrants.value = grantsByDatabase.flat();
+    currentTableGrantsLoaded.value = true;
+    syncAuthorizationSelectionsFromTableGrants();
+  } catch (error: any) {
+    if (requestId !== tableGrantRequestId || selectedUserKey.value !== selectedKey) return;
+    currentTableGrants.value = [];
+    currentTableGrantsLoaded.value = false;
+    tableGrantLoadError.value = error?.message || String(error);
+  } finally {
+    if (requestId === tableGrantRequestId) currentTableGrantsLoading.value = false;
+  }
+}
+
+function syncAuthorizationSelectionsFromTableGrants() {
+  const userProvider = provider.value;
+  if (!userProvider || createDatabases.value.length === 0 || privilegeAuthorizations.value.length > 0) return;
+  const loaded = databaseAuthorizationsFromTableGrants(userProvider, currentTableGrants.value);
+  const available = new Map(createDatabases.value.map((option) => [authorizationDatabaseOptionKey(option), option]));
+  const selections = loaded.selections.flatMap((selection) => {
+    const option = available.get(authorizationDatabaseOptionKey(selection));
+    if (!option) return [];
+    return [{ ...selection, catalog: option.catalog }];
+  });
+  privilegeAuthorizations.value = selections;
+  if (selections.length > 0) grantOption.value = loaded.grantOption;
+}
+
+function authorizationDatabaseOptionKey(option: AuthorizationDatabaseOption): string {
+  const catalog = provider.value?.authorizationModel === "starrocks" ? (normalizeStarrocksCatalog(option.catalog ?? "") ?? "default_catalog") : (option.catalog ?? "");
+  return JSON.stringify([catalog, option.database]);
+}
+
+async function preparePrivilegeScopeEditor() {
+  if (createDatabases.value.length === 0) await loadDatabases();
+  if (provider.value?.authorizationModel === "postgres" && !currentTableGrantsLoaded.value) await loadCurrentTableGrants();
 }
 
 function selectUser(user: DatabaseUserIdentity) {
@@ -257,19 +338,39 @@ function togglePrivilege(privilege: string) {
 }
 
 // 加载当前连接下的数据库列表：新增用户弹窗与权限编辑面板的授权范围编辑器共用
-async function loadDatabases() {
-  if (createDatabasesLoading.value) return;
-  createDatabases.value = [];
-  createDatabasesLoading.value = true;
-  try {
-    await ensureConnection();
-    const config = props.connection;
-    createDatabases.value = config.db_type === "dameng" ? await fetchNamespaceOptionsForConnection(config.id, config) : (await api.listDatabases(config.id)).map((database) => database.name);
-  } catch (error: any) {
-    toast(t("userAdmin.loadDatabasesFailed", { message: error?.message || String(error) }), 5000);
-  } finally {
-    createDatabasesLoading.value = false;
-  }
+function loadDatabases(): Promise<void> {
+  if (databaseLoadPromise) return databaseLoadPromise;
+  let request!: Promise<void>;
+  request = (async () => {
+    createDatabases.value = [];
+    createDatabasesLoading.value = true;
+    createDatabasesLoadError.value = "";
+    try {
+      await ensureConnection();
+      const config = props.connection;
+      if (provider.value?.authorizationModel === "starrocks") {
+        const catalogs = await api.listDorisCatalogs(config.id);
+        if (catalogs.length > 0) {
+          const catalogDatabases = await Promise.all(catalogs.map(async (catalog) => (await api.listDorisCatalogDatabases(config.id, catalog.name)).map((database) => ({ catalog: catalog.name, database: database.name }))));
+          createDatabases.value = catalogDatabases.flat();
+        } else {
+          createDatabases.value = (await api.listDatabases(config.id)).map((database) => ({ database: database.name }));
+        }
+      } else {
+        const databases = config.db_type === "dameng" ? await fetchNamespaceOptionsForConnection(config.id, config) : (await api.listDatabases(config.id)).map((database) => database.name);
+        createDatabases.value = databases.map((database) => ({ database }));
+      }
+      if (currentTableGrantsLoaded.value) syncAuthorizationSelectionsFromTableGrants();
+    } catch (error: any) {
+      createDatabasesLoadError.value = error?.message || String(error);
+      toast(t("userAdmin.loadDatabasesFailed", { message: createDatabasesLoadError.value }), 5000);
+    } finally {
+      createDatabasesLoading.value = false;
+      if (databaseLoadPromise === request) databaseLoadPromise = undefined;
+    }
+  })();
+  databaseLoadPromise = request;
+  return request;
 }
 
 async function openCreateUserDialog() {
@@ -290,9 +391,21 @@ function authorizationSelectionsValid(selections: DatabaseAuthorizationSelection
   if (!userProvider) return false;
   return selections.every((selection) => {
     if (selection.tables !== undefined && selection.tables.length === 0) return false;
-    if (selection.preset !== "custom") return true;
-    return authorizationPrivileges(userProvider, selection.tables === undefined ? "database" : "table").some((privilege) => selection.privileges?.includes(privilege));
+    const targetScope = selection.tables === undefined && userProvider.authorizationModel !== "starrocks" ? "database" : "table";
+    const available = authorizationPrivileges(userProvider, targetScope);
+    if (selection.preset !== "custom") return authorizationPresetPrivileges(userProvider, selection.preset, selection.privileges, targetScope).length > 0;
+    return available.some((privilege) => selection.privileges?.includes(privilege));
   });
+}
+
+async function prepareAuthorizationSelections(selections: DatabaseAuthorizationSelection[]): Promise<DatabaseAuthorizationSelection[]> {
+  if (provider.value?.authorizationModel !== "postgres") return selections;
+  return Promise.all(
+    selections.map(async (selection) => ({
+      ...selection,
+      schemas: selection.tables === undefined ? await api.listSchemas(props.connection.id, selection.database) : Array.from(new Set(selection.tables.flatMap((table) => (table.schema ? [table.schema] : [])))),
+    })),
+  );
 }
 
 function previewSql(sql: string, options: { danger?: boolean; afterApply?: () => Promise<void> } = {}) {
@@ -315,7 +428,7 @@ async function applyPendingSql() {
       source: t("production.sourceAdmin"),
       execute: async () => {
         if (pendingPlan.value) {
-          return executeAuthorizationPlan(pendingPlan.value, (step) => api.executeMulti(props.connection.id, step.database, step.sql, undefined, undefined, { maxRows: 1000, continueOnError: true }));
+          return executeAuthorizationPlan(pendingPlan.value, (step) => api.executeMulti(props.connection.id, step.database, step.sql, undefined, undefined, { maxRows: 1000, catalog: step.targetCatalog, continueOnError: step.targetCatalog ? false : true }));
         }
         const queryResults = await api.executeMulti(props.connection.id, "", pendingSql.value, undefined, undefined, { maxRows: 1000, continueOnError: true });
         const failed = queryResults.find((item) => item.execution_error === true);
@@ -392,12 +505,15 @@ function authorizationStepLabel(result: AuthorizationStepResult): string {
   if (step.operation === "createUser") return t("userAdmin.stepCreateUser");
   if (step.operation === "grantAdmin") return t("userAdmin.stepGrantAdmin", { user: step.subject });
   if (step.operation === "grantDatabase") {
-    return step.targetTable ? t("userAdmin.stepGrantTable", { user: step.subject, database: step.targetDatabase, table: step.targetTable }) : t("userAdmin.stepGrantDatabase", { user: step.subject, database: step.targetDatabase });
+    const database = authorizationStepDatabase(step);
+    return step.targetTable ? t("userAdmin.stepGrantTable", { user: step.subject, database, table: step.targetTable }) : t("userAdmin.stepGrantDatabase", { user: step.subject, database });
   }
   if (step.operation === "revokePrivileges") {
-    return step.targetTable ? t("userAdmin.stepRevokeTable", { user: step.subject, database: step.targetDatabase, table: step.targetTable }) : t("userAdmin.stepRevokeDatabase", { user: step.subject, database: step.targetDatabase });
+    const database = authorizationStepDatabase(step);
+    return step.targetTable ? t("userAdmin.stepRevokeTable", { user: step.subject, database, table: step.targetTable }) : t("userAdmin.stepRevokeDatabase", { user: step.subject, database });
   }
   if (step.operation === "grantCurrentObjects") {
+    if (step.targetTable) return t("userAdmin.stepGrantTable", { user: step.subject, database: authorizationStepDatabase(step), table: step.targetTable });
     return t("userAdmin.stepGrantCurrentObjects", {
       user: step.subject,
       database: step.targetDatabase,
@@ -411,6 +527,10 @@ function authorizationStepLabel(result: AuthorizationStepResult): string {
       : t("userAdmin.stepGrantFutureObjects", { user: step.subject, database: step.targetDatabase, scope: authorizationObjectScopeLabel(step.objectScope) });
   }
   return step.label;
+}
+
+function authorizationStepDatabase(step: AuthorizationStepResult["step"]): string {
+  return [step.targetCatalog, step.targetDatabase, step.targetSchema].filter(Boolean).join(".");
 }
 
 function authorizationObjectScopeLabel(scope: AuthorizationStepResult["step"]["objectScope"]): string {
@@ -480,15 +600,23 @@ function previewPlan(plan: AuthorizationPlan, options: { danger?: boolean } = {}
   sqlDialogOpen.value = true;
 }
 
-function previewGrant() {
+async function previewGrant() {
   const user = selectedUser.value;
   const userProvider = provider.value;
   const grantPrivilegesSql = userProvider?.grantPrivilegesSql;
   if (!user || !userProvider || !grantPrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
   if (usePrivilegeScopeEditor.value) {
-    // MySQL 表级授权：按所选库/表展开为多条 GRANT（仅追加，不回收该用户已有权限）
-    if (!privilegeAuthorizationsValid.value) return;
-    previewPlan(buildGrantAuthorizationPlan({ provider: userProvider, user, databases: privilegeAuthorizations.value, grantOption: grantOption.value }));
+    if (!privilegeAuthorizationsValid.value || !tableGrantDiffReady.value) return;
+    const databases = await prepareAuthorizationSelections(privilegeAuthorizations.value);
+    previewPlan(
+      buildGrantAuthorizationPlan({
+        provider: userProvider,
+        user,
+        databases,
+        grantOption: grantOption.value,
+        currentGrants: userProvider.authorizationModel === "mysql" ? undefined : currentTableGrants.value,
+      }),
+    );
     return;
   }
   previewSql(
@@ -504,15 +632,15 @@ function previewGrant() {
   );
 }
 
-function previewRevoke() {
+async function previewRevoke() {
   const user = selectedUser.value;
   const userProvider = provider.value;
   const revokePrivilegesSql = userProvider?.revokePrivilegesSql;
   if (!user || !userProvider || !revokePrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
   if (usePrivilegeScopeEditor.value) {
-    // 与授权保持同一套选择：按所选库/表展开为多条 REVOKE
-    if (!privilegeAuthorizationsValid.value) return;
-    previewPlan(buildGrantAuthorizationPlan({ provider: userProvider, user, databases: privilegeAuthorizations.value, revoke: true }), { danger: true });
+    if (!privilegeAuthorizationsValid.value || !tableGrantDiffReady.value) return;
+    const databases = await prepareAuthorizationSelections(privilegeAuthorizations.value);
+    previewPlan(buildGrantAuthorizationPlan({ provider: userProvider, user, databases, revoke: true, currentGrants: userProvider.authorizationModel === "mysql" ? undefined : currentTableGrants.value }), { danger: true });
     return;
   }
   previewSql(
@@ -551,9 +679,14 @@ watch(
 watch(
   () => selectedUserKey.value,
   () => {
+    tableGrantRequestId += 1;
     grantsLoaded.value = false;
     // 切换用户时清空上一位用户选择的授权范围，避免把权限误授给当前用户
     privilegeAuthorizations.value = [];
+    currentTableGrants.value = [];
+    currentTableGrantsLoaded.value = false;
+    currentTableGrantsLoading.value = false;
+    tableGrantLoadError.value = "";
     void loadGrants();
   },
 );
@@ -561,17 +694,23 @@ watch(
 watch(
   () => props.connection.id,
   () => {
+    tableGrantRequestId += 1;
     users.value = [];
     createDatabases.value = [];
+    createDatabasesLoadError.value = "";
     createDatabaseAuthorizations.value = [];
     privilegeAuthorizations.value = [];
+    currentTableGrants.value = [];
+    currentTableGrantsLoaded.value = false;
+    currentTableGrantsLoading.value = false;
+    tableGrantLoadError.value = "";
     selectedUserKey.value = "";
     grants.value = [];
     grantsLoaded.value = false;
     privilegeScope.value = provider.value?.defaultScope ?? "mysql";
     resetPrivilegeDefaults(privilegeScope.value);
     void loadUsers();
-    if (usePrivilegeScopeEditor.value) void loadDatabases();
+    if (usePrivilegeScopeEditor.value) void preparePrivilegeScopeEditor();
   },
 );
 
@@ -599,10 +738,17 @@ watch(
 
 watch([privilegeDatabase, privilegeTable], syncPrivilegeSelectionFromGrants);
 
+watch(
+  () => usePrivilegeScopeEditor.value,
+  async (enabled) => {
+    if (!enabled) return;
+    await preparePrivilegeScopeEditor();
+  },
+);
+
 onMounted(() => {
   void loadUsers();
-  // 权限编辑面板的授权范围选择需要数据库列表，进入页面即预加载（仅 MySQL 表级授权场景）
-  if (usePrivilegeScopeEditor.value) void loadDatabases();
+  if (usePrivilegeScopeEditor.value) void preparePrivilegeScopeEditor();
 });
 </script>
 
@@ -721,7 +867,7 @@ onMounted(() => {
           <aside v-if="canEditPrivileges" class="flex min-h-0 flex-col bg-muted/10">
             <div class="border-b p-3">
               <div class="text-xs font-semibold">{{ t("userAdmin.privilegeEditor") }}</div>
-              <div class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t(usePrivilegeScopeEditor ? "userAdmin.privilegeAppendHint" : "userAdmin.privilegeHint") }}</div>
+              <div class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t(usePrivilegeScopeEditor && provider?.authorizationModel === "mysql" ? "userAdmin.privilegeAppendHint" : "userAdmin.privilegeHint") }}</div>
             </div>
             <div class="min-h-0 flex-1 overflow-auto p-3">
               <template v-if="isPostgres">
@@ -743,7 +889,14 @@ onMounted(() => {
                 <label class="mb-2 block text-xs font-medium">{{ t("userAdmin.memberRole") }}</label>
                 <Input v-model="privilegeRole" class="mb-3 h-8 text-xs" :placeholder="t('userAdmin.memberRole')" />
               </template>
-              <AuthorizationScopeEditor v-else-if="usePrivilegeScopeEditor" v-model="privilegeAuthorizations" compact :provider="provider" :databases="createDatabases" :databases-loading="createDatabasesLoading" :connection-id="connection.id" />
+              <div v-else-if="usePrivilegeScopeEditor" class="flex h-full min-h-0 flex-col gap-2">
+                <AuthorizationScopeEditor v-model="privilegeAuthorizations" compact :provider="provider" :databases="createDatabases" :databases-loading="createDatabasesLoading" :connection-id="connection.id" />
+                <div v-if="currentTableGrantsLoading" class="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                  {{ t("userAdmin.loadingGrants") }}
+                </div>
+                <p v-else-if="tableGrantLoadError" class="text-[11px] text-destructive">{{ tableGrantLoadError }}</p>
+              </div>
               <template v-else>
                 <label class="mb-2 block text-xs font-medium">
                   {{ isPostgres && privilegeScope !== "database" ? t("userAdmin.schema") : t("userAdmin.database") }}
@@ -781,10 +934,10 @@ onMounted(() => {
               </span>
             </label>
             <div class="flex shrink-0 items-center justify-end gap-2 border-t p-3">
-              <Button v-if="canRevokePrivileges" variant="outline" size="sm" class="h-7 px-2 text-xs" :disabled="usePrivilegeScopeEditor && !privilegeAuthorizationsValid" @click="previewRevoke">
+              <Button v-if="canRevokePrivileges" variant="outline" size="sm" class="h-7 px-2 text-xs" :disabled="usePrivilegeScopeEditor && (!privilegeAuthorizationsValid || !tableGrantDiffReady)" @click="previewRevoke">
                 {{ t("userAdmin.revoke") }}
               </Button>
-              <Button v-if="canGrantPrivileges" size="sm" class="h-7 px-2 text-xs" :disabled="usePrivilegeScopeEditor && !privilegeAuthorizationsValid" @click="previewGrant">
+              <Button v-if="canGrantPrivileges" size="sm" class="h-7 px-2 text-xs" :disabled="usePrivilegeScopeEditor && (!privilegeAuthorizationsValid || !tableGrantDiffReady)" @click="previewGrant">
                 {{ t("userAdmin.grant") }}
               </Button>
             </div>

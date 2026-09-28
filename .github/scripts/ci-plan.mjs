@@ -42,7 +42,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     if (owner) affected.add(owner[0]);
     else if (/^(?:crates|src-tauri)\//.test(file)) unknownRust = true;
     if (file.startsWith("plugins/connection-types/")) affected.add("dbx-types");
-    if (file.startsWith("plugins/dialects/")) affected.add("dbx-sql");
+    if (file.startsWith("plugins/dialects/")) affected.add("dbx-sql-dialect");
   }
   const knownGroups = new Set(Object.values(rustGroups).flat());
   const unknownMember = packages.some((pkg) => !knownGroups.has(pkg.name));
@@ -72,7 +72,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     && !nativeDrivers.some((driver) => file.startsWith(`agents/drivers/${driver}/`))
     && !jdbcDrivers.some((driver) => file.startsWith(`agents/drivers/${driver}/`)))
     || files.some((file) => file.startsWith(".github/scripts/bump-agent-versions.") || file === ".github/workflows/agents-release.yml"
-      || file === "crates/dbx-drivers/assets/agent-protocol-v2.json");
+      || file === "crates/dbx-driver-agent/assets/agent-protocol-v2.json");
   const allAgents = sharedAgents || (agentsChanged && nativeChanges.size === 0 && !javaDriverChanges);
   if (allAgents) {
     for (const driver of nativeDrivers) nativeChanges.add(driver);

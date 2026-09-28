@@ -1,0 +1,29 @@
+[package]
+name = "dbx-driver-mysql"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+dbx-driver-support = { path = "../dbx-driver-support" }
+dbx-sql-core = { path = "../dbx-sql-core" }
+dbx-sql-dialect = { path = "../dbx-sql-dialect" }
+dbx-types = { path = "../dbx-types", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+log = "0.4"
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
+percent-encoding = "2"
+rust_decimal = { version = "1", features = ["serde"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+sqlparser = { version = "0.62.0", features = ["visitor"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+
+[dev-dependencies]
+mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }

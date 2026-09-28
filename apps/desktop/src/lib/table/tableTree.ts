@@ -112,6 +112,18 @@ function foldedPartitionObjectLookupKey(objectType: string, schema: string | und
   return `${objectType}\0${(schema || "").toLowerCase()}\0${name.toLowerCase()}`;
 }
 
+/**
+ * Folded identity of one row of a paged object list. Paged loads remember the
+ * row that was expected to open the next page (the peek row the previous page
+ * fetched but did not show) so a window that shifted under concurrent DDL can be
+ * detected before an unaligned page is appended. Kept case-insensitive on
+ * purpose: an anchor must never look "changed" because the server cased a name
+ * differently between two responses.
+ */
+export function tablePageRowAnchorKey(name: string, schema?: string | null, parentName?: string | null) {
+  return `${(schema || "").toLowerCase()}\0${(parentName || "").toLowerCase()}\0${name.toLowerCase()}`;
+}
+
 type PrefixSortInfo = {
   rootName: string;
   leadingSegments: number;

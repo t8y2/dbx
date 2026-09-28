@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+use std::future::Future;
 use std::io::{BufWriter, Write};
 
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::query::{execute_sql_statement_with_options, QueryExecutionOptions};
 use crate::sql_dialect::{build_table_data_select_sql, TableDataSelectSqlOptions};
+use crate::types::QueryResult;
 
 pub use dbx_formats::csv_export::*;
 
@@ -52,10 +54,53 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
     if database_type == DatabaseType::Salesforce {
         return Err("Exporting a Salesforce object to CSV is not supported yet: SOQL pages through a QueryLocator, not LIMIT/OFFSET. Run a SOQL query and export its result instead.".to_string());
     }
-    let page_size = options.page_size.unwrap_or(TABLE_DATA_EXPORT_PAGE_SIZE).max(1);
     let mut writer =
         BufWriter::new(File::create(&options.file_path).map_err(|err| format!("Failed to write CSV file: {err}"))?);
     writer.write_all("\u{FEFF}".as_bytes()).map_err(|err| err.to_string())?;
+    let client_session_id =
+        (database_type == DatabaseType::Cassandra).then(|| format!("table-export:{}", uuid::Uuid::new_v4()));
+    let export_options = &options;
+    let outcome = write_table_csv_pages(
+        &mut writer,
+        database_type,
+        &options,
+        client_session_id.as_deref(),
+        |sql, query_options| async move {
+            execute_sql_statement_with_options(
+                state,
+                &export_options.connection_id,
+                &export_options.database,
+                &sql,
+                export_options.schema.as_deref(),
+                None,
+                query_options,
+            )
+            .await
+        },
+    )
+    .await;
+    if let Some(client_session_id) = client_session_id {
+        let _ =
+            state.close_client_session_pool(&options.connection_id, Some(&options.database), &client_session_id).await;
+    }
+    outcome
+}
+
+async fn write_table_csv_pages<Execute, QueryFuture>(
+    writer: &mut impl Write,
+    database_type: DatabaseType,
+    options: &TableCsvExportOptions,
+    client_session_id: Option<&str>,
+    mut execute_page: Execute,
+) -> Result<u64, String>
+where
+    Execute: FnMut(String, QueryExecutionOptions) -> QueryFuture,
+    QueryFuture: Future<Output = Result<QueryResult, String>>,
+{
+    let use_cursor = database_type == DatabaseType::Cassandra;
+    let requested_page_size = options.page_size.unwrap_or(TABLE_DATA_EXPORT_PAGE_SIZE).max(1);
+    let page_size = if use_cursor { requested_page_size.min(TABLE_DATA_EXPORT_PAGE_SIZE) } else { requested_page_size };
+    let mut session_id = None;
 
     let mut offset = 0usize;
     let mut rows_exported = 0u64;
@@ -77,37 +122,45 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
             include_row_id: false,
             ..Default::default()
         });
-        let result = execute_sql_statement_with_options(
-            state,
-            &options.connection_id,
-            &options.database,
-            &sql,
-            options.schema.as_deref(),
-            None,
+        let result = execute_page(
+            sql,
             QueryExecutionOptions {
-                max_rows: Some(page_size),
+                max_rows: Some(if use_cursor { i32::MAX as usize } else { page_size }),
+                fetch_size: use_cursor.then_some(page_size),
+                page_size: use_cursor.then_some(page_size),
+                result_session_id: session_id.take(),
+                client_session_id: client_session_id.map(str::to_string),
                 timeout_secs: options.timeout_secs,
                 ..Default::default()
             },
         )
         .await?;
+        let fetched = result.rows.len();
+        let complete = if use_cursor {
+            session_id = result.session_id.clone().filter(|session| !session.trim().is_empty());
+            if result.truncated {
+                return Err("Incomplete cursor result during table export".to_string());
+            }
+            if result.has_more && session_id.is_none() {
+                return Err("Result session ended before table export completed".to_string());
+            }
+            !result.has_more
+        } else {
+            fetched < page_size
+        };
 
         if !wrote_header {
-            write_csv_text_row(&mut writer, result.columns, options.csv_quote_mode)?;
+            write_csv_text_row(writer, result.columns, options.csv_quote_mode)?;
             wrote_header = true;
         }
 
-        let fetched = result.rows.len();
-        if fetched == 0 {
-            break;
-        }
         for row in result.rows {
             writer.write_all(b"\n").map_err(|err| err.to_string())?;
-            write_csv_value_row(&mut writer, row, options.csv_quote_mode)?;
+            write_csv_value_row(writer, row, options.csv_quote_mode)?;
         }
 
         rows_exported += fetched as u64;
-        if fetched < page_size {
+        if complete {
             break;
         }
         offset += fetched;
@@ -122,9 +175,168 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
 
 #[cfg(test)]
 mod tests {
-    use super::{export_table_data_csv_core, CsvQuoteMode, TableCsvExportOptions};
+    use super::{export_table_data_csv_core, write_table_csv_pages, CsvQuoteMode, TableCsvExportOptions};
     use crate::connection::AppState;
     use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use crate::types::QueryResult;
+
+    fn export_options(page_size: usize) -> TableCsvExportOptions {
+        TableCsvExportOptions {
+            file_path: String::new(),
+            connection_id: "csv-test".to_string(),
+            database: "app".to_string(),
+            schema: None,
+            table_name: "events".to_string(),
+            columns: vec!["id".to_string()],
+            page_size: Some(page_size),
+            timeout_secs: Some(30),
+            csv_quote_mode: CsvQuoteMode::default(),
+        }
+    }
+
+    fn page(ids: &[usize], session_id: Option<&str>, has_more: bool) -> QueryResult {
+        serde_json::from_value(serde_json::json!({
+            "columns": ["id"],
+            "rows": ids.iter().map(|id| vec![*id]).collect::<Vec<_>>(),
+            "affected_rows": 0,
+            "execution_time_ms": 1,
+            "session_id": session_id,
+            "has_more": has_more
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cassandra_csv_export_follows_cursor_beyond_default_page_size() {
+        let first_ids: Vec<usize> = (1..=10_000).collect();
+        let mut pages = vec![page(&first_ids, Some("cursor-1"), true), page(&[10_001], None, false)].into_iter();
+        let mut requests = Vec::new();
+        let mut output = Vec::new();
+        let count = write_table_csv_pages(
+            &mut output,
+            DatabaseType::Cassandra,
+            &export_options(usize::MAX),
+            Some("export-test"),
+            |sql, options| {
+                requests.push((sql, options));
+                std::future::ready(Ok(pages.next().expect("must not restart the first page")))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 10_001);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1.result_session_id, None);
+        assert_eq!(requests[1].1.result_session_id.as_deref(), Some("cursor-1"));
+        for (sql, options) in requests {
+            assert!(!sql.contains("OFFSET"));
+            assert!(!sql.contains("LIMIT"));
+            assert_eq!(options.max_rows, Some(i32::MAX as usize));
+            assert_eq!(options.page_size, Some(10_000));
+            assert_eq!(options.fetch_size, Some(10_000));
+            assert_eq!(options.client_session_id.as_deref(), Some("export-test"));
+            assert_eq!(options.timeout_secs, Some(30));
+        }
+        let csv = String::from_utf8(output).unwrap();
+        assert_eq!(csv.lines().count(), 10_002);
+        assert_eq!(csv.lines().skip(1).collect::<std::collections::HashSet<_>>().len(), 10_001);
+    }
+
+    #[tokio::test]
+    async fn cassandra_csv_export_handles_short_empty_and_exact_cursor_pages() {
+        for pages in [
+            vec![page(&[], None, false)],
+            vec![page(&[1, 2], None, false)],
+            vec![page(&[1], Some("cursor-1"), true), page(&[], Some("cursor-1"), true), page(&[2, 3], None, false)],
+        ] {
+            let expected_rows: usize = pages.iter().map(|page| page.rows.len()).sum();
+            let expected_calls = pages.len();
+            let mut pages = pages.into_iter();
+            let mut calls = 0;
+            let count = write_table_csv_pages(
+                &mut Vec::new(),
+                DatabaseType::Cassandra,
+                &export_options(2),
+                Some("export-test"),
+                |_, _| {
+                    calls += 1;
+                    std::future::ready(Ok(pages.next().expect("unexpected extra request")))
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(count, expected_rows as u64);
+            assert_eq!(calls, expected_calls);
+        }
+    }
+
+    #[tokio::test]
+    async fn cassandra_csv_export_rejects_incomplete_cursor_pages() {
+        let mut truncated = page(&[1], None, false);
+        truncated.truncated = true;
+        for malformed in [page(&[1], None, true), page(&[1], Some("   "), true), truncated] {
+            let mut calls = 0;
+            let error = write_table_csv_pages(
+                &mut Vec::new(),
+                DatabaseType::Cassandra,
+                &export_options(2),
+                Some("export-test"),
+                |_, _| {
+                    calls += 1;
+                    std::future::ready(Ok(malformed.clone()))
+                },
+            )
+            .await
+            .expect_err("incomplete CSV must not be reported as successful");
+            assert!(error.contains("export"));
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn cassandra_csv_export_propagates_continuation_failure() {
+        let mut calls = 0;
+        let error = write_table_csv_pages(
+            &mut Vec::new(),
+            DatabaseType::Cassandra,
+            &export_options(2),
+            Some("export-test"),
+            |_, options| {
+                calls += 1;
+                std::future::ready(if calls == 1 {
+                    Ok(page(&[1], Some("cursor-lost"), true))
+                } else {
+                    assert_eq!(options.result_session_id.as_deref(), Some("cursor-lost"));
+                    Err("cursor lost".to_string())
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "cursor lost");
+        assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn non_cassandra_csv_export_preserves_limit_offset_paging() {
+        let mut pages = vec![page(&[1, 2], None, false), page(&[3], None, false)].into_iter();
+        let mut sqls = Vec::new();
+        let count =
+            write_table_csv_pages(&mut Vec::new(), DatabaseType::Sqlite, &export_options(2), None, |sql, options| {
+                sqls.push(sql);
+                assert_eq!(options.max_rows, Some(2));
+                assert!(options.page_size.is_none());
+                assert!(options.result_session_id.is_none());
+                assert!(options.client_session_id.is_none());
+                std::future::ready(Ok(pages.next().unwrap()))
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(sqls.len(), 2);
+        assert!(sqls[0].contains("LIMIT 2"));
+        assert!(sqls[1].contains("OFFSET 2"));
+    }
 
     fn salesforce_config(id: &str) -> ConnectionConfig {
         let mut config = serde_json::from_value::<ConnectionConfig>(serde_json::json!({

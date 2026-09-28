@@ -22,6 +22,7 @@ const section = ref<HTMLElement | null>(null);
 const scroll = ref<HTMLElement | null>(null);
 const sidebarList = computed(() => props.position === "sidebar-bottom");
 const left = computed(() => props.position.startsWith("left-"));
+const right = computed(() => props.position.startsWith("right-"));
 const bottom = computed(() => !sidebarList.value && props.position.endsWith("-bottom"));
 const ids = computed(() => entries.value.map((entry) => entry.id));
 function saveError(error: unknown) {
@@ -129,8 +130,8 @@ function activate(entry: PluginShortcutEntry) {
       <div v-if="drag.active || sizing.resizing.value" class="shortcut-pointer-overlay fixed inset-0 select-none touch-none" :style="{ cursor: drag.active ? 'grabbing' : 'row-resize' }" aria-hidden="true" />
       <div
         v-if="drag.active && draggedEntry"
-        class="shortcut-drag-preview pointer-events-none fixed flex max-w-xs items-center gap-2 rounded-md border border-primary/50 bg-popover px-2 py-1.5 text-xs text-popover-foreground shadow-md"
-        :style="{ left: `${drag.x + 12}px`, top: `${drag.y + 12}px` }"
+        class="shortcut-drag-preview pointer-events-none fixed flex w-max max-w-xs items-center gap-2 rounded-md border border-primary/50 bg-popover px-2 py-1.5 text-xs text-popover-foreground shadow-md"
+        :style="{ left: `${drag.x + (right ? -12 : 12)}px`, top: `${drag.y + 12}px`, transform: right ? 'translateX(-100%)' : undefined }"
         aria-hidden="true"
       >
         <PluginIcon :plugin-id="draggedEntry.pluginId" :icon="draggedEntry.icon" class="size-4 [&_svg]:text-current" />

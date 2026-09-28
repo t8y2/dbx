@@ -27,6 +27,37 @@ function requirePermission(manifest, permission) {
 function ensureSucceeded(result) {
   if (result?.success === false) throw new Error(result.message || "Plugin connection operation failed");
 }
+const AI_RECOMMENDATION_PLACEHOLDER_PATH = /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.(?:[A-Za-z_$][A-Za-z0-9_$]*|[0-9]+))*$/;
+const AI_RECOMMENDATION_FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
+function isValidAiRecommendationTemplate(value) {
+  let offset = 0;
+  for (;;) {
+    const open = value.indexOf("{{", offset);
+    const close = value.indexOf("}}", offset);
+    const next = open < 0 ? close : close < 0 ? open : Math.min(open, close);
+    if (next < 0) return true;
+    if (value.startsWith("}}", next)) return false;
+    const end = value.indexOf("}}", next + 2);
+    if (end < 0) return false;
+    const path = value.slice(next + 2, end).trim();
+    if (!AI_RECOMMENDATION_PLACEHOLDER_PATH.test(path) || path.split(".").some((segment) => AI_RECOMMENDATION_FORBIDDEN_SEGMENTS.has(segment))) return false;
+    offset = end + 2;
+  }
+}
+function requireAiRecommendationUpdate(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("AI recommendation update must be an object");
+  if (!value.context || typeof value.context !== "object" || Array.isArray(value.context)) throw new Error("AI recommendation context must be an object");
+  if (!Array.isArray(value.items) || value.items.length > 5) throw new Error("AI recommendation items must contain at most 5 entries");
+  for (const [index, item] of value.items.entries()) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`AI recommendation ${index} must be an object`);
+    if (typeof item.id !== "string" || !item.id.trim()) throw new Error(`AI recommendation ${index} requires id`);
+    if (typeof item.label !== "string" || !item.label.trim() || item.label.length > 200) throw new Error(`AI recommendation ${index} label is invalid`);
+    if (typeof item.prompt !== "string" || !item.prompt.trim() || item.prompt.length > 32000) throw new Error(`AI recommendation ${index} prompt is invalid`);
+    if (!isValidAiRecommendationTemplate(item.label) || !isValidAiRecommendationTemplate(item.prompt)) throw new Error(`AI recommendation ${index} contains an invalid placeholder`);
+    if (item.order !== undefined && (typeof item.order !== "number" || !Number.isFinite(item.order))) throw new Error(`AI recommendation ${index} order is invalid`);
+  }
+  return structuredClone({ context: value.context, items: value.items });
+}
 function pageId(value = "legacy") {
   if (typeof value !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(value)) throw new Error("Invalid page ID");
   return value;
@@ -203,7 +234,7 @@ export async function createMockHost(options) {
       existing.name = name;
       return expose(existing);
     }
-    const frame = { id: randomUUID(), channel: randomUUID(), session: session.id, page: session.page, connectionId, contributionId: contribution.id, context, name };
+    const frame = { id: randomUUID(), channel: randomUUID(), session: session.id, page: session.page, connectionId, contributionId: contribution.id, context, name, aiRecommendations: [] };
     frames.set(frame.id, frame);
     return expose(frame);
   }
@@ -241,6 +272,22 @@ export async function createMockHost(options) {
     switch (input.method) {
       case "host.getContext":
         return structuredClone(frame.context);
+      case "host.ai.openConversation":
+        requirePermission(manifest, "host.ai");
+        if (!p || typeof p.title !== "string" || !p.title.trim() || p.title.length > 200) throw new Error("AI conversation title is invalid");
+        if (typeof p.prompt !== "string" || !p.prompt.trim() || p.prompt.length > 32000) throw new Error("AI conversation prompt is invalid");
+        if (!p.context || typeof p.context !== "object" || Array.isArray(p.context) || jsonSize(p.context) > BRIDGE_LIMIT) throw new Error("AI conversation context is invalid");
+        if (p.send !== undefined && typeof p.send !== "boolean") throw new Error("AI conversation send is invalid");
+        if (p.mode !== undefined && p.mode !== "ask" && p.mode !== "agent") throw new Error("AI conversation mode is invalid");
+        return null;
+      case "host.ai.setRecommendations":
+        requirePermission(manifest, "host.ai");
+        frame.aiRecommendations = requireAiRecommendationUpdate(p);
+        return null;
+      case "host.ai.clearRecommendations":
+        requirePermission(manifest, "host.ai");
+        frame.aiRecommendations = [];
+        return null;
       case "backend.invoke": {
         if (p.timeoutMs !== undefined && (typeof p.timeoutMs !== "number" || !Number.isFinite(p.timeoutMs))) throw new Error("Invalid request timeout");
         const timeout = p.timeoutMs === undefined ? 30000 : Math.min(120000, Math.max(1, Math.round(p.timeoutMs)));

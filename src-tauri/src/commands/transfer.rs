@@ -68,6 +68,8 @@ pub async fn start_transfer(
     )
     .await?;
 
+    dbx_core::transfer::ensure_transfer_source_types_supported(&state, &request, &source_pool_key).await?;
+
     tokio::spawn(async move {
         // Sort tables by FK dependency so referenced tables are transferred first,
         // and keep the foreign key metadata fetched along the way — MySQL-family

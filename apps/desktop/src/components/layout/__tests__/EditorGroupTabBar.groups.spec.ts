@@ -131,6 +131,19 @@ describe("EditorGroupTabBar group behavior", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
     vi.restoreAllMocks();
+    // Pin the engine to modern capabilities: these tests assert the designed
+    // styles, not the legacy WebView fallbacks (covered in styles/__tests__).
+    vi.stubGlobal("CSS", { supports: () => true });
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      media: query,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+      onchange: null,
+    }));
     pinia = createPinia();
     setActivePinia(pinia);
   });

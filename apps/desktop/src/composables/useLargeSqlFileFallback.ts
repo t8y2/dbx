@@ -1,7 +1,8 @@
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
-import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { resolveExternalSqlFileTargetForActiveTab } from "@/lib/sql/externalSqlFileTarget";
 import { formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath } from "@/lib/sql/sqlFileOpen";
 
 /**
@@ -12,10 +13,11 @@ import { formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath } from
 export function useLargeSqlFileStreamingFallback() {
   const { t } = useI18n();
   const connectionStore = useConnectionStore();
+  const queryStore = useQueryStore();
   const { toast } = useToast();
 
   function openInStreamingExecutor(path: string, sizeBytes: number) {
-    const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+    const target = resolveExternalSqlFileTargetForActiveTab(path, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId));
     connectionStore.sqlFileSource = {
       connectionId: target.connectionId,
       database: target.database,

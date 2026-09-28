@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { Channel } from "@tauri-apps/api/core";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
@@ -50,7 +51,7 @@ import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type Meil
 import type { XuguTablespaceInfo } from "@/types/database";
 import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchCreateIndexInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
-import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import type { SqlExportColumnSelection, SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
 /** Normalize Tauri rejections once at the public backend boundary. */
 async function invokeBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -171,7 +172,7 @@ import type {
   TableAdminSqlOptions,
   VacuumTableSqlOptions,
 } from "@/lib/database/dbAdminSql";
-import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
+import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions } from "@/lib/export/databaseExport";
 
 export interface SshPromptResolution {
   id: string;
@@ -815,7 +816,16 @@ export interface McpHttpServerStatus {
 export interface WebMcpHttpStatus {
   enabled: boolean;
   endpointPath: string;
-  tokenSource: "environment" | "file" | null;
+  tokenSource: "environment" | "file" | "managed" | null;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+  deploymentManaged: boolean;
+  managementAvailable: boolean;
+  accessToken: string | null;
+}
+
+export interface WebMcpHttpSettings {
+  enabled: boolean;
   allowedHosts: string[];
   allowedOrigins: string[];
 }
@@ -837,7 +847,15 @@ export async function rotateMcpHttpServerToken(): Promise<McpHttpServerStatus> {
 }
 
 export async function loadWebMcpHttpStatus(): Promise<WebMcpHttpStatus> {
-  return { enabled: false, endpointPath: "/mcp", tokenSource: null, allowedHosts: [], allowedOrigins: [] };
+  return { enabled: false, endpointPath: "/mcp", tokenSource: null, allowedHosts: [], allowedOrigins: [], deploymentManaged: false, managementAvailable: false, accessToken: null };
+}
+
+export async function saveWebMcpHttpSettings(_settings: WebMcpHttpSettings): Promise<WebMcpHttpStatus> {
+  throw new Error("Web MCP settings are available only in DBX Web");
+}
+
+export async function rotateWebMcpToken(): Promise<WebMcpHttpStatus> {
+  throw new Error("Web MCP settings are available only in DBX Web");
 }
 
 export async function loadMaxAgentTurns(): Promise<number> {
@@ -862,6 +880,14 @@ export async function loadHistoryRetentionLimit(): Promise<number> {
 
 export async function saveHistoryRetentionLimit(limit: number): Promise<void> {
   return invoke("save_history_retention_limit", { limit });
+}
+
+export async function loadMcpHistoryRetentionLimit(): Promise<number> {
+  return invoke("load_mcp_history_retention_limit");
+}
+
+export async function saveMcpHistoryRetentionLimit(limit: number): Promise<void> {
+  return invoke("save_mcp_history_retention_limit", { limit });
 }
 
 export async function loadMaxRetries(): Promise<number> {
@@ -2233,7 +2259,7 @@ export async function buildExportInsertStatements(options: BuildExportInsertStat
   return invoke("build_export_insert_statements", { options });
 }
 
-export async function buildExportSqlInsert(options: BuildExportInsertStatementsOptions): Promise<string> {
+export async function buildExportSqlInsert(options: BuildExportSqlInsertOptions): Promise<string> {
   return invoke("build_export_sql_insert", { options });
 }
 
@@ -2465,6 +2491,18 @@ export async function collectDocsSnapshot(connectionId: string, database: string
   return invoke("docs_collect_snapshot", { connectionId, database, schemas, tables, projectName });
 }
 
+export interface DocsCollectProgress {
+  completed: number;
+  total: number;
+  current: string;
+}
+
+export async function collectDocsSnapshotForExport(connectionId: string, database: string, schemas: string[], tables: string[], onProgress: (progress: DocsCollectProgress) => void): Promise<SchemaSnapshot> {
+  const channel = new Channel<DocsCollectProgress>();
+  channel.onmessage = onProgress;
+  return invoke("docs_collect_snapshot_for_export", { connectionId, database, schemas, tables, projectName: database, onProgress: channel });
+}
+
 export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
   return invoke("docs_load_annotations", { connectionId });
 }
@@ -2481,8 +2519,8 @@ export async function exportDocsHtml(filePath: string, snapshot: SchemaSnapshot,
   return invoke("docs_export_html", { filePath, snapshot, annotations, lang });
 }
 
-export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
-  return invoke("save_connections", { configs });
+export async function saveConnections(configs: ConnectionConfig[], removedIds: string[] = []): Promise<void> {
+  return invoke("save_connections", { configs, removedIds });
 }
 
 export async function loadConnections(): Promise<ConnectionConfig[]> {
@@ -2633,6 +2671,14 @@ export async function writePluginLocalFileChunk(pluginId: string, handleId: stri
 
 export async function closePluginLocalFile(pluginId: string, handleId: string): Promise<void> {
   return invoke("plugin_file_close", { pluginId, handleId });
+}
+
+export async function openPluginMedia(pluginId: string, method: string, params: Record<string, unknown>): Promise<string> {
+  return invoke("plugin_media_open", { pluginId, method, params });
+}
+
+export async function closePluginMedia(pluginId: string, token: string): Promise<void> {
+  return invoke("plugin_media_close", { pluginId, token });
 }
 
 export async function getPluginUiStorage(pluginId: string, key: string): Promise<unknown> {
@@ -2968,7 +3014,9 @@ export interface UpdateDownloadProgress {
 
 export interface McpServerStatus {
   installed: boolean;
+  installation_source: "native" | "homebrew" | "npm" | null;
   npm_available: boolean;
+  npm_installed: boolean;
   node_path: string | null;
   node_version: string | null;
   current_version: string | null;
@@ -2992,8 +3040,16 @@ export async function installMcpServer(): Promise<string> {
   return invoke("install_mcp_server");
 }
 
+export async function installNativeMcpServer(): Promise<string> {
+  return invoke("install_native_mcp_server");
+}
+
 export async function uninstallMcpServer(): Promise<string> {
   return invoke("uninstall_mcp_server");
+}
+
+export async function uninstallNpmMcpServer(): Promise<string> {
+  return invoke("uninstall_npm_mcp_server");
 }
 
 export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
@@ -3050,7 +3106,8 @@ export interface RedisKeyInfo {
 
 export interface RedisDatabaseInfo {
   db: number;
-  keys: number;
+  /** 该库的键数量；服务端无法给出可信数量时（如 kvrocks 未执行过 DBSIZE SCAN）缺省。 */
+  keys?: number;
 }
 
 export type RedisBlobEncoding = "utf8" | "binary";
@@ -3154,7 +3211,11 @@ export type RedisValueData =
       scan_cursor?: number;
     }
   | { kind: "stream"; entries: RedisStreamEntry[]; total?: number; next_cursor?: string }
-  | { kind: "unknown" };
+  // kvrocks 把位图/HLL 实现为独立类型（TYPE 返回 bitmap / hyperloglog），
+  // 这里单独建模，避免落到 unknown 后界面显示不出值。
+  | { kind: "bitmap"; content: RedisBlob; total_bytes?: number; truncated?: boolean; set_bits?: number }
+  | { kind: "hyperloglog"; count?: number }
+  | { kind: "unknown"; redis_type: string };
 
 export interface RedisValue {
   key_display: string;
@@ -3383,6 +3444,10 @@ export async function redisSetKeysExpireAt(connectionId: string, db: number, key
 
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
   return invoke("redis_delete_keys", { connectionId, db, keyRaws });
+}
+
+export async function redisDeleteKeysByPattern(connectionId: string, db: number, pattern: string): Promise<number> {
+  return invoke("redis_delete_keys_by_pattern", { connectionId, db, pattern });
 }
 
 export async function redisFlushDb(connectionId: string, db: number): Promise<void> {
@@ -5042,6 +5107,11 @@ export interface HistoryEntry {
   affected_rows?: number | null;
   rollback_sql?: string | null;
   details_json?: string | null;
+  source?: "sql" | "mcp" | "other";
+  mcp_tool_name?: string | null;
+  mcp_request_json?: string | null;
+  mcp_response_json?: string | null;
+  mcp_session_id?: string | null;
 }
 
 export interface HistoryConnectionFilter {
@@ -5068,6 +5138,8 @@ export interface HistorySearchRequest {
   ended_at?: string;
   cursor?: HistoryCursor;
   limit: number;
+  source?: "sql" | "mcp" | "other";
+  mcp_tool_name?: string;
 }
 
 export interface HistorySearchResult {
@@ -5106,6 +5178,14 @@ export async function loadRedisHistory(limit = 100, offset = 0): Promise<History
 
 export async function clearHistory(): Promise<void> {
   return invoke("clear_history");
+}
+
+export async function clearHistoryBySource(source: string): Promise<void> {
+  return invoke("clear_history_by_source", { source });
+}
+
+export async function cleanupMcpHistoryRetention(): Promise<number> {
+  return invoke("cleanup_mcp_history_retention");
 }
 
 export async function clearRedisHistory(): Promise<void> {
@@ -5249,7 +5329,7 @@ export interface TransferProgress {
   transferFailuresOmitted?: number;
 }
 
-export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {
+export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
   return new Promise((resolve, reject) => {
     let unlisten: UnlistenFn | null = null;
     void (async () => {
@@ -5264,6 +5344,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
         });
 
         await invoke("start_transfer", { request });
+        onStarted?.();
       } catch (e) {
         unlisten?.();
         reject(e instanceof BackendErrorException ? e : new BackendErrorException(e));
@@ -5300,6 +5381,7 @@ export async function sortTablesByFkDependency(options: SortTablesByFkOptions): 
 
 // --- Table File Import ---
 export type TableImportMode = "append" | "truncate";
+export type TableImportConflictPolicy = "error" | "skip" | "updateExisting";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
 export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql";
@@ -5376,6 +5458,8 @@ export interface TableImportRequest {
   dateTimeFormat?: string;
   preparedSource?: TableImportPreparedSource | null;
   retainSource?: boolean;
+  conflictPolicy?: TableImportConflictPolicy;
+  skipDuplicateRows?: boolean;
 }
 
 export interface TableImportSummary {
@@ -5669,6 +5753,7 @@ export interface DatabaseExportRequest {
   failOnError?: boolean;
   preventOverwrite?: boolean;
   outputCompression?: "none" | "gzip";
+  insertDialect?: SqlInsertDialect;
   snapshotSessionId?: string;
   batchSize: number;
   splitMaxMb?: number;
@@ -5709,8 +5794,10 @@ export interface TableExportRequest {
   filePath: string;
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
   insertMode?: SqlInsertMode;
+  insertDialect?: SqlInsertDialect;
   csvQuoteMode?: CsvQuoteMode;
   columns?: string[];
+  selectedColumns?: SqlExportColumnSelection[];
   columnTypes?: Array<string | null | undefined>;
   /** 与 `columns` 对齐的列 EXTRA 元数据（identity 等），用于 SQL INSERT 导出的 `SET IDENTITY_INSERT`。 */
   columnExtras?: Array<string | null | undefined>;
@@ -5776,6 +5863,7 @@ export interface QueryResultExportRequest {
   dateTimeFormat?: string;
   exportTableName?: string;
   exportColumnTypes?: Array<string | null | undefined>;
+  selectedColumns?: SqlExportColumnSelection[];
   /**
    * 结果列对应的原表 EXTRA 元数据（identity 等）。后端据此为 SQL INSERT 导出
    * 补上 `SET IDENTITY_INSERT` 包裹，缺省表示未知。

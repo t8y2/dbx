@@ -424,10 +424,11 @@ export function useSqlExecution(deps: {
       return;
     }
     const statementCount = splitSqlStatementRanges(sql, executionDatabaseType, sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : undefined)).length;
+    const redisConsoleSelected = executionDatabaseType === "redis" && tab.uiState?.redisResultViewMode === "console";
     // Output-view switching belongs to the tab the user is looking at — both
     // when the query starts and when it finishes.
     if (deps.activeTab.value?.id === executionTabId) {
-      deps.activeOutputView.value = statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : "result";
+      deps.activeOutputView.value = redisConsoleSelected ? "result" : statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : "result";
     }
     const connName = executionConnection?.name || "";
     const start = Date.now();

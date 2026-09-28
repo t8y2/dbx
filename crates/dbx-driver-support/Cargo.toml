@@ -1,0 +1,27 @@
+[package]
+name = "dbx-driver-support"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+test-support = ["dbx-platform/test-support"]
+
+[dependencies]
+dbx-platform = { path = "../dbx-platform" }
+dbx-types = { path = "../dbx-types", default-features = false }
+bytes = "1"
+portpicker = "0.1.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+russh = "0.60"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+sqlparser = { version = "0.62.0", features = ["visitor"] }
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

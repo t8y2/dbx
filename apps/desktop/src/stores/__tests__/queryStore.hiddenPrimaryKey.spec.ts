@@ -159,6 +159,42 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   }, 10_000);
 
+  it("appends the hidden primary key for Dameng tables whose columns keep the created case", async () => {
+    // #10233: Dameng keeps the case an unquoted identifier was created with, so the
+    // server reports `name` while the Oracle-family dialect handling folds the SQL
+    // token to `NAME`. The binding has to survive that mismatch, otherwise the result
+    // stays read-only even though the table has a primary key.
+    getConnectionConfig.mockReturnValue({ id: "dameng-1", name: "Dameng", db_type: "dameng", database: "SYSDBA", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "id", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "name", data_type: "VARCHAR(50)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    // Mirror what the analyzer reports for this dialect: the user's unquoted token
+    // keeps its spelling and quoting flag (the store then folds it, like the real
+    // Oracle-family path), while the hidden key dbx appends is quoted as `"id"`.
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "users",
+        selectStar: false,
+        columns: [{ sourceName: "name", sourceNameQuoted: false, resultName: "name", expression: "name" }, ...(sql.includes("__DBX_PK_0") ? [{ sourceName: "id", sourceNameQuoted: true, resultName: "__DBX_PK_0", expression: '"id"' }] : [])],
+      },
+    }));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("dameng-1", "SYSDBA", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    expect(executeMulti).toHaveBeenCalledWith("dameng-1", "SYSDBA", 'SELECT name, "id" AS "__DBX_PK_0" FROM users', undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.hidden_column_indexes).toEqual([1]);
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  }, 10_000);
+
   it("keeps MySQL expression columns read-only without disabling direct columns", async () => {
     const sql = "SELECT id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl FROM items";
     getColumns.mockResolvedValue([

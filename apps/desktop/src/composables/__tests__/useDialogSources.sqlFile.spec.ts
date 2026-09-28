@@ -46,6 +46,8 @@ it("hands prepared Web previews to the dialog, clears them on close, and preserv
   expect(mocks.store.sqlFileSource).toBeNull();
   dialogs.showSqlFileDialog.value = false;
   await nextTick();
+  expect(dialogs.sqlFilePrefillConnectionId.value).toBe("");
+  expect(dialogs.sqlFilePrefillDatabase.value).toBe("");
   expect(dialogs.sqlFilePrefillPreview.value).toBeUndefined();
   mocks.store.sqlFileSource = { connectionId: "mysql", database: "app", filePath: "/local/backup.sql" };
   await nextTick();

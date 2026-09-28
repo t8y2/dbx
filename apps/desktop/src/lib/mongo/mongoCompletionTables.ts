@@ -294,6 +294,97 @@ export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   ["$rand", "Returns a random float between 0 and 1", "$rand: {}"],
 ]);
 
+/**
+ * The operations a `bulkWrite()` array accepts, and the fields each one allows.
+ *
+ * Both lists are exactly what the shell parser accepts: it rejects an unknown operation key and
+ * an unknown field inside one, so anything extra here would complete into a command that fails.
+ */
+export const BULK_WRITE_OPERATIONS: MongoOperatorSpec[] = specs([
+  ["insertOne", "Insert one document", "insertOne: { document: { ${} } }"],
+  ["updateOne", "Update the first matching document", "updateOne: { filter: { ${} }, update: { $set: { ${} } } }"],
+  ["updateMany", "Update every matching document", "updateMany: { filter: { ${} }, update: { $set: { ${} } } }"],
+  ["replaceOne", "Replace the first matching document", "replaceOne: { filter: { ${} }, replacement: { ${} } }"],
+  ["deleteOne", "Delete the first matching document", "deleteOne: { filter: { ${} } }"],
+  ["deleteMany", "Delete every matching document", "deleteMany: { filter: { ${} } }"],
+]);
+
+const BULK_WRITE_FILTER: Spec = ["filter", "Documents the operation applies to", "filter: { ${} }"];
+const BULK_WRITE_UPSERT: Spec = ["upsert", "Insert the document when the filter matches nothing", "upsert: true"];
+
+export const BULK_WRITE_OPERATION_FIELDS: Record<string, MongoOperatorSpec[]> = {
+  insertOne: specs([["document", "Document to insert", "document: { ${} }"]]),
+  updateOne: specs([BULK_WRITE_FILTER, ["update", "Update operators or an aggregation pipeline", "update: { $set: { ${} } }"], BULK_WRITE_UPSERT, ["arrayFilters", "Conditions for the $[<identifier>] positional operator", 'arrayFilters: [{ "${elem}.${field}": ${} }]']]),
+  updateMany: specs([BULK_WRITE_FILTER, ["update", "Update operators or an aggregation pipeline", "update: { $set: { ${} } }"], BULK_WRITE_UPSERT, ["arrayFilters", "Conditions for the $[<identifier>] positional operator", 'arrayFilters: [{ "${elem}.${field}": ${} }]']]),
+  replaceOne: specs([BULK_WRITE_FILTER, ["replacement", "Whole document that replaces the match", "replacement: { ${} }"], BULK_WRITE_UPSERT]),
+  deleteOne: specs([BULK_WRITE_FILTER]),
+  deleteMany: specs([BULK_WRITE_FILTER]),
+};
+
+/**
+ * Option keys accepted by a collection method's trailing options argument.
+ *
+ * Only methods whose options DBX actually applies appear here, and only with the keys they
+ * accept: several of these are deserialized with `deny_unknown_fields`, so suggesting a key the
+ * driver does not know would produce a completion that fails at Run. Methods with no options
+ * support (`find`, `insertOne`, `deleteOne`, `countDocuments`, …) are absent by design.
+ *
+ * `createIndex` and `aggregate` pass their options through to the server command, so those lists
+ * are the common documented ones rather than an exhaustive set.
+ */
+export const METHOD_OPTION_KEYS: Record<string, MongoOperatorSpec[]> = {
+  findOne: specs([["sort", "Sort order used to pick the single document", "sort: { ${field}: -1 }"]]),
+  updateOne: specs([
+    ["upsert", "Insert the document when the filter matches nothing", "upsert: true"],
+    ["arrayFilters", "Conditions for the $[<identifier>] positional operator", 'arrayFilters: [{ "${elem}.${field}": ${} }]'],
+  ]),
+  updateMany: specs([
+    ["upsert", "Insert the document when the filter matches nothing", "upsert: true"],
+    ["arrayFilters", "Conditions for the $[<identifier>] positional operator", 'arrayFilters: [{ "${elem}.${field}": ${} }]'],
+  ]),
+  replaceOne: specs([["upsert", "Insert the replacement when the filter matches nothing", "upsert: true"]]),
+  findOneAndUpdate: specs([
+    ["returnDocument", "Return the document 'before' or 'after' the update", 'returnDocument: "after"'],
+    ["returnNewDocument", "Return the updated document instead of the original", "returnNewDocument: true"],
+    ["new", "Legacy alias for returnNewDocument", "new: true"],
+    ["upsert", "Insert the document when the filter matches nothing", "upsert: true"],
+    ["projection", "Fields to return", "projection: { ${field}: 1 }"],
+    ["sort", "Sort order used to pick the single document", "sort: { ${field}: -1 }"],
+    ["arrayFilters", "Conditions for the $[<identifier>] positional operator", 'arrayFilters: [{ "${elem}.${field}": ${} }]'],
+  ]),
+  findOneAndReplace: specs([
+    ["returnDocument", "Return the document 'before' or 'after' the replacement", 'returnDocument: "after"'],
+    ["returnNewDocument", "Return the replacement instead of the original", "returnNewDocument: true"],
+    ["new", "Legacy alias for returnNewDocument", "new: true"],
+    ["upsert", "Insert the replacement when the filter matches nothing", "upsert: true"],
+    ["projection", "Fields to return", "projection: { ${field}: 1 }"],
+    ["sort", "Sort order used to pick the single document", "sort: { ${field}: -1 }"],
+  ]),
+  findOneAndDelete: specs([
+    ["projection", "Fields to return", "projection: { ${field}: 1 }"],
+    ["sort", "Sort order used to pick the single document", "sort: { ${field}: -1 }"],
+  ]),
+  bulkWrite: specs([["ordered", "Stop at the first failed operation", "ordered: false"]]),
+  createIndex: specs([
+    ["name", "Index name", 'name: "${name}"'],
+    ["unique", "Reject duplicate values", "unique: true"],
+    ["sparse", "Index only documents that have the field", "sparse: true"],
+    ["expireAfterSeconds", "TTL index lifetime in seconds", "expireAfterSeconds: 3600"],
+    ["partialFilterExpression", "Index only documents matching this filter", "partialFilterExpression: { ${} }"],
+    ["collation", "Locale-aware comparison rules", 'collation: { locale: "${en}" }'],
+    ["hidden", "Keep the index but hide it from the planner", "hidden: true"],
+  ]),
+  aggregate: specs([
+    ["allowDiskUse", "Let stages write temporary files", "allowDiskUse: true"],
+    ["maxTimeMS", "Server-side time limit in milliseconds", "maxTimeMS: 5000"],
+    ["collation", "Locale-aware comparison rules", 'collation: { locale: "${en}" }'],
+    ["hint", "Index to use", 'hint: "${index}"'],
+    ["comment", "Comment recorded in the server logs and profiler", 'comment: "${comment}"'],
+    ["let", "Variables available to the pipeline as $$name", "let: { ${name}: ${} }"],
+    ["explain", "Return the query plan instead of the results", "explain: true"],
+  ]),
+};
+
 /** Option keys accepted by the stages whose shape is a fixed set of names. */
 export const STAGE_OPTION_KEYS: Record<string, MongoOperatorSpec[]> = {
   $lookup: specs([

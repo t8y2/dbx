@@ -8,7 +8,6 @@ pub mod config_cmd;
 pub mod connection;
 #[allow(dead_code, unused_imports)]
 mod connection_secrets;
-pub mod consul_cmd;
 pub mod csv_export;
 pub mod data_compare;
 pub mod database_export;
@@ -41,6 +40,7 @@ pub mod nacos_cmd;
 pub mod plugin_download;
 pub mod plugin_download_file;
 pub mod plugin_file;
+pub mod plugin_media;
 pub mod plugin_storage;
 pub mod plugins;
 pub mod prompt_template;

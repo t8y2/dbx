@@ -133,6 +133,7 @@ export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConne
   if (!connection) return false;
   if (connection.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return true;
   if (connection.db_type === "kingbase") return true;
+  if (connection.db_type === "kyuubi") return true;
   // Cloud Spanner is dual-dialect: the agent reports a backtick for GoogleSQL and
   // a double quote for PostgreSQL-dialect databases. The backend counts Spanner
   // unconditionally in `uses_connection_identifier_quote`, so the UI must fetch

@@ -1,5 +1,5 @@
 import type { AstNode, ClauseNode, ParenthesisNode, StatementNode } from "sql-formatter/dist/esm/parser/ast.js";
-import { CREATE_TABLE_KEYWORD, keywordText, renderInline, splitByComma, Writer, type SqlLayoutContext } from "./primitives";
+import { CREATE_TABLE_KEYWORD, endsWithLineComment, keywordText, renderInline, splitByComma, Writer, type SqlLayoutContext } from "./primitives";
 
 /**
  * Column alignment for `CREATE TABLE`.
@@ -131,6 +131,7 @@ export function createTableLayout(statement: StatementNode, ctx: SqlLayoutContex
     } else {
       writer.newline(indent);
       writer.write(ctx.renderers.block(rest).trim());
+      if (endsWithLineComment(rest)) writer.markLineComment();
     }
   }
   if (statement.hasSemicolon) writer.write(";");
@@ -153,8 +154,10 @@ function emitDefinition(writer: Writer, nodes: AstNode[], indent: number, ctx: S
     writer.write(`${keywordText(first.text, ctx)} ${renderInline(ctx, [second], ctx.options.lineWidth) ?? second.text}`);
     writer.newline(indent + ctx.options.indentWidth);
     writer.write(ctx.renderers.block(nodes.slice(2)).trim());
+    if (endsWithLineComment(nodes.slice(2))) writer.markLineComment();
     return;
   }
 
   writer.write(ctx.renderers.block(nodes).trim());
+  if (endsWithLineComment(nodes)) writer.markLineComment();
 }

@@ -97,4 +97,10 @@ describe("tabUiState", () => {
       page: { query: { Panel: { count: 3 } } },
     });
   });
+
+  it("persists only supported Redis result view modes", () => {
+    expect(sanitizeTabUiState({ redisResultViewMode: "console" })).toEqual({ redisResultViewMode: "console" });
+    expect(sanitizeTabUiState({ redisResultViewMode: "grid" })).toEqual({ redisResultViewMode: "grid" });
+    expect(sanitizeTabUiState({ redisResultViewMode: "invalid" })).toBeUndefined();
+  });
 });

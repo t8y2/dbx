@@ -1,6 +1,7 @@
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { hexToRgba } from "@/lib/common/color";
+import { isLegacyWebView } from "@/lib/ui/legacyWebView";
 import type { CSSProperties } from "vue";
 import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
 import { supportsConnectionDatabaseInfo } from "@/lib/connection/connectionDatabaseInfo";
@@ -262,10 +263,13 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   const connName = connectionDisplayName(tab.connectionId);
   const groupName = connectionGroupDisplayName(tab.connectionId, t);
   const connection = useConnectionStore().getConfig(tab.connectionId);
+  const isPluginTab = tab.mode === "plugin-workbench" || tab.mode === "plugin-filesystem";
+  const database = isPluginTab ? tab.database || connection?.database || "" : tab.database;
+  const showDatabase = (!connection || supportsConnectionDatabaseInfo(connection.db_type)) && (!isPluginTab || Boolean(database.trim()));
   const lines: { label: string; value: string }[] = [
     { label: t("tabs.tooltipConnection"), value: connName },
     ...(groupName ? [{ label: t("tabs.tooltipGroup"), value: groupName }] : []),
-    ...(!connection || supportsConnectionDatabaseInfo(connection.db_type) ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, tab.database, t) }] : []),
+    ...(showDatabase ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, database, t) }] : []),
   ];
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });
@@ -682,14 +686,38 @@ export function tabIconClass(tab: QueryTab): string {
   return "text-blue-600 dark:text-blue-400";
 }
 
+// WebKit without color-mix() (macOS 12 Safari < 16.2) invalidates these inline
+// values at computed-value time, leaving the active tab with no background at
+// all — and it also fails to substitute var() references inside inline custom
+// properties, so the legacy branch resolves the theme token to concrete rgb
+// once per call instead of leaning on rgba(var(--dbx-foreground-rgb), …).
+function foregroundRgb(): string {
+  if (typeof document !== "undefined") {
+    const rgb = getComputedStyle(document.documentElement).getPropertyValue("--dbx-foreground-rgb").trim();
+    if (rgb) return rgb;
+  }
+  return "10, 10, 10";
+}
+
+export function appTabActiveBackground(): string {
+  if (isLegacyWebView()) return `rgba(${foregroundRgb()}, 0.18)`;
+  return "color-mix(in srgb, var(--foreground) 18%, var(--background))";
+}
+
+export function appTabActiveIndicator(): string {
+  if (isLegacyWebView()) return `inset 0 -2px 0 rgba(${foregroundRgb()}, 0.72)`;
+  return "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)";
+}
+
 export function tabColorStyle(tab: QueryTab, active: boolean, isClassic: boolean): CSSProperties | undefined {
-  const activeIndicator = "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)";
+  const activeIndicator = appTabActiveIndicator();
   const color = connectionColor(tab.connectionId);
   if (!color) {
+    const background = appTabActiveBackground();
     if (isClassic) {
-      return active ? { "--app-tab-background": "color-mix(in srgb, var(--foreground) 18%, var(--background))", boxShadow: activeIndicator } : undefined;
+      return active ? { "--app-tab-background": background, boxShadow: activeIndicator } : undefined;
     }
-    return active ? { "--app-tab-background": "color-mix(in srgb, var(--foreground) 18%, var(--background))", borderColor: "var(--ring)" } : undefined;
+    return active ? { "--app-tab-background": background, borderColor: "var(--ring)" } : undefined;
   }
   if (isClassic) {
     return {

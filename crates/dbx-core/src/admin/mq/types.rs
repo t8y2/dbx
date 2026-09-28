@@ -380,6 +380,79 @@ pub struct ListTopicsOpts {
     pub include_non_persistent: bool,
 }
 
+pub const DEFAULT_MQ_LIST_PAGE_SIZE: u32 = 100;
+pub const MAX_MQ_LIST_PAGE_SIZE: u32 = 500;
+
+/// Sort keys shared by the bounded MQ list endpoints. `MessagesReady` is used
+/// by RabbitMQ queues; exchange listings use the default name ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum MqListSort {
+    #[default]
+    Name,
+    MessagesReady,
+}
+
+/// One-based request for a bounded MQ list page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MqListPageRequest {
+    #[serde(default = "default_mq_list_page")]
+    pub page: u32,
+    #[serde(default = "default_mq_list_page_size")]
+    pub page_size: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub sort: MqListSort,
+    #[serde(default)]
+    pub sort_descending: bool,
+}
+
+impl Default for MqListPageRequest {
+    fn default() -> Self {
+        Self {
+            page: default_mq_list_page(),
+            page_size: default_mq_list_page_size(),
+            search: None,
+            sort: MqListSort::default(),
+            sort_descending: false,
+        }
+    }
+}
+
+impl MqListPageRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.page == 0 {
+            return Err("page must be at least 1".to_string());
+        }
+        if self.page_size == 0 || self.page_size > MAX_MQ_LIST_PAGE_SIZE {
+            return Err(format!("pageSize must be between 1 and {MAX_MQ_LIST_PAGE_SIZE}"));
+        }
+        Ok(())
+    }
+}
+
+const fn default_mq_list_page() -> u32 {
+    1
+}
+
+const fn default_mq_list_page_size() -> u32 {
+    DEFAULT_MQ_LIST_PAGE_SIZE
+}
+
+/// A bounded list response. `total_count` is the number of rows matching the
+/// request's search filter, not merely the number loaded in this page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MqListPage<T> {
+    pub items: Vec<T>,
+    pub page: u32,
+    pub page_size: u32,
+    pub total_count: u64,
+    pub has_more: bool,
+}
+
 /// Aggregated, UI-friendly topic statistics. Parsed from the version-specific
 /// raw stats payload by the adapter's version profile.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

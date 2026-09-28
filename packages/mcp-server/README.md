@@ -175,6 +175,19 @@ When connection scoping is enabled, mutating connection tools and desktop UI too
 
 Salesforce connections take SOQL through `dbx_execute_query` and list objects through `dbx_list_tables`. `dbx_execute_batch` and `dbx_open_session` are refused: SOQL is read-only, and every call is a stateless REST request with no session to pin. A record write is a two-step confirmed operation — `dbx_salesforce_prepare_write` returns a summary plus a single-use `confirm_token` that expires after 5 minutes, a person approves that summary, and `dbx_salesforce_apply_write` sends exactly the prepared statement. Preparing needs the per-connection **Allow DML** switch in DBX Settings → MCP, which is off by default, and Salesforce cannot roll an applied write back.
 
+## Resources
+
+Clients that support MCP Resources can read the connection catalog and expand templates for database metadata:
+
+| Resource URI | Description |
+| --- | --- |
+| `dbx://connections` | Connections visible to the current MCP scope |
+| `dbx://connections/{connection_id}/databases` | Databases visible through one connection |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | Tables and views in an optional database/schema |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | Column definitions for a table; `table` is required |
+
+Resource discovery and reads reuse the corresponding Tool allowlist plus connection, group, database, and runtime scopes. Query parameter values must be URI encoded. SQL execution and all write-capable operations remain Tools.
+
 ## Execution Modes
 
 ### Local native mode
@@ -245,7 +258,7 @@ It listens on `http://127.0.0.1:5225/mcp` by default. Configure an HTTP-capable 
 
 The default loopback address accepts only clients on the same computer. Binding to a non-loopback address requires all of the following: `DBX_MCP_HTTP_ALLOW_REMOTE=1`, the `--http-allow-remote` flag, and non-empty `DBX_MCP_HTTP_ALLOWED_HOSTS` plus `DBX_MCP_HTTP_ALLOWED_ORIGINS` allowlists. Use exact public Host authorities and browser Origins.
 
-DBX Web can host native Streamable HTTP on its existing listener, rather than opening a second port. Enable it with `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) and configure the public Host allowlist. For a container published as `4225:4224`, the endpoint is `http://localhost:4225/mcp`:
+DBX Web can host native Streamable HTTP on its existing listener, rather than opening a second port. On a single password-protected Web instance, enable it in **Settings → MCP → HTTP Service** with the public Host allowlist; the generated token is encrypted in DBX's secret store and can be rotated there. For multi-instance or deployment-managed setups, set `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) and `DBX_WEB_MCP_ALLOWED_HOSTS` in the deployment. Deployment secrets take precedence and make the page read-only. For a container published as `4225:4224`, the endpoint is `http://localhost:4225/mcp`:
 
 ```yaml
 environment:
@@ -558,6 +571,19 @@ MCP 配置：
 
 Salesforce 连接通过 `dbx_execute_query` 执行 SOQL，通过 `dbx_list_tables` 列出对象。`dbx_execute_batch` 与 `dbx_open_session` 会被拒绝：SOQL 只读，且每次调用都是无状态 REST 请求，没有可固定的会话。写入记录是两步确认操作——`dbx_salesforce_prepare_write` 返回摘要和一次性 `confirm_token`（5 分钟后过期），由人确认该摘要后，`dbx_salesforce_apply_write` 才会发送那条已准备好的语句。准备写入需要在 DBX 设置 → MCP 中为该连接开启 **允许 DML**（默认关闭），且 Salesforce 无法回滚已应用的写入。
 
+### Resources
+
+支持 MCP Resources 的客户端可以读取连接目录，并通过模板获取数据库元数据：
+
+| Resource URI | 说明 |
+| --- | --- |
+| `dbx://connections` | 当前 MCP 范围内可见的连接 |
+| `dbx://connections/{connection_id}/databases` | 指定连接中可见的数据库 |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | 可选数据库或 Schema 中的表和视图 |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | 指定表的字段定义；`table` 为必填参数 |
+
+Resource 的发现和读取会复用对应 Tool 的白名单，以及连接、分组、数据库和运行时范围限制。查询参数值必须进行 URI 编码。SQL 执行和所有可写操作仍只通过 Tool 提供。
+
 ### 本地数据目录
 
 - macOS：`~/Library/Application Support/com.dbx.app/dbx.db`
@@ -608,7 +634,7 @@ DBX_MCP_HTTP_TOKEN=replace-with-a-long-random-secret dbx-mcp-server --http
 
 默认回环地址仅允许同一台电脑上的客户端访问。监听非回环地址时，必须同时设置 `DBX_MCP_HTTP_ALLOW_REMOTE=1`、传入 `--http-allow-remote`，并提供非空的 `DBX_MCP_HTTP_ALLOWED_HOSTS` 和 `DBX_MCP_HTTP_ALLOWED_ORIGINS` 白名单。Host authority 与浏览器 Origin 均应使用精确的公网值。
 
-DBX Web 可以通过现有 Web 监听器提供原生 Streamable HTTP，无需额外开放第二个端口。设置 `DBX_WEB_MCP_TOKEN`（或 `DBX_WEB_MCP_TOKEN_FILE`）并配置公网 Host 白名单即可启用。容器映射为 `4225:4224` 时，端点为 `http://localhost:4225/mcp`：
+DBX Web 可以通过现有 Web 监听器提供原生 Streamable HTTP，无需额外开放第二个端口。单实例且启用 Web 登录密码时，可在 **设置 → MCP → HTTP 服务**配置公网 Host 白名单并启用；生成的 Token 存在加密 Secret 存储中，可在页面轮换。多实例或部署管理场景仍使用 `DBX_WEB_MCP_TOKEN`（或 `DBX_WEB_MCP_TOKEN_FILE`）和 `DBX_WEB_MCP_ALLOWED_HOSTS`；部署 Secret 优先，页面只读。容器映射为 `4225:4224` 时，端点为 `http://localhost:4225/mcp`：
 
 ```yaml
 environment:

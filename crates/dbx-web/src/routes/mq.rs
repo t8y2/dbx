@@ -92,6 +92,15 @@ pub(crate) struct ListTopicsReq {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ListTopicsPageReq {
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+    opts: dbx_core::mq::ListTopicsOpts,
+    pagination: dbx_core::mq::MqListPageRequest,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CreateTopicReq {
     connection_id: String,
     topic: dbx_core::mq::TopicRef,
@@ -127,6 +136,14 @@ pub(crate) struct TopicReq {
 pub(crate) struct ListExchangesReq {
     connection_id: String,
     ns: dbx_core::mq::NamespaceRef,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ListExchangesPageReq {
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+    pagination: dbx_core::mq::MqListPageRequest,
 }
 
 #[derive(serde::Deserialize)]
@@ -591,6 +608,24 @@ pub async fn list_topics(
     Ok(Json(result))
 }
 
+pub async fn list_topics_page(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<ListTopicsPageReq>,
+) -> Result<Json<dbx_core::mq::MqListPage<dbx_core::mq::TopicInfo>>, AppError> {
+    super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let result = dbx_core::mq::service::mq_list_topics_page_core(
+        &state.app,
+        &req.connection_id,
+        req.ns,
+        req.opts,
+        req.pagination,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn create_topic(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -663,6 +698,19 @@ pub async fn list_exchanges(
     let result = dbx_core::mq::service::mq_list_exchanges_core(&state.app, &req.connection_id, req.ns)
         .await
         .map_err(AppError::internal)?;
+    Ok(Json(result))
+}
+
+pub async fn list_exchanges_page(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<ListExchangesPageReq>,
+) -> Result<Json<dbx_core::mq::MqListPage<dbx_core::mq::MqExchangeInfo>>, AppError> {
+    super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let result =
+        dbx_core::mq::service::mq_list_exchanges_page_core(&state.app, &req.connection_id, req.ns, req.pagination)
+            .await
+            .map_err(AppError::internal)?;
     Ok(Json(result))
 }
 
@@ -1532,7 +1580,7 @@ mod tests {
     use axum::Json;
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::ConnectionConfig;
-    use dbx_core::storage::{McpGlobalPolicy, Storage};
+    use dbx_core::storage::McpGlobalPolicy;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock};
@@ -1574,6 +1622,7 @@ mod tests {
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
         });
         (state, dir)
     }

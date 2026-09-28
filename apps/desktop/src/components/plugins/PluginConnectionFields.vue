@@ -28,7 +28,7 @@ const emit = defineEmits<{
   "update:modelValue": [value: Record<string, PluginFormFieldValue>];
 }>();
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { toast } = useToast();
 
 const formValues = computed(() => props.modelValue);
@@ -118,7 +118,9 @@ watch(
       const action = field.options_action;
       if (!action || !props.pluginId || dynamicOptionsRequested.value.has(field.key)) continue;
       dynamicOptionsRequested.value.add(field.key);
-      invokePlugin<{ options?: PluginFormFieldOption[] }>(props.pluginId, action)
+      // locale lets the sidecar localize the returned option labels (same
+      // field the plugin UI webview receives at init); older sidecars ignore it.
+      invokePlugin<{ options?: PluginFormFieldOption[] }>(props.pluginId, action, { locale: locale.value })
         .then((result) => {
           const options = Array.isArray(result?.options) ? result.options.filter((option) => option && option.value !== undefined) : [];
           dynamicOptions.value = { ...dynamicOptions.value, [field.key]: options };

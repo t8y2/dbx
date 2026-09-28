@@ -48,6 +48,7 @@ import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { detectKvValueFormat, validateKvValue, type KvValueFormat } from "@/lib/kv/kvValueFormat";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { saveTextFile } from "@/lib/export/saveTextFile";
 
 interface KvKeyBrowserLabels {
   prefixPlaceholder: string;
@@ -933,7 +934,7 @@ async function refreshLazyParent(parentPath: string) {
   }
 }
 
-async function loadSelectedKey(input: string | KvKeyRoute) {
+async function loadSelectedKey(input: string | KvKeyRoute): Promise<boolean> {
   const route = routeFromKey(input);
   const key = route.key;
   const keyIdentity = routeIdentity(route);
@@ -950,7 +951,7 @@ async function loadSelectedKey(input: string | KvKeyRoute) {
   detailError.value = "";
   try {
     const result = await props.api.get(connectionId, key, route.keyBytes ? { keyBytes: route.keyBytes } : undefined);
-    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return;
+    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return false;
     const lazyNode = lazyTreeState.nodeByKey.get(key);
     if (lazyNode) {
       lazyNode.hasValue = result.found;
@@ -958,16 +959,18 @@ async function loadSelectedKey(input: string | KvKeyRoute) {
     }
     if (!result.found) {
       removeExpiredSelectedKey(key);
-      return;
+      return false;
     }
     selectedValue.value = result;
     selectedKeyIdentity.value = result.keyIdentity ?? selectedKeyIdentity.value;
     selectedRouteKeyBytes.value = result.keyBytes ?? selectedRouteKeyBytes.value;
     startMetadataRefresh(key);
     startKeyListRefresh();
+    return true;
   } catch (error) {
-    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return;
+    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return false;
     detailError.value = formatError(error);
+    return false;
   } finally {
     if (requestId === detailRequestId && connectionId === props.connectionId) detailLoading.value = false;
   }
@@ -1487,54 +1490,47 @@ function watchSelectedKey() {
   });
 }
 
-function downloadText(filename: string, content: string, type = "application/json") {
-  const url = URL.createObjectURL(new Blob([content], { type }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-function exportSelectedKey() {
-  if (!selectedKey.value || !selectedValue.value?.found) return;
-  downloadText(
-    `${selectedKey.value.split("/").filter(Boolean).pop() || props.exportFallbackName}${props.exportFileExtension}`,
-    JSON.stringify(
-      {
-        format: props.exportFormat,
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        prefix: selectedKey.value,
-        scopeKind: "key",
-        entries: [
-          {
-            key: selectedKeyBytes.value ?? { encoding: "utf8", data: selectedKey.value },
-            value: selectedValue.value.value,
-            metadata: selectedValue.value.metadata,
-            formatHint: detectKvValueFormat(selectedTextValue.value, selectedValueIsBase64.value ? "base64" : "utf8"),
-          },
-        ],
-      },
-      null,
-      2,
-    ),
+async function exportSelectedKey(): Promise<boolean> {
+  if (!selectedKey.value || !selectedValue.value?.found) return false;
+  const filename = `${selectedKey.value.split("/").filter(Boolean).pop() || props.exportFallbackName}${props.exportFileExtension}`;
+  const content = JSON.stringify(
+    {
+      format: props.exportFormat,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      prefix: selectedKey.value,
+      scopeKind: "key",
+      entries: [
+        {
+          key: selectedKeyBytes.value ?? { encoding: "utf8", data: selectedKey.value },
+          value: selectedValue.value.value,
+          metadata: selectedValue.value.metadata,
+          formatHint: detectKvValueFormat(selectedTextValue.value, selectedValueIsBase64.value ? "base64" : "utf8"),
+        },
+      ],
+    },
+    null,
+    2,
   );
+  return saveTextFile(content, filename, "DBX KV Bundle", "json", { operation: "kv-key-export" });
 }
 
 async function exportNode(node: BrowserTreeNode) {
-  const request: KvExportScopeRequest = {
-    path: nodePath(node),
-    kind: nodeIsExpandable(node) ? "prefix" : "key",
-    keyBytes: node.kind === "lazy" ? null : node.keyBytes,
-  };
-  if (props.api.exportScope) {
-    await props.api.exportScope(props.connectionId, request);
-    return;
+  try {
+    const request: KvExportScopeRequest = {
+      path: nodePath(node),
+      kind: nodeIsExpandable(node) ? "prefix" : "key",
+      keyBytes: node.kind === "lazy" ? null : node.keyBytes,
+    };
+    if (props.api.exportScope) {
+      await props.api.exportScope(props.connectionId, request);
+      return;
+    }
+    if (!nodeHasValue(node)) return;
+    if (await loadSelectedKey(routeFromNode(node))) await exportSelectedKey();
+  } catch (error) {
+    toast(formatError(error), 4000);
   }
-  if (!nodeHasValue(node)) return;
-  await loadSelectedKey(routeFromNode(node));
-  exportSelectedKey();
 }
 
 async function openCloneDialog() {

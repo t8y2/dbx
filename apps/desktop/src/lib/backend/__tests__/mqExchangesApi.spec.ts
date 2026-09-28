@@ -9,6 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const NS = { tenant: "_rabbitmq", namespace: "/" };
+const PAGINATION = { page: 2, pageSize: 100, search: "orders", sort: "name" as const, sortDescending: false };
 
 describe("mq exchanges/bindings tauri API", () => {
   beforeEach(() => {
@@ -25,6 +26,18 @@ describe("mq exchanges/bindings tauri API", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("mq_list_exchanges", { connectionId: "conn-1", ns: NS });
     expect(result).toHaveLength(1);
     expect(result[0]?.name).toBe("dbx-events");
+  });
+
+  it("invokes the bounded exchange and topic list commands with pagination", async () => {
+    const { mqListExchangesPage, mqListTopicsPage } = await import("@/lib/backend/mq-tauri");
+    mocks.invoke.mockResolvedValue({ items: [], page: 2, pageSize: 100, totalCount: 125, hasMore: false });
+
+    await mqListExchangesPage("conn-1", NS, PAGINATION);
+    expect(mocks.invoke).toHaveBeenCalledWith("mq_list_exchanges_page", { connectionId: "conn-1", ns: NS, pagination: PAGINATION });
+
+    const opts = { includeNonPersistent: false };
+    await mqListTopicsPage("conn-1", NS, opts, PAGINATION);
+    expect(mocks.invoke).toHaveBeenCalledWith("mq_list_topics_page", { connectionId: "conn-1", ns: NS, opts, pagination: PAGINATION });
   });
 
   it("invokes mq_create_exchange with flattened fields", async () => {
@@ -111,6 +124,18 @@ describe("mq exchanges/bindings HTTP API", () => {
 
     await mqDeleteExchange("conn-1", NS, "dbx-events");
     expect(lastCall(fetchMock)).toEqual({ url: "/api/mq/exchanges/delete", body: { connectionId: "conn-1", ns: NS, name: "dbx-events" } });
+  });
+
+  it("posts bounded exchange and topic list requests", async () => {
+    const fetchMock = stubFetch();
+    const { mqListExchangesPage, mqListTopicsPage } = await import("@/lib/backend/mq-http");
+
+    await mqListExchangesPage("conn-1", NS, PAGINATION);
+    expect(lastCall(fetchMock)).toEqual({ url: "/api/mq/exchanges/list-page", body: { connectionId: "conn-1", ns: NS, pagination: PAGINATION } });
+
+    const opts = { includeNonPersistent: false };
+    await mqListTopicsPage("conn-1", NS, opts, PAGINATION);
+    expect(lastCall(fetchMock)).toEqual({ url: "/api/mq/topics/list-page", body: { connectionId: "conn-1", ns: NS, opts, pagination: PAGINATION } });
   });
 
   it("posts to the bindings endpoints", async () => {

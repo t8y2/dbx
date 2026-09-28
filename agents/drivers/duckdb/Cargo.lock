@@ -1317,6 +1317,168 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-driver-agent"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crc",
+ "dbx-platform",
+ "dbx-sql-core",
+ "dbx-types",
+ "flate2",
+ "futures",
+ "log",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "zip 4.6.1",
+ "zstd",
+]
+
+[[package]]
+name = "dbx-driver-elasticsearch"
+version = "0.1.0"
+dependencies = [
+ "dbx-driver-support",
+ "dbx-types",
+ "percent-encoding",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dbx-driver-mongodb"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "dbx-driver-support",
+ "dbx-types",
+ "futures",
+ "json5",
+ "log",
+ "mongodb",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "dbx-driver-mysql"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-driver-support",
+ "dbx-sql-core",
+ "dbx-sql-dialect",
+ "dbx-types",
+ "futures",
+ "log",
+ "mysql_async",
+ "percent-encoding",
+ "rust_decimal",
+ "serde_json",
+ "sqlparser",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "dbx-driver-postgres"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "dbx-driver-support",
+ "dbx-sql-core",
+ "dbx-types",
+ "deadpool-postgres",
+ "futures",
+ "log",
+ "openssl",
+ "percent-encoding",
+ "postgres-openssl",
+ "rustls 0.23.42",
+ "rustls-pemfile 2.2.0",
+ "serde_json",
+ "sqlparser",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tokio-util",
+ "uuid",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "dbx-driver-redis"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "dbx-driver-support",
+ "dbx-types",
+ "redis",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dbx-driver-sqlserver"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-driver-support",
+ "dbx-sql-core",
+ "dbx-sql-data",
+ "dbx-types",
+ "futures",
+ "log",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "tiberius",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "dbx-driver-support"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "dbx-platform",
+ "dbx-types",
+ "portpicker",
+ "reqwest",
+ "russh",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "dbx-drivers"
 version = "0.1.0"
 dependencies = [
@@ -1325,8 +1487,18 @@ dependencies = [
  "chrono",
  "crc",
  "csv",
+ "dbx-driver-agent",
+ "dbx-driver-elasticsearch",
+ "dbx-driver-mongodb",
+ "dbx-driver-mysql",
+ "dbx-driver-postgres",
+ "dbx-driver-redis",
+ "dbx-driver-sqlserver",
+ "dbx-driver-support",
  "dbx-platform",
- "dbx-sql",
+ "dbx-sql-core",
+ "dbx-sql-data",
+ "dbx-sql-dialect",
  "dbx-sqlite-worker",
  "dbx-types",
  "deadpool-postgres",
@@ -1334,14 +1506,12 @@ dependencies = [
  "futures",
  "json5",
  "log",
- "mongodb",
  "mysql_async",
  "openssl",
  "pageant",
  "percent-encoding",
  "portpicker",
  "postgres-openssl",
- "redis",
  "regex",
  "reqwest",
  "rusqlite",
@@ -1374,6 +1544,7 @@ name = "dbx-duckdb-driver"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "dbx-core",
  "duckdb",
  "log",
@@ -1435,22 +1606,71 @@ dependencies = [
 name = "dbx-sql"
 version = "0.1.0"
 dependencies = [
+ "dbx-sql-core",
+ "dbx-sql-data",
+ "dbx-sql-dialect",
+ "dbx-sql-schema",
+ "dbx-types",
+]
+
+[[package]]
+name = "dbx-sql-core"
+version = "0.1.0"
+dependencies = [
  "chrono",
  "dbx-types",
  "encoding_rs",
  "log",
+ "regex",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "unicode-ident",
+ "winnow",
+]
+
+[[package]]
+name = "dbx-sql-data"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-sql-core",
+ "dbx-sql-dialect",
+ "dbx-types",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "unicode-width",
+]
+
+[[package]]
+name = "dbx-sql-dialect"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-types",
+ "log",
  "notify",
  "percent-encoding",
+ "serde",
+ "serde_yaml",
+ "tokio",
+]
+
+[[package]]
+name = "dbx-sql-schema"
+version = "0.1.0"
+dependencies = [
+ "dbx-sql-core",
+ "dbx-sql-dialect",
+ "dbx-types",
+ "log",
  "rayon",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "sqlparser",
- "tokio",
- "unicode-ident",
- "unicode-width",
- "winnow",
 ]
 
 [[package]]

@@ -81,7 +81,9 @@ export function previewJdbcUpdate(): JdbcPluginStatus {
 export function previewMcpUpdate(): McpServerStatus {
   return {
     installed: true,
+    installation_source: "npm",
     npm_available: true,
+    npm_installed: true,
     node_path: "/preview/bin/node",
     node_version: "v22.18.0",
     current_version: "0.4.88",

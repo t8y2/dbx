@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   redisCheckJsonModule: vi.fn(),
   redisDeleteKey: vi.fn(),
   redisDeleteKeys: vi.fn(),
+  redisDeleteKeysByPattern: vi.fn(),
   redisExecuteCommand: vi.fn(),
   saveHistory: vi.fn(),
   canBuildRedisFuzzyTree: vi.fn((loadedKeyCount: number) => loadedKeyCount <= 200_000),
@@ -65,6 +66,7 @@ vi.mock("@/lib/backend/api", () => ({
   redisCheckJsonModule: mocks.redisCheckJsonModule,
   redisDeleteKey: mocks.redisDeleteKey,
   redisDeleteKeys: mocks.redisDeleteKeys,
+  redisDeleteKeysByPattern: mocks.redisDeleteKeysByPattern,
   redisExecuteCommand: mocks.redisExecuteCommand,
   saveHistory: mocks.saveHistory,
 }));
@@ -500,6 +502,7 @@ function resetApiMocks() {
   mocks.redisCheckJsonModule.mockResolvedValue(true);
   mocks.redisDeleteKey.mockResolvedValue(undefined);
   mocks.redisDeleteKeys.mockResolvedValue(0);
+  mocks.redisDeleteKeysByPattern.mockResolvedValue(0);
   mocks.redisExecuteCommand.mockResolvedValue({ value: "OK" });
   mocks.saveHistory.mockResolvedValue(undefined);
   mocks.listRedisCompletionCommandDocs.mockResolvedValue(completionCommands);
@@ -523,6 +526,8 @@ function mountBrowser(withDeleteDetails = false) {
     en: {
       redis: {
         deleteGroupDetails: withDeleteDetails ? "{target}\n{count} keys" : "redis.deleteGroupDetails",
+        deleteGroupSubtreeDetails: "{target}\nall {count}",
+        deleteGroupSubtreeSuccess: "deleted {count}",
         keys: "{count} keys",
         batchExpirySelected: "redis.batchExpirySelected",
         batchExpirySuccess: "applied {count}",
@@ -633,6 +638,11 @@ function groupRow(label: string): HTMLElement {
   const row = labelElement?.closest<HTMLElement>(".group");
   expect(row, label).toBeDefined();
   return row!;
+}
+
+function groupRowOrUndefined(label: string): HTMLElement | undefined {
+  const labelElement = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).find((element) => element.textContent === label);
+  return labelElement?.closest<HTMLElement>(".group") ?? undefined;
 }
 
 function redisCheckboxes(): HTMLElement[] {
@@ -1576,6 +1586,37 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     expect(mocks.redisDeleteKeys).toHaveBeenCalledWith("connection", 0, [key.key_raw]);
     expect(document.body.textContent).not.toContain("session:current");
+  });
+
+  it("deletes every key under a group prefix instead of only the loaded rows (#10164)", async () => {
+    const loaded = [
+      { key_display: "MCP:AAA:1", key_raw: btoa("MCP:AAA:1"), key_type: "string", ttl: -1 },
+      { key_display: "MCP:AAA:2", key_raw: btoa("MCP:AAA:2"), key_type: "string", ttl: -1 },
+      { key_display: "OTHER:key1", key_raw: btoa("OTHER:key1"), key_type: "string", ttl: -1 },
+    ];
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: loaded, total_keys: 3002 });
+    mocks.redisDeleteKeysByPattern.mockResolvedValue(3001);
+    mountBrowser();
+    await settle();
+
+    const groupDelete = groupRow("MCP").querySelector<HTMLButtonElement>('button[title="redis.deleteGroup"]');
+    expect(groupDelete, "group delete button").not.toBeNull();
+    groupDelete!.click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
+    expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("MCP");
+    requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
+    await settle();
+
+    // 整个前缀在服务端删除（未加载的子键也在内），不再按已加载行逐个删
+    expect(mocks.redisDeleteKeysByPattern).toHaveBeenCalledWith("connection", 0, "MCP:*");
+    expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
+    // 整个 MCP 分组消失，前缀之外的分组保留
+    expect(groupRowOrUndefined("MCP")).toBeUndefined();
+    expect(groupRow("OTHER")).toBeDefined();
+    expect(mocks.updateRedisDbKeyStats).toHaveBeenCalledWith("connection", 0, { loaded: 1, totalDelta: -3001 });
+    expect(mocks.toast).toHaveBeenCalledWith("deleted 3001", 3000);
   });
 
   it("preserves the cursor and finds a sparse fuzzy match after a bounded continuation", async () => {

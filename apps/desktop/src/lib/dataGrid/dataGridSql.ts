@@ -105,6 +105,7 @@ export interface DataGridColumnDistinctValuesSqlOptions {
   searchValue?: string;
   limit?: number;
   includeCounts?: boolean;
+  excludeNulls?: boolean;
 }
 
 export interface DataGridCountSqlOptions {

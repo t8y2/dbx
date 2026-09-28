@@ -1,7 +1,7 @@
 import * as langSql from "@codemirror/lang-sql";
-import { ensureSyntaxTree, foldable } from "@codemirror/language";
+import { ensureSyntaxTree, foldable, foldService } from "@codemirror/language";
 import { Compartment, EditorState } from "@codemirror/state";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { collectUnionBranchFoldRanges, createSqlBlockFoldService, sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 
@@ -21,6 +21,20 @@ function foldedTextAtLine(state: EditorState, lineNumber: number): string | null
 }
 
 describe("sqlBlockFoldService", () => {
+  it("does not flatten SQL documents for REST request detection", () => {
+    const state = stateFor("BEGIN\n SELECT 1;\nEND", "mysql", createSqlBlockFoldService("mysql"));
+    const flatten = vi.spyOn(state.doc, "toString");
+    expect(foldedTextAtLine(state, 1)).toBe("\n SELECT 1;\n");
+    expect(flatten).not.toHaveBeenCalled();
+  });
+
+  it("uses background ranges without falling back to a synchronous scan", () => {
+    const cached = vi.fn(() => null);
+    const state = stateFor("BEGIN\n SELECT 1;\nEND", "mysql", createSqlBlockFoldService("mysql", cached));
+    const service = state.facet(foldService)[0];
+    expect(service(state, 0, state.doc.line(1).to)).toBeNull();
+    expect(cached).toHaveBeenCalled();
+  });
   it.each(["elasticsearch", "easysearch", "meilisearch"] as const)("folds one %s REST request without a semicolon", (databaseType) => {
     const sql = `POST /orders/_search
 {

@@ -40,6 +40,7 @@ import {
   schemaDiffDeployTargetSchema,
   normalizeDialectKind,
   databaseTypeToDialectKind,
+  schemaDiffEngineDatabaseType,
   findSchemaDiffObject,
   flattenSchemaDiffObjects,
   schemaDiffSelectionTargets,
@@ -107,6 +108,10 @@ const showFieldMappingDialog = ref(false);
 const showConfigSelector = ref(false);
 const sourceDbType = computed(() => store.getConfig(sourceConnectionId.value)?.db_type ?? "");
 const targetDbType = computed(() => store.getConfig(targetConnectionId.value)?.db_type ?? "");
+// A JDBC connection stores `jdbc` in db_type while its product lives in the driver
+// profile; the diff engine needs the product for clause shapes and view comparison.
+const sourceEngineDbType = computed(() => schemaDiffEngineDatabaseType(store.getConfig(sourceConnectionId.value)));
+const targetEngineDbType = computed(() => schemaDiffEngineDatabaseType(store.getConfig(targetConnectionId.value)));
 
 // Clear stale field mappings when source and target are the same type
 watch([sourceDbType, targetDbType], ([src, tgt]) => {
@@ -116,7 +121,7 @@ watch([sourceDbType, targetDbType], ([src, tgt]) => {
 });
 const optionTree = computed(() => {
   const targetConfig = store.getConfig(targetConnectionId.value);
-  const dbType = targetConfig?.db_type || "postgres";
+  const dbType = schemaDiffEngineDatabaseType(targetConfig) || targetConfig?.db_type || "postgres";
   return getSchemaDiffOptionsForDbType(dbType);
 });
 
@@ -742,6 +747,8 @@ function handleCompare(): void {
       targetSchema: targetSchema.value,
       sourceDbType,
       targetDbType,
+      sourceEngineDbType: sourceEngineDbType.value,
+      targetEngineDbType: targetEngineDbType.value,
       options,
       ignoreComments: ignoreComments.value,
       label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value)}`,
@@ -802,11 +809,12 @@ function rebuildDiffGroups() {
 }
 
 function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
+  const engineDbType = targetEngineDbType.value ?? getDbType();
   return {
-    databaseType: getDbType(),
+    databaseType: engineDbType,
     targetSchema: schemaDiffDeployTargetSchema(getDbType(), targetDatabase.value, targetSchema.value),
     cascadeDelete: options.cascadeDelete,
-    sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceDbType.value ? databaseTypeToDialectKind(sourceDbType.value) : undefined,
+    sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceEngineDbType.value ? databaseTypeToDialectKind(sourceEngineDbType.value) : undefined,
     fieldMappings: options.fieldMappings,
     enableRollback: options.enableRollback,
   };
@@ -1639,12 +1647,14 @@ const targetConnectionInfo = computed(() => {
 
       <!-- Options Panel Overlay -->
       <div v-if="showOptionsPanel" class="absolute inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center" @click.self="showOptionsPanel = false">
-        <div class="bg-card border rounded-lg shadow-lg w-[760px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-auto p-4">
-          <div class="flex items-center justify-between mb-4">
+        <div class="flex h-[calc(100%-2rem)] max-h-[680px] w-[900px] max-w-[calc(100%-2rem)] flex-col overflow-hidden rounded-lg border bg-card shadow-lg">
+          <div class="flex shrink-0 items-center justify-between border-b px-4 py-3">
             <h3 class="text-sm font-medium">{{ t("schemaDiff.optionsTitle") }}</h3>
             <Button variant="ghost" size="sm" @click="showOptionsPanel = false" :aria-label="t('common.close')">✕</Button>
           </div>
-          <SchemaDiffOptionsPanel :options="schemaDiffPanelOptions" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
+          <div class="min-h-0 flex-1 p-4">
+            <SchemaDiffOptionsPanel :options="schemaDiffPanelOptions" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
+          </div>
         </div>
       </div>
 

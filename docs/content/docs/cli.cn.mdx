@@ -40,11 +40,26 @@ chmod +x dbx
 dbx --version
 ```
 
+## 官方 Agent Skill
+
+CLI 二进制内置了供 Codex、Claude Code 等可执行 Shell 的 AI Agent 使用的官方 DBX Skill。安装或升级 CLI 后启用一次：
+
+```bash
+dbx agent setup
+dbx agent status
+```
+
+默认安装到 `~/.agents/skills/dbx`。`setup` 全程离线运行，可重复执行并升级到 CLI 内置的新版本；如果目标位置存在非 DBX 管理或经过本地修改的 Skill，则不会覆盖，除非显式使用 `--force`。Agent 使用其它 Skill 根目录时可传入 `--skills-dir <路径>`。
+
+Skill 负责告诉 AI 何时以及如何安全调用 CLI，并不会绕过 CLI、连接或数据库本身的权限限制。普通用户仍然可以直接运行所有 `dbx` 命令。
+
 ## 常用命令
 
 ```bash
 dbx doctor
 dbx capabilities
+dbx agent setup
+dbx agent status --json
 dbx connections list --json
 dbx connections list --format csv
 dbx schema list local --json
@@ -166,6 +181,11 @@ CLI JSON 错误使用稳定错误码：
 | `CONNECTION_NOT_FOUND`   | 找不到指定的 DBX 连接        |
 | `SQL_BLOCKED`            | SQL 被安全规则拦截           |
 | `DBX_NOT_RUNNING`        | DBX 桌面端 bridge 不可用     |
+| `HOME_NOT_FOUND`         | 无法确定默认用户 Skill 目录  |
+| `SKILL_MODIFIED`         | Skill 未被 DBX 管理或已被修改 |
+| `SKILL_PATH_UNSAFE`      | 受管理的 Skill 路径是符号链接 |
+| `SKILL_READ_FAILED`      | 无法读取已安装的 Skill 文件  |
+| `SKILL_WRITE_FAILED`     | 无法安装 CLI 内置的 Skill    |
 | `ERROR`                  | 未预期的运行时错误           |
 
 ## 桌面端 Deep Link

@@ -242,6 +242,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -435,7 +436,7 @@ mod tests {
             name: "analytics".to_string(),
             path: dir.join("analytics.sqlite").to_string_lossy().to_string(),
         });
-        let error = save_connection_configs(&state, &[invalid]).await.unwrap_err();
+        let error = save_connection_configs(&state, &[invalid], Vec::new()).await.unwrap_err();
 
         assert!(error.contains("in-memory main database"), "{error}");
         assert!(state.pool_handle(&initial.id).await.is_some());
@@ -658,7 +659,7 @@ mod tests {
         let first = state.mq_registry.get_or_build(&initial).await.unwrap().adapter;
 
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        save_connection_configs(&state, std::slice::from_ref(&updated)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&updated), Vec::new()).await.unwrap();
 
         let cached_admin_url = state
             .configs
@@ -729,7 +730,7 @@ mod tests {
         }
         let stale = state.mq_registry.get_or_build(&removed).await.unwrap().adapter;
 
-        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept), Vec::new()).await.unwrap();
 
         let configs = state.configs.read().await;
         assert!(configs.contains_key(&kept.id));
@@ -797,7 +798,7 @@ mod tests {
         state.configs.write().await.insert(preview.id.clone(), preview.clone());
         state.session_credentials.set("", &preview.id, "secret").expect("session credential fixture");
 
-        save_connection_configs(&state, std::slice::from_ref(&persisted)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&persisted), Vec::new()).await.unwrap();
 
         // If the config is retained the credential must be retained with it, or the
         // next query re-prompts for a password that was already entered.
@@ -826,7 +827,7 @@ mod tests {
             })
             .await;
 
-        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept), Vec::new()).await.unwrap();
 
         assert!(state.pool_handle(&removed.id).await.is_none());
 
@@ -903,14 +904,22 @@ mod tests {
 }
 
 #[tauri::command]
-pub async fn save_connections(state: State<'_, Arc<AppState>>, configs: Vec<ConnectionConfig>) -> Result<(), String> {
+pub async fn save_connections(
+    state: State<'_, Arc<AppState>>,
+    configs: Vec<ConnectionConfig>,
+    removed_ids: Option<Vec<String>>,
+) -> Result<(), String> {
     let configs: Vec<ConnectionConfig> = configs.into_iter().map(|config| config.canonicalized()).collect();
-    save_connection_configs(state.inner(), &configs).await
+    save_connection_configs(state.inner(), &configs, removed_ids.unwrap_or_default()).await
 }
 
-async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig]) -> Result<(), String> {
+async fn save_connection_configs(
+    state: &AppState,
+    configs: &[ConnectionConfig],
+    removed_ids: Vec<String>,
+) -> Result<(), String> {
     for config in configs {
-        if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_ssh_worker_requested(config) {
+        if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_remote_worker_requested(config) {
             db::sqlite::validate_persistent_attachments(
                 &config.host,
                 &config.password,
@@ -918,8 +927,15 @@ async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig])
             )?;
         }
     }
+    if !removed_ids.is_empty() {
+        state.storage.delete_connections(&removed_ids).await?;
+    }
     state.storage.save_connections(configs).await?;
-    let sync = sync_connection_configs(state, configs).await;
+    // Saving upserts, so the request only covers this window's connections. Sync
+    // against the whole persisted list to keep connections saved by another
+    // window/process alive in the runtime cache as well.
+    let persisted = state.storage.load_connections().await?;
+    let sync = sync_connection_configs(state, &persisted).await;
     remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(state, &sync.mq_adapter_ids_to_drop).await;
@@ -1078,12 +1094,14 @@ async fn connect_sqlite_from_config_with_state(
     connection_id: &str,
     config: &ConnectionConfig,
 ) -> Result<db::sqlite::SqliteHandle, String> {
-    if db::sqlite_worker::sqlite_ssh_worker_requested(config) {
+    if db::sqlite_worker::sqlite_remote_worker_requested(config) {
         let state =
             state.ok_or_else(|| "Remote SQLite over SSH is only available in the DBX Desktop app".to_string())?;
         let transport_layers = state.resolved_transport_layers(config).await?;
         let worker = db::sqlite_worker::connect_sqlite_worker(
             &state.tunnels,
+            &state.proxy_tunnels,
+            &state.http_tunnels,
             &state.agent_manager,
             state.storage.data_dir(),
             connection_id,
@@ -1725,7 +1743,7 @@ pub async fn connect_db(
     client_attempt: Option<u64>,
 ) -> Result<String, String> {
     let config = config.canonicalized();
-    if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_ssh_worker_requested(&config) {
+    if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_remote_worker_requested(&config) {
         db::sqlite::validate_persistent_attachments(
             &config.host,
             &config.password,
@@ -2175,7 +2193,7 @@ pub async fn connection_final_proxy_port(
         return Err("Connection has no configured transport layers".to_string());
     }
     if runtime_config.db_type == DatabaseType::Sqlite
-        && !db::sqlite_worker::sqlite_ssh_worker_requested(&runtime_config)
+        && !db::sqlite_worker::sqlite_remote_worker_requested(&runtime_config)
     {
         db::sqlite::validate_persistent_attachments(
             &runtime_config.host,

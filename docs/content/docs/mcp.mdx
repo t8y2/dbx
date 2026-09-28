@@ -14,7 +14,36 @@ AI agent → DBX MCP → your database → results
                     ↘ DBX desktop app (open or display results)
 ```
 
-## Quick Start
+## Native installation (recommended)
+
+No Node.js is required. On macOS or Linux:
+
+```bash
+curl -fsSL https://dbxio.com/install-mcp | sh
+```
+
+On Windows, run in PowerShell:
+
+```powershell
+irm https://dbxio.com/install-mcp.ps1 | iex
+```
+
+The installer verifies the download, installs `dbx-mcp` into `~/.dbx/bin`, and prints ready-to-paste Claude Code, Cursor, Codex, ZCode, and generic MCP configurations. Use the **expanded absolute executable path** it prints, not `~` or the bare `dbx-mcp` command: GUI clients do not necessarily inherit your shell's PATH. Existing environment settings such as `DBX_DATA_DIR` remain applicable. DBX desktop settings prefer a discovered native binary, with the existing npm launcher as fallback.
+
+Rerun the same install command to upgrade. A matching version reports `already up to date`. Version probing uses `dbx-mcp --version`, falling back to `~/.dbx/bin/.dbx-mcp-version` for older binaries. Offline installation fails without replacing an existing binary. Download sources are tried in order: npmjs, npmmirror, then GitHub Releases; an integrity mismatch stops installation.
+
+Homebrew is also available on macOS and Linux:
+
+```bash
+brew install t8y2/tap/dbx-mcp
+brew upgrade t8y2/tap/dbx-mcp
+```
+
+For Homebrew client configurations, use the absolute path printed by `echo "$(brew --prefix)/bin/dbx-mcp"`. This installs the MCP server, not the separate `dbx` CLI.
+
+The npm/npx channel remains supported unchanged. DBX desktop now installs the standalone native server by default and shows existing npm users a recommended native migration action. Migration keeps the npm package as a fallback and does not rewrite external client files automatically: replace their launch command with the generated native absolute path, remove Node/npx arguments, and preserve `env`. Removing the old global package with `npm rm -g @dbx-app/mcp-server` remains optional. The desktop can update and uninstall the active standalone or Homebrew native installation; uninstalling a standalone native installation reveals any retained npm installation again.
+
+## Quick Start with npm
 
 <Steps>
   <Step>
@@ -123,6 +152,19 @@ DBX MCP provides the following tools (availability depends on build features and
 
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
 
+## Resources
+
+Clients that support MCP Resources can read the connection catalog and expand templates for database metadata:
+
+| Resource URI | Description |
+| --- | --- |
+| `dbx://connections` | Connections visible to the current MCP scope |
+| `dbx://connections/{connection_id}/databases` | Databases visible through one connection |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | Tables and views in an optional database/schema |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | Column definitions for a table; `table` is required |
+
+Resource discovery and reads reuse the corresponding Tool allowlist plus connection, group, database, and runtime scopes. Query parameter values must be URI encoded. SQL execution and all write-capable operations remain Tools.
+
 ## Read Kafka Messages
 
 `dbx_peek_messages` is available in builds with `mq-admin`, in both local and Web modes. Select a saved Kafka connection by `connection_id` or `connection_name` and provide `topic`. It respects MCP connection scopes and tool allowlists and works with read-only and production connections without committing consumer offsets.
@@ -213,7 +255,7 @@ Desktop can optionally host its own Streamable HTTP MCP endpoint. It is **off by
 To connect a local MCP client:
 
 1. Open **Settings → MCP → HTTP Service**, turn on **Streamable HTTP Service**, and keep the default loopback address unless another device genuinely needs access.
-2. Click **Save and start service**. Saving a changed address, port, or path applies the configuration by restarting the service.
+2. Click **Save and apply**. The button saves the configuration and starts, restarts, or stops the service according to the toggle; changing the address, port, or path restarts the service automatically.
 3. Copy the displayed service address and bearer token into the MCP client.
 
 Use the generated values in an HTTP-capable MCP client. The transport-specific field names differ between clients, but the essential configuration is:
@@ -262,7 +304,9 @@ DBX Web and Docker require the same standalone DuckDB driver. Install it from Dr
 
 ### Native Streamable HTTP for DBX Web
 
-DBX Web can also host MCP itself. This mode is disabled unless `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) is configured. It uses the existing Web listener and the `/mcp` path, so Docker and reverse-proxy deployments do not need a second exposed port. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities that clients send in the `Host` header, including a mapped port when applicable. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
+DBX Web can also host MCP itself on its existing listener at `/mcp`, so Docker and reverse-proxy deployments do not need a second exposed port. A single-instance deployment with a Web login password can enable it in **Settings → MCP → HTTP Service** after entering the allowed Hosts. DBX generates a bearer token in its encrypted secret store; the page can copy, rotate, or disable it, with changes applying to new requests immediately. The page does not show `/mcp` as a usable endpoint while it is disabled. Page-managed MCP is inactive without a Web login password; demo deployments disable MCP entirely.
+
+Deployment configuration takes precedence: when `DBX_WEB_MCP_TOKEN` or `DBX_WEB_MCP_TOKEN_FILE` is set, the page shows read-only status and cannot replace the deployment secret. A previously enabled page-managed token remains stored and becomes active again if the deployment token is removed and Web is restarted. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities clients send in the `Host` header, including mapped ports. Multi-instance deployments should use a shared deployment secret and allowlist, not the page-managed mode. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
 
 For example, a container published as `4225:4224` uses `http://localhost:4225/mcp`:
 
@@ -339,7 +383,7 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
   <Accordion title="The optional platform package was not installed">Reinstall without `--no-optional`, then verify the platform with `node -p 'process.platform + "-" + process.arch'`. The current platform must appear in the supported platform table.</Accordion>
   <Accordion title="dbx.db cannot be found">Set `DBX_DATA_DIR` to the folder containing `dbx.db`. For Windows portable builds, this is normally the `data` folder beside `DBX.exe`.</Accordion>
   <Accordion title="DBX is not running">Only `dbx_open_table` and `dbx_execute_and_show` require the desktop app. Local query tools can run without DBX open.</Accordion>
-  <Accordion title="A Desktop HTTP client gets ERR_CONNECTION_REFUSED">In **Settings → MCP → HTTP Service**, turn on the service and click **Save and start service**. Confirm that the client uses the displayed address, path, and current bearer token. The default `127.0.0.1` address accepts connections only from the same computer.</Accordion>
+  <Accordion title="A Desktop HTTP client gets ERR_CONNECTION_REFUSED">In **Settings → MCP → HTTP Service**, turn on the service and click **Save and apply**. Confirm that the client uses the displayed address, path, and current bearer token. The default `127.0.0.1` address accepts connections only from the same computer.</Accordion>
   <Accordion title="Desktop says the HTTP address is already in use">Another process is listening on the selected address and port. Choose an unused port in **Settings → MCP → HTTP Service**, then save the configuration to restart the service. Do not run two DBX Desktop instances with the same HTTP endpoint.</Accordion>
   <Accordion title="A request returns DATABASE_OUT_OF_SCOPE">The connection is exposed, but the requested database is not in its MCP database scope. Add the exact database name in **Settings → MCP**, or change that connection's scope to all databases if appropriate. For a specified scope, call `dbx_list_databases` first and then use one of the returned names.</Accordion>
   <Accordion title="A previously visible tool is rejected">The tool is no longer selected in **Settings → MCP** or the current policy does not permit it. Refresh the MCP client's tool list after changing the allowlist; the server rejects stale tool calls as well.</Accordion>

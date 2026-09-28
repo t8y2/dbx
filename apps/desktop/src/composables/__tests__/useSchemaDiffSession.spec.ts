@@ -31,6 +31,7 @@ async function waitForSession(session: { status: string }) {
 test("defaults enable tables and functions compare for common targets", () => {
   assert.equal(DEFAULT_MYSQL_OPTIONS.tables, true);
   assert.equal(DEFAULT_MYSQL_OPTIONS.functions, true);
+  assert.equal(DEFAULT_MYSQL_OPTIONS.compareCharset, true);
   assert.equal(getDefaultOptionsForDbType("oracle").tables, true);
   assert.equal(getDefaultOptionsForDbType("oracle").functions, true);
   assert.equal(getDefaultOptionsForDbType("mysql").tables, true);
@@ -82,10 +83,47 @@ test("runs a schema diff session after the dialog is closed and retains the prep
   assert.equal(trackerMock.updateCompareTask.mock.calls.at(-1)?.[1].status, "Done");
   // MySQL defaults now enable functions compare for same-dialect pairs.
   assert.equal(apiMock.listFunctions.mock.calls.length, 2);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls[0]?.[0]?.compareCharset, true);
 
   const onOpen = trackerMock.addSchemaDiffTask.mock.calls[0]?.[2] as (() => void) | undefined;
   onOpen?.();
   assert.equal(openMock.mock.calls.at(-1)?.[0], session.id);
+});
+
+test("forwards a disabled charset comparison to the backend", async () => {
+  apiMock.prepareSchemaDiff.mockClear();
+  apiMock.prepareSchemaDiff.mockResolvedValue({
+    diffs: [],
+    functionDiffs: [],
+    sequenceDiffs: [],
+    ruleDiffs: [],
+    ownerDiffs: [],
+    renameCandidates: [],
+    syncSql: "",
+    rollbackSyncSql: "",
+  });
+
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "source",
+      sourceDatabase: "app",
+      sourceSchema: "",
+      targetConnectionId: "target",
+      targetDatabase: "warehouse",
+      targetSchema: "",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: { compareCharset: false },
+      ignoreComments: false,
+      label: "charset disabled",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+
+  await waitForSession(session);
+
+  assert.equal(session.status, "completed");
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls[0]?.[0]?.compareCharset, false);
 });
 
 test("loads routines for mysql↔mysql when functions is enabled", async () => {
@@ -321,4 +359,48 @@ test("skips table list loading for routines-only compares", async () => {
   assert.equal(tableListLoader.load.mock.calls.length, 0);
   assert.equal(apiMock.listFunctions.mock.calls.length, 2);
   assert.deepEqual(apiMock.prepareSchemaDiff.mock.calls[0]?.[0]?.sourceTables, []);
+});
+
+test("resolves the JDBC engine dialect from the connection's product type", async () => {
+  // 「Oracle (JDBC)」这类连接的 db_type 是 jdbc，后端 DialectKind 认不出它：对话框把产品类型
+  // 解析出来传进 sourceEngineDbType/targetEngineDbType 后，方言（以及视图比较）才成立。
+  apiMock.prepareSchemaDiff.mockClear();
+  apiMock.prepareSchemaDiff.mockResolvedValue({
+    diffs: [],
+    functionDiffs: [],
+    sequenceDiffs: [],
+    ruleDiffs: [],
+    ownerDiffs: [],
+    renameCandidates: [],
+    syncSql: "",
+    rollbackSyncSql: "",
+  });
+
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "jdbc-src",
+      sourceDatabase: "XE",
+      sourceSchema: "DBX_TEST",
+      targetConnectionId: "jdbc-dst",
+      targetDatabase: "XE",
+      targetSchema: "DBX_TGT",
+      sourceDbType: "jdbc",
+      targetDbType: "jdbc",
+      sourceEngineDbType: "oracle",
+      targetEngineDbType: "oracle",
+      options: {},
+      ignoreComments: false,
+      label: "jdbc oracle",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+
+  await waitForSession(session);
+
+  assert.equal(session.status, "completed");
+  const payload = apiMock.prepareSchemaDiff.mock.calls[0]?.[0];
+  assert.equal(payload?.sourceDialect, "oracle");
+  assert.equal(payload?.targetDialect, "oracle");
+  // 部署脚本按目标产品类型（而不是 jdbc）生成。
+  assert.equal(payload?.databaseType, "oracle");
 });

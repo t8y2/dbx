@@ -42,7 +42,9 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
 }));
 
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import type { ConnectionConfig } from "@/types/database";
 
 function createHost(): HTMLDivElement {
   const host = document.createElement("div");
@@ -84,6 +86,12 @@ function mountBar(
         en: {
           toolbar: { pluginCenter: "Plugin Center" },
           common: { close: "Close" },
+          connectionGroup: { ungroupedLabel: "Ungrouped" },
+          tabs: {
+            tooltipConnection: "Connection:",
+            tooltipGroup: "Group:",
+            tooltipDatabase: "Database:",
+          },
           contextMenu: {
             splitRight: "Split right",
             splitDown: "Split down",
@@ -177,6 +185,33 @@ describe("EditorGroupTabBar behavior", () => {
     host.remove();
   });
 
+  it("keeps a focus-return click on tab-strip whitespace out of native window dragging", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const activated: string[] = [];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia, (tabId) => activated.push(tabId));
+    await settle();
+
+    const tabTail = host.querySelector<HTMLElement>('[data-tauri-drag-region="false"]');
+    expect(tabTail).not.toBeNull();
+
+    window.dispatchEvent(new Event("blur"));
+    window.dispatchEvent(new Event("focus"));
+    tabTail!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, detail: 1 }));
+    tabTail!.click();
+    await settle();
+    expect(activated).toEqual([]);
+
+    tabPill(host, secondId).click();
+    await settle();
+    expect(activated).toEqual([secondId]);
+
+    app.unmount();
+    host.remove();
+  });
+
   it("closes a tab tooltip when the pointer leaves the tab", async () => {
     const store = useQueryStore();
     const tabId = store.createTab("pg-1", "app", "Plugin", "query");
@@ -217,7 +252,10 @@ describe("EditorGroupTabBar behavior", () => {
 
   it("keeps the tooltip for a connection-bound plugin tab", async () => {
     const store = useQueryStore();
-    const tabId = store.openPluginWorkbench("com.example.toolbox", "toolbox", { connectionId: "pg-1" });
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "plugin-1", name: "SSH server", db_type: "plugin" } as ConnectionConfig];
+    connectionStore.sidebarLayout = { groups: [], order: [{ type: "connection", id: "plugin-1" }] };
+    const tabId = store.openPluginWorkbench("com.example.toolbox", "toolbox", { connectionId: "plugin-1" });
     const mainGroup = store.groups[0];
     const { app, host } = mountBar(mainGroup.id, [tabId], tabId, pinia);
     await settle();
@@ -228,6 +266,8 @@ describe("EditorGroupTabBar behavior", () => {
 
     expect(tooltip.dataset.open).toBe("true");
     expect(host.querySelector("[data-plugin-title-tooltip]")).toBeNull();
+    expect(host.querySelector<HTMLElement>(".tooltip-content-stub")?.textContent).toContain("SSH server");
+    expect(host.querySelector<HTMLElement>(".tooltip-content-stub")?.textContent).not.toContain("Database:");
 
     app.unmount();
     host.remove();

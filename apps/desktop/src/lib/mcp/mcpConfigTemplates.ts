@@ -8,6 +8,10 @@ const DEFAULT_MCP_LAUNCH_CONFIG: McpLaunchConfig = {
   command: "dbx-mcp-server",
 };
 
+export function preferMcpNativeLaunch(config?: McpLaunchConfig, nativeBinPath?: string | null): McpLaunchConfig | undefined {
+  return nativeBinPath ? { command: nativeBinPath, env: config?.env } : config;
+}
+
 function launchConfig(config?: McpLaunchConfig): McpLaunchConfig {
   return config ?? DEFAULT_MCP_LAUNCH_CONFIG;
 }
@@ -41,7 +45,7 @@ export function buildMcpJsonConfig(config?: McpLaunchConfig): string {
 }
 
 export function buildMcpTraeConfig(config?: McpLaunchConfig, nativeBinPath?: string): string {
-  return buildMcpJsonConfig(nativeBinPath ? { command: nativeBinPath, env: config?.env } : config);
+  return buildMcpJsonConfig(preferMcpNativeLaunch(config, nativeBinPath));
 }
 
 export function buildMcpQoderConfig(config?: McpLaunchConfig, nativeBinPath?: string): string {

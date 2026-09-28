@@ -1,7 +1,35 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2, Layers, MoreHorizontal, BetweenVerticalStart, Eye, WrapText, RefreshCw, UserRound } from "@lucide/vue";
+import {
+  Play,
+  SquarePlay,
+  CirclePlay,
+  Loader2,
+  Square,
+  Database,
+  Check,
+  Table2,
+  AlignLeft,
+  GitBranch,
+  Save,
+  FolderOpen,
+  X,
+  Shield,
+  Download,
+  RotateCcw,
+  AlertTriangle,
+  ClipboardPaste,
+  Minimize2,
+  SpellCheck2,
+  Layers,
+  MoreHorizontal,
+  BetweenVerticalStart,
+  Eye,
+  WrapText,
+  RefreshCw,
+  UserRound,
+} from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -63,6 +91,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   toolbarExecute: [source: "pointer" | "keyboard"];
+  toolbarExecuteInNewResultTab: [source: "pointer" | "keyboard"];
   executePointerDown: [];
   cancel: [];
   previewChanges: [];
@@ -289,6 +318,11 @@ function refreshObjectSource() {
 }
 const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql));
 const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
+const executeInNewResultTabShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSqlInNewResultTab));
+const executeInNewResultTabTooltip = computed(() => {
+  const label = t("settings.shortcutExecuteSqlInNewResultTab");
+  return executeInNewResultTabShortcutDisplay.value ? `${label} (${executeInNewResultTabShortcutDisplay.value})` : label;
+});
 // executableSql 在无选区时可能是整篇文档；只要有 DML 语句出现就显示预览按钮，
 // 具体"当前语句"由编辑器（QueryEditor）按执行模式解析。
 const DML_KEYWORD_RE = /(^|\s)(update|insert|delete)\s/i;
@@ -469,6 +503,10 @@ function onExecuteClick(event: MouseEvent) {
   emit("toolbarExecute", event.detail > 0 ? "pointer" : "keyboard");
 }
 
+function onExecuteInNewResultTabClick(event: MouseEvent) {
+  emit("toolbarExecuteInNewResultTab", event.detail > 0 ? "pointer" : "keyboard");
+}
+
 async function changeCatalog(selectedCatalog: string) {
   const connection = props.activeConnection;
   if (!connection) return;
@@ -503,6 +541,22 @@ async function changeCatalog(selectedCatalog: string) {
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : executeShortcutTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200"
+            :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !executableSql.trim()"
+            :aria-label="t('settings.shortcutExecuteSqlInNewResultTab')"
+            @mousedown.prevent="onExecutePointerDown"
+            @click="onExecuteInNewResultTabClick"
+          >
+            <SquarePlay class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ executeInNewResultTabTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="showPreviewButton">
         <TooltipTrigger as-child>

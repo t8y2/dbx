@@ -8,9 +8,21 @@ use dbx_core::connection::AppState;
 use dbx_core::docs::annotations::{
     apply_annotations, load_annotations, resolve_notes_path, save_annotations, AnnotationFile,
 };
-use dbx_core::docs::{collect_snapshot, to_standalone_html, CollectOptions, SchemaSnapshot};
+use dbx_core::docs::{
+    collect_snapshot, collect_snapshot_with_concurrency, to_standalone_html, CollectOptions, SchemaSnapshot,
+};
 use dbx_core::models::connection::ConnectionConfig;
+use serde::Serialize;
+use tauri::ipc::Channel;
 use tauri::State;
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocsCollectProgress {
+    completed: usize,
+    total: usize,
+    current: String,
+}
 
 async fn connection_of(state: &Arc<AppState>, connection_id: &str) -> Result<ConnectionConfig, String> {
     let configs = state.configs.read().await;
@@ -43,6 +55,36 @@ pub async fn docs_collect_snapshot(
     let options =
         CollectOptions { database, schemas, tables, project_name: project_name.unwrap_or_else(|| config.name.clone()) };
     collect_snapshot(&state, &config, &options, &|_progress| {}, &AtomicBool::new(false)).await
+}
+
+#[tauri::command]
+pub async fn docs_collect_snapshot_for_export(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schemas: Vec<String>,
+    tables: Vec<String>,
+    project_name: Option<String>,
+    on_progress: Channel<DocsCollectProgress>,
+) -> Result<SchemaSnapshot, String> {
+    let config = connection_of(&state, &connection_id).await?;
+    let options =
+        CollectOptions { database, schemas, tables, project_name: project_name.unwrap_or_else(|| config.name.clone()) };
+    collect_snapshot_with_concurrency(
+        &state,
+        &config,
+        &options,
+        &|event| {
+            let _ = on_progress.send(DocsCollectProgress {
+                completed: event.completed,
+                total: event.total,
+                current: event.current,
+            });
+        },
+        &AtomicBool::new(false),
+        2,
+    )
+    .await
 }
 
 #[tauri::command]

@@ -138,6 +138,7 @@ async fn run_database_export_of_partition_tree_has_no_duplicates_and_replays() {
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),
+        insert_dialect: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,

@@ -682,6 +682,16 @@ fn plugin_lacks_mcp_surface(err: &str) -> bool {
 const PLUGIN_TOOLS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 impl LocalBackend {
+    async fn notify_connections_changed(&self) {
+        // Persistence has already succeeded. A closed or unresponsive desktop
+        // must not turn the mutation into an error (or block headless MCP).
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.bridge_request("/reload-connections", json!({})),
+        )
+        .await;
+    }
+
     fn spawn_connection_lifecycle_watcher(
         &self,
         lifecycle: ConnectionLifecycleSnapshot,
@@ -1242,6 +1252,7 @@ impl DbxBackend for LocalBackend {
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.add_connection_for_mcp(config).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
         Ok(config)
     }
 
@@ -1253,6 +1264,7 @@ impl DbxBackend for LocalBackend {
     ) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.duplicate_connection_for_mcp(source_id, copy_id, copy_name).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
         Ok(config)
     }
 
@@ -1262,6 +1274,7 @@ impl DbxBackend for LocalBackend {
             self.state.configs.write().await.remove(connection_id);
             self.transaction_owners.invalidate_connection(connection_id);
             self.state.remove_connection_pools_detached(connection_id).await;
+            self.notify_connections_changed().await;
         }
         Ok(removed)
     }
@@ -2808,6 +2821,123 @@ mod tests {
         },
         time::Duration,
     };
+
+    async fn connection_mutation_backend(data_dir: &Path) -> LocalBackend {
+        let storage = Storage::open(&data_dir.join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir);
+        storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
+        LocalBackend::from_app_state(Arc::new(AppState::new(storage)), data_dir.to_path_buf())
+    }
+
+    fn mutation_test_connection() -> ConnectionConfig {
+        new_connection_config(
+            "source".into(),
+            "Source".into(),
+            DatabaseType::Postgres,
+            "127.0.0.1".into(),
+            5432,
+            "postgres".into(),
+            "test-password".into(),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_notify_desktop_only_after_success() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backend = connection_mutation_backend(data_dir.path()).await;
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let storage = backend.state.storage.clone();
+        let app = axum::Router::new().route(
+            "/reload-connections",
+            axum::routing::post(move || {
+                let sent = sent.clone();
+                let storage = storage.clone();
+                async move {
+                    // The desktop must observe the committed state, not the old list.
+                    let ids: Vec<_> = storage.load_connections().await.unwrap().into_iter().map(|c| c.id).collect();
+                    sent.send(ids).unwrap();
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        tokio::fs::write(data_dir.path().join("mcp-bridge-port"), listener.local_addr().unwrap().port().to_string())
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+        backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
+        let mut ids = received.try_recv().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["copy", "source"]);
+        assert!(backend.remove_connection_for_mcp("copy").await.unwrap());
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+
+        assert!(!backend.remove_connection_for_mcp("missing").await.unwrap());
+        assert!(backend.duplicate_connection_for_mcp("missing", "other", "Other").await.is_err());
+        backend
+            .state
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy { read_only: true, ..Default::default() })
+            .await
+            .unwrap();
+        assert!(backend.add_connection_for_mcp(mutation_test_connection()).await.is_err());
+        assert!(backend.remove_connection_for_mcp("source").await.is_err());
+        assert!(received.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_succeed_without_desktop() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backend = connection_mutation_backend(data_dir.path()).await;
+        backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
+        backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
+        assert!(backend.remove_connection_for_mcp("source").await.unwrap());
+        let connections = backend.load_connections().await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, "copy");
+        assert_eq!(connections[0].password, "test-password");
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_succeed_when_desktop_fails_or_stalls() {
+        for stall in [false, true] {
+            let data_dir = tempfile::tempdir().unwrap();
+            let backend = connection_mutation_backend(data_dir.path()).await;
+            let app = axum::Router::new().route(
+                "/reload-connections",
+                axum::routing::post(move || async move {
+                    if stall {
+                        std::future::pending::<()>().await;
+                    }
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            tokio::fs::write(
+                data_dir.path().join("mcp-bridge-port"),
+                listener.local_addr().unwrap().port().to_string(),
+            )
+            .await
+            .unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            tokio::time::timeout(Duration::from_secs(5), backend.add_connection_for_mcp(mutation_test_connection()))
+                .await
+                .expect("desktop notification must be bounded")
+                .unwrap();
+            assert_eq!(backend.load_connections().await.unwrap().len(), 1);
+            server.abort();
+        }
+    }
 
     fn policy_state(configured: bool, read_only: bool) -> McpGlobalPolicyState {
         McpGlobalPolicyState {

@@ -785,6 +785,53 @@ fn builds_postgres_type_change_that_drops_default() {
 }
 
 #[test]
+fn builds_postgres_timestamp_precision_changes_without_losing_timezone_semantics() {
+    let mut with_timezone = column("with_timezone");
+    with_timezone.data_type = "timestamp(3) with time zone".to_string();
+    with_timezone.original = Some(ColumnInfo {
+        name: "with_timezone".to_string(),
+        data_type: "timestamp(6) with time zone".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let with_timezone_result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        driver_profile: None,
+        schema: Some("public".to_string()),
+        table_name: "events".to_string(),
+        column: with_timezone,
+    });
+    assert_eq!(
+        with_timezone_result.statements,
+        vec![
+            r#"ALTER TABLE "public"."events" ALTER COLUMN "with_timezone" TYPE timestamp(3) with time zone USING "with_timezone"::timestamp(3) with time zone;"#
+        ]
+    );
+
+    let mut without_timezone = column("without_timezone");
+    without_timezone.data_type = "timestamp(3) without time zone".to_string();
+    without_timezone.original = Some(ColumnInfo {
+        name: "without_timezone".to_string(),
+        data_type: "timestamp(6) without time zone".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let without_timezone_result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        driver_profile: None,
+        schema: Some("public".to_string()),
+        table_name: "events".to_string(),
+        column: without_timezone,
+    });
+    assert_eq!(
+        without_timezone_result.statements,
+        vec![
+            r#"ALTER TABLE "public"."events" ALTER COLUMN "without_timezone" TYPE timestamp(3) without time zone USING "without_timezone"::timestamp(3) without time zone;"#
+        ]
+    );
+}
+
+#[test]
 fn builds_xugu_timezone_temporal_precision_in_final_ddl() {
     let mut local_time = column("local_time");
     local_time.data_type = "TIME(3) WITH TIME ZONE".to_string();

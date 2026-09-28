@@ -66,9 +66,10 @@ import { usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/data
 import { connectionIsDorisFamilyCatalogCapable, defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState, usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
 import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
-import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
+import { repairRestoredDataTabTableIdentity, tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, tableMetadataToDataTabMeta, updateCachedTableMetadataType, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
@@ -2425,6 +2426,7 @@ export const useQueryStore = defineStore("query", () => {
         tab.autoCommit = defaultAutoCommitForDbTypeWithSetting(connection?.db_type);
       } else if (tab.mode === "data" && connection) {
         tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
+        repairRestoredDataTabTableIdentity(tab, effectiveDatabaseTypeForConnection(connection));
       }
     }
     restored.tabs.forEach(initializeResultAutoSave);
@@ -4841,6 +4843,7 @@ export const useQueryStore = defineStore("query", () => {
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         driverProfile: conn?.driver_profile,
+        serverVersion: conn?.database_info?.productVersion,
         identifierQuote,
         database: tableMeta.database,
         schema: tableMeta.schema,
@@ -8961,6 +8964,7 @@ export const useQueryStore = defineStore("query", () => {
           const sql = await api.buildTableSelectSql({
             databaseType: effectiveDbType,
             driverProfile: conn?.driver_profile,
+            serverVersion: conn?.database_info?.productVersion,
             identifierQuote,
             database: tableMeta.database,
             schema: tableMeta.schema,
@@ -9237,6 +9241,7 @@ export const useQueryStore = defineStore("query", () => {
       keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
       csvQuoteMode: settings.csvQuoteMode,
       clientSessionId,
+      nullLiteral: csvNullLiteralForMode(settings.csvNullMode),
       executionId: uuid(),
       exportTableName: options.exportTableName,
       exportColumnTypes: options.exportColumnTypes,
@@ -9277,6 +9282,7 @@ export const useQueryStore = defineStore("query", () => {
       keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
       csvQuoteMode: settings.csvQuoteMode,
       clientSessionId: `${tabClientSessionId(tab, "export")}:${exportId}`,
+      nullLiteral: csvNullLiteralForMode(settings.csvNullMode),
       executionId: uuid(),
       numericColumnRightAlign: settings.numericColumnRightAlign,
       columnComments,

@@ -102,6 +102,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { showSqlInsertModeDialog, type SqlInsertDialect, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
 import {
   defaultPasteTableMode,
@@ -1691,6 +1692,7 @@ async function openNewQuery(row: ObjectBrowserRow) {
     await buildTableSelectSql({
       databaseType: effectiveDatabaseType.value,
       driverProfile: props.connection.driver_profile,
+      serverVersion: props.connection.database_info?.productVersion,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       catalog: props.catalog,
       database: props.database,
@@ -2423,7 +2425,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
         executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
       });
       if (format === "csv") {
-        await api.exportQueryResultCsv(filePath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), settingsStore.editorSettings.csvQuoteMode);
+        await api.exportQueryResultCsv(filePath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), settingsStore.editorSettings.csvQuoteMode, csvNullLiteralForMode(settingsStore.editorSettings.csvNullMode));
       } else {
         const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
         const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -2463,6 +2465,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       format,
       ...(format === "sql" ? { insertMode, insertDialect, splitMaxMb } : {}),
       csvQuoteMode: settingsStore.editorSettings.csvQuoteMode,
+      nullLiteral: csvNullLiteralForMode(settingsStore.editorSettings.csvNullMode),
       columns,
       columnComments: format === "xlsx" ? columnComments : undefined,
       autoFilter: format === "xlsx" ? autoFilter : undefined,

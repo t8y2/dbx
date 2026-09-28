@@ -1215,6 +1215,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         execution_id: Some(format!("live-sqlserver-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
+        null_literal: String::new(),
         export_table_name: None,
         export_column_types: None,
         selected_columns: None,

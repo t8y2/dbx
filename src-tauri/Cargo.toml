@@ -73,6 +73,7 @@ zip = "4.6.1"
 dbx-core = { path = "../crates/dbx-core", default-features = false }
 dbx-mcp = { path = "../crates/dbx-mcp", default-features = false, features = ["duckdb-sidecar", "mq-admin"] }
 dbx-tauri-consul = { path = "../crates/dbx-tauri-consul" }
+dbx-tauri-schema = { path = "../crates/dbx-tauri-schema" }
 wry = { path = "../vendor/wry" }
 axum = { version = "0.8", features = ["ws"] }
 font-kit = "0.14.3"

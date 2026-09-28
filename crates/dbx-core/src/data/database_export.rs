@@ -15,6 +15,7 @@ use crate::connection::task_client_session_id;
 use crate::models::connection::DatabaseType;
 use crate::mysql_ddl_normalize::DdlNormalizeOptions;
 use crate::object_source_sql::build_export_object_source_sql;
+use crate::sql::{SqlParsingOptions, SqlStatementSplitter};
 use crate::sql_dialect::{qualified_table_name, uses_single_row_insert_statements};
 use crate::transfer::{
     format_ch_array_sql_literal, format_pg_array_sql_literal, format_postgres_vector_sql_literal,
@@ -166,6 +167,16 @@ enum DatabaseExportWriter {
     SplitZip(Box<crate::export_split_zip::SplitZipExportWriter>),
 }
 
+impl DatabaseExportWriter {
+    fn write_sql_unit(&mut self, unit: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.write_all(unit),
+            Self::Gzip(writer) => writer.write_all(unit),
+            Self::SplitZip(writer) => writer.write_sql_unit(unit),
+        }
+    }
+}
+
 impl Write for DatabaseExportWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         match self {
@@ -173,6 +184,12 @@ impl Write for DatabaseExportWriter {
             Self::Gzip(writer) => writer.write(buffer),
             Self::SplitZip(writer) => writer.write(buffer),
         }
+    }
+
+    fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+        let mut unit = String::new();
+        std::fmt::write(&mut unit, fmt).map_err(|_| std::io::Error::other("Failed to format SQL export unit"))?;
+        self.write_sql_unit(unit.as_bytes())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -3221,17 +3238,21 @@ fn postgres_create_schema_sql(schema: &str) -> String {
     format!("CREATE SCHEMA IF NOT EXISTS {};", quote_identifier(schema, &DatabaseType::Postgres))
 }
 
-// Copy one line at a time so a `SplitZipExportWriter` can only rotate between
-// complete SQL statements; `std::io::copy` would feed it arbitrary 8KB chunks.
 fn combine_schema_sql_export<W: Write>(source: &mut dyn BufRead, destination: &mut W) -> std::io::Result<()> {
-    let mut line = Vec::new();
+    let mut splitter = SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Postgres));
+    let mut chunk = String::new();
     loop {
-        line.clear();
-        let bytes_read = source.read_until(b'\n', &mut line)?;
+        chunk.clear();
+        let bytes_read = source.read_line(&mut chunk)?;
         if bytes_read == 0 {
             break;
         }
-        destination.write_all(&line)?;
+        for statement in splitter.push_chunk(&chunk) {
+            destination.write_all(format!("{statement};\n").as_bytes())?;
+        }
+    }
+    for statement in splitter.finish() {
+        destination.write_all(format!("{statement};\n").as_bytes())?;
     }
     Ok(())
 }
@@ -6707,6 +6728,75 @@ mod tests {
     }
 
     #[test]
+    fn split_zip_export_writer_keeps_an_oversized_create_table_ddl_whole_before_the_next_unit() {
+        // Exercises the "SQL unit, not just INSERT" contract: a CREATE TABLE
+        // DDL statement, an INSERT, and a SQL Server-style multi-statement
+        // routine body must each land in exactly one part, never split at an
+        // arbitrary byte offset inside one, even when writeln! formats the
+        // unit from several interpolated arguments (real call sites do this,
+        // e.g. `writeln!(file, "{source}\n")` for exported routine bodies).
+        let directory = tempfile::tempdir().unwrap();
+        let zip_path = directory.path().join("schema.zip");
+        let mut writer = crate::export_split_zip::SplitZipExportWriter::create(
+            &zip_path,
+            crate::export_split_zip::MIN_SPLIT_PART_MAX_MB,
+            "schema",
+            "sql",
+        )
+        .unwrap();
+
+        let table_name = "dbo.orders";
+        // part_max_bytes for MIN_SPLIT_PART_MAX_MB is 1 MiB. Make the CREATE
+        // TABLE unit alone exceed that -- it stays whole as the oversized-unit
+        // exception, but the *next* unit must then rotate into a new part.
+        let columns = (0..100_000).map(|index| format!("col_{index} INT")).collect::<Vec<_>>().join(", ");
+        let create_table_ddl = format!("CREATE TABLE {table_name} ({columns});");
+        // A SQL Server routine body: multiple statements inside one BEGIN/END
+        // block plus a batch-separator comment, matching what
+        // build_export_object_source_sql emits for a procedure/trigger --
+        // the writer must never cut between the inner statements.
+        let procedure_source = "CREATE PROCEDURE dbo.recalc_totals AS\nBEGIN\n  UPDATE dbo.orders SET total = total + 1;\n  INSERT INTO dbo.audit_log (message) VALUES ('recalculated');\nEND".to_string();
+        let go_batch_separator = "GO";
+        let insert = "INSERT INTO dbo.orders (id) VALUES (1);".to_string();
+
+        writeln!(writer, "{create_table_ddl}").unwrap();
+        writeln!(writer, "{procedure_source}").unwrap();
+        writeln!(writer, "{go_batch_separator}").unwrap();
+        writeln!(writer, "{insert}").unwrap();
+        writer.finish("schema.sql").unwrap();
+
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut sql_parts = Vec::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            if !entry.name().ends_with(".sql") {
+                continue;
+            }
+            let mut contents = String::new();
+            entry.read_to_string(&mut contents).unwrap();
+            sql_parts.push((entry.name().to_string(), contents));
+        }
+        sql_parts.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert!(sql_parts.len() >= 2, "the oversized CREATE TABLE alone must rotate before later units");
+
+        let combined: String = sql_parts.iter().map(|(_, contents)| contents.as_str()).collect();
+        assert_eq!(
+            combined,
+            format!("{create_table_ddl}\n{procedure_source}\n{go_batch_separator}\n{insert}\n"),
+            "reassembling every part must reproduce the original stream byte for byte"
+        );
+
+        // Every unit must be found intact inside exactly one part -- proof
+        // that none of them was fragmented across a rotation boundary.
+        for unit in [create_table_ddl.as_str(), procedure_source.as_str(), go_batch_separator, insert.as_str()] {
+            let containing_parts = sql_parts.iter().filter(|(_, contents)| contents.contains(unit)).count();
+            assert_eq!(containing_parts, 1, "unit must appear whole in exactly one part: {unit:?}");
+        }
+    }
+
+    #[test]
     fn all_schemas_combine_keeps_split_part_boundaries_statement_safe() {
         // Mirror of the per-schema temporary files that
         // `export_postgres_all_schemas_sql_core` combines: whole SQL
@@ -6758,7 +6848,7 @@ mod tests {
             for line in contents.lines().filter(|line| !line.trim().is_empty()) {
                 assert!(
                     line.trim_start().starts_with("INSERT INTO") && line.trim_end().ends_with(';'),
-                    "{name} has a malformed line from a mid-statement cut"
+                    "{name} has a malformed line from a mid-statement cut: {line:?}"
                 );
             }
         }

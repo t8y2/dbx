@@ -202,6 +202,49 @@ describe("tableStructureEditorState", () => {
     });
   });
 
+  describe("PostgreSQL temporal precision", () => {
+    it("keeps the time-zone qualifier returned by PostgreSQL metadata", () => {
+      const drafts = createColumnDrafts(
+        [
+          { name: "with_tz", data_type: "timestamp(6) with time zone", is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "without_tz", data_type: "timestamp(6) without time zone", is_nullable: true, column_default: null, is_primary_key: false },
+        ],
+        "postgres",
+      );
+
+      expect(drafts.map((column) => column.dataType)).toEqual(["timestamp(6) with time zone", "timestamp(6) without time zone"]);
+      expect(drafts.map((column) => column.original?.data_type)).toEqual(drafts.map((column) => column.dataType));
+      expect(hasExistingColumnTypeChange(drafts)).toBe(false);
+      expect(dataTypeBaseInputValue("postgres", drafts[0]!.dataType)).toBe("timestamp with time zone");
+      expect(dataTypeBaseInputValue("postgres", drafts[1]!.dataType)).toBe("timestamp without time zone");
+      expect(dataTypeLengthInputValue("postgres", drafts[0]!.dataType)).toBe("6");
+      expect(dataTypeLengthInputValue("postgres", drafts[1]!.dataType)).toBe("6");
+      expect(combineDataTypeForDatabase("postgres", dataTypeBaseInputValue("postgres", drafts[0]!.dataType), "3")).toBe("timestamp(3) with time zone");
+      expect(combineDataTypeForDatabase("postgres", dataTypeBaseInputValue("postgres", drafts[1]!.dataType), "3")).toBe("timestamp(3) without time zone");
+    });
+
+    it("rebuilds qualified timestamp precision without changing time-zone semantics", () => {
+      expect(combineDataTypeForDatabase("postgres", "timestamp with time zone", "3")).toBe("timestamp(3) with time zone");
+      expect(combineDataTypeForDatabase("postgres", "timestamp without time zone", "3")).toBe("timestamp(3) without time zone");
+      expect(combineDataTypeForDatabase("postgres", "timestamptz", "3")).toBe("timestamptz(3)");
+      expect(combineDataTypeForDatabase("postgres", "timestamp", "3")).toBe("timestamp(3)");
+    });
+
+    it("does not reinterpret temporal arrays, domains, or user-defined types as scalar timestamps", () => {
+      expect(dataTypeBaseInputValue("postgres", "timestamp(6) with time zone[]")).toBe("timestamp with time zone[]");
+      expect(dataTypeLengthInputValue("postgres", "timestamp(6) with time zone[]")).toBe("");
+      expect(dataTypeBaseInputValue("postgres", "timestamptz(6)[][]")).toBe("timestamptz[][]");
+      expect(dataTypeLengthInputValue("postgres", "timestamptz(6)[][]")).toBe("");
+
+      const metadataTypes = ["audit.timestamp_domain", 'audit."timestamp"', "custom_timestamp(6)"];
+      const drafts = createColumnDrafts(
+        metadataTypes.map((dataType, index) => ({ name: `custom_${index}`, data_type: dataType, is_nullable: true, column_default: null, is_primary_key: false })),
+        "postgres",
+      );
+      expect(drafts.map((column) => column.dataType)).toEqual(metadataTypes);
+    });
+  });
+
   it("keeps quoted mixed-case identifiers distinct when detecting copied-column duplicates", () => {
     const postgresNames = new Set([tableStructureIdentifierComparisonKey("Foo", "postgres")]);
     expect(postgresNames.has(tableStructureIdentifierComparisonKey("foo", "postgres"))).toBe(false);

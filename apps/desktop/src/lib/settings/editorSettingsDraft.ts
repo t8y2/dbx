@@ -7,6 +7,7 @@ import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPo
 import { normalizeSqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
 import { normalizeTableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
+import { normalizeCsvNullMode } from "@/lib/export/csvNullMode";
 
 export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "fontFamily",
@@ -120,6 +121,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "redisDatabaseDisplayLimit",
   "exportBatchSize",
   "csvQuoteMode",
+  "csvNullMode",
   "exportRowLimitEnabled",
   "exportRowLimit",
   "queryExportKeysetOptimizationEnabled",
@@ -164,6 +166,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "tableCompletionSchemaQualification") return normalizeSqlTableCompletionSchemaQualification(value);
   if (key === "tableHoverLookupMode") return normalizeTableHoverLookupMode(value);
   if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
+  if (key === "csvNullMode") return normalizeCsvNullMode(value);
   if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   return value;
 }

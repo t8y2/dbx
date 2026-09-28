@@ -101,6 +101,7 @@ import {
   type TabSortMode,
   type UpdateDownloadSource,
   type CsvQuoteMode,
+  type CsvNullMode,
   type CustomThemeColors,
   type CustomTheme,
   type McpConnectionPolicy,
@@ -854,6 +855,7 @@ const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
 const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
 const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
+const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMode);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
 const editGlobalDateTimeExportFormat = ref(settingsStore.editorSettings.globalDateTimeExportFormat);
 const editGlobalDateTimeImportFormat = ref(settingsStore.editorSettings.globalDateTimeImportFormat);
@@ -1117,6 +1119,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit.value,
     exportBatchSize: editExportBatchSize.value,
     csvQuoteMode: editCsvQuoteMode.value,
+    csvNullMode: editCsvNullMode.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
     globalDateTimeExportFormat: editGlobalDateTimeExportFormat.value,
     globalDateTimeImportFormat: editGlobalDateTimeImportFormat.value,
@@ -1779,6 +1782,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
   editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
   editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
+  editCsvNullMode.value = settingsStore.editorSettings.csvNullMode;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = settingsStore.editorSettings.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = settingsStore.editorSettings.globalDateTimeImportFormat;
@@ -1915,6 +1919,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit,
   exportBatchSize: editExportBatchSize,
   csvQuoteMode: editCsvQuoteMode,
+  csvNullMode: editCsvNullMode,
   exportRowLimitEnabled: editExportRowLimitEnabled,
   exportRowLimit: editExportRowLimit,
   queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled,
@@ -2428,6 +2433,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
     editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
+    editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
     editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
     editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -2572,6 +2578,7 @@ function resetAllDefaults() {
   editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
   editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
+  editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -6650,7 +6657,9 @@ onUnmounted(() => {
                     <p class="text-xs text-muted-foreground">{{ t("settings.doubleClickStringSelectionModeDescription") }}</p>
                   </div>
                   <Select :model-value="editDoubleClickStringSelectionMode" @update:model-value="setDoubleClickStringSelectionMode">
-                    <SelectTrigger id="editor-double-click-string" class="h-8 w-36 shrink-0">
+                    <!-- The option labels are long in several languages; let the trigger hug its value
+                         (bounded) instead of clipping it at a fixed width. -->
+                    <SelectTrigger id="editor-double-click-string" class="h-8 min-w-36 max-w-[13rem] shrink-0">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -8547,6 +8556,23 @@ onUnmounted(() => {
                     <SelectContent>
                       <SelectItem value="all">{{ t("settings.csvQuoteModeAll") }}</SelectItem>
                       <SelectItem value="necessary">{{ t("settings.csvQuoteModeNecessary") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div class="flex items-start justify-between gap-4">
+                  <div class="min-w-0 space-y-0.5">
+                    <Label for="csv-null-mode">{{ t("settings.csvNullMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.csvNullModeDescription") }}
+                    </p>
+                  </div>
+                  <Select v-model="editCsvNullMode">
+                    <SelectTrigger id="csv-null-mode" class="h-8 w-44 shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="marker">{{ t("settings.csvNullModeMarker") }}</SelectItem>
+                      <SelectItem value="empty">{{ t("settings.csvNullModeEmpty") }}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

@@ -208,6 +208,10 @@ pub struct TableImportParseOptions {
     pub last_data_row: Option<usize>,
     pub trim_values: Option<bool>,
     pub empty_string_as_null: Option<bool>,
+    /// 分隔文本里代表 NULL 的字面量。缺省表示使用与导出端一致的默认字面量（`\N`）；
+    /// 显式配置空串表示关闭字面量，退回「空字段即 NULL」的旧行为。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub null_literal: Option<String>,
     pub sheet_name: Option<String>,
     pub sheet_index: Option<usize>,
     pub json_shape: Option<TableImportJsonShape>,
@@ -227,6 +231,7 @@ impl Default for TableImportParseOptions {
             last_data_row: None,
             trim_values: Some(false),
             empty_string_as_null: Some(true),
+            null_literal: None,
             sheet_name: None,
             sheet_index: None,
             json_shape: Some(TableImportJsonShape::Auto),
@@ -651,12 +656,24 @@ fn unique_import_headers(headers: impl IntoIterator<Item = String>) -> Vec<Strin
         .collect()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DelimitedParseConfig {
     pub delimiter: u8,
     pub trim_values: bool,
     pub empty_string_as_null: bool,
+    /// 命中的字段按 NULL 处理；`None` 表示不按字面量识别 NULL。
+    pub null_literal: Option<String>,
     pub row_range: ImportRowRange,
+}
+
+/// 分隔文本里 NULL 字面量的默认值：与导出端共用 [`dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL`]，
+/// 因此 DBX 自己导出的 CSV 默认即可无损导入。
+fn effective_delimited_null_literal(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL.to_string()),
+        // 显式空串 = 关闭字面量
+        Some(raw) => dbx_formats::csv_export::csv_null_literal(raw).map(str::to_string),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -707,10 +724,15 @@ pub fn effective_delimited_config(
         }
     };
 
+    let null_literal = effective_delimited_null_literal(options.null_literal.as_deref());
+
     Ok(DelimitedParseConfig {
         delimiter,
         trim_values: options.trim_values.unwrap_or(false),
-        empty_string_as_null: options.empty_string_as_null.unwrap_or(true),
+        // 配了 NULL 字面量时空字段一律是空串：否则字面量刚把 NULL 和空串分开，
+        // 这里又会把空串重新当成 NULL。
+        empty_string_as_null: null_literal.is_none() && options.empty_string_as_null.unwrap_or(true),
+        null_literal,
         row_range: effective_import_row_range(options)?,
     })
 }
@@ -734,9 +756,13 @@ fn unwrap_csv_force_text(value: &str) -> &str {
     inner
 }
 
-pub fn csv_value_with_config(value: &str, config: DelimitedParseConfig) -> serde_json::Value {
+pub fn csv_value_with_config(value: &str, config: &DelimitedParseConfig) -> serde_json::Value {
     let value = if config.trim_values { value.trim() } else { value };
     let value = unwrap_csv_force_text(value);
+    // 字面量优先：命中即为 NULL，空字段则原样保留为空字符串。
+    if config.null_literal.as_deref() == Some(value) {
+        return serde_json::Value::Null;
+    }
     if config.empty_string_as_null && value.is_empty() {
         serde_json::Value::Null
     } else {
@@ -747,10 +773,11 @@ pub fn csv_value_with_config(value: &str, config: DelimitedParseConfig) -> serde
 pub fn csv_value(value: &str) -> serde_json::Value {
     csv_value_with_config(
         value,
-        DelimitedParseConfig {
+        &DelimitedParseConfig {
             delimiter: b',',
             trim_values: false,
             empty_string_as_null: true,
+            null_literal: None,
             row_range: ImportRowRange { title_row: Some(1), data_start_row: 2, last_data_row: None },
         },
     )
@@ -1089,7 +1116,7 @@ fn open_delimited_csv_reader_with_progress(
 
 pub fn parse_delimited_reader<R: std::io::Read>(
     reader: R,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
 ) -> Result<ParsedImportFile, String> {
     parse_decoded_delimited_reader(reader, config, preview_limit, TableImportTextEncoding::Utf8)
@@ -1097,7 +1124,7 @@ pub fn parse_delimited_reader<R: std::io::Read>(
 
 fn parse_decoded_delimited_reader<R: IoRead>(
     reader: R,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
@@ -1114,7 +1141,12 @@ pub fn parse_delimited_bytes_with_options(
 ) -> Result<ParsedImportFile, String> {
     let (encoding, bom_len) = resolve_text_encoding_from_bytes(bytes, options.encoding)?;
     let reader = StrictTranscodingReader::new(std::io::Cursor::new(&bytes[bom_len..]), encoding)?;
-    parse_decoded_delimited_reader(reader, effective_delimited_config(source_format, options)?, preview_limit, encoding)
+    parse_decoded_delimited_reader(
+        reader,
+        &effective_delimited_config(source_format, options)?,
+        preview_limit,
+        encoding,
+    )
 }
 
 pub fn parse_delimited_file_with_options(
@@ -1132,7 +1164,7 @@ pub fn parse_delimited_file_with_options(
             explicit_options.encoding = Some(encoding);
             let (reader, config, encoding) =
                 open_delimited_csv_reader_with_progress(path, source_format, &explicit_options, |_| {})?;
-            return parse_csv_reader(reader, config, preview_limit, encoding);
+            return parse_csv_reader(reader, &config, preview_limit, encoding);
         }
 
         for encoding in [TableImportTextEncoding::Utf8, TableImportTextEncoding::Gbk] {
@@ -1140,7 +1172,7 @@ pub fn parse_delimited_file_with_options(
             explicit_options.encoding = Some(encoding);
             let (reader, config, encoding) =
                 open_delimited_csv_reader_with_progress(path, source_format, &explicit_options, |_| {})?;
-            match parse_csv_reader(reader, config, preview_limit, encoding) {
+            match parse_csv_reader(reader, &config, preview_limit, encoding) {
                 Ok(parsed) => return Ok(parsed),
                 Err(error) if error.starts_with("Invalid byte sequence for ") => continue,
                 Err(error) => return Err(error),
@@ -1150,12 +1182,12 @@ pub fn parse_delimited_file_with_options(
     }
 
     let (reader, config, encoding) = open_delimited_csv_reader_with_progress(path, source_format, options, |_| {})?;
-    parse_csv_reader(reader, config, preview_limit, encoding)
+    parse_csv_reader(reader, &config, preview_limit, encoding)
 }
 
 fn parse_csv_reader<R: IoRead>(
     mut reader: csv::Reader<R>,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
@@ -1164,7 +1196,7 @@ fn parse_csv_reader<R: IoRead>(
 
 fn parse_csv_reader_bounded<R: IoRead>(
     mut reader: csv::Reader<R>,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
@@ -1173,7 +1205,7 @@ fn parse_csv_reader_bounded<R: IoRead>(
 
 fn parse_csv_reader_inner<R: IoRead>(
     reader: &mut csv::Reader<R>,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
     count_all_rows: bool,
@@ -1236,7 +1268,7 @@ fn parse_delimited_preview_file_with_options(
             explicit_options.encoding = Some(encoding);
             let (reader, config, encoding) =
                 open_delimited_csv_reader_with_progress(path, source_format, &explicit_options, |_| {})?;
-            return parse_csv_reader_bounded(reader, config, preview_limit, encoding);
+            return parse_csv_reader_bounded(reader, &config, preview_limit, encoding);
         }
 
         for encoding in [TableImportTextEncoding::Utf8, TableImportTextEncoding::Gbk] {
@@ -1244,7 +1276,7 @@ fn parse_delimited_preview_file_with_options(
             explicit_options.encoding = Some(encoding);
             let (reader, config, encoding) =
                 open_delimited_csv_reader_with_progress(path, source_format, &explicit_options, |_| {})?;
-            match parse_csv_reader_bounded(reader, config, preview_limit, encoding) {
+            match parse_csv_reader_bounded(reader, &config, preview_limit, encoding) {
                 Ok(parsed) => return Ok(parsed),
                 Err(error) if error.starts_with("Invalid byte sequence for ") => continue,
                 Err(error) => return Err(error),
@@ -1254,7 +1286,7 @@ fn parse_delimited_preview_file_with_options(
     }
 
     let (reader, config, encoding) = open_delimited_csv_reader_with_progress(path, source_format, options, |_| {})?;
-    parse_csv_reader_bounded(reader, config, preview_limit, encoding)
+    parse_csv_reader_bounded(reader, &config, preview_limit, encoding)
 }
 
 pub fn parse_csv_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -6291,7 +6323,7 @@ fn import_cancelled_progress(
 fn delimited_record_to_row(
     record: &csv::StringRecord,
     columns_len: usize,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
 ) -> Vec<serde_json::Value> {
     (0..columns_len)
         .map(|index| {
@@ -6302,7 +6334,7 @@ fn delimited_record_to_row(
 
 fn delimited_columns_and_first_record<R: std::io::Read>(
     reader: &mut csv::Reader<R>,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
 ) -> Result<(Vec<String>, Option<csv::StringRecord>), String> {
     let mut columns = Vec::new();
     for (index, record) in reader.records().enumerate() {
@@ -6351,7 +6383,7 @@ fn stream_delimited_rows_to_channel(
     // Keep CSV parsing off the async executor while the bounded channel prevents unbounded
     // accumulation when the database consumer is under load.
     let (mut reader, config, _) = open_delimited_csv_reader_with_progress(path, source_format, options, |_| {})?;
-    let (columns, first_record) = delimited_columns_and_first_record(&mut reader, config)?;
+    let (columns, first_record) = delimited_columns_and_first_record(&mut reader, &config)?;
     sender
         .blocking_send(Ok(DelimitedStreamMessage::Header(columns.clone())))
         .map_err(|_| "Delimited import consumer closed before the stream started".to_string())?;
@@ -6374,7 +6406,7 @@ fn stream_delimited_rows_to_channel(
         if config.row_range.last_data_row.is_some_and(|last| source_row_number > last) {
             break;
         }
-        pending_rows.push(delimited_record_to_row(&record, columns.len(), config));
+        pending_rows.push(delimited_record_to_row(&record, columns.len(), &config));
         if pending_rows.len() >= batch_size {
             sender
                 .blocking_send(Ok(DelimitedStreamMessage::Rows {
@@ -9372,10 +9404,91 @@ mod tests {
             parsed.rows[1],
             vec![
                 serde_json::Value::String("2".to_string()),
-                serde_json::Value::Null,
+                // 默认 NULL 字面量生效后，空字段保留为空字符串，只有字面量才是 NULL
+                serde_json::Value::String(String::new()),
                 serde_json::Value::String("false".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn effective_delimited_config_shares_the_export_null_literal_by_default() {
+        let config =
+            effective_delimited_config(TableImportSourceFormat::Csv, &TableImportParseOptions::default()).unwrap();
+        assert_eq!(config.null_literal.as_deref(), Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL));
+        assert!(!config.empty_string_as_null, "NULL 字面量生效时不再把空字段当作 NULL");
+
+        // 显式空串 = 关闭字面量，退回「空字段即 NULL」的旧行为
+        let legacy =
+            TableImportParseOptions { null_literal: Some(String::new()), ..TableImportParseOptions::default() };
+        let config = effective_delimited_config(TableImportSourceFormat::Csv, &legacy).unwrap();
+        assert_eq!(config.null_literal, None);
+        assert!(config.empty_string_as_null);
+    }
+
+    #[test]
+    fn csv_null_literal_separates_null_from_an_empty_string() {
+        // `\N` 是 NULL；`""` 与裸空字段都是空字符串
+        let parsed = parse_csv_bytes(b"id,name\n1,\\N\n2,\"\"\n3,\n", 10).unwrap();
+
+        assert_eq!(parsed.total_rows, 3);
+        assert_eq!(parsed.rows[0][1], serde_json::Value::Null);
+        assert_eq!(parsed.rows[1][1], serde_json::json!(""));
+        assert_eq!(parsed.rows[2][1], serde_json::json!(""));
+    }
+
+    #[test]
+    fn tsv_export_with_null_literal_round_trips_through_the_importer() {
+        // 导出端（push_tsv_row + 默认字面量）写出的 TSV，按 TSV 规则导入：
+        // NULL 仍是 NULL、空字符串仍是空字符串
+        let mut text = String::from("id\tnote\n");
+        dbx_formats::csv_export::push_tsv_row(
+            &mut text,
+            &[serde_json::json!(1), serde_json::Value::Null],
+            Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL),
+        );
+        text.push('\n');
+        dbx_formats::csv_export::push_tsv_row(
+            &mut text,
+            &[serde_json::json!(2), serde_json::json!("")],
+            Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL),
+        );
+
+        let parsed = parse_delimited_bytes_with_options(
+            text.as_bytes(),
+            TableImportSourceFormat::Tsv,
+            &TableImportParseOptions::default(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(parsed.rows[0][1], serde_json::Value::Null);
+        assert_eq!(parsed.rows[1][1], serde_json::json!(""));
+    }
+
+    #[test]
+    fn csv_null_literal_can_be_replaced_or_disabled() {
+        let custom =
+            TableImportParseOptions { null_literal: Some("(null)".to_string()), ..TableImportParseOptions::default() };
+        let parsed =
+            parse_delimited_bytes_with_options(b"id,name\n1,(null)\n2,\n", TableImportSourceFormat::Csv, &custom, 10)
+                .unwrap();
+        assert_eq!(parsed.rows[0][1], serde_json::Value::Null);
+        assert_eq!(parsed.rows[1][1], serde_json::json!(""));
+
+        let legacy =
+            TableImportParseOptions { null_literal: Some(String::new()), ..TableImportParseOptions::default() };
+        let parsed =
+            parse_delimited_bytes_with_options(b"id,name\n1,\n2,Ada\n", TableImportSourceFormat::Csv, &legacy, 10)
+                .unwrap();
+        assert_eq!(parsed.rows[0][1], serde_json::Value::Null);
+        assert_eq!(parsed.rows[1][1], serde_json::json!("Ada"));
+    }
+
+    #[test]
+    fn csv_null_literal_is_not_reported_as_a_missing_value() {
+        // 字面量只按整字段匹配：夹带空格的 `\N ` 不是 NULL，避免误伤真实数据
+        let parsed = parse_csv_bytes(b"id,name\n1, \\N \n", 10).unwrap();
+        assert_eq!(parsed.rows[0][1], serde_json::json!(" \\N "));
     }
 
     #[test]
@@ -9627,7 +9740,7 @@ mod tests {
         let config =
             effective_delimited_config(TableImportSourceFormat::Csv, &TableImportParseOptions::default()).unwrap();
 
-        let preview = parse_csv_reader_bounded(reader, config, 1, TableImportTextEncoding::Utf8).unwrap();
+        let preview = parse_csv_reader_bounded(reader, &config, 1, TableImportTextEncoding::Utf8).unwrap();
 
         assert_eq!(preview.columns, vec!["id", "name"]);
         assert_eq!(preview.rows, vec![vec![serde_json::json!("1"), serde_json::json!("Ada")]]);
@@ -9754,7 +9867,9 @@ mod tests {
         assert_eq!(parsed.columns, vec!["column_1", "column_2"]);
         assert_eq!(parsed.total_rows, 2);
         assert_eq!(parsed.rows[0], vec![serde_json::json!("1"), serde_json::json!("Ada")]);
-        assert_eq!(parsed.rows[1], vec![serde_json::json!("2"), serde_json::Value::Null]);
+        // 默认 NULL 字面量生效时，显式打开的「空字符串作为 NULL」不再接管空字段：
+        // 否则字面量刚把 NULL 和空串分开，这里又会把空串重新写成 NULL。
+        assert_eq!(parsed.rows[1], vec![serde_json::json!("2"), serde_json::json!("")]);
     }
 
     #[test]

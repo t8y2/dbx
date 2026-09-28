@@ -178,6 +178,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "redisDatabaseDisplayLimit",
     "exportBatchSize",
     "csvQuoteMode",
+    "csvNullMode",
     "exportRowLimitEnabled",
     "exportRowLimit",
     "queryExportKeysetOptimizationEnabled",

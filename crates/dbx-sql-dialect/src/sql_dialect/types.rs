@@ -25,6 +25,11 @@ pub struct TableDataSelectSqlOptions {
     pub driver_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
+    /// Server version reported by the connection (for example `Neo4j/4.4.44`).
+    /// Engines that renamed a built-in function across releases use it to emit
+    /// SQL the connected server understands instead of the newest spelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,

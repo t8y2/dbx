@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllSegment, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllSegment, dataGridUserFacingPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
 
 test("estimated display totals do not become pagination bounds", () => {
   assert.equal(
@@ -243,4 +243,24 @@ test("auto-redirect: total is zero — guard prevents redirect attempt", () => {
 test("auto-redirect: total is undefined — guard prevents redirect attempt", () => {
   const total = undefined;
   assert.equal(!total || (total as any) <= 0, true, "guard should prevent redirect when total is unknown");
+});
+
+test("the SQL shown under the grid describes the segment that actually ran", () => {
+  // "Load all" keeps resultPageLimit/Offset on the logical first page, so the
+  // footer has to read the executed segment instead of claiming LIMIT 100.
+  assert.deepEqual(
+    dataGridUserFacingPage({
+      executedPageLimit: 99_900,
+      executedPageOffset: 100,
+      pageLimit: 100,
+      pageOffset: 0,
+      fallbackLimit: 100,
+      fallbackOffset: 0,
+    }),
+    { limit: 99_900, offset: 100 },
+  );
+  assert.deepEqual(dataGridUserFacingPage({ executedPageLimit: 100, executedPageOffset: 200, pageLimit: 100, pageOffset: 200, fallbackLimit: 100, fallbackOffset: 0 }), { limit: 100, offset: 200 });
+  // Snapshots written before the executed page existed fall back to the page props.
+  assert.deepEqual(dataGridUserFacingPage({ pageLimit: 50, pageOffset: 150, fallbackLimit: 100, fallbackOffset: 0 }), { limit: 50, offset: 150 });
+  assert.deepEqual(dataGridUserFacingPage({ fallbackLimit: 100, fallbackOffset: 300 }), { limit: 100, offset: 300 });
 });

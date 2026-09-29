@@ -217,6 +217,7 @@ import {
   canGoNextDataGridPage,
   dataGridLoadAllSegment,
   dataGridTotalRowCountLabelKey,
+  dataGridUserFacingPage,
   dataGridTruncationHintKey,
   ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS,
   elasticsearchCursorPageJumpRequestCount,
@@ -501,6 +502,13 @@ interface DataGridProps {
   autoShowTableInfo?: boolean;
   pageOffset?: number;
   pageLimit?: number;
+  /**
+   * Pagination of the segment that produced the currently displayed rows. It
+   * differs from `pageOffset`/`pageLimit` once a result was extended by
+   * "load all" or infinite scroll, because those stay on the logical first page.
+   */
+  executedPageOffset?: number;
+  executedPageLimit?: number;
   countSql?: string;
   totalRowCount?: number;
   totalRowCountIsExact?: boolean;
@@ -7858,6 +7866,14 @@ async function syncUserFacingSql() {
 
   try {
     const config = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
+    const footerPage = dataGridUserFacingPage({
+      executedPageLimit: props.executedPageLimit,
+      executedPageOffset: props.executedPageOffset,
+      pageLimit: props.pageLimit,
+      pageOffset: props.pageOffset,
+      fallbackLimit: pageSize.value,
+      fallbackOffset: Math.max(0, currentPage.value - 1) * pageSize.value,
+    });
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
       driverProfile: config?.driver_profile,
@@ -7872,8 +7888,8 @@ async function syncUserFacingSql() {
       injectDefaultTimeSeriesWhere: true,
       whereInput: currentWhereInput(),
       orderBy: currentOrderBy(),
-      limit: props.pageLimit ?? pageSize.value,
-      offset: props.pageOffset ?? Math.max(0, currentPage.value - 1) * pageSize.value,
+      limit: footerPage.limit,
+      offset: footerPage.offset,
     });
     if (generation === userFacingSqlGeneration) userFacingSql.value = sqlWithDisplayDatabaseName(sql);
   } catch {
@@ -7882,7 +7898,7 @@ async function syncUserFacingSql() {
 }
 
 watch(
-  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, currentWhereInput(), currentOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
+  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, currentWhereInput(), currentOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
   () => void syncUserFacingSql(),
   { immediate: true },
 );

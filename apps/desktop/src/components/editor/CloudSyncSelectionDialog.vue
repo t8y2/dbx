@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/api";
 import { transferCategoryForKey, type SettingsTransferCategoryId } from "@/lib/settings/settingsTransfer";
+import { clonePluginData } from "@/lib/plugins/pluginData";
 
 type BackupSettingsCategoryId = Exclude<SettingsTransferCategoryId, "other"> | "ai";
 
@@ -271,7 +272,7 @@ function confirmSelection() {
     selection.value.desktopSettings = selectedSettings(selection.value.desktopSettings, selectableDesktopSettings(props.catalog));
     selection.value.editorSettings = selectedSettings(selection.value.editorSettings, selectableEditorSettings(props.catalog));
   }
-  emit("confirm", structuredClone(selection.value));
+  emit("confirm", clonePluginData(selection.value));
   emit("update:open", false);
 }
 </script>

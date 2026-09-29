@@ -123,6 +123,7 @@ const DatabaseBrowser = defineAsyncComponent(() => import("@/components/objects/
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
+const XuguUserPermissions = defineAsyncComponent(() => import("@/components/admin/XuguUserPermissions.vue"));
 const ProcessListPanel = defineAsyncComponent(() => import("@/components/admin/ProcessListPanel.vue"));
 const SqlServerActivityTracePanel = defineAsyncComponent(() => import("@/components/admin/SqlServerActivityTracePanel.vue"));
 const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MySqlDashboard.vue"));
@@ -3082,6 +3083,10 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'users' && activeConnection">
       <DatabaseUserAdmin :key="activeTab.id" :connection="activeConnection" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'xugu-users' && activeConnection">
+      <XuguUserPermissions :key="activeTab.id" :connection="activeConnection" />
     </template>
 
     <template v-else-if="activeTab.mode === 'processlist' && activeConnection">

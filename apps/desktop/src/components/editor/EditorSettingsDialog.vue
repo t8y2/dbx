@@ -233,7 +233,18 @@ import {
 } from "@/lib/mcp/mcpConfigTemplates";
 import { beginMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
-import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, MCP_TOOL_OPTIONS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, toggleMcpAllowedToolName, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
+import {
+  addMcpAllowedToolName,
+  customMcpAllowedToolNames,
+  isMcpPolicyMutationBlocked,
+  MCP_CAPABILITY_ROWS,
+  MCP_EXECUTION_MODE_COLUMNS,
+  MCP_TOOL_OPTIONS,
+  mcpExecutionModeFromPolicy,
+  mcpPolicyFieldsForExecutionMode,
+  toggleMcpAllowedToolName,
+  type McpExecutionMode,
+} from "@/lib/mcp/mcpPolicySelection";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
@@ -819,6 +830,7 @@ const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
 const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
 const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
+const editSidebarSearchOpenedDatabasesOnly = ref(settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editSidebarBrowseObjectsOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
@@ -1098,6 +1110,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
+    sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
     sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
@@ -1763,6 +1776,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
+  editSidebarSearchOpenedDatabasesOnly.value = settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly;
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
   editSidebarBrowseObjectsOnDatabaseActivation.value = settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
@@ -1900,6 +1914,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarObjectDisplay: editSidebarObjectDisplay,
   routineSourceOpenMode: editRoutineSourceOpenMode,
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
+  sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly,
   autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode,
   sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation,
   openTabsRestoreMode: editOpenTabsRestoreMode,
@@ -2384,6 +2399,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
+    editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -2562,6 +2578,7 @@ function resetAllDefaults() {
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
+  editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -3702,6 +3719,24 @@ function mcpToolAllowed(name: string): boolean {
 
 function onMcpToolAllowedChange(name: string, allowed: boolean) {
   void saveMcpPolicy({ allowedToolNames: toggleMcpAllowedToolName(mcpAllowedToolNames.value, name, allowed) });
+}
+
+// Entries beyond the static options: discovered plugin tool names and the
+// `dbx_<prefix>__*` / `dbx_*__*` wildcards the backend matcher expands. They
+// are invisible in the checkbox grid, so they render as removable chips.
+const mcpCustomToolEntries = computed(() => customMcpAllowedToolNames(mcpAllowedToolNames.value));
+const mcpCustomToolInput = ref("");
+
+function onMcpCustomToolAdd() {
+  const rawName = mcpCustomToolInput.value;
+  if (!rawName.trim()) return;
+  const { names, added } = addMcpAllowedToolName(mcpAllowedToolNames.value, rawName);
+  mcpCustomToolInput.value = "";
+  if (added) void saveMcpPolicy({ allowedToolNames: names });
+}
+
+function onMcpCustomToolRemove(name: string) {
+  void saveMcpPolicy({ allowedToolNames: toggleMcpAllowedToolName(mcpAllowedToolNames.value, name, false) });
 }
 
 const mcpConnectionPolicyConnections = computed(() => {
@@ -7642,6 +7677,15 @@ onUnmounted(() => {
               </div>
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
+                  <Label for="sidebar-search-opened-databases-only">{{ t("settings.sidebarSearchOpenedDatabasesOnly") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarSearchOpenedDatabasesOnly')">
+                    {{ t("settings.sidebarSearchOpenedDatabasesOnlyDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-search-opened-databases-only" v-model="editSidebarSearchOpenedDatabasesOnly" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
                   <Label for="auto-select-active-sidebar-node">{{ t("settings.autoSelectActiveSidebarNode") }}</Label>
                   <HelpTooltip :label="t('settings.autoSelectActiveSidebarNode')">
                     {{ t("settings.autoSelectActiveSidebarNodeDescription") }}
@@ -10582,6 +10626,21 @@ LIMIT 100;</pre
                               <input type="checkbox" :checked="mcpToolAllowed(tool.name)" :disabled="mcpPolicyControlsDisabled" @change="onMcpToolAllowedChange(tool.name, ($event.target as HTMLInputElement).checked)" />
                               <span>{{ t(tool.labelKey) }}</span>
                             </label>
+                          </div>
+                          <div class="space-y-2">
+                            <div class="flex gap-2">
+                              <Input v-model="mcpCustomToolInput" class="h-8 flex-1 font-mono text-xs" :placeholder="t('settings.mcpToolCustomPlaceholder')" :disabled="mcpPolicyControlsDisabled" spellcheck="false" @keydown.enter.prevent="onMcpCustomToolAdd" />
+                              <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="mcpPolicyControlsDisabled || !mcpCustomToolInput.trim()" @click="onMcpCustomToolAdd">{{ t("settings.mcpToolCustomAdd") }}</Button>
+                            </div>
+                            <p class="text-xs text-muted-foreground">{{ t("settings.mcpToolCustomHint") }}</p>
+                            <div v-if="mcpCustomToolEntries.length" class="flex flex-wrap gap-1.5">
+                              <span v-for="name in mcpCustomToolEntries" :key="name" class="flex items-center gap-1 rounded border bg-background px-2 py-1 font-mono text-xs">
+                                {{ name }}
+                                <button type="button" class="text-muted-foreground transition-colors hover:text-destructive" :disabled="mcpPolicyControlsDisabled" :aria-label="t('settings.mcpToolCustomRemove')" @click="onMcpCustomToolRemove(name)">
+                                  <X class="size-3" />
+                                </button>
+                              </span>
+                            </div>
                           </div>
                         </section>
                       </div>

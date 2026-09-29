@@ -94,21 +94,25 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
     </Tooltip>
 
     <DropdownMenu v-if="isDataGridToolbarCapabilityVisible(autoRefresh)">
-      <DropdownMenuTrigger as-child>
-        <Button
-          variant="ghost"
-          size="sm"
-          data-toolbar-action="autoRefresh"
-          :class="[...actionButtonClass('autoRefresh'), autoRefresh?.enabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground']"
-          :disabled="isDataGridToolbarCapabilityDisabled(autoRefresh)"
-          :title="autoRefresh?.label"
-          :aria-label="autoRefresh?.label"
-          :aria-pressed="autoRefresh?.enabled"
-        >
-          <DataGridAutoRefreshClock :enabled="autoRefresh?.enabled === true" :interval-seconds="autoRefresh?.intervalSeconds" :sweep-key="autoRefresh?.sweepKey" />
-          <span class="data-grid-topbar-action-label" :class="actionLabelClass('autoRefresh')">{{ autoRefresh?.enabled ? `${autoRefresh.intervalSeconds}s` : autoRefresh?.shortLabel }}</span>
-        </Button>
-      </DropdownMenuTrigger>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <DropdownMenuTrigger as-child>
+            <Button
+              variant="ghost"
+              size="sm"
+              data-toolbar-action="autoRefresh"
+              :class="[...actionButtonClass('autoRefresh'), autoRefresh?.enabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground']"
+              :disabled="isDataGridToolbarCapabilityDisabled(autoRefresh)"
+              :aria-label="autoRefresh?.label"
+              :aria-pressed="autoRefresh?.enabled"
+            >
+              <DataGridAutoRefreshClock :enabled="autoRefresh?.enabled === true" :interval-seconds="autoRefresh?.intervalSeconds" :sweep-key="autoRefresh?.sweepKey" />
+              <span class="data-grid-topbar-action-label" :class="actionLabelClass('autoRefresh')">{{ autoRefresh?.enabled ? `${autoRefresh.intervalSeconds}s` : autoRefresh?.shortLabel }}</span>
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{{ autoRefresh?.label ?? autoRefresh?.shortLabel }}</TooltipContent>
+      </Tooltip>
       <DropdownMenuContent align="end" class="w-40">
         <DropdownMenuItem class="gap-2" :disabled="autoRefresh?.disabled" @select="void toggleDataGridToolbarAutoRefresh(autoRefresh)">
           <Check v-if="autoRefresh?.enabled" class="h-3.5 w-3.5" />

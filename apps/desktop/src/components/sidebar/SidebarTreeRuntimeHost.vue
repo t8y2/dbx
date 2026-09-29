@@ -1036,6 +1036,9 @@ async function toggle(requestId = beginNavigationRequest()) {
     } else if (node.type === "user-admin" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openUserAdmin(node.connectionId);
+    } else if (node.type === "xugu-user-admin" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
+      queryStore.openXuguUserAdmin(node.connectionId);
     } else if (node.type === "dameng-users" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openDamengUsers(node.connectionId);
@@ -1841,6 +1844,18 @@ async function openUserAdmin() {
     queryStore.openUserAdmin(node.connectionId);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
+async function openXuguUserPermissions() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openXuguUserAdmin(node.connectionId);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
 }
 
@@ -6057,6 +6072,11 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "user-admin") {
     items.push({ label: t("contextMenu.openUserAdmin"), action: openUserAdmin, icon: UsersRound });
+    return true;
+  }
+
+  if (node.type === "xugu-user-admin") {
+    items.push({ label: t("contextMenu.openXuguUserPermissions"), action: openXuguUserPermissions, icon: ShieldCheck });
     return true;
   }
 

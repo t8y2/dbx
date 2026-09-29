@@ -1052,17 +1052,27 @@ impl DbxMcpServer {
             (owned, hidden)
         };
         if owned.is_empty() {
-            let reason = if hidden > 0 {
-                format!("All {hidden} tool(s) of plugin \"{plugin_id}\" are hidden by the DBX MCP tool allowlist.")
-            } else {
-                format!("Plugin \"{plugin_id}\" does not contribute MCP tools. Use dbx_plugin_list to list plugins.")
-            };
-            return tool_error("PLUGIN_NOT_FOUND", reason);
+            // An all-allowlist-hidden plugin and a nonexistent one answer
+            // identically, so this meta tool cannot fingerprint installed
+            // plugin ids. dbx_plugin_list stays the enumeration surface and
+            // only shows what the caller may see.
+            return tool_error(
+                "PLUGIN_NOT_FOUND",
+                format!(
+                    "Plugin \"{plugin_id}\" does not contribute visible MCP tools. It may not exist, may not contribute tools, or every tool may be hidden by the DBX MCP settings. Use dbx_plugin_list to list visible plugins."
+                ),
+            );
         }
         let allowed = match self.allowed_plugin_connections_for(plugin_id).await {
             Ok(allowed) => allowed,
             Err(error) => return error,
         };
+        if self.scope.enabled() && allowed.is_empty() {
+            return tool_error(
+                "PLUGIN_OUT_OF_SCOPE",
+                format!("Plugin \"{plugin_id}\" has no connection inside the current DBX MCP session scope."),
+            );
+        }
         let mut lines = Vec::new();
         for entry in &owned {
             let mut line = format!(
@@ -3136,6 +3146,46 @@ impl DbxMcpServer {
         }
     }
 
+    /// Scoped-session and read-only enforcement shared by both plugin-tool
+    /// call paths, closing the gap between what the flat `tools/list`
+    /// advertises and what the lazy/meta surface executes:
+    /// - under a read-only execution policy, only tools the plugin declares
+    ///   with `readOnlyHint` may run. The hint is the plugin author's claim,
+    ///   so the host defaults to deny for undeclared tools instead of
+    ///   letting an opaque write bypass the mode;
+    /// - with a scope active, only plugins owning at least one in-scope
+    ///   connection stay callable — a connection-less tool of an
+    ///   out-of-scope plugin must not become a side door.
+    #[allow(clippy::result_large_err)]
+    async fn ensure_plugin_tool_policy(
+        &self,
+        entry: &crate::plugin_tools::PluginToolEntry,
+    ) -> Result<(), CallToolResult> {
+        let policy = self.load_policy().await?;
+        if policy.read_only && !entry.tool.read_only {
+            return Err(tool_error(
+                "MCP_READ_ONLY",
+                format!(
+                    "Plugin tool \"{}\" is not declared read-only, but the DBX MCP execution policy is read-only.",
+                    entry.exposed_name
+                ),
+            ));
+        }
+        if self.scope.enabled() {
+            let allowed = self.allowed_plugin_connections().await?;
+            if !allowed.contains_key(&entry.plugin_id) {
+                return Err(tool_error(
+                    "PLUGIN_OUT_OF_SCOPE",
+                    format!(
+                        "Plugin \"{}\" has no connection inside the current DBX MCP session scope.",
+                        entry.plugin_id
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The advertised `tools/list` view: router-enabled tools narrowed to the
     /// global policy's tool allowlist, plus the automatically exposed plugin
     /// tools (`dbx_<prefix>__<tool>`). When the policy cannot be loaded every
@@ -3387,6 +3437,11 @@ impl DbxMcpServer {
         let Some(entry) = entry else {
             return Ok(tool_error("TOOL_NOT_FOUND", format!("Plugin tool \"{name}\" is not available.")));
         };
+        // Same policy stack as the flat surface: allowlist above, then
+        // read-only mode and session scope before the backend is reached.
+        if let Err(error) = self.ensure_plugin_tool_policy(&entry).await {
+            return Ok(error);
+        }
         let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
         if let Some(object) = arguments.as_object_mut() {
             for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
@@ -3463,6 +3518,13 @@ impl DbxMcpServer {
         let mut rows = Vec::new();
         let mut hidden = 0usize;
         for (plugin_id, (plugin_name, tool_count, any_allowed)) in grouped {
+            // Mirror the flat tools/list scoping: with a scope active,
+            // plugins without an in-scope connection are not enumerable
+            // either. They are hidden by scope (not by the allowlist), so
+            // they stay out of the rows and out of the allowlist note too.
+            if self.scope.enabled() && !allowed.contains_key(&plugin_id) {
+                continue;
+            }
             if any_allowed {
                 let connections = allowed.get(&plugin_id).map_or(0, Vec::len);
                 rows.push((plugin_id, plugin_name, tool_count, connections));
@@ -3508,8 +3570,10 @@ impl DbxMcpServer {
         };
         // Lazy calls are governed by the same per-tool allowlist as the flat
         // surface: gate on the exposed name so an allowlist cannot be bypassed
-        // by addressing a tool through its plugin id instead.
+        // by addressing a tool through its plugin id instead. Read-only mode
+        // and session scope gate the call through the same shared check.
         self.ensure_tool_allowed(&entry.exposed_name).await?;
+        self.ensure_plugin_tool_policy(&entry).await?;
         let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
         if let Some(object) = arguments.as_object_mut() {
             for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
@@ -4073,7 +4137,19 @@ fn policy_allows_connection(
 }
 
 fn policy_allows_tool(policy: &McpGlobalPolicy, tool_name: &str) -> bool {
-    policy.allowed_tool_names.as_ref().is_none_or(|allowed| allowed.iter().any(|name| name == tool_name))
+    let Some(allowed) = policy.allowed_tool_names.as_ref() else { return true };
+    if allowed.iter().any(|name| name == tool_name) {
+        return true;
+    }
+    // Plugin wildcard entries: plugin tool names are discovered from sidecars
+    // at runtime, so a static settings list cannot name them individually —
+    // `dbx_<prefix>__*` exposes every tool of one plugin, `dbx_*__*` every
+    // plugin. Static tools never contain the `__` separator (guarded by
+    // `is_plugin_tool_name`), so a wildcard cannot widen their access.
+    let Some((prefix, _)) = tool_name.strip_prefix("dbx_").and_then(|rest| rest.split_once("__")) else {
+        return false;
+    };
+    allowed.iter().any(|name| name == "dbx_*__*" || name == &format!("dbx_{prefix}__*"))
 }
 
 fn database_scope_for_connection(
@@ -5620,7 +5696,7 @@ mod tests {
         // Unknown plugin id fails with a discovery pointer.
         let unknown = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.nope".into() })).await;
         assert_eq!(unknown.is_error, Some(true));
-        assert!(result_text(&unknown).contains("does not contribute MCP tools"), "{}", result_text(&unknown));
+        assert!(result_text(&unknown).contains("does not contribute visible MCP tools"), "{}", result_text(&unknown));
 
         // dbx_plugin_call routes by plugin id + tool name; selector stripped.
         let call = server
@@ -5714,13 +5790,51 @@ mod tests {
 
         let all_hidden = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.ssh".into() })).await;
         assert_eq!(all_hidden.is_error, Some(true));
-        assert!(result_text(&all_hidden).contains("All 1 tool(s)"), "{}", result_text(&all_hidden));
+        // A fully-hidden plugin and an unknown id answer identically so the
+        // listing cannot fingerprint installed plugin ids.
+        assert!(
+            result_text(&all_hidden).contains("does not contribute visible MCP tools"),
+            "{}",
+            result_text(&all_hidden)
+        );
 
         // A plugin whose every tool is denied resolves to the hidden reason.
         // Unknown plugin ids (never installed) keep the plain not-found text.
         let unknown = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.nope".into() })).await;
         assert_eq!(unknown.is_error, Some(true));
-        assert!(result_text(&unknown).contains("does not contribute MCP tools"), "{}", result_text(&unknown));
+        assert!(result_text(&unknown).contains("does not contribute visible MCP tools"), "{}", result_text(&unknown));
+    }
+
+    #[test]
+    fn plugin_tool_wildcards_match_only_the_plugin_namespace() {
+        let per_plugin =
+            McpGlobalPolicy { allowed_tool_names: Some(vec!["dbx_ssh__*".to_string()]), ..Default::default() };
+        assert!(policy_allows_tool(&per_plugin, "dbx_ssh__sftp_list_dir"));
+        assert!(policy_allows_tool(&per_plugin, "dbx_ssh__sftp_write_file"));
+        assert!(!policy_allows_tool(&per_plugin, "dbx_kafka__kafka_topics_list"));
+        assert!(
+            !policy_allows_tool(&per_plugin, "dbx_execute_query"),
+            "a plugin wildcard must never widen a static tool"
+        );
+
+        let every_plugin = McpGlobalPolicy {
+            allowed_tool_names: Some(vec!["dbx_plugin_list".to_string(), "dbx_*__*".to_string()]),
+            ..Default::default()
+        };
+        assert!(policy_allows_tool(&every_plugin, "dbx_kafka__kafka_topics_delete"));
+        assert!(policy_allows_tool(&every_plugin, "dbx_ssh__sftp_list_dir"));
+        assert!(policy_allows_tool(&every_plugin, "dbx_plugin_list"), "exact entries keep working beside the wildcard");
+        assert!(!policy_allows_tool(&every_plugin, "dbx_execute_query"));
+
+        let explicit = McpGlobalPolicy {
+            allowed_tool_names: Some(vec!["dbx_ssh__sftp_list_dir".to_string()]),
+            ..Default::default()
+        };
+        assert!(policy_allows_tool(&explicit, "dbx_ssh__sftp_list_dir"));
+        assert!(
+            !policy_allows_tool(&explicit, "dbx_ssh__sftp_write_file"),
+            "no wildcard means per-tool gating stays exact"
+        );
     }
 
     #[tokio::test]
@@ -5763,6 +5877,112 @@ mod tests {
             .await;
         assert_eq!(allowed.is_error, Some(false), "{}", result_text(&allowed));
         assert_eq!(restricted.plugin_tool_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_enforce_read_only_policy() {
+        // Under a read-only execution policy only plugin tools declared with
+        // readOnlyHint may run: the hint is the plugin's claim, and the host
+        // defaults to deny so the mode cannot be bypassed through a plugin
+        // tool (kafka_topics_delete is the canonical undeclared write).
+        let backend = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy { read_only: true, ..Default::default() },
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let denied = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_delete".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(denied.is_error, Some(true));
+        assert!(result_text(&denied).contains("MCP_READ_ONLY"), "{}", result_text(&denied));
+        assert!(backend.plugin_tool_calls.lock().unwrap().is_empty(), "the backend must not be reached");
+
+        // The flat dispatch path is gated by the same shared check.
+        let flat_denied =
+            server.call_plugin_tool_dispatch("dbx_kafka__kafka_topics_delete", json!({ "topics": ["t"] })).await;
+        let flat_denied = flat_denied.unwrap();
+        assert_eq!(flat_denied.is_error, Some(true));
+        assert!(result_text(&flat_denied).contains("MCP_READ_ONLY"), "{}", result_text(&flat_denied));
+        assert!(backend.plugin_tool_calls.lock().unwrap().is_empty(), "the backend must not be reached");
+
+        // The declared read-only tool keeps working under the same policy.
+        let read_allowed = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_list".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(read_allowed.is_error, Some(false), "{}", result_text(&read_allowed));
+        assert_eq!(backend.plugin_tool_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn plugin_tools_enforce_session_scope() {
+        // A scoped session must not reach plugins whose connections are all
+        // out of scope — including their connection-less tools, which the
+        // flat view would never advertise and could never bind.
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                plugin_connection("k1", "prod", "io.dbx.kafka"),
+                plugin_connection("s1", "box", "io.dbx.ssh"),
+            ],
+            plugin_providers: vec![
+                plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing()),
+                plugin_provider(
+                    "io.dbx.ssh",
+                    "Terminal",
+                    json!({ "tools": [{ "name": "ssh_ping", "description": "Ping the host" }] }),
+                ),
+            ],
+            ..Default::default()
+        });
+        let scope = McpScope { connection_ids: vec!["k1".into()], ..Default::default() };
+        let server = DbxMcpServer::with_runtime_options(backend, scope, false);
+
+        let denied = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.ssh".into(),
+                tool: "ssh_ping".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(denied.is_error, Some(true));
+        assert!(result_text(&denied).contains("PLUGIN_OUT_OF_SCOPE"), "{}", result_text(&denied));
+
+        // The out-of-scope plugin disappears from every meta listing too: no
+        // row, no tool schema, no hidden-count disclosure to fingerprint it.
+        let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        let list_text = result_text(&list);
+        assert!(!list_text.contains("io.dbx.ssh"), "{list_text}");
+        assert!(list_text.contains("io.dbx.kafka"), "{list_text}");
+
+        let tools = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.ssh".into() })).await;
+        assert_eq!(tools.is_error, Some(true));
+        let tools_text = result_text(&tools);
+        assert!(tools_text.contains("PLUGIN_OUT_OF_SCOPE") || tools_text.contains("session scope"), "{tools_text}");
+        assert!(!tools_text.contains("ssh_ping"), "{tools_text}");
+
+        // The in-scope plugin keeps working.
+        let allowed = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_list".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(allowed.is_error, Some(false), "{}", result_text(&allowed));
     }
 
     #[tokio::test]

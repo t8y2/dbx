@@ -8292,6 +8292,11 @@ export default withEnglishFallback({
     mcpConnectionPolicyAllowSalesforceDmlReadOnlyBlocked: "Esta conexión es de solo lectura, por lo que DML de Salesforce permanece desactivado. Elija primero un modo de ejecución que permita escrituras.",
     mcpToolPermissionsTitle: "Permisos de herramientas MCP",
     mcpToolPermissionsDescription: "Expón solo las herramientas MCP que necesitas. Al desmarcarlas, el servidor rechaza las solicitudes aunque el cliente haya cacheado las definiciones.",
+    mcpToolCustomPlaceholder: "Añade un nombre de herramienta o comodín, p. ej. dbx_ssh__*",
+    mcpToolCustomAdd: "Añadir",
+    mcpToolCustomRemove: "Eliminar entrada",
+    mcpToolCustomHint:
+      "Las herramientas de plugins se descubren en tiempo de ejecución, por lo que no se pueden listar aquí: permite un plugin con dbx_<prefijo>__* o todas las herramientas de plugins con dbx_*__*. Las entradas guardadas fuera de las casillas anteriores se muestran aquí y pueden eliminarse.",
     mcpToolListConnections: "Listar conexiones",
     mcpToolListDatabases: "Listar bases de datos",
     mcpToolListTables: "Listar tablas",
@@ -8435,6 +8440,8 @@ export default withEnglishFallback({
     supportInfoDatabaseTypes: "Tipos de bases de datos",
     supportInfoLocalDriverVersions: "Versiones de controladores locales",
     supportInfoAiProviders: "Proveedores de IA",
+    sidebarSearchOpenedDatabasesOnly: "Buscar solo en bases de datos abiertas",
+    sidebarSearchOpenedDatabasesOnlyDescription: "La búsqueda de la barra lateral solo carga las bases de datos abiertas en la conexión actual (si no hay ninguna abierta, busca en todas). Al desactivarla, se buscará en todas las bases de datos de esa conexión.",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

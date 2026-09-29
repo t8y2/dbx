@@ -957,6 +957,7 @@ export interface EditorSettings {
   sidebarTableSearchEnabled: boolean;
   sidebarTableSearchLocal: boolean;
   sidebarGlobalSearchLocal: boolean;
+  sidebarSearchOpenedDatabasesOnly: boolean;
   autoSelectActiveSidebarNode: boolean;
   sidebarBrowseObjectsOnDatabaseActivation: boolean;
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: number;
@@ -1244,6 +1245,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarTableSearchEnabled: false,
   sidebarTableSearchLocal: true,
   sidebarGlobalSearchLocal: false,
+  sidebarSearchOpenedDatabasesOnly: true,
   autoSelectActiveSidebarNode: false,
   sidebarBrowseObjectsOnDatabaseActivation: false,
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
@@ -1816,6 +1818,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
     sidebarTableSearchLocal: typeof settings.sidebarTableSearchLocal === "boolean" ? settings.sidebarTableSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchLocal,
     sidebarGlobalSearchLocal: typeof settings.sidebarGlobalSearchLocal === "boolean" ? settings.sidebarGlobalSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal,
+    sidebarSearchOpenedDatabasesOnly: typeof settings.sidebarSearchOpenedDatabasesOnly === "boolean" ? settings.sidebarSearchOpenedDatabasesOnly : DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
     sidebarBrowseObjectsOnDatabaseActivation:
       typeof settings.sidebarBrowseObjectsOnDatabaseActivation === "boolean"
@@ -2661,6 +2664,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
     if (partial.sidebarTableSearchLocal !== undefined) editorSettings.value.sidebarTableSearchLocal = partial.sidebarTableSearchLocal;
     if (partial.sidebarGlobalSearchLocal !== undefined) editorSettings.value.sidebarGlobalSearchLocal = partial.sidebarGlobalSearchLocal;
+    if (partial.sidebarSearchOpenedDatabasesOnly !== undefined) editorSettings.value.sidebarSearchOpenedDatabasesOnly = partial.sidebarSearchOpenedDatabasesOnly;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
     if (partial.sidebarBrowseObjectsOnDatabaseActivation !== undefined) editorSettings.value.sidebarBrowseObjectsOnDatabaseActivation = partial.sidebarBrowseObjectsOnDatabaseActivation === true;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);

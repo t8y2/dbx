@@ -2178,6 +2178,12 @@ impl AppState {
                     match result {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
+                            if !keepalive_failure_proves_pool_dead(&err.to_string()) {
+                                log::debug!(
+                                    "Connection keepalive for '{key}' could not check out a connection; keeping the busy pool: {err}"
+                                );
+                                continue;
+                            }
                             log::warn!("Connection keepalive failed for '{key}': {err}; invalidating pool");
                             let replace_runtime =
                                 err.recovery_decision().is_some_and(RecoveryDecision::replaces_runtime);
@@ -5936,6 +5942,18 @@ impl From<String> for KeepaliveError {
     }
 }
 
+/// Whether a failed keepalive probe is evidence that the pool is dead.
+///
+/// A probe that ran out of its checkout budget because every connection is in use reports
+/// pool saturation, which says nothing about the health of the pooled connections. That is
+/// the normal state of a session-scoped pool (a single connection) while a batch import or
+/// transfer holds a long transaction on it. Invalidating the pool there used to abort the
+/// running operation with "Connection not found for transaction" instead of letting it
+/// finish. Every other probe failure keeps the invalidate-and-reconnect behaviour.
+fn keepalive_failure_proves_pool_dead(error: &str) -> bool {
+    !crate::query::is_pool_saturation_error(error)
+}
+
 impl KeepaliveTarget {
     fn matches_pool(&self, pool: &PoolKind) -> bool {
         match (self, pool) {
@@ -6913,8 +6931,8 @@ mod tests {
         connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
         database_connection_config, database_connection_config_with_catalog,
         gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-        kafka_single_loopback_bootstrap_endpoint, metadata_connection_config, metadata_pool_database,
-        mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
+        kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
+        metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
         prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
         redis_sentinel_transport_prefix, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
         sqlserver_uses_legacy_driver, task_client_session_id, transport_layers_through_last_ssh,
@@ -8343,6 +8361,23 @@ mod tests {
         server.abort();
         let _ = tokio::time::timeout(Duration::from_secs(1), pool.disconnect()).await;
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keepalive_probe_keeps_a_busy_pool_but_invalidates_a_dead_one() {
+        // Every connection is checked out: the probe learned nothing about pool health, so the
+        // pool must survive. Invalidating it here aborts whatever holds the connection — a
+        // truncate import reports "Connection not found for transaction" on its next chunk.
+        assert!(!keepalive_failure_proves_pool_dead(
+            "MySQL connection pool checkout timed out [stage=wait, timeout_ms=10000]"
+        ));
+        // A checkout failure while creating a connection is still evidence the pool is dead.
+        assert!(keepalive_failure_proves_pool_dead(
+            "MySQL connection pool checkout failed [stage=create]: connection refused"
+        ));
+        assert!(keepalive_failure_proves_pool_dead(
+            "MySQL connection pool checkout timed out [stage=create, timeout_ms=10000]"
+        ));
     }
 
     #[tokio::test]

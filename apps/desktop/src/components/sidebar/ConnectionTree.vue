@@ -27,6 +27,7 @@ import {
 import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
 import { collectSidebarRegexIndexScopes, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode, shouldRestoreTrackedSidebarSearchTargetsInRegexMode } from "@/lib/sidebar/sidebarRegexSearchIndex";
 import { needsSidebarObjectGroupDiscovery } from "@/lib/sidebar/sidebarSearchDiscovery";
+import { isSidebarSearchPrunedDatabaseNode, resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import { createSidebarSearchExpansionState } from "@/lib/sidebar/sidebarSearchExpansionState";
 import { createSidebarSearchLoadingTracker } from "@/lib/sidebar/sidebarSearchLoadingTracker";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -387,9 +388,16 @@ async function loadSidebarSearchTargets(query: string, preservesNodeSubtree?: (n
   } while (deferredSearchQuery.value === query && store.sidebarSearchQuery === query);
 }
 
-function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearchTask[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false, scheduledNodeIds?: Set<string>) {
+function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearchTask[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false, scheduledNodeIds?: Set<string>, databaseScope?: ReadonlySet<string> | null) {
   const preservesSearchSubtree = ancestorPreservesSearchSubtree || (!!refreshedNodeIds && !!preservesNodeSubtree?.(node));
   if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
+    // 数据库级节点只有被用户真正打开（树已加载或被打开的页签引用，与侧栏
+    // 「打开」高亮同口径）才参与自动搜索；一个都没打开时退回全库搜索。
+    databaseScope = resolveSidebarSearchDatabaseScope(node, {
+      enabled: settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly,
+      isChildrenLoaded: store.isTreeNodeChildrenLoaded,
+      openDatabaseKeys: queryStore.openDatabaseKeys,
+    });
     const connectionIsConnected = store.connectedIds.has(node.connectionId);
     if (connectionIsConnected && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
       const connectionId = node.connectionId;
@@ -400,6 +408,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
     // 断开或连不上的连接直接跳过，后台搜索不会因此弹出凭据输入或写入整段连接错误。
     if (!connectionIsConnected || node.connectionId !== store.activeConnectionId) return;
   }
+  if (refreshedNodeIds && databaseScope && isSidebarSearchPrunedDatabaseNode(node, databaseScope)) return;
   if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {
     if (!scheduledNodeIds || !scheduledNodeIds.has(node.id)) {
       scheduledNodeIds?.add(node.id);
@@ -460,7 +469,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
   }
   if (node.children) {
     for (const child of node.children) {
-      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds, preservesNodeSubtree, preservesSearchSubtree, scheduledNodeIds);
+      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds, preservesNodeSubtree, preservesSearchSubtree, scheduledNodeIds, databaseScope);
     }
   }
 }

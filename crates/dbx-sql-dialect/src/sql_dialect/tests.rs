@@ -1,3 +1,4 @@
+use super::identifiers::quote_gaussdb_jdbc_identifier;
 use super::*;
 use crate::models::connection::DatabaseType;
 
@@ -1693,4 +1694,58 @@ fn oracle_view_later_pages_keep_rownum_pagination() {
 fn normalizes_where_input_with_multibyte_identifier_prefix() {
     assert_eq!(normalize_where_input(Some("`客户名称` = '示例客户'")), "`客户名称` = '示例客户'");
     assert_eq!(normalize_where_input(Some("WHERE `客户名称` = '示例客户';")), "`客户名称` = '示例客户'");
+}
+
+// Grid saves re-quote the table identity carried by the query result. For
+// PostgreSQL-family engines reached through an agent-reported identifier quote,
+// `quote_gaussdb_jdbc_identifier` only leaves all-lower-case identifiers
+// unquoted, so a folded (`mss_check_sales_item`) write resolves while the
+// query's original casing (`term."MSS_CHECK_SALES_ITEM"`) fails with
+// `relation ... does not exist` on a lower-case-stored table (issue #10567).
+// The frontend folds unquoted SQL-text identifiers before they reach this
+// layer; these assertions lock the quoting contract that makes that fix work.
+#[test]
+fn postgres_family_table_data_quoting_resolves_folded_identifiers() {
+    let quote = Some("\"".to_string());
+    assert_eq!(quote_gaussdb_jdbc_identifier("mss_check_sales_item", "\""), "mss_check_sales_item");
+    assert_eq!(quote_gaussdb_jdbc_identifier("MSS_CHECK_SALES_ITEM", "\""), "\"MSS_CHECK_SALES_ITEM\"");
+    assert_eq!(quote_gaussdb_jdbc_identifier("term", "\""), "term");
+
+    assert_eq!(
+        table_data_qualified_table_name(
+            Some(DatabaseType::Postgres),
+            Some("term"),
+            "mss_check_sales_item",
+            quote.as_deref()
+        ),
+        "term.mss_check_sales_item"
+    );
+    assert_eq!(
+        table_data_qualified_table_name(
+            Some(DatabaseType::Postgres),
+            Some("term"),
+            "MSS_CHECK_SALES_ITEM",
+            quote.as_deref()
+        ),
+        "term.\"MSS_CHECK_SALES_ITEM\""
+    );
+    assert_eq!(
+        table_data_qualified_table_name(
+            Some(DatabaseType::Gaussdb),
+            Some("term"),
+            "mss_check_sales_item",
+            quote.as_deref()
+        ),
+        "term.mss_check_sales_item"
+    );
+    // Engines outside the GaussDB/PG identifier-quote path quote both parts.
+    assert_eq!(
+        table_data_qualified_table_name(
+            Some(DatabaseType::Jdbc),
+            Some("term"),
+            "mss_check_sales_item",
+            quote.as_deref()
+        ),
+        "\"term\".\"mss_check_sales_item\""
+    );
 }

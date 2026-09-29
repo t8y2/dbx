@@ -500,6 +500,20 @@ export function getMongoDocumentQueryCompletionContext(text: string, cursor: num
   return { ...classified, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor) };
 }
 
+/**
+ * Drops the `: ` a key completion carries when the text after the replaced range
+ * already starts with the separator, so re-picking the key of an existing
+ * `{ name: 1 }` entry yields `{ other: 1 }` rather than `{ other: : 1 }`.
+ *
+ * Only a plain key completion may fold its separator away. A snippet's colon
+ * introduces the placeholder that follows it (`$gt: ${}`), so it is never the
+ * same colon as one already in the text.
+ */
+export function foldMongoKeySeparator(insert: string, followingText: string): string {
+  if (insert.includes("${") || !insert.endsWith(": ") || !/^\s*:/.test(followingText)) return insert;
+  return insert.slice(0, -2);
+}
+
 /** Text to splice into a plain input for a chosen completion, and where to leave the selection. */
 export interface MongoPlainCompletionInsertion {
   text: string;
@@ -539,10 +553,7 @@ export function plainMongoCompletionInsertion(apply: string, followingText = "")
   }
   text += rest;
 
-  // Only a plain key completion may fold its separator away. A snippet's colon
-  // introduces the placeholder that follows it (`$gt: ${}`), so it is never the
-  // same colon as one already in the text.
-  if (!selection && text.endsWith(": ") && /^\s*:/.test(followingText)) text = text.slice(0, -2);
+  if (!selection) text = foldMongoKeySeparator(text, followingText);
 
   return { text, selectionStart: Math.min(selection?.start ?? text.length, text.length), selectionEnd: Math.min(selection?.end ?? text.length, text.length) };
 }

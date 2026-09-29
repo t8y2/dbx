@@ -26,6 +26,7 @@ import { useI18n } from "vue-i18n";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { createPluginAiCompletion } from "@/lib/plugins/pluginAiCompletion";
 import { OPEN_PLUGIN_AI_CONVERSATION } from "@/lib/ai/aiPluginConversation";
 
 const props = withDefaults(
@@ -50,6 +51,19 @@ const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
 const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
+const aiCompletion = createPluginAiCompletion({
+  load: () => import("@/lib/backend/tauri").then(api => api.loadAiConfigs()),
+  discover: config => import("@/lib/backend/tauri").then(api => api.aiListModels(config)),
+  complete: request => import("@/lib/backend/tauri").then(api => api.aiComplete(request)),
+  confirm: async (pluginName, model) => {
+    const { ask } = await import("@tauri-apps/plugin-dialog");
+    const zh = appLocale.value.startsWith("zh");
+    return ask(zh
+      ? `插件「${pluginName}」将把准备的文本发送给「${model.name} / ${model.model}」，并读取生成结果。是否继续？`
+      : `Plugin "${pluginName}" will send its prepared text to "${model.name} / ${model.model}" and receive the generated result. Continue?`,
+      { title: zh ? "插件 AI 生成" : "Plugin AI generation", kind: "info" });
+  },
+});
 const iframe = ref<HTMLIFrameElement>();
 const source = ref("");
 const loading = ref(true);
@@ -383,6 +397,7 @@ function createBridge() {
       sendBinary: api.sendPluginBinary,
       readAsset: api.readPluginUiAsset,
       openAiConversation,
+      ...(isTauriRuntime() ? aiCompletion : {}),
       setAiRecommendations: (update) => emit("recommendations", update),
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),

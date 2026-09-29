@@ -1801,3 +1801,26 @@ describe("plugin SDK source", () => {
     expect(messages.some((message) => message.type === "workbench/close")).toBe(true);
   });
 });
+
+describe("AI completion bridge", () => {
+  it("gates permission, bounds input, strips metadata and binds plugin identity", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const api = { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), listAiModels: vi.fn().mockResolvedValue([{ configId: "one", name: "AI", model: "a", isDefault: true, apiKey: "secret" }]), generateAiText: vi.fn().mockResolvedValue("fix: example") };
+    let bridge = new PluginHostBridge(plugin([]), workbench, {}, () => target, api);
+    const request = async (method: string, params: unknown = {}) => {
+      const count = messages.length;
+      bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: String(count), method, params } } as MessageEvent);
+      await vi.waitFor(() => expect(messages.length).toBe(count + 1));
+      return messages[count];
+    };
+    expect((await request("host.ai.listModels")).error).toContain("host.ai");
+    expect((await request("host.ai.generateText")).error).toContain("host.ai");
+    bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, api);
+    expect((await request("host.ai.listModels")).result).toEqual([{ configId: "one", name: "AI", model: "a", isDefault: true }]);
+    expect((await request("host.ai.generateText", { configId: "one", model: "a", prompt: "x".repeat(100001) })).error).toContain("Invalid");
+    expect(api.generateAiText).not.toHaveBeenCalled();
+    expect((await request("host.ai.generateText", { pluginName: "forged", configId: "one", model: "a", prompt: "hi" })).result).toBe("fix: example");
+    expect(api.generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
+  });
+});

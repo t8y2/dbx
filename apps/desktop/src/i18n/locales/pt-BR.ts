@@ -3324,6 +3324,9 @@ export default withEnglishFallback({
     attachmentPreview: "Visualizar anexo",
     attachmentUnavailableAfterReload: "O conteúdo fica indisponível após recarregar e não será enviado novamente",
     attachmentUnsupportedDocument: "Este tipo de arquivo ainda não é compatível. Anexe imagens ou arquivos de texto.",
+    selectionChipLabel: "Seleção do editor",
+    selectionChipDetail: "{name} · {count} caracteres",
+    externalTargetUnavailable: "A conexão de origem não está disponível (ela pode ter sido excluída). Escolha uma conexão para esta conversa e envie novamente.",
     tableMentionEmpty: "Nenhuma tabela ou arquivo SQL correspondente",
     tableMentionPlaceholderHint: "Digite {'@'} para adicionar objetos ou arquivos disponíveis como contexto",
     tableMentionTypes: {

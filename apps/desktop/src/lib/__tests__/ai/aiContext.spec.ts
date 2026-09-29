@@ -236,3 +236,32 @@ describe("Plugin AI context", () => {
     expect(apiMock.listForeignKeys).not.toHaveBeenCalled();
   });
 });
+
+// #10058 R8: the selection has to reach the request through the context object
+// the prompt builders already treat as untrusted data — not as an instruction.
+describe("AI selection context", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.listTables.mockResolvedValue([]);
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.listForeignKeys.mockResolvedValue([]);
+  });
+
+  it("passes attached selections through to the context", async () => {
+    const selections = [{ id: "s1", source: "editor" as const, label: "query-1", content: "select 1" }];
+
+    const context = await buildAiContext(queryTab("analytics"), sqliteConnection(), { selections });
+
+    expect(context.selections).toEqual(selections);
+  });
+
+  it("omits the field entirely when nothing was attached", async () => {
+    // Older callers and fixtures compare whole context objects; an always-present
+    // empty array would show up as a diff in every one of them.
+    const context = await buildAiContext(queryTab("analytics"), sqliteConnection());
+
+    expect(context.selections).toBeUndefined();
+    expect("selections" in context).toBe(false);
+  });
+});

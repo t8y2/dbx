@@ -3121,6 +3121,9 @@ export default withEnglishFallback({
     attachmentPreview: "첨부 파일 미리보기",
     attachmentUnavailableAfterReload: "다시 로드한 후에는 콘텐츠를 사용할 수 없으며 다시 전송되지 않습니다",
     attachmentUnsupportedDocument: "이 파일 형식은 아직 지원되지 않습니다. 이미지 또는 텍스트 파일을 첨부하세요.",
+    selectionChipLabel: "편집기 선택 영역",
+    selectionChipDetail: "{name} · {count}자",
+    externalTargetUnavailable: "원본 연결을 확인할 수 없습니다(삭제되었을 수 있음). 이 대화의 연결을 선택한 뒤 다시 보내세요.",
     tableMentionEmpty: "일치하는 테이블이나 SQL 파일이 없습니다",
     tableMentionPlaceholderHint: "{'@'}를 입력하여 사용 가능한 객체나 파일을 컨텍스트에 추가하세요",
     tableMentionTypes: {

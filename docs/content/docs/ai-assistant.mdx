@@ -89,7 +89,7 @@ Increasing the turn limit raises latency, database reads, and model cost. Prefer
 AI context can include:
 
 - Database type, connection name, database, and schema
-- Current or selected editor SQL and the latest error, once the open editor is on the conversation's own connection and database
+- Current editor SQL and the latest error, once the open editor is on the conversation's own connection and database — plus any editor selection you explicitly sent over
 - Tables, columns, indexes, foreign keys, and limited sample rows
 - A bounded preview of the current result
 - Selected prompt templates
@@ -100,6 +100,18 @@ Type `@` in the prompt to search tables and saved SQL files:
 - `@users` prioritizes metadata for `users`
 - `@public.orders` selects a schema-qualified table
 - Multiple tables or SQL files can be selected together
+
+### Send an Editor Selection to AI
+
+Select text in the SQL editor and choose **Send to AI** from the context menu (or its shortcut). The selection appears as a removable chip above the prompt, and the input box stays empty and focused for your own question. The selection travels as **data**, not as an instruction: an `-- ignore previous instructions` comment inside it is never treated as a command.
+
+The conversation target comes from the editor tab the selection was taken in:
+
+- Same connection, database, and schema as the current conversation — the conversation is reused
+- A different namespace — a new conversation is opened and bound to that tab; an existing conversation's binding is never rewritten
+- The tab's connection was deleted — the chat stays unbound and says so, and you pick a connection before sending
+
+A single selection is capped at 12,000 characters; anything beyond that is truncated and the chip is marked as truncated. **Fix with AI** under a query error follows the same rules.
 
 Large schemas are truncated. Explicit mentions are more reliable than asking the model to guess among every object, and they reduce tokens and metadata requests.
 

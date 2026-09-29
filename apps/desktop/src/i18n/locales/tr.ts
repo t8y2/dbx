@@ -3019,6 +3019,9 @@ export default withEnglishFallback({
     attachmentPreview: "Eki önizle",
     attachmentUnavailableAfterReload: "Yeniden yüklemeden sonra içerik kullanılamıyor; yeniden gönderilmeyecek",
     attachmentUnsupportedDocument: "Bu dosya türü henüz desteklenmiyor. Bunun yerine görsel veya metin tabanlı dosyalar ekleyin.",
+    selectionChipLabel: "Düzenleyici seçimi",
+    selectionChipDetail: "{name} · {count} karakter",
+    externalTargetUnavailable: "Kaynak bağlantı kullanılamıyor (silinmiş olabilir). Bu sohbet için bir bağlantı seçip yeniden gönderin.",
     tableMentionEmpty: "Eşleşen tablo veya SQL dosyası yok",
     tableMentionPlaceholderHint: "Kullanılabilir nesneleri veya dosyaları bağlama eklemek için {'@'} yazın",
     tableMentionTypes: {

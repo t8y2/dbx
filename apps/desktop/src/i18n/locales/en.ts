@@ -3411,6 +3411,9 @@ export default {
     attachmentPreview: "Preview attachment",
     attachmentUnavailableAfterReload: "Content unavailable after reload; it will not be sent again",
     attachmentUnsupportedDocument: "This file type is not supported yet. Attach images or text-based files instead.",
+    selectionChipLabel: "Editor selection",
+    selectionChipDetail: "{name} · {count} chars",
+    externalTargetUnavailable: "The source connection is unavailable (it may have been deleted). Pick a connection for this conversation, then send again.",
     tableMentionEmpty: "No matching tables or SQL files",
     tableMentionPlaceholderHint: "Type {'@'} to add available objects or files as context",
     tableMentionTypes: {

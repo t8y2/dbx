@@ -9443,6 +9443,7 @@ mod tests {
                 failed: None,
                 covered_messages: None,
                 source_binding: None,
+                selections_omitted: None,
             }],
             queued_input: None,
             created_at: updated_at.to_string(),
@@ -9759,6 +9760,29 @@ mod tests {
         assert_eq!(source.schema.as_deref(), Some("legacy"));
         let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"assistant","content":"old reply"}"#).unwrap();
         assert!(legacy.source_binding.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // #10058: a turn that carried a context selection keeps only a footprint in
+    // storage — the selection text is session-only. The record must round-trip
+    // that boolean, and a record written before the field existed must load.
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_selection_omitted_footprint() {
+        let path = temp_db_path("ai-conversation-selection-footprint");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        let mut conversation = ai_conversation("selection-conv", "0000");
+        conversation.messages[0].selections_omitted = Some(true);
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].messages[0].selections_omitted, Some(true));
+        // No selection text is stored alongside it, only the flag.
+        assert!(loaded[0].messages[0].mentions.is_none());
+
+        let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"user","content":"old turn"}"#).unwrap();
+        assert!(legacy.selections_omitted.is_none());
 
         let _ = std::fs::remove_file(path);
     }

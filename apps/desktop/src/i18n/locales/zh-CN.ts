@@ -3323,6 +3323,9 @@ export default withEnglishFallback({
     attachmentPreview: "预览附件",
     attachmentUnavailableAfterReload: "重载后内容不可用，不会再次发送",
     attachmentUnsupportedDocument: "暂不支持此文件类型。请附加图片或文本类文件。",
+    selectionChipLabel: "编辑器选区",
+    selectionChipDetail: "{name} · {count} 字符",
+    externalTargetUnavailable: "无法确定来源连接（可能已被删除）。请先为该对话选择连接，再重新发送。",
     tableMentionEmpty: "没有匹配的表或 SQL 文件",
     tableMentionPlaceholderHint: "输入 {'@'} 可添加可用对象或文件作为上下文",
     tableMentionTypes: {

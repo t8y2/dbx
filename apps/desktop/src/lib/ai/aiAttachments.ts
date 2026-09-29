@@ -1,4 +1,4 @@
-import type { AiCsvFileContext, AiTextAttachmentEncoding, AiTextAttachmentResolvedEncoding } from "@/lib/ai/ai";
+import type { AiCsvFileContext, AiSelectionContext, AiSelectionSource, AiTextAttachmentEncoding, AiTextAttachmentResolvedEncoding } from "@/lib/ai/ai";
 
 export const AI_TEXT_ATTACHMENT_MAX_BYTES = 48 * 1024;
 export const AI_TEXT_ATTACHMENT_MAX_CHARS = 12_000;
@@ -7,6 +7,15 @@ export const AI_TEXT_ATTACHMENT_MAX_TOTAL_CHARS = 32_000;
 export const AI_IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
 export const AI_IMAGE_ATTACHMENT_MAX_COUNT = 4;
 export const AI_IMAGE_ATTACHMENT_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
+
+/**
+ * Per-item budget for a context selection (editor SQL today, #10058 R5).
+ *
+ * A selection is user-chosen text of unbounded length — a 500 KB script without
+ * this cap would enter every request whole. It mirrors the single-text-file
+ * budget above rather than the total, because a selection is one item.
+ */
+export const AI_SELECTION_CONTEXT_MAX_CHARS = 12_000;
 
 export const AI_TEXT_ATTACHMENT_EXTENSIONS = new Set(["csv", "md", "markdown", "txt", "text", "json", "yaml", "yml", "xml", "log", "tsv"]);
 export const AI_IMAGE_ATTACHMENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -123,6 +132,23 @@ export function priorAttachmentHistoryNote(hasOmittedAttachments: boolean): stri
   return hasOmittedAttachments ? "[Prior-turn attachment content is not repeated in this request.]" : "";
 }
 
+/**
+ * Model-facing note for a prior turn whose context selection is no longer
+ * available (#10058).
+ *
+ * A selection's content is deliberately session-only — up to 12 000 chars, and
+ * conversation records are cloud-synced — so only a footprint boolean is
+ * persisted (see `AiChatMessage.selectionsOmitted`). After a restart or a
+ * conversation reload there is nothing left to replay, and without this note the
+ * model would see an empty user turn and could re-ask for SQL it was already
+ * given. Separate from the attachment note on purpose: the two describe
+ * different kinds of omission, and reusing one string for both would tell the
+ * model about an attachment that never existed.
+ */
+export function priorSelectionHistoryNote(hasOmittedSelection: boolean): string {
+  return hasOmittedSelection ? "[Prior-turn selection content is not repeated in this request.]" : "";
+}
+
 /** Create an isolated edit draft so cancelling cannot mutate model history. */
 export function cloneTextAttachmentForEdit(attachment: AiCsvFileContext): AiCsvFileContext {
   return { ...attachment };
@@ -152,6 +178,34 @@ export function truncateTextAttachmentContent(content: string, maxChars: number)
   if (truncated.length === content.length) return truncated;
   const lastCodeUnit = truncated.charCodeAt(truncated.length - 1);
   return lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff ? truncated.slice(0, -1) : truncated;
+}
+
+/** Caller-supplied half of a context selection; the id is a UI concern. */
+export interface AiSelectionContextInput {
+  source: AiSelectionSource;
+  label?: string;
+  content: string;
+}
+
+/**
+ * Bound a context selection to its budget and report the truncation on the item
+ * itself, so the composer chip can mark it (R5, "截断对用户可见") and the model
+ * sees the same `(truncated)` suffix attachments use.
+ *
+ * Content is preserved verbatim — leading/trailing whitespace included — for the
+ * same reason attached text data keeps it: a selection is exact SQL, and trimming
+ * it would change what the model is asked to explain.
+ */
+export function createSelectionContext(input: AiSelectionContextInput, id: string): AiSelectionContext {
+  const content = truncateTextAttachmentContent(input.content, AI_SELECTION_CONTEXT_MAX_CHARS);
+  const label = input.label?.trim();
+  return {
+    id,
+    source: input.source,
+    ...(label ? { label } : {}),
+    content,
+    ...(content.length < input.content.length ? { truncated: true } : {}),
+  };
 }
 
 export function textAttachmentBudgetError(existing: readonly AiCsvFileContext[]): AttachmentBudgetError | undefined {

@@ -1317,6 +1317,13 @@ export interface AiChatMessage {
   failed?: boolean;
   /** Target frozen when this assistant turn started, retained for confirmation. */
   sourceBinding?: import("@/lib/ai/aiConversationBinding").AiConversationBinding;
+  /**
+   * Footprint of a turn that carried a context selection (#10058). The selection
+   * text is never persisted (it can be 12 000 chars and records are
+   * cloud-synced), so this boolean is all a reloaded transcript has left to say
+   * the turn was not empty. Absent on records written before the field existed.
+   */
+  selectionsOmitted?: boolean;
 }
 
 export interface AiConversation {

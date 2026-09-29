@@ -3216,6 +3216,9 @@ export default withEnglishFallback({
     attachmentPreview: "Anteprima allegato",
     attachmentUnavailableAfterReload: "Il contenuto non è disponibile dopo il ricaricamento e non verrà inviato di nuovo",
     attachmentUnsupportedDocument: "Questo tipo di file non è ancora supportato. Allega immagini o file di testo.",
+    selectionChipLabel: "Selezione dell'editor",
+    selectionChipDetail: "{name} · {count} caratteri",
+    externalTargetUnavailable: "La connessione di origine non è disponibile (potrebbe essere stata eliminata). Scegli una connessione per questa conversazione e invia di nuovo.",
     tableMentionEmpty: "Nessuna tabella o file SQL corrispondente",
     tableMentionPlaceholderHint: "Digita {'@'} per aggiungere oggetti o file disponibili al contesto",
     tableMentionTypes: {

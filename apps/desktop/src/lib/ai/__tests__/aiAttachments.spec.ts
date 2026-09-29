@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   AI_IMAGE_ATTACHMENT_MAX_TOTAL_BYTES,
+  AI_SELECTION_CONTEXT_MAX_CHARS,
   AI_TEXT_ATTACHMENT_MAX_BYTES,
   AI_TEXT_ATTACHMENT_MAX_CHARS,
   AI_TEXT_ATTACHMENT_MAX_COUNT,
   AI_TEXT_ATTACHMENT_MAX_TOTAL_CHARS,
   buildAiModelInstruction,
   cloneTextAttachmentForEdit,
+  createSelectionContext,
   decodeTextAttachmentBytes,
   formatAttachmentBytes,
   imageAttachmentBudgetError,
@@ -14,6 +16,7 @@ import {
   imageProviderSupportsAttachments,
   physicalDropPositionInsideRect,
   priorAttachmentHistoryNote,
+  priorSelectionHistoryNote,
   readTextAttachmentPrefix,
   remainingTextAttachmentChars,
   resolveTextAttachmentEncoding,
@@ -139,5 +142,54 @@ describe("AI attachment policy", () => {
     expect(formatAttachmentBytes(512)).toBe("512 B");
     expect(formatAttachmentBytes(2048)).toBe("2 KB");
     expect(formatAttachmentBytes(2 * 1024 * 1024)).toBe("2.0 MB");
+  });
+});
+
+// #10058 R5/R7: an editor selection is the same kind of payload as an attached
+// text file, so it gets the same per-item budget and the same visible marker —
+// without it a 500 KB script would enter every request whole.
+describe("AI selection context budget", () => {
+  it("keeps a selection that fits, verbatim", () => {
+    const content = " select 1;\n-- trailing comment ";
+    const selection = createSelectionContext({ source: "editor", label: "query-1", content }, "s1");
+
+    expect(selection).toEqual({ id: "s1", source: "editor", label: "query-1", content });
+  });
+
+  it("truncates past the budget and reports it on the item", () => {
+    const selection = createSelectionContext({ source: "editor", content: "x".repeat(AI_SELECTION_CONTEXT_MAX_CHARS + 500) }, "s1");
+
+    expect(selection.content).toHaveLength(AI_SELECTION_CONTEXT_MAX_CHARS);
+    expect(selection.truncated).toBe(true);
+    // No label supplied: the UI falls back to its own copy, so the field stays absent.
+    expect(selection.label).toBeUndefined();
+  });
+
+  it("does not split a surrogate pair at the budget boundary", () => {
+    const source = "x".repeat(AI_SELECTION_CONTEXT_MAX_CHARS - 1) + "😀tail";
+    const selection = createSelectionContext({ source: "editor", content: source }, "s1");
+
+    expect(selection.content).toBe("x".repeat(AI_SELECTION_CONTEXT_MAX_CHARS - 1));
+    expect(selection.truncated).toBe(true);
+  });
+
+  it("drops a blank label instead of rendering an empty chip", () => {
+    expect(createSelectionContext({ source: "terminal", label: "   ", content: "ls" }, "s1").label).toBeUndefined();
+  });
+});
+
+// #10058 follow-up: only a footprint of a sent selection is persisted, so a
+// reloaded turn must tell the model the content is gone. The note is a sibling of
+// the attachment note, never a reuse of it — the two report different omissions.
+describe("prior-turn omission notes", () => {
+  it("reports an omitted selection with its own wording", () => {
+    expect(priorSelectionHistoryNote(true)).toBe("[Prior-turn selection content is not repeated in this request.]");
+    expect(priorSelectionHistoryNote(false)).toBe("");
+  });
+
+  it("keeps the attachment note byte-identical", () => {
+    expect(priorAttachmentHistoryNote(true)).toBe("[Prior-turn attachment content is not repeated in this request.]");
+    expect(priorSelectionHistoryNote(true)).not.toBe(priorAttachmentHistoryNote(true));
+    expect(priorAttachmentHistoryNote(true)).not.toContain("selection");
   });
 });

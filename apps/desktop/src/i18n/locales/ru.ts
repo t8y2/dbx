@@ -3266,6 +3266,9 @@ export default withEnglishFallback({
     attachmentPreview: "Предпросмотр вложения",
     attachmentUnavailableAfterReload: "Содержимое недоступно после перезагрузки; повторно оно не будет отправлено",
     attachmentUnsupportedDocument: "Этот тип файлов пока не поддерживается. Прикрепите изображения или текстовые файлы.",
+    selectionChipLabel: "Выделение в редакторе",
+    selectionChipDetail: "{name} · {count} символов",
+    externalTargetUnavailable: "Исходное подключение недоступно (возможно, оно удалено). Выберите подключение для этого диалога и отправьте снова.",
     tableMentionEmpty: "Подходящих таблиц или SQL-файлов нет",
     tableMentionPlaceholderHint: "Введите {'@'}, чтобы добавить доступные объекты или файлы в контекст",
     tableMentionTypes: {

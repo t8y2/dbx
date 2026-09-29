@@ -3043,6 +3043,9 @@ export default withEnglishFallback({
     attachmentPreview: "Qoşmaya önbaxış",
     attachmentUnavailableAfterReload: "Yenidən yükləmədən sonra məzmun əlçatan deyil; təkrar göndərilməyəcək",
     attachmentUnsupportedDocument: "Bu fayl növü hələ dəstəklənmir. Əvəzində şəkillər və ya mətn əsaslı fayllar əlavə edin.",
+    selectionChipLabel: "Redaktor seçimi",
+    selectionChipDetail: "{name} · {count} simvol",
+    externalTargetUnavailable: "Mənbə bağlantısı əlçatan deyil (silinmiş ola bilər). Bu söhbət üçün bağlantı seçib yenidən göndərin.",
     tableMentionEmpty: "Uyğun cədvəl və ya SQL faylı yoxdur",
     tableMentionPlaceholderHint: "Mövcud obyektləri və ya faylları kontekstə əlavə etmək üçün {'@'} yazın",
     tableMentionTypes: {

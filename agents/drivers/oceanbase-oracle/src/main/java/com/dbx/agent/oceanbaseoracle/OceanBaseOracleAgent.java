@@ -27,6 +27,8 @@ import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.OracleObjectPrivilege;
 import com.dbx.agent.PartitionInfo;
+import com.dbx.agent.PlDebugBreakpoint;
+import com.dbx.agent.PlDebugStartRequest;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
@@ -52,6 +54,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 
@@ -72,6 +77,14 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private boolean queryTimeoutChanged;
     private final OceanBaseLobValues lobValues = new OceanBaseLobValues();
     private boolean deferCharacterLobs;
+    /** Active PL/SQL debug sessions keyed by the DBMS_DEBUG debug id. */
+    private final Map<String, PlDebugSession> plDebugSessions = new ConcurrentHashMap<>();
+    /** Runs debuggee programs; debugging a stored program blocks that thread by design. */
+    private final ExecutorService plDebugExecutor = Executors.newCachedThreadPool(runnable -> {
+        Thread thread = new Thread(runnable, "dbx-pl-debug-debuggee");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
@@ -2078,6 +2091,265 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             case "RAW" -> dataLen == null ? "RAW" : "RAW(" + dataLen + ")";
             default -> base;
         };
+    }
+
+    // ------------------------------------------------------------------
+    // PL/SQL debugging (DBMS_DEBUG based).
+    // ------------------------------------------------------------------
+
+    @Override
+    public Map<String, Object> plDebugProbe() {
+        return unchecked(() -> {
+            Map<String, Object> result = new LinkedHashMap<>();
+            List<String> debugProcedures = probePackageProcedures("DBMS_DEBUG");
+            boolean dbmsOutput = !probePackageProcedures("DBMS_OUTPUT").isEmpty();
+            // Subroutines the debug flow cannot degrade without. Anything else
+            // (delete/show breakpoints, backtrace, runtime info) falls back to
+            // client-side bookkeeping when the server implementation lacks it.
+            List<String> required = List.of(
+                "INITIALIZE",
+                "ATTACH_SESSION",
+                "DEBUG_ON",
+                "DEBUG_OFF",
+                "SET_TIMEOUT_BEHAVIOUR",
+                "SET_BREAKPOINT",
+                "CONTINUE",
+                "GET_VALUES"
+            );
+            List<String> missing = required
+                .stream()
+                .filter(name -> debugProcedures.stream().noneMatch(procedure -> procedure.equalsIgnoreCase(name)))
+                .collect(java.util.stream.Collectors.toList());
+            boolean supported = missing.isEmpty() && dbmsOutput;
+            // Dictionary visibility does not imply EXECUTE: the package owner is
+            // the internal `oceanbase` user and INNER_INITIALIZE rejects plain
+            // business users with -5036 "Access denied". PING has no side
+            // effects, so it doubles as the execution-level privilege probe.
+            if (supported) {
+                boolean executable = debugProbeCall("CALL DBMS_DEBUG.PING()");
+                supported = executable;
+                result.put("executable", executable);
+                if (!executable) {
+                    result.put(
+                        "reason",
+                        "DBMS_DEBUG is visible but the current user cannot execute it "
+                            + "(ORA-00600 -5036 Access denied). Ask the tenant administrator to run: "
+                            + "GRANT EXECUTE ON oceanbase.DBMS_DEBUG TO <user>;"
+                    );
+                }
+            }
+            result.put("supported", supported);
+            result.put("dbmsDebug", !debugProcedures.isEmpty());
+            result.put("dbmsOutput", dbmsOutput);
+            result.put("procedures", debugProcedures);
+            if (!dbmsOutput) {
+                result.put(
+                    "reason",
+                    "DBMS_OUTPUT is not visible to this user; grant EXECUTE ON DBMS_OUTPUT TO <user> and retry."
+                );
+            } else if (!missing.isEmpty()) {
+                result.put(
+                    "reason",
+                    "DBMS_DEBUG is missing required subroutines: " + String.join(", ", missing)
+                        + "; the OceanBase version behind this connection does not support PL debugging."
+                );
+            }
+            return result;
+        });
+    }
+
+    @Override
+    public Map<String, Object> plDebugStart(PlDebugStartRequest request) {
+        return unchecked(() -> {
+            reapExpiredPlDebugSessions();
+            Connection debuggee = openDetachedConnection();
+            Connection debugger;
+            try {
+                debugger = openDetachedConnection();
+            } catch (Exception error) {
+                closeQuietly(debuggee);
+                throw error;
+            }
+            try {
+                PlDebugSession session = PlDebugSession.start(
+                    debuggee,
+                    debugger,
+                    request,
+                    plDebugExecutor,
+                    PlDebugSession.DEFAULT_TIMEOUT_MILLIS
+                );
+                plDebugSessions.put(session.debugId(), session);
+                return session.snapshot();
+            } catch (Exception error) {
+                closeQuietly(debuggee);
+                closeQuietly(debugger);
+                throw error;
+            }
+        });
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetBreakpoints(String debugId, List<PlDebugBreakpoint> breakpoints) {
+        return unchecked(() -> plDebugSession(debugId).setBreakpoints(breakpoints));
+    }
+
+    @Override
+    public Map<String, Object> plDebugDeleteBreakpoints(String debugId, List<PlDebugBreakpoint> breakpoints) {
+        return unchecked(() -> plDebugSession(debugId).deleteBreakpoints(breakpoints));
+    }
+
+    @Override
+    public List<PlDebugBreakpoint> plDebugListBreakpoints(String debugId) {
+        return plDebugSession(debugId).listBreakpoints();
+    }
+
+    @Override
+    public Map<String, Object> plDebugResume(String debugId) {
+        return unchecked(() -> plDebugSession(debugId).resume());
+    }
+
+    @Override
+    public Map<String, Object> plDebugStepOver(String debugId) {
+        return unchecked(() -> plDebugSession(debugId).stepOver());
+    }
+
+    @Override
+    public Map<String, Object> plDebugStepIn(String debugId) {
+        return unchecked(() -> plDebugSession(debugId).stepIn());
+    }
+
+    @Override
+    public Map<String, Object> plDebugStepOut(String debugId) {
+        return unchecked(() -> plDebugSession(debugId).stepOut());
+    }
+
+    @Override
+    public Map<String, Object> plDebugAbort(String debugId) {
+        return unchecked(() -> plDebugSession(debugId).abort());
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetVariables(String debugId) {
+        return unchecked(() -> plDebugSession(debugId).variables());
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetStack(String debugId) {
+        return unchecked(() -> plDebugSession(debugId).stack());
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetLog(String debugId) {
+        return unchecked(() -> plDebugSession(debugId).log());
+    }
+
+    @Override
+    public boolean plDebugClose(String debugId) {
+        PlDebugSession session = plDebugSessions.remove(debugId);
+        if (session != null) {
+            session.close();
+        }
+        return true;
+    }
+
+    @Override
+    protected void afterDisconnect() {
+        for (PlDebugSession session : plDebugSessions.values()) {
+            session.close();
+        }
+        plDebugSessions.clear();
+    }
+
+    private PlDebugSession plDebugSession(String debugId) {
+        PlDebugSession session = debugId == null ? null : plDebugSessions.get(debugId);
+        if (session == null) {
+            throw new IllegalStateException("PL debug session not found: " + debugId);
+        }
+        return session;
+    }
+
+    /**
+     * Closes sessions whose debuggee has been parked past the debug timeout, so
+     * an abandoned debugger cannot pin OceanBase sessions forever.
+     */
+    private void reapExpiredPlDebugSessions() {
+        for (Map.Entry<String, PlDebugSession> entry : plDebugSessions.entrySet()) {
+            PlDebugSession session = entry.getValue();
+            if (session.isExpired() && plDebugSessions.remove(entry.getKey(), session)) {
+                session.close();
+            }
+        }
+    }
+
+    /** Executes a no-side-effect probe statement; failures mean no EXECUTE right. */
+    private boolean debugProbeCall(String sql) {
+        try (java.sql.Statement statement = requireConnection().createStatement()) {
+            statement.execute(sql);
+            return true;
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    /**
+     * Lists the visible subroutines of a system package. {@code ALL_PROCEDURES}
+     * only exposes packages the current user may execute (or owns), so an empty
+     * list doubles as a privilege check without calling any package routine.
+     * OceanBase's {@code DBMS_DEBUG} is an undocumented compatibility package
+     * (absent from the public manual), which is exactly why probing the
+     * dictionary beats calling a specific subroutine such as {@code PING}:
+     * nothing here depends on a routine existing.
+     *
+     * <p>When the dictionary view has no rows for an existing package the
+     * method falls back to a plain existence probe; the caller then reports
+     * the per-routine verdict it can defend.
+     */
+    private List<String> probePackageProcedures(String packageName) {
+        try (
+            PreparedStatement statement = requireConnection().prepareStatement(
+                "SELECT DISTINCT PROCEDURE_NAME FROM ALL_PROCEDURES "
+                    + "WHERE OBJECT_NAME = ? AND PROCEDURE_NAME IS NOT NULL ORDER BY PROCEDURE_NAME"
+            )
+        ) {
+            statement.setString(1, packageName);
+            try (ResultSet rows = statement.executeQuery()) {
+                List<String> procedures = new ArrayList<>();
+                while (rows.next()) {
+                    String name = rows.getString(1);
+                    if (name != null && !name.trim().isEmpty()) {
+                        procedures.add(name.trim());
+                    }
+                }
+                if (!procedures.isEmpty()) {
+                    return procedures;
+                }
+            }
+        } catch (Exception ignored) {
+            // Fall through to the existence probe below.
+        }
+        try (
+            PreparedStatement statement = requireConnection().prepareStatement(
+                "SELECT COUNT(*) FROM ALL_OBJECTS WHERE OBJECT_NAME = ?"
+            )
+        ) {
+            statement.setString(1, packageName);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (rows.next() && rows.getInt(1) > 0) {
+                    // Existence-only signal: the caller's required-subroutine
+                    // check stays fail-closed and reports what it could not see.
+                    return Collections.singletonList(packageName);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return Collections.emptyList();
+    }
+
+    private static void closeQuietly(Connection connection) {
+        try {
+            connection.close();
+        } catch (Exception ignored) {
+        }
     }
 
     private static Integer intOrNull(ResultSet rs, String column) throws SQLException {

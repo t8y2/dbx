@@ -574,6 +574,8 @@ type server struct {
 	activeRows             map[*sql.Rows]context.CancelFunc
 	activeTimer            *time.Timer
 	activeTimedOut         bool
+	plDebugSessions        map[string]*plDebugSession
+	plDebugMu              sync.Mutex
 }
 
 type agentSession struct {
@@ -999,6 +1001,47 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return map[string]bool{"ok": true}, false, s.commitManualTransaction()
 	case "rollback_manual_transaction":
 		return map[string]bool{"ok": true}, false, s.rollbackManualTransaction()
+	case "pl_debug_probe":
+		return s.plDebugProbe(), false, nil
+	case "pl_debug_start":
+		result, err := s.plDebugStart(params)
+		return result, false, err
+	case "pl_debug_set_breakpoints":
+		result, err := s.plDebugSetBreakpoints(stringParam(params, "debugId"), params)
+		return result, false, err
+	case "pl_debug_delete_breakpoints":
+		result, err := s.plDebugDeleteBreakpoints(stringParam(params, "debugId"), params)
+		return result, false, err
+	case "pl_debug_list_breakpoints":
+		result, err := s.plDebugListBreakpoints(stringParam(params, "debugId"))
+		return result, false, err
+	case "pl_debug_resume":
+		result, err := s.plDebugResume(stringParam(params, "debugId"))
+		return result, false, err
+	case "pl_debug_step_over":
+		result, err := s.plDebugStepOver(stringParam(params, "debugId"))
+		return result, false, err
+	case "pl_debug_step_in":
+		result, err := s.plDebugStepIn(stringParam(params, "debugId"))
+		return result, false, err
+	case "pl_debug_step_out":
+		result, err := s.plDebugStepOut(stringParam(params, "debugId"))
+		return result, false, err
+	case "pl_debug_abort":
+		result, err := s.plDebugAbort(stringParam(params, "debugId"))
+		return result, false, err
+	case "pl_debug_get_variables":
+		result, err := s.plDebugGetVariables(stringParam(params, "debugId"))
+		return result, false, err
+	case "pl_debug_get_stack":
+		result, err := s.plDebugGetStack(stringParam(params, "debugId"))
+		return result, false, err
+	case "pl_debug_get_log":
+		result, err := s.plDebugGetLog(stringParam(params, "debugId"))
+		return result, false, err
+	case "pl_debug_close":
+		result, err := s.plDebugClose(stringParam(params, "debugId"))
+		return result, false, err
 	case "disconnect":
 		return map[string]bool{"ok": true}, false, s.disconnect()
 	case "shutdown":
@@ -1019,6 +1062,7 @@ func (s *server) connect(params connectParams) error {
 	s.db = db
 	s.params = params
 	s.legacyLOBFetchDeferred = shouldUseLegacyOracleLOBFetch(params, majorVersion, versionKnown)
+	s.plDebugSessions = map[string]*plDebugSession{}
 	return nil
 }
 
@@ -3891,6 +3935,210 @@ func restoreOracleCurrentSchema(conn *sql.Conn, schema string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, _ = conn.ExecContext(ctx, "ALTER SESSION SET CURRENT_SCHEMA = "+quoteIdentifier(schema))
+}
+
+// ---------------------------------------------------------------------------
+// PL/SQL debugging (DBMS_DEBUG based, Oracle mode only).
+// ---------------------------------------------------------------------------
+
+// plDebugProbe lists the visible DBMS_DEBUG / DBMS_OUTPUT subroutines through
+// the dictionary; an empty DBMS_DEBUG list means the package is not visible
+// to this user and debugging is unavailable.
+func (s *server) plDebugProbe() map[string]interface{} {
+	response := map[string]interface{}{}
+	debugProcedures := s.plDebugPackageProcedures("DBMS_DEBUG")
+	outputProcedures := s.plDebugPackageProcedures("DBMS_OUTPUT")
+	response["dbmsDebug"] = len(debugProcedures) > 0
+	response["dbmsOutput"] = len(outputProcedures) > 0
+	response["procedures"] = debugProcedures
+	required := []string{
+		"INITIALIZE", "ATTACH_SESSION", "DEBUG_ON", "DEBUG_OFF",
+		"SET_TIMEOUT_BEHAVIOUR", "SET_BREAKPOINT", "CONTINUE", "GET_VALUES",
+	}
+	missing := []string{}
+	seen := map[string]bool{}
+	for _, name := range debugProcedures {
+		seen[name] = true
+	}
+	for _, name := range required {
+		if !seen[name] {
+			missing = append(missing, name)
+		}
+	}
+	supported := len(missing) == 0 && len(outputProcedures) > 0
+	response["supported"] = supported
+	if len(outputProcedures) == 0 {
+		response["reason"] = "DBMS_OUTPUT is not visible to this user; grant EXECUTE ON DBMS_OUTPUT and retry."
+	} else if len(missing) > 0 {
+		response["reason"] = "DBMS_DEBUG is missing required subroutines: " + strings.Join(missing, ", ")
+	}
+	return response
+}
+
+func (s *server) plDebugPackageProcedures(packageName string) []string {
+	procedures := []string{}
+	if s.db == nil {
+		return procedures
+	}
+	rows, err := s.db.Query(
+		"SELECT DISTINCT PROCEDURE_NAME FROM ALL_PROCEDURES WHERE OBJECT_NAME = :1 AND PROCEDURE_NAME IS NOT NULL ORDER BY PROCEDURE_NAME",
+		packageName,
+	)
+	if err != nil {
+		return procedures
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil && strings.TrimSpace(name) != "" {
+			procedures = append(procedures, strings.TrimSpace(name))
+		}
+	}
+	return procedures
+}
+
+// plDebugStart opens the two dedicated sessions and launches the target.
+func (s *server) plDebugStart(params map[string]json.RawMessage) (map[string]interface{}, error) {
+	s.plDebugMu.Lock()
+	for debugID, session := range s.plDebugSessions {
+		if session.expired() {
+			delete(s.plDebugSessions, debugID)
+			_ = session.Close()
+		}
+	}
+	s.plDebugMu.Unlock()
+
+	request := map[string]interface{}{}
+	for key, raw := range params {
+		var value interface{}
+		if err := json.Unmarshal(raw, &value); err == nil {
+			request[key] = value
+		}
+	}
+	debuggee, err := plDebugOpenConfigured(s)
+	if err != nil {
+		return nil, err
+	}
+	debugger, err := plDebugOpenConfigured(s)
+	if err != nil {
+		_ = debuggee.Close()
+		return nil, err
+	}
+	session, err := plDebugStart(s, debuggee, debugger, request)
+	if err != nil {
+		_ = debuggee.Close()
+		_ = debugger.Close()
+		return nil, err
+	}
+	s.plDebugMu.Lock()
+	s.plDebugSessions[session.debugID] = session
+	s.plDebugMu.Unlock()
+	return session.snapshot(""), nil
+}
+
+func (s *server) plDebugSetBreakpoints(debugID string, params map[string]json.RawMessage) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	var requested []plDebugBreakpoint
+	if raw, ok := params["breakpoints"]; ok {
+		if err := json.Unmarshal(raw, &requested); err != nil {
+			return nil, err
+		}
+	}
+	return session.setBreakpoints(requested)
+}
+
+func (s *server) plDebugDeleteBreakpoints(debugID string, params map[string]json.RawMessage) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	var requested []plDebugBreakpoint
+	if raw, ok := params["breakpoints"]; ok {
+		if err := json.Unmarshal(raw, &requested); err != nil {
+			return nil, err
+		}
+	}
+	return session.deleteBreakpoints(requested)
+}
+
+func (s *server) plDebugListBreakpoints(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.listBreakpoints(), nil
+}
+
+func (s *server) plDebugResume(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.resume()
+}
+
+func (s *server) plDebugStepOver(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.stepOver()
+}
+
+func (s *server) plDebugStepIn(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.stepIn()
+}
+
+func (s *server) plDebugStepOut(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.stepOut()
+}
+
+func (s *server) plDebugAbort(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.abort()
+}
+
+func (s *server) plDebugGetVariables(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.variables()
+}
+
+func (s *server) plDebugGetStack(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.stack()
+}
+
+func (s *server) plDebugGetLog(debugID string) (interface{}, error) {
+	session, err := s.plDebugSession(debugID)
+	if err != nil {
+		return nil, err
+	}
+	return session.log()
+}
+
+func (s *server) plDebugClose(debugID string) (interface{}, error) {
+	s.closePlDebugSession(debugID)
+	return map[string]bool{"ok": true}, nil
 }
 
 func (s *server) executeTransaction(params map[string]json.RawMessage) (queryResult, error) {

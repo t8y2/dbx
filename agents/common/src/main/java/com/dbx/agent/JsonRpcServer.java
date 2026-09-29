@@ -398,6 +398,52 @@ public final class JsonRpcServer {
             }
             return agent.executeBatch(statements, stringOrNull(params, "schema"));
         }
+        if (AgentProtocol.METHOD_PL_DEBUG_PROBE.equals(method)) {
+            return agent.plDebugProbe();
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_START.equals(method)) {
+            return agent.plDebugStart(gson.fromJson(params, PlDebugStartRequest.class));
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_SET_BREAKPOINTS.equals(method)) {
+            Type breakpointsType = new TypeToken<List<PlDebugBreakpoint>>() {}.getType();
+            List<PlDebugBreakpoint> breakpoints = gson.fromJson(params.get("breakpoints"), breakpointsType);
+            return agent.plDebugSetBreakpoints(params.get("debugId").getAsString(), breakpoints);
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_DELETE_BREAKPOINTS.equals(method)) {
+            Type breakpointsType = new TypeToken<List<PlDebugBreakpoint>>() {}.getType();
+            List<PlDebugBreakpoint> breakpoints = gson.fromJson(params.get("breakpoints"), breakpointsType);
+            return agent.plDebugDeleteBreakpoints(params.get("debugId").getAsString(), breakpoints);
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_LIST_BREAKPOINTS.equals(method)) {
+            return agent.plDebugListBreakpoints(params.get("debugId").getAsString());
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_RESUME.equals(method)) {
+            return agent.plDebugResume(params.get("debugId").getAsString());
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_STEP_OVER.equals(method)) {
+            return agent.plDebugStepOver(params.get("debugId").getAsString());
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_STEP_IN.equals(method)) {
+            return agent.plDebugStepIn(params.get("debugId").getAsString());
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_STEP_OUT.equals(method)) {
+            return agent.plDebugStepOut(params.get("debugId").getAsString());
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_ABORT.equals(method)) {
+            return agent.plDebugAbort(params.get("debugId").getAsString());
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_GET_VARIABLES.equals(method)) {
+            return agent.plDebugGetVariables(params.get("debugId").getAsString());
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_GET_STACK.equals(method)) {
+            return agent.plDebugGetStack(params.get("debugId").getAsString());
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_GET_LOG.equals(method)) {
+            return agent.plDebugGetLog(params.get("debugId").getAsString());
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_CLOSE.equals(method)) {
+            return agent.plDebugClose(params.get("debugId").getAsString());
+        }
         if (AgentProtocol.METHOD_DISCONNECT.equals(method)) {
             jdbcExecutor.closeAllQuerySessions();
             jdbcExecutor.closeAllTableReadSessions();

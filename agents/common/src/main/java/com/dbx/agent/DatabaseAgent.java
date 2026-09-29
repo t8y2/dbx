@@ -349,6 +349,68 @@ public interface DatabaseAgent {
         return "";
     }
 
+    // ------------------------------------------------------------------
+    // PL/SQL debugging (OceanBase Oracle mode). Served by the oceanbase-oracle
+    // agent; every other agent keeps the unsupported default. Each session is
+    // identified by the DBMS_DEBUG debug id returned from plDebugStart.
+    // ------------------------------------------------------------------
+
+    default Map<String, Object> plDebugProbe() {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugStart(PlDebugStartRequest request) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugSetBreakpoints(String debugId, List<PlDebugBreakpoint> breakpoints) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugDeleteBreakpoints(String debugId, List<PlDebugBreakpoint> breakpoints) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default List<PlDebugBreakpoint> plDebugListBreakpoints(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugResume(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugStepOver(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugStepIn(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugStepOut(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugAbort(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugGetVariables(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugGetStack(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default Map<String, Object> plDebugGetLog(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
+    default boolean plDebugClose(String debugId) {
+        throw new UnsupportedOperationException("PL/SQL debugging is not supported");
+    }
+
     static String buildTableDdl(
         String schema,
         String table,

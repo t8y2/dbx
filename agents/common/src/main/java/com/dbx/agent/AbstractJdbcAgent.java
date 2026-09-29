@@ -692,6 +692,25 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         }
     }
 
+    /**
+     * Opens a dedicated, non-pooled connection using the parameters of the
+     * active connection. Debug sessions need their own pair of connections
+     * (debuggee + debugger) that must not be shared with the request pool nor
+     * with regular queries: {@code DBMS_DEBUG} binds state to the physical
+     * session, and a pooled connection would leak that state into unrelated
+     * requests.
+     */
+    protected final Connection openDetachedConnection() throws Exception {
+        ConnectParams params;
+        synchronized (this) {
+            params = connectParams;
+        }
+        if (params == null) {
+            throw new IllegalStateException("Not connected");
+        }
+        return openInitializedConnection(params);
+    }
+
     private JdbcConnectionPoolRegistry.Lease borrowPooledConnection() throws Exception {
         ConnectParams params = connectParams;
         if (params == null || poolIdentity == null || poolRegistry == null) {

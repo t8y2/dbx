@@ -259,6 +259,16 @@ describe("AiAssistant mount", () => {
     expect(modelTrigger?.getAttribute("title")).toBe("deepseek-chat");
   });
 
+  // The compact classes settle through requestAnimationFrame plus async measurement,
+  // so a fixed sleep races on loaded CI runners; poll until the state holds.
+  async function waitForCompactState(settled: () => boolean, timeoutMs = 2000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!settled()) {
+      if (Date.now() > deadline) throw new Error("composer compact state did not settle in time");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   it("progressively compacts and expands composer controls while the AI panel is dragged", async () => {
     let resizeObserverCallback: ResizeObserverCallback | undefined;
     let resizeObserver: ResizeObserver | undefined;
@@ -313,7 +323,7 @@ describe("AiAssistant mount", () => {
 
     beginPanelResize();
     resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCompactState(() => contextRow.classList.contains("ai-prompt-context-row--compact") && actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
 
     expect(contextRow.classList.contains("ai-prompt-context-row--compact")).toBe(true);
     expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(true);
@@ -323,7 +333,7 @@ describe("AiAssistant mount", () => {
     actionClientWidth = 220;
     actionModelCompactScrollWidth = 250;
     resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCompactState(() => actionRow.classList.contains("ai-prompt-action-row--model-compact") && actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
     expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(true);
     expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(true);
 
@@ -331,7 +341,7 @@ describe("AiAssistant mount", () => {
     actionClientWidth = 280;
     actionModelCompactScrollWidth = 280;
     resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCompactState(() => actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
     expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(true);
     expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(false);
 
@@ -342,7 +352,7 @@ describe("AiAssistant mount", () => {
     actionFullScrollWidth = 400;
     actionModelCompactScrollWidth = 400;
     resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCompactState(() => !contextRow.classList.contains("ai-prompt-context-row--compact") && !actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
     expect(contextRow.classList.contains("ai-prompt-context-row--compact")).toBe(false);
     expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(false);
     expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(false);

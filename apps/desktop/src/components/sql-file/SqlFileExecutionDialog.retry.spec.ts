@@ -23,13 +23,20 @@ const mocks = vi.hoisted(() => ({
   inspectSqlFileTables: vi.fn(),
   progressHandler: undefined as undefined | ((progress: Record<string, unknown>) => void),
   changeDialogOpen: undefined as undefined | ((open: boolean) => void),
+  connections: [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }] as Array<{ id: string; name: string; db_type: string; driver_profile: string; database: string }>,
+  getConfig: vi.fn(),
   refreshDatabaseTreeNode: vi.fn(),
+  refreshObjectListTreeNode: vi.fn(),
   requestConfirmation: vi.fn(),
   toast: vi.fn(),
   trackerTask: undefined as any,
   unlisten: vi.fn(),
   updateSqlFileTask: vi.fn(),
   uuid: vi.fn(),
+  queryStore: {
+    tabs: [{ id: "mysql-tab", connectionId: "mysql-1", database: "" }] as Array<{ id: string; connectionId: string; database: string; schema?: string; catalog?: string }>,
+    activeTabId: "mysql-tab" as string | null,
+  },
 }));
 
 function passthrough(tag: string) {
@@ -57,7 +64,10 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast
 vi.mock("@/composables/useExportTracker", () => ({
   useExportTracker: () => ({ addSqlFileTask: mocks.addSqlFileTask, updateSqlFileTask: mocks.updateSqlFileTask }),
 }));
-vi.mock("@/composables/useDatabaseOptions", () => ({ fetchSqlFileTargetOptions: mocks.fetchSqlFileTargetOptions }));
+vi.mock("@/composables/useDatabaseOptions", () => ({
+  fetchSqlFileTargetOptions: mocks.fetchSqlFileTargetOptions,
+  namespaceOptionsAreSchemas: (connection: { db_type?: string } | undefined) => ["oracle", "dameng", "oceanbase-oracle"].includes(connection?.db_type ?? ""),
+}));
 vi.mock("@/lib/connection/connectionLevelDatabaseBootstrap", () => ({ requiresSqlFileTargetDatabaseSelection: () => false, supportsConnectionLevelDatabaseBootstrap: (connection: any) => connection?.db_type === "mysql" }));
 vi.mock("@/lib/database/productionSafety", () => ({ productionContextForDatabase: () => ({ active: false, databases: [] }) }));
 vi.mock("@/stores/productionSafetyStore", () => ({
@@ -65,12 +75,16 @@ vi.mock("@/stores/productionSafetyStore", () => ({
 }));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
-    connections: [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql" }],
+    get connections() {
+      return mocks.connections;
+    },
     ensureConnected: mocks.ensureConnected,
-    getConfig: () => ({ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }),
+    getConfig: mocks.getConfig,
     refreshDatabaseTreeNode: mocks.refreshDatabaseTreeNode,
+    refreshObjectListTreeNode: mocks.refreshObjectListTreeNode,
   }),
 }));
+vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => mocks.queryStore }));
 vi.mock("@/lib/backend/api", () => ({
   beginManualTransaction: mocks.beginManualTransaction,
   commitManualTransaction: mocks.commitManualTransaction,
@@ -126,6 +140,7 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({ default: passthrough("sp
 vi.mock("@/components/connection/ConnectionGroupBadge.vue", () => ({ default: passthrough("span") }));
 
 import SqlFileExecutionDialog from "./SqlFileExecutionDialog.vue";
+import { rememberExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 
 let app: ReturnType<typeof createApp> | undefined;
 let root: HTMLDivElement | undefined;
@@ -187,6 +202,7 @@ function deferred() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   mocks.desktop = true;
   mocks.releaseSqlFilePreview.mockResolvedValue(undefined);
   mocks.progressHandler = undefined;
@@ -230,6 +246,8 @@ beforeEach(() => {
     { database: "archive", name: "users" },
   ]);
   mocks.fetchSqlFileTargetOptions.mockResolvedValue([]);
+  mocks.connections = [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }];
+  mocks.getConfig.mockImplementation((connectionId: string) => mocks.connections.find((connection) => connection.id === connectionId));
   mocks.openFileDialog.mockResolvedValue(["/tmp/first.sql", "/tmp/second.sql"]);
   mocks.previewSqlFile.mockImplementation(async (filePath: string) => ({
     fileName: filePath.split("/").pop()!,
@@ -244,8 +262,11 @@ beforeEach(() => {
   });
   mocks.cancelSqlFileExecution.mockResolvedValue(true);
   mocks.refreshDatabaseTreeNode.mockResolvedValue(undefined);
+  mocks.refreshObjectListTreeNode.mockResolvedValue(undefined);
   mocks.requestConfirmation.mockResolvedValue(true);
   mocks.uuid.mockReset().mockReturnValueOnce("run-1").mockReturnValueOnce("run-2");
+  mocks.queryStore.tabs = [{ id: "mysql-tab", connectionId: "mysql-1", database: "" }];
+  mocks.queryStore.activeTabId = "mysql-tab";
 });
 
 afterEach(() => {
@@ -602,6 +623,148 @@ describe("SqlFileExecutionDialog retries", () => {
     expect(mocks.ensureConnected).not.toHaveBeenCalled();
     expect(mocks.fetchSqlFileTargetOptions).not.toHaveBeenCalled();
     expect(findButton("sqlFile.execute").disabled).toBe(true);
+  });
+
+  it("uses the active SQL tab instead of the first connection when opened from the toolbar", async () => {
+    mocks.connections = [
+      { id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "first" },
+      { id: "postgres-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "analytics" },
+    ];
+    mocks.queryStore.tabs = [{ id: "postgres-tab", connectionId: "postgres-1", database: "reporting" }];
+    mocks.queryStore.activeTabId = "postgres-tab";
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.ensureConnected).toHaveBeenCalledWith("postgres-1"));
+    expect(mocks.ensureConnected).not.toHaveBeenCalledWith("mysql-1");
+  });
+
+  it.each([
+    ["MySQL", "mysql"],
+    ["PostgreSQL", "postgres"],
+  ])("keeps the selected %s namespace in the database field", async (name, dbType) => {
+    mocks.connections = [{ id: "database-1", name, db_type: dbType, driver_profile: dbType, database: "configured_db" }];
+    mocks.queryStore.tabs = [{ id: "database-tab", connectionId: "database-1", database: "selected_db", schema: "remembered_schema" }];
+    mocks.queryStore.activeTabId = "database-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["configured_db", "selected_db"]);
+
+    await mountReadyDialog();
+    await completeFirstExecution();
+
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({ connectionId: "database-1", database: "selected_db" });
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).not.toHaveProperty("schema");
+  });
+
+  it("restores and executes a remembered OceanBase Oracle schema without replacing the connection database", async () => {
+    mocks.connections = [
+      { id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "first" },
+      { id: "ob-oracle-1", name: "OceanBase Oracle", db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", database: "tenant_service" },
+    ];
+    rememberExternalSqlFileTarget("/tmp/first.sql", { connectionId: "ob-oracle-1", database: "APP", schema: "APP" });
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["SYS", "APP"]);
+
+    await mountReadyDialog();
+    await completeFirstExecution();
+
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({
+      connectionId: "ob-oracle-1",
+      database: "tenant_service",
+      schema: "APP",
+    });
+    expect(mocks.refreshObjectListTreeNode).toHaveBeenCalledWith("ob-oracle-1", "tenant_service", "APP");
+  });
+
+  it("restores a legacy root-schema target that stored the schema in database", async () => {
+    mocks.connections = [{ id: "ob-oracle-1", name: "OceanBase Oracle", db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", database: "tenant_service" }];
+    mocks.queryStore.tabs = [{ id: "ob-tab", connectionId: "ob-oracle-1", database: "tenant_service" }];
+    mocks.queryStore.activeTabId = "ob-tab";
+    rememberExternalSqlFileTarget("/tmp/first.sql", { connectionId: "ob-oracle-1", database: "APP" });
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["SYS", "APP"]);
+
+    await mountReadyDialog();
+    await completeFirstExecution();
+
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({
+      connectionId: "ob-oracle-1",
+      database: "tenant_service",
+      schema: "APP",
+    });
+  });
+
+  it("keeps an empty configured Oracle-family database empty when restoring a legacy schema target", async () => {
+    mocks.connections = [{ id: "ob-oracle-1", name: "OceanBase Oracle", db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", database: "" }];
+    mocks.queryStore.tabs = [{ id: "ob-tab", connectionId: "ob-oracle-1", database: "" }];
+    mocks.queryStore.activeTabId = "ob-tab";
+    rememberExternalSqlFileTarget("/tmp/first.sql", { connectionId: "ob-oracle-1", database: "APP" });
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["SYS", "APP"]);
+
+    await mountReadyDialog();
+    await completeFirstExecution();
+
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({
+      connectionId: "ob-oracle-1",
+      database: "",
+      schema: "APP",
+    });
+  });
+
+  it("uses the same OceanBase Oracle database and schema for manual SQL-file execution", async () => {
+    mocks.connections = [{ id: "ob-oracle-1", name: "OceanBase Oracle", db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", database: "tenant_service" }];
+    mocks.queryStore.tabs = [{ id: "ob-tab", connectionId: "ob-oracle-1", database: "APP", schema: "APP" }];
+    mocks.queryStore.activeTabId = "ob-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["SYS", "APP"]);
+
+    await enableManualTransaction();
+    await completeFirstExecution();
+
+    expect(mocks.beginManualTransaction).toHaveBeenCalledWith("ob-oracle-1", "tenant_service", "APP");
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({
+      connectionId: "ob-oracle-1",
+      database: "tenant_service",
+      schema: "APP",
+      txnSessionId: "txn-1",
+    });
+  });
+
+  it("does not select a connection when the active tab is non-SQL", async () => {
+    mocks.connections = [
+      { id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "first" },
+      { id: "kafka-1", name: "Kafka", db_type: "mq", driver_profile: "kafka", database: "invalid" },
+    ];
+    mocks.queryStore.tabs = [{ id: "kafka-tab", connectionId: "kafka-1", database: "invalid" }];
+    mocks.queryStore.activeTabId = "kafka-tab";
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+    await nextTick();
+
+    expect(mocks.ensureConnected).not.toHaveBeenCalled();
+    expect(mocks.fetchSqlFileTargetOptions).not.toHaveBeenCalled();
+  });
+
+  it("lets a remembered file target override the active toolbar target", async () => {
+    mocks.connections = [
+      { id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "app" },
+      { id: "saved-1", name: "Saved", db_type: "postgres", driver_profile: "postgres", database: "saved_db" },
+    ];
+    rememberExternalSqlFileTarget("/tmp/saved.sql", { connectionId: "saved-1", database: "saved_db" });
+    mocks.openFileDialog.mockResolvedValueOnce("/tmp/saved.sql");
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.ensureConnected).toHaveBeenCalledWith("mysql-1"));
+    mocks.ensureConnected.mockClear();
+
+    findButton("sqlFile.browse").click();
+
+    await vi.waitFor(() => expect(mocks.ensureConnected).toHaveBeenCalledWith("saved-1"));
   });
 
   it("does not restore a completed run's file summary after an early retry failure", async () => {

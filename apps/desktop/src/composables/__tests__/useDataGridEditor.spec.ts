@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { computed, nextTick, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
+import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor, type CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { buildMongoUpdateDocument, MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridInputValue, mongoDocumentGridValue } from "@/lib/mongo/mongoDocumentValues";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
@@ -51,11 +51,13 @@ function createEditorWithResult(
   mongoCollectionGrid = false,
   quickEntry = false,
   editable = ref(true),
+  resultColumnTypes?: string[],
 ) {
   let editor: ReturnType<typeof useDataGridEditor>;
-  const result = ref<{ columns: string[]; rows: CellValue[][] }>({
+  const result = ref<{ columns: string[]; rows: CellValue[][]; column_types?: string[] }>({
     columns: ["first", "hidden", "last"],
     rows: existingRows,
+    column_types: resultColumnTypes,
   });
 
   editor = useDataGridEditor({
@@ -734,12 +736,66 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     ]);
   });
 
-  it("keeps explicitly read-only mapped columns out of editing and paste", () => {
-    const editor = createEditor(["first", "hidden", "last"], true, undefined, [0]);
+  it("preserves ordinary read-only values when cloning while still blocking edits and paste", () => {
+    const editor = createEditor(["first", "hidden", "last"], true, undefined, [0], [["Ada", "hidden", "Lovelace"]]);
 
     expect(editor.canEditColumn(0)).toBe(false);
     expect(editor.canEditColumn(2)).toBe(true);
     expect(editor.appendPastedRowsToNewRow(-1, [["Ada"]], [0])).toEqual({ ok: false, reason: "readonly-column" });
+    editor.applyCellValue(0, 0, null);
+    expect(editor.dirtyRows.value.size).toBe(0);
+    editor.cloneRow(0);
+    expect(editor.newRows.value.at(-1)).toEqual(["Ada", "hidden", "Lovelace"]);
+  });
+
+  it("clears opaque aggregate states when cloning and prefers the result type over metadata", () => {
+    const opaque = createEditor(
+      ["first", "hidden", "last"],
+      true,
+      undefined,
+      [1],
+      [["Ada", "0x00ff", "Lovelace"]],
+      undefined,
+      [
+        { name: "first", data_type: "varchar" },
+        { name: "hidden", data_type: "varchar" },
+        { name: "last", data_type: "varchar" },
+      ],
+      false,
+      false,
+      ref(true),
+      ["varchar", "agg_state<sum(int)>", "varchar"],
+    );
+    opaque.cloneRow(0);
+    expect(opaque.newRows.value.at(-1)).toEqual(["Ada", null, "Lovelace"]);
+
+    const metadataFallback = createEditor(["first", "hidden", "last"], true, undefined, [1], [["Ada", "0x00ff", "Lovelace"]], undefined, [
+      { name: "first", data_type: "varchar" },
+      { name: "hidden", data_type: "agg_state<sum(int)>" },
+      { name: "last", data_type: "varchar" },
+    ]);
+    metadataFallback.cloneRow(0);
+    expect(metadataFallback.newRows.value.at(-1)).toEqual(["Ada", null, "Lovelace"]);
+
+    const resultTypeWins = createEditor(
+      ["first", "hidden", "last"],
+      true,
+      undefined,
+      [1],
+      [["Ada", "ordinary", "Lovelace"]],
+      undefined,
+      [
+        { name: "first", data_type: "varchar" },
+        { name: "hidden", data_type: "agg_state<sum(int)>" },
+        { name: "last", data_type: "varchar" },
+      ],
+      false,
+      false,
+      ref(true),
+      ["varchar", "varchar", "varchar"],
+    );
+    resultTypeWins.cloneRow(0);
+    expect(resultTypeWins.newRows.value.at(-1)).toEqual(["Ada", "ordinary", "Lovelace"]);
   });
 
   it("fills following blank new rows before adding more rows", () => {
@@ -947,7 +1003,7 @@ describe("useDataGridEditor saveChanges reload", () => {
       queryResult?: { columns: string[]; rows: CellValue[][] };
       currentPage?: Ref<number>;
       prepareFullReload?: () => void;
-      customSaveHandler?: { save: ReturnType<typeof vi.fn> };
+      customSaveHandler?: CustomSaveHandler;
       confirmSaveRequest?: (request: import("@/composables/useDataGridEditor").DataGridSaveConfirmationRequest) => Promise<boolean>;
       manualTransactionSessionId?: string;
       ensureManualTransactionSession?: () => Promise<string>;
@@ -1392,6 +1448,60 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(customSave).toHaveBeenCalledTimes(1);
     expect(prepareFullReload).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalledWith("reload", expect.anything());
+  });
+
+  it("previews and confirms a guarded custom delete before execution, then reloads", async () => {
+    const customSave = vi.fn().mockResolvedValue(undefined);
+    const preview = vi.fn().mockResolvedValue(["DELETE FROM guarded WHERE exact_identity"]);
+    const confirmSaveRequest = vi.fn().mockResolvedValue(true);
+    const prepareFullReload = vi.fn();
+    const { editor, emit } = createSaveTestEditor({
+      customSaveHandler: { save: customSave, preview, confirmation: "influxdb-v1-delete", canDelete: true },
+      confirmSaveRequest,
+      prepareFullReload,
+      databaseType: "influxdb",
+    });
+    editor.deletedRows.value.add(0);
+
+    await editor.saveChanges();
+
+    expect(preview).toHaveBeenCalledTimes(1);
+    expect(confirmSaveRequest).toHaveBeenCalledWith({ updates: 0, inserts: 0, deletes: 1, targetLabel: undefined, statements: ["DELETE FROM guarded WHERE exact_identity"] });
+    expect(customSave).toHaveBeenCalledTimes(1);
+    expect(editor.deletedRows.value.size).toBe(0);
+    expect(prepareFullReload).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("keeps a guarded delete staged when declined and refreshes after an execution failure", async () => {
+    const preview = vi.fn().mockResolvedValue(["DELETE FROM guarded WHERE exact_identity"]);
+    const declinedSave = vi.fn();
+    const declined = createSaveTestEditor({
+      customSaveHandler: { save: declinedSave, preview, confirmation: "influxdb-v1-delete", canDelete: true },
+      confirmSaveRequest: vi.fn().mockResolvedValue(false),
+      databaseType: "influxdb",
+    });
+    declined.editor.deletedRows.value.add(0);
+
+    await declined.editor.saveChanges();
+
+    expect(declinedSave).not.toHaveBeenCalled();
+    expect(declined.editor.deletedRows.value).toEqual(new Set([0]));
+    expect(declined.emit).not.toHaveBeenCalledWith("reload", expect.anything());
+
+    const failedSave = vi.fn().mockRejectedValue(new Error("server rejected delete"));
+    const failed = createSaveTestEditor({
+      customSaveHandler: { save: failedSave, preview, confirmation: "influxdb-v1-delete", reloadOnFailure: true, canDelete: true },
+      confirmSaveRequest: vi.fn().mockResolvedValue(true),
+      databaseType: "influxdb",
+    });
+    failed.editor.deletedRows.value.add(1);
+
+    await failed.editor.saveChanges();
+
+    expect(failed.editor.saveError.value).toContain("server rejected delete");
+    expect(failed.editor.deletedRows.value).toEqual(new Set([1]));
+    expect(failed.emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
   });
 
   // Engines that cannot roll a partial batch back (Salesforce: one REST call per

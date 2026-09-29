@@ -1,26 +1,20 @@
 #![recursion_limit = "256"]
 
-pub use dbx_sql::query_result_sql;
+pub use dbx_sql_data::query_result_sql;
 
+pub use dbx_driver_support::{runtime_config, ssh_config};
 pub use dbx_platform::download::DownloadSource;
 pub use dbx_platform::{path_utils, process};
-pub use dbx_sql::{mysql_ddl_normalize, mysql_event_sql, sql, sql_dialect, sql_error_position, sqlserver_temporal};
+pub use dbx_sql_core::{mysql_ddl_normalize, mysql_event_sql, sql, sql_error_position, sqlserver_temporal};
+pub use dbx_sql_dialect::sql_dialect;
 pub use dbx_types::{database_manifest, models, types};
 
-pub mod agent_catalog;
-pub mod agent_connection;
-pub mod agent_manager;
-pub mod agent_offline_export;
-pub mod agent_recovery;
-pub mod agent_runtime;
-pub mod agent_service;
-pub mod backend_error;
-pub mod database_capabilities;
+pub use dbx_driver_agent::{
+    agent_catalog, agent_connection, agent_manager, agent_offline_export, agent_recovery, agent_runtime, agent_service,
+    backend_error, database_capabilities,
+};
 pub mod db;
-pub mod execution;
+pub use dbx_driver_support::execution;
 pub mod metadata;
-pub mod mongo_oidc;
-pub mod mongo_shell;
-pub mod runtime_config;
+pub use dbx_driver_mongodb::{mongo_oidc, mongo_shell};
 pub mod salesforce_oauth;
-pub mod ssh_config;

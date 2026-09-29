@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { filterLocallySearchedTables } from "@/lib/sidebar/sidebarSearchTree";
 import type { ConnectionConfig, ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 
 function installLocalStorage() {
@@ -2790,6 +2791,79 @@ describe("connectionStore metadata loading", () => {
     expect(dbNode.isLoading).toBe(false);
   });
 
+  it("finishes an expanding database when the connection refresh adds siblings", async () => {
+    let resolveSchemas!: (schemas: { name: string; comment: null }[]) => void;
+    const listSchemaInfos = vi.fn(
+      () =>
+        new Promise<{ name: string; comment: null }[]>((resolve) => {
+          resolveSchemas = resolve;
+        }),
+    );
+    const listDatabases = vi.fn().mockResolvedValue([
+      { name: "app", comment: null },
+      { name: "postgres", comment: null },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listSchemaInfos,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    const databaseNode: TreeNode = {
+      id: `${connection.id}:app`,
+      label: "app",
+      type: "database",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      isLoading: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [databaseNode],
+      },
+    ];
+    const liveDatabaseNode = store.treeNodes[0]!.children![0]!;
+
+    const schemaLoad = store.loadSchemas(connection.id, "app");
+    await vi.waitFor(() => expect(listSchemaInfos).toHaveBeenCalledTimes(1));
+    expect(liveDatabaseNode.isLoading).toBe(true);
+
+    await store.loadDatabases(connection.id, { connectedOnly: true });
+
+    const databaseDuringRefresh = store.treeNodes[0]?.children?.find((child) => child.id === databaseNode.id);
+    expect(databaseDuringRefresh).toBe(liveDatabaseNode);
+    expect(databaseDuringRefresh?.isLoading).toBe(true);
+
+    resolveSchemas([{ name: "public", comment: null }]);
+    await schemaLoad;
+
+    const loadedDatabase = store.treeNodes[0]?.children?.find((child) => child.id === databaseNode.id);
+    expect(loadedDatabase).toBe(liveDatabaseNode);
+    expect(loadedDatabase?.isLoading).toBe(false);
+    expect(loadedDatabase?.isExpanded).toBe(true);
+    expect(loadedDatabase?.children?.map((child) => child.label)).toContain("public");
+  });
+
   it("clears sticky subtree loading when health-check reconnect bumps revision", async () => {
     let resolveTables!: (tables: TableInfo[]) => void;
     const listTables = vi.fn(
@@ -3163,11 +3237,134 @@ describe("connectionStore metadata loading", () => {
     await store.loadObjectGroupChildren(tablesGroup, { force: true });
     expect(tablesGroup.children?.some((child) => child.label?.startsWith("fresh_"))).toBe(true);
 
-    resolveSecondPage([{ name: "t_0202", table_type: "TABLE", comment: null }]);
+    resolveSecondPage([{ name: "t_0201", table_type: "TABLE", comment: null }]);
     await loadMorePromise;
 
-    expect(tablesGroup.children?.some((child) => child.label === "t_0202")).toBe(false);
+    expect(tablesGroup.children?.some((child) => child.label === "t_0201")).toBe(false);
     expect(tablesGroup.children?.some((child) => child.label?.startsWith("fresh_"))).toBe(true);
+  });
+
+  it("automatically drains only opted-in table groups", async () => {
+    const rows = Array.from({ length: 5 }, (_, index) => ({
+      name: `object_${index + 1}`,
+      table_type: "TABLE" as const,
+      comment: null,
+    }));
+    const listTables = vi.fn((_connectionId: string, _database: string, _schema: string, searchFilter?: string, limit?: number, offset?: number, objectTypes?: string[]) => {
+      const tableType = objectTypes?.includes("VIEW") ? "VIEW" : "TABLE";
+      const matches = searchFilter ? rows.filter((row) => row.name.includes(searchFilter)) : rows;
+      return Promise.resolve(matches.slice(offset ?? 0, (offset ?? 0) + (limit ?? matches.length)).map((row) => ({ ...row, table_type: tableType })));
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 2;
+
+    const connection = { ...mysqlConnection(), sidebar_auto_load_all_tables: true };
+    const tablesGroup: TreeNode = {
+      id: `${connection.id}:app:__tables`,
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      children: [],
+    };
+    const viewsGroup: TreeNode = {
+      ...tablesGroup,
+      id: `${connection.id}:app:__views`,
+      label: "tree.views",
+      type: "group-views",
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [tablesGroup, viewsGroup] }];
+
+    await store.loadObjectGroupChildren(tablesGroup);
+
+    expect(listTables.mock.calls.map((call) => call[5])).toEqual([0, 2, 4]);
+    expect(tablesGroup.children?.map((child) => child.label)).toEqual(rows.map((row) => row.name));
+    expect(tablesGroup.children?.some((child) => child.type === "load-more")).toBe(false);
+    const filteredTree = filterLocallySearchedTables(store.treeNodes, {
+      enabled: true,
+      queries: { [tablesGroup.id]: "object_5" },
+      indexedResults: {},
+    });
+    expect(filteredTree[0].children?.[0]?.children?.map((child) => child.label)).toEqual(["object_5"]);
+
+    await store.loadObjectGroupChildren(viewsGroup);
+
+    expect(listTables).toHaveBeenCalledTimes(4);
+    expect(viewsGroup.children?.map((child) => child.label)).toEqual(["object_1", "object_2", "tree.loadMore"]);
+
+    const searchedTablesGroup: TreeNode = { ...tablesGroup, id: `${connection.id}:search:__tables`, database: "search", children: [] };
+    store.treeNodes[0].children!.push(searchedTablesGroup);
+    store.sidebarSearchQuery = "object_5";
+    await store.loadObjectGroupChildren(searchedTablesGroup, { force: true });
+
+    expect(listTables).toHaveBeenCalledTimes(5);
+    expect(listTables.mock.calls.at(-1)?.slice(3, 6)).toEqual(["object_5", SIDEBAR_SEARCH_RESULT_BUDGET, undefined]);
+    expect(searchedTablesGroup.children?.map((child) => child.label)).toEqual(["object_5"]);
+  });
+
+  it("keeps legacy connections on the first table page", async () => {
+    const rows = Array.from({ length: 3 }, (_, index) => ({
+      name: `table_${index + 1}`,
+      table_type: "TABLE" as const,
+      comment: null,
+    }));
+    const listTables = vi.fn((_connectionId: string, _database: string, _schema: string, _searchFilter?: string, limit?: number, offset?: number) => Promise.resolve(rows.slice(offset ?? 0, (offset ?? 0) + (limit ?? rows.length))));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 2;
+
+    const connection = mysqlConnection();
+    const tablesGroup: TreeNode = {
+      id: `${connection.id}:app:__tables`,
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [tablesGroup] }];
+
+    await store.loadObjectGroupChildren(tablesGroup);
+
+    expect(listTables).toHaveBeenCalledTimes(1);
+    expect(tablesGroup.children?.map((child) => child.label)).toEqual(["table_1", "table_2", "tree.loadMore"]);
   });
 
   it("restores and drains unfiltered pages when expand-all races a search clear reload", async () => {
@@ -3800,12 +3997,12 @@ describe("connectionStore metadata loading", () => {
     };
     connectionNode.children![0].children = [liveTablesGroup];
 
-    resolveSecondPage([{ name: "t_0202", table_type: "TABLE", comment: null }]);
+    resolveSecondPage([{ name: "t_0201", table_type: "TABLE", comment: null }]);
     await loadMorePromise;
 
-    expect(staleTablesGroup.children?.some((child) => child.label === "t_0202")).toBe(false);
+    expect(staleTablesGroup.children?.some((child) => child.label === "t_0201")).toBe(false);
     expect(liveTablesGroup.children?.some((child) => child.id === concurrentTable.id)).toBe(true);
-    expect(liveTablesGroup.children?.some((child) => child.label === "t_0202")).toBe(true);
+    expect(liveTablesGroup.children?.some((child) => child.label === "t_0201")).toBe(true);
   });
 
   it("keeps table column loaded markers when a tables group appends via load-more", async () => {
@@ -3817,7 +4014,7 @@ describe("connectionStore metadata loading", () => {
     const listTables = vi
       .fn()
       .mockResolvedValueOnce(firstPage)
-      .mockResolvedValueOnce([{ name: "t_0202", table_type: "TABLE", comment: null }]);
+      .mockResolvedValueOnce([{ name: "t_0201", table_type: "TABLE", comment: null }]);
     const getColumns = vi.fn().mockResolvedValue([{ name: "id", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
@@ -3887,6 +4084,192 @@ describe("connectionStore metadata loading", () => {
 
     expect(store.isTreeNodeChildrenLoaded(columnsGroupId)).toBe(true);
     expect(getColumns).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the displayed table window when the next page no longer opens with the anchored row", async () => {
+    const firstPage = Array.from({ length: 201 }, (_, index) => ({
+      name: `t_${String(index + 1).padStart(4, "0")}`,
+      table_type: "TABLE" as const,
+      comment: null,
+    }));
+    // Between the two page loads a table that sorts to the very front was created, so every
+    // later offset now points one row earlier: offset 200 no longer opens with the first
+    // page's peek row t_0201 but with t_0199. Appending that page would leave the freshly
+    // created t_0000b (and the row the window slid past) out of the tree for good (#9400).
+    const afterCreate = [
+      { name: "t_0000b", table_type: "TABLE" as const, comment: null },
+      ...firstPage,
+      ...Array.from({ length: 200 }, (_, index) => ({
+        name: `t_${String(index + 202).padStart(4, "0")}`,
+        table_type: "TABLE" as const,
+        comment: null,
+      })),
+    ];
+    const listTables = vi
+      .fn()
+      .mockResolvedValueOnce(firstPage)
+      .mockImplementation((_connectionId: string, _database: string, _schema: string, _searchFilter?: string, limit?: number, offset?: number) => Promise.resolve(afterCreate.slice(offset ?? 0, (offset ?? 0) + (limit ?? afterCreate.length))));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 200;
+
+    const connection = mysqlConnection();
+    const tablesGroup: TreeNode = {
+      id: "mysql-1:app:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "mysql-1:app",
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: true,
+            children: [tablesGroup],
+          },
+        ],
+      },
+    ];
+
+    await store.loadObjectGroupChildren(tablesGroup);
+    const loadMoreNode = tablesGroup.children?.at(-1);
+    expect(loadMoreNode?.type).toBe("load-more");
+    expect(loadMoreNode?.loadMore?.offset).toBe(200);
+    expect(listTables.mock.calls[0].slice(3, 6)).toEqual([undefined, 201, 0]);
+
+    await store.loadMoreObjectGroupChildren(loadMoreNode!);
+
+    // The drifted page is replaced by one re-read of the whole displayed range (offset 0,
+    // pageSize 200 + the 200 rows already shown), so nothing is skipped or repeated.
+    expect(listTables).toHaveBeenCalledTimes(3);
+    expect(listTables.mock.calls[1].slice(3, 6)).toEqual([undefined, 201, 200]);
+    expect(listTables.mock.calls[2].slice(3, 6)).toEqual([undefined, 401, 0]);
+
+    const labels = (tablesGroup.children ?? []).filter((child) => child.type === "table").map((child) => child.label);
+    expect(labels).toContain("t_0000b");
+    expect(labels).toContain("t_0201");
+    expect(labels.filter((label) => label === "t_0199")).toHaveLength(1);
+    expect(labels.filter((label) => label === "t_0200")).toHaveLength(1);
+
+    const nextLoadMore = tablesGroup.children?.at(-1);
+    expect(nextLoadMore?.type).toBe("load-more");
+    expect(nextLoadMore?.loadMore?.offset).toBe(400);
+    expect(nextLoadMore?.loadMore?.anchor).toBeDefined();
+  });
+
+  it("re-reads the displayed window when the next page comes back empty after rows were dropped", async () => {
+    const firstPage = Array.from({ length: 201 }, (_, index) => ({
+      name: `t_${String(index + 1).padStart(4, "0")}`,
+      table_type: "TABLE" as const,
+      comment: null,
+    }));
+    // The three leading tables were dropped between the two page loads, so offset 200 now
+    // points past the end of the list. Keeping the empty page would leave the deleted rows
+    // on screen and the rows the window slid onto (t_0201) out of the tree forever (#9400).
+    const afterDrop = firstPage.slice(3);
+    const listTables = vi
+      .fn()
+      .mockResolvedValueOnce(firstPage)
+      .mockImplementation((_connectionId: string, _database: string, _schema: string, _searchFilter?: string, limit?: number, offset?: number) => Promise.resolve(afterDrop.slice(offset ?? 0, (offset ?? 0) + (limit ?? afterDrop.length))));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 200;
+
+    const connection = mysqlConnection();
+    const tablesGroup: TreeNode = {
+      id: "mysql-1:app:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "mysql-1:app",
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: true,
+            children: [tablesGroup],
+          },
+        ],
+      },
+    ];
+
+    await store.loadObjectGroupChildren(tablesGroup);
+    const loadMoreNode = tablesGroup.children?.at(-1);
+    expect(loadMoreNode?.type).toBe("load-more");
+    expect(loadMoreNode?.loadMore?.offset).toBe(200);
+
+    await store.loadMoreObjectGroupChildren(loadMoreNode!);
+
+    expect(listTables.mock.calls[1].slice(3, 6)).toEqual([undefined, 201, 200]);
+    expect(listTables.mock.calls[2].slice(3, 6)).toEqual([undefined, 401, 0]);
+
+    // The window slides onto t_0201 instead of staying on the pre-drop window, and the
+    // list is now known to be complete, so the dead load-more node goes away. Rows the
+    // server no longer returns are left to the sidebar's own staleness prunes.
+    const labels = (tablesGroup.children ?? []).filter((child) => child.type === "table").map((child) => child.label);
+    expect(labels).toContain("t_0201");
+    expect(labels.filter((label) => label === "t_0201")).toHaveLength(1);
+    expect(tablesGroup.children?.some((child) => child.type === "load-more")).toBe(false);
   });
 
   it("applies SQL Server database object loads to the current tree node after an in-tree replacement", async () => {

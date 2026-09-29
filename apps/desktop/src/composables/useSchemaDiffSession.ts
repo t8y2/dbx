@@ -226,6 +226,7 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
       ignoreComments: input.ignoreComments,
       cascadeDelete: sessionOptions.cascadeDelete ?? false,
       compareColumnOrder: sessionOptions.compareColumnOrder,
+      compareCharset: sessionOptions.compareCharset,
       ignoreTableNameCase: sessionOptions.ignoreTableNameCase,
       ignoreColumnNameCase: sessionOptions.ignoreColumnNameCase,
       detectRenames: sessionOptions.detectRenames ?? false,

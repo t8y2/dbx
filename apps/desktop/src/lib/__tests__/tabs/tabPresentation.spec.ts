@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import {
   connectionGroupDisplayName,
   executionSummaryItems,
@@ -14,6 +15,7 @@ import {
   resultSourceRange,
   statementExecutionMarkers,
   tabColorStyle,
+  tabConnectionColor,
   tabDatabaseIconType,
   tabDisplayTitle,
   tabDisplayTitles,
@@ -431,6 +433,25 @@ describe("tab group presentation", () => {
     }
   });
 
+  it("shows a database row for plugin tabs only when the tab or connection has a database", () => {
+    const store = useConnectionStore();
+    store.sidebarLayout = {
+      groups: [],
+      order: [{ type: "connection", id: "conn-1" }],
+    };
+    store.connections = [{ id: "conn-1", name: "SSH server", db_type: "plugin" } as ConnectionConfig];
+
+    const tab = queryTab({ mode: "plugin-workbench", database: "" });
+    expect(tabTooltipLines(tab, translate)).toEqual([
+      { label: "Connection:", value: "SSH server" },
+      { label: "Group:", value: "Ungrouped" },
+    ]);
+
+    store.connections = [{ id: "conn-1", name: "Database plugin", db_type: "plugin", database: "analytics" } as ConnectionConfig];
+    expect(tabTooltipLines(tab, translate)).toContainEqual({ label: "Database:", value: "analytics" });
+    expect(tabTooltipLines(queryTab({ mode: "plugin-workbench", database: "reporting" }), translate)).toContainEqual({ label: "Database:", value: "reporting" });
+  });
+
   it("labels a top-level connection as ungrouped", () => {
     const store = useConnectionStore();
     store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", database: "app" } as ConnectionConfig];
@@ -685,6 +706,7 @@ describe("shared tab presentation helpers", () => {
   });
 
   it("builds active/inactive color styles for classic and non-classic layouts", () => {
+    useSettingsStore().editorSettings.colorizeConnectionTabs = false;
     // Node has no window/CSS globals: pin both to modern-engine answers.
     vi.stubGlobal("CSS", { supports: () => true });
     vi.stubGlobal("window", {
@@ -706,6 +728,7 @@ describe("shared tab presentation helpers", () => {
   });
 
   it("swaps inline color-mix tab colors for concrete rgba on legacy WebViews", () => {
+    useSettingsStore().editorSettings.colorizeConnectionTabs = false;
     // WebKit without color-mix() invalidates the inline values at computed-value
     // time, which left the active tab with no background at all (macOS 12); and
     // it cannot substitute var() inside inline custom properties, so the legacy
@@ -722,6 +745,18 @@ describe("shared tab presentation helpers", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("assigns stable palette colors to unconfigured connections", () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      { id: "conn-1", name: "One", db_type: "mysql", color: "" },
+      { id: "conn-2", name: "Two", db_type: "mysql", color: "#abcdef" },
+    ] as ConnectionConfig[];
+    expect(tabConnectionColor("conn-1")).toBe(tabConnectionColor("conn-1"));
+    expect(tabConnectionColor("conn-1")).not.toBe("");
+    expect(tabConnectionColor("conn-1")).not.toBe(tabConnectionColor("conn-3"));
+    expect(tabConnectionColor("conn-2")).toBe("#abcdef");
   });
 
   it("resolves MQ driver icons from the connection store", () => {

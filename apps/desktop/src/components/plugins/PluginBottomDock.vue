@@ -6,10 +6,11 @@
 // Each entry owns a host-stable workbenchId; v-show keeps sessions alive while switching tabs.
 import { computed, nextTick, onScopeDispose, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { ChevronDown, ChevronUp, Maximize2, Minimize2, Plus, X } from "@lucide/vue";
+import { ChevronDown, ChevronRight, ChevronUp, Folder, Maximize2, Minimize2, Plus, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -28,6 +29,7 @@ import {
   usePluginBottomDock,
   type PluginDockEntry,
 } from "@/lib/plugins/pluginBottomDock";
+import { buildConnectionPickerRows } from "@/lib/connection/connectionPickerTree";
 import { useDockResize } from "@/composables/useDockResize";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
@@ -36,7 +38,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import * as api from "@/lib/backend/api";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 // Tab strip interactions (drag reorder + double-click rename).
 const dragEntryId = ref<string | null>(null);
 const renamingEntryId = ref<string | null>(null);
@@ -179,7 +181,9 @@ async function loadLaunchOptions() {
   // options_action is OPTIONAL on open-workbench commands: without it there is
   // nothing to fetch — proceeding fired a doomed invokePlugin(undefined) IPC
   // round trip and a console.warn on every picker open / entry switch.
-  const cacheKey = action?.options_action && pluginId && commandId ? `${pluginId}:${commandId}` : "";
+  // The locale is part of the cache key: a UI language switch must refetch
+  // instead of repainting labels cached under the previous language.
+  const cacheKey = action?.options_action && pluginId && commandId ? `${pluginId}:${commandId}:${locale.value}` : "";
   if (!cacheKey) {
     launchOptionEntries.value = [];
     return;
@@ -191,7 +195,10 @@ async function loadLaunchOptions() {
   launchOptionEntries.value = cached ?? [];
   launchOptionsLoading.value = !cached;
   try {
-    const result = await api.invokePlugin<{ entries?: Array<{ label: string; description?: string; context?: Record<string, unknown> }> }>(pluginId!, action!.options_action!, {});
+    // locale tells the sidecar which UI language to label the entries in —
+    // the same field the plugin UI webview receives at init. Sidecars that
+    // don't read it are unaffected (they ignore the extra param).
+    const result = await api.invokePlugin<{ entries?: Array<{ label: string; description?: string; context?: Record<string, unknown> }> }>(pluginId!, action!.options_action!, { locale: locale.value });
     const next = (result?.entries ?? []).map((entry, index) => ({ key: `opt:${index}`, label: entry.label, description: entry.description, context: entry.context }));
     launchOptionsCache.set(cacheKey, next);
     // A stale response (entry switched while fetching) must not overwrite the
@@ -385,26 +392,74 @@ const plusOpen = ref(false);
 // what the entries mean.
 const plusFilter = ref("");
 const PLUS_FILTER_THRESHOLD = 8;
-const plusItemCount = computed(() => 1 + launchOptionEntries.value.length + connectionTargets.value.length);
+// A command declaring options_action owns this picker: the generic replay
+// item hides (replaying a singleton command would only refocus the live
+// panel — multi-open is exactly what the plugin's own options exist for).
+const showReplayItem = computed(() => !activeAction.value?.options_action);
+const plusItemCount = computed(() => (showReplayItem.value ? 1 : 0) + launchOptionEntries.value.length + connectionTargets.value.length);
 const plusQuery = computed(() => plusFilter.value.trim().toLowerCase());
 function plusMatches(label: string): boolean {
   return !plusQuery.value || label.toLowerCase().includes(plusQuery.value);
 }
 const visibleLaunchOptions = computed(() => launchOptionEntries.value.filter((option) => plusMatches(option.label)));
-const visibleConnectionTargets = computed(() => connectionTargets.value.filter((target) => plusMatches(optionLabel(target))));
-function optionLabel(target: { label: string }): string {
-  return target.label;
+// Connection rows reuse the AI assistant's connection tree select logic
+// (buildConnectionPickerRows): sidebar groups, per-connection icons, and a
+// search that also matches group paths and force-expands its matches — the
+// flat label filter below stays for the replay/launch-option items only.
+// Collapsed groups are dock-local view state.
+const collapsedPickerGroups = ref(new Set<string>());
+const connectionById = computed(() => new Map(connectionTargets.value.map((target) => [target.connection.id, target.connection])));
+const connectionPickerRows = computed(() =>
+  buildConnectionPickerRows(
+    connectionStore.sidebarLayout,
+    connectionTargets.value.map((target) => target.connection),
+    collapsedPickerGroups.value,
+    plusQuery.value,
+  ),
+);
+function togglePickerGroup(groupId: string) {
+  if (plusQuery.value) return;
+  const next = new Set(collapsedPickerGroups.value);
+  if (!next.delete(groupId)) next.add(groupId);
+  collapsedPickerGroups.value = next;
 }
-function setPlusOpen(open: boolean) {
-  plusOpen.value = open;
+const plusHasMatches = computed(() => (showReplayItem.value && plusMatches(t("pluginDock.newTerminal"))) || visibleLaunchOptions.value.length > 0 || connectionPickerRows.value.length > 0);
+async function setPlusOpen(open: boolean) {
   plusFilter.value = "";
-  if (open) {
-    void loadLaunchOptions();
-    warmActivePluginPanelHtml();
+  if (!open) {
+    plusOpen.value = false;
+    return;
   }
+  // Collapsed dock: the strip hugs the window bottom edge, leaving no room
+  // below the "+" for a downward picker. Restore the panel body first — the
+  // picker is about to add a panel entry, which a collapsed frame would hide.
+  if (collapsed.value) collapsed.value = false;
+  await nextTick();
+  measurePlusMenuHeight();
+  plusOpen.value = true;
+  void loadLaunchOptions();
+  warmActivePluginPanelHtml();
 }
 function closePlusMenu() {
   plusOpen.value = false;
+}
+
+// Keep the "+" picker opening strictly downward. reka's menu chain silently
+// drops the `side-flip` prop (MenuContentImpl forwards side/align/sticky/... to
+// PopperContent but not sideFlip), so the flip middleware is always live: any
+// bottom overflow makes the menu jump above the trigger. Instead of fighting
+// the middleware, cap the menu height to the space remaining under the trigger
+// — floating-ui then never sees a bottom overflow, so the menu can only open
+// downward, while cross-axis shift keeps it inside the window near the edges.
+// Must run before `plusOpen` flips true: the inline cap has to be bound when
+// the content mounts, or the first uncapped measurement would still flip it.
+const PLUS_MENU_MIN_HEIGHT_PX = 80;
+const plusMenuMaxHeight = ref<string>();
+function measurePlusMenuHeight() {
+  const trigger = dockRoot.value?.querySelector<HTMLElement>("[data-plugin-dock-plus-trigger]");
+  if (!trigger) return;
+  const below = window.innerHeight - trigger.getBoundingClientRect().bottom - 8;
+  plusMenuMaxHeight.value = `${Math.max(PLUS_MENU_MIN_HEIGHT_PX, below)}px`;
 }
 
 // Hide the first-open html pipeline under the time the user spends reading the
@@ -489,31 +544,55 @@ onScopeDispose(() => window.removeEventListener("blur", onPlusMenuWindowBlur));
            viewport edge instead of running off-screen. -->
       <DropdownMenu v-if="activeCommand" :open="plusOpen" @update:open="setPlusOpen">
         <DropdownMenuTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-7 w-7" :aria-label="t('pluginDock.newTerminal')" :aria-expanded="plusOpen">
+          <Button variant="ghost" size="icon" class="h-7 w-7" :aria-label="t('pluginDock.newTerminal')" :aria-expanded="plusOpen" data-plugin-dock-plus-trigger>
             <Plus class="h-4 w-4" />
           </Button>
         </DropdownMenuTrigger>
-        <!-- sideFlip=false pins the menu below the "+": the dock panel body
-             below it is the intended scroll area, so flipping upward over the
-             workbench (the default when the panel is short) reads as the menu
-             "growing from the mouse". Cross-axis shift stays on, so the menu
-             still hugs the window edge instead of overflowing it; height
-             follows the popper's available space below the trigger. -->
-        <DropdownMenuContent align="start" :side-offset="4" :side-flip="false" class="max-h-(--reka-dropdown-menu-content-available-height) w-64" data-plugin-dock-plus-menu>
+        <!-- Always pinned below the "+" (see measurePlusMenuHeight): the inline
+             max-height caps the menu to the space under the trigger, so the
+             flip middleware never sees a bottom overflow. Cross-axis shift
+             stays on, so the menu still hugs the window edge instead of
+             overflowing it; the capped list scrolls internally. -->
+        <DropdownMenuContent align="start" :side-offset="4" class="max-h-(--reka-dropdown-menu-content-available-height) w-64" :style="plusMenuMaxHeight ? { maxHeight: plusMenuMaxHeight } : undefined" data-plugin-dock-plus-menu>
           <!-- Generic list filter (appears only for long lists): the host filters
                by label without knowing what the entries mean. -->
           <input v-if="plusItemCount > PLUS_FILTER_THRESHOLD" v-model="plusFilter" class="mb-1 w-full rounded-md border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary/40" :placeholder="t('pluginDock.filter')" spellcheck="false" @keydown.stop />
-          <DropdownMenuItem v-if="plusMatches(t('pluginDock.newTerminal'))" @select="onPlusAction('replay')">
+          <DropdownMenuItem v-if="showReplayItem && plusMatches(t('pluginDock.newTerminal'))" @select="onPlusAction('replay')">
             <Plus class="h-3.5 w-3.5 shrink-0" />
-            <span class="truncate">{{ t("pluginDock.newTerminal") }}</span>
+            <span class="min-w-0 flex-1 truncate text-sm">{{ t("pluginDock.newTerminal") }}</span>
           </DropdownMenuItem>
           <DropdownMenuItem v-for="option in visibleLaunchOptions" :key="option.key" @select="onPlusAction(option.key)">
-            <span class="truncate">{{ option.label }}</span>
+            <PluginIcon :plugin-id="activeEntry?.pluginId ?? ''" :icon="activeCommand?.icon" class="h-3.5 w-3.5 shrink-0" />
+            <span class="min-w-0 flex-1">
+              <span class="block truncate text-sm">{{ option.label }}</span>
+              <span v-if="option.description" class="block truncate text-xs text-muted-foreground">{{ option.description }}</span>
+            </span>
           </DropdownMenuItem>
-          <DropdownMenuItem v-for="target in visibleConnectionTargets" :key="target.key" :title="target.connection.name" @select="onPlusAction(target.key)">
-            <span class="truncate">{{ t("pluginDock.connectionTerminal") }} · {{ target.label }}</span>
-          </DropdownMenuItem>
-          <div v-if="plusQuery && !plusMatches(t('pluginDock.newTerminal')) && !visibleLaunchOptions.length && !visibleConnectionTargets.length" class="px-2 py-1.5 text-xs text-muted-foreground">
+          <DropdownMenuSeparator v-if="visibleLaunchOptions.length && connectionPickerRows.length" />
+          <template v-for="row in connectionPickerRows" :key="row.key">
+            <!-- Group headers are plain rows, not menu items: clicking toggles
+                 collapse (a no-op while searching), and reka-ui keyboard
+                 navigation skips them — same contract as the AI assistant's
+                 connection tree select. -->
+            <div
+              v-if="row.kind === 'group'"
+              :title="row.label"
+              :aria-expanded="!row.collapsed"
+              :style="{ paddingLeft: `${8 + row.depth * 14}px` }"
+              class="flex h-6 cursor-default select-none items-center gap-1.5 rounded-md pr-2 text-xs font-medium text-muted-foreground"
+              @click="togglePickerGroup(row.id)"
+            >
+              <ChevronDown v-if="!row.collapsed" class="h-3 w-3 shrink-0" />
+              <ChevronRight v-else class="h-3 w-3 shrink-0" />
+              <Folder class="h-3.5 w-3.5 shrink-0" />
+              <span class="truncate">{{ row.label }}</span>
+            </div>
+            <DropdownMenuItem v-else :title="row.label" :style="{ paddingLeft: `${8 + row.depth * 14}px` }" @select="onPlusAction(`conn:${row.id}`)">
+              <ConnectionIcon :connection="connectionById.get(row.id)" class="h-3.5 w-3.5 shrink-0" />
+              <span class="min-w-0 flex-1 truncate text-sm">{{ row.label }}</span>
+            </DropdownMenuItem>
+          </template>
+          <div v-if="plusQuery && !plusHasMatches" class="px-2 py-1.5 text-xs text-muted-foreground">
             {{ t("pluginDock.noMatch") }}
           </div>
         </DropdownMenuContent>

@@ -230,6 +230,21 @@ export function parseFilterValues(rawValue: string, columnInfo?: Pick<DataGridCo
   });
 }
 
+export function formatFilterRawValue(value: GridCellValue, quoteStrings = false): string {
+  if (typeof value === "string") {
+    const wrappedInMatchingQuotes = value.length >= 2 && ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"')));
+    if (!quoteStrings && value.trim() === value && !wrappedInMatchingQuotes) return value;
+    return `'${value.replaceAll("'", "''")}'`;
+  }
+  if (value === null) return "null";
+  if (typeof value === "object") return `'${JSON.stringify(value).replaceAll("'", "''")}'`;
+  return String(value);
+}
+
+export function formatFilterRawValues(values: readonly GridCellValue[]): string {
+  return values.map((value) => formatFilterRawValue(value, true)).join(", ");
+}
+
 type ParsedFilterValue = {
   value: string;
   quoted: boolean;
@@ -295,7 +310,8 @@ function unwrapMatchingQuotes(text: string): string {
     const first = text[0];
     const last = text[text.length - 1];
     if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
-      return text.slice(1, -1);
+      const quote = first as "'" | '"';
+      return text.slice(1, -1).replaceAll(`${quote}${quote}`, quote);
     }
   }
   return text;

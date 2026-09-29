@@ -152,9 +152,11 @@ const TAB_OUTPUT_VIEWS = new Set<TabOutputView>(["result", "summary", "explain",
 
 function restoredTabUiState(tab: SavedOpenTab): QueryTab["uiState"] {
   const activeOutputView = tab.uiState?.activeOutputView;
+  const redisResultViewMode = tab.uiState?.redisResultViewMode;
   const resultPaneOpen = tab.uiState?.resultPaneOpen;
   const restored: NonNullable<QueryTab["uiState"]> = {};
   if (activeOutputView && TAB_OUTPUT_VIEWS.has(activeOutputView)) restored.activeOutputView = activeOutputView;
+  if (redisResultViewMode === "grid" || redisResultViewMode === "console") restored.redisResultViewMode = redisResultViewMode;
   if (typeof resultPaneOpen === "boolean") restored.resultPaneOpen = resultPaneOpen;
   if (tab.uiState?.page) {
     const sanitized = sanitizeTabUiState({ page: tab.uiState.page });

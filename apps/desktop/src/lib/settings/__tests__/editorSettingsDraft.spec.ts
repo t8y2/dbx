@@ -136,6 +136,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
   });
 
+  it("includes tableCompletionSchemaQualification", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tableCompletionSchemaQualification");
+  });
+
   it("includes tableHoverLookupMode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tableHoverLookupMode");
   });
@@ -230,6 +234,16 @@ describe("editorSettingsDraftFromSettings", () => {
   it("normalizes invalid completionTriggerMode to positional", () => {
     const draft = editorSettingsDraftFromSettings(makeSettings({ completionTriggerMode: "always" as unknown } as Partial<EditorSettings>));
     expect(draft.completionTriggerMode).toBe("positional");
+  });
+
+  it("maps csvNullMode and normalizes an unknown value back to the marker", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ csvNullMode: "empty" })).csvNullMode).toBe("empty");
+    expect(editorSettingsDraftFromSettings(makeSettings({ csvNullMode: "bogus" as unknown } as Partial<EditorSettings>)).csvNullMode).toBe("marker");
+  });
+
+  it("maps and normalizes tableCompletionSchemaQualification", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ tableCompletionSchemaQualification: "always" })).tableCompletionSchemaQualification).toBe("always");
+    expect(editorSettingsDraftFromSettings(makeSettings({ tableCompletionSchemaQualification: "invalid" } as any)).tableCompletionSchemaQualification).toBe("collision");
   });
 });
 
@@ -405,6 +419,16 @@ describe("editorSettingsPatchFromDraft", () => {
     const base = editorSettingsDraftFromSettings(settings);
     const patch = editorSettingsPatchFromDraft(draft, base);
     expect(patch.completionTriggerMode).toBeUndefined();
+  });
+
+  it("includes tableCompletionSchemaQualification only when changed", () => {
+    const settings = makeSettings({ tableCompletionSchemaQualification: "collision" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+
+    expect(editorSettingsPatchFromDraft(draft, base).tableCompletionSchemaQualification).toBeUndefined();
+    draft.tableCompletionSchemaQualification = "never";
+    expect(editorSettingsPatchFromDraft(draft, base).tableCompletionSchemaQualification).toBe("never");
   });
 });
 

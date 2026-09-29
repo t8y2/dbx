@@ -61,6 +61,7 @@ export const databaseSupport: DatabaseSupportItem[] = [
   { id: "hive", name: "Hive", icon: "/icons/database/hive.svg", tone: "#fdcb00" },
   { id: "kyuubi", name: "Kyuubi", icon: "/icons/database/kyuubi.svg", tone: "#f51b21" },
   { id: "argo", name: "ArgoDB", icon: "/icons/database/hive.svg", tone: "#0055b8" },
+  { id: "transwarp-inceptor", name: "Transwarp Inceptor", icon: "/icons/database/transwarp-inceptor.png", tone: "#0055b8" },
   { id: "impala", name: "Impala", icon: "/icons/database/impala.svg", tone: "#2c6791" },
   { id: "hbase", name: "HBase", icon: "/icons/database/hbase.svg", tone: "#ba160c" },
   { id: "phoenix", name: "Phoenix", icon: "/icons/database/phoenix.svg", tone: "#f97316" },

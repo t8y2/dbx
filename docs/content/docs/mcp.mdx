@@ -152,6 +152,20 @@ DBX MCP provides the following tools (availability depends on build features and
 
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
 
+## Plugin tools
+
+DBX plugins whose sidecar implements the `mcp/tools` bridge can be served by the `dbx` MCP server and merged into `tools/list` — no per-plugin `--mcp` process configuration in your client. Exposure is author opt-in: a plugin's tools appear only when its manifest declares an `mcp` contribution with `external_tools: true` (SSH, Files, Kafka, LDAP, ... any plugin can do it):
+
+- Tools are exposed as `dbx_<prefix>__<tool>`, with the prefix derived from the plugin id's last segment: `io.dbx.ssh` → `dbx_ssh__sftp_list_dir`, `io.dbx.kafka` → `dbx_kafka__kafka_topics_list`.
+- Connections stay host-bound: the plugin schema's `connectionId` / `connectionName` are removed and replaced by an optional `dbx_connection` argument that selects among the plugin's **saved connections allowed by the DBX MCP settings**. With exactly one allowed connection you can omit it. The host generates the lifecycle payload (credentials, runtime endpoint) from the saved connection — credentials never reach the model or client.
+- Scoped sessions (`DBX_MCP_SCOPE_*`), the global tool allowlist, and the connection allowlist constrain plugin tools exactly like the `dbx_*` tools.
+- The tool allowlist matches exact names: after enabling plugin tools, add each `dbx_<prefix>__<tool>` you want exposed (or clear the allowlist to allow everything).
+- The Web / Docker backend does not serve plugin tools.
+
+### Lazy discovery (`DBX_MCP_PLUGIN_TOOLS`)
+
+With many plugins, one flat `tools/list` spends a lot of context on argument schemas. Set `DBX_MCP_PLUGIN_TOOLS=lazy` to expose only three meta tools — `dbx_plugin_list` (filterable plugin catalog), `dbx_plugin_tools` (one plugin's tools and schemas), and `dbx_plugin_call` (call by **plugin id** + tool) — so schemas enter the context on demand. `both` advertises the flat tools and the meta tools at once. The default stays `flat`.
+
 ## Resources
 
 Clients that support MCP Resources can read the connection catalog and expand templates for database metadata:
@@ -255,7 +269,7 @@ Desktop can optionally host its own Streamable HTTP MCP endpoint. It is **off by
 To connect a local MCP client:
 
 1. Open **Settings → MCP → HTTP Service**, turn on **Streamable HTTP Service**, and keep the default loopback address unless another device genuinely needs access.
-2. Click **Save and start service**. Saving a changed address, port, or path applies the configuration by restarting the service.
+2. Click **Save and apply**. The button saves the configuration and starts, restarts, or stops the service according to the toggle; changing the address, port, or path restarts the service automatically.
 3. Copy the displayed service address and bearer token into the MCP client.
 
 Use the generated values in an HTTP-capable MCP client. The transport-specific field names differ between clients, but the essential configuration is:
@@ -304,7 +318,9 @@ DBX Web and Docker require the same standalone DuckDB driver. Install it from Dr
 
 ### Native Streamable HTTP for DBX Web
 
-DBX Web can also host MCP itself. This mode is disabled unless `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) is configured. It uses the existing Web listener and the `/mcp` path, so Docker and reverse-proxy deployments do not need a second exposed port. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities that clients send in the `Host` header, including a mapped port when applicable. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
+DBX Web can also host MCP itself on its existing listener at `/mcp`, so Docker and reverse-proxy deployments do not need a second exposed port. A single-instance deployment with a Web login password can enable it in **Settings → MCP → HTTP Service** after entering the allowed Hosts. DBX generates a bearer token in its encrypted secret store; the page can copy, rotate, or disable it, with changes applying to new requests immediately. The page does not show `/mcp` as a usable endpoint while it is disabled. Page-managed MCP is inactive without a Web login password; demo deployments disable MCP entirely.
+
+Deployment configuration takes precedence: when `DBX_WEB_MCP_TOKEN` or `DBX_WEB_MCP_TOKEN_FILE` is set, the page shows read-only status and cannot replace the deployment secret. A previously enabled page-managed token remains stored and becomes active again if the deployment token is removed and Web is restarted. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities clients send in the `Host` header, including mapped ports. Multi-instance deployments should use a shared deployment secret and allowlist, not the page-managed mode. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
 
 For example, a container published as `4225:4224` uses `http://localhost:4225/mcp`:
 
@@ -381,7 +397,7 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
   <Accordion title="The optional platform package was not installed">Reinstall without `--no-optional`, then verify the platform with `node -p 'process.platform + "-" + process.arch'`. The current platform must appear in the supported platform table.</Accordion>
   <Accordion title="dbx.db cannot be found">Set `DBX_DATA_DIR` to the folder containing `dbx.db`. For Windows portable builds, this is normally the `data` folder beside `DBX.exe`.</Accordion>
   <Accordion title="DBX is not running">Only `dbx_open_table` and `dbx_execute_and_show` require the desktop app. Local query tools can run without DBX open.</Accordion>
-  <Accordion title="A Desktop HTTP client gets ERR_CONNECTION_REFUSED">In **Settings → MCP → HTTP Service**, turn on the service and click **Save and start service**. Confirm that the client uses the displayed address, path, and current bearer token. The default `127.0.0.1` address accepts connections only from the same computer.</Accordion>
+  <Accordion title="A Desktop HTTP client gets ERR_CONNECTION_REFUSED">In **Settings → MCP → HTTP Service**, turn on the service and click **Save and apply**. Confirm that the client uses the displayed address, path, and current bearer token. The default `127.0.0.1` address accepts connections only from the same computer.</Accordion>
   <Accordion title="Desktop says the HTTP address is already in use">Another process is listening on the selected address and port. Choose an unused port in **Settings → MCP → HTTP Service**, then save the configuration to restart the service. Do not run two DBX Desktop instances with the same HTTP endpoint.</Accordion>
   <Accordion title="A request returns DATABASE_OUT_OF_SCOPE">The connection is exposed, but the requested database is not in its MCP database scope. Add the exact database name in **Settings → MCP**, or change that connection's scope to all databases if appropriate. For a specified scope, call `dbx_list_databases` first and then use one of the returned names.</Accordion>
   <Accordion title="A previously visible tool is rejected">The tool is no longer selected in **Settings → MCP** or the current policy does not permit it. Refresh the MCP client's tool list after changing the allowlist; the server rejects stale tool calls as well.</Accordion>

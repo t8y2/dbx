@@ -74,6 +74,49 @@ describe("WebDAV sync HTTP API", () => {
     });
   });
 
+  it("requests a selectable catalog and sends the selected snapshot items", async () => {
+    const fetchMock = stubFetch({ connections: [{ id: "db-1", label: "Production" }] });
+    const { cloudSyncLocalCatalog, webdavSyncInspect, webdavSyncUpload, webdavSyncDownload } = await import("@/lib/backend/http");
+    const editorSettings = { theme: "dark" };
+    const catalog = await cloudSyncLocalCatalog(editorSettings);
+    expect(catalog.connections).toEqual([{ id: "db-1", label: "Production" }]);
+    expect(lastCall(fetchMock)).toEqual({ url: "/api/cloud-sync/catalog/local", body: { editorSettings } });
+
+    await webdavSyncInspect(config, "sync-password");
+    expect(lastCall(fetchMock)).toEqual({
+      url: "/api/cloud-sync/webdav/inspect",
+      body: { config, secretsPassphrase: "sync-password" },
+    });
+
+    const selection = {
+      connections: ["db-1"],
+      connectionSecrets: ["db-1"],
+      tunnelProfiles: [],
+      tunnelSecrets: [],
+      savedSqlFolders: [],
+      savedSqlFiles: [],
+      desktopSettings: ["iconTheme"],
+      editorSettings: ["theme"],
+      aiConfigs: [],
+      pluginUiStorage: [],
+      sidebarLayout: false,
+      pinnedTreeNodeIds: false,
+      includeSecrets: true,
+      syncCredentials: false,
+    };
+    await webdavSyncUpload(config, editorSettings, "sync-password", true, selection);
+    expect(lastCall(fetchMock)).toEqual({
+      url: "/api/cloud-sync/webdav/upload",
+      body: { config, editorSettings, secretsPassphrase: "sync-password", includeSecrets: true, selection },
+    });
+
+    await webdavSyncDownload(config, "sync-password", true, selection);
+    expect(lastCall(fetchMock)).toEqual({
+      url: "/api/cloud-sync/webdav/download",
+      body: { config, secretsPassphrase: "sync-password", restoreSecrets: true, selection },
+    });
+  });
+
   it("accepts the migration cleanup endpoint's empty 204 response", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);

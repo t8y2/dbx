@@ -2899,7 +2899,7 @@ async fn execute_sql_statement_with_options_typed_inner(
         || crate::sql::has_executable_sql(sql),
         |db_type| crate::sql::has_executable_sql_for_database(sql, db_type),
     );
-    if !has_executable_sql {
+    if !has_executable_sql && options.result_session_id.is_none() {
         return Ok(empty_query_result(0));
     }
 
@@ -8060,6 +8060,7 @@ for line in sys.stdin:
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -10901,6 +10902,7 @@ for line in sys.stdin:
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -11425,7 +11427,11 @@ for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
     if method == "execute_query":
-        sql = request.get("params", {{}}).get("sql", "")
+        params = request.get("params", {{}})
+        sql = params.get("sql", "")
+        if "REQUIRE_APP_SCHEMA" in sql and params.get("schema") != "APP":
+            print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "schema was not forwarded"}}}}), flush=True)
+            continue
         if "RAISE_FILE_ERROR" in sql:
             print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "file statement rejected"}}}}), flush=True)
             continue
@@ -11489,7 +11495,7 @@ for line in sys.stdin:
                 snapshot_rotation_safe: true,
                 connection_id: "agent-conn".to_string(),
                 database: "ORCL".to_string(),
-                schema: None,
+                schema: Some("APP".to_string()),
             },
         );
         (state, txn_session_id, dir)
@@ -11501,6 +11507,7 @@ for line in sys.stdin:
             execution_id: "manual-file-test".to_string(),
             connection_id: "agent-conn".to_string(),
             database: "ORCL".to_string(),
+            schema: Some("APP".to_string()),
             file_path: String::new(),
             continue_on_error: false,
             selected_tables: None,
@@ -11519,7 +11526,7 @@ for line in sys.stdin:
         crate::data::sql_file_import::execute_sql_file_content(
             &state,
             &request,
-            "UPDATE T SET V = 1; UPDATE T SET V = 2;",
+            "SELECT REQUIRE_APP_SCHEMA; UPDATE T SET V = 2;",
             CancellationToken::new(),
             std::time::Instant::now(),
             |event| events.push(event),
@@ -11635,6 +11642,23 @@ for line in sys.stdin:
             assert!(events.is_empty());
             assert!(state.transaction_sessions.read().await.contains_key(&session_id));
         }
+        let mut request = manual_sql_file_request(&session_id);
+        request.schema = Some("OTHER".to_string());
+        let mut events = Vec::new();
+        let error = crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &request,
+            "UPDATE T SET V = 1;",
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("target does not match"));
+        assert!(events.is_empty());
+        assert!(state.transaction_sessions.read().await.contains_key(&session_id));
+
         rollback_manual_transaction(&state, &session_id).await.unwrap();
         let error = crate::data::sql_file_import::execute_sql_file_content(
             &state,

@@ -24,8 +24,9 @@ export function usePluginShortcutHeight(options: { section: Ref<HTMLElement | nu
     if (!section || !scroll || !options.sidebarList.value) return;
     const tree = section.previousElementSibling as HTMLElement | null;
     const divider = section.querySelector<HTMLElement>("[data-shortcut-resize]");
-    available.value = (tree?.offsetHeight ?? 0) + section.offsetHeight - (divider?.offsetHeight ?? 0);
-    const item = scroll.querySelector<HTMLElement>("[data-shortcut-id]");
+    const header = section.querySelector<HTMLElement>("[data-shortcut-header]");
+    available.value = (tree?.offsetHeight ?? 0) + section.offsetHeight - (divider?.offsetHeight ?? 0) - (header?.offsetHeight ?? 0);
+    const item = scroll.querySelector<HTMLElement>("[data-shortcut-id], [data-plugin-shortcut-settings]");
     const grid = scroll.firstElementChild;
     itemSize.value = item?.offsetHeight || 28;
     gap.value = grid ? parseFloat(getComputedStyle(grid).gap) || 0 : 0;

@@ -36,6 +36,16 @@ afterEach(() => {
   container.remove();
 });
 describe("plugin shortcut settings", () => {
+  it("saves the settings shortcut choice without affecting plugin order", async () => {
+    (container.querySelector("#plugin-shortcuts-settings-entry") as HTMLElement).click();
+    await vi.waitFor(() => expect(mocks.state.editorSettings.pluginShortcuts.showSettingsEntry).toBe(false));
+    expect(mocks.state.editorSettings.pluginShortcuts.order).toEqual(["saved"]);
+    await vi.waitFor(() => expect(container.querySelector("#plugin-shortcuts-settings-entry")?.hasAttribute("disabled")).toBe(false));
+    mocks.save.mockRejectedValueOnce(new Error("disk full"));
+    (container.querySelector("#plugin-shortcuts-settings-entry") as HTMLElement).click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalled());
+    expect(mocks.state.editorSettings.pluginShortcuts.showSettingsEntry).toBe(false);
+  });
   it("selects the Plugin Center dropdown and preserves unrelated preferences", async () => {
     const trigger = container.querySelector<HTMLElement>('[role="combobox"]')!;
     trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
@@ -48,8 +58,8 @@ describe("plugin shortcut settings", () => {
   });
   it("shows one toggle per plugin and preserves choices under the global switch", async () => {
     const switches = container.querySelectorAll<HTMLElement>('[role="switch"]');
-    expect(switches).toHaveLength(2);
-    switches[1].click();
+    expect(switches).toHaveLength(3);
+    switches[2].click();
     await vi.waitFor(() => expect(mocks.state.editorSettings.pluginShortcuts.hiddenPluginIds).toEqual(["p"]));
     await vi.waitFor(() => expect(switches[0].hasAttribute("disabled")).toBe(false));
     switches[0].click();

@@ -250,6 +250,7 @@ pub enum PluginContribution {
     ResultView(PluginResultViewContribution),
     Command(PluginCommandContribution),
     Menus(PluginMenusContribution),
+    Mcp(PluginMcpContribution),
 }
 
 impl PluginContribution {
@@ -262,8 +263,44 @@ impl PluginContribution {
             Self::ResultView(contribution) => &contribution.id,
             Self::Command(contribution) => &contribution.id,
             Self::Menus(contribution) => &contribution.id,
+            Self::Mcp(contribution) => &contribution.id,
         }
     }
+}
+
+/// Optional surface override for a sidecar that implements the MCP tool
+/// bridge (`mcp/tools` + `mcp/call`, see `plugins/README.md` "Tools for the
+/// built-in AI assistant").
+///
+/// Neither surface is exposed by install alone: the built-in AI agent only
+/// sees a plugin after the user enabled it in the Plugin Center, and the
+/// external `dbx` MCP server only sees plugins that declare
+/// `external_tools: true` here. This contribution narrows or widens those
+/// surfaces per author: `ai_tools: false` keeps the tools off the built-in AI
+/// agent even when the user opts in, and `external_tools` (default `false`)
+/// opts the tools into the external `dbx` MCP server. The Plugin Center
+/// switch and the global MCP policy still override either surface per user.
+/// Note that declaring this contribution makes the manifest unreadable to
+/// hosts that predate it, so plugins that must install on older hosts should
+/// not declare it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMcpContribution {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Keep the tools on the built-in AI agent. Defaults to `true`; set to
+    /// `false` to keep them off that surface even when the user opts in.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub ai_tools: bool,
+    /// Expose the tools on the external `dbx` MCP server. Defaults to
+    /// `false`; set to `true` to opt in to that surface.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub external_tools: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -664,6 +701,25 @@ pub struct PluginWorkbenchContribution {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<PluginWorkbenchAiContribution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginWorkbenchAiContribution {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommendations: Vec<PluginAiRecommendation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginAiRecommendation {
+    pub id: String,
+    pub label: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
 }
 
 /// Native context-menu entry contributed to DBX surfaces. Legacy entries
@@ -976,6 +1032,29 @@ impl PluginManifest {
         }))
     }
 
+    /// The plugin's single MCP tool declaration, if any. A manifest declaring
+    /// more than one is rejected during validation, so first match is exact.
+    pub fn mcp_contribution(&self) -> Option<&PluginMcpContribution> {
+        self.contributions.iter().find_map(|contribution| match contribution {
+            PluginContribution::Mcp(mcp) => Some(mcp),
+            _ => None,
+        })
+    }
+
+    /// Whether the optional `mcp` declaration keeps the sidecar tools off the
+    /// built-in AI agent (`ai_tools: false`) even when the user opts in via
+    /// the Plugin Center. Without it the tools participate once opted in.
+    pub fn ai_tools_excluded(&self) -> bool {
+        self.mcp_contribution().is_some_and(|mcp| !mcp.ai_tools)
+    }
+
+    /// Whether the optional `mcp` declaration does not opt the sidecar tools
+    /// into the external `dbx` MCP server. `external_tools` defaults to
+    /// `false`, so only an explicit `true` exposes them there.
+    pub fn external_tools_excluded(&self) -> bool {
+        self.mcp_contribution().is_some_and(|mcp| !mcp.external_tools)
+    }
+
     pub fn compatibility(&self, plugin_dir: &Path, dbx_version: &str) -> PluginCompatibility {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
@@ -1257,6 +1336,7 @@ fn validate_contributions(
     let mut command_ids = HashSet::new();
     let mut command_workbench_references = Vec::new();
     let mut menu_command_references = Vec::new();
+    let mut mcp_contributions = 0usize;
 
     for (index, contribution) in contributions.iter().enumerate() {
         let id = contribution.id();
@@ -1319,6 +1399,9 @@ fn validate_contributions(
                 }
                 if !has_ui {
                     errors.push(format!("Workbench contribution '{id}' requires a UI entrypoint"));
+                }
+                if let Some(ai) = &workbench.ai {
+                    validate_ai_recommendations(&ai.recommendations, id, errors);
                 }
             }
             PluginContribution::ResultView(result_view) => {
@@ -1459,9 +1542,23 @@ fn validate_contributions(
                     menu_command_references.push((id.to_string(), item.command.clone()));
                 }
             }
+            PluginContribution::Mcp(mcp) => {
+                mcp_contributions += 1;
+                validate_optional_text(
+                    mcp.description.as_deref(),
+                    &format!("Mcp contribution '{id}' description"),
+                    errors,
+                );
+                if !has_backend {
+                    errors.push(format!("Mcp contribution '{id}' requires a backend entrypoint"));
+                }
+            }
         }
     }
 
+    if mcp_contributions > 1 {
+        errors.push(format!("A manifest declares {mcp_contributions} mcp contributions; at most one is allowed"));
+    }
     for (provider, workbench) in workbench_references {
         if !workbench_ids.contains(&workbench) {
             errors.push(format!("Connection provider '{provider}' references missing workbench '{workbench}'"));
@@ -1489,6 +1586,108 @@ fn validate_contributions(
             errors.push(format!("Command '{command}' references missing workbench '{workbench}'"));
         }
     }
+}
+
+fn validate_ai_recommendations(
+    recommendations: &[PluginAiRecommendation],
+    workbench_id: &str,
+    errors: &mut Vec<String>,
+) {
+    if recommendations.len() > 5 {
+        errors.push(format!(
+            "Workbench '{workbench_id}' declares {} AI recommendations; at most 5 are allowed",
+            recommendations.len()
+        ));
+    }
+    let mut seen_ids = HashSet::new();
+    for recommendation in recommendations {
+        if !valid_identifier(&recommendation.id) {
+            errors.push(format!("Workbench '{workbench_id}' AI recommendation has an invalid id"));
+        } else if !seen_ids.insert(recommendation.id.as_str()) {
+            errors.push(format!(
+                "Workbench '{workbench_id}' declares duplicate AI recommendation id '{}'",
+                recommendation.id
+            ));
+        }
+        validate_required_text(
+            &recommendation.label,
+            &format!("Workbench '{workbench_id}' AI recommendation label"),
+            errors,
+        );
+        validate_required_text(
+            &recommendation.prompt,
+            &format!("Workbench '{workbench_id}' AI recommendation prompt"),
+            errors,
+        );
+        validate_ai_recommendation_template(&recommendation.label, workbench_id, &recommendation.id, "label", errors);
+        validate_ai_recommendation_template(&recommendation.prompt, workbench_id, &recommendation.id, "prompt", errors);
+        if recommendation.label.chars().count() > 200 {
+            errors.push(format!(
+                "Workbench '{workbench_id}' AI recommendation '{}' label exceeds 200 characters",
+                recommendation.id
+            ));
+        }
+        if recommendation.prompt.chars().count() > 32_000 {
+            errors.push(format!(
+                "Workbench '{workbench_id}' AI recommendation '{}' prompt exceeds 32000 characters",
+                recommendation.id
+            ));
+        }
+    }
+}
+
+/// Validate the only interpolation syntax supported by the workbench AI
+/// recommendation contract. Ordinary single braces remain valid prompt text;
+/// double braces must contain a safe dotted context path.
+fn validate_ai_recommendation_template(
+    value: &str,
+    workbench_id: &str,
+    recommendation_id: &str,
+    field: &str,
+    errors: &mut Vec<String>,
+) {
+    let mut offset = 0;
+    loop {
+        let remainder = &value[offset..];
+        let Some(open_relative) = remainder.find("{{") else {
+            if remainder.contains("}}") {
+                errors.push(format!("Workbench '{workbench_id}' AI recommendation '{recommendation_id}' {field} contains an unmatched placeholder close").to_string());
+            }
+            return;
+        };
+        if remainder[..open_relative].contains("}}") {
+            errors.push(format!("Workbench '{workbench_id}' AI recommendation '{recommendation_id}' {field} contains an unmatched placeholder close").to_string());
+            return;
+        }
+        let content_start = offset + open_relative + 2;
+        let Some(close_relative) = value[content_start..].find("}}") else {
+            errors.push(format!("Workbench '{workbench_id}' AI recommendation '{recommendation_id}' {field} contains an unterminated placeholder").to_string());
+            return;
+        };
+        let path = value[content_start..content_start + close_relative].trim();
+        if !valid_template_path(path) {
+            errors.push(format!("Workbench '{workbench_id}' AI recommendation '{recommendation_id}' {field} contains an invalid placeholder").to_string());
+        }
+        offset = content_start + close_relative + 2;
+    }
+}
+
+fn valid_template_path(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    value.split('.').enumerate().all(|(index, segment)| {
+        if index > 0 && segment.chars().all(|character| character.is_ascii_digit()) {
+            return !segment.is_empty();
+        }
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        (first.is_ascii_alphabetic() || first == '_' || first == '$')
+            && chars.all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '$')
+            && !matches!(segment, "__proto__" | "prototype" | "constructor")
+    })
 }
 
 /// Sidecar method names look like `<domain>/<action>[/<sub>]` (lower-case
@@ -1839,8 +2038,8 @@ mod tests {
         parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions, validate_contributions,
         PluginCommandAction, PluginCommandContribution, PluginCommandPresentation, PluginCommandRestore,
         PluginCommandReuse, PluginConnectionActionContribution, PluginConnectionProviderContribution,
-        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMenuItem, PluginMenuLocation,
-        PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
+        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMcpContribution, PluginMenuItem,
+        PluginMenuLocation, PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
         SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
@@ -1866,6 +2065,85 @@ mod tests {
             }]
         }))?;
         Ok((dir, manifest))
+    }
+
+    #[test]
+    fn mcp_contribution_parses_the_frozen_contract() {
+        // Defaults: the built-in AI surface participates (subject to the
+        // Plugin Center opt-in), the external `dbx` server does not.
+        let mcp: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.example.mcp"
+        }))
+        .unwrap();
+        let PluginContribution::Mcp(mcp) = mcp else { unreachable!("parsed as mcp above") };
+        assert!(mcp.ai_tools);
+        assert!(!mcp.external_tools);
+
+        let widened: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.example.mcp",
+            "external_tools": true
+        }))
+        .unwrap();
+        let PluginContribution::Mcp(widened) = widened else { unreachable!() };
+        assert!(widened.ai_tools);
+        assert!(widened.external_tools);
+
+        // Unknown fields inside the contribution reject (frozen contract).
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "mcp", "id": "x", "entrypoint": "bin/example"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_contribution_requires_a_backend_and_stays_single() {
+        let plugin_dir = std::env::temp_dir();
+        let mcp = PluginContribution::Mcp(PluginMcpContribution {
+            id: "io.dbx.example.mcp".to_string(),
+            description: None,
+            ai_tools: true,
+            external_tools: true,
+        });
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), false, false, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("requires a backend entrypoint")), "{errors:?}");
+
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), true, false, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let two = vec![mcp.clone(), mcp];
+        let mut errors = Vec::new();
+        validate_contributions(&two, true, false, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("at most one")), "{errors:?}");
+    }
+
+    #[test]
+    fn full_manifest_parses_the_mcp_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&binary_dir).unwrap();
+        std::fs::write(binary_dir.join("example"), b"example").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "backend": { "executable": "bin/example" } },
+            "contributions": [{
+                "type": "mcp",
+                "id": "io.dbx.example.mcp"
+            }]
+        }))
+        .unwrap();
+        assert!(!manifest.ai_tools_excluded(), "ai_tools defaults to participating");
+        assert!(manifest.external_tools_excluded(), "external_tools defaults to off");
+        let compatibility = manifest.compatibility(dir.path(), "0.6.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
     }
 
     #[test]
@@ -1938,6 +2216,57 @@ mod tests {
             "type": "invoke-sidecar", "method": "x"
         }));
         assert!(rpc.is_err(), "RPC actions are outside the v1 contract");
+    }
+
+    #[test]
+    fn workbench_ai_recommendations_parse_as_an_additive_manifest_field() {
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "contributions": [{
+                "type": "workbench",
+                "id": "io.dbx.example.workbench",
+                "label": "Example",
+                "ai": { "recommendations": [{
+                    "id": "health",
+                    "label": "Inspect {{resource.name}}",
+                    "prompt": "Check {{resource.kind}}/{{resource.name}}",
+                    "order": 10
+                }] }
+            }]
+        }))
+        .unwrap();
+
+        let PluginContribution::Workbench(workbench) = &manifest.contributions[0] else {
+            panic!("expected workbench contribution");
+        };
+        let ai = workbench.ai.as_ref().expect("AI contribution");
+        assert_eq!(ai.recommendations[0].id, "health");
+        assert_eq!(ai.recommendations[0].order, Some(10));
+
+        let plugin_dir = std::env::temp_dir();
+        for invalid in ["Inspect {{resource..name}}", "Inspect {{resource.name", "Inspect resource.name}}"] {
+            let contribution = serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "workbench",
+                "id": "io.dbx.example.workbench",
+                "label": "Example",
+                "ai": { "recommendations": [{ "id": "health", "label": invalid, "prompt": "Check" }] }
+            }))
+            .unwrap();
+            let mut errors = Vec::new();
+            validate_contributions(std::slice::from_ref(&contribution), false, true, &plugin_dir, &mut errors);
+            assert!(
+                errors.iter().any(|error| error.contains("invalid placeholder")
+                    || error.contains("unterminated")
+                    || error.contains("unmatched")),
+                "{invalid:?}: {errors:?}"
+            );
+        }
     }
 
     #[test]
@@ -2390,6 +2719,53 @@ mod tests {
             error == "Context menu 'io.dbx.example.inspect' declares unsupported menu 'schema'; only 'connection' and 'table' are available"
         }));
         Ok(())
+    }
+
+    /// The runtime `PluginContribution` enum is the source of truth for
+    /// contribution `type` tags; the published schema's `contributions.oneOf`
+    /// must accept every one of them, or schema-validating tooling (CI,
+    /// editors) rejects manifests the host itself accepts. Adding a runtime
+    /// variant without extending the schema fails here.
+    #[test]
+    fn manifest_schema_lists_every_runtime_contribution_kind() {
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("plugins")
+            .join("manifest.schema.json");
+        let schema: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&schema_path).unwrap()).unwrap();
+        let referenced: Vec<String> = schema["properties"]["contributions"]["items"]["oneOf"]
+            .as_array()
+            .expect("contributions.items.oneOf must be an array")
+            .iter()
+            .map(|entry| {
+                entry["$ref"]
+                    .as_str()
+                    .expect("every oneOf entry must be a $ref")
+                    .trim_start_matches("#/$defs/")
+                    .to_string()
+            })
+            .collect();
+
+        // Mirrors the PluginContribution variants and their kebab-case serde
+        // tags; the schema def names append "Contribution".
+        let kinds = [
+            ("connection-provider", "connectionProviderContribution"),
+            ("workbench", "workbenchContribution"),
+            ("filesystem-provider", "filesystemProviderContribution"),
+            ("context-menu", "contextMenuContribution"),
+            ("result-view", "resultViewContribution"),
+            ("command", "commandContribution"),
+            ("menus", "menusContribution"),
+            ("mcp", "mcpContribution"),
+        ];
+        assert_eq!(referenced, kinds.iter().map(|(_, def)| def.to_string()).collect::<Vec<_>>());
+        for (tag, def) in kinds {
+            assert_eq!(
+                schema["$defs"][def]["properties"]["type"]["const"], tag,
+                "schema def {def} must pin the {tag:?} contribution type tag"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App, type ComponentPublicInstance } from "vue";
+import { createApp, h, ref, nextTick, type App, type ComponentPublicInstance } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
 import { formatMarketplaceReleasedDate, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   removePluginTrustedKey: vi.fn(),
   toast: vi.fn(),
   isTauriRuntime: vi.fn(),
+  openExternal: vi.fn(),
   refreshPluginWorkbenches: vi.fn(),
 }));
 
@@ -31,6 +32,7 @@ vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connec
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => vi.fn()) }));
+vi.mock("@tauri-apps/plugin-shell", () => ({ open: mocks.openExternal }));
 vi.mock("vue-i18n", async () => {
   const { ref } = await import("vue");
   return { useI18n: () => ({ locale: ref("en"), t: (key: string, values = {}) => `${key}:${JSON.stringify(values)}` }) };
@@ -63,6 +65,7 @@ vi.mock("@/components/plugins/PluginShortcutSettings.vue", async () => ({ defaul
 import PluginContributionsPanel from "@/components/plugins/PluginContributionsPanel.vue";
 
 type PanelState = {
+  activeSection: "marketplace" | "installed" | "settings";
   batchRunning: boolean;
   batchMode: boolean;
   marketplaceViewMode: "grid" | "list";
@@ -267,6 +270,33 @@ describe("PluginContributionsPanel batch source validation", () => {
       { repositoryId: "second", pluginId: "b", version },
     ]);
     expect(state.selectedListingKeys.size).toBe(0);
+  });
+});
+
+describe("PluginContributionsPanel external links", () => {
+  it("hands GitHub and homepage clicks to the desktop shell without selecting the card", async () => {
+    const linkedCatalog = catalog("first", ["linked"]);
+    Object.assign(linkedCatalog.catalog!.plugins[0], {
+      source: "https://github.com/dbxio/linked",
+      homepage: "https://dbxio.com/plugins/linked",
+    });
+    state.catalogResults = [linkedCatalog];
+    state.marketplaceViewMode = "grid";
+    mocks.isTauriRuntime.mockReturnValue(true);
+    await nextTick();
+
+    const sourceButton = host.querySelector<HTMLButtonElement>('[aria-label^="pluginPlatform.sourceRepository"]')!;
+    const homepageButton = host.querySelector<HTMLButtonElement>('[aria-label^="pluginPlatform.pluginHomepage"]')!;
+    const cardClick = vi.fn();
+    sourceButton.closest("article")!.addEventListener("click", cardClick);
+
+    sourceButton.click();
+    await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledTimes(1));
+    homepageButton.click();
+    await vi.waitFor(() => expect(mocks.openExternal).toHaveBeenCalledTimes(2));
+
+    expect(mocks.openExternal.mock.calls).toEqual([["https://github.com/dbxio/linked"], ["https://dbxio.com/plugins/linked"]]);
+    expect(cardClick).not.toHaveBeenCalled();
   });
 });
 
@@ -852,5 +882,123 @@ describe("PluginContributionsPanel marketplace sort", () => {
 
     expect(state.marketplaceSortMode).toBe("name");
     expect(renderedOrder()).toEqual(["a.older", "b.newer"]);
+  });
+});
+
+describe("PluginContributionsPanel marketplace card layout", () => {
+  it("keeps the three-column grid and shows full names and versions in both views", async () => {
+    state.batchMode = false;
+    const longName = "Database Schema Explorer Marketplace Plugin With Deliberately Long Name";
+    const versionValue = "3.0.0-preview.10483";
+    const plugin = state.catalogResults[0].catalog!.plugins.find((entry) => entry.id === "a")!;
+    plugin.name = longName;
+    plugin.latestVersion = versionValue;
+    plugin.versions[0].version = versionValue;
+    await flushUi();
+
+    for (const view of ["grid", "list"] as const) {
+      state.marketplaceViewMode = view;
+      await nextTick();
+
+      const cards = [...host.querySelectorAll("article")];
+      const pluginName = cards.flatMap((card) => [...card.querySelectorAll<HTMLElement>("[title]")]).find((element) => element.title === longName);
+      expect(pluginName?.textContent?.trim(), `${view}: full plugin name`).toBe(longName);
+      expect(pluginName?.classList.contains("truncate"), `${view}: long name truncates visually`).toBe(true);
+      expect(pluginName?.classList.contains("text-sm"), `${view}: name size stays fixed`).toBe(true);
+
+      const card = pluginName?.closest("article");
+      const versionBadge = [...(card?.querySelectorAll<HTMLElement>("[data-stub='Badge']") ?? [])].find((element) => element.textContent?.trim() === `v${versionValue}`);
+      expect(versionBadge?.textContent?.trim(), `${view}: full version`).toBe(`v${versionValue}`);
+      expect(versionBadge?.classList.contains("max-w-full"), `${view}: version fits the available width`).toBe(true);
+
+      const details = [...(card?.querySelectorAll<HTMLElement>("span") ?? [])].find((element) => element.textContent?.trim() === "DBX · first");
+      expect(details, `${view}: publisher and repository details render`).toBeDefined();
+      expect(versionBadge!.compareDocumentPosition(details!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+
+      if (view === "grid") {
+        expect(card?.parentElement?.classList.contains("md:grid-cols-3"), "grid must not use the viewport breakpoint removed by #10444").toBe(false);
+        expect(card?.parentElement?.className, "grid tracks the panel width via auto-fill").toContain("auto-fill");
+      }
+    }
+  });
+});
+
+describe("PluginContributionsPanel single uninstall outcomes", () => {
+  it("re-reads the installed list and notifies listeners when a single uninstall fails", async () => {
+    const changed = vi.fn();
+    window.addEventListener("dbx:plugins-changed", changed);
+    const failure = "The process cannot access the file because it is being used by another process. (os error 32)";
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error(failure));
+    // The backend kept the plugin installed (the uninstall never committed), and the panel has to
+    // show exactly that instead of the state it guessed before the call.
+    mocks.listPlugins.mockResolvedValueOnce([installed("a"), installed("b", "9.9.9")]);
+
+    try {
+      await state.uninstallSelectedPlugin();
+    } finally {
+      window.removeEventListener("dbx:plugins-changed", changed);
+    }
+
+    expect(mocks.toast).toHaveBeenLastCalledWith(failure, 5000);
+    expect(mocks.listPlugins).toHaveBeenCalledOnce();
+    expect(state.installedPlugins.map((plugin) => `${plugin.manifest.id}@${plugin.manifest.version}`)).toEqual(["a@1.0.0", "b@9.9.9"]);
+    expect(changed).toHaveBeenCalledOnce();
+    expect(state.error).toBe("");
+  });
+
+  it("keeps the uninstall failure visible when the follow-up refresh also fails", async () => {
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error("denied"));
+    mocks.listPlugins.mockRejectedValueOnce(new Error("refresh offline"));
+
+    await state.uninstallSelectedPlugin();
+
+    expect(mocks.toast).toHaveBeenLastCalledWith("denied", 5000);
+    expect(state.error).toBe('pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}');
+  });
+});
+
+describe("PluginContributionsPanel settings navigation", () => {
+  it.each(["marketplace", "installed"] as const)("preserves navigation to %s while the initial refresh is pending", async (section) => {
+    app.unmount();
+    const pending = deferred<InstalledPlugin[]>();
+    mocks.listPlugins.mockReturnValue(pending.promise);
+    app = createApp(PluginContributionsPanel, { focusTarget: { section: "settings" } });
+    const instance = app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } };
+    const current = instance.$.setupState;
+    expect(current.activeSection).toBe("settings");
+    current.activeSection = section;
+    await nextTick();
+    pending.resolve([installed("a")]);
+    await flushUi();
+    expect(current.activeSection).toBe(section);
+  });
+
+  it.each(["empty", "installed", "load-failure"])("opens and reopens settings without depending on plugin loading (%s)", async (scenario) => {
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    if (scenario === "load-failure") mocks.listPlugins.mockRejectedValue(new Error("unavailable"));
+    else mocks.listPlugins.mockResolvedValue(scenario === "empty" ? [] : [installed("a")]);
+    const focus = ref<{ section: "settings" }>({ section: "settings" });
+    let panel!: ComponentPublicInstance;
+    app = createApp({
+      render: () =>
+        h(PluginContributionsPanel, {
+          focusTarget: focus.value,
+          ref: (value) => {
+            panel = value as ComponentPublicInstance;
+          },
+        }),
+    });
+    app.mount(host);
+    const current = (panel as ComponentPublicInstance & { $: { setupState: PanelState } }).$.setupState;
+    expect(current.activeSection).toBe("settings");
+    await flushUi();
+    expect(current.activeSection).toBe("settings");
+    current.activeSection = "marketplace";
+    focus.value = { section: "settings" };
+    await nextTick();
+    expect(current.activeSection).toBe("settings");
   });
 });

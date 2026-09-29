@@ -3,7 +3,7 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } fr
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
+import { copyToClipboard, readImageFromClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import {
   PluginHostBridge,
   pluginSandboxDocument,
@@ -16,6 +16,7 @@ import {
   type PluginSaveFileRequest,
   type PluginSaveFileResult,
   type PluginWorkbenchContext,
+  type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
 import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
@@ -42,6 +43,7 @@ const emit = defineEmits<{
   openWorkbench: [pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }];
   openFilesystem: [pluginId: string, providerId: string, context?: PluginWorkbenchContext];
   closeTab: [];
+  recommendations: [update: PluginAiRecommendationHostUpdate];
 }>();
 
 const { t, locale: appLocale } = useI18n();
@@ -381,6 +383,7 @@ function createBridge() {
       sendBinary: api.sendPluginBinary,
       readAsset: api.readPluginUiAsset,
       openAiConversation,
+      setAiRecommendations: (update) => emit("recommendations", update),
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
@@ -419,12 +422,15 @@ function createBridge() {
       // Permission-gated in the bridge (host.clipboard:read); the helper
       // prefers the Tauri clipboard plugin and falls back to the Web Clipboard.
       clipboardRead: (_pluginId) => readTextFromClipboard(),
+      clipboardReadImage: isTauriRuntime() ? (_pluginId) => readImageFromClipboard() : undefined,
       // Session consent for the first clipboard read: a native ask dialog naming
       // the plugin, so reads always have a human in the loop. On the web host
       // (no dialog surface) the callback is omitted and the bridge denies.
       confirmClipboardRead: isTauriRuntime()
         ? (_pluginId, pluginName) => import("@tauri-apps/plugin-dialog").then(({ ask }) => ask(t("pluginPlatform.clipboardReadConsent", { name: pluginName }), { title: t("pluginPlatform.clipboardReadConsentTitle"), kind: "warning" }).then((allowed) => allowed === true))
         : undefined,
+      openMedia: isTauriRuntime() ? (pluginId, method, params) => tauriFileApi().then(({ openPluginMedia }) => openPluginMedia(pluginId, method, params)) : undefined,
+      closeMedia: isTauriRuntime() ? (pluginId, token) => tauriFileApi().then(({ closePluginMedia }) => closePluginMedia(pluginId, token)) : undefined,
       pickFiles: (pluginId, options) => pickPluginFiles(pluginId, options),
       readFileChunk: (pluginId, handleId, offset, length) => readPluginFileChunkById(pluginId, handleId, offset, length),
       beginFileSave: (pluginId, request) => beginPluginFileSave(pluginId, request),

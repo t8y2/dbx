@@ -686,7 +686,7 @@ describe("UpdateDialog aggregate update center", () => {
 
     // "Update all" skips the changed-source plugin, so the dialog has to explain why it stays.
     const hint = "Confirm the change in the Plugin Center first";
-    const rows = [...document.body.querySelectorAll<HTMLElement>(".rounded-md.border.p-3")];
+    const rows = [...document.body.querySelectorAll<HTMLElement>("[data-update-entry]")];
     const rowFor = (name: string) => rows.find((row) => row.textContent?.includes(name));
     expect(rowFor("moved plugin")?.textContent).toContain(hint);
     expect(rowFor("same plugin")?.textContent).not.toContain(hint);

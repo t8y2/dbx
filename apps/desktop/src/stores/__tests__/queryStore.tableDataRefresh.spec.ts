@@ -248,6 +248,227 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledWith("yasdb-1", "app", "SELECT * FROM app.users", undefined, expect.any(String), expect.not.objectContaining({ rowOffset: expect.anything() }));
   });
 
+  it("continues and restarts Cassandra table cursors without duplicating page one", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "cassandra-1",
+      name: "Cassandra",
+      db_type: "cassandra",
+      database: "app",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti
+      .mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-1", has_more: true }])
+      .mockResolvedValueOnce([{ columns: ["id"], rows: [[3], [4]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-1", has_more: true }])
+      .mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-2", has_more: true }])
+      .mockResolvedValueOnce([{ columns: ["id"], rows: [[3], [4]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-2", has_more: true }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const sql = 'SELECT * FROM "paged_rows";';
+
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 0 } });
+    let tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[1], [2]]);
+    expect(tab.resultSessionId).toBe("cursor-1");
+    expect(tab.resultClientSessionId).toBe(tabId);
+
+    await store.executeTabSql(tabId, sql, {
+      pagination: { limit: 2, offset: 2, sessionId: "cursor-1", clientSessionId: tab.resultClientSessionId },
+    });
+    tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[3], [4]]);
+    expect(mocks.closeQuerySession).not.toHaveBeenCalled();
+
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 0 } });
+    tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[1], [2]]);
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("cassandra-1", "app", "cursor-1", tabId);
+
+    await store.executeTabSql(tabId, sql, {
+      pagination: { limit: 2, offset: 2, sessionId: "cursor-2", clientSessionId: tab.resultClientSessionId },
+    });
+    expect(store.tabs.find((candidate) => candidate.id === tabId)?.result?.rows).toEqual([[3], [4]]);
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5])).toEqual([
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 2, pageSize: 2, resultSessionId: undefined, clientSessionId: tabId }),
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 2, pageSize: 2, resultSessionId: "cursor-1", clientSessionId: tabId }),
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 2, pageSize: 2, resultSessionId: undefined, clientSessionId: tabId }),
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 2, pageSize: 2, resultSessionId: "cursor-2", clientSessionId: tabId }),
+    ]);
+  });
+
+  it("replays Cassandra table cursors to direct, last, and exact-boundary pages", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    const page = (rows: number[], sessionId?: string) => ({
+      columns: ["id"],
+      rows: rows.map((value) => [value]),
+      affected_rows: 0,
+      execution_time_ms: rows.length,
+      session_id: sessionId,
+      has_more: !!sessionId,
+      query_timings_ms: { agent_total: rows.length },
+    });
+    mocks.executeMulti
+      .mockResolvedValueOnce([page([1, 2], "cursor-last")])
+      .mockResolvedValueOnce([page([3, 4], "cursor-last")])
+      .mockResolvedValueOnce([page([5])]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const sql = 'SELECT * FROM "paged_rows";';
+
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 4 } });
+
+    let tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[5]]);
+    expect(tab.result?.execution_time_ms).toBe(5);
+    expect(tab.result?.timing_page_count).toBe(3);
+    expect(tab.resultPageOffset).toBe(4);
+    expect(tab.resultTotalRowCount).toBe(5);
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5]?.resultSessionId)).toEqual([undefined, "cursor-last", "cursor-last"]);
+
+    mocks.executeMulti.mockReset();
+    mocks.executeMulti.mockResolvedValueOnce([page([1, 2], "cursor-boundary")]).mockResolvedValueOnce([page([3, 4])]);
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 4 } });
+
+    tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([]);
+    expect(tab.result?.has_more).toBe(false);
+    expect(tab.resultPageOffset).toBe(4);
+    expect(tab.resultTotalRowCount).toBeUndefined();
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes a Cassandra replay cursor when a later page fails", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-lost", has_more: true }]).mockRejectedValueOnce(new Error("query session not found: cursor-lost"));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+
+    await store.executeTabSql(tabId, 'SELECT * FROM "paged_rows";', { pagination: { limit: 2, offset: 2 } });
+
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.execution_error).toBe(true);
+    expect(tab.resultSessionId).toBeUndefined();
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("cassandra-1", "app", "cursor-lost", tabId, undefined);
+  });
+
+  it.each(["cancellation", "supersession"] as const)("does not dispatch another Cassandra replay page after %s", async (interruption) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    mocks.executeMulti.mockImplementationOnce(async () => {
+      const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+      if (interruption === "cancellation") {
+        tab.isCancelling = true;
+        tab.cancelRequestCount = (tab.cancelRequestCount ?? 0) + 1;
+      } else {
+        tab.executionId = "replacement-execution";
+      }
+      return [{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-cancel", has_more: true }];
+    });
+
+    await store.executeTabSql(tabId, 'SELECT * FROM "paged_rows";', { pagination: { limit: 2, offset: 4 } });
+
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("cassandra-1", "app", "cursor-cancel", tabId, undefined);
+  });
+
+  it("exports Cassandra table data by advancing one Agent cursor", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "paged_rows";');
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 2, session_id: "export-cursor", has_more: true }]).mockResolvedValueOnce([{ columns: ["id"], rows: [[3]], affected_rows: 0, execution_time_ms: 1, has_more: false }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.result = { columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 2 };
+
+    const exported = await store.fetchTabResultForExport(tabId);
+
+    expect(exported?.rows).toEqual([[1], [2], [3]]);
+    expect(exported?.execution_time_ms).toBe(3);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(2);
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5])).toEqual([
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 10_000, pageSize: 10_000, resultSessionId: undefined, clientSessionId: `${tabId}:export` }),
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 10_000, pageSize: 10_000, resultSessionId: "export-cursor", clientSessionId: `${tabId}:export` }),
+    ]);
+    expect(mocks.closeClientConnectionSession).toHaveBeenCalledWith("cassandra-1", "app", `${tabId}:export`);
+  });
+
+  it("stops Cassandra table export when continuation has no session", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "paged_rows";');
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, has_more: true }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.result = { columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1 };
+
+    await expect(store.fetchTabResultForExport(tabId)).rejects.toThrow("Result session ended before table export completed");
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(mocks.closeClientConnectionSession).toHaveBeenCalledWith("cassandra-1", "app", `${tabId}:export`);
+  });
+
+  it.each([{ has_more: undefined }, { has_more: false, truncated: true }, { has_more: true, session_id: " " }])("rejects incomplete Cassandra export continuation %j and cleans its active cursor", async (malformed) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "paged_rows";');
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, session_id: "active-cursor", has_more: true }]).mockResolvedValueOnce([{ columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, ...malformed }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.result = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    await expect(store.fetchTabResultForExport(tabId)).rejects.toThrow(/export/);
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(2);
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("cassandra-1", "app", "active-cursor", `${tabId}:export`, undefined);
+    expect(mocks.closeClientConnectionSession).toHaveBeenCalledWith("cassandra-1", "app", `${tabId}:export`);
+  });
+
   it("executes Doris external catalog data tabs against the catalog database, not the connection default database", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "doris-1",

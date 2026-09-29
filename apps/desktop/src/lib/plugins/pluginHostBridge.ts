@@ -2,6 +2,8 @@ import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayl
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
 import { createPluginAiConversation, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
+import { isValidPluginAiRecommendationTemplate, resolvePluginAiRecommendationUpdate, type PluginAiRecommendationContext, type PluginAiRecommendationUpdate } from "@/lib/plugins/pluginAiRecommendations";
+import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
 import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_SQL_CHARS, MAX_PLUGIN_DATA_TIMEOUT_MS, PLUGIN_DATA_ACCESS_NOT_GRANTED, PLUGIN_DATA_CAPABILITY, PLUGIN_DATA_READ_PERMISSION, type PluginDataQueryRequest, type PluginDataQueryResult } from "@/types/pluginData";
 
@@ -10,6 +12,7 @@ const HOST_MESSAGE_SOURCE = "dbx-host";
 const BRIDGE_VERSION = 1;
 const MAX_BRIDGE_PAYLOAD_BYTES = 2 * 1024 * 1024;
 const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
+const MAX_CLIPBOARD_IMAGE_BASE64_BYTES = 24 * 1024 * 1024;
 // Distinct from the sidecar binary cap: saved files go straight from the
 // plugin iframe to disk and never traverse plugin frames.
 const MAX_BRIDGE_SAVE_BYTES = 512 * 1024 * 1024;
@@ -34,7 +37,7 @@ export interface PluginClipboardAuditEntry {
   at: number;
   /** Request outcome: granted (content returned), denied (user or no consent surface). */
   outcome: "granted" | "denied" | "rate-limited";
-  /** Content length in UTF-16 code units; the content itself is never stored. */
+  /** Returned payload size (text code units or decoded image bytes); content is never stored. */
   length: number;
 }
 
@@ -87,6 +90,13 @@ export interface PluginWorkbenchContext {
   schema?: string;
   values?: Record<string, unknown>;
   [key: string]: unknown;
+}
+
+export interface PluginClipboardImage {
+  contentType: "image/png";
+  dataBase64: string;
+  width: number;
+  height: number;
 }
 
 export interface PluginSaveFileRequest {
@@ -144,6 +154,7 @@ export interface PluginHostBridgeApi {
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
   openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
+  setAiRecommendations?(update: PluginAiRecommendationHostUpdate): void;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
@@ -197,6 +208,8 @@ export interface PluginHostBridgeApi {
    * further user interaction, so it is permission-gated.
    */
   clipboardRead?(pluginId: string): Promise<string>;
+  /** Read and PNG-encode the current clipboard image. Shares the clipboard-read permission and consent gate. */
+  clipboardReadImage?(pluginId: string): Promise<PluginClipboardImage>;
   /**
    * Session consent prompt for the first clipboard read of a bridge lifetime.
    * Resolves true to allow (and remember for the workbench session), false to
@@ -204,6 +217,10 @@ export interface PluginHostBridgeApi {
    * surface; a host that cannot ask must not silently allow.
    */
   confirmClipboardRead?(pluginId: string, pluginName: string): Promise<boolean> | boolean;
+  /** Register a short-lived, plugin-scoped custom-protocol media source. */
+  openMedia?(pluginId: string, method: string, params: Record<string, unknown>): Promise<string>;
+  /** Revoke a media source token previously returned by openMedia. */
+  closeMedia?(pluginId: string, token: string): Promise<void>;
   /** Native open dialog; resolves opened read handles (null selection → empty list). */
   pickFiles?(pluginId: string, options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]>;
   /** Stream a chunk from an opened read handle. */
@@ -222,6 +239,15 @@ export interface PluginHostBridgeApi {
   storageDelete?(pluginId: string, key: string): Promise<void>;
 }
 
+export interface PluginAiRecommendationHostUpdate {
+  pluginId: string;
+  pluginName: string;
+  contributionId: string;
+  workbenchId: string;
+  context: PluginAiRecommendationContext;
+  items: readonly PluginAiRecommendation[];
+}
+
 interface PluginRequestMessage {
   source: typeof PLUGIN_MESSAGE_SOURCE;
   version: typeof BRIDGE_VERSION;
@@ -235,6 +261,7 @@ interface PluginRequestMessage {
 
 export class PluginHostBridge {
   private downloads = new Set<string>();
+  private mediaTokens = new Set<string>();
   private context: PluginWorkbenchContext;
   private locale: string;
   private theme?: PluginBridgeTheme;
@@ -250,6 +277,7 @@ export class PluginHostBridge {
   /** One consent prompt per connection at a time; concurrent queries share it. */
   private pendingDataAccess = new Map<string, Promise<void>>();
   private inFlightDataQueries = 0;
+  private runtimeAiRecommendations: PluginAiRecommendationUpdate | null | undefined;
 
   /** Bounded audit trail of this session's clipboard read attempts (oldest first). */
   get clipboardAudit(): readonly PluginClipboardAuditEntry[] {
@@ -271,6 +299,7 @@ export class PluginHostBridge {
     this.context = snapshotPluginWorkbenchContext(context);
     this.locale = locale;
     this.theme = theme ? clonePluginData(theme) : undefined;
+    this.publishAiRecommendations();
   }
 
   handleWindowMessage(event: MessageEvent): boolean {
@@ -311,6 +340,8 @@ export class PluginHostBridge {
     if ((this.initSignals.load && this.initSignals.ready) || (signal === "load" && this.initSignals.load)) {
       for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
       this.downloads.clear();
+      for (const token of this.mediaTokens) void this.api.closeMedia?.(this.plugin.manifest.id, token).catch(() => undefined);
+      this.mediaTokens.clear();
       this.initGeneration += 1;
       this.initSignals = { load: false, ready: false };
       this.initStarted = false;
@@ -341,6 +372,9 @@ export class PluginHostBridge {
     this.disposed = true;
     for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
     this.downloads.clear();
+    for (const token of this.mediaTokens) void this.api.closeMedia?.(this.plugin.manifest.id, token).catch(() => undefined);
+    this.mediaTokens.clear();
+    this.publishAiRecommendations({ context: {}, items: [] });
   }
 
   private disposed = false;
@@ -400,10 +434,13 @@ export class PluginHostBridge {
         [PLUGIN_DATA_CAPABILITY]: !!this.api.queryData && !!this.api.hasDataGrant && !!this.api.confirmDataAccess && !!this.api.grantDataAccess,
         storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
         ai: !!this.api.openAiConversation,
+        aiRecommendations: !!this.api.openAiConversation && !!this.api.setAiRecommendations,
         // Additive with the same "absence means unsupported" contract: an older
         // host omits these, and a web host has neither.
         clipboardWrite: !!this.api.copyText,
         clipboardRead: !!this.api.clipboardRead,
+        clipboardImageRead: !!this.api.clipboardReadImage,
+        mediaUrl: !!this.api.openMedia && !!this.api.closeMedia,
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });
@@ -416,7 +453,40 @@ export class PluginHostBridge {
    */
   updateContext(context: PluginWorkbenchContext): void {
     this.context = snapshotPluginWorkbenchContext(context);
+    this.runtimeAiRecommendations = undefined;
+    this.publishAiRecommendations();
     this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "context", context: snapshotPluginWorkbenchContext(this.context) });
+  }
+
+  private publishAiRecommendations(override?: PluginAiRecommendationUpdate): void {
+    if (!this.hasPermission("host.ai") || !this.api.openAiConversation || !this.api.setAiRecommendations) return;
+    const workbenchId = typeof this.context.workbenchId === "string" ? this.context.workbenchId : "";
+    const contribution = this.contribution.type === "workbench" ? this.contribution : undefined;
+    const defaults = contribution?.ai?.recommendations;
+    const runtime = override ?? this.runtimeAiRecommendations;
+    // Runtime updates usually contain only the resource-specific fields used by
+    // placeholders. Keep host-owned routing fields authoritative so clicking a
+    // recommendation remains bound to this workbench's connection even when the
+    // plugin does not repeat connectionId in every update.
+    const runtimeContext = runtime
+      ? snapshotPluginWorkbenchContext({
+          ...runtime.context,
+          ...(this.context.connectionId === undefined ? {} : { connectionId: this.context.connectionId }),
+          ...(this.context.database === undefined ? {} : { database: this.context.database }),
+          ...(this.context.schema === undefined ? {} : { schema: this.context.schema }),
+          ...(this.context.workbenchId === undefined ? {} : { workbenchId: this.context.workbenchId }),
+        })
+      : this.context;
+    const effectiveRuntime = runtime === null ? { context: {}, items: [] } : runtime ? { ...runtime, context: runtimeContext } : undefined;
+    const items = resolvePluginAiRecommendationUpdate(defaults, effectiveRuntime, this.context);
+    this.api.setAiRecommendations({
+      pluginId: this.plugin.manifest.id,
+      pluginName: this.plugin.manifest.name,
+      contributionId: this.contribution.id,
+      workbenchId,
+      context: runtime ? runtimeContext : this.context,
+      items,
+    });
   }
 
   /** Notify the plugin UI about a locale change without a reload. */
@@ -494,6 +564,21 @@ export class PluginHostBridge {
       await this.api.openAiConversation(request);
       return null;
     }
+    if (method === "host.ai.setRecommendations") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation || !this.api.setAiRecommendations) throw new Error("DBX AI recommendations are unavailable");
+      const update = requirePluginAiRecommendationUpdate(params);
+      this.runtimeAiRecommendations = update;
+      this.publishAiRecommendations();
+      return null;
+    }
+    if (method === "host.ai.clearRecommendations") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation || !this.api.setAiRecommendations) throw new Error("DBX AI recommendations are unavailable");
+      this.runtimeAiRecommendations = { context: {}, items: [] };
+      this.publishAiRecommendations();
+      return null;
+    }
     if (method === "backend.invoke") {
       const input = requireRecord(params, "backend.invoke params");
       const backendMethod = requireProtocolName(input.method, "backend method");
@@ -515,6 +600,21 @@ export class PluginHostBridge {
         return null;
       }
       await this.api.sendBinary(this.plugin.manifest.id, channel, requireBase64(input.dataBase64));
+      return null;
+    }
+    if (method === "host.mediaOpen") {
+      if (!this.api.openMedia || !this.api.closeMedia) throw new Error("Host media URLs are unavailable");
+      const input = requireRecord(params, "media params");
+      const backendMethod = requireProtocolName(input.method, "media backend method");
+      const backendParams = requireRecord(input.params, "media backend params");
+      const token = await this.api.openMedia(this.plugin.manifest.id, backendMethod, backendParams);
+      this.mediaTokens.add(token);
+      return { token };
+    }
+    if (method === "host.mediaClose") {
+      const input = requireRecord(params, "media close params");
+      const token = requireProtocolName(input.token, "media token");
+      if (this.mediaTokens.delete(token)) await this.api.closeMedia?.(this.plugin.manifest.id, token);
       return null;
     }
     if (method === "ui.readAsset") {
@@ -612,28 +712,25 @@ export class PluginHostBridge {
       // `host.clipboard:read` (writes stay on ungated host.copy).
       this.requirePermission("host.clipboard:read");
       if (!this.api.clipboardRead) throw new Error("Host clipboard read is unavailable");
-      const now = Date.now();
-      if (!clipboardReadGateAllows(this.clipboardReadGate, now)) {
-        recordClipboardRead(this.clipboardReadGate, now, "rate-limited", 0);
-        throw new Error("Clipboard read rate limit exceeded; retry in a moment");
-      }
-      // Session consent: the first read asks the user through the host's
-      // dialog surface; a denial is remembered for this workbench session (an
-      // iframe reload rebuilds the bridge and asks again). A host without a
-      // consent surface denies rather than silently allowing.
-      if (this.clipboardReadGate.consented === null) {
-        const answer = this.api.confirmClipboardRead ? await this.api.confirmClipboardRead(this.plugin.manifest.id, this.plugin.manifest.name) : false;
-        this.clipboardReadGate.consented = answer === true;
-        if (!this.clipboardReadGate.consented) {
-          recordClipboardRead(this.clipboardReadGate, now, "denied", 0);
-          throw new Error("Clipboard read was denied for this plugin session");
-        }
-      }
+      const now = await this.requireClipboardRead();
       const text = await this.api.clipboardRead(this.plugin.manifest.id);
       if (typeof text !== "string") throw new Error("Host clipboard read returned a non-string value");
       const clamped = text.length > MAX_BRIDGE_PAYLOAD_BYTES ? text.slice(0, MAX_BRIDGE_PAYLOAD_BYTES) : text;
       recordClipboardRead(this.clipboardReadGate, now, "granted", clamped.length);
       return { text: clamped };
+    }
+    if (method === "host.clipboardReadImage") {
+      this.requirePermission("host.clipboard:read");
+      if (!this.api.clipboardReadImage) throw new Error("Host clipboard image read is unavailable");
+      const now = await this.requireClipboardRead();
+      const image = await this.api.clipboardReadImage(this.plugin.manifest.id);
+      if (image.contentType !== "image/png" || !Number.isSafeInteger(image.width) || image.width <= 0 || !Number.isSafeInteger(image.height) || image.height <= 0) {
+        throw new Error("Host clipboard image returned invalid metadata");
+      }
+      const dataBase64 = requireBase64(image.dataBase64);
+      if (dataBase64.length > MAX_CLIPBOARD_IMAGE_BASE64_BYTES) throw new Error("Clipboard image exceeds the 18 MiB upload limit");
+      recordClipboardRead(this.clipboardReadGate, now, "granted", Math.floor(dataBase64.length * 0.75));
+      return { ...image, dataBase64 };
     }
     if (method === "host.pickFiles") {
       // Same trust level as host.saveFile: the bytes only flow after the user
@@ -707,6 +804,23 @@ export class PluginHostBridge {
       return null;
     }
     throw new Error(`Unsupported plugin host method '${method}'`);
+  }
+
+  private async requireClipboardRead(): Promise<number> {
+    const now = Date.now();
+    if (!clipboardReadGateAllows(this.clipboardReadGate, now)) {
+      recordClipboardRead(this.clipboardReadGate, now, "rate-limited", 0);
+      throw new Error("Clipboard read rate limit exceeded; retry in a moment");
+    }
+    if (this.clipboardReadGate.consented === null) {
+      const answer = this.api.confirmClipboardRead ? await this.api.confirmClipboardRead(this.plugin.manifest.id, this.plugin.manifest.name) : false;
+      this.clipboardReadGate.consented = answer === true;
+      if (!this.clipboardReadGate.consented) {
+        recordClipboardRead(this.clipboardReadGate, now, "denied", 0);
+        throw new Error("Clipboard read was denied for this plugin session");
+      }
+    }
+    return now;
   }
 
   private requirePermission(permission: string): void {
@@ -1037,7 +1151,11 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       downloadFile: (options) => request('host.downloadFile', options),
       cancelDownload: (downloadId) => request('host.cancelDownload', { downloadId }),
       request,
-      ai: Object.freeze({ openConversation: (options) => request('host.ai.openConversation', options) }),
+      ai: Object.freeze({
+        openConversation: (options) => request('host.ai.openConversation', options),
+        setRecommendations: (update) => request('host.ai.setRecommendations', update),
+        clearRecommendations: () => request('host.ai.clearRecommendations'),
+      }),
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       stream,
       notify: (method, params) => request('backend.notify', { method, params }),
@@ -1080,6 +1198,16 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
           const result = await request('host.clipboardRead');
           return (result && typeof result === 'object' && typeof result.text === 'string') ? result.text : '';
         },
+        readImage: async () => request('host.clipboardReadImage'),
+      }),
+      media: Object.freeze({
+        open: async (method, params) => {
+          const result = await request('host.mediaOpen', { method, params });
+          const token = result && typeof result === 'object' && typeof result.token === 'string' ? result.token : '';
+          if (!token) throw new Error('Host returned an invalid media token');
+          return { token, url: new URL('__media/' + encodeURIComponent(token), document.baseURI).href };
+        },
+        close: (token) => request('host.mediaClose', { token }),
       }),
       // Persistent per-plugin key-value state; gate on capabilities.storage
       // (older hosts omit it) and declare the host.storage permission.
@@ -1096,8 +1224,11 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
           if (typeof data === 'string') return request('host.writeFileChunk', { handleId, offset, dataBase64: data });
           // A Uint8Array can be a view into a larger buffer — transferring
           // .buffer blindly would send bytes outside the view. Copy the
-          // visible range into a standalone buffer first.
-          const bytes = data instanceof ArrayBuffer ? data : new Uint8Array(data instanceof Uint8Array ? data.slice().buffer : new Uint8Array(data).buffer);
+          // visible range into a standalone ArrayBuffer first: the transfer
+          // list only accepts ArrayBuffer/MessagePort (a Uint8Array view is
+          // rejected by the engine with "Value at index 0 does not have a
+          // transferable type", which failed every fileTransfer.write).
+          const bytes = data instanceof ArrayBuffer ? data : (data instanceof Uint8Array ? data.slice().buffer : new Uint8Array(data).buffer);
           return request('host.writeFileChunk', { handleId, offset }, { transfer: bytes });
         },
         finish: (handleId) => request('host.finishFileSave', { handleId }),
@@ -1320,6 +1451,29 @@ function clampPluginPlanTimeout(value: unknown): number {
 function requireHandleId(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > 128) throw new Error("handleId is invalid");
   return value;
+}
+
+function requirePluginAiRecommendationUpdate(value: unknown): PluginAiRecommendationUpdate {
+  const input = requireRecord(value, "AI recommendation update");
+  if (!isRecord(input.context)) throw new Error("AI recommendation context must be an object");
+  if (!Array.isArray(input.items)) throw new Error("AI recommendation items must be an array");
+  if (input.items.length > 5) throw new Error("At most 5 AI recommendations may be registered");
+  const context = snapshotPluginWorkbenchContext(input.context) as PluginAiRecommendationContext;
+  const items = input.items.map((candidate, index) => {
+    if (!isRecord(candidate)) throw new Error(`AI recommendation ${index} must be an object`);
+    if (typeof candidate.id !== "string" || !candidate.id.trim()) throw new Error(`AI recommendation ${index} requires id`);
+    if (typeof candidate.label !== "string" || !candidate.label.trim() || candidate.label.length > 200) throw new Error(`AI recommendation ${index} label is invalid`);
+    if (typeof candidate.prompt !== "string" || !candidate.prompt.trim() || candidate.prompt.length > 32000) throw new Error(`AI recommendation ${index} prompt is invalid`);
+    if (!isValidPluginAiRecommendationTemplate(candidate.label) || !isValidPluginAiRecommendationTemplate(candidate.prompt)) throw new Error(`AI recommendation ${index} contains an invalid placeholder`);
+    if (candidate.order !== undefined && (typeof candidate.order !== "number" || !Number.isFinite(candidate.order))) throw new Error(`AI recommendation ${index} order is invalid`);
+    return {
+      id: candidate.id.trim(),
+      label: candidate.label.trim(),
+      prompt: candidate.prompt.trim(),
+      ...(candidate.order === undefined ? {} : { order: candidate.order }),
+    };
+  });
+  return { context, items };
 }
 
 function requireOffset(value: unknown): number {

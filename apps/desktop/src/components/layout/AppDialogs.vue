@@ -235,6 +235,7 @@ watch(
   />
   <DataTransferDialog
     v-model:open="dialogs.showTransferDialog.value"
+    :task-id="dialogs.transferTaskId.value"
     :prefill-connection-id="dialogs.transferPrefillConnectionId.value"
     :prefill-database="dialogs.transferPrefillDatabase.value"
     :prefill-catalog="dialogs.transferPrefillCatalog.value"
@@ -267,6 +268,7 @@ watch(
     v-model:open="dialogs.showSqlFileDialog.value"
     :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value"
     :prefill-database="dialogs.sqlFilePrefillDatabase.value"
+    :prefill-schema="dialogs.sqlFilePrefillSchema.value"
     :prefill-file-path="dialogs.sqlFilePrefillFilePath.value"
     :prefill-preview="dialogs.sqlFilePrefillPreview.value"
   />
@@ -308,6 +310,7 @@ watch(
   <DataGenerateDialog
     v-if="dialogs.showTableDataGenerateDialog.value"
     v-model:open="dialogs.showTableDataGenerateDialog.value"
+    :session-id="dialogs.tableDataGenerateSessionId.value"
     :prefill-connection-id="dialogs.tableDataGeneratePrefillConnectionId.value"
     :prefill-database="dialogs.tableDataGeneratePrefillDatabase.value"
     :prefill-schema="dialogs.tableDataGeneratePrefillSchema.value"

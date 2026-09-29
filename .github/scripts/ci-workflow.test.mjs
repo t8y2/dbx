@@ -44,9 +44,14 @@ test("stable Rust, Agent and overall gates always inspect selected upstream resu
     ["ci", "all", ["rust", "agents", "frontend", "packages", "windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver", "nix-packaging"]],
   ]) {
     const content = job(name);
-    assert.match(content, /if: always\(\)/);
+    // A superseded run must not leave a failing gate behind: when the workflow is
+    // cancelled the selected upstream jobs are cancelled too, and `always()` alone
+    // would still run the gate and report those cancellations as failures.
+    assert.match(content, /if: always\(\) && !cancelled\(\)/);
     assert.ok(content.includes(`node .github/scripts/ci-gate.mjs ${mode}`));
     assert.ok(content.includes("${{ toJSON(needs) }}"));
+    assert.ok(content.includes("uses: actions/checkout@v7"));
+    assert.doesNotMatch(content, /actions\/setup-node|name: Setup Node\.js/);
     for (const dependency of dependencies) assert.match(content, new RegExp(`^      - ${dependency}$`, "m"));
   }
 });
@@ -145,6 +150,22 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.ok(win7.includes("--timings"));
   assert.ok(win7.includes("name: DBX-win7-cargo-timings"));
   assert.ok(win7.includes("path: target/cargo-timings/"));
+  assert.ok(win7.includes("name: Measure dbx library command registry expansion"));
+  assert.ok(win7.includes("if: vars.WIN7_REGISTRY_AB == 'true'"));
+  assert.ok(win7.includes("--package dbx"));
+  assert.ok(win7.includes("--lib"));
+  assert.ok(win7.includes('$env:RUSTC_WRAPPER = ""'));
+  assert.ok(win7.includes('Measure-Registry "full" $fullCommandCount'));
+  assert.ok(win7.includes('Measure-Registry "half" $keptCommandCount'));
+  assert.ok(win7.includes('"-Zdump-mono-stats=$outputDir"'));
+  assert.ok(win7.includes('"-Zdump-mono-stats-format=json"'));
+  assert.ok(win7.includes("git restore --source=HEAD -- $sourcePath"));
+  assert.ok(win7.includes("name: DBX-win7-dbx-lib-command-registry-ab"));
+  assert.ok(win7.includes("if: always() && vars.WIN7_REGISTRY_AB == 'true'"));
+  assert.ok(win7.includes("path: ${{ runner.temp }}/dbx-lib-command-registry-ab/"));
+  assert.ok(win7.includes("retention-days: 3"));
+  assert.ok(win7.indexOf("name: Build DBX for Windows 7") < win7.indexOf("name: Measure dbx library command registry expansion"));
+  assert.ok(win7.indexOf("name: Measure dbx library command registry expansion") < win7.indexOf("name: Upload dbx library command registry A/B"));
   assert.doesNotMatch(win7, /^\s+(?:CC|CXX):/m);
 });
 

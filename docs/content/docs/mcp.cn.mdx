@@ -152,6 +152,20 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 
 启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
 
+## 插件工具
+
+实现了 `mcp/tools` 桥接协议的 DBX 插件 sidecar，其工具可由 `dbx` MCP 服务器合并进 `tools/list`，无需在客户端逐个配置插件的 `--mcp` 进程。该机制按作者声明加入：只有 manifest 中声明了 `mcp` 贡献且 `external_tools: true` 的插件（SSH、Files、Kafka、LDAP 等均可）才会暴露工具：
+
+- 工具名为 `dbx_<插件前缀>__<工具名>`，前缀取插件 id 的最后一段：`io.dbx.ssh` → `dbx_ssh__sftp_list_dir`，`io.dbx.kafka` → `dbx_kafka__kafka_topics_list`；
+- 连接由宿主绑定：工具 schema 中的 `connectionId` / `connectionName` 会被移除，改由可选的 `dbx_connection` 参数选择该插件**已保存且被 MCP 设置放行**的连接；只有一个可用连接时省略该参数即可自动绑定；凭据由宿主从保存的连接生成 lifecycle 注入，永不经过模型或客户端；
+- 作用域会话（`DBX_MCP_SCOPE_*`）与全局 MCP 设置（工具 allowlist、连接 allowlist）同样约束插件工具；
+- 工具白名单按精确名称匹配：启用插件工具后，请把要暴露的 `dbx_<前缀>__<工具名>` 逐个加入白名单（或清空白名单以全部放行）；
+- Web / Docker 后端不提供插件工具。
+
+### 懒发现（`DBX_MCP_PLUGIN_TOOLS`）
+
+插件较多时，平铺的 `tools/list` 会在参数 schema 上消耗大量上下文。设置 `DBX_MCP_PLUGIN_TOOLS=lazy` 只暴露三个元工具——`dbx_plugin_list`（可过滤的插件目录）、`dbx_plugin_tools`（按**插件 id** 查看某插件的工具与 schema）、`dbx_plugin_call`（按插件 id + 工具名调用）——schema 在需要时才进入上下文。`both` 同时平铺与元工具。默认仍为 `flat`。
+
 ## Resources
 
 支持 MCP Resources 的客户端可以读取连接目录，并通过模板获取数据库元数据：
@@ -255,7 +269,7 @@ Desktop 可以选择直接托管 Streamable HTTP MCP 服务。该服务**默认�
 本机 MCP 客户端的接入步骤：
 
 1. 打开 **设置 → MCP → HTTP 服务**，开启 **Streamable HTTP 服务**。除非确实需要让其他设备访问，否则保持默认本机回环地址。
-2. 点击 **保存并启动服务**。修改地址、端口或路径后保存，会通过重启服务来应用新配置。
+2. 点击 **保存并应用**。该按钮会保存配置，并根据开关状态启动、重启或停止服务；修改地址、端口或路径时会自动重启服务。
 3. 将页面展示的服务地址和 Bearer Token 复制到 MCP 客户端。
 
 不同客户端的字段名称可能不同，但核心配置如下：
@@ -304,7 +318,9 @@ DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 D
 
 ### DBX Web 原生 Streamable HTTP
 
-DBX Web 也可以直接托管 MCP。只有配置 `DBX_WEB_MCP_TOKEN` 或 `DBX_WEB_MCP_TOKEN_FILE` 后才会启用。它复用现有 Web 监听器和 `/mcp` 路径，因此 Docker 和反向代理部署不需要额外暴露第二个端口。将 `DBX_WEB_MCP_ALLOWED_HOSTS` 配置为客户端在 `Host` 请求头中发送的公网访问地址；如有端口映射，必须包含映射后的端口。生产环境请使用 `DBX_WEB_MCP_TOKEN_FILE` 或部署平台的 Secret 管理能力，不要把真实 Token 提交到 Compose 文件中。
+DBX Web 可以直接托管 MCP，复用现有 Web 监听器和 `/mcp` 路径，因此 Docker 和反向代理部署不需要额外暴露第二个端口。单实例、已启用 Web 登录密码的部署可在 **设置 → MCP → HTTP 服务**填写允许的 Host 并启用服务；DBX 自动生成 Bearer Token，使用现有加密 Secret 存储，可在页面复制、轮换或禁用，修改立即对新请求生效。未启用时页面不会把 `/mcp` 显示为可连接地址。无 Web 登录密码时，页面管理的 MCP 不会生效；演示部署禁用 MCP。
+
+部署环境变量仍然优先：配置 `DBX_WEB_MCP_TOKEN` 或 `DBX_WEB_MCP_TOKEN_FILE` 后，页面只读显示状态，不会覆盖部署 Secret。此前启用的页面 Token 仍会保留；移除部署 Token 并重启 Web 后，它会重新生效。将 `DBX_WEB_MCP_ALLOWED_HOSTS` 配置为客户端在 `Host` 请求头中发送的公网访问地址；如有端口映射，必须包含映射后的端口。多实例部署应使用一致的部署 Secret 与白名单，而不是页面管理模式。生产环境请使用 `DBX_WEB_MCP_TOKEN_FILE` 或部署平台的 Secret 管理能力，不要把真实 Token 提交到 Compose 文件中。
 
 例如容器映射为 `4225:4224` 时，MCP 地址为 `http://localhost:4225/mcp`：
 
@@ -381,7 +397,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
   <Accordion title="npm 没有安装当前平台包">不要使用 `--no-optional`，重新安装 `@dbx-app/mcp-server`，并用 `node -p 'process.platform + "-" + process.arch'` 检查平台。Alpine Linux 默认使用 musl，目前不在 Linux 发布包支持范围内。</Accordion>
   <Accordion title="找不到 dbx.db">将 `DBX_DATA_DIR` 设置为包含 `dbx.db` 的目录。Windows 便携版通常是 `DBX.exe` 旁边的 `data` 目录。</Accordion>
   <Accordion title="提示 DBX 未运行">只有 `dbx_open_table` 和 `dbx_execute_and_show` 需要桌面端运行；本地查询工具可以在 DBX 关闭时执行。</Accordion>
-  <Accordion title="Desktop HTTP 客户端提示 ERR_CONNECTION_REFUSED">进入 **设置 → MCP → HTTP 服务**，确认服务已开启并点击 **保存并启动服务**。客户端应使用页面展示的地址、路径和当前 Bearer Token。默认的 `127.0.0.1` 只接受同一台电脑上的连接。</Accordion>
+  <Accordion title="Desktop HTTP 客户端提示 ERR_CONNECTION_REFUSED">进入 **设置 → MCP → HTTP 服务**，确认服务已开启并点击 **保存并应用**。客户端应使用页面展示的地址、路径和当前 Bearer Token。默认的 `127.0.0.1` 只接受同一台电脑上的连接。</Accordion>
   <Accordion title="Desktop 提示 HTTP 地址已被占用">已有其他进程监听了所选地址和端口。请在 **设置 → MCP → HTTP 服务** 中改用未被占用的端口，再保存配置以重启服务。不要让两个 DBX Desktop 实例使用相同 HTTP 端点。</Accordion>
   <Accordion title="请求返回 DATABASE_OUT_OF_SCOPE">该连接虽然已暴露给 MCP，但请求的数据库不在它的 MCP 数据库范围内。请在 **设置 → MCP** 中添加精确的数据库名称，或在合适时将该连接设为全部数据库。指定范围时，应先调用 `dbx_list_databases`，再使用返回的名称。</Accordion>
   <Accordion title="之前可见的工具现在被拒绝">该工具已不在 **设置 → MCP** 的选中范围内，或当前权限策略不允许它。修改工具 allowlist 后请刷新 MCP 客户端的工具列表；服务端同样会拒绝缓存的旧工具调用。</Accordion>

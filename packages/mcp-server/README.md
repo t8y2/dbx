@@ -258,7 +258,7 @@ It listens on `http://127.0.0.1:5225/mcp` by default. Configure an HTTP-capable 
 
 The default loopback address accepts only clients on the same computer. Binding to a non-loopback address requires all of the following: `DBX_MCP_HTTP_ALLOW_REMOTE=1`, the `--http-allow-remote` flag, and non-empty `DBX_MCP_HTTP_ALLOWED_HOSTS` plus `DBX_MCP_HTTP_ALLOWED_ORIGINS` allowlists. Use exact public Host authorities and browser Origins.
 
-DBX Web can host native Streamable HTTP on its existing listener, rather than opening a second port. Enable it with `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) and configure the public Host allowlist. For a container published as `4225:4224`, the endpoint is `http://localhost:4225/mcp`:
+DBX Web can host native Streamable HTTP on its existing listener, rather than opening a second port. On a single password-protected Web instance, enable it in **Settings → MCP → HTTP Service** with the public Host allowlist; the generated token is encrypted in DBX's secret store and can be rotated there. For multi-instance or deployment-managed setups, set `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) and `DBX_WEB_MCP_ALLOWED_HOSTS` in the deployment. Deployment secrets take precedence and make the page read-only. For a container published as `4225:4224`, the endpoint is `http://localhost:4225/mcp`:
 
 ```yaml
 environment:
@@ -634,7 +634,7 @@ DBX_MCP_HTTP_TOKEN=replace-with-a-long-random-secret dbx-mcp-server --http
 
 默认回环地址仅允许同一台电脑上的客户端访问。监听非回环地址时，必须同时设置 `DBX_MCP_HTTP_ALLOW_REMOTE=1`、传入 `--http-allow-remote`，并提供非空的 `DBX_MCP_HTTP_ALLOWED_HOSTS` 和 `DBX_MCP_HTTP_ALLOWED_ORIGINS` 白名单。Host authority 与浏览器 Origin 均应使用精确的公网值。
 
-DBX Web 可以通过现有 Web 监听器提供原生 Streamable HTTP，无需额外开放第二个端口。设置 `DBX_WEB_MCP_TOKEN`（或 `DBX_WEB_MCP_TOKEN_FILE`）并配置公网 Host 白名单即可启用。容器映射为 `4225:4224` 时，端点为 `http://localhost:4225/mcp`：
+DBX Web 可以通过现有 Web 监听器提供原生 Streamable HTTP，无需额外开放第二个端口。单实例且启用 Web 登录密码时，可在 **设置 → MCP → HTTP 服务**配置公网 Host 白名单并启用；生成的 Token 存在加密 Secret 存储中，可在页面轮换。多实例或部署管理场景仍使用 `DBX_WEB_MCP_TOKEN`（或 `DBX_WEB_MCP_TOKEN_FILE`）和 `DBX_WEB_MCP_ALLOWED_HOSTS`；部署 Secret 优先，页面只读。容器映射为 `4225:4224` 时，端点为 `http://localhost:4225/mcp`：
 
 ```yaml
 environment:

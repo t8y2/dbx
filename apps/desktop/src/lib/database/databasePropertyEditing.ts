@@ -71,6 +71,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   prestosql: { deferred: "catalog properties are connector-managed" },
   hive: { deferred: "database properties need agent metadata validation first" },
   argo: { deferred: "database properties need agent metadata validation first" },
+  transwarp: { deferred: "database properties need server validation first" },
   kyuubi: { deferred: "database properties need Kyuubi-specific validation first" },
   impala: { deferred: "database properties need Impala-specific validation first" },
   spark: { deferred: "database properties need agent metadata validation first" },

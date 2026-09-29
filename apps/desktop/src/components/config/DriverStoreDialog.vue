@@ -2231,14 +2231,22 @@ html.dark .driver-store-agent-row--installed::before {
   overflow-x: hidden;
 }
 
-/* Storage tab: cards scroll together inside the tab */
-.driver-store-storage-tab {
+/* Storage tab: cards scroll together inside the tab. The selector must out-specify
+   `.driver-store-tabs-root > [data-slot="tabs-content"]` above, otherwise the
+   `overflow: hidden` there wins and the cards get clipped with no way to scroll. */
+.driver-store-tabs-root > [data-slot="tabs-content"].driver-store-storage-tab {
   display: flex !important;
   flex-direction: column;
   flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* Cards must keep their natural height, otherwise `flex` squeezes the runtime
+   list inside the last card instead of letting the tab scroll. */
+.driver-store-tabs-root > [data-slot="tabs-content"].driver-store-storage-tab > * {
+  flex-shrink: 0;
 }
 
 .driver-store-agent-name,

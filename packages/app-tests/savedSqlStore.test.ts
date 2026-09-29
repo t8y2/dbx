@@ -28,6 +28,38 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+test("tracks saved SQL library loading and supports retry after failure", async () => {
+  let resolveLoad: ((library: SavedSqlLibrary) => void) | undefined;
+  apiMock.loadSavedSqlLibrary.mockImplementationOnce(
+    () =>
+      new Promise<SavedSqlLibrary>((resolve) => {
+        resolveLoad = resolve;
+      }),
+  );
+
+  const store = useSavedSqlStore();
+  assert.equal(store.loadState, "idle");
+
+  const loading = store.initFromStorage();
+  assert.equal(store.loadState, "loading");
+  await Promise.resolve();
+  resolveLoad?.({ folders: [], files: [] });
+  await loading;
+
+  assert.equal(store.loadState, "loaded");
+  assert.equal(store.isLoaded, true);
+
+  setActivePinia(createPinia());
+  const retryingStore = useSavedSqlStore();
+  apiMock.loadSavedSqlLibrary.mockRejectedValueOnce(new Error("storage unavailable"));
+  await assert.rejects(retryingStore.initFromStorage(), /storage unavailable/);
+  assert.equal(retryingStore.loadState, "failed");
+
+  apiMock.loadSavedSqlLibrary.mockResolvedValueOnce({ folders: [], files: [] });
+  await retryingStore.initFromStorage();
+  assert.equal(retryingStore.loadState, "loaded");
+});
+
 test("concurrent saved SQL folder creates reuse the same pending folder", async () => {
   let resolveSave: ((folder: SavedSqlFolder) => void) | undefined;
   apiMock.saveSavedSqlFolder.mockImplementation(

@@ -92,11 +92,14 @@ type querySession struct {
 }
 
 type connectionRuntime struct {
-	driver     neo4j.Driver
-	params     connectParams
-	references int
-	closed     bool
-	mu         sync.Mutex
+	driver neo4j.Driver
+	params connectParams
+	// legacySingleDatabase is set for servers that negotiated Bolt 3 or older:
+	// they have a single default database and reject session database selection.
+	legacySingleDatabase bool
+	references           int
+	closed               bool
+	mu                   sync.Mutex
 }
 
 type server struct {

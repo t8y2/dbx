@@ -11,8 +11,11 @@ const mocks = vi.hoisted(() => ({
   productionGuard: vi.fn(),
   toast: vi.fn(),
   listDatabases: vi.fn(),
+  listDorisCatalogs: vi.fn(),
+  listDorisCatalogDatabases: vi.fn(),
   listTables: vi.fn(),
   listSchemas: vi.fn(),
+  tabUiState: {} as Record<string, unknown>,
 }));
 
 function passthrough(tag: string): Component {
@@ -119,6 +122,8 @@ vi.mock("@/lib/backend/api", () => ({
   executeQuery: mocks.executeQuery,
   executeMulti: mocks.executeMulti,
   listDatabases: mocks.listDatabases,
+  listDorisCatalogs: mocks.listDorisCatalogs,
+  listDorisCatalogDatabases: mocks.listDorisCatalogDatabases,
   listTables: mocks.listTables,
   listSchemas: mocks.listSchemas,
 }));
@@ -127,6 +132,9 @@ vi.mock("@/lib/database/productionExecutionGuard", () => ({
     mocks.productionGuard(options);
     return options.execute();
   },
+}));
+vi.mock("@/lib/tabs/tabUiState", () => ({
+  useTabUiState: () => ({ initialState: mocks.tabUiState, track: vi.fn(), update: vi.fn() }),
 }));
 
 import DatabaseUserAdmin from "@/components/admin/DatabaseUserAdmin.vue";
@@ -151,6 +159,26 @@ const nativeMysqlConnection: ConnectionConfig = {
   port: 3306,
 };
 
+const postgresConnection: ConnectionConfig = {
+  ...connection,
+  id: "postgres",
+  name: "PostgreSQL",
+  db_type: "postgres",
+  driver_profile: "postgres",
+  database: "app-db",
+  port: 5432,
+};
+
+const starrocksConnection: ConnectionConfig = {
+  ...connection,
+  id: "starrocks",
+  name: "StarRocks",
+  db_type: "starrocks",
+  driver_profile: "starrocks",
+  database: "analytics",
+  port: 9030,
+};
+
 let app: ReturnType<typeof createApp> | undefined;
 let root: HTMLDivElement | undefined;
 
@@ -159,6 +187,7 @@ afterEach(() => {
   root?.remove();
   app = undefined;
   root = undefined;
+  mocks.tabUiState = {};
   vi.clearAllMocks();
 });
 
@@ -263,6 +292,140 @@ describe("DatabaseUserAdmin MySQL create-user table grants", () => {
     await vi.waitFor(() => expect(root?.textContent).toContain("GRANT SELECT, SHOW VIEW ON `scope_test`.`allowed_table` TO 'app_user'@'%';"));
     expect(root.textContent).not.toContain("ON `scope_test`.*");
     expect(root.textContent).not.toContain("`blocked_table`");
+  });
+});
+
+describe("DatabaseUserAdmin PostgreSQL create-user table grants", () => {
+  it("loads schema-qualified tables and keeps same-named tables distinct", async () => {
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["user", "host", "plugin"], rows: [["postgres", "LOGIN", "SUPERUSER"]] }).mockResolvedValueOnce({ columns: ["line"], rows: [["Role: postgres"]] });
+    mocks.listDatabases.mockResolvedValue([{ name: "app-db" }]);
+    mocks.listSchemas.mockResolvedValue(["sales", "audit", "pg_catalog"]);
+    mocks.listTables.mockImplementation(async (_connectionId, _database, schema) => [{ name: "orders", table_type: "BASE TABLE" }, ...(schema === "sales" ? [{ name: 'daily"rollup', table_type: "BASE TABLE" }] : [])]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: postgresConnection });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(2));
+
+    findButton("userAdmin.newUser")?.click();
+    await vi.waitFor(() => expect(findDialogButton("app-db")).toBeDefined());
+    findDialogButton("app-db")?.click();
+    const password = root.querySelector<HTMLInputElement>('[data-password-input="true"]');
+    password!.value = "test-password";
+    password!.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    findDialogButton("userAdmin.specificTables")?.click();
+
+    await vi.waitFor(() => expect(mocks.listTables).toHaveBeenCalledTimes(2));
+    expect(mocks.listTables.mock.calls.map((call) => call[2])).toEqual(["sales", "audit"]);
+    expect(findDialogButton("sales.orders")).toBeDefined();
+    expect(findDialogButton("audit.orders")).toBeDefined();
+    findDialogButton("sales.orders")?.click();
+    findDialogButton("audit.orders")?.click();
+    findDialogButton('sales.daily"rollup')?.click();
+    await nextTick();
+    findDialogButton("userAdmin.previewSql")?.click();
+
+    await vi.waitFor(() => expect(root?.textContent).toContain('GRANT SELECT ON TABLE "sales"."orders" TO "app_user";'));
+    expect(root?.textContent).toContain('GRANT SELECT ON TABLE "audit"."orders" TO "app_user";');
+    expect(root?.textContent).toContain('GRANT SELECT ON TABLE "sales"."daily""rollup" TO "app_user";');
+    expect(root?.textContent).not.toContain("ON ALL TABLES");
+  });
+
+  it("loads an existing schema-qualified grant and executes its revoke in the target database", async () => {
+    mocks.tabUiState = { privilegeScope: "table" };
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockImplementation(async (_connectionId, database, sql) => {
+      if (sql.includes('r.rolname AS "user"')) return { columns: ["user", "host", "plugin"], rows: [["reader", "LOGIN", ""]] };
+      if (sql.includes("FROM information_schema.table_privileges") && !sql.includes("UNION ALL")) return { columns: ["schema", "table", "privilege", "grant_option"], rows: [["sales", "orders", "SELECT", "NO"]] };
+      return { columns: ["line"], rows: [["Role: reader"]] };
+    });
+    mocks.listDatabases.mockResolvedValue([{ name: "app-db" }]);
+    mocks.listSchemas.mockResolvedValue(["sales"]);
+    mocks.listTables.mockResolvedValue([{ name: "orders", table_type: "BASE TABLE" }]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: postgresConnection });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(findButton("userAdmin.revoke")?.disabled).toBe(false));
+    expect(root.textContent).toContain("userAdmin.selectedTableCount");
+    findButton("userAdmin.revoke")?.click();
+    await vi.waitFor(() => expect(root?.textContent).toContain('REVOKE SELECT ON TABLE "sales"."orders" FROM "reader";'));
+
+    mocks.executeMulti.mockResolvedValue([]);
+    findButton("userAdmin.applySql")?.click();
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalled());
+    expect(mocks.executeMulti.mock.calls[0][1]).toBe("app-db");
+    expect(mocks.executeMulti.mock.calls[0][2]).toBe('REVOKE SELECT ON TABLE "sales"."orders" FROM "reader";');
+  });
+});
+
+describe("DatabaseUserAdmin StarRocks table grants", () => {
+  it("loads catalog-qualified tables for create and previews catalog-aware SQL", async () => {
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["User"], rows: [["'root'@'%'"]] }).mockResolvedValueOnce({ columns: ["UserIdentity", "Catalog", "Grants"], rows: [["'root'@'%'", null, "GRANT 'root' TO USER 'root'@'%'"]] });
+    mocks.listDorisCatalogs.mockResolvedValue([
+      { name: "default_catalog", catalog_type: "Internal", is_current: true },
+      { name: "hive`catalog", catalog_type: "Hive", is_current: false },
+    ]);
+    mocks.listDorisCatalogDatabases.mockResolvedValue([{ name: "analytics" }]);
+    mocks.listTables.mockResolvedValue([{ name: "event`log", table_type: "BASE TABLE" }]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: starrocksConnection });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(2));
+    findButton("userAdmin.newUser")?.click();
+
+    await vi.waitFor(() => expect(findDialogButton("hive`catalog / analytics")).toBeDefined());
+    findDialogButton("hive`catalog / analytics")?.click();
+    const password = root.querySelector<HTMLInputElement>('[data-password-input="true"]');
+    password!.value = "test-password";
+    password!.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    findDialogButton("userAdmin.specificTables")?.click();
+    await vi.waitFor(() => expect(mocks.listTables).toHaveBeenCalled());
+    expect(mocks.listTables).toHaveBeenCalledWith("starrocks", "analytics", "", undefined, undefined, undefined, ["TABLE"], "hive`catalog");
+    await vi.waitFor(() => expect(findDialogButton("event`log")).toBeDefined());
+    findDialogButton("event`log")?.click();
+    await nextTick();
+    findDialogButton("userAdmin.previewSql")?.click();
+
+    await vi.waitFor(() => expect(root?.textContent).toContain("SET CATALOG `hive``catalog`;"));
+    expect(root?.textContent).toContain("GRANT SELECT ON TABLE `analytics`.`event``log` TO USER 'app_user'@'%';");
+
+    mocks.executeMulti.mockResolvedValue([]);
+    mocks.executeQuery.mockResolvedValue({ columns: ["User"], rows: [["'app_user'@'%'"]] });
+    findButton("userAdmin.applySql")?.click();
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+    expect(mocks.executeMulti.mock.calls[1][5]).toEqual(expect.objectContaining({ catalog: "hive`catalog" }));
+  });
+
+  it("restores a direct table grant and previews its revoke diff", async () => {
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["User"], rows: [["'reader'@'%'"]] }).mockResolvedValueOnce({
+      columns: ["UserIdentity", "Catalog", "Grants"],
+      rows: [["'reader'@'%'", "default", "GRANT SELECT ON TABLE `analytics`.`events` TO USER 'reader'@'%'"]],
+    });
+    mocks.listDorisCatalogs.mockResolvedValue([{ name: "default_catalog", catalog_type: "Internal", is_current: true }]);
+    mocks.listDorisCatalogDatabases.mockResolvedValue([{ name: "analytics" }]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: starrocksConnection });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(findButton("userAdmin.revoke")?.disabled).toBe(false));
+    expect(root.textContent).toContain("userAdmin.selectedTableCount");
+    findButton("userAdmin.revoke")?.click();
+
+    await vi.waitFor(() => expect(root?.textContent).toContain("REVOKE SELECT ON TABLE `analytics`.`events` FROM USER 'reader'@'%';"));
+    expect(root?.textContent).toContain("SET CATALOG `default_catalog`;");
   });
 });
 

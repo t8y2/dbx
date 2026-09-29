@@ -477,8 +477,10 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         execution_id: Some(format!("live-mysql-query-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
+        null_literal: String::new(),
         export_table_name: None,
         export_column_types: None,
+        selected_columns: None,
         export_column_extras: None,
         column_comments: None,
         auto_filter: None,
@@ -571,8 +573,10 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         execution_id: Some(format!("live-mysql-issue-8803-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
+        null_literal: String::new(),
         export_table_name: None,
         export_column_types: None,
+        selected_columns: None,
         export_column_extras: None,
         column_comments: None,
         auto_filter: None,
@@ -689,8 +693,10 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         execution_id: Some(format!("live-mysql-query-export-timeout-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
+        null_literal: String::new(),
         export_table_name: None,
         export_column_types: None,
+        selected_columns: None,
         export_column_extras: None,
         column_comments: None,
         auto_filter: None,
@@ -1291,6 +1297,7 @@ INSERT INTO install_check (id) VALUES (1), (2);
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
+        schema: None,
         file_path: std::env::temp_dir()
             .join(format!("issue-2356-mysql-install-{suffix}.sql"))
             .to_string_lossy()
@@ -1380,6 +1387,7 @@ INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
+        schema: None,
         file_path: std::env::temp_dir()
             .join(format!("issue-7738-mysql-order-{suffix}.sql"))
             .to_string_lossy()
@@ -1456,6 +1464,7 @@ async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
+        schema: None,
         file_path: std::env::temp_dir().join(format!("mysql-binary-dump-{suffix}.sql")).to_string_lossy().into_owned(),
         continue_on_error: false,
         selected_tables: None,

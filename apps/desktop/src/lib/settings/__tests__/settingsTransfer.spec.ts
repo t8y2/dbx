@@ -68,6 +68,18 @@ describe("settingsTransfer", () => {
     expect(result.error.detail).toContain("updateDownloadSource");
   });
 
+  it("round-trips table completion schema qualification as an editor setting", () => {
+    const result = parseSettingsTransferFile(fileWith({ tableCompletionSchemaQualification: "always" }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.tableCompletionSchemaQualification).toBe("always");
+    expect(result.value.categories).toEqual(["editor"]);
+
+    const invalid = parseSettingsTransferFile(fileWith({ tableCompletionSchemaQualification: "sometimes" }));
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) expect(invalid.error.detail).toContain("tableCompletionSchemaQualification");
+  });
+
   it("rejects out-of-range numbers that the normalizer clamps", () => {
     const result = parseSettingsTransferFile(fileWith({ sidebarIndent: 99999 }));
     expect(result.ok).toBe(false);
@@ -400,5 +412,10 @@ describe("settingsTransfer", () => {
   it("maps csvQuoteMode into the data category", () => {
     expect(transferCategoryForKey("csvQuoteMode")).toBe("data");
     expect(collectTransferCategories(["csvQuoteMode", "pageSize"])).toEqual(["data"]);
+  });
+
+  it("maps csvNullMode into the data category", () => {
+    expect(transferCategoryForKey("csvNullMode")).toBe("data");
+    expect(collectTransferCategories(["csvNullMode", "csvQuoteMode"])).toEqual(["data"]);
   });
 });

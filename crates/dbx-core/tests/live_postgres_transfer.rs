@@ -72,6 +72,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         is_production: false,
         production_databases: vec![],
         show_system_schemas: false,
+        sidebar_auto_load_all_tables: false,
         database_info: None,
     }
 }

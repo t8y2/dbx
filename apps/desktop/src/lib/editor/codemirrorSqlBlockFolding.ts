@@ -1,14 +1,14 @@
 import { foldService, syntaxTree } from "@codemirror/language";
 import type { EditorState } from "@codemirror/state";
 import { elasticsearchRestRequestRanges } from "@/lib/sql/sqlStatementRanges";
-import type { DatabaseType } from "@/types/database";
+import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 
 // `@lezer/common` is only a transitive dependency here (see sqlSyntaxTreeWindow.ts's comment on
 // the same pattern), so derive the node types structurally instead of importing them.
 type SyntaxNode = ReturnType<ReturnType<typeof syntaxTree>["resolve"]>;
 type Tree = ReturnType<typeof syntaxTree>;
 
-interface FoldRange {
+export interface FoldRange {
   from: number;
   to: number;
 }
@@ -151,6 +151,7 @@ function addQueryStructureFoldRanges(state: EditorState, tree: Tree, ranges: Map
 }
 
 function addRestRequestFoldRanges(state: EditorState, ranges: Map<number, FoldRange>, databaseType?: DatabaseType): boolean {
+  if (databaseType && !isElasticsearchCompatibleDatabaseType(databaseType) && !isMeilisearchDatabaseType(databaseType) && !isSolrDatabaseType(databaseType)) return false;
   const requests = elasticsearchRestRequestRanges(state.doc.toString(), databaseType ?? "elasticsearch");
   if (requests.length === 0) return false;
 
@@ -160,8 +161,7 @@ function addRestRequestFoldRanges(state: EditorState, ranges: Map<number, FoldRa
   return true;
 }
 
-function computeBlockFoldRanges(state: EditorState, databaseType?: DatabaseType): Map<number, FoldRange> {
-  const tree = syntaxTree(state);
+export function computeBlockFoldRanges(state: EditorState, databaseType?: DatabaseType, tree: Tree = syntaxTree(state)): Map<number, FoldRange> {
   const cacheByDatabaseType = rangeCache.get(tree);
   const cacheKey = databaseType ?? "auto-detect";
   const cached = cacheByDatabaseType?.get(cacheKey);
@@ -220,9 +220,11 @@ function computeBlockFoldRanges(state: EditorState, databaseType?: DatabaseType)
 }
 
 /** Creates folding for REST requests, procedural blocks, query parentheses, and UNION branches. */
-export function createSqlBlockFoldService(databaseType?: DatabaseType) {
+export function createSqlBlockFoldService(databaseType?: DatabaseType | (() => DatabaseType | undefined), cachedRange?: (state: EditorState, lineStart: number) => FoldRange | null | undefined) {
   return foldService.of((state, lineStart) => {
-    const range = computeBlockFoldRanges(state, databaseType).get(state.doc.lineAt(lineStart).number);
+    const cached = cachedRange?.(state, lineStart);
+    if (cached !== undefined) return cached;
+    const range = computeBlockFoldRanges(state, typeof databaseType === "function" ? databaseType() : databaseType).get(state.doc.lineAt(lineStart).number);
     return range ?? null;
   });
 }

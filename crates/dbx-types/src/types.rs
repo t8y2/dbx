@@ -278,6 +278,22 @@ pub struct ColumnInfo {
     pub metadata_capabilities: Option<ColumnMetadataCapabilities>,
 }
 
+/// Doris aggregate-state columns contain opaque engine serialization, not a
+/// value that DBX can safely edit or emit as an INSERT literal.
+pub fn is_opaque_aggregate_state_type(data_type: &str) -> bool {
+    let data_type = data_type.trim();
+    let Some(prefix) = data_type.get(.."agg_state".len()) else { return false };
+    if !prefix.eq_ignore_ascii_case("agg_state") {
+        return false;
+    }
+    let Some(arguments) =
+        data_type.get("agg_state".len()..).map(str::trim_start).and_then(|value| value.strip_prefix('<'))
+    else {
+        return false;
+    };
+    arguments.strip_suffix('>').is_some_and(|inner| !inner.trim().is_empty())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableColumnsResult {
     pub table_name: String,
@@ -390,6 +406,20 @@ pub struct SpatialColumn {
     /// SRID shared by the column's geometry cells. `None` when unknown/absent
     /// (or SRID 0). A column reports the first non-null SRID it observes.
     pub srid: Option<u32>,
+}
+
+/// Stable identity for one column selected for SQL INSERT export.
+///
+/// `source_index` preserves duplicate result labels. `name` and
+/// `name_occurrence` let paginated exports recover the same identity when a
+/// driver reports later-page metadata in a different order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlExportColumnSelection {
+    pub source_index: usize,
+    pub name: String,
+    #[serde(default)]
+    pub name_occurrence: usize,
 }
 
 #[derive(Debug, Default)]
@@ -1047,9 +1077,20 @@ pub struct CustomTypeDetails {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo, ObjectSourceKind, QueryMessage,
-        SpatialColumn, SpatialColumnBuilder, TableInfo,
+        is_opaque_aggregate_state_type, CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo,
+        ObjectSourceKind, QueryMessage, SpatialColumn, SpatialColumnBuilder, TableInfo,
     };
+
+    #[test]
+    fn opaque_aggregate_state_type_is_narrow() {
+        assert!(is_opaque_aggregate_state_type("agg_state<group_concat(text)>"));
+        assert!(is_opaque_aggregate_state_type(" AGG_STATE <sum(int)> "));
+        assert!(!is_opaque_aggregate_state_type("agg_state"));
+        assert!(!is_opaque_aggregate_state_type("agg_state<"));
+        assert!(!is_opaque_aggregate_state_type("agg_state<>"));
+        assert!(!is_opaque_aggregate_state_type("😺agg_state<sum(int)>"));
+        assert!(!is_opaque_aggregate_state_type("varchar"));
+    }
 
     #[test]
     fn query_message_format_line_uppercases_severity() {

@@ -31,6 +31,7 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 | snowflake | Snowflake | Snowflake JDBC |
 | trino | Trino (Presto) | Trino JDBC |
 | hive | Apache Hive | 原生 Go HS2 agent |
+| transwarp | 星环 Inceptor | 内置官方 JDBC 驱动 Agent |
 | db2 | IBM DB2 | DB2 JDBC |
 | informix | IBM Informix | Informix JDBC |
 | neo4j | Neo4j | 官方 Neo4j Go Driver 原生 Agent |

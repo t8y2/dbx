@@ -16,6 +16,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import TablePhysicalOptionsEditor from "@/components/structure/TablePhysicalOptionsEditor.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -58,6 +59,7 @@ import {
 import { buildMysqlAutoIncrementCounterStatement, canEditMysqlAutoIncrementCounter, refreshMysqlAutoIncrementCounterDraft } from "@/lib/table/mysqlAutoIncrementCounter";
 import { mysqlTableCollationSql, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
 import { MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineSql, mysqlTableEngineSqlOption, parseMysqlTableEngineMetadata, refreshMysqlTableEngineDraft, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
+import { INCEPTOR_PHYSICAL_OPTIONS, buildInceptorCreateOptions, emptyTablePhysicalOptions, hasTablePhysicalOptions, pruneTablePhysicalOptions, restoreTablePhysicalOptions } from "@/lib/table/tablePhysicalOptions";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
 import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
 import { getPostgresDataTypeHelp, gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
@@ -1581,6 +1583,14 @@ const mysqlAutoIncrementLoading = ref(false);
 const mysqlAutoIncrementLoadError = ref("");
 const mysqlTableEngine = ref("");
 const originalMysqlTableEngine = ref("");
+const physicalOptions = ref(emptyTablePhysicalOptions());
+watch(
+  () => columns.value.filter((column) => !column.markedForDrop).map((column) => column.id),
+  (ids) => {
+    if (!isCreateMode.value) return;
+    physicalOptions.value = pruneTablePhysicalOptions(physicalOptions.value, new Set(ids));
+  },
+);
 const mysqlTableEngineOptions = ref<string[]>([]);
 const mysqlTableEngineLoading = ref(false);
 const mysqlTableEngineLoadError = ref("");
@@ -1900,6 +1910,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     originalMysqlAutoIncrementValue: originalMysqlAutoIncrementValue.value,
     mysqlTableEngine: mysqlTableEngine.value,
     originalMysqlTableEngine: originalMysqlTableEngine.value,
+    physicalOptions: cloneDraftValue(physicalOptions.value),
     tableOwner: tableOwner.value,
     originalTableOwner: originalTableOwner.value,
     columns: cloneDraftValue(columns.value),
@@ -1977,6 +1988,7 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   tableOwner.value = draft.tableOwner || "";
   originalTableOwner.value = draft.originalTableOwner || "";
   columns.value = cloneDraftValue(draft.columns || []);
+  physicalOptions.value = restoreTablePhysicalOptions(draft);
   // Existing-index edits never support Concurrent (the checkbox is disabled and
   // the core builder rejects the request), so a stale `concurrently: true`
   // saved in a restored draft must not be submitted or deadlock the save.
@@ -2066,6 +2078,7 @@ function hasPendingStructureChanges(): boolean {
       !!newTableName.value.trim() ||
       !!tableComment.value.trim() ||
       mysqlTableEngine.value !== originalMysqlTableEngine.value ||
+      hasTablePhysicalOptions(physicalOptions.value) ||
       columns.value.length > 0 ||
       indexes.value.length > 0 ||
       foreignKeys.value.length > 0 ||
@@ -2236,6 +2249,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
     mysqlEngine: mysqlTableEngineSqlOption({ value: mysqlTableEngine.value, originalValue: originalMysqlTableEngine.value }, isCreateMode.value, supportsMysqlEngine.value && !mysqlTableEngineLoading.value && !mysqlTableEngineLoadError.value),
+    transwarpCreate: isCreateMode.value && databaseType.value === "transwarp" ? buildInceptorCreateOptions(physicalOptions.value, columns.value) : undefined,
     tableCollation: mysqlTableDefaultCollation.value || undefined,
     partitioned: isPartitionedParent.value,
     isGaussdbMMode: connection.value?.driver_profile?.toLowerCase() === "gaussdb-m",
@@ -2425,6 +2439,7 @@ function resetState() {
   mysqlAutoIncrementLoadError.value = "";
   mysqlTableEngine.value = "";
   originalMysqlTableEngine.value = "";
+  physicalOptions.value = emptyTablePhysicalOptions();
   mysqlTableEngineOptions.value = [];
   mysqlTableEngineLoadRequestId += 1;
   mysqlTableEngineLoading.value = false;
@@ -4786,6 +4801,7 @@ watch(
     mysqlAutoIncrementLoadError,
     mysqlTableEngine,
     originalMysqlTableEngine,
+    physicalOptions,
     mysqlTableEngineLoading,
     mysqlTableEngineLoadError,
     mysqlTableDefaultCollation,
@@ -4964,6 +4980,8 @@ watch(
         <TooltipContent>{{ t("structureEditor.mysqlTableEngineLoadFailed", { message: mysqlTableEngineLoadError }) }}</TooltipContent>
       </Tooltip>
     </div>
+
+    <TablePhysicalOptionsEditor v-if="isCreateMode && databaseType === 'transwarp'" v-model="physicalOptions" :config="INCEPTOR_PHYSICAL_OPTIONS" :columns="columns.filter((column) => !column.markedForDrop && !!column.name.trim())" :disabled="saving" />
 
     <div v-if="supportsTableOwner" class="flex shrink-0 items-center gap-2">
       <label class="flex shrink-0 items-center gap-1 font-medium text-muted-foreground">
@@ -6636,11 +6654,6 @@ watch(
     inset 3px 0 0 var(--primary),
     inset 0 1px 0 color-mix(in oklab, var(--primary) 55%, transparent),
     inset 0 -1px 0 color-mix(in oklab, var(--primary) 55%, transparent);
-}
-
-/* Inputs are bg-transparent; give them a solid surface on the selected row so fields stay readable. */
-.structure-column-search-current :is(input, button, [role="combobox"], [data-slot="select-trigger"]) {
-  background-color: var(--background);
 }
 </style>
 

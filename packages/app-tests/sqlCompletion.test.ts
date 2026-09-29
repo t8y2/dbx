@@ -1343,6 +1343,44 @@ test("uses the full Unicode prefix as the replacement range without result reuse
   assert.equal(getSqlCompletionResultValidFor(sql, sql.length), undefined);
 });
 
+test("keeps FROM tables when the select list is separated from FROM by a blank line (#10196)", () => {
+  const sql = "SELECT id, name\n\nFROM users";
+  const cursor = "SELECT id, name".length;
+  const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+  assert.equal(context.suggestColumns, true);
+  assert.equal(shouldAutoOpenSqlCompletion(sql, cursor, { databaseType: "mysql" }), true);
+});
+
+test("keeps column hints while typing a select-list prefix before a blank-line FROM (#10196)", () => {
+  const sql = "SELECT id, na\n\nFROM users";
+  const cursor = sql.indexOf("na") + 2;
+  const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+  assert.equal(context.suggestColumns, true);
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+  assert.equal(shouldAutoOpenSqlCompletion(sql, cursor, { databaseType: "mysql" }), true);
+});
+
+test("select-list column context still works without a blank line before FROM", () => {
+  const sql = "SELECT id, name\nFROM users";
+  const cursor = "SELECT id, name".length;
+  const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+  assert.equal(context.suggestColumns, true);
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+});
+
 test("ranks prefix matches above substring matches for table names", () => {
   const sql = "select * from user";
   const items = buildSqlCompletionItems(sql, sql.length, {

@@ -31,7 +31,9 @@ import {
   type DictionaryTemplateId,
 } from "@/lib/docs/dataDictionary";
 import { buildDataDictionaryPdf } from "@/lib/docs/dataDictionaryPdf";
-import { DictionaryFileExistsError, saveDataDictionaryFile } from "@/lib/docs/saveDataDictionaryFile";
+import { DictionaryFileExistsError, chooseDataDictionaryPath } from "@/lib/docs/saveDataDictionaryFile";
+import { hasActiveDictionaryExport, startDataDictionaryExport } from "@/lib/docs/dataDictionaryExportTask";
+import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useConnectionStore } from "@/stores/connectionStore";
 
@@ -46,14 +48,13 @@ const props = defineProps<{
 const open = defineModel<boolean>("open", { default: false });
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const { toast } = useToast();
 
 const step = ref(0);
 const loading = ref(false);
 const exporting = ref(false);
 const loadError = ref<string | null>(null);
 const exportError = ref<string | null>(null);
-const generatedPath = ref("");
-const elapsed = ref(0);
 const databases = ref<Array<{ name: string; checked: boolean }>>([]);
 const schemas = ref<Array<{ database: string; name: string; checked: boolean }>>([]);
 const objects = ref<DictionaryObjectRef[]>([]);
@@ -67,7 +68,6 @@ const continueOnError = ref(true);
 const outputPath = ref("");
 const previewUrl = ref("");
 let generation = 0;
-let elapsedTimer = 0;
 
 const steps = computed(() => [t("dataDictionary.stepDatabases"), t("dataDictionary.stepObjects"), t("dataDictionary.stepTemplate"), t("dataDictionary.stepLayout"), t("dataDictionary.stepFile")]);
 const dbType = computed(() => connectionStore.getConfig(props.prefillConnectionId || "")?.db_type);
@@ -312,22 +312,42 @@ async function browse(): Promise<void> {
 }
 
 async function exportDictionary(): Promise<void> {
+  const connectionId = props.prefillConnectionId;
+  if (!connectionId) return;
+  if (hasActiveDictionaryExport(connectionId)) {
+    exportError.value = t("dataDictionary.alreadyRunning");
+    return;
+  }
   exporting.value = true;
   exportError.value = null;
-  generatedPath.value = "";
-  elapsed.value = 0;
-  elapsedTimer = window.setInterval(() => (elapsed.value += 1), 1000);
   try {
     const fallback = dataDictionaryFileName(checkedDatabases.value[0] || "DataDictionary", false);
     const suggested = resolveDictionaryExportPath(outputPath.value, fallback, appendTimestamp.value);
-    const document = await collectSelection();
-    const bytes = buildDataDictionaryPdf(document.tables, labels(), layout.value, continueOnError.value ? document.warnings : []);
-    const saved = await saveDataDictionaryFile(suggested, bytes, { overwrite: overwrite.value });
-    if (saved) generatedPath.value = saved;
+    const path = await chooseDataDictionaryPath(suggested);
+    if (!path) return;
+    const started = startDataDictionaryExport({
+      connectionId,
+      databases: [...checkedDatabases.value],
+      schemas: checkedSchemas.value.map((item) => ({ database: item.database, name: item.name })),
+      objects: orderedObjects.value.map((item) => ({ ...item })),
+      snapshot: props.snapshot,
+      layout: { ...layout.value },
+      labels: labels(),
+      outputPath: path,
+      overwrite: overwrite.value,
+      continueOnError: continueOnError.value,
+      warningText: (warning) => warningText(warning),
+      skippedDatabase: (database, reason) => t("dataDictionary.warningTableSkipped", { table: database, reason }),
+      missingObject: (object) => t("dataDictionary.warningTableSkipped", { table: objectLabel(object), reason: t("dataDictionary.objectUnavailable") }),
+      onSuccess: (saved, warnings) => toast(t("dataDictionary.backgroundDone", { path: saved }) + (warnings ? ` · ${t("dataDictionary.warningCount", { count: warnings })}` : ""), 8000),
+      onFailure: (error) => toast(t("dataDictionary.backgroundFailed", { error: error instanceof DictionaryFileExistsError ? t("dataDictionary.fileExists") : error instanceof Error ? error.message : String(error) }), 8000),
+    });
+    if (!started) throw new Error(t("dataDictionary.alreadyRunning"));
+    toast(t("dataDictionary.backgroundStarted"));
+    open.value = false;
   } catch (error) {
     exportError.value = error instanceof DictionaryFileExistsError ? t("dataDictionary.fileExists") : t("dataDictionary.exportFailed", { error: error instanceof Error ? error.message : String(error) });
   } finally {
-    window.clearInterval(elapsedTimer);
     exporting.value = false;
   }
 }
@@ -420,7 +440,6 @@ watch(
       return;
     }
     step.value = 0;
-    generatedPath.value = "";
     exportError.value = null;
     outputPath.value = "";
     appendTimestamp.value = false;
@@ -434,7 +453,6 @@ watch(
 
 onBeforeUnmount(() => {
   generation += 1;
-  window.clearInterval(elapsedTimer);
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
 });
 </script>
@@ -597,8 +615,7 @@ onBeforeUnmount(() => {
             ><span>{{ t("dataDictionary.continueOnError") }}</span
             ><input v-model="continueOnError" type="checkbox"
           /></label>
-          <p v-if="exporting" class="text-sm text-muted-foreground">{{ t("dataDictionary.generating") }} {{ elapsed }}s</p>
-          <p v-if="generatedPath" class="text-sm">{{ t("dataDictionary.generated") }} {{ generatedPath }}</p>
+          <p v-if="exporting" class="text-sm text-muted-foreground">{{ t("dataDictionary.exporting") }}</p>
           <p v-if="exportError" class="text-sm text-destructive">{{ exportError }}</p>
         </div>
       </div>

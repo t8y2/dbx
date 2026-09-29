@@ -324,9 +324,16 @@ pub async fn ai_resolve_tool_approval(session_id: String, approval_id: String, a
 }
 
 /// Plugin ids whose MCP tools the built-in AI agent may call.
+/// Plugin ids whose MCP tools the built-in AI agent may call: every detected
+/// tool-capable plugin (a manifest `mcp` contribution with `ai_tools: false`
+/// opts out) minus the ids the user explicitly turned off in the Plugin
+/// Center.
 #[tauri::command]
 pub async fn get_ai_plugin_tool_plugins(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
-    state.storage.load_ai_plugin_tool_plugin_ids().await
+    let mut ids =
+        dbx_core::ai::plugin_tools::effective_ai_tool_plugin_ids(state.inner()).await.into_iter().collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
 }
 
 #[tauri::command]

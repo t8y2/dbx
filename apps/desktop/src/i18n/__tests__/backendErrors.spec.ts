@@ -48,7 +48,7 @@ const STRUCTURED_BACKEND_ERROR_KEYS = [
   "backendErrors.unknown",
 ] as const;
 
-// Reproduces the exact string crates/dbx-drivers/src/agent_service.rs builds on
+// Reproduces the exact string crates/dbx-driver-agent/src/agent_service.rs builds on
 // Windows: `\` line continuations strip the newline plus the following indent.
 const WINDOWS_JRE_REMOVE_ERROR = [
   "Failed to remove the old JRE directory: C:\\dbx\\jre21",
@@ -644,9 +644,9 @@ describe("backend error wording is pinned to the Rust sources", () => {
     ["crates/dbx-core/src/data/mongodb_import_export.rs", "MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver"],
     ["crates/dbx-core/src/data/mongodb_import_export.rs", "MongoDB Legacy Agent returned an invalid find cursor"],
     ["crates/dbx-core/src/query/mongo_ops.rs", "MongoDB Legacy Agent rejected "],
-    ["crates/dbx-drivers/src/agent_service.rs", "Failed to remove the old JRE directory: "],
-    ["crates/dbx-drivers/src/agent_service.rs", "is in use by drivers: "],
-    ["crates/dbx-drivers/src/agent_service.rs", "agent-registry.json not found in the ZIP; not a valid offline driver package."],
+    ["crates/dbx-driver-agent/src/agent_service.rs", "Failed to remove the old JRE directory: "],
+    ["crates/dbx-driver-agent/src/agent_service.rs", "is in use by drivers: "],
+    ["crates/dbx-driver-agent/src/agent_service.rs", "agent-registry.json not found in the ZIP; not a valid offline driver package."],
     ["crates/dbx-core/src/admin/mq/adapters/kafka.rs", "Kafka does not support unloading topics"],
     ["crates/dbx-plugin-runtime/src/plugins/installer.rs", "Plugin update source change requires confirmation:"],
     ["crates/dbx-plugin-runtime/src/plugins/installer.rs", "Plugin downgrade to version "],

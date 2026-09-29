@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { MqBindingInfo, MqExchangeInfo, MqExchangeType, NamespaceRef, TopicInfo } from "@/types/mq";
-import { mqBind, mqCreateExchange, mqDeleteExchange, mqListBindings, mqListExchanges, mqListTopics, mqUnbind } from "@/lib/backend/api";
+import type { MqBindingInfo, MqExchangeInfo, MqExchangeType, MqListPageRequest, NamespaceRef, TopicInfo } from "@/types/mq";
+import { mqBind, mqCreateExchange, mqDeleteExchange, mqListBindings, mqListExchangesPage, mqListTopicsPage, mqUnbind } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { isBuiltinRabbitMqExchange, rabbitMqExchangeDisplayName, RABBITMQ_EXCHANGE_TYPES } from "@/lib/mq/rabbitmqExchanges";
 import { isAllVhostsNamespace, resolveMqRowNamespace } from "@/lib/mq/mqConsoleDefaults";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import MqListPagination from "./shared/MqListPagination.vue";
+
+const RABBITMQ_DEFAULT_PAGE_SIZE = 100;
+const RABBITMQ_SEARCH_DEBOUNCE_MS = 250;
 
 interface Props {
   connectionId: string;
@@ -25,6 +29,12 @@ const loading = ref(false);
 const error = ref<string>();
 const exchangeSearch = ref("");
 const selectedExchange = ref<MqExchangeInfo>();
+const exchangePage = ref(1);
+const exchangePageSize = ref(RABBITMQ_DEFAULT_PAGE_SIZE);
+const exchangeTotalCount = ref(0);
+const exchangeHasMore = ref(false);
+let exchangeLoadSequence = 0;
+let exchangeSearchTimer: ReturnType<typeof setTimeout> | undefined;
 
 const bindings = ref<MqBindingInfo[]>([]);
 const bindingsLoading = ref(false);
@@ -58,6 +68,9 @@ const unbindTarget = ref<MqBindingInfo>();
 const unbinding = ref(false);
 
 const availableQueues = ref<TopicInfo[]>([]);
+const availableQueueTotal = ref(0);
+let queueLoadSequence = 0;
+let queueSearchTimer: ReturnType<typeof setTimeout> | undefined;
 
 const filteredExchanges = computed(() => {
   const query = exchangeSearch.value.trim().toLowerCase();
@@ -92,22 +105,58 @@ async function guardWritable(operation: string): Promise<boolean> {
 async function loadExchanges() {
   const ns = nsRef();
   if (!ns) {
+    exchangeLoadSequence += 1;
     exchanges.value = [];
+    exchangeTotalCount.value = 0;
+    exchangeHasMore.value = false;
     return;
   }
+  const loadSequence = ++exchangeLoadSequence;
   loading.value = true;
   error.value = undefined;
   try {
-    exchanges.value = await mqListExchanges(props.connectionId, ns);
+    const pagination: MqListPageRequest = {
+      page: exchangePage.value,
+      pageSize: exchangePageSize.value,
+      search: exchangeSearch.value.trim() || undefined,
+      sort: "name",
+      sortDescending: false,
+    };
+    const result = await mqListExchangesPage(props.connectionId, ns, pagination);
+    if (loadSequence !== exchangeLoadSequence) return;
+    const lastPage = Math.max(1, Math.ceil(result.totalCount / result.pageSize));
+    if (result.page > lastPage) {
+      exchangePage.value = lastPage;
+      void loadExchanges();
+      return;
+    }
+    exchanges.value = result.items;
+    exchangePage.value = result.page;
+    exchangePageSize.value = result.pageSize;
+    exchangeTotalCount.value = result.totalCount;
+    exchangeHasMore.value = result.hasMore;
     if (selectedExchange.value && !exchanges.value.some((exchange) => exchange.name === selectedExchange.value?.name && exchange.namespace === selectedExchange.value?.namespace)) {
       selectedExchange.value = undefined;
       bindings.value = [];
     }
   } catch (e: unknown) {
+    if (loadSequence !== exchangeLoadSequence) return;
     error.value = formatError(e);
   } finally {
-    loading.value = false;
+    if (loadSequence === exchangeLoadSequence) loading.value = false;
   }
+}
+
+function changeExchangePage(page: number) {
+  if (page < 1 || page === exchangePage.value) return;
+  exchangePage.value = page;
+  void loadExchanges();
+}
+
+function changeExchangePageSize(pageSize: number) {
+  exchangePageSize.value = pageSize;
+  exchangePage.value = 1;
+  void loadExchanges();
 }
 
 async function loadBindings(exchange: MqExchangeInfo) {
@@ -124,12 +173,28 @@ async function loadBindings(exchange: MqExchangeInfo) {
   }
 }
 
-async function loadQueues() {
+async function loadQueues(search = "") {
   const ns = nsRefFor(selectedExchange.value);
   if (!ns) return;
+  const loadSequence = ++queueLoadSequence;
   try {
-    availableQueues.value = await mqListTopics(props.connectionId, ns, { includeNonPersistent: false });
+    const result = await mqListTopicsPage(
+      props.connectionId,
+      ns,
+      { includeNonPersistent: false },
+      {
+        page: 1,
+        pageSize: RABBITMQ_DEFAULT_PAGE_SIZE,
+        search: search.trim() || undefined,
+        sort: "name",
+        sortDescending: false,
+      },
+    );
+    if (loadSequence !== queueLoadSequence) return;
+    availableQueues.value = result.items;
+    availableQueueTotal.value = result.totalCount;
   } catch (e: unknown) {
+    if (loadSequence !== queueLoadSequence) return;
     console.warn("[DBX] Failed to load queues for binding dialog:", e);
   }
 }
@@ -224,7 +289,6 @@ function openBindDialog() {
   if (!selectedExchange.value) return;
   dialogError.value = undefined;
   bindForm.value = { destinationType: "queue", destination: "", routingKey: "", argumentsText: "" };
-  void loadQueues();
   showBindDialog.value = true;
 }
 
@@ -312,20 +376,50 @@ function formatBindingArguments(bindingRow: MqBindingInfo): string {
 watch(
   () => [props.tenant, props.namespace],
   () => {
+    if (exchangeSearchTimer) clearTimeout(exchangeSearchTimer);
+    exchangePage.value = 1;
     selectedExchange.value = undefined;
     bindings.value = [];
     loadExchanges();
   },
   { immediate: true },
 );
+
+watch(exchangeSearch, () => {
+  if (exchangeSearchTimer) clearTimeout(exchangeSearchTimer);
+  exchangeSearchTimer = setTimeout(() => {
+    exchangeSearchTimer = undefined;
+    exchangePage.value = 1;
+    void loadExchanges();
+  }, RABBITMQ_SEARCH_DEBOUNCE_MS);
+});
+
+watch(
+  () => [bindForm.value.destination, bindForm.value.destinationType, showBindDialog.value] as const,
+  ([destination, destinationType, open]) => {
+    if (queueSearchTimer) clearTimeout(queueSearchTimer);
+    if (!open || destinationType !== "queue") return;
+    queueSearchTimer = setTimeout(() => {
+      queueSearchTimer = undefined;
+      void loadQueues(destination);
+    }, RABBITMQ_SEARCH_DEBOUNCE_MS);
+  },
+);
+
+onBeforeUnmount(() => {
+  exchangeLoadSequence += 1;
+  queueLoadSequence += 1;
+  if (exchangeSearchTimer) clearTimeout(exchangeSearchTimer);
+  if (queueSearchTimer) clearTimeout(queueSearchTimer);
+});
 </script>
 
 <template>
   <div class="exchanges-panel">
     <div class="panel-toolbar">
       <div class="toolbar-left">
-        <input v-model="exchangeSearch" type="search" class="exchange-search" :placeholder="t('mqExchanges.searchPlaceholder')" :disabled="loading && !exchanges.length" />
-        <span v-if="exchanges.length" class="exchange-count">{{ filteredExchanges.length }} / {{ exchanges.length }}</span>
+        <input v-model="exchangeSearch" type="search" class="exchange-search" :placeholder="t('mqExchanges.searchPlaceholder')" :disabled="loading && !exchanges.length && !exchangeSearch" />
+        <span v-if="exchanges.length" class="exchange-count">{{ filteredExchanges.length }} / {{ exchangeTotalCount }}</span>
       </div>
       <div class="toolbar-actions">
         <button @click="loadExchanges" :disabled="loading || !tenant || !namespace" class="btn-secondary">
@@ -341,7 +435,7 @@ watch(
 
     <div v-else-if="loading && !exchanges.length" class="panel-loading">{{ t("mqExchanges.loading") }}</div>
 
-    <div v-else-if="!exchanges.length" class="panel-placeholder">{{ t("mqExchanges.noExchanges") }}</div>
+    <div v-else-if="!exchanges.length" class="panel-placeholder">{{ exchangeSearch.trim() ? t("mqExchanges.noMatches") : t("mqExchanges.noExchanges") }}</div>
 
     <div v-else-if="!filteredExchanges.length" class="panel-placeholder">{{ t("mqExchanges.noMatches") }}</div>
 
@@ -381,6 +475,8 @@ watch(
         </tbody>
       </table>
     </div>
+
+    <MqListPagination v-if="exchangeTotalCount > exchangePageSize || exchangePage > 1" :page="exchangePage" :page-size="exchangePageSize" :total-count="exchangeTotalCount" :has-more="exchangeHasMore" :loading="loading" @page-change="changeExchangePage" @page-size-change="changeExchangePageSize" />
 
     <!-- Bindings of the selected exchange -->
     <div v-if="selectedExchange" class="bindings-section">
@@ -495,6 +591,7 @@ watch(
             <datalist id="mq-exchange-bind-queues">
               <option v-for="queue in availableQueues" :key="queue.name" :value="queue.shortName" />
             </datalist>
+            <small v-if="bindForm.destinationType === 'queue' && availableQueueTotal > availableQueues.length" class="queue-suggestion-count">{{ availableQueues.length }} / {{ availableQueueTotal }}</small>
           </div>
           <div class="form-group">
             <label>{{ t("mqExchanges.routingKey") }}</label>
@@ -589,6 +686,13 @@ watch(
   flex: 0 0 auto;
   color: var(--color-text-tertiary);
   font-size: 12px;
+}
+
+.queue-suggestion-count {
+  display: block;
+  margin-top: 4px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
 }
 
 .panel-placeholder,

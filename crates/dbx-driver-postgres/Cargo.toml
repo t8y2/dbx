@@ -1,0 +1,34 @@
+[package]
+name = "dbx-driver-postgres"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+dbx-driver-support = { path = "../dbx-driver-support" }
+dbx-sql-core = { path = "../dbx-sql-core" }
+dbx-types = { path = "../dbx-types", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
+futures = "0.3"
+log = "0.4"
+openssl = { version = "0.10", features = ["vendored"] }
+percent-encoding = "2"
+postgres-openssl = "0.5"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-pemfile = "2.2"
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+sqlparser = { version = "0.62.0", features = ["visitor"] }
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+tokio-postgres-rustls = "0.13"
+tokio-util = { version = "0.7", features = ["compat"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+webpki-roots = "0.26"
+
+[dev-dependencies]
+portpicker = "0.1.1"
+tempfile = "3"
+tokio-openssl = "0.6"

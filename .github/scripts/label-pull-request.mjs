@@ -30,7 +30,7 @@ export const STATIC_LABEL_SPECS = {
   "tests-only": { color: "bfd4f2", description: "Changes only tests, fixtures, or snapshots" },
 };
 
-const CORE_CRATE_PATH = /^crates\/dbx-(?:core|drivers|sql|formats|types|platform|ai-provider|plugin-runtime)\//;
+const CORE_CRATE_PATH = /^crates\/dbx-(?:core|driver(?:s|-[^/]+)|sql(?:-[^/]+)?|formats|types|platform|ai-provider|plugin-runtime)\//;
 
 const TYPE_LABELS = new Set(["bug", "enhancement", "documentation", "maintenance"]);
 const LABEL_PALETTE = [
@@ -151,6 +151,7 @@ export function inferAreaLabels(changedFiles) {
   if (has((file) => file.startsWith("crates/dbx-cli/")
     || file.startsWith("packages/cli-")
     || file.startsWith("packages/cli/")
+    || file.startsWith("skills/dbx/")
     || file.startsWith("examples/cli/"))) {
     labels.add("area/cli");
   }

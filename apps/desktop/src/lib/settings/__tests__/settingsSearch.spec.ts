@@ -40,6 +40,11 @@ const translate = (key: string) => translations[key] ?? key;
 const allCategories = new Set(Object.keys(categoryLabels) as SettingsCategory[]);
 
 describe("settings search", () => {
+  it("finds connection tab colors by their Chinese label", () => {
+    const entries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: false, visibleCategories: allCategories }, (key) => (key === "settings.colorizeConnectionTabs" ? "按连接颜色区分标签页" : key), categoryLabels);
+    expect(searchSettings(entries, "连接颜色", "zh-CN")).toEqual(expect.arrayContaining([expect.objectContaining({ id: "appearance-connection-tab-colors", category: "appearance", targetId: "appearance" })]));
+  });
+
   const definitions: readonly SettingsSearchDefinition[] = [
     { id: "font", category: "editor", titleKey: "font", descriptionKey: "fontDescription" },
     { id: "export", category: "data", titleKey: "export" },
@@ -130,6 +135,31 @@ describe("settings search", () => {
     expect(desktopEntries.map((entry) => entry.id)).toContain("sql-file-editor-max-mb");
     expect(desktopEntries.map((entry) => entry.id)).not.toContain("sql-file-web-upload-max-mb");
     expect(webEntries.map((entry) => entry.id)).toEqual(expect.arrayContaining(["sql-file-editor-max-mb", "sql-file-web-upload-max-mb"]));
+  });
+
+  it("points the debug logging result at the About tab that renders the switch", () => {
+    // The 启用调试日志 switch (id="debug-logging-enabled") is rendered inside the
+    // About section, next to the debug log copy/download/clear actions. The
+    // search entry used to claim "appearance", so picking the result switched
+    // to 外观 and never revealed the control (regression from #10308).
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
+      id: "about-debug-logs",
+      category: "about",
+      titleKey: "settings.debugLoggingEnabled",
+      descriptionKey: "settings.debugLoggingEnabledDescription",
+      targetId: "about",
+      visible: expect.any(Function),
+    });
+    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("appearance-debug-logs");
+
+    const desktopEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: false, visibleCategories: new Set<SettingsCategory>(["appearance", "about"]) }, translate, categoryLabels);
+    const entry = desktopEntries.find((item) => item.id === "about-debug-logs");
+    expect(entry?.category).toBe("about");
+    expect(entry?.categoryLabel).toBe("About");
+    expect(entry?.targetId).toBe("about");
+
+    const webEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["appearance", "about"]) }, translate, categoryLabels);
+    expect(webEntries.map((item) => item.id)).not.toContain("about-debug-logs");
   });
 
   it("maps legacy SQL file settings navigation to the editor", () => {
@@ -270,6 +300,7 @@ describe("settings search", () => {
       { titleKey: "settings.sidebarObjectInfoMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.insertSpaceAfterCompletion", category: "editor", targetId: "editor" },
       { titleKey: "settings.completionTriggerMode", category: "editor", targetId: "editor" },
+      { titleKey: "settings.tableCompletionSchemaQualification", category: "editor", targetId: "editor" },
       { titleKey: "settings.autoAliasTables", category: "editor", targetId: "editor" },
       { titleKey: "settings.clickTableNavigationTarget", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.prefillNewQueryWithSelect", category: "navigation", targetId: "navigation" },

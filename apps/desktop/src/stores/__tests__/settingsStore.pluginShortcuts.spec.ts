@@ -18,7 +18,7 @@ describe("plugin shortcut persistence", () => {
     });
     const first = useSettingsStore();
     await first.initEditorSettings();
-    const pluginShortcuts = { enabled: false, position, order: ["b", "missing", "a"], hiddenPluginIds: ["hidden"], sidebarHeight: 132, toolbarCount: 6 };
+    const pluginShortcuts = { enabled: false, position, order: ["b", "missing", "a"], hiddenPluginIds: ["hidden"], sidebarHeight: 132, toolbarCount: 6, showSettingsEntry: false };
     await first.updateEditorSettingsAndPersist({ pluginShortcuts });
     setActivePinia(createPinia());
     const second = useSettingsStore();

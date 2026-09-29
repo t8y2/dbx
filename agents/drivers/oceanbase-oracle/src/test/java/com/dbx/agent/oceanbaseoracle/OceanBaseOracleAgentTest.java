@@ -621,7 +621,7 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
-    void fallsBackToAllSourceForOracleRoutineAndPackageTypes() {
+    void readsOracleRoutineAndPackageTypesFromAllSourceFirst() {
         for (String[] object : new String[][]{
             {"PROCEDURE", "PROCEDURE"},
             {"FUNCTION", "FUNCTION"},
@@ -631,7 +631,7 @@ class OceanBaseOracleAgentTest {
             List<String> sql = new ArrayList<>();
             List<String> params = new ArrayList<>();
             OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
-            TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(
+            TestSupport.setPrivateConnection(agent, objectSourceConnection(
                 sql,
                 params,
                 resultSet(
@@ -645,12 +645,35 @@ class OceanBaseOracleAgentTest {
             Assertions.assertEquals(object[0], source.getObject_type());
             Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE " + object[1]), source.getSource());
             Assertions.assertEquals(
-                List.of(object[0], "MixedRoutine", "MixedOwner", "MixedOwner", "MixedRoutine", object[1]),
+                List.of("MixedOwner", "MixedRoutine", object[1]),
                 params
             );
-            Assertions.assertTrue(sql.get(1).contains("ALL_SOURCE"), sql.get(1));
-            Assertions.assertTrue(sql.get(1).contains("ORDER BY LINE"), sql.get(1));
+            Assertions.assertEquals(1, sql.size());
+            Assertions.assertTrue(sql.get(0).contains("ALL_SOURCE"), sql.get(0));
+            Assertions.assertTrue(sql.get(0).contains("ORDER BY LINE"), sql.get(0));
         }
+    }
+
+    @Test
+    void fallsBackToDbmsMetadataWhenAllSourceIsUnavailable() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(
+            sql,
+            params,
+            resultSet(
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE OR REPLACE PROCEDURE APP.P1 AS BEGIN NULL; END;"}}
+            )
+        ));
+
+        ObjectSource source = agent.getObjectSource("APP", "P1", "PROCEDURE");
+
+        Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE PROCEDURE"), source.getSource());
+        Assertions.assertTrue(sql.get(0).contains("ALL_SOURCE"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("DBMS_METADATA.GET_DDL"), sql.get(1));
+        Assertions.assertEquals(List.of("APP", "P1", "PROCEDURE", "PROCEDURE", "P1", "APP"), params);
     }
 
     @Test

@@ -21,6 +21,8 @@ pub struct DocsSnapshotRequest {
     pub tables: Vec<String>,
     #[serde(default)]
     pub project_name: Option<String>,
+    #[serde(default)]
+    pub max_concurrent_tables: Option<usize>,
 }
 
 async fn load_connection(state: &Arc<WebState>, connection_id: &str) -> Result<ConnectionConfig, AppError> {
@@ -48,10 +50,16 @@ pub async fn collect_snapshot(
         project_name: request.project_name.clone().unwrap_or_else(|| connection.name.clone()),
     };
 
-    let snapshot =
-        dbx_core::docs::collect_snapshot(&state.app, &connection, &options, &|_progress| {}, &AtomicBool::new(false))
-            .await
-            .map_err(AppError::from)?;
+    let snapshot = dbx_core::docs::collect_snapshot_with_concurrency(
+        &state.app,
+        &connection,
+        &options,
+        &|_progress| {},
+        &AtomicBool::new(false),
+        request.max_concurrent_tables.unwrap_or(8).clamp(1, 8),
+    )
+    .await
+    .map_err(AppError::from)?;
 
     Ok(Json(snapshot))
 }

@@ -297,7 +297,10 @@ async fn run_agent_loop_inner(
     // Plugin tools join agent runs only; ask mode keeps its database-only
     // read tools.
     let plugin_tool_set = if is_agent_mode {
-        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref()).await
+        let bound_plugin_connection =
+            (agent_ctx.db_type == DatabaseType::Plugin).then_some(agent_ctx.connection_id.as_str());
+        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref(), bound_plugin_connection)
+            .await
     } else {
         PluginToolSet::default()
     };
@@ -592,6 +595,10 @@ async fn run_agent_loop_inner(
         let state2 = Arc::clone(&agent_ctx.state);
         let conn2 = agent_ctx.connection_id.clone();
         let db2 = agent_ctx.database.clone();
+        // The run's database scope travels with every tool call so a tool that
+        // can address a namespace (Redis logical databases) cannot step outside
+        // the databases this conversation is bound to or the user selected.
+        let scope2 = agent_ctx.selected_databases.clone();
         let schema2 = agent_ctx.schema.clone();
         let db_type = agent_ctx.db_type;
         let parallel_sql_permissions = sql_permissions.clone();
@@ -610,21 +617,31 @@ async fn run_agent_loop_inner(
         };
 
         // Run parallel group
-        let parallel_futures: Vec<_> =
-            parallel_indices
-                .iter()
-                .map(|&i| {
-                    let tc = make_tc(&collected_tool_calls[i]);
-                    let state = Arc::clone(&state2);
-                    let conn = conn2.clone();
-                    let db = db2.clone();
-                    let schema = schema2.clone();
-                    let perms = parallel_sql_permissions.clone();
-                    async move {
-                        agent_tools::execute_tool(&tc, &state, &conn, &db, schema.as_deref(), &db_type, perms).await
-                    }
-                })
-                .collect();
+        let parallel_futures: Vec<_> = parallel_indices
+            .iter()
+            .map(|&i| {
+                let tc = make_tc(&collected_tool_calls[i]);
+                let state = Arc::clone(&state2);
+                let conn = conn2.clone();
+                let db = db2.clone();
+                let scope = scope2.clone();
+                let schema = schema2.clone();
+                let perms = parallel_sql_permissions.clone();
+                async move {
+                    agent_tools::execute_tool_scoped(
+                        &tc,
+                        &state,
+                        &conn,
+                        &db,
+                        &scope,
+                        schema.as_deref(),
+                        &db_type,
+                        perms,
+                    )
+                    .await
+                }
+            })
+            .collect();
         let parallel_results = join_all(parallel_futures).await;
 
         // Run sequential group one-by-one
@@ -638,11 +655,12 @@ async fn run_agent_loop_inner(
                 Some(Err(not_executed)) => not_executed,
                 None => {
                     let execution_permissions = sequential_tool_permissions(&tc, db_type, &mut sql_permissions);
-                    agent_tools::execute_tool(
+                    agent_tools::execute_tool_scoped(
                         &tc,
                         &state2,
                         &conn2,
                         &db2,
+                        &scope2,
                         schema2.as_deref(),
                         &db_type,
                         execution_permissions,

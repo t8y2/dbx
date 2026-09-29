@@ -5,7 +5,9 @@ import * as api from "@/lib/backend/api";
 import { forgetSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { nextSavedSqlCopyName } from "@/lib/savedSql/savedSqlClipboard";
+import { savedSqlBatchReassignment, type SavedSqlBatchTargetSelection } from "@/lib/savedSql/savedSqlBatchTarget";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { normalizeSqlExecutionTarget, sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { SavedSqlFile, SavedSqlFolder, SavedSqlLibrary } from "@/types/database";
@@ -33,6 +35,32 @@ interface SavedSqlExecutionTargetInput {
   database: string;
   catalog?: string;
   schema?: string;
+}
+
+interface SavedSqlExecutionTargetUpdateOptions {
+  folderId?: string;
+  metadataOnly?: boolean;
+  orderIndex?: number;
+  updateFolder?: boolean;
+  syncLocalDirectory?: boolean;
+}
+
+interface PersistedSavedSqlFileTarget extends SavedSqlExecutionTargetInput {
+  folderId?: string;
+  orderIndex?: number;
+  updatedAt: string;
+}
+
+export interface SavedSqlBatchTargetFailure {
+  fileId: string;
+  fileName: string;
+  error: unknown;
+}
+
+export interface SavedSqlBatchTargetResult {
+  succeeded: SavedSqlFile[];
+  updated: SavedSqlFile[];
+  failures: SavedSqlBatchTargetFailure[];
 }
 
 interface SavedSqlNameScope {
@@ -148,12 +176,13 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   const folders = ref<SavedSqlFolder[]>([]);
   const files = ref<SavedSqlFile[]>([]);
   const isLoaded = ref(false);
+  const loadState = ref<"idle" | "loading" | "loaded" | "failed">("idle");
   let pendingSync: Promise<void> | null = null;
   let initFromStoragePromise: Promise<void> | null = null;
   const pendingFolderCreates = new Map<string, Promise<SavedSqlFolder>>();
   const fileTargetRevisions = new Map<string, number>();
   const pendingFileTargetSaves = new Map<string, Promise<SavedSqlFile | undefined>>();
-  const persistedFileTargets = new Map<string, SavedSqlExecutionTargetInput & { updatedAt: string }>();
+  const persistedFileTargets = new Map<string, PersistedSavedSqlFileTarget>();
   const persistedFileTargetNameReleases = new Map<string, () => void>();
   const pendingNamesByScope = new Map<string, Map<string, PendingSavedSqlName>>();
 
@@ -186,13 +215,20 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   async function initFromStorage() {
     if (isLoaded.value) return;
     if (!initFromStoragePromise) {
+      loadState.value = "loading";
       initFromStoragePromise = (async () => {
         await migrateLegacyLocalStorage();
         applyLibrary(await api.loadSavedSqlLibrary());
         isLoaded.value = true;
-      })().finally(() => {
-        initFromStoragePromise = null;
-      });
+        loadState.value = "loaded";
+      })()
+        .catch((error) => {
+          loadState.value = "failed";
+          throw error;
+        })
+        .finally(() => {
+          initFromStoragePromise = null;
+        });
     }
     await initFromStoragePromise;
   }
@@ -375,15 +411,26 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       catalog: normalizedCatalog(file.catalog),
       database: file.database,
       schema: file.schema,
+      folderId: file.folderId,
+      orderIndex: file.orderIndex,
       updatedAt: file.updatedAt,
     });
   }
 
-  function updateFileExecutionTarget(id: string, target: SavedSqlExecutionTargetInput): Promise<SavedSqlFile | undefined> {
+  function updateFileExecutionTarget(id: string, target: SavedSqlExecutionTargetInput, options: SavedSqlExecutionTargetUpdateOptions = {}): Promise<SavedSqlFile | undefined> {
     const existing = getFile(id);
     if (!existing) return Promise.resolve(undefined);
     const normalizedTarget = { ...target, catalog: normalizedCatalog(target.catalog) };
-    if (existing.connectionId === normalizedTarget.connectionId && normalizedCatalog(existing.catalog) === normalizedTarget.catalog && existing.database === normalizedTarget.database && existing.schema === normalizedTarget.schema) {
+    const folderId = options.updateFolder ? options.folderId || undefined : existing.folderId;
+    const orderIndex = options.updateFolder ? options.orderIndex : existing.orderIndex;
+    if (
+      existing.connectionId === normalizedTarget.connectionId &&
+      normalizedCatalog(existing.catalog) === normalizedTarget.catalog &&
+      existing.database === normalizedTarget.database &&
+      existing.schema === normalizedTarget.schema &&
+      existing.folderId === folderId &&
+      existing.orderIndex === orderIndex
+    ) {
       return Promise.resolve(existing);
     }
 
@@ -392,7 +439,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     }
     const revision = (fileTargetRevisions.get(id) ?? 0) + 1;
     fileTargetRevisions.set(id, revision);
-    files.value = files.value.map((file) => (file.id === id ? { ...file, ...normalizedTarget, updatedAt: nowIso() } : file));
+    files.value = files.value.map((file) => (file.id === id ? { ...file, ...normalizedTarget, folderId, orderIndex, updatedAt: nowIso() } : file));
     bumpVersion({ tree: true });
 
     const previousSave = pendingFileTargetSaves.get(id) ?? Promise.resolve(undefined);
@@ -403,13 +450,14 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
 
         let releaseName: (() => void) | undefined;
         try {
-          const loaded = await ensureFileContent(id);
-          if (!loaded || fileTargetRevisions.get(id) !== revision) return getFile(id);
+          const currentFile = options.metadataOnly ? getFile(id) : await ensureFileContent(id);
+          if (!currentFile || fileTargetRevisions.get(id) !== revision) return currentFile;
 
           const candidate: SavedSqlFile = {
-            ...loaded,
+            ...currentFile,
             ...normalizedTarget,
-            sqlLoaded: true,
+            folderId,
+            orderIndex,
             updatedAt: nowIso(),
           };
           files.value = files.value.map((file) => (file.id === id ? candidate : file));
@@ -422,17 +470,18 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
                 connectionId: persistedTarget.connectionId,
                 catalog: persistedTarget.catalog,
                 database: persistedTarget.database,
+                folderId: persistedTarget.folderId,
               })
             : savedSqlNameIdentity(candidate);
           if (persistedNameIdentity !== savedSqlNameIdentity(candidate)) releaseName = reserveFileName(candidate);
           const saved = normalizeSavedSqlFile(await api.saveSavedSqlFile(candidate));
           setPersistedFileTarget(saved);
           if (fileTargetRevisions.get(id) !== revision) return getFile(id);
-          const current = getFile(id);
-          const persisted = { ...saved, sql: current?.sql ?? saved.sql, sqlLoaded: current?.sqlLoaded ?? true };
+          const latest = getFile(id);
+          const persisted = { ...saved, sql: latest?.sql ?? saved.sql, sqlLoaded: latest?.sqlLoaded ?? true };
           files.value = files.value.map((file) => (file.id === id ? persisted : file));
           bumpVersion();
-          await syncToLocalDirectory();
+          if (options.syncLocalDirectory !== false) await syncToLocalDirectory();
           return persisted;
         } catch (error) {
           if (fileTargetRevisions.get(id) === revision) {
@@ -456,6 +505,68 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     };
     void save.then(cleanup, cleanup);
     return save;
+  }
+
+  async function updateFilesExecutionTarget(fileIds: readonly string[], target: SavedSqlBatchTargetSelection): Promise<SavedSqlBatchTargetResult> {
+    const uniqueFileIds = [...new Set(fileIds)];
+    if (uniqueFileIds.length === 0 || !target.connectionId) return { succeeded: [], updated: [], failures: [] };
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const targetConnection = useConnectionStore().getConfig(target.connectionId);
+    const targetCapabilities = sqlExecutionTargetCapabilities(targetConnection);
+    if (!targetConnection || !targetCapabilities || (targetCapabilities.databaseRequired && !target.database)) return { succeeded: [], updated: [], failures: [] };
+    const normalizedTarget = normalizeSqlExecutionTarget(targetConnection, target);
+
+    const selectedFiles = uniqueFileIds.map((id) => getFile(id)).filter((file): file is SavedSqlFile => Boolean(file));
+    if (selectedFiles.length === 0) return { succeeded: [], updated: [], failures: [] };
+
+    let nextUnfiledOrder = maxOrderIndex(files.value.filter((file) => !file.folderId)) + 1;
+    const succeeded: SavedSqlFile[] = [];
+    const updated: SavedSqlFile[] = [];
+    const failures: SavedSqlBatchTargetFailure[] = [];
+
+    for (const file of selectedFiles) {
+      const folder = file.folderId ? folders.value.find((candidate) => candidate.id === file.folderId) : undefined;
+      const reassignment = savedSqlBatchReassignment(file, folder, normalizedTarget);
+      const leavesFolder = !!file.folderId && !reassignment.folderId;
+      const orderIndex = leavesFolder ? nextUnfiledOrder++ : file.orderIndex;
+      const targetChanged =
+        file.connectionId !== reassignment.target.connectionId ||
+        normalizedCatalog(file.catalog) !== normalizedCatalog(reassignment.target.catalog) ||
+        file.database !== reassignment.target.database ||
+        file.schema !== reassignment.target.schema ||
+        file.folderId !== reassignment.folderId ||
+        file.orderIndex !== orderIndex;
+
+      try {
+        const saved = await updateFileExecutionTarget(file.id, reassignment.target, {
+          folderId: reassignment.folderId,
+          metadataOnly: true,
+          orderIndex,
+          updateFolder: true,
+          syncLocalDirectory: false,
+        });
+        if (!saved) continue;
+        succeeded.push(saved);
+        if (targetChanged) updated.push(saved);
+      } catch (error) {
+        failures.push({ fileId: file.id, fileName: file.name, error });
+      }
+    }
+
+    if (succeeded.length > 0) {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      useQueryStore().syncSavedSqlExecutionTargets(succeeded);
+    }
+    if (updated.length > 0) {
+      try {
+        await syncToLocalDirectory();
+      } catch (error) {
+        console.warn("[DBX][saved-sql:sync:error]", error);
+      }
+    }
+
+    return { succeeded, updated, failures };
   }
 
   async function renameFile(id: string, name: string) {
@@ -821,6 +932,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     folders,
     files,
     isLoaded,
+    loadState,
     version,
     treeVersion,
     initFromStorage,
@@ -834,6 +946,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     deleteFolder,
     saveFile,
     updateFileExecutionTarget,
+    updateFilesExecutionTarget,
     renameFile,
     copyFilesToDatabase,
     recordFileUsage,

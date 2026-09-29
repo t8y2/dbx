@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::agent_events::{ToolCall, ToolDefinition, ToolResult};
 use crate::connection::AppState;
+use crate::db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety};
 use crate::db::vector_driver;
 use crate::models::connection::DatabaseType;
 use crate::models::connection::{ConnectionConfig, SPANNER_MIN_QUERY_TIMEOUT_SECS};
@@ -30,6 +31,19 @@ const BROWSE_COLLECTION_LIMIT: usize = 20;
 /// Absolute maximum rows requested by the sampling tools (get_sample_data,
 /// browse_collection) and by execute_query on MongoDB shell commands.
 const MAX_ALLOWED_ROWS: usize = 100;
+
+/// Maximum items rendered from one Redis command result. A Redis reply has no
+/// row contract — one `HGETALL` can return millions of fields — so the agent
+/// mirror uses the same ceiling as the sampling tools instead of inventing a
+/// second budget.
+const MAX_REDIS_RESULT_ITEMS: usize = MAX_ALLOWED_ROWS;
+
+/// Total character budget for one formatted Redis command result.
+///
+/// Deliberately below the agent loop's `MAX_TOOL_RESULT_CONTEXT_CHARS` (12_000)
+/// so this renderer's own truncation notice and narrowing guidance survive
+/// context compaction instead of being cut off by it.
+const MAX_REDIS_RESULT_CHARS: usize = 8_000;
 
 /// Absolute maximum rows `execute_query` may request on SQL connections.
 /// MCP publishes this as the `max_rows` tool parameter; kept below the driver
@@ -77,6 +91,7 @@ fn tool_uses_database(tool_name: &str) -> bool {
             | "list_collections"
             | "browse_collection"
             | "explain_query"
+            | "execute_redis_command"
     )
 }
 
@@ -369,6 +384,11 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         // REST requests the query console accepts. Writes (`/{core}/update`)
         // still flow through the shared risk classifier and confirmation gate.
         tools.push(solr_execute_query_tool(sql_permissions));
+    } else if db_type == DatabaseType::Redis {
+        // Redis is a command surface, not a SQL one: `supports_sql_query` is false
+        // for it and the schema tools above can only ever answer "No databases" /
+        // "No tables", so the read-only console-command tool is its data surface.
+        tools.push(redis_execute_command_tool());
     } else if supports_sql_query(db_type) {
         tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
@@ -458,6 +478,61 @@ fn solr_execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefiniti
                 }
             },
             "required": ["sql"]
+        }),
+        read_only: true,
+        parallel_ok: false,
+    }
+}
+
+/// execute_redis_command tool definition (Redis connections).
+///
+/// Read-only by construction: the handler refuses every command whose driver
+/// safety class is not `Allowed`, so an agent can explore Redis but never
+/// mutate it. Writes are handed back to the user instead — the model emits the
+/// command in a fenced code block and DBX routes the run action to the bound
+/// Redis console, which applies its own classification and confirmation (see
+/// `App.vue`'s `routeAiRedisCommand`, which owns that hand-off). The tool
+/// therefore takes no permissions: unlike `execute_query` there is no confirmed
+/// write path to describe.
+fn redis_execute_command_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "execute_redis_command".into(),
+        description: "Execute a read-only Redis command and return its result. \
+             The db argument selects the logical database; never send SELECT. \
+             Use SCAN with COUNT and continue from the returned cursor instead of KEYS to \
+             enumerate keys. Only commands DBX classifies as read-only may run, so SET, DEL, \
+             EXPIRE, EVAL and similar are refused here: when the user asks for a change, put \
+             the exact command in one ```redis fenced code block and ask them to run it in the \
+             Redis console, which confirms before executing. Long values come back in a character \
+             window — raise cell_char_limit (up to 4000), or use GETRANGE, HSCAN or LRANGE \
+             with explicit bounds, to read more."
+            .into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The Redis command to execute, for example SCAN 0 MATCH session:* COUNT 100 or GET mykey"
+                },
+                "db": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Redis logical database number; defaults to the database this conversation is bound to. Use this instead of the SELECT command."
+                },
+                "cell_char_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000,
+                    "description": "Start character offset for every string value (default 0). Use the next offset reported by a truncated value to slide through long values."
+                },
+                "cell_char_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4000,
+                    "description": "Maximum characters returned per string value (default 200, max 4000). Increase only for an explicit long-value expansion."
+                }
+            },
+            "required": ["command"]
         }),
         read_only: true,
         parallel_ok: false,
@@ -674,11 +749,36 @@ fn browse_collection_tool() -> ToolDefinition {
 }
 
 /// Execute a tool call and return the result.
+///
+/// Callers that know the run's database scope should use
+/// [`execute_tool_scoped`] instead; this wrapper exposes the unscoped behaviour
+/// that every existing caller relied on.
 pub async fn execute_tool(
     tool_call: &ToolCall,
     state: &Arc<AppState>,
     connection_id: &str,
     database: &str,
+    default_schema: Option<&str>,
+    db_type: &DatabaseType,
+    sql_permissions: AgentSqlPermissions,
+) -> ToolResult {
+    execute_tool_scoped(tool_call, state, connection_id, database, &[], default_schema, db_type, sql_permissions).await
+}
+
+/// Execute a tool call with the run's database scope.
+///
+/// `database_scope` lists the databases this run is allowed to touch: the
+/// conversation's bound database plus any the user explicitly selected. Only
+/// `execute_redis_command` consumes it today — a Redis logical database is a
+/// real namespace, so a `db` argument outside the scope would read a different
+/// database than the conversation is bound to, which the MCP server already
+/// refuses for its own clients. An empty scope keeps the previous behaviour.
+pub async fn execute_tool_scoped(
+    tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    database_scope: &[String],
     default_schema: Option<&str>,
     db_type: &DatabaseType,
     sql_permissions: AgentSqlPermissions,
@@ -728,6 +828,9 @@ pub async fn execute_tool(
                     };
                 }
             }
+        }
+        "execute_redis_command" => {
+            execute_redis_command(tool_call, state, connection_id, database, database_scope).await
         }
         "get_current_time" => execute_get_current_time(tool_call),
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
@@ -1056,6 +1159,222 @@ async fn execute_mongo_query(
     format_query_result_as_text(&result, limit, cell_window)
 }
 
+/// Execute the read-only `execute_redis_command` tool.
+///
+/// The safety boundary is the explicit `classify_command` check below. Passing
+/// `skip_safety_check = false` to the driver is NOT a read-only gate — it only
+/// refuses `Blocked`, so `Write` and `Confirm` commands would still run. Do not
+/// "simplify" this by delegating the check to the driver.
+async fn execute_redis_command(
+    tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    database_scope: &[String],
+) -> Result<String, String> {
+    let command = tool_call
+        .arguments
+        .get("command")
+        .and_then(|value| value.as_str())
+        .ok_or("Missing required parameter: command")?
+        .trim()
+        .to_string();
+    if command.is_empty() {
+        return Err("Redis command cannot be empty".to_string());
+    }
+
+    // Refuse before resolving the target database: the refusals are pure, so a
+    // write or blocking command reports "read-only" rather than whatever the db
+    // argument happened to be, and a refused command never reads run state.
+    let argv = parse_command_argv(&command)
+        .map_err(|error| format!("{error} Send one Redis command, for example SCAN 0 MATCH session:* COUNT 100."))?;
+    let command_name = argv[0].to_ascii_uppercase();
+    if let Some(refusal) = redis_command_refusal(&argv) {
+        return Err(refusal);
+    }
+
+    let db = redis_target_database(tool_call, state, connection_id, database, database_scope).await?;
+
+    let result = crate::redis_ops::redis_execute_command_core(state, connection_id, db, &command, false)
+        .await
+        .map_err(|error| format!("Failed to execute {command_name}: {error}"))?;
+
+    Ok(format_redis_result_as_text(&result, QueryCellWindow::from_arguments(&tool_call.arguments)))
+}
+
+/// Refuse a Redis command that the read-only agent may not run, returning the
+/// message to hand back to the model.
+///
+/// Kept separate from the handler so the safety boundary is unit-testable
+/// without a live connection: every refusal happens before anything reaches the
+/// database.
+fn redis_command_refusal(argv: &[String]) -> Option<String> {
+    let command_name = argv[0].to_ascii_uppercase();
+    if command_name == "SELECT" {
+        return Some(
+            "Blocked: Redis SELECT is not available to the AI agent. Pass the db argument to choose the logical database instead."
+                .to_string(),
+        );
+    }
+
+    // `classify_command` only inspects argv[0], so the blocking forms stay
+    // `Allowed` and must be refused here. The driver's execute path has no
+    // timeout (it awaits the connection directly), so one of these would hold
+    // this connection's agent tool lock until the client goes away and stall
+    // every other tool call on the same connection.
+    if command_name == "XREAD" && argv.iter().any(|argument| argument.eq_ignore_ascii_case("BLOCK")) {
+        return Some(
+            "Blocked: XREAD BLOCK waits indefinitely and cannot be interrupted. Drop BLOCK to read the entries already in the stream."
+                .to_string(),
+        );
+    }
+    if matches!(command_name.as_str(), "WAIT" | "WAITAOF") {
+        return Some("Blocked: waiting for replica acknowledgement is not available to the AI agent.".to_string());
+    }
+
+    // Only reads reach the server, so no production/read-only-connection check is
+    // needed here: neither flag restricts reads, and every non-read command is
+    // already refused below.
+    match classify_command(&command_name) {
+        RedisCommandSafety::Allowed => None,
+        RedisCommandSafety::Blocked => Some(format!(
+            "Blocked: the Redis Agent cannot run \"{command_name}\". Put the command in a fenced code block and ask the user to run it in the Redis console."
+        )),
+        _ => Some(format!(
+            "Blocked: the Redis Agent is read-only, so \"{command_name}\" was not executed. Put the command in a fenced code block and ask the user to run it in the Redis console, which asks for confirmation before running it."
+        )),
+    }
+}
+
+/// Resolve the Redis logical database for one agent call.
+///
+/// A logical database is a real namespace, so the resolved value must stay
+/// inside the run's scope: the databases the user selected plus the one this
+/// conversation is bound to. An explicit `db` argument outside that scope is
+/// refused rather than silently reading a different database, mirroring the
+/// MCP server's `DATABASE_OUT_OF_SCOPE` for its own clients.
+///
+/// With no explicit `db`, the bound database wins, then the connection's
+/// configured database. A non-numeric binding (the agent context falls back to
+/// SQL's `"main"` on connections without a database) is not an error — it
+/// simply cannot name a Redis database, so the connection default applies.
+async fn redis_target_database(
+    tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    database_scope: &[String],
+) -> Result<u32, String> {
+    let requested = match tool_call.arguments.get("db").and_then(serde_json::Value::as_u64) {
+        Some(value) => Some(u32::try_from(value).map_err(|_| format!("Redis database {value} is out of range."))?),
+        None => None,
+    };
+
+    let bound = database.trim().parse::<u32>().ok();
+    let configured = state
+        .configs
+        .read()
+        .await
+        .get(connection_id)
+        .and_then(|config| config.effective_database())
+        .and_then(|value| value.trim().parse::<u32>().ok());
+
+    let mut allowed: Vec<u32> = database_scope.iter().filter_map(|value| value.trim().parse::<u32>().ok()).collect();
+    allowed.extend(bound);
+    // Only fall back to the connection default when the run itself carries no
+    // scope: otherwise that default would silently widen the conversation's
+    // databases back open.
+    if allowed.is_empty() {
+        allowed.extend(configured);
+    }
+    // A Redis connection with no numeric database anywhere can only mean db0.
+    // Keeping the allowlist non-empty is what stops "no scope" from meaning
+    // "every database".
+    if allowed.is_empty() {
+        allowed.push(0);
+    }
+    allowed.sort_unstable();
+    allowed.dedup();
+
+    if let Some(requested) = requested {
+        if !allowed.contains(&requested) {
+            return Err(format!(
+                "Blocked: Redis database {requested} is outside this conversation's databases ({}). Ask the user to select that database for the conversation instead of switching with the db argument.",
+                allowed.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        return Ok(requested);
+    }
+
+    Ok(bound.or(configured).filter(|db| allowed.contains(db)).unwrap_or(allowed[0]))
+}
+
+/// Render a Redis command result for the model under a hard output budget.
+///
+/// The MCP sibling (`format_redis_result`) is deliberately unbounded, but an
+/// agent tool result is replayed into the model context on every turn, so this
+/// renderer caps both the item count and the total characters. When it
+/// truncates it also says how to narrow the command, so the model does not
+/// answer from a meaningless fragment.
+fn format_redis_result_as_text(result: &RedisCommandResult, cell_window: QueryCellWindow) -> String {
+    let mut lines: Vec<String> = vec![format!("Command: {}", result.command)];
+    let mut truncated = false;
+
+    match &result.value {
+        serde_json::Value::Array(items) => {
+            let shown = items.len().min(MAX_REDIS_RESULT_ITEMS);
+            truncated |= shown < items.len();
+            for item in items.iter().take(shown) {
+                lines.push(format!("- {}", redis_result_cell(item, cell_window)));
+            }
+        }
+        serde_json::Value::Object(entries) => {
+            let shown = entries.len().min(MAX_REDIS_RESULT_ITEMS);
+            truncated |= shown < entries.len();
+            for (field, value) in entries.iter().take(shown) {
+                lines.push(format!("{field} = {}", redis_result_cell(value, cell_window)));
+            }
+        }
+        scalar => lines.push(redis_result_cell(scalar, cell_window)),
+    }
+
+    // The character budget is applied last so a single huge value cannot defeat
+    // the item cap. The header line is always kept.
+    let mut budget = MAX_REDIS_RESULT_CHARS;
+    let mut kept: Vec<String> = Vec::with_capacity(lines.len());
+    for (index, line) in lines.into_iter().enumerate() {
+        let cost = line.chars().count().saturating_add(1);
+        if index > 0 && cost > budget {
+            truncated = true;
+            break;
+        }
+        budget = budget.saturating_sub(cost);
+        kept.push(line);
+    }
+
+    if truncated {
+        kept.push(format!(
+            "... (result truncated at {MAX_REDIS_RESULT_ITEMS} items / {MAX_REDIS_RESULT_CHARS} characters). \
+             Narrow the command to read the rest: SCAN with COUNT and continue from the returned cursor, \
+             LRANGE/HSCAN/SSCAN/ZSCAN with explicit bounds, or GETRANGE for long strings."
+        ));
+    }
+
+    kept.join("\n")
+}
+
+/// Render one Redis result element. Strings use the shared sliding-window
+/// formatter so long values keep the `next cell_char_offset` guidance the SQL
+/// and MongoDB tools already publish; other shapes are rendered as compact JSON
+/// and windowed the same way.
+fn redis_result_cell(value: &serde_json::Value, cell_window: QueryCellWindow) -> String {
+    match value {
+        serde_json::Value::String(text) => format_query_string_cell(text, cell_window),
+        serde_json::Value::Null => "NULL".to_string(),
+        other => format_query_string_cell(&other.to_string(), cell_window),
+    }
+}
+
 /// Format a QueryResult as a Markdown table for LLM consumption.
 pub fn format_query_result_as_text(
     result: &QueryResult,
@@ -1172,7 +1491,8 @@ async fn execute_get_sample_data(
 
     // Reuse the table-data builder so identifier quoting and row limiting follow
     // the active database instead of assuming PostgreSQL syntax.
-    let sql = build_sample_data_sql(db_type, schema.as_deref(), table, limit);
+    let server_version = connection_server_version(state, connection_id).await;
+    let sql = build_sample_data_sql(db_type, server_version.as_deref(), schema.as_deref(), table, limit);
 
     // Delegate to execute_execute_query with a synthetic tool call
     let synthetic_call = ToolCall {
@@ -1193,9 +1513,28 @@ async fn execute_get_sample_data(
     .await
 }
 
-fn build_sample_data_sql(db_type: &DatabaseType, schema: Option<&str>, table: &str, limit: usize) -> String {
+/// The sample-data statement is produced by the shared dialect code, so it has to match the
+/// connected server too: Neo4j below 5 only accepts `id()` where 5+ uses `elementId()`.
+async fn connection_server_version(state: &Arc<AppState>, connection_id: &str) -> Option<String> {
+    state
+        .configs
+        .read()
+        .await
+        .get(connection_id)
+        .and_then(|config| config.database_info.as_ref())
+        .and_then(|info| info.product_version.clone())
+}
+
+fn build_sample_data_sql(
+    db_type: &DatabaseType,
+    server_version: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+    limit: usize,
+) -> String {
     build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(*db_type),
+        server_version: server_version.map(str::to_owned),
         schema: schema.map(str::to_owned),
         table_name: table.to_string(),
         limit: Some(limit),
@@ -1657,6 +1996,7 @@ for line in sys.stdin:
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1759,6 +2099,225 @@ for line in sys.stdin:
         );
         let confirmed_execute_query = confirmed_tools.iter().find(|tool| tool.name == "execute_query").unwrap();
         assert!(confirmed_execute_query.description.contains("confirmed"));
+    }
+
+    #[test]
+    fn redis_agent_registers_the_read_only_command_tool_in_agent_mode_only() {
+        let agent_mode_tools = all_tools(DatabaseType::Redis, AgentSqlPermissions::default());
+        let names: Vec<&str> = agent_mode_tools.iter().map(|tool| tool.name.as_ref()).collect();
+        assert!(names.contains(&"execute_redis_command"));
+        // Redis is a command surface, so none of the SQL-shaped data tools apply.
+        assert!(!names.contains(&"execute_query"));
+        assert!(!names.contains(&"get_sample_data"));
+        assert!(!names.contains(&"explain_query"));
+        assert!(names.contains(&"get_current_time"));
+
+        let redis_tool = agent_mode_tools.iter().find(|tool| tool.name == "execute_redis_command").unwrap();
+        // A Redis command must not share the connection concurrently: commands
+        // carry session state and the driver path is not reentrant per command.
+        assert!(!redis_tool.parallel_ok);
+
+        // Ask mode runs no data tool for any database type.
+        let ask_mode_tools = read_only_tools(DatabaseType::Redis);
+        let ask_names: Vec<&str> = ask_mode_tools.iter().map(|tool| tool.name.as_ref()).collect();
+        assert!(!ask_names.contains(&"execute_redis_command"));
+    }
+
+    #[test]
+    fn redis_agent_refuses_every_non_read_command() {
+        for source in [
+            "SET key value",
+            "DEL key",
+            "EXPIRE key 60",
+            "FLUSHALL",
+            "EVAL \"return 1\" 0",
+            "KEYS *",
+            "CONFIG GET maxmemory",
+            "SELECT 1",
+        ] {
+            let argv = parse_command_argv(source).expect("test command must parse");
+            let refusal = redis_command_refusal(&argv).unwrap_or_else(|| panic!("{source} must be refused"));
+            assert!(refusal.starts_with("Blocked:"), "{source}: {refusal}");
+        }
+
+        // Writes and dangerous commands must steer the model at the console
+        // hand-off rather than reporting a bare failure.
+        for source in ["SET key value", "DEL key", "EVAL \"return 1\" 0", "CONFIG GET maxmemory"] {
+            let argv = parse_command_argv(source).unwrap();
+            let refusal = redis_command_refusal(&argv).unwrap();
+            assert!(refusal.contains("fenced code block"), "{source}: {refusal}");
+        }
+    }
+
+    #[test]
+    fn redis_agent_allows_the_read_allowlist() {
+        for source in [
+            "GET key",
+            "SCAN 0 MATCH session:* COUNT 100",
+            "TYPE key",
+            "TTL key",
+            "HGETALL hash",
+            "XREAD COUNT 10 STREAMS stream 0",
+        ] {
+            let argv = parse_command_argv(source).expect("test command must parse");
+            assert!(redis_command_refusal(&argv).is_none(), "{source} must stay available to the agent");
+        }
+    }
+
+    #[test]
+    fn redis_agent_refuses_the_blocking_forms_the_classifier_cannot_see() {
+        for source in
+            ["XREAD BLOCK 0 STREAMS stream $", "XREAD COUNT 10 BLOCK 0 STREAMS stream $", "WAIT 1 0", "WAITAOF 1 0 0"]
+        {
+            let argv = parse_command_argv(source).expect("test command must parse");
+            assert!(redis_command_refusal(&argv).is_some(), "{source} must be refused");
+        }
+
+        // The guard keys on BLOCK, not on XREAD, so the non-blocking form stays.
+        let argv = parse_command_argv("XREAD COUNT 10 STREAMS stream 0").unwrap();
+        assert!(redis_command_refusal(&argv).is_none());
+    }
+
+    #[test]
+    fn redis_agent_has_no_write_path_even_when_write_permissions_are_granted() {
+        // The Redis tool takes no permissions at all, so a confirmed write-SQL
+        // grant for a SQL connection cannot become a Redis write path.
+        let granted = AgentSqlPermissions {
+            allow_writes: true,
+            allow_dangerous: true,
+            confirmed_write_sql: Some("SET key value".to_string()),
+        };
+        let granted_tools = all_tools(DatabaseType::Redis, granted);
+        let redis_tool = granted_tools.iter().find(|tool| tool.name == "execute_redis_command").unwrap();
+        assert_eq!(redis_tool.description, redis_execute_command_tool().description);
+        assert!(!redis_tool.description.contains("confirmed"));
+
+        let argv = parse_command_argv("SET key value").unwrap();
+        assert!(redis_command_refusal(&argv).is_some());
+    }
+
+    #[tokio::test]
+    async fn redis_agent_tool_call_rejects_a_write_before_touching_the_connection() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let call = ToolCall {
+            id: "redis-write".to_string(),
+            name: "execute_redis_command".to_string(),
+            arguments: json!({ "command": "SET key value", "db": 0 }),
+            provider_payload: None,
+        };
+
+        let result =
+            execute_tool(&call, &state, "redis-1", "0", None, &DatabaseType::Redis, AgentSqlPermissions::default())
+                .await;
+
+        assert!(result.is_error, "{}", result.content);
+        assert!(result.content.contains("read-only"), "{}", result.content);
+        assert!(result.content.contains("fenced code block"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn redis_target_database_prefers_the_explicit_argument_then_the_binding() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let call = |arguments: serde_json::Value| ToolCall {
+            id: "redis-db".to_string(),
+            name: "execute_redis_command".to_string(),
+            arguments,
+            provider_payload: None,
+        };
+
+        // An explicit database that is in scope wins.
+        let explicit = call(json!({ "command": "PING", "db": 3 }));
+        assert_eq!(redis_target_database(&explicit, &state, "redis-1", "3", &[]).await.unwrap(), 3);
+        // A database the user selected for this run is in scope as well.
+        assert_eq!(redis_target_database(&explicit, &state, "redis-1", "0", &["3".to_string()]).await.unwrap(), 3);
+
+        let bound = call(json!({ "command": "PING" }));
+        assert_eq!(redis_target_database(&bound, &state, "redis-1", "3", &[]).await.unwrap(), 3);
+        // A non-numeric binding (the agent context falls back to SQL's "main")
+        // resolves to 0 instead of failing the tool.
+        assert_eq!(redis_target_database(&bound, &state, "redis-1", "main", &[]).await.unwrap(), 0);
+        assert_eq!(redis_target_database(&bound, &state, "redis-1", "", &[]).await.unwrap(), 0);
+        // A selected database is used when the binding cannot name one.
+        assert_eq!(redis_target_database(&bound, &state, "redis-1", "main", &["4".to_string()]).await.unwrap(), 4);
+    }
+
+    /// A Redis logical database is a real namespace: the tool must not let a run
+    /// bound to one database read another one through the `db` argument.
+    #[tokio::test]
+    async fn redis_target_database_refuses_a_database_outside_the_run_scope() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let out_of_scope = ToolCall {
+            id: "redis-db".to_string(),
+            name: "execute_redis_command".to_string(),
+            arguments: json!({ "command": "PING", "db": 3 }),
+            provider_payload: None,
+        };
+
+        let error = redis_target_database(&out_of_scope, &state, "redis-1", "2", &[]).await.unwrap_err();
+        assert!(error.contains("outside this conversation's databases"), "{error}");
+        assert!(error.contains('2'), "{error}");
+
+        // Selected databases widen the scope; they do not replace it.
+        assert!(redis_target_database(&out_of_scope, &state, "redis-1", "2", &["5".to_string()]).await.is_err());
+        assert_eq!(redis_target_database(&out_of_scope, &state, "redis-1", "2", &["3".to_string()]).await.unwrap(), 3);
+
+        // The refusal also holds through the tool entry point, before anything
+        // reaches the connection.
+        let error = execute_redis_command(&out_of_scope, &state, "redis-1", "2", &[]).await.unwrap_err();
+        assert!(error.contains("outside this conversation's databases"), "{error}");
+    }
+
+    fn redis_command_result(value: serde_json::Value) -> RedisCommandResult {
+        RedisCommandResult { command: "TEST".to_string(), safety: RedisCommandSafety::Allowed, value }
+    }
+
+    #[test]
+    fn redis_result_formatter_truncates_oversized_replies_with_narrowing_guidance() {
+        let items: Vec<serde_json::Value> =
+            (0..(MAX_REDIS_RESULT_ITEMS * 5)).map(|index| json!(format!("key-{index}"))).collect();
+        let output = format_redis_result_as_text(
+            &redis_command_result(serde_json::Value::Array(items)),
+            QueryCellWindow::default(),
+        );
+
+        assert!(output.contains("result truncated at"), "{output}");
+        assert!(output.contains("SCAN with COUNT"), "{output}");
+        assert!(output.chars().count() < MAX_REDIS_RESULT_CHARS + 1_000, "{}", output.chars().count());
+    }
+
+    #[test]
+    fn redis_result_formatter_bounds_long_values_with_the_shared_cell_window() {
+        let items: Vec<serde_json::Value> = (0..MAX_REDIS_RESULT_ITEMS).map(|_| json!("X".repeat(4_000))).collect();
+        let output = format_redis_result_as_text(
+            &redis_command_result(serde_json::Value::Array(items)),
+            QueryCellWindow::default(),
+        );
+
+        // The per-value window applies before the character budget, so the model
+        // gets the same "next cell_char_offset" advice the SQL tools publish.
+        assert!(output.contains("next cell_char_offset="), "{output}");
+        assert!(output.contains("result truncated at"), "{output}");
+        assert!(output.chars().count() < MAX_REDIS_RESULT_CHARS + 1_000, "{}", output.chars().count());
+    }
+
+    #[test]
+    fn redis_result_formatter_keeps_scalars_and_maps_readable() {
+        let scalar = format_redis_result_as_text(&redis_command_result(json!("hello")), QueryCellWindow::default());
+        assert_eq!(scalar, "Command: TEST\nhello");
+
+        let map = format_redis_result_as_text(
+            &redis_command_result(json!({ "field": "value", "count": 3 })),
+            QueryCellWindow::default(),
+        );
+        assert!(map.starts_with("Command: TEST"), "{map}");
+        assert!(map.contains("field = value"), "{map}");
+        assert!(map.contains("count = 3"), "{map}");
     }
 
     #[cfg(unix)]
@@ -2101,20 +2660,32 @@ for line in sys.stdin:
     #[test]
     fn sample_data_sql_uses_database_identifier_and_limit_syntax() {
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::Mysql, Some("app"), "sys_tenant", 20),
+            build_sample_data_sql(&DatabaseType::Mysql, None, Some("app"), "sys_tenant", 20),
             "SELECT * FROM `app`.`sys_tenant` LIMIT 20;"
         );
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::Postgres, Some("public"), "sys_tenant", 20),
+            build_sample_data_sql(&DatabaseType::Postgres, None, Some("public"), "sys_tenant", 20),
             "SELECT * FROM \"public\".\"sys_tenant\" LIMIT 20;"
         );
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::SqlServer, Some("dbo"), "sys_tenant", 20),
+            build_sample_data_sql(&DatabaseType::SqlServer, None, Some("dbo"), "sys_tenant", 20),
             "SELECT TOP (20) * FROM [dbo].[sys_tenant]"
         );
         assert_eq!(
-            build_sample_data_sql(&DatabaseType::Oracle, Some("APP"), "SYS_TENANT", 20),
+            build_sample_data_sql(&DatabaseType::Oracle, None, Some("APP"), "SYS_TENANT", 20),
             "SELECT * FROM (SELECT * FROM \"APP\".\"SYS_TENANT\") WHERE ROWNUM <= 20"
+        );
+    }
+
+    #[test]
+    fn sample_data_sql_follows_the_connected_neo4j_identifier_function() {
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::Neo4j, Some("Neo4j/4.4.44"), None, "Person", 20),
+            "MATCH (n:`Person`) RETURN id(n) AS `__DBX_ELEMENT_ID`, n LIMIT 20;"
+        );
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::Neo4j, Some("Neo4j/5.26.0"), None, "Person", 20),
+            "MATCH (n:`Person`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n LIMIT 20;"
         );
     }
 

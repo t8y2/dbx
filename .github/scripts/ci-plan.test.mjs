@@ -12,9 +12,22 @@ import { assertCoverage, parseCoverage } from "./ci-rust-coverage.mjs";
 
 const root = "/fixture";
 const graph = {
-  "dbx-types": [], "dbx-platform": [], "dbx-formats": [], "dbx-sql": ["dbx-types"],
+  "dbx-types": [], "dbx-platform": [], "dbx-formats": [], "dbx-sql-core": ["dbx-types"],
+  "dbx-sql-dialect": ["dbx-types"], "dbx-sql-data": ["dbx-sql-core", "dbx-sql-dialect", "dbx-types"],
+  "dbx-sql-schema": ["dbx-sql-core", "dbx-sql-dialect", "dbx-types"],
+  "dbx-sql": ["dbx-sql-core", "dbx-sql-data", "dbx-sql-dialect", "dbx-sql-schema", "dbx-types"],
   "dbx-ai-provider": ["dbx-platform"], "dbx-plugin-runtime": ["dbx-platform", "dbx-types"],
-  "dbx-sqlite-worker": [], "dbx-drivers": ["dbx-platform", "dbx-sql", "dbx-types", "dbx-sqlite-worker"],
+  "dbx-driver-support": ["dbx-platform", "dbx-types"],
+  "dbx-driver-agent": ["dbx-platform", "dbx-sql-core", "dbx-types"],
+  "dbx-driver-elasticsearch": ["dbx-driver-support", "dbx-types"],
+  "dbx-driver-mongodb": ["dbx-driver-support", "dbx-types"],
+  "dbx-driver-mysql": ["dbx-driver-support", "dbx-sql-core", "dbx-sql-dialect", "dbx-types"],
+  "dbx-driver-postgres": ["dbx-driver-support", "dbx-sql-core", "dbx-types"],
+  "dbx-driver-redis": ["dbx-driver-support", "dbx-types"],
+  "dbx-driver-sqlserver": ["dbx-driver-support", "dbx-sql-core", "dbx-sql-data", "dbx-types"],
+  "dbx-sqlite-worker": [], "dbx-drivers": ["dbx-driver-agent", "dbx-driver-elasticsearch", "dbx-driver-mongodb",
+    "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver", "dbx-driver-support",
+    "dbx-platform", "dbx-sql-core", "dbx-sql-data", "dbx-sql-dialect", "dbx-types", "dbx-sqlite-worker"],
   "dbx-core": ["dbx-drivers", "dbx-sql", "dbx-types", "dbx-platform", "dbx-ai-provider", "dbx-plugin-runtime", "dbx-formats"],
   "dbx-mcp": ["dbx-core"], "dbx-cli": ["dbx-core", "dbx-mcp"], "dbx-web": ["dbx-core", "dbx-mcp"], "dbx": ["dbx-core", "dbx-mcp"],
 };
@@ -51,7 +64,7 @@ test("core and consumer changes do not pull unrelated foundation test groups", (
   const cli = plan(["crates/dbx-cli/src/main.rs"]);
   assert.deepEqual(groups(cli), ["application"]);
   assert.equal(cli.agents, false);
-  assert.deepEqual(groups(plan(["crates/dbx-drivers/src/db/postgres.rs"])), ["drivers", "application"]);
+  assert.deepEqual(groups(plan(["crates/dbx-driver-postgres/src/postgres.rs"])), ["drivers", "application"]);
 });
 
 test("code generation and test-only dependencies participate in impact analysis", () => {
@@ -123,7 +136,7 @@ test("known JDBC driver changes only select Java agent tests", () => {
 
 test("shared Agent inputs and unknown native modules never silently lose coverage", () => {
   for (const file of ["agents/common/src/main/java/Protocol.java", "agents/scripts/validate_agents.py", "agents/build.gradle",
-    "agents/drivers/new-driver/main.go", "crates/dbx-drivers/assets/agent-protocol-v2.json", ".github/workflows/agents-release.yml"]) {
+    "agents/drivers/new-driver/main.go", "crates/dbx-driver-agent/assets/agent-protocol-v2.json", ".github/workflows/agents-release.yml"]) {
     const result = plan([file]);
     assert.equal(result.agent_go.include.length, 10, file);
     assert.equal(result.agent_integration.include.length, 16, file);

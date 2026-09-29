@@ -1,0 +1,54 @@
+dialect:
+  name: Transwarp
+  display_name: 星环Inceptor
+
+types:
+  - name: TINYINT
+    category: INTEGER
+  - name: SMALLINT
+    category: INTEGER
+  - name: INT
+    category: INTEGER
+  - name: BIGINT
+    category: INTEGER
+  - name: FLOAT
+    category: FLOAT
+  - name: DOUBLE
+    category: FLOAT
+  - name: DECIMAL
+    category: DECIMAL
+    has_precision: true
+  - name: STRING
+    category: STRING
+  - name: VARCHAR
+    category: STRING
+    has_length: true
+  - name: BINARY
+    category: BINARY
+  - name: BOOLEAN
+    category: BOOLEAN
+  - name: DATE
+    category: DATE
+  - name: TIMESTAMP
+    category: DATETIME
+  - name: ARRAY
+    category: ARRAY
+  - name: MAP
+    category: MAP
+  - name: STRUCT
+    category: STRUCT
+
+ddl_capabilities:
+  add_column: true
+  drop_column: false
+  create_index: false
+  drop_index: false
+  create_table: true
+  drop_table: true
+
+structural_capabilities:
+  supports_schemas: true
+
+identifier_rules:
+  quote_char: "`"
+  case_sensitive: false

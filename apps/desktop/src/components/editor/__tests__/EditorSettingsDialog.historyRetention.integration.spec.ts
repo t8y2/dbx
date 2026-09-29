@@ -111,6 +111,12 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
       hoisted.saves.push(limit);
       hoisted.limit = limit;
     },
+    loadMcpHistoryRetentionLimit: async () => hoisted.limit,
+    saveMcpHistoryRetentionLimit: async (limit: number) => {
+      hoisted.saves.push(limit);
+      hoisted.limit = limit;
+    },
+    cleanupMcpHistoryRetention: async () => 0,
   };
 });
 

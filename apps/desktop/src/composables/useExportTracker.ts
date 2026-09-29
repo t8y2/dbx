@@ -4,7 +4,7 @@ import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import { uuid } from "@/lib/common/utils";
 import { formatQueryDuration } from "@/lib/format/duration";
 
-export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer" | "multi-db-execution" | "schema-diff" | "data-compare";
+export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
@@ -86,6 +86,12 @@ export interface ExportTask {
   compareAddedCount?: number;
   compareRemovedCount?: number;
   compareModifiedCount?: number;
+  dictionaryPhase?: "preparing" | "collecting" | "generating" | "saving";
+  dictionaryCompleted?: number;
+  dictionaryTotal?: number;
+  dictionaryCurrent?: string;
+  dictionaryWarnings?: number;
+  dictionaryProgressKnown?: boolean;
   canCancel?: boolean;
   onOpen?: () => void;
   onRemove?: () => void;
@@ -121,6 +127,16 @@ export interface MultiDbExecutionTaskProgress {
   elapsedMs?: number;
   currentTarget?: { connectionId: string; catalog?: string; database: string; schema?: string };
   errorMessage?: string;
+}
+
+export interface DataGenerationTaskProgress {
+  status: BackgroundTaskStatus;
+  tableIndex: number;
+  totalTables: number;
+  currentTable: string;
+  rowsGenerated: number;
+  totalRows: number;
+  errorMessage?: string | null;
 }
 
 export const MAX_TRANSFER_FAILURE_DETAILS = 100;
@@ -422,6 +438,35 @@ export function useExportTracker() {
     return task;
   }
 
+  function addDataDictionaryTask(exportId: string, label: string, total: number): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId,
+      kind: "data-dictionary",
+      tableName: label,
+      format: "pdf",
+      filePath: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      errorMessage: null,
+      dictionaryPhase: "preparing",
+      dictionaryCompleted: 0,
+      dictionaryTotal: total,
+      dictionaryProgressKnown: false,
+      canCancel: false,
+      startedAt: Date.now(),
+    });
+    taskMap.set(exportId, task);
+    return task;
+  }
+
+  function updateDataDictionaryTask(exportId: string, changes: Partial<ExportTask>): void {
+    const task = taskMap.get(exportId);
+    if (!task || task.kind !== "data-dictionary") return;
+    Object.assign(task, changes);
+    if (task.status === "Done" || task.status === "Error") finishExportTask(task);
+  }
+
   function addSqlFileTask(executionId: string, fileName: string, filePath: string): ExportTask {
     sqlFileFailureStates.delete(executionId);
     const task = reactive<ExportTask>({
@@ -467,6 +512,29 @@ export function useExportTracker() {
       transferFailuresOmitted: 0,
     });
     taskMap.set(transferId, task);
+    return task;
+  }
+
+  function addDataGenerationTask(executionId: string, label: string, totalRows: number, totalTables: number, onOpen?: () => void, onRemove?: () => void): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId: executionId,
+      kind: "data-generation",
+      tableName: label,
+      format: "generate",
+      filePath: "",
+      rowsExported: 0,
+      totalRows,
+      status: "Running",
+      errorMessage: null,
+      tableIndex: 0,
+      totalTables,
+      currentTable: "",
+      canCancel: true,
+      onOpen,
+      onRemove,
+      startedAt: Date.now(),
+    });
+    taskMap.set(executionId, task);
     return task;
   }
 
@@ -547,12 +615,15 @@ export function useExportTracker() {
     request: api.TransferRequest,
     label: string,
     options: {
+      onStarted?: () => void;
       onDone?: () => void | Promise<void>;
+      onOpen?: () => void;
       formatOverlapError?: (tables: string[]) => string;
     } = {},
   ): ExportTask {
     const existingTask = taskMap.get(request.transferId);
     const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
+    task.onOpen = options.onOpen;
     task.startedAt ??= Date.now();
     task.targetConnectionId = request.targetConnectionId;
     task.targetCatalog = request.targetCatalog;
@@ -572,13 +643,23 @@ export function useExportTracker() {
 
     activeTransferRuns.add(request.transferId);
     let terminalStatus: api.TransferProgress["status"] | null = null;
+    let startAcknowledged = false;
+    const acknowledgeStart = () => {
+      if (startAcknowledged) return;
+      startAcknowledged = true;
+      options.onStarted?.();
+    };
 
     void (async () => {
       try {
-        await api.startTransfer(request, (progress) => {
-          terminalStatus = isTerminalTransferProgress(progress) ? progress.status : terminalStatus;
-          updateDataTransferTask(progress.transferId, progress);
-        });
+        await api.startTransfer(
+          request,
+          (progress) => {
+            terminalStatus = isTerminalTransferProgress(progress) ? progress.status : terminalStatus;
+            updateDataTransferTask(progress.transferId, progress);
+          },
+          acknowledgeStart,
+        );
 
         if (terminalStatus === "done" && task.status === "Done") {
           await options.onDone?.();
@@ -688,6 +769,19 @@ export function useExportTracker() {
     task.totalRows = progress.totalRows ?? task.totalRows;
   }
 
+  function updateDataGenerationTask(executionId: string, progress: DataGenerationTaskProgress): void {
+    const task = taskMap.get(executionId);
+    if (!task || task.kind !== "data-generation") return;
+    task.status = progress.status;
+    task.tableIndex = progress.tableIndex;
+    task.totalTables = progress.totalTables;
+    task.currentTable = progress.currentTable;
+    task.rowsExported = progress.rowsGenerated;
+    task.totalRows = progress.totalRows;
+    task.errorMessage = progress.errorMessage ?? null;
+    if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
+  }
+
   function updateCompareTask(sessionId: string, progress: CompareTaskProgress): void {
     const task = taskMap.get(sessionId);
     if (!task || (task.kind !== "schema-diff" && task.kind !== "data-compare")) return;
@@ -771,8 +865,11 @@ export function useExportTracker() {
     hasActive,
     addTask,
     addDatabaseExportTask,
+    addDataDictionaryTask,
+    updateDataDictionaryTask,
     addSqlFileTask,
     addDataTransferTask,
+    addDataGenerationTask,
     addSchemaDiffTask,
     addDataCompareTask,
     addMultiDbExecutionTask,
@@ -784,6 +881,7 @@ export function useExportTracker() {
     restoreDatabaseExportTaskRunning,
     updateSqlFileTask,
     updateDataTransferTask,
+    updateDataGenerationTask,
     updateCompareTask,
     registerTaskCancelHandler,
     unregisterTaskCancelHandler,

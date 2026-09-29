@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, inject, ref, watch } from "vue";
+import { Settings2 } from "@lucide/vue";
+import { OPEN_PLUGIN_SETTINGS } from "@/lib/plugins/pluginCenterNavigation";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -7,6 +9,7 @@ import PluginIcon from "./PluginIcon.vue";
 import { usePluginShortcuts } from "@/composables/usePluginShortcuts";
 import { usePluginShortcutPreferences } from "@/composables/usePluginShortcutPreferences";
 import { usePluginShortcutSort } from "@/composables/usePluginShortcutSort";
+import { useCursorFloatingPosition } from "@/composables/useCursorFloatingPosition";
 import { usePluginShortcutHeight } from "@/composables/usePluginShortcutHeight";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -15,6 +18,8 @@ import { movePluginShortcut, type PluginShortcutEntry, type PluginShortcutPositi
 const props = defineProps<{ position: PluginShortcutPosition }>();
 const { t } = useI18n();
 const settings = useSettingsStore();
+const openSettings = inject(OPEN_PLUGIN_SETTINGS, () => {});
+const showSettingsEntry = computed(() => settings.editorSettings.pluginShortcuts.showSettingsEntry);
 const { toast } = useToast();
 const { entries, open, isActive } = usePluginShortcuts();
 const { update, saving } = usePluginShortcutPreferences();
@@ -56,6 +61,8 @@ const sorting = usePluginShortcutSort({
   },
 });
 const { drag } = sorting;
+const preview = ref<HTMLElement | null>(null);
+const previewStyle = useCursorFloatingPosition(preview, drag, () => (right.value ? "left" : "right"));
 const draggedEntry = computed(() => entries.value.find((entry) => entry.id === drag.source));
 watch(() => props.position, sorting.cancel);
 function activate(entry: PluginShortcutEntry) {
@@ -65,6 +72,9 @@ function activate(entry: PluginShortcutEntry) {
   } catch (error) {
     toast(String(error), 5000);
   }
+}
+function activateSettings() {
+  if (!sorting.suppressClick()) openSettings();
 }
 </script>
 
@@ -79,7 +89,7 @@ function activate(entry: PluginShortcutEntry) {
     @dragstart.prevent
   >
     <div
-      v-if="sidebarList"
+      v-if="sidebarList && entries.length"
       data-shortcut-resize
       role="separator"
       tabindex="0"
@@ -92,7 +102,15 @@ function activate(entry: PluginShortcutEntry) {
       @dblclick="!saving && sizing.reset()"
       @keydown="!saving && sizing.resizeWithKeyboard($event)"
     />
-    <div ref="scroll" data-shortcut-scroll class="min-h-0 overflow-y-auto overflow-x-hidden p-1" :class="sidebarList ? 'shrink-0' : 'flex-1'" :style="sidebarList ? { height: `${sizing.height.value}px` } : undefined">
+    <div v-if="sidebarList" data-shortcut-header class="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border/60 px-3" :class="{ 'border-t': !entries.length }">
+      <span class="min-w-0 truncate text-xs font-medium text-muted-foreground">{{ t("pluginPlatform.shortcutsHeading") }}</span>
+      <LightTooltip v-if="showSettingsEntry" :text="t('pluginPlatform.shortcutsSettings')" :disabled="drag.active || sizing.resizing.value" side="top">
+        <Button variant="ghost" size="icon" data-plugin-shortcut-settings class="shortcut-button size-6 shrink-0" :aria-label="t('pluginPlatform.shortcutsSettings')" @click="activateSettings">
+          <Settings2 class="size-3.5 text-foreground" />
+        </Button>
+      </LightTooltip>
+    </div>
+    <div v-show="!sidebarList || entries.length" ref="scroll" data-shortcut-scroll class="min-h-0 overflow-y-auto overflow-x-hidden p-1" :class="sidebarList ? 'shrink-0' : 'flex-1'" :style="sidebarList ? { height: `${sizing.height.value}px` } : undefined">
       <div class="shortcut-items flex flex-col" :class="sidebarList ? 'gap-0' : ['min-h-full gap-1', { 'shortcut-items--bottom': bottom }]">
         <LightTooltip v-for="(entry, index) in entries" :key="entry.id" :text="entry.label" :disabled="drag.active || sizing.resizing.value" :side="sidebarList ? 'top' : left ? 'right' : 'left'" content-class="shortcut-tooltip">
           <span
@@ -124,14 +142,24 @@ function activate(entry: PluginShortcutEntry) {
             </Button>
           </span>
         </LightTooltip>
+        <LightTooltip v-if="showSettingsEntry && !sidebarList" :text="t('pluginPlatform.shortcutsSettings')" :disabled="drag.active || sizing.resizing.value" :side="left ? 'right' : 'left'" content-class="shortcut-tooltip">
+          <span class="relative flex shrink-0" :class="{ 'mt-auto': bottom && !entries.length, 'pt-2': entries.length > 0 }">
+            <span v-if="entries.length" class="pointer-events-none absolute inset-x-2 top-0 z-10 h-px bg-border/60" aria-hidden="true" />
+            <Button variant="ghost" size="icon" data-plugin-shortcut-settings class="shortcut-button size-8 shrink-0" :aria-label="t('pluginPlatform.shortcutsSettings')" @click="activateSettings">
+              <Settings2 class="size-4 shrink-0 text-foreground" />
+            </Button>
+          </span>
+        </LightTooltip>
       </div>
     </div>
     <Teleport to="body">
       <div v-if="drag.active || sizing.resizing.value" class="shortcut-pointer-overlay fixed inset-0 select-none touch-none" :style="{ cursor: drag.active ? 'grabbing' : 'row-resize' }" aria-hidden="true" />
       <div
         v-if="drag.active && draggedEntry"
-        class="shortcut-drag-preview pointer-events-none fixed flex w-max max-w-xs items-center gap-2 rounded-md border border-primary/50 bg-popover px-2 py-1.5 text-xs text-popover-foreground shadow-md"
-        :style="{ left: `${drag.x + (right ? -12 : 12)}px`, top: `${drag.y + 12}px`, transform: right ? 'translateX(-100%)' : undefined }"
+        ref="preview"
+        data-shortcut-drag-preview
+        class="shortcut-drag-preview pointer-events-none fixed flex w-max max-w-xs overflow-hidden items-center gap-2 rounded-md border border-primary/50 bg-popover px-2 py-1.5 text-xs text-popover-foreground shadow-md"
+        :style="previewStyle"
         aria-hidden="true"
       >
         <PluginIcon :plugin-id="draggedEntry.pluginId" :icon="draggedEntry.icon" class="size-4 [&_svg]:text-current" />

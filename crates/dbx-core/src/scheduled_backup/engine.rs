@@ -338,6 +338,7 @@ impl BackupService {
                         } else {
                             DatabaseExportOutputCompression::None
                         },
+                        insert_dialect: Default::default(),
                         snapshot_session_id: Some(snapshot.session_id.clone()),
                         batch_size: 1000,
                         split_max_mb: None,

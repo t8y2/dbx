@@ -28,6 +28,16 @@ describe("HiveServer2-compatible driver installation", () => {
   });
 });
 
+describe("Transwarp driver installation", () => {
+  it("routes the single Inceptor profile to the shared Agent package", () => {
+    const profile = "transwarp-inceptor";
+    expect(agentDriverInstallKey("transwarp", profile)).toBe("transwarp");
+    expect(showAgentDriverInstallHint("transwarp", [], profile)).toBe(true);
+    expect(showAgentDriverInstallHint("transwarp", [{ db_type: "transwarp", installed: true }], profile)).toBe(false);
+    expect(driverStoreFocusForInstallError("transwarp driver is not installed. Please install it from the Driver Manager.", "transwarp", profile)).toEqual({ target: "driver", driver: "transwarp" });
+  });
+});
+
 describe("shouldApplyDriverStoreFocus", () => {
   it("applies when the driver first appears after a list load", () => {
     expect(shouldApplyDriverStoreFocus(null, "driver:mysql", false)).toBe(true);

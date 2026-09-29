@@ -6,7 +6,10 @@ Paths in this guide are relative to `.github/`.
 does not change release workflows or branch-protection settings. The existing
 `rust` and `agents` aggregate check names remain; `ci` additionally summarizes all
 selected jobs. None of these gates accepts a failed, cancelled, missing, or
-unexpectedly skipped prerequisite.
+unexpectedly skipped prerequisite. The gates are guarded by
+`if: always() && !cancelled()`: on a superseded commit a newer push cancels the
+run, and `always()` alone would still execute the gate and report those
+cancellations as a failure of the commit that no longer matters.
 
 ## Selection
 

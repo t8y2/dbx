@@ -100,6 +100,7 @@ const JDBC_URL_PREFIXES: Partial<Record<DatabaseType, string>> = {
   hive: "jdbc:hive2",
   kyuubi: "jdbc:hive2",
   argo: "jdbc:hive2",
+  transwarp: "jdbc:inceptor2",
   impala: "jdbc:impala",
   trino: "jdbc:trino",
   prestosql: "jdbc:presto",
@@ -352,6 +353,12 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
       if (!host) return null;
       const query = joinNonEmpty("&", [database && `db=${database}`, ...credentials, rawParams.replace(/^[?&]+/, "")]);
       return `jdbc:snowflake://${formatHostForUrl(host)}/${query ? `?${query}` : ""}`;
+    }
+    case "transwarp": {
+      const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
+      const props = rawParams.replace(/^[?&;]+/, "").replace(/&/g, ";");
+      const ssl = config.ssl && !queryHasParam(props, ["ssl"]) ? ";ssl=true" : "";
+      return `jdbc:inceptor2://${formatHostForUrl(host)}${portPart}/${database || "default"}${props ? `;${props}` : ""}${ssl}`;
     }
     case "informix":
     case "gbase": {

@@ -43,6 +43,58 @@ static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::
 static MYSQL_COLLATE_CLAUSE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"(?i)\bCOLLATE\s*=?\s*([A-Za-z0-9_]+)\b").expect("valid MySQL COLLATE clause regex")
 });
+
+pub async fn ensure_transfer_source_types_supported(
+    state: &AppState,
+    request: &TransferRequest,
+    source_pool_key: &str,
+) -> Result<(), String> {
+    if matches!(request.content, TransferContent::StructureOnly) {
+        return Ok(());
+    }
+    let is_doris = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&request.source_connection_id)
+            .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
+    };
+    if !is_doris {
+        return Ok(());
+    }
+    for table in &request.tables {
+        let columns = get_columns_for_transfer(
+            state,
+            source_pool_key,
+            &request.source_connection_id,
+            &request.source_database,
+            &request.source_schema,
+            table,
+            request.source_catalog.as_deref(),
+        )
+        .await?;
+        ensure_transfer_columns_supported(request, true, table, &columns)?;
+    }
+    Ok(())
+}
+
+fn ensure_transfer_columns_supported(
+    request: &TransferRequest,
+    is_doris_source: bool,
+    table: &str,
+    columns: &[db::ColumnInfo],
+) -> Result<(), String> {
+    if matches!(request.content, TransferContent::StructureOnly) || !is_doris_source {
+        return Ok(());
+    }
+    if let Some(column) = columns.iter().find(|column| crate::types::is_opaque_aggregate_state_type(&column.data_type))
+    {
+        return Err(format!(
+            "Data transfer does not support Doris aggregate-state column `{}` in table `{table}`; export a representation format or use explicit Doris state functions instead",
+            column.name
+        ));
+    }
+    Ok(())
+}
 // An inline FK constraint *definition line*: an optional `CONSTRAINT <name>`
 // prefix followed by `FOREIGN KEY (`. Anchored to the line start so column
 // definitions whose COMMENT/DEFAULT strings mention "foreign key" never match.
@@ -68,7 +120,8 @@ impl SqlBatchLimits {
     pub(crate) fn for_database(db_type: &DatabaseType, requested_max_rows: usize) -> Self {
         let max_rows = requested_max_rows.max(1).min(match db_type {
             DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-            DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Transwarp => 100,
             _ => usize::MAX,
         });
         let target_sql_bytes = match db_type {
@@ -2249,7 +2302,7 @@ fn postgres_index_column_sql(
 ) -> String {
     // The base key text: a real column is quoted as an identifier; an expression/functional
     // key part arrives as raw expression text (the per-column `pg_get_indexdef` omits the
-    // opclass — see `crates/dbx-drivers/src/db/postgres.rs`), so quoting the whole thing as
+    // opclass — see `crates/dbx-driver-postgres/src/postgres.rs`), so quoting the whole thing as
     // an identifier would turn it into a nonexistent column reference (#6295).
     let base = if is_expression { column.to_string() } else { quote_identifier(column, &DatabaseType::Postgres) };
     // The opclass is read separately from `pg_index.indclass` for every key position
@@ -2269,9 +2322,45 @@ fn postgres_index_column_sql(
     }
 }
 
-fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &str) -> Vec<String> {
+/// `CREATE INDEX/SEQUENCE IF NOT EXISTS` was added in PostgreSQL 9.5: 9.2/9.3/9.4
+/// reject both with `syntax error at or near "NOT"` (issue #8853). A server that does
+/// not report its version keeps the idempotent form, matching the long-standing behavior.
+fn postgres_if_not_exists_supported(server_version_num: Option<i32>) -> bool {
+    server_version_num.is_none_or(|version| version >= 90_500)
+}
+
+/// Decides whether the target index/sequence DDL may use `IF NOT EXISTS`. openGauss/GaussDB
+/// report a 9.x `server_version_num` but do implement the syntax, so only a plain
+/// PostgreSQL target is version-gated.
+async fn target_supports_if_not_exists_ddl(state: &AppState, pool_key: &str) -> bool {
+    let (_, _, db_type, _) = transfer_pool_context(state, pool_key).await;
+    if db_type != Some(DatabaseType::Postgres) {
+        return true;
+    }
+    let version = execute_read_on_pool(state, pool_key, "SHOW server_version_num")
+        .await
+        .ok()
+        .and_then(|result| result.rows.first().and_then(|row| row.first()).and_then(server_version_num_of));
+    postgres_if_not_exists_supported(version)
+}
+
+fn server_version_num_of(value: &serde_json::Value) -> Option<i32> {
+    match value {
+        serde_json::Value::Number(number) => number.as_i64().and_then(|version| i32::try_from(version).ok()),
+        serde_json::Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn generate_postgres_index_ddl(
+    indexes: &[db::IndexInfo],
+    table: &str,
+    schema: &str,
+    if_not_exists: bool,
+) -> Vec<String> {
     let full_table = qualified_table(table, schema, &DatabaseType::Postgres, None);
     let mut statements = Vec::new();
+    let idempotent = if if_not_exists { "IF NOT EXISTS " } else { "" };
     for index in indexes.iter().filter(|index| !index.is_primary) {
         if index.name.trim().is_empty() || index.columns.is_empty() {
             continue;
@@ -2323,7 +2412,7 @@ fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &
             .map(|value| format!(" WHERE {value}"))
             .unwrap_or_default();
         statements.push(format!(
-            "CREATE {unique}INDEX IF NOT EXISTS {} ON {full_table}{using_clause} ({columns}){include_clause}{filter_clause}",
+            "CREATE {unique}INDEX {idempotent}{} ON {full_table}{using_clause} ({columns}){include_clause}{filter_clause}",
             quote_identifier(&index.name, &DatabaseType::Postgres)
         ));
         if let Some(comment) = index.comment.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
@@ -2404,7 +2493,8 @@ async fn restore_postgres_table_schema_objects(
     source_indexes: &[db::IndexInfo],
     source_foreign_keys: &[db::ForeignKeyInfo],
 ) -> Result<(), String> {
-    for statement in generate_postgres_index_ddl(source_indexes, target_table, target_schema) {
+    let index_if_not_exists = target_supports_if_not_exists_ddl(state, target_pool_key).await;
+    for statement in generate_postgres_index_ddl(source_indexes, target_table, target_schema, index_if_not_exists) {
         execute_on_pool(state, target_pool_key, &statement)
             .await
             .map_err(|e| format!("Failed to create PostgreSQL index for {target_table}: {e}"))?;
@@ -2551,11 +2641,16 @@ fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String
     }
 }
 
-fn generate_postgres_transfer_sequence_create_ddl(sequence: &PostgresTransferSequence, schema: &str) -> String {
+fn generate_postgres_transfer_sequence_create_ddl(
+    sequence: &PostgresTransferSequence,
+    schema: &str,
+    if_not_exists: bool,
+) -> String {
     let qualified_name = postgres_sequence_qualified_name(schema, &sequence.name);
     let cycle = if sequence.cycle { "CYCLE" } else { "NO CYCLE" };
+    let idempotent = if if_not_exists { "IF NOT EXISTS " } else { "" };
     format!(
-        "CREATE SEQUENCE IF NOT EXISTS {qualified_name}\n  AS {data_type}\n  START WITH {start_value}\n  INCREMENT BY {increment}\n  MINVALUE {min_value}\n  MAXVALUE {max_value}\n  CACHE {cache_value}\n  {cycle}",
+        "CREATE SEQUENCE {idempotent}{qualified_name}\n  AS {data_type}\n  START WITH {start_value}\n  INCREMENT BY {increment}\n  MINVALUE {min_value}\n  MAXVALUE {max_value}\n  CACHE {cache_value}\n  {cycle}",
         data_type = sequence.data_type,
         start_value = sequence.start_value,
         increment = sequence.increment,
@@ -2845,6 +2940,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
         }
         serde_json::Value::String(s) => {
+            if let Some(json_array_literal) = format_starrocks_json_array_sql_literal(s, db_type, column_type) {
+                return json_array_literal;
+            }
             if let Some(integer_literal) = normalize_integer_literal(s, db_type, column_type) {
                 return integer_literal;
             }
@@ -2912,6 +3010,30 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
         }
     }
+}
+
+fn format_starrocks_json_array_sql_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if *db_type != DatabaseType::StarRocks || !column_type.is_some_and(is_starrocks_json_array_type) {
+        return None;
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(value.trim()).ok()?;
+    if !parsed.is_array() {
+        return None;
+    }
+    let json = parsed.to_string().replace('\\', "\\\\").replace('\'', "''");
+    Some(format!("CAST(PARSE_JSON('{json}') AS ARRAY<JSON>)"))
+}
+
+fn is_starrocks_json_array_type(column_type: &str) -> bool {
+    column_type
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>()
+        .eq_ignore_ascii_case("array<json>")
 }
 
 fn is_mysql_bit_type(column_type: &str) -> bool {
@@ -3318,7 +3440,10 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
     // Extract basic type, `bigint unsigned` -> `bigint`
     base = base.split(' ').next().unwrap_or(base).trim();
 
-    if matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
+    if matches!(
+        target_db,
+        DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo | DatabaseType::Transwarp
+    ) {
         return match base {
             "tinyint" => "TINYINT".into(),
             "smallint" | "int2" => "SMALLINT".into(),
@@ -3563,7 +3688,11 @@ fn generate_create_table_ddl_with_column_quoting(
             if !c.is_nullable
                 && !matches!(
                     target_db,
-                    DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo
+                    DatabaseType::Hive
+                        | DatabaseType::Kyuubi
+                        | DatabaseType::Impala
+                        | DatabaseType::Argo
+                        | DatabaseType::Transwarp
                 )
             {
                 line.push_str(" NOT NULL");
@@ -3588,7 +3717,10 @@ fn generate_create_table_ddl_with_column_quoting(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
+    if !matches!(
+        target_db,
+        DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo | DatabaseType::Transwarp
+    ) {
         for c in columns {
             if c.is_primary_key {
                 let qname = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
@@ -3760,6 +3892,7 @@ pub(crate) fn generate_insert_typed_from_value_rows(
 struct InsertSqlTemplate {
     standard_prefix: String,
     oracle_into_prefix: Option<String>,
+    inceptor_select_prefix: Option<String>,
     xugu_multirow_values: bool,
 }
 
@@ -3799,8 +3932,15 @@ impl InsertSqlTemplate {
             };
         Self {
             standard_prefix: format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n"),
-            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle)
+            // OceanBase's Oracle mode rejects the comma-separated multi-row VALUES form
+            // just like Oracle itself, but it does implement Oracle's multi-table
+            // `INSERT ALL ... SELECT 1 FROM dual` syntax, so it shares this template.
+            // Without it the importer falls back to single-row INSERTs (one network
+            // round trip per row), which makes CSV imports orders of magnitude slower.
+            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
                 .then(|| format!("INTO {full_table} ({col_list}) VALUES ")),
+            inceptor_select_prefix: (matches!(db_type, DatabaseType::Transwarp) && !columns.is_empty())
+                .then(|| format!("INSERT INTO {full_table} ({col_list})\n")),
             // Xugu accepts consecutive row constructors (`VALUES (...) (...)`) but rejects
             // the comma-separated multi-row form emitted by the generic template.
             xugu_multirow_values: matches!(db_type, DatabaseType::Xugu),
@@ -3810,6 +3950,22 @@ impl InsertSqlTemplate {
     fn build(&self, value_rows: &[String]) -> String {
         if value_rows.is_empty() {
             return String::new();
+        }
+        if let Some(prefix) = self.inceptor_select_prefix.as_deref() {
+            let mut sql = String::with_capacity(self.statement_bytes(
+                value_rows.iter().map(String::len).sum(),
+                value_rows.len(),
+                &DatabaseType::Transwarp,
+            ));
+            sql.push_str(prefix);
+            for (index, values) in value_rows.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str("\nUNION ALL\n");
+                }
+                sql.push_str("SELECT ");
+                sql.push_str(values.strip_prefix('(').and_then(|row| row.strip_suffix(')')).unwrap_or(values));
+            }
+            return sql;
         }
         if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| value_rows.len() > 1) {
             let capacity = "INSERT ALL\n".len()
@@ -3849,6 +4005,12 @@ impl InsertSqlTemplate {
     }
 
     fn statement_bytes(&self, value_rows_bytes: usize, row_count: usize, db_type: &DatabaseType) -> usize {
+        if let Some(prefix) = self.inceptor_select_prefix.as_deref() {
+            return sql_text_bytes(prefix, db_type)
+                .saturating_add(value_rows_bytes.saturating_sub(2usize.saturating_mul(row_count)))
+                .saturating_add("SELECT ".len().saturating_mul(row_count))
+                .saturating_add("\nUNION ALL\n".len().saturating_mul(row_count.saturating_sub(1)));
+        }
         if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| row_count > 1) {
             return sql_text_bytes("INSERT ALL\n", db_type)
                 .saturating_add(sql_text_bytes(into_prefix, db_type).saturating_mul(row_count))
@@ -3937,6 +4099,52 @@ pub fn generate_upsert_typed(
     )
 }
 
+fn generate_insert_ignore_duplicates_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    overrides_postgres_system_values: bool,
+    quote_target_column_names: bool,
+) -> String {
+    if value_rows.is_empty() || columns.is_empty() {
+        return String::new();
+    }
+
+    let full_table = qualified_table(table, schema, db_type, catalog);
+    let col_list = columns
+        .iter()
+        .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
+        " OVERRIDING SYSTEM VALUE"
+    } else {
+        ""
+    };
+
+    let mut sql = format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n{}", value_rows.join(",\n"));
+
+    match db_type {
+        db_type
+            if (is_postgres_transfer_dialect(db_type) && !matches!(db_type, DatabaseType::OpenGauss))
+                || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb) =>
+        {
+            sql.push_str("\nON CONFLICT DO NOTHING");
+        }
+        db_type if uses_mysql_style_upsert(db_type) => {
+            let first_column = transfer_column_identifier(&columns[0], db_type, quote_target_column_names);
+            sql.push_str(&format!("\nON DUPLICATE KEY UPDATE {first_column} = {first_column}"));
+        }
+        _ => {}
+    }
+
+    sql
+}
+
 /// Upsert targets that take the MySQL-style `INSERT ... ON DUPLICATE KEY UPDATE
 /// ... VALUES(col)` arm. openGauss belongs here instead of the PostgreSQL
 /// `ON CONFLICT` arm: its INSERT grammar has no `ON CONFLICT` clause, but it
@@ -3946,6 +4154,76 @@ pub fn generate_upsert_typed(
 /// double-quoted PostgreSQL-style names.
 fn uses_mysql_style_upsert(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::OpenGauss)
+}
+
+pub(crate) fn supports_primary_key_upsert(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Postgres
+            | DatabaseType::Kingbase
+            | DatabaseType::Sqlite
+            | DatabaseType::CloudflareD1
+            | DatabaseType::DuckDb
+            | DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::OpenGauss
+    )
+}
+
+fn primary_key_upsert_clause(
+    columns: &[String],
+    pk_columns: &[String],
+    db_type: &DatabaseType,
+    quote_target_column_names: bool,
+) -> Result<String, String> {
+    if pk_columns.is_empty() {
+        return Err("Update-existing import requires target primary-key metadata".to_string());
+    }
+    if pk_columns.iter().any(|primary_key| !columns.iter().any(|column| column.eq_ignore_ascii_case(primary_key))) {
+        return Err("Update-existing import requires every target primary-key column to be mapped".to_string());
+    }
+
+    let non_pk_columns = columns
+        .iter()
+        .filter(|column| !pk_columns.iter().any(|primary_key| column.eq_ignore_ascii_case(primary_key)))
+        .collect::<Vec<_>>();
+    if non_pk_columns.is_empty() {
+        return Err("Update-existing import requires at least one mapped non-primary-key column".to_string());
+    }
+
+    if (is_postgres_transfer_dialect(db_type) && !matches!(db_type, DatabaseType::OpenGauss))
+        || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb)
+    {
+        let primary_keys = pk_columns
+            .iter()
+            .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let updates = non_pk_columns
+            .iter()
+            .map(|column| {
+                let column = transfer_column_identifier(column, db_type, quote_target_column_names);
+                format!("{column} = EXCLUDED.{column}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!("\nON CONFLICT ({primary_keys}) DO UPDATE SET {updates}"));
+    }
+
+    if uses_mysql_style_upsert(db_type) {
+        let updates = non_pk_columns
+            .iter()
+            .map(|column| {
+                let column = transfer_column_identifier(column, db_type, quote_target_column_names);
+                format!("{column} = VALUES({column})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!("\nON DUPLICATE KEY UPDATE {updates}"));
+    }
+
+    Err(format!("Update-existing import conflict policy is not supported for {}", db_type.as_str()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4157,8 +4435,18 @@ fn generate_upsert_typed_for_transfer(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
-        (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo, _) => 500,
+        (
+            DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Impala
+            | DatabaseType::Argo
+            | DatabaseType::Transwarp,
+            _,
+        ) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
+        // The INSERT ALL template is shared with OceanBase's Oracle mode, so its
+        // append/overwrite batches must clamp to the same per-statement row count.
+        (DatabaseType::OceanbaseOracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
@@ -4549,9 +4837,163 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
-    generate_insert_sql_batches_from_value_rows(
-        columns, value_rows, table, schema, db_type, catalog, limits, false, true,
+    generate_insert_typed_sql_batches_from_value_rows_with_options(
+        columns, value_rows, table, schema, db_type, catalog, limits, false,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    skip_duplicate_rows: bool,
+) -> Result<Vec<(String, usize)>, String> {
+    if !skip_duplicate_rows {
+        return generate_insert_sql_batches_from_value_rows(
+            columns, value_rows, table, schema, db_type, catalog, limits, false, true,
+        );
+    }
+
+    if value_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_rows = limits.max_rows.max(1).min(match db_type {
+        DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        _ => usize::MAX,
+    });
+    let target_sql_bytes = limits.target_sql_bytes.max(1);
+    let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
+
+    let template = InsertSqlTemplate::new_with_column_quoting(columns, table, schema, db_type, catalog, false, true);
+
+    let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
+
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+
+    while start < value_rows.len() {
+        let mut end = start;
+        let mut rows_bytes = 0usize;
+
+        while end < value_rows.len() && end - start < max_rows {
+            let single_row_bytes = template.statement_bytes(value_row_bytes[end], 1, db_type);
+
+            if let Some(hard_sql_bytes) = limits.hard_sql_bytes {
+                if single_row_bytes > hard_sql_bytes {
+                    return Err(format!(
+                        "SQL batch row {} requires {} bytes and exceeds the {} byte hard limit",
+                        end + 1,
+                        single_row_bytes,
+                        hard_sql_bytes
+                    ));
+                }
+            }
+
+            let candidate_rows_bytes = rows_bytes.saturating_add(value_row_bytes[end]);
+            let candidate_row_count = end - start + 1;
+            let candidate_bytes = template.statement_bytes(candidate_rows_bytes, candidate_row_count, db_type);
+
+            if candidate_row_count > 1 && candidate_bytes > batch_sql_bytes {
+                break;
+            }
+
+            rows_bytes = candidate_rows_bytes;
+            end += 1;
+        }
+
+        let value_rows_batch = &value_rows[start..end];
+
+        let mut sql = if matches!(
+            db_type,
+            DatabaseType::Postgres
+                | DatabaseType::Kingbase
+                | DatabaseType::Sqlite
+                | DatabaseType::CloudflareD1
+                | DatabaseType::DuckDb
+                | DatabaseType::Mysql
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::OpenGauss
+        ) {
+            generate_insert_ignore_duplicates_from_value_rows(
+                columns,
+                value_rows_batch,
+                table,
+                schema,
+                db_type,
+                catalog,
+                false,
+                true,
+            )
+        } else {
+            template.build(value_rows_batch)
+        };
+
+        if sql.is_empty() {
+            return Err("Generated empty SQL batch".to_string());
+        }
+
+        statements.push((std::mem::take(&mut sql), end - start));
+        start = end;
+    }
+
+    Ok(statements)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_primary_key_upsert_sql_batches_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    pk_columns: &[String],
+) -> Result<Vec<(String, usize)>, String> {
+    if !supports_primary_key_upsert(db_type) {
+        return Err(format!("Update-existing import conflict policy is not supported for {}", db_type.as_str()));
+    }
+
+    let clause = primary_key_upsert_clause(columns, pk_columns, db_type, true)?;
+    let clause_bytes = sql_text_bytes(&clause, db_type);
+    let adjusted_limits = SqlBatchLimits {
+        max_rows: limits.max_rows,
+        target_sql_bytes: limits.target_sql_bytes.saturating_sub(clause_bytes).max(1),
+        hard_sql_bytes: limits.hard_sql_bytes.map(|limit| limit.saturating_sub(clause_bytes).max(1)),
+    };
+    let batches = generate_insert_sql_batches_from_value_rows(
+        columns,
+        value_rows,
+        table,
+        schema,
+        db_type,
+        catalog,
+        adjusted_limits,
+        false,
+        true,
+    )?;
+
+    batches
+        .into_iter()
+        .map(|(mut sql, row_count)| {
+            sql.push_str(&clause);
+            if limits.hard_sql_bytes.is_some_and(|limit| sql_text_bytes(&sql, db_type) > limit) {
+                return Err(format!(
+                    "SQL batch with update-existing conflict handling exceeds the {} byte hard limit",
+                    limits.hard_sql_bytes.unwrap_or_default()
+                ));
+            }
+            Ok((sql, row_count))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4604,7 +5046,7 @@ fn generate_insert_sql_batches_from_value_rows(
 
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -5894,6 +6336,22 @@ fn transfer_pool_error_action(
     }
 }
 
+/// A structured Agent quarantine makes the current logical session unusable, but
+/// does not authorize replaying the operation whose outcome is unknown. Prepare a
+/// replacement only for later transfer work. Keep legacy/untyped failures and
+/// runtime replacement on their existing, more conservative paths.
+fn should_prepare_fresh_agent_transfer_session(db_type: Option<DatabaseType>, error: &str) -> bool {
+    if !db_type.is_some_and(|db_type| crate::database_capabilities::is_agent_type(&db_type)) {
+        return false;
+    }
+    matches!(
+        crate::db::agent_driver::try_agent_error_from_legacy(error),
+        Some(crate::db::agent_driver::AgentCallError::Structured { context, .. })
+            if context.session_disposition
+                == crate::db::agent_driver::AgentSessionDisposition::Quarantine
+    )
+}
+
 async fn transfer_pool_context(
     state: &AppState,
     pool_key: &str,
@@ -5952,17 +6410,36 @@ async fn execute_on_pool_with_options(
                 // caller isn't handed a known-dead connection; this never retries
                 // the failed statement above, only prepares the pool for
                 // whichever statement runs next.
-                if pool_error_action(db_type, error) == PoolErrorAction::ReconnectAndRetry {
+                let prepare_agent_session = should_prepare_fresh_agent_transfer_session(db_type, error);
+                if pool_error_action(db_type, error) == PoolErrorAction::ReconnectAndRetry || prepare_agent_session {
                     if let Some(connection_id) = connection_id.as_deref() {
                         let catalog = catalog_from_pool_key(&current_pool_key).map(str::to_string);
-                        let _ = state
-                            .reconnect_pool_for_session_with_catalog(
-                                connection_id,
-                                database.as_deref(),
-                                catalog.as_deref(),
-                                client_session_id.as_deref(),
-                            )
-                            .await;
+                        let recovery = if prepare_agent_session {
+                            state
+                                .get_or_create_pool_for_session_with_catalog(
+                                    connection_id,
+                                    database.as_deref(),
+                                    catalog.as_deref(),
+                                    client_session_id.as_deref(),
+                                )
+                                .await
+                        } else {
+                            state
+                                .reconnect_pool_for_session_with_catalog(
+                                    connection_id,
+                                    database.as_deref(),
+                                    catalog.as_deref(),
+                                    client_session_id.as_deref(),
+                                )
+                                .await
+                        };
+                        if let Err(reconnect_error) = recovery {
+                            // Preserve the failed operation's original error and unknown
+                            // outcome. The replacement is only for later transfer work.
+                            log::warn!(
+                                "[transfer] failed to prepare a fresh pool after discarding '{current_pool_key}': {reconnect_error}"
+                            );
+                        }
                     }
                 }
                 return result;
@@ -6156,6 +6633,12 @@ pub async fn get_db_type(state: &AppState, connection_id: &str) -> Result<Databa
 fn effective_transfer_database_type(config: &ConnectionConfig) -> DatabaseType {
     if config.db_type != DatabaseType::Jdbc {
         return config.db_type;
+    }
+    // The OceanBase JDBC URL and driver class are shared by MySQL and Oracle
+    // compatibility modes, so neither is a safe mode discriminator. The
+    // connection form persists this explicit profile only for Oracle mode.
+    if config.driver_profile.as_deref().is_some_and(|profile| profile.trim().eq_ignore_ascii_case("oceanbase-oracle")) {
+        return DatabaseType::OceanbaseOracle;
     }
     if config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")) {
         return DatabaseType::Jdbc;
@@ -6590,6 +7073,7 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             .map(|sequence| (sequence.name.clone(), sequence))
             .collect::<HashMap<_, _>>();
 
+    let sequence_if_not_exists = target_supports_if_not_exists_ddl(state, target_pool_key).await;
     for sequence in &owned_sequences {
         let should_create = validate_existing_postgres_sequence(
             sequence,
@@ -6600,7 +7084,11 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             let definition = definitions
                 .get(&sequence.name)
                 .ok_or_else(|| format!("PostgreSQL sequence definition not found: {}", sequence.name))?;
-            let create_sql = generate_postgres_transfer_sequence_create_ddl(definition, &request.target_schema);
+            let create_sql = generate_postgres_transfer_sequence_create_ddl(
+                definition,
+                &request.target_schema,
+                sequence_if_not_exists,
+            );
             execute_on_pool(state, target_pool_key, &create_sql)
                 .await
                 .map_err(|e| format!("Failed to create PostgreSQL sequence for {target_table}: {e}"))?;
@@ -8353,6 +8841,45 @@ struct HiveServerTransferCursor {
     session_id: Option<String>,
 }
 
+fn is_transwarp_complex_type(data_type: &str) -> bool {
+    matches!(
+        data_type.trim().split('<').next().unwrap_or("").trim().to_ascii_lowercase().as_str(),
+        "array" | "map" | "struct" | "uniontype"
+    )
+}
+
+fn should_use_transwarp_server_side_copy(
+    source_db_type: &DatabaseType,
+    content: &TransferContent,
+    columns: &[db::ColumnInfo],
+) -> bool {
+    *source_db_type == DatabaseType::Transwarp
+        && should_copy_data(content)
+        && columns.iter().any(|column| is_transwarp_complex_type(&column.data_type))
+}
+
+fn transwarp_server_side_copy_sql(
+    source_columns: &[String],
+    target_columns: &[String],
+    source_table: &str,
+    source_schema: &str,
+    target_table: &str,
+    target_schema: &str,
+    quote_target_columns: bool,
+) -> String {
+    let db_type = DatabaseType::Transwarp;
+    let source = qualified_table(source_table, source_schema, &db_type, None);
+    let target = qualified_table(target_table, target_schema, &db_type, None);
+    let source_columns =
+        source_columns.iter().map(|name| quote_identifier(name, &db_type)).collect::<Vec<_>>().join(", ");
+    let target_columns = target_columns
+        .iter()
+        .map(|name| transfer_column_identifier(name, &db_type, quote_target_columns))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("INSERT INTO {target} ({target_columns}) SELECT {source_columns} FROM {source}")
+}
+
 fn transfer_cursor_sql(
     columns: &[String],
     table: &str,
@@ -8381,7 +8908,7 @@ async fn fetch_hive_server_transfer_batch(
     };
     let pool_handle = state.pool_handle(pool_key).await;
     let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
-        return Err("Impala transfer requires an Agent connection".to_string());
+        return Err("Agent cursor transfer requires an Agent connection".to_string());
     };
     let client = client.clone();
 
@@ -8517,6 +9044,14 @@ pub async fn rename_tables_to_backup<F>(
 where
     F: FnMut(TransferProgress),
 {
+    let source_pool_key = ensure_transfer_pool(
+        state,
+        &request.source_connection_id,
+        &request.source_database,
+        request.source_catalog.as_deref(),
+    )
+    .await?;
+    ensure_transfer_source_types_supported(state, request, &source_pool_key).await?;
     let total_tables = tables.len();
 
     // Resolve target names first so the fail-fast check below sees the names that will
@@ -9096,6 +9631,14 @@ where
         return Err(format!("No columns found for table {table}"));
     }
 
+    let is_doris_source = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&request.source_connection_id)
+            .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
+    };
+    ensure_transfer_columns_supported(request, is_doris_source, table, &columns)?;
+
     let writable_columns = writable_transfer_columns(&columns, source_db_type, target_db_type);
     let default_rows_only = mysql_generated_only_transfer(&columns, source_db_type, target_db_type);
     if writable_columns.is_empty() && !default_rows_only {
@@ -9154,6 +9697,26 @@ where
         None
     };
     log::info!("[transfer] {} total_rows={:?}", table, total_rows);
+
+    let server_side_complex_copy =
+        should_use_transwarp_server_side_copy(source_db_type, &request.content, &writable_columns);
+    if server_side_complex_copy {
+        if *target_db_type != DatabaseType::Transwarp || request.source_connection_id != request.target_connection_id {
+            return Err(format!(
+                "Native Inceptor complex columns in '{table}' require source and target on the same Transwarp connection"
+            ));
+        }
+        let source_table =
+            qualified_table(table, &request.source_schema, source_db_type, request.source_catalog.as_deref());
+        let destination_table =
+            qualified_table(&target_table, &request.target_schema, target_db_type, request.target_catalog.as_deref());
+        if source_table.eq_ignore_ascii_case(&destination_table) {
+            return Err(format!("Cannot transfer native complex columns in '{table}' onto the same table"));
+        }
+        if total_rows.is_none() {
+            return Err(format!("Cannot count native complex rows in '{table}' before transfer"));
+        }
+    }
 
     // Create table on target if requested
     if request.create_table {
@@ -9234,6 +9797,7 @@ where
                     | DatabaseType::Kyuubi
                     | DatabaseType::Impala
                     | DatabaseType::Argo
+                    | DatabaseType::Transwarp
             ))
         || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2);
     let target_columns = if needs_target_columns {
@@ -9300,6 +9864,27 @@ where
         col_names.clone()
     };
 
+    if server_side_complex_copy {
+        for (source_column, target_name) in writable_columns.iter().zip(&write_col_names) {
+            let Some(target_column) =
+                target_columns.iter().find(|column| column.name.eq_ignore_ascii_case(target_name))
+            else {
+                if target_table_preexisting {
+                    return Err(format!("Target table '{target_table}' is missing column '{target_name}'"));
+                }
+                continue;
+            };
+            if is_transwarp_complex_type(&source_column.data_type)
+                && !source_column.data_type.trim().eq_ignore_ascii_case(target_column.data_type.trim())
+            {
+                return Err(format!(
+                    "Native Inceptor column '{}' needs matching source and target types ({} vs {})",
+                    source_column.name, source_column.data_type, target_column.data_type
+                ));
+            }
+        }
+    }
+
     // Truncate target if overwrite mode (only when not rebuilding the table).
     // When drop_target_before_create is true, the target table was just created
     // and is already empty, so TRUNCATE is unnecessary.
@@ -9324,6 +9909,7 @@ where
                 | DatabaseType::Kyuubi
                 | DatabaseType::Impala
                 | DatabaseType::Argo
+                | DatabaseType::Transwarp
         ) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
@@ -9351,6 +9937,37 @@ where
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
+
+    if server_side_complex_copy {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
+        let sql = transwarp_server_side_copy_sql(
+            &col_names,
+            &write_col_names,
+            table,
+            &request.source_schema,
+            &target_table,
+            &request.target_schema,
+            request.quote_target_column_names,
+        );
+        execute_on_pool(state, target_pool_key, &sql)
+            .await
+            .map_err(|error| format!("Native Inceptor transfer failed for '{table}': {error}"))?;
+        let copied = total_rows.expect("complex transfer count validated");
+        progress_callback(TransferProgress {
+            transfer_id: request.transfer_id.clone(),
+            table: table.to_string(),
+            table_index,
+            total_tables,
+            rows_transferred: copied,
+            total_rows,
+            status: TransferStatus::Running,
+            error: None,
+            terminal: false,
+        });
+        return Ok(copied);
+    }
 
     // COPY fast path: PG-family append/overwrite transfers stream the whole
     // table through the COPY protocol instead of paged SELECT + multi-row
@@ -9434,9 +10051,11 @@ where
     // does not hold up mid-table.
     let mut keyset_indexes = transfer_keyset_column_indexes(&writable_columns, &primary_key_columns, source_db_type);
     let mut keyset_cursor: Vec<serde_json::Value> = Vec::new();
-    // A single Agent cursor keeps Kyuubi/Impala rows in one query execution.
+    // A single Agent cursor keeps Hive-family rows in one query execution. Inceptor
+    // rejects the generic LIMIT/OFFSET form, just like the other Agent cursor paths.
     // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
-    let use_hive_server_cursor = matches!(source_db_type, DatabaseType::Kyuubi | DatabaseType::Impala);
+    let use_hive_server_cursor =
+        matches!(source_db_type, DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp);
     let hive_server_transfer_sql = use_hive_server_cursor.then(|| {
         transfer_cursor_sql(
             &col_names,
@@ -10130,6 +10749,11 @@ where
             .map_err(|e| format!("Failed to create PostgreSQL domain {}: {e}", domain.domain_name))?;
     }
 
+    let sequence_if_not_exists = if selected_sequences.is_empty() {
+        true
+    } else {
+        target_supports_if_not_exists_ddl(state, target_pool_key).await
+    };
     for sequence in selected_sequences {
         if is_cancelled(&request.transfer_id).await {
             return Err("Cancelled".to_string());
@@ -10149,7 +10773,7 @@ where
         execute_on_pool(
             state,
             target_pool_key,
-            &generate_postgres_transfer_sequence_create_ddl(&sequence, &request.target_schema),
+            &generate_postgres_transfer_sequence_create_ddl(&sequence, &request.target_schema, sequence_if_not_exists),
         )
         .await
         .map_err(|e| format!("Failed to create PostgreSQL sequence {}: {e}", sequence.name))?;
@@ -10499,6 +11123,319 @@ where
 mod tests {
     use super::*;
 
+    async fn fake_transfer_agent_state(
+        error_category: &str,
+        error_message: &str,
+        vendor_code: i32,
+        fail_reopen: bool,
+    ) -> (AppState, std::path::PathBuf, std::path::PathBuf, String) {
+        fake_transfer_agent_state_with_proxy(error_category, error_message, vendor_code, fail_reopen, false).await
+    }
+
+    async fn fake_transfer_agent_state_with_proxy(
+        error_category: &str,
+        error_message: &str,
+        vendor_code: i32,
+        fail_reopen: bool,
+        use_proxy: bool,
+    ) -> (AppState, std::path::PathBuf, std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("dbx-transfer-agent-recovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            dir.join("plugins"),
+            dir.join("agents"),
+            "0.0.0-test",
+        );
+        let script_path = dir.join("agent.py");
+        let trace_path = dir.join("trace.jsonl");
+        let trace_json = serde_json::to_string(&trace_path.to_string_lossy()).unwrap();
+        let category_json = serde_json::to_string(error_category).unwrap();
+        let message_json = serde_json::to_string(error_message).unwrap();
+        let fail_reopen = if fail_reopen { "True" } else { "False" };
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import json, pathlib, sys
+trace = pathlib.Path({trace_json})
+category = {category_json}
+message = {message_json}
+vendor_code = {vendor_code}
+fail_reopen = {fail_reopen}
+open_count = 0
+execute_count = 0
+
+def record(req):
+    with trace.open('a', encoding='utf-8') as output:
+        output.write(json.dumps({{
+            'method': req['method'],
+            'session': req.get('params', {{}}).get('agentSessionId'),
+            'sql': req.get('params', {{}}).get('sql')
+        }}) + '\n')
+
+def structured_error(req, *, error_category, error_message, error_vendor_code, disposition, stage, outcome, retryable):
+    return {{
+        'jsonrpc': '2.0',
+        'id': req['id'],
+        'error': {{
+            'code': -1,
+            'message': error_message,
+            'data': {{
+                'contractVersion': 1,
+                'category': error_category,
+                'retryable': retryable,
+                'sessionDisposition': disposition,
+                'stage': stage,
+                'operationOutcome': outcome,
+                'agentSessionId': req.get('params', {{}}).get('agentSessionId'),
+                'sqlState': 'HY000',
+                'vendorCode': error_vendor_code,
+                'exceptionClass': 'java.sql.SQLTransientConnectionException'
+            }}
+        }}
+    }}
+
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    record(req)
+    method = req['method']
+    if method == 'handshake':
+        response = {{
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'result': {{
+                'protocolVersion': 2,
+                'agentProtocolVersion': 2,
+                'capabilities': ['multi_session', 'structured_error_v1', 'query']
+            }}
+        }}
+    elif method == 'open_session':
+        open_count += 1
+        if fail_reopen and open_count > 1:
+            response = structured_error(
+                req,
+                error_category='connection',
+                error_message='injected replacement open failure',
+                error_vendor_code=0,
+                disposition='keep',
+                stage='connect',
+                outcome='not_started',
+                retryable=True
+            )
+        else:
+            response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': {{'ok': True}}}}
+    elif method == 'execute_query':
+        execute_count += 1
+        if execute_count == 1:
+            response = structured_error(
+                req,
+                error_category=category,
+                error_message=message,
+                error_vendor_code=vendor_code,
+                disposition='quarantine' if category != 'sql' else 'keep',
+                stage='execute',
+                outcome='unknown',
+                retryable=False
+            )
+        else:
+            response = {{
+                'jsonrpc': '2.0',
+                'id': req['id'],
+                'result': {{
+                    'columns': [], 'column_types': [], 'column_sortables': [], 'rows': [],
+                    'affected_rows': 1, 'execution_time_ms': 1, 'truncated': False,
+                    'session_id': None, 'has_more': False
+                }}
+            }}
+    else:
+        response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': {{'ok': True}}}}
+    print(json.dumps(response), flush=True)
+"#
+            ),
+        )
+        .unwrap();
+
+        let launch_config = state.agent_manager.driver_launch_config_path("oceanbase-oracle");
+        std::fs::create_dir_all(launch_config.parent().unwrap()).unwrap();
+        std::fs::write(
+            launch_config,
+            serde_json::to_vec(&json!({
+                "command": if cfg!(windows) { "python" } else { "python3" },
+                "args": [script_path.to_string_lossy()],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut config = jdbc_transfer_config(
+            "jdbc:oceanbase://127.0.0.1:2883/tenant",
+            "com.oceanbase.jdbc.Driver",
+            "oceanbase-oracle",
+        );
+        config.id = "ob-transfer".to_string();
+        config.db_type = DatabaseType::OceanbaseOracle;
+        config.host = "127.0.0.1".to_string();
+        config.port = 2883;
+        config.database = Some("tenant".to_string());
+        config.keepalive_interval_secs = 0;
+        if use_proxy {
+            config.transport_layers = vec![crate::models::connection::TransportLayerConfig::Proxy(
+                crate::models::connection::ProxyTunnelConfig {
+                    profile_id: String::new(),
+                    id: "transfer-proxy".to_string(),
+                    name: String::new(),
+                    enabled: true,
+                    proxy_type: crate::models::connection::ProxyType::Socks5,
+                    host: "127.0.0.1".to_string(),
+                    port: 65000,
+                    username: String::new(),
+                    password: String::new(),
+                    test_target: None,
+                },
+            )];
+        }
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let pool_key =
+            state.get_or_create_pool_for_session("ob-transfer", Some("tenant"), Some("transfer-client")).await.unwrap();
+        assert!(pool_key.contains(":session:transfer-client"), "{pool_key}");
+        (state, dir, trace_path, pool_key)
+    }
+
+    fn fake_transfer_agent_trace(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn structured_agent_quarantine_prepares_a_fresh_session_without_replaying_the_failed_write() {
+        for (category, message, vendor_code) in [
+            ("connection", "OBE-01843: not a valid month", 1843),
+            (
+                "timeout",
+                "OBE-00600: internal error code, arguments: -4012, Timeout, query has reached the maximum query timeout",
+                600,
+            ),
+            ("canceled", "Query canceled", 0),
+        ] {
+            let (state, dir, trace_path, pool_key) =
+                fake_transfer_agent_state(category, message, vendor_code, false).await;
+
+            let first_sql = "INSERT INTO target_table VALUES (1)";
+            let first_error = execute_on_pool(&state, &pool_key, first_sql).await.unwrap_err();
+            let replacement_present = state.pool_handle(&pool_key).await.is_some();
+            let second_sql = "CREATE TABLE next_table (id NUMBER)";
+            let second_result = execute_on_pool(&state, &pool_key, second_sql).await;
+            let trace = fake_transfer_agent_trace(&trace_path);
+
+            state.shutdown(std::time::Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(first_error.contains(message), "{first_error}");
+            assert!(first_error.contains("\"sqlState\":\"HY000\""), "{first_error}");
+            assert!(first_error.contains(&format!("\"vendorCode\":{vendor_code}")), "{first_error}");
+            assert!(replacement_present, "replacement was not published under {pool_key}");
+            assert!(second_result.is_ok(), "next transfer operation did not get a fresh session: {second_result:?}");
+            let opens = trace.iter().filter(|entry| entry["method"] == "open_session").collect::<Vec<_>>();
+            let closes = trace.iter().filter(|entry| entry["method"] == "close_session").collect::<Vec<_>>();
+            let executes = trace.iter().filter(|entry| entry["method"] == "execute_query").collect::<Vec<_>>();
+            assert_eq!(opens.len(), 2, "trace: {trace:?}");
+            assert_eq!(closes.len(), 1, "trace: {trace:?}");
+            assert_eq!(executes.len(), 2, "trace: {trace:?}");
+            assert_eq!(executes.iter().filter(|entry| entry["sql"] == first_sql).count(), 1, "trace: {trace:?}");
+            assert_eq!(executes.iter().filter(|entry| entry["sql"] == second_sql).count(), 1, "trace: {trace:?}");
+            assert_eq!(closes[0]["session"], executes[0]["session"], "trace: {trace:?}");
+            assert_ne!(executes[0]["session"], executes[1]["session"], "trace: {trace:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_agent_quarantine_preserves_shared_transport_and_manual_session() {
+        let (state, dir, trace_path, pool_key) =
+            fake_transfer_agent_state_with_proxy("connection", "OBE-01843: not a valid month", 1843, false, true).await;
+        let transport_key = "ob-transfer:transport:0";
+        let initial_port = state.proxy_tunnels.local_port(transport_key).await.unwrap();
+        let manual_pool_key = state
+            .get_or_create_pool_for_session("ob-transfer", Some("tenant"), Some("manual-txn-protected"))
+            .await
+            .unwrap();
+        let manual_pool = state.pool_handle(&manual_pool_key).await.unwrap();
+        let PoolKind::Agent(manual_client) = manual_pool else {
+            panic!("expected manual Agent session");
+        };
+        manual_client.lock().await.begin_manual_transaction::<serde_json::Value>(None).await.unwrap();
+
+        let failed_sql = "INSERT INTO target_table VALUES (1)";
+        let failed_result = execute_on_pool(&state, &pool_key, failed_sql).await;
+        let manual_still_routed = state.pool_handle(&manual_pool_key).await.is_some();
+        let retained_port = state.proxy_tunnels.local_port(transport_key).await;
+        let next_result = execute_on_pool(&state, &pool_key, "CREATE TABLE next_table (id NUMBER)").await;
+        let rollback_result = manual_client.lock().await.rollback_manual_transaction::<serde_json::Value>().await;
+        let trace = fake_transfer_agent_trace(&trace_path);
+
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(failed_result.unwrap_err().contains("OBE-01843"));
+        assert!(manual_still_routed, "recovery removed a sibling manual-transaction pool");
+        assert_eq!(retained_port, Some(initial_port), "recovery reset the shared transport");
+        assert!(next_result.is_ok(), "next transfer operation failed: {next_result:?}");
+        assert!(rollback_result.is_ok(), "manual transaction was lost: {rollback_result:?}");
+        let manual_session =
+            &trace.iter().find(|entry| entry["method"] == "begin_manual_transaction").unwrap()["session"];
+        assert!(trace.iter().all(|entry| entry["method"] != "close_session" || &entry["session"] != manual_session));
+        assert_eq!(
+            trace.iter().filter(|entry| entry["method"] == "execute_query" && entry["sql"] == failed_sql).count(),
+            1,
+            "failed write was replayed: {trace:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_agent_sql_keep_reuses_the_session() {
+        let (state, dir, trace_path, pool_key) = fake_transfer_agent_state("sql", "syntax error", 900, false).await;
+
+        let first_sql = "INSERT INTO target_table VALUES (1)";
+        let first_error = execute_on_pool(&state, &pool_key, first_sql).await.unwrap_err();
+        let second_sql = "CREATE TABLE next_table (id NUMBER)";
+        let second_result = execute_on_pool(&state, &pool_key, second_sql).await;
+        let trace = fake_transfer_agent_trace(&trace_path);
+
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(first_error.contains("syntax error"), "{first_error}");
+        assert!(second_result.is_ok(), "{second_result:?}");
+        let opens = trace.iter().filter(|entry| entry["method"] == "open_session").collect::<Vec<_>>();
+        let closes = trace.iter().filter(|entry| entry["method"] == "close_session").collect::<Vec<_>>();
+        let executes = trace.iter().filter(|entry| entry["method"] == "execute_query").collect::<Vec<_>>();
+        assert_eq!(opens.len(), 1, "trace: {trace:?}");
+        assert!(closes.is_empty(), "trace: {trace:?}");
+        assert_eq!(executes.len(), 2, "trace: {trace:?}");
+        assert_eq!(executes[0]["session"], executes[1]["session"], "trace: {trace:?}");
+    }
+
+    #[tokio::test]
+    async fn structured_agent_quarantine_recreation_failure_preserves_the_original_error() {
+        let original_message = "OBE-01843: not a valid month";
+        let (state, dir, trace_path, pool_key) =
+            fake_transfer_agent_state("connection", original_message, 1843, true).await;
+
+        let first_error = execute_on_pool(&state, &pool_key, "INSERT INTO target_table VALUES (1)").await.unwrap_err();
+        let trace = fake_transfer_agent_trace(&trace_path);
+        let pool_missing = state.pool_handle(&pool_key).await.is_none();
+
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(first_error.contains(original_message), "{first_error}");
+        assert!(!first_error.contains("injected replacement open failure"), "{first_error}");
+        assert_eq!(trace.iter().filter(|entry| entry["method"] == "execute_query").count(), 1, "trace: {trace:?}");
+        assert_eq!(trace.iter().filter(|entry| entry["method"] == "open_session").count(), 2, "trace: {trace:?}");
+        assert!(pool_missing);
+    }
+
     #[test]
     fn transfer_query_timeout_errors_are_classified() {
         assert!(is_transfer_query_timeout("Query timed out after 1 seconds"));
@@ -10527,6 +11464,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -12232,8 +13170,14 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             };
 
             assert_eq!(
-                generate_postgres_transfer_sequence_create_ddl(&sequence, "archive"),
+                generate_postgres_transfer_sequence_create_ddl(&sequence, "archive", true),
                 "CREATE SEQUENCE IF NOT EXISTS \"archive\".\"biz_banner_id_seq\"\n  AS bigint\n  START WITH 5\n  INCREMENT BY 2\n  MINVALUE -10\n  MAXVALUE 999\n  CACHE 7\n  CYCLE"
+            );
+            // PostgreSQL 9.2-9.4 reject `CREATE SEQUENCE IF NOT EXISTS` just like the
+            // index form, so legacy targets get the plain statement.
+            assert_eq!(
+                generate_postgres_transfer_sequence_create_ddl(&sequence, "archive", false),
+                "CREATE SEQUENCE \"archive\".\"biz_banner_id_seq\"\n  AS bigint\n  START WITH 5\n  INCREMENT BY 2\n  MINVALUE -10\n  MAXVALUE 999\n  CACHE 7\n  CYCLE"
             );
             assert_eq!(
                 generate_postgres_transfer_sequence_setval_sql(&sequence, "archive"),
@@ -12284,6 +13228,36 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             drop_target_before_create: false,
             drop_target_confirmed: false,
         }
+    }
+
+    #[test]
+    fn transfer_column_validation_rejects_opaque_state_for_actual_doris_table() {
+        let request = test_transfer_request(vec!["first_state", "actual_state"]);
+        let columns = vec![test_column("id", "int"), test_column("v2", "agg_state<group_concat(text)>")];
+
+        let error = ensure_transfer_columns_supported(&request, true, "actual_state", &columns).unwrap_err();
+
+        assert!(error.contains("`v2`"), "{error}");
+        assert!(error.contains("`actual_state`"), "{error}");
+        assert!(!error.contains("first_state"), "{error}");
+    }
+
+    #[test]
+    fn transfer_column_validation_is_doris_data_only_and_structure_aware() {
+        let columns = vec![test_column("v2", "AGG_STATE<SUM(INT)>")];
+        let data_request = test_transfer_request(vec!["states"]);
+        assert!(ensure_transfer_columns_supported(&data_request, false, "states", &columns).is_ok());
+
+        let structure_request = TransferRequest { content: TransferContent::StructureOnly, ..data_request };
+        assert!(ensure_transfer_columns_supported(&structure_request, true, "states", &columns).is_ok());
+    }
+
+    #[test]
+    fn transfer_column_validation_allows_regular_doris_columns() {
+        let request = test_transfer_request(vec!["items"]);
+        let columns = vec![test_column("id", "bigint"), test_column("name", "varchar(64)")];
+
+        assert!(ensure_transfer_columns_supported(&request, true, "items", &columns).is_ok());
     }
 
     #[test]
@@ -14759,7 +15733,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             },
         ];
 
-        let index_sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let index_sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
         let foreign_key_sql = generate_postgres_foreign_key_ddl(&foreign_keys, "orders", "public", "archive");
 
         assert_eq!(
@@ -14794,12 +15768,50 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,
             vec!["CREATE INDEX IF NOT EXISTS \"users_name_trgm_idx\" ON \"public\".\"users\" USING gin (\"name\" gin_trgm_ops)".to_string()]
         );
+    }
+
+    #[test]
+    fn postgres_index_ddl_drops_if_not_exists_for_legacy_servers() {
+        // PostgreSQL 9.2/9.3/9.4 reject `CREATE INDEX IF NOT EXISTS` outright
+        // (`syntax error at or near "NOT"`), so the transfer must fall back to the
+        // plain form there (issue #8853).
+        let indexes = vec![db::IndexInfo {
+            name: "users_name_idx".to_string(),
+            columns: vec!["name".to_string(), "status".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false, false],
+            column_opclasses: vec![None, None],
+            key_options: Vec::new(),
+            constraint_backed: false,
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", false);
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX \"users_name_idx\" ON \"public\".\"users\" (\"name\", \"status\")".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_if_not_exists_is_version_gated() {
+        assert!(postgres_if_not_exists_supported(Some(150_001)));
+        assert!(postgres_if_not_exists_supported(Some(90_500)));
+        assert!(!postgres_if_not_exists_supported(Some(90_499)));
+        assert!(!postgres_if_not_exists_supported(Some(90_223)));
+        // Unknown version keeps the idempotent form used by every modern target.
+        assert!(postgres_if_not_exists_supported(None));
     }
 
     #[test]
@@ -14819,7 +15831,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,
@@ -14850,7 +15862,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,
@@ -14876,7 +15888,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,
@@ -14906,7 +15918,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "event_log", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "event_log", "public", true);
 
         assert_eq!(
             sql,
@@ -14931,7 +15943,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "events", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "events", "public", true);
 
         assert_eq!(
             sql,
@@ -14957,7 +15969,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             constraint_backed: false,
         }];
 
-        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public", true);
 
         assert_eq!(
             sql,
@@ -15902,6 +16914,74 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn oceanbase_oracle_multi_row_insert_uses_insert_all() {
+        // OceanBase's Oracle mode rejects multi-row VALUES but implements Oracle's
+        // INSERT ALL, so the import/transfer generators must batch through it instead
+        // of degrading to one INSERT per row.
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Brien")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT ALL
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (1, 'Ada')
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (2, 'O''Brien')
+SELECT 1 FROM dual"#
+        );
+        assert!(!sql.contains("),\n("));
+    }
+
+    #[test]
+    fn oceanbase_oracle_single_row_insert_keeps_values_shape() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES
+(1, 'Ada')"#
+        );
+    }
+
+    #[test]
+    fn oceanbase_oracle_transfer_write_batches_limit_insert_all_rows() {
+        let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("id")],
+            &[Some(String::from("number"))],
+            &rows,
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            &[],
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].matches("\nINTO ").count(), MAX_ORACLE_INSERT_ALL_ROWS);
+        assert!(statements[0].starts_with("INSERT ALL\nINTO "));
+        assert!(statements[0].ends_with("SELECT 1 FROM dual"));
+    }
+
+    #[test]
     fn oracle_transfer_write_batches_limit_insert_all_rows() {
         let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
         let statements = generate_transfer_write_sql_batches(
@@ -15953,6 +17033,68 @@ SELECT 1 FROM dual"#
         assert!(sql.starts_with("INSERT ALL\nINTO "));
         assert!(sql.ends_with("SELECT 1 FROM dual"));
         assert!(!sql.contains("),\n("));
+    }
+
+    #[test]
+    fn oceanbase_oracle_jdbc_profile_routes_create_table_through_oracle_mode() {
+        let config = jdbc_transfer_config(
+            "jdbc:oceanbase://localhost:2883/ORCL",
+            "com.oceanbase.jdbc.Driver",
+            "OceanBase-Oracle",
+        );
+        let target_db = effective_transfer_database_type(&config);
+
+        assert_eq!(target_db, DatabaseType::OceanbaseOracle);
+
+        let ddl = generate_create_table_ddl(
+            &[
+                test_column("INSUPROKEY", "VARCHAR2(36 BYTE)"),
+                test_column("PREMIUM", "NUMBER(14,2)"),
+                test_column("DETAIL", "CLOB"),
+            ],
+            "PRPDINSURANCEPLANPROM",
+            "CPRPALL",
+            "CPRPALL",
+            &target_db,
+            &DatabaseType::Oracle,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            ddl,
+            "CREATE TABLE \"CPRPALL\".\"PRPDINSURANCEPLANPROM\" (\n  \"INSUPROKEY\" VARCHAR(36 byte),\n  \"PREMIUM\" DECIMAL(14,2),\n  \"DETAIL\" CLOB\n)"
+        );
+    }
+
+    #[test]
+    fn oceanbase_jdbc_url_without_oracle_profile_stays_generic() {
+        for profile in ["", "oceanbase"] {
+            let config =
+                jdbc_transfer_config("jdbc:oceanbase://localhost:2883/test", "com.oceanbase.jdbc.Driver", profile);
+            let target_db = effective_transfer_database_type(&config);
+
+            assert_eq!(target_db, DatabaseType::Jdbc, "profile: {profile}");
+
+            let ddl = generate_create_table_ddl(
+                &[test_column("INSUPROKEY", "VARCHAR2(36 BYTE)"), test_column("PREMIUM", "NUMBER(14,2)")],
+                "PRPDINSURANCEPLANPROM",
+                "CPRPALL",
+                "CPRPALL",
+                &target_db,
+                &DatabaseType::Oracle,
+                None,
+                None,
+            );
+            assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS "), "profile {profile}: {ddl}");
+            assert!(ddl.contains("\"INSUPROKEY\" VARCHAR(36)"), "profile {profile}: {ddl}");
+            assert!(ddl.contains("\"PREMIUM\" NUMERIC"), "profile {profile}: {ddl}");
+        }
+
+        let mut mysql_mode =
+            jdbc_transfer_config("jdbc:oceanbase://localhost:2883/test", "com.oceanbase.jdbc.Driver", "oceanbase");
+        mysql_mode.db_type = DatabaseType::Mysql;
+        assert_eq!(effective_transfer_database_type(&mysql_mode), DatabaseType::Mysql);
     }
 
     #[test]
@@ -16312,6 +17454,137 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn inceptor_insert_uses_select_for_ordinary_tables() {
+        assert_eq!(SqlBatchLimits::for_database(&DatabaseType::Transwarp, 500).max_rows, 100);
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("label")],
+            &[Some(String::from("int")), Some(String::from("string"))],
+            &[vec![json!(1), json!("first")], vec![json!(2), json!("second")]],
+            "events",
+            "analytics",
+            &DatabaseType::Transwarp,
+            None,
+        );
+        assert_eq!(
+            sql,
+            "INSERT INTO `analytics`.`events` (`id`, `label`)\nSELECT 1, 'first'\nUNION ALL\nSELECT 2, 'second'"
+        );
+
+        let batches = generate_insert_typed_sql_batches(
+            &[String::from("id"), String::from("label")],
+            &[Some(String::from("int")), Some(String::from("string"))],
+            &[vec![json!(1), json!("first")], vec![json!(2), json!("second")]],
+            "events",
+            "analytics",
+            &DatabaseType::Transwarp,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 76, hard_sql_bytes: Some(76) },
+        )
+        .unwrap();
+        assert_eq!(batches.iter().map(|(_, rows)| *rows).sum::<usize>(), 2);
+        assert!(batches.iter().all(|(sql, _)| sql.len() <= 76 && sql.contains("\nSELECT ")));
+    }
+
+    #[test]
+    fn inceptor_native_complex_copy_uses_server_side_projection() {
+        assert!(is_transwarp_complex_type("ARRAY<INT>"));
+        assert!(is_transwarp_complex_type("map<string,int>"));
+        assert!(is_transwarp_complex_type("struct<a:int>"));
+        assert!(!is_transwarp_complex_type("STRING"));
+        let columns = vec![db::ColumnInfo { data_type: "ARRAY<INT>".into(), ..Default::default() }];
+        assert!(!should_use_transwarp_server_side_copy(
+            &DatabaseType::Transwarp,
+            &TransferContent::StructureOnly,
+            &columns,
+        ));
+        assert!(should_use_transwarp_server_side_copy(
+            &DatabaseType::Transwarp,
+            &TransferContent::StructureAndData,
+            &columns,
+        ));
+        assert!(should_use_transwarp_server_side_copy(&DatabaseType::Transwarp, &TransferContent::DataOnly, &columns,));
+        assert!(!should_use_transwarp_server_side_copy(
+            &DatabaseType::Hive,
+            &TransferContent::StructureAndData,
+            &columns,
+        ));
+        let sql = transwarp_server_side_copy_sql(
+            &["id".into(), "numbers".into(), "tags".into()],
+            &["id".into(), "numbers".into(), "tags".into()],
+            "events",
+            "source_db",
+            "events",
+            "target_db",
+            true,
+        );
+        assert_eq!(sql, "INSERT INTO `target_db`.`events` (`id`, `numbers`, `tags`) SELECT `id`, `numbers`, `tags` FROM `source_db`.`events`");
+    }
+
+    #[test]
+    fn postgres_insert_can_skip_duplicate_rows() {
+        let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
+            &[String::from("id"), String::from("name")],
+            &[String::from("(42, 'Ada')"), String::from("(43, 'Bob')")],
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 2);
+        assert!(batches[0].0.contains("ON CONFLICT DO NOTHING"));
+        assert!(batches[0].0.contains("(42, 'Ada')"));
+        assert!(batches[0].0.contains("(43, 'Bob')"));
+    }
+
+    #[test]
+    fn mysql_insert_can_skip_duplicate_rows() {
+        let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
+            &[String::from("id"), String::from("name")],
+            &[String::from("(42, 'Ada')"), String::from("(43, 'Bob')")],
+            "users",
+            "public",
+            &DatabaseType::Mysql,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 2);
+        assert!(batches[0].0.contains("ON DUPLICATE KEY UPDATE"));
+        assert!(batches[0].0.contains("`id` = `id`"));
+        assert!(batches[0].0.contains("(42, 'Ada')"));
+        assert!(batches[0].0.contains("(43, 'Bob')"));
+    }
+
+    #[test]
+    fn sqlite_insert_can_skip_duplicate_rows() {
+        let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
+            &[String::from("id"), String::from("name")],
+            &[String::from("(42, 'Ada')"), String::from("(43, 'Bob')")],
+            "users",
+            "",
+            &DatabaseType::Sqlite,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1, 2);
+        assert!(batches[0].0.contains("ON CONFLICT DO NOTHING"));
+        assert!(batches[0].0.contains("(42, 'Ada')"));
+        assert!(batches[0].0.contains("(43, 'Bob')"));
+    }
+
+    #[test]
     fn database_from_pool_key_handles_session_scoped_keys() {
         assert_eq!(database_from_pool_key("conn:analytics"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn:analytics:session:editor-1"), Some("analytics"));
@@ -16356,6 +17629,7 @@ SELECT 1 FROM dual"#
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -16439,6 +17713,23 @@ SELECT 1 FROM dual"#
             ),
             PoolErrorAction::Discard
         );
+    }
+
+    #[test]
+    fn fresh_transfer_session_preparation_is_scoped_to_structured_agent_quarantine() {
+        let quarantine = "Agent RPC error (-1): lost\nDBX_AGENT_ERROR_DATA:{\"contractVersion\":1,\"category\":\"connection\",\"retryable\":false,\"sessionDisposition\":\"quarantine\",\"stage\":\"execute\",\"operationOutcome\":\"unknown\"}";
+        let keep = "Agent RPC error (-1): syntax error\nDBX_AGENT_ERROR_DATA:{\"contractVersion\":1,\"category\":\"sql\",\"retryable\":false,\"sessionDisposition\":\"keep\",\"stage\":\"execute\",\"operationOutcome\":\"unknown\"}";
+        let replace_runtime = "Agent RPC error (-1): exhausted\nDBX_AGENT_ERROR_DATA:{\"contractVersion\":1,\"category\":\"resource\",\"retryable\":false,\"sessionDisposition\":\"replace_runtime\",\"stage\":\"execute\",\"operationOutcome\":\"unknown\"}";
+
+        assert!(should_prepare_fresh_agent_transfer_session(Some(DatabaseType::OceanbaseOracle), quarantine));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::Jdbc), quarantine));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::Postgres), quarantine));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::OceanbaseOracle), keep));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::OceanbaseOracle), replace_runtime));
+        assert!(!should_prepare_fresh_agent_transfer_session(
+            Some(DatabaseType::OceanbaseOracle),
+            "Agent RPC error (-1): legacy connection error"
+        ));
     }
 
     #[test]

@@ -110,6 +110,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "oceanbase-oracle",
       "oscar",
       "sundb",
+      "transwarp",
       "uxdb",
       "vastbase",
       "xugu",

@@ -1,6 +1,6 @@
 [package]
 name = "dbx-mcp"
-version = "0.4.97"
+version = "0.4.101"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -24,8 +24,10 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
+futures = "0.3"
 dbx-core = { path = "../dbx-core", default-features = false }
 dirs = "6"
+env_logger = "0.11"
 log = "0.4"
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 axum = "0.8"

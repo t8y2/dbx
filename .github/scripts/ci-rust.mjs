@@ -12,10 +12,13 @@ export function rustCommand(action, group, mode) {
   if (mode === "full") capabilityFeatures.push("system-fonts");
   const appFeatures = ["dbx", "dbx-core", "dbx-web"].flatMap((name) => capabilityFeatures.map((feature) => `${name}/${feature}`));
   const foundationFeatures = ["dbx-types/mq-admin", "dbx-types/openapi", "dbx-sql/duckdb-sidecar", "dbx-sql/openapi",
+    "dbx-sql-data/openapi", "dbx-sql-schema/duckdb-sidecar",
     "dbx-platform/downloads", "dbx-platform/host-prompts", "dbx-platform/test-support", "dbx-plugin-runtime/default", "dbx-plugin-runtime/test-support"];
   const features = group === "foundation" ? foundationFeatures : group === "drivers" ? [
     ...["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-bundled", "sqlite-sqlcipher", "test-support"].map((feature) => `dbx-drivers/${feature}`),
-    "dbx-sqlite-worker/runtime", "dbx-types/openapi", "dbx-sql/openapi",
+    "dbx-driver-agent/test-support", "dbx-driver-mysql/test-support", "dbx-driver-redis/test-support",
+    "dbx-driver-support/test-support",
+    "dbx-sqlite-worker/runtime", "dbx-types/openapi", "dbx-sql-data/openapi",
   ] : appFeatures;
   const packages = group === "workspace" ? ["--workspace"] : rustGroups[group].flatMap((name) => ["--package", name]);
   const command = action === "test" ? ["nextest", "run", "--no-fail-fast"] : action === "doctest" ? ["test", "--doc"] : [action];

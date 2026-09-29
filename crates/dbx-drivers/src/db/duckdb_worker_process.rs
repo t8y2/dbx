@@ -210,6 +210,35 @@ impl DuckDbWorkerClient {
         cancel_token: Option<CancellationToken>,
         query_timeout: Option<Duration>,
     ) -> Result<db::QueryResult, DuckDbWorkerError> {
+        self.execute_typed_with_options(database, sql, max_rows, cancel_token, query_timeout, false).await
+    }
+
+    /// Executes a query with DuckDB insertion-order preservation enabled for
+    /// the duration of that request. This is used by Parquet pagination:
+    /// independent LIMIT/OFFSET scans must see the same source order even
+    /// when the connection's init script disabled `preserve_insertion_order`.
+    pub async fn execute_preserving_insertion_order(
+        &self,
+        database: Option<String>,
+        sql: String,
+        max_rows: Option<usize>,
+        cancel_token: Option<CancellationToken>,
+        query_timeout: Option<Duration>,
+    ) -> Result<db::QueryResult, String> {
+        self.execute_typed_with_options(database, sql, max_rows, cancel_token, query_timeout, true)
+            .await
+            .map_err(|error| error.message)
+    }
+
+    async fn execute_typed_with_options(
+        &self,
+        database: Option<String>,
+        sql: String,
+        max_rows: Option<usize>,
+        cancel_token: Option<CancellationToken>,
+        query_timeout: Option<Duration>,
+        preserve_insertion_order: bool,
+    ) -> Result<db::QueryResult, DuckDbWorkerError> {
         let _query_guard = self.inner.query_lock.lock().await;
         let client = self.clone();
         // Cancellation and timeout restart the worker via cancel_or_kill below. An ordinary
@@ -228,7 +257,7 @@ impl DuckDbWorkerClient {
             match client
                 .send_request_structured::<db::QueryResult>(
                     DuckDbWorkerMethod::Execute,
-                    DuckDbWorkerExecuteParams { sql, database, max_rows },
+                    DuckDbWorkerExecuteParams { sql, database, max_rows, preserve_insertion_order },
                     None,
                 )
                 .await

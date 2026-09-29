@@ -2744,8 +2744,51 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
 .panel-resize-handle--left {
   left: -4px;
 }
+.app-panel-gutter .panel-resize-handle--right::before {
+  transform: translate(calc(-50% + 2.5px), -50%);
+}
+.app-panel-gutter .panel-resize-handle--left::before {
+  transform: translate(calc(-50% - 2.5px), -50%);
+}
+/* The vertical editor tab bar is its own overflow-hidden clipping context, so
+   its handles keep the grip dots just inside the bar edge instead of the
+   gutter center, where they would be clipped away entirely. */
+.app-panel-gutter .app-tab-bar > .panel-resize-handle--right::before {
+  transform: translate(calc(-50% - 2.5px), -50%);
+}
+.app-panel-gutter .app-tab-bar > .panel-resize-handle--left::before {
+  transform: translate(calc(-50% + 2.5px), -50%);
+}
 .panel-resize-handle::before {
-  display: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 5px 0 currentColor, 0 10px 0 currentColor;
+  color: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+  content: "";
+  opacity: 0.75;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  transition: color 140ms ease, opacity 140ms ease;
+}
+.panel-resize-handle:hover::before,
+.panel-resize-handle:focus-visible::before,
+.panel-resize-handle:active::before {
+  color: var(--ring);
+  opacity: 1;
+}
+body.dbx-is-resizing .panel-resize-handle::before {
+  color: var(--primary);
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-resize-handle::before {
+    transition: none;
+  }
 }
 
 /* Shared menu surfaces */

@@ -76,6 +76,15 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const containerRef = ref<HTMLDivElement>();
+const whereEditorRef = ref<InstanceType<typeof DataGridConditionEditor>>();
+
+function focusWhere(): boolean {
+  if (!props.canUseWhereSearch || !whereEditorRef.value) return false;
+  whereEditorRef.value.focus();
+  return true;
+}
+
+defineExpose({ focusWhere });
 const filterBuilderRef = ref<InstanceType<typeof DataGridFilterBuilder>>();
 const pendingFirstEmptyRuleColumnSearch = ref(false);
 let openingFirstEmptyRuleColumnSearch = false;
@@ -262,6 +271,7 @@ onUnmounted(onResizeEnd);
         <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ filterButtonCount }}</span>
       </button>
       <DataGridConditionEditor
+        ref="whereEditorRef"
         :model-value="whereInput"
         kind="where"
         :columns="conditionColumns"

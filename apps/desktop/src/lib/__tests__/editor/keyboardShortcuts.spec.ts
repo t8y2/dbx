@@ -6,6 +6,7 @@ import {
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
   isGoToColumnShortcut,
+  isFocusWhereShortcut,
   isGoToFirstPageShortcut,
   isGoToLastPageShortcut,
   isGoToNextPageShortcut,
@@ -20,6 +21,12 @@ import { formatShortcutDisplay, isMacShortcutPlatform } from "@/lib/editor/short
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 
 describe("keyboard shortcut matching", () => {
+  it("matches configured WHERE focus on macOS and Windows while respecting a cleared binding", () => {
+    expect(isFocusWhereShortcut({ key: "L", metaKey: true, shiftKey: true }, { focusWhere: "Mod+Shift+L" }, "MacIntel")).toBe(true);
+    expect(isFocusWhereShortcut({ key: "L", ctrlKey: true, shiftKey: true }, { focusWhere: "Mod+Shift+L" }, "Win32")).toBe(true);
+    expect(isFocusWhereShortcut({ key: "L", ctrlKey: true, shiftKey: true }, { focusWhere: "" }, "Win32")).toBe(false);
+  });
+
   it("records modifier-only mouse shortcut settings", () => {
     expect(eventToModifierOnlyShortcut({ key: "Alt", altKey: true })).toBe("Alt");
     expect(eventToModifierOnlyShortcut({ key: "Shift", shiftKey: true })).toBe("Shift");

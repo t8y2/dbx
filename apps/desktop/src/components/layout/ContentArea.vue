@@ -200,6 +200,7 @@ import { isAiRedisConsoleTarget, type AiConversationBinding } from "@/lib/ai/aiC
 type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: (target?: Element | null) => boolean;
+  focusWhere: () => boolean;
   openGoToColumn: () => boolean;
   openCellDetailSearch: () => boolean;
   nullColumnsHidden: boolean;
@@ -1160,6 +1161,11 @@ function focusSearch(target: Element | null = null): boolean {
   return dataGridRef.value?.focusSearch(target) ?? false;
 }
 
+function focusWhere(): boolean {
+  if (props.activeTab.mode !== "data") return false;
+  return dataGridRef.value?.focusWhere() ?? false;
+}
+
 function openGoToColumn(): boolean {
   if (props.activeTab.mode !== "data") return false;
   return dataGridRef.value?.openGoToColumn() ?? false;
@@ -1624,6 +1630,7 @@ function locateExecutionSummaryError(item: ExecutionSummaryItem) {
 
 defineExpose({
   focusSearch,
+  focusWhere,
   openGoToColumn,
   refreshData,
   toggleResultsPane,

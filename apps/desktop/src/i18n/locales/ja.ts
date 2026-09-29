@@ -7841,6 +7841,7 @@ export default withEnglishFallback({
     shortcutEditTableStructure: "テーブル構造を編集",
     shortcutCopyCurrentRow: "現在のデータ行をコピー",
     shortcutDeleteCurrentRow: "現在のデータ行を削除",
+    shortcutFocusWhere: "WHERE 条件入力欄にフォーカス",
     shortcutGoToColumn: "列へ移動",
     shortcutGoToFirstPage: "最初のページ",
     shortcutGoToPreviousPage: "前のページ",

@@ -7625,6 +7625,7 @@ export default withEnglishFallback({
     shortcutEditTableStructure: "테이블 구조 편집",
     shortcutCopyCurrentRow: "현재 데이터 행 복사",
     shortcutDeleteCurrentRow: "현재 데이터 행 삭제",
+    shortcutFocusWhere: "WHERE 조건 입력란에 포커스",
     shortcutGoToColumn: "컬럼으로 이동",
     shortcutGoToFirstPage: "첫 페이지",
     shortcutGoToPreviousPage: "이전 페이지",

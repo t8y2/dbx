@@ -82,6 +82,15 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("goToFirstPage", "Mod+F", shortcuts)).toBeNull();
   });
 
+  it("adds the focus-WHERE default to existing settings and detects grid conflicts", () => {
+    expect(DEFAULT_SHORTCUT_SETTINGS.focusWhere).toBe("Mod+Shift+L");
+    expect(normalizeShortcutSettings({ executeSql: "Mod+Enter" }).focusWhere).toBe("Mod+Shift+L");
+    expect(normalizeShortcutSettings({ focusWhere: "" }).focusWhere).toBe("");
+    const shortcuts = normalizeShortcutSettings({ focusWhere: "Mod+D" });
+    expect(shortcuts.focusWhere).toBe("Mod+D");
+    expect(findShortcutConflict("focusWhere", shortcuts.focusWhere, shortcuts)).toBe("copyCurrentRow");
+  });
+
   it("registers go to column as an unassigned grid shortcut", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "goToColumn");
 

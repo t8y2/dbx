@@ -7881,6 +7881,7 @@ export default withEnglishFallback({
     shortcutEditTableStructure: "Cədvəlin quruluşunu redaktə et",
     shortcutCopyCurrentRow: "Cari məlumat sətrini kopyala",
     shortcutDeleteCurrentRow: "Cari məlumat sətrini sil",
+    shortcutFocusWhere: "WHERE şərtinə fokuslan",
     shortcutGoToColumn: "Sütuna keç",
     shortcutGoToFirstPage: "İlk səhifə",
     shortcutGoToPreviousPage: "Əvvəlki səhifə",

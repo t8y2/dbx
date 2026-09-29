@@ -7780,6 +7780,7 @@ export default withEnglishFallback({
     shortcutEditTableStructure: "Tablo yapısını düzenle",
     shortcutCopyCurrentRow: "Geçerli veri satırını kopyala",
     shortcutDeleteCurrentRow: "Geçerli veri satırını sil",
+    shortcutFocusWhere: "WHERE koşuluna odaklan",
     shortcutGoToColumn: "Sütuna git",
     shortcutGoToFirstPage: "İlk sayfa",
     shortcutGoToPreviousPage: "Önceki sayfa",

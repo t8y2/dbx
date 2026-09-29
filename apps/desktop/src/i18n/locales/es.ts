@@ -7919,6 +7919,7 @@ export default withEnglishFallback({
     shortcutEditTableStructure: "Editar estructura de tabla",
     shortcutCopyCurrentRow: "Copiar fila de datos actual",
     shortcutDeleteCurrentRow: "Eliminar fila de datos actual",
+    shortcutFocusWhere: "Enfocar la condición WHERE",
     shortcutGoToColumn: "Ir a la columna",
     shortcutGoToFirstPage: "Primera página",
     shortcutGoToPreviousPage: "Página anterior",

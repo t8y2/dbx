@@ -9116,6 +9116,7 @@ export default withEnglishFallback({
     shortcutEditTableStructure: "Изменить структуру таблицы",
     shortcutCopyCurrentRow: "Копировать текущую строку данных",
     shortcutDeleteCurrentRow: "Удалить текущую строку данных",
+    shortcutFocusWhere: "Фокус на условии WHERE",
     shortcutGoToColumn: "Перейти к столбцу",
     shortcutGoToFirstPage: "Первая страница",
     shortcutGoToPreviousPage: "Предыдущая страница",

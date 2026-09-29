@@ -273,6 +273,10 @@ export function isDeleteCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?:
   return matchesShortcut(event, actionShortcut("deleteCurrentRow", shortcuts));
 }
 
+export function isFocusWhereShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("focusWhere", shortcuts, platform), platform);
+}
+
 export function isGoToColumnShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("goToColumn", shortcuts, platform), platform);
 }

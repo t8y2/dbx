@@ -8682,6 +8682,7 @@ export default withEnglishFallback({
     shortcutEditTableStructure: "编辑表结构",
     shortcutCopyCurrentRow: "复制当前数据行",
     shortcutDeleteCurrentRow: "删除当前数据行",
+    shortcutFocusWhere: "聚焦 WHERE 条件输入框",
     shortcutGoToColumn: "跳转列",
     shortcutGoToFirstPage: "第一页",
     shortcutGoToPreviousPage: "上一页",

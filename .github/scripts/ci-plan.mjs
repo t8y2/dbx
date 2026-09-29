@@ -26,6 +26,12 @@ export function knownJavaDrivers(root, nativeDrivers) {
   }
 }
 
+export function cargoMetadata(root, execute = execFileSync) {
+  return JSON.parse(execute("cargo", ["+stable", "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"], {
+    cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+  }));
+}
+
 export function planCi({ files, metadata, root, eventName = "pull_request", rustChanged = false, agentsChanged = false, javaDrivers }) {
   const unknownDiff = files === null;
   files ??= [];
@@ -97,9 +103,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const root = process.cwd();
-  const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"], {
-    cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
-  }));
+  const metadata = cargoMetadata(root);
   const plan = planCi({
     files: changedPaths(process.env.BASE_SHA, root), metadata, root, eventName: process.env.GITHUB_EVENT_NAME,
     rustChanged: process.env.RUST_CHANGED === "true", agentsChanged: process.env.AGENTS_CHANGED === "true",

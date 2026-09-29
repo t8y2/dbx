@@ -1630,6 +1630,10 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 }
 
 fn parse_delimiter_command(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.eq_ignore_ascii_case("delimiter;") {
+        return Some(";");
+    }
     let bytes = line.as_bytes();
     let rest = if bytes.len() > 10
         && (bytes[..10].eq_ignore_ascii_case(b"delimiter ") || bytes[..10].eq_ignore_ascii_case(b"delimiter\t"))
@@ -3690,6 +3694,12 @@ SELECT 3;";
     fn delimiter_no_space_before_delim() {
         let sql = "DELIMITER //\nCREATE PROCEDURE foo() BEGIN SELECT 1; END//\nDELIMITER ;";
         assert_eq!(super::split_sql_statements(sql), vec!["CREATE PROCEDURE foo() BEGIN SELECT 1; END"]);
+    }
+
+    #[test]
+    fn delimiter_reset_without_whitespace() {
+        let sql = "DELIMITER //\nCREATE PROCEDURE foo() BEGIN SELECT 1; END//\nDELIMITER;\nCALL foo();";
+        assert_eq!(super::split_sql_statements(sql), vec!["CREATE PROCEDURE foo() BEGIN SELECT 1; END", "CALL foo()"]);
     }
 
     #[test]

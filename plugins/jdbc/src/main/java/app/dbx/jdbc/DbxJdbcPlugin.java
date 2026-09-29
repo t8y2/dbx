@@ -2472,6 +2472,21 @@ public final class DbxJdbcPlugin {
             }
         } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
+        if (primaryColumnsBySequence.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+            try (ResultSet rs = meta.getPrimaryKeys(catalog, null, table)) {
+                while (rs != null && rs.next()) {
+                    String name = rs.getString("PK_NAME");
+                    if (name != null && !name.isBlank()) {
+                        primaryIndexNames.add(name);
+                    }
+                    String column = rs.getString("COLUMN_NAME");
+                    if (column != null && !column.isBlank()) {
+                        primaryColumnsBySequence.put((int) rs.getShort("KEY_SEQ"), column);
+                    }
+                }
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
+        }
 
         // Presto/Trino JDBC throws SQLFeatureNotSupportedException from getIndexInfo, and
         // drivers compiled before JDBC 4 surface unimplemented DatabaseMetaData methods as
@@ -2482,8 +2497,20 @@ public final class DbxJdbcPlugin {
             appendJdbcIndexes(indexes, primaryIndexNames, rs);
         } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
+        if (indexes.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+            try (ResultSet rs = meta.getIndexInfo(catalog, null, table, false, false)) {
+                appendJdbcIndexes(indexes, primaryIndexNames, rs);
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
+        }
         if (indexes.isEmpty() && catalog != null) {
             try (ResultSet rs = meta.getIndexInfo(null, schemaPattern, table, false, false)) {
+                appendJdbcIndexes(indexes, primaryIndexNames, rs);
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
+        }
+        if (indexes.isEmpty() && isSybaseConnection(connection) && schemaPattern != null && catalog != null) {
+            try (ResultSet rs = meta.getIndexInfo(null, null, table, false, false)) {
                 appendJdbcIndexes(indexes, primaryIndexNames, rs);
             } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
@@ -2586,10 +2613,19 @@ public final class DbxJdbcPlugin {
         String catalog = metadataCatalog(database, quirks);
         String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
         JdbcMetadataIdentity identity = appendColumns(result, meta, catalog, schemaPattern, table);
+        if (result.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+            identity = appendColumns(result, meta, catalog, null, table);
+        }
         if (result.isEmpty() && catalog != null) {
             identity = appendColumns(result, meta, null, schemaPattern, table);
+            if (result.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+                identity = appendColumns(result, meta, null, null, table);
+            }
         }
         Set<String> primaryKeys = safePrimaryKeys(meta, identity.catalog(), identity.schema(), identity.table());
+        if (primaryKeys.isEmpty() && isSybaseConnection(connection) && identity.schema() != null) {
+            primaryKeys = safePrimaryKeys(meta, identity.catalog(), null, identity.table());
+        }
         markPrimaryKeyColumns(result, primaryKeys);
         if (quirks.useCatalogFallbackSql()) {
             mergeShowFullColumnMetadata(conn, result, schemaPattern, table);
@@ -3288,6 +3324,19 @@ public final class DbxJdbcPlugin {
 
     private static boolean isKingbaseUrl(String url) {
         return urlMatchesPrefix(url, "jdbc:kingbase");
+    }
+
+    private static boolean isSybaseConnection(JsonNode connection) {
+        String url = optionalText(connection, "connection_string");
+        if (urlMatchesPrefix(url, "jdbc:sybase:") || urlMatchesPrefix(url, "jdbc:jtds:sybase:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        if (driverClass == null) {
+            return false;
+        }
+        String normalized = driverClass.toLowerCase(Locale.ROOT);
+        return normalized.contains("sybdriver") || normalized.contains("sybase");
     }
 
     private static String quoteAnsiIdentifier(String identifier) {
@@ -4092,6 +4141,9 @@ public final class DbxJdbcPlugin {
             String catalog = metadataCatalog(database, quirks);
             String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
             foreignKeys = listGenericForeignKeys(meta, catalog, schemaPattern, table);
+            if (foreignKeys.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+                foreignKeys = listGenericForeignKeys(meta, catalog, null, table);
+            }
         }
 
         String source = GenericJdbcDdlBuilder.buildTableDdl(

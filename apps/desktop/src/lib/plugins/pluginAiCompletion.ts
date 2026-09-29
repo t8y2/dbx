@@ -1,4 +1,5 @@
 import type { AiConfigItem } from "@/types/ai";
+import { isCliProvider } from "@/lib/ai/aiConfigCandidates";
 import type { AiCompletionRequest } from "@/lib/backend/tauri";
 
 export interface PluginAiProvider {
@@ -21,7 +22,7 @@ export interface PluginAiGenerateRequest {
 // this surface is text completion and must never launch an agent with tools.
 export function pluginAiModels(configs: AiConfigItem[]): PluginAiModel[] {
   return configs
-    .filter((c) => !c.provider.endsWith("-cli"))
+    .filter((c) => !isCliProvider(c.provider))
     .flatMap((c) =>
       [...new Set([c.model, ...(c.models ?? []).map((m) => m.name)].filter(Boolean))].map((model) => ({
         configId: c.id,
@@ -36,10 +37,10 @@ export function createPluginAiCompletion(deps: { load: () => Promise<AiConfigIte
   let busy = false;
   return {
     async listAiProviders() {
-      return (await deps.load()).filter((c) => !c.provider.endsWith("-cli")).map((c) => ({ configId: c.id, name: c.name }));
+      return (await deps.load()).filter((c) => !isCliProvider(c.provider)).map((c) => ({ configId: c.id, name: c.name }));
     },
     async discoverAiModels(configId: string) {
-      const config = (await deps.load()).find((c) => c.id === configId && !c.provider.endsWith("-cli"));
+      const config = (await deps.load()).find((c) => c.id === configId && !isCliProvider(c.provider));
       if (!config) throw new Error("AI configuration is no longer available.");
       try {
         if (!deps.discover) throw new Error();
@@ -56,7 +57,7 @@ export function createPluginAiCompletion(deps: { load: () => Promise<AiConfigIte
       busy = true;
       try {
         const configs = await deps.load();
-        const chosen = configs.find((c) => c.id === input.configId && !c.provider.endsWith("-cli"));
+        const chosen = configs.find((c) => c.id === input.configId && !isCliProvider(c.provider));
         const model = chosen && input.model.trim() && input.model.length <= 256 ? { configId: chosen.id, name: chosen.name, model: input.model.trim(), isDefault: false } : undefined;
         if (!model) throw new Error("AI configuration or model is no longer available. Refresh the model list.");
         if (!(await deps.confirm(pluginName, model))) throw new Error("AI generation cancelled.");

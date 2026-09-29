@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
@@ -230,8 +231,20 @@ func TestClassifyNeo4jErrors(t *testing.T) {
 	syntax := classifyRPCError("execute_query", "session-1", &neo4jdb.Neo4jError{
 		Code: "Neo.ClientError.Statement.SyntaxError", Msg: "invalid input",
 	})
-	if syntax.Data.Category != "sql" || syntax.Data.SQLState == "" {
+	if syntax.Data.Category != "sql" || syntax.Data.SQLState != "" || syntax.Data.AgentSessionID != "session-1" {
 		t.Fatalf("unexpected syntax classification: %#v", syntax)
+	}
+	if syntax.Data.ContractVersion != 1 || syntax.Data.Stage != "execute" || syntax.Data.OperationOutcome != "unknown" {
+		t.Fatalf("invalid structured error contract: %#v", syntax.Data)
+	}
+	if syntax.Message == "" || !strings.Contains(syntax.Message, "Neo.ClientError.Statement.SyntaxError") {
+		t.Fatalf("Neo4j error code was lost: %q", syntax.Message)
+	}
+	resource := classifyRPCError("execute_query", "session-1", &neo4jdb.Neo4jError{
+		Code: "Neo.TransientError.General.DatabaseUnavailable", Msg: "database unavailable",
+	})
+	if resource.Data.Category != "resource" || resource.Data.SessionDisposition != "replace_runtime" {
+		t.Fatalf("invalid resource error contract: %#v", resource.Data)
 	}
 	canceled := classifyRPCError("execute_query", "session-1", context.Canceled)
 	if canceled.Data.Category != "canceled" || canceled.Data.SessionDisposition != "quarantine" {

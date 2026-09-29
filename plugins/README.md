@@ -493,7 +493,7 @@ For a declarative `open-workbench` action, DBX passes the current connection sum
 
 #### Declarative launch options (`options_action`)
 
-An `open-workbench` action (on dock `command` contributions and context-menu entries) may declare `options_action: "<sidecar method>"`. Before offering launch targets, the host invokes that method with the current UI locale so labels arrive localized:
+A dock `command` contribution's `open-workbench` action may declare `options_action: "<sidecar method>"` (context-menu entries cannot: their action form has no such field, and unknown fields are rejected at manifest validation). Before offering launch targets, the host invokes that method with the current UI locale so labels arrive localized:
 
 ```json
 { "locale": "zh-CN" }
@@ -505,14 +505,13 @@ The sidecar answers:
 {
   "entries": [
     { "label": "Local terminal", "description": "Default shell: /bin/zsh", "context": {} },
-    { "label": "zsh", "description": "/bin/zsh", "context": { "shell": "zsh" }, "group": "Local shell" }
+    { "label": "zsh", "description": "/bin/zsh", "context": { "shell": "zsh" } }
   ]
 }
 ```
 
 - `context` is opaque plugin payload: it is merged into the host-authored Workbench context of the panel opened for that entry, and the host never interprets it.
-- `group` (optional, plugin-localized) folds entries sharing the label into one collapsible picker section — collapsed by default; hosts without grouping support render the entries flat.
-- A command declaring `options_action` owns the picker: the host's generic replay item hides while entries are available and falls back in when the sidecar fetch fails or returns nothing.
+- A command declaring `options_action` owns the picker: the host's generic replay item hides while `options_action` is declared and does not come back if the sidecar fetch fails or returns nothing — the picker then simply has no launch entries.
 - Plugins ignore the `locale` field safely if they do not localize.
 
 A backend entrypoint is required only for legacy context-menu entries without a declarative action. Their `{ "message": "..." }` result continues to surface as a toast.

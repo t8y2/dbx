@@ -5,11 +5,15 @@ const config = { id: "one", name: "My AI", provider: "openai", authMethod: "api-
 describe("plugin text completion", () => {
   it("only exposes whitelisted metadata and excludes CLI agents", () => {
     const models = pluginAiModels([config, { ...config, id: "cli", provider: "codex-cli" }]);
-    expect(models).toEqual([{ configId: "one", name: "My AI", model: "a", isDefault: true }, { configId: "one", name: "My AI", model: "b", isDefault: false }]);
+    expect(models).toEqual([
+      { configId: "one", name: "My AI", model: "a", isDefault: true },
+      { configId: "one", name: "My AI", model: "b", isDefault: false },
+    ]);
     expect(JSON.stringify(models)).not.toContain("secret");
   });
   it("validates selected models and requires host consent", async () => {
-    const complete = vi.fn(); const confirm = vi.fn().mockResolvedValue(false);
+    const complete = vi.fn();
+    const confirm = vi.fn().mockResolvedValue(false);
     const api = createPluginAiCompletion({ load: async () => [config], complete, confirm });
     await expect(api.generateAiText("Plugin", { configId: "missing", model: "unknown", prompt: "hi" })).rejects.toThrow("no longer available");
     expect(confirm).not.toHaveBeenCalled();
@@ -39,12 +43,18 @@ describe("plugin text completion", () => {
   });
   it("blocks concurrent requests and rejects empty or excessive results", async () => {
     let finish!: (s: string) => void;
-    const complete = vi.fn(() => new Promise<string>(resolve => { finish = resolve; }));
+    const complete = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
     const api = createPluginAiCompletion({ load: async () => [config], complete, confirm: async () => true });
     const input = { configId: "one", model: "a", prompt: "hi" };
     const first = api.generateAiText("Plugin", input);
     await expect(api.generateAiText("Plugin", input)).rejects.toThrow("already generating");
-    await vi.waitFor(() => expect(complete).toHaveBeenCalled()); finish("");
+    await vi.waitFor(() => expect(complete).toHaveBeenCalled());
+    finish("");
     await expect(first).rejects.toThrow("empty");
     complete.mockResolvedValue("x".repeat(16001));
     await expect(api.generateAiText("Plugin", input)).rejects.toThrow("16000");

@@ -568,20 +568,20 @@ export class PluginHostBridge {
     if (method === "host.ai.listProviders") {
       this.requirePermission("host.ai");
       if (!this.api.listAiProviders) throw new Error("AI provider selection is unavailable");
-      return (await this.api.listAiProviders()).map(p => ({ configId: p.configId, name: p.name }));
+      return (await this.api.listAiProviders()).map((p) => ({ configId: p.configId, name: p.name }));
     }
     if (method === "host.ai.discoverModels") {
       this.requirePermission("host.ai");
       if (!this.api.discoverAiModels) throw new Error("AI model discovery is unavailable");
       const input = requireRecord(params, "AI model discovery");
       if (typeof input.configId !== "string" || !input.configId.trim() || input.configId.length > 256) throw new Error("Invalid AI configId");
-      return (await this.api.discoverAiModels(input.configId)).map(m => ({ configId: m.configId, name: m.name, model: m.model, isDefault: !!m.isDefault }));
+      return (await this.api.discoverAiModels(input.configId)).map((m) => ({ configId: m.configId, name: m.name, model: m.model, isDefault: !!m.isDefault }));
     }
     if (method === "host.ai.listModels") {
       this.requirePermission("host.ai");
       if (!this.api.listAiModels) throw new Error("DBX AI model selection is unavailable");
       // Whitelist response fields even if an adapter accidentally returns config objects.
-      return (await this.api.listAiModels()).map(m => ({ configId: m.configId, name: m.name, model: m.model, isDefault: !!m.isDefault }));
+      return (await this.api.listAiModels()).map((m) => ({ configId: m.configId, name: m.name, model: m.model, isDefault: !!m.isDefault }));
     }
     if (method === "host.ai.generateText") {
       this.requirePermission("host.ai");

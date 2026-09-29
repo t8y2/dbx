@@ -20,7 +20,7 @@ import {
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { buildElasticsearchCompletionItemsFromContext, elasticsearchCompletionNeedsFields, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionField } from "@/lib/elasticsearch/elasticsearchCompletion";
-import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsDatabases, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion } from "@/lib/mongo/mongoCompletion";
+import { buildMongoCompletionItemsFromContext, foldMongoKeySeparator, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsDatabases, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion } from "@/lib/mongo/mongoCompletion";
 import { buildSoqlCompletionItems, getSoqlCompletionContext, getSoqlCompletionResultValidFor, resolveSoqlFieldCandidates, resolveSoqlValueField, shouldAutoOpenSoqlCompletion, soqlCompletionNeedsObjects, type SoqlCompletionField, type SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
 import {
   buildSqlServerUseDatabaseCompletionItems,
@@ -466,11 +466,15 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           replaceClosingQuote: "replaceClosingQuote" in item ? item.replaceClosingQuote : undefined,
           replaceSelectWildcard: "replaceSelectWildcard" in item ? item.replaceSelectWildcard : undefined,
         });
-        const insert = appendSqlCompletionSpace(item.apply ?? item.label, {
+        let insert = appendSqlCompletionSpace(item.apply ?? item.label, {
           enabled: ("appendSpace" in item && item.appendSpace === true) || (shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion),
           itemType: item.type,
           nextCharacter: view.state.sliceDoc(replaceTo, replaceTo + 1),
         });
+        if (props.databaseType === "mongodb") {
+          // A key completion writes its own `: `; re-picking a key in front of an existing one must not double it.
+          insert = foldMongoKeySeparator(insert, view.state.sliceDoc(replaceTo, view.state.doc.lineAt(replaceTo).to));
+        }
         if (runtime.codeMirrorInsertCompletionText) {
           view.dispatch(runtime.codeMirrorInsertCompletionText(view.state, insert, from, replaceTo));
         } else {

@@ -255,6 +255,26 @@ describe("QueryEditor completion provider ownership", () => {
     expect(await pending).toBeNull();
   });
 
+  it("does not double the separator when a Mongo key is re-picked in front of an existing colon", async () => {
+    const accept = async (doc: string, cursor: number) => {
+      const { store, provide, currentView } = createHarness({ databaseType: "mongodb", modelValue: doc });
+      store.listMongoCompletionFields.mockResolvedValue([{ name: "name", type: "string" }]);
+      currentView.dispatch({ selection: { anchor: cursor } });
+      const result = await provide();
+      const option = result?.options.find((candidate) => candidate.label === "name");
+      expect(option, "the field is offered").toBeDefined();
+      (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, cursor);
+      return { doc: currentView.state.doc.toString(), cursor: currentView.state.selection.main.head };
+    };
+
+    // Editing the key of an existing entry: the colon already there is kept, not doubled.
+    expect(await accept("db.users.find({ na: 1 })", 18)).toEqual({ doc: "db.users.find({ name: 1 })", cursor: 20 });
+    expect(await accept("db.users.find({ na : 1 })", 18)).toEqual({ doc: "db.users.find({ name : 1 })", cursor: 20 });
+    // A fresh key still gets its separator.
+    expect(await accept("db.users.find({ na", 18)).toEqual({ doc: "db.users.find({ name: ", cursor: 22 });
+    expect(await accept("db.users.find({ na })", 18)).toEqual({ doc: "db.users.find({ name:  })", cursor: 22 });
+  });
+
   it.each(["redis", "mongodb", "mysql"] as const)("does not query %s metadata without a connection", async (databaseType) => {
     const { store, provide } = createHarness({ databaseType, connectionId: undefined });
     expect(await provide()).toBeNull();

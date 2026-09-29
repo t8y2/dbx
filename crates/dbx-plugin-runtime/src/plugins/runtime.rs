@@ -9,7 +9,7 @@ use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{broadcast, oneshot, watch, Mutex, RwLock};
 use tokio::time::Instant;
 
@@ -158,7 +158,8 @@ pub struct PluginSidecarSession {
     plugin: InstalledPlugin,
     app_version: String,
     transport: PluginBackendTransport,
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<crate::process::ManagedChild>>,
+    shutdown_lock: Mutex<()>,
     stdin: Mutex<ChildStdin>,
     pending: Arc<Mutex<HashMap<u64, PendingResponse>>>,
     next_request_id: AtomicU64,
@@ -216,10 +217,10 @@ impl PluginSidecarSession {
         ensure_plugin_backend(&plugin)?;
         let transport = plugin.manifest.backend_entrypoint().map(|backend| backend.transport).unwrap_or_default();
         let app_version = app_version.into();
-        let mut child = spawn_plugin_child(&plugin, &app_version, &env)?;
-        let stdin = child.stdin.take().ok_or("Plugin stdin unavailable")?;
-        let stdout = child.stdout.take().ok_or("Plugin stdout unavailable")?;
-        let stderr = child.stderr.take();
+        let mut child = spawn_plugin_child(&plugin, &app_version, &env).await?;
+        let stdin = child.take_stdin().ok_or("Plugin stdin unavailable")?;
+        let stdout = child.take_stdout().ok_or("Plugin stdout unavailable")?;
+        let stderr = child.take_stderr();
         let child = Arc::new(Mutex::new(child));
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let (events, _) = broadcast::channel(256);
@@ -230,6 +231,7 @@ impl PluginSidecarSession {
             app_version,
             transport,
             child,
+            shutdown_lock: Mutex::new(()),
             stdin: Mutex::new(stdin),
             pending,
             next_request_id: AtomicU64::new(1),
@@ -249,8 +251,12 @@ impl PluginSidecarSession {
             let handshake = match session.initialize().await {
                 Ok(handshake) => handshake,
                 Err(error) => {
-                    session.shutdown().await;
-                    return Err(format!("Plugin '{}' initialization failed: {error}", session.plugin.manifest.id));
+                    let shutdown_error = session.shutdown().await.err();
+                    let message = match shutdown_error {
+                        Some(shutdown_error) => format!("{error}; additionally failed to shut down: {shutdown_error}"),
+                        None => error,
+                    };
+                    return Err(format!("Plugin '{}' initialization failed: {message}", session.plugin.manifest.id));
                 }
             };
             *session.handshake.write().await = Some(handshake);
@@ -264,11 +270,12 @@ impl PluginSidecarSession {
         });
         if !transitioned {
             let status = session.status();
-            session.shutdown().await;
+            let shutdown_error = session.shutdown().await.err();
+            let message = status.message.map_or_else(String::new, |message| format!(": {message}"));
+            let shutdown_error = shutdown_error.map_or_else(String::new, |error| format!("; shutdown failed: {error}"));
             return Err(format!(
-                "Plugin '{}' stopped during initialization{}",
-                session.plugin.manifest.id,
-                status.message.map_or_else(String::new, |message| format!(": {message}"))
+                "Plugin '{}' stopped during initialization{message}{shutdown_error}",
+                session.plugin.manifest.id
             ));
         }
         Ok(session)
@@ -354,14 +361,33 @@ impl PluginSidecarSession {
         stdin.flush().await.map_err(|error| self.write_error(error))
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<(), String> {
+        let _shutdown = self.shutdown_lock.lock().await;
+        if self.status().state == PluginSessionState::Stopped {
+            return Ok(());
+        }
+
         self.status.send_replace(PluginSessionStatus::new(PluginSessionState::Stopping, None));
         // Let any open user prompt resolve and close its dialog.
         self.prompts.close();
-        let kill_result = self.child.lock().await.kill().await;
-        let message = kill_result.err().map(|error| error.to_string());
+        let termination = self
+            .child
+            .lock()
+            .await
+            .terminate()
+            .await
+            .map_err(|error| format!("Failed to stop plugin '{}' process tree: {error}", self.plugin.manifest.id));
         fail_pending(&self.pending, "Plugin session stopped").await;
-        self.status.send_replace(PluginSessionStatus::new(PluginSessionState::Stopped, message));
+        match termination {
+            Ok(()) => {
+                self.status.send_replace(PluginSessionStatus::new(PluginSessionState::Stopped, None));
+                Ok(())
+            }
+            Err(error) => {
+                self.status.send_replace(PluginSessionStatus::new(PluginSessionState::Stopping, Some(error.clone())));
+                Err(error)
+            }
+        }
     }
 
     pub async fn pid(&self) -> Option<u32> {
@@ -594,14 +620,9 @@ impl PluginSidecarSession {
     }
 
     async fn terminate_after_output_end(&self, message: String) -> String {
-        let mut child = self.child.lock().await;
-        match child.try_wait() {
-            Ok(Some(_)) => message,
-            Ok(None) => match child.kill().await {
-                Ok(()) => format!("{message}; process terminated by host"),
-                Err(error) => format!("{message}; failed to terminate process: {error}"),
-            },
-            Err(error) => format!("{message}; failed to inspect process: {error}"),
+        match self.child.lock().await.terminate().await {
+            Ok(()) => format!("{message}; process tree terminated by host"),
+            Err(error) => format!("{message}; failed to terminate process tree: {error}"),
         }
     }
 
@@ -1048,7 +1069,11 @@ fn ensure_plugin_backend(plugin: &InstalledPlugin) -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_plugin_child(plugin: &InstalledPlugin, app_version: &str, env: &PluginRuntimeEnv) -> Result<Child, String> {
+async fn spawn_plugin_child(
+    plugin: &InstalledPlugin,
+    app_version: &str,
+    env: &PluginRuntimeEnv,
+) -> Result<crate::process::ManagedChild, String> {
     let executable_path =
         plugin.compatibility.backend_executable.as_ref().ok_or_else(|| {
             format!("Plugin '{}' does not provide a compatible backend executable", plugin.manifest.id)
@@ -1067,17 +1092,19 @@ fn spawn_plugin_child(plugin: &InstalledPlugin, app_version: &str, env: &PluginR
         .env("DBX_HOST_API_VERSION", SUPPORTED_PLUGIN_HOST_API_VERSION)
         .env("DBX_PLUGIN_PROTOCOL_VERSION", SUPPORTED_PLUGIN_PROTOCOL_VERSION.to_string());
     env.apply_to(&mut command);
-    command.spawn().map_err(|error| format!("Failed to start plugin '{}': {error}", plugin.manifest.id))
+    crate::process::spawn_managed_child(&mut command)
+        .await
+        .map_err(|error| format!("Failed to start plugin '{}': {error}", plugin.manifest.id))
 }
 
-fn ensure_executable_permission(path: &Path) -> Result<(), String> {
+fn ensure_executable_permission(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mode = std::fs::metadata(path).map_err(|error| error.to_string())?.permissions().mode();
+        let mode = std::fs::metadata(_path).map_err(|error| error.to_string())?.permissions().mode();
         if mode & 0o111 == 0 {
-            return Err(format!("Plugin backend is not executable: {}", path.display()));
+            return Err(format!("Plugin backend is not executable: {}", _path.display()));
         }
     }
     Ok(())
@@ -1088,10 +1115,13 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        decode_response_value, read_limited_line, trim_ascii_whitespace, user_input_result, PluginSessionState,
-        PluginSidecarSession, PromptActivity, UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS,
-        USER_INPUT_MAX_TIMEOUT, USER_INPUT_MIN_TIMEOUT,
+        decode_response_value, read_limited_line, trim_ascii_whitespace, user_input_result, PromptActivity,
+        UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_TIMEOUT,
+        USER_INPUT_MIN_TIMEOUT,
     };
+    #[cfg(unix)]
+    use super::{PluginSessionState, PluginSidecarSession};
+    #[cfg(unix)]
     use crate::plugins::{InstalledPlugin, PluginManifest, PluginRuntimeEnv};
     use tokio::io::BufReader;
 
@@ -1302,7 +1332,7 @@ sleep 30
             .invoke("sample/echo", serde_json::Value::Null)
             .await
             .expect("host should answer every plugin-initiated request");
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
 
         // A headless host (tests, MCP) must refuse instead of hanging the
         // plugin until the prompt timeout expires.
@@ -1327,7 +1357,7 @@ sleep 30
             .invoke("sample/echo", serde_json::Value::Null)
             .await
             .expect("host should answer every plugin-initiated request");
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         ssh_prompt::clear_ssh_prompt_gateway();
 
         let prompt = echoed_answer(&echoed, "prompt-1");
@@ -1359,7 +1389,7 @@ sleep 30
             .invoke("sample/echo", serde_json::Value::Null)
             .await
             .expect("host should answer every plugin-initiated request");
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         ssh_prompt::clear_ssh_prompt_gateway();
 
         let prompt = echoed_answer(&echoed, "prompt-1");
@@ -1386,7 +1416,7 @@ sleep 30
             .invoke_with_timeout("sample/echo", serde_json::Value::Null, None, Some(Duration::from_millis(300)))
             .await
             .expect("a prompt must pause the request deadline instead of failing it");
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         ssh_prompt::clear_ssh_prompt_gateway();
 
         assert_eq!(echoed_answer(&echoed, "prompt-1")["result"]["value"], "123456");
@@ -1413,7 +1443,7 @@ sleep 30
         assert_eq!(request.kind, dbx_platform::ssh_prompt::SshPromptKind::UserInput);
         assert!(!responder.is_closed());
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         ssh_prompt::clear_ssh_prompt_gateway();
 
         // The request fails (the session is gone) and the prompt's responder is
@@ -1447,7 +1477,7 @@ sleep 30
         assert!(!second_responder.is_closed());
         assert_eq!(session.prompts.state.borrow().open, 2);
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         let (first_answer, second_answer) =
             tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(first, second) })
                 .await
@@ -1512,7 +1542,7 @@ sleep 30
             assert!(result.unwrap_err().contains("timed out after 30 seconds"));
         }
         tokio::time::resume();
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1534,7 +1564,7 @@ sleep 30
         assert_eq!(first.await.unwrap(), serde_json::json!({ "ok": true }));
         assert!(second.await.unwrap_err().contains("response channel closed"));
         session.prompts.end();
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
     }
 
     #[test]
@@ -1681,7 +1711,7 @@ sleep 30
         let event = events.recv().await.unwrap();
         assert_eq!(event.method, "sample/progress");
         assert_eq!(event.params["value"], 50);
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         assert_eq!(session.status().state, PluginSessionState::Stopped);
     }
 
@@ -1730,7 +1760,7 @@ sleep 30
         let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
         let error = match PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default()).await {
             Ok(session) => {
-                session.shutdown().await;
+                session.shutdown().await.unwrap();
                 panic!("mismatched backend identity should fail initialization")
             }
             Err(error) => error,
@@ -1779,7 +1809,7 @@ sleep 30
         let session = PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default()).await.unwrap();
         let result: serde_json::Value = session.invoke("ping", serde_json::Value::Null).await.unwrap();
         assert_eq!(result["ok"], true);
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
     }
 
     /// A legacy `stdio-jsonl` plugin answers with one line per response, so a whole
@@ -1823,7 +1853,7 @@ sleep 30
             .await
             .expect("a 12 MB legacy JSONL response must be read instead of failing the query");
         assert_eq!(result["page"].as_str().map(str::len), Some(12_000_000));
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
     }
 
     #[cfg(unix)]

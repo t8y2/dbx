@@ -5,6 +5,7 @@ import { installDebugLogCapture } from "@/lib/backend/debugLog";
 import { retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRecovery";
 import { markStartupPhase } from "@/lib/startup/startupTiming";
 import { applyLegacyWebViewClass, isBlockingCompatFailure } from "@/lib/ui/legacyWebView";
+import { hydrateAppAppearance } from "@/lib/app/appAppearance";
 
 function startupErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -87,6 +88,10 @@ async function bootstrap() {
     window.dispatchEvent(new Event("dbx:startup-ready"));
     return;
   }
+  // Tauri WebViews may not retain localStorage across macOS restarts. Load the
+  // durable appearance record before importing i18n and the theme composable;
+  // those modules synchronously read the compatibility keys during evaluation.
+  await hydrateAppAppearance();
   const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), import("./StartupGate.vue")]);
   console.log("[STARTUP] frontend modules loaded");
   const localeReady = loadSavedLocale();

@@ -53,6 +53,7 @@ const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
+const APP_APPEARANCE_SETTINGS_KEY: &str = "app_appearance";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
@@ -429,6 +430,47 @@ pub struct DesktopSettings {
     pub custom_ai_skill_root: Option<String>,
     #[serde(default = "default_sidebar_table_page_size")]
     pub sidebar_table_page_size: usize,
+}
+
+/// Appearance preferences are kept separately from device-specific desktop
+/// settings because they are renderer-owned and must be available before the
+/// frontend modules initialize. The optional fields also keep older databases
+/// compatible: an absent value means the frontend may use its legacy storage
+/// fallback and migrate it on first startup.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppAppearanceSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_palette: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors_dark: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_style: Option<String>,
+}
+
+/// A partial appearance update. Patches are applied in one SQLite transaction
+/// so rapid controls cannot overwrite a value changed by another control.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppAppearanceSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_palette: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors_dark: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_style: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -4228,6 +4270,7 @@ impl Storage {
                 .optional()
                 .map_err(|e| e.to_string())?;
             let dedicated_keys = [
+                APP_APPEARANCE_SETTINGS_KEY,
                 MCP_GLOBAL_POLICY_KEY,
                 WEB_MCP_SETTINGS_KEY,
                 MAX_RETRIES_KEY,
@@ -4502,6 +4545,37 @@ impl Storage {
             app_settings.insert(WEB_MCP_SETTINGS_KEY.to_string(), value);
             persist_secret_in_tx(&tx, &codec, GLOBAL_SECRET_NAMESPACE, "web_mcp_token", &token)?;
             write_app_settings_map(&tx, &app_settings)?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_app_appearance_settings(&self) -> Result<AppAppearanceSettings, String> {
+        let settings = self.load_app_settings_json().await?;
+        match settings.get(APP_APPEARANCE_SETTINGS_KEY) {
+            Some(value) if !value.is_null() => serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid app appearance settings: {error}")),
+            _ => Ok(AppAppearanceSettings::default()),
+        }
+    }
+
+    pub async fn update_app_appearance_settings(&self, patch: &AppAppearanceSettingsPatch) -> Result<(), String> {
+        let patch = serde_json::to_value(patch).map_err(|error| error.to_string())?;
+        let patch = patch.as_object().cloned().ok_or_else(|| "app appearance patch must be an object".to_string())?;
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let mut settings = app_settings_map_from_conn(&tx)?;
+            let mut appearance = match settings.remove(APP_APPEARANCE_SETTINGS_KEY) {
+                Some(value) if !value.is_null() => {
+                    serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(value)
+                        .map_err(|error| format!("invalid app appearance settings: {error}"))?
+                }
+                _ => serde_json::Map::new(),
+            };
+            appearance.extend(patch);
+            settings.insert(APP_APPEARANCE_SETTINGS_KEY.to_string(), serde_json::Value::Object(appearance));
+            write_app_settings_map(&tx, &settings)?;
             tx.commit().map_err(|error| error.to_string())
         })
         .await
@@ -8794,8 +8868,9 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
-        McpGlobalPolicyState, Storage, SyncImportPlan, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION, MCP_GLOBAL_POLICY_KEY,
+        maybe_import_user_data_db, AppAppearanceSettingsPatch, DataDbImportResult, DesktopIconTheme, DesktopSettings,
+        McpGlobalPolicy, McpGlobalPolicyState, Storage, SyncImportPlan, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION,
+        MCP_GLOBAL_POLICY_KEY,
     };
     use crate::ai::{
         AiActiveModelSelection, AiAssistantMode, AiChatMessage, AiChatSelectionState, AiConversation,
@@ -11473,6 +11548,48 @@ mod tests {
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_desktop_settings().await.unwrap(), DesktopSettings::default());
+    }
+
+    #[tokio::test]
+    async fn app_appearance_settings_patch_roundtrips_and_survives_desktop_saves() {
+        let path = temp_db_path("app-appearance-settings");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        storage
+            .update_app_appearance_settings(&AppAppearanceSettingsPatch {
+                locale: Some("zh-CN".to_string()),
+                theme_mode: Some("dark".to_string()),
+                theme_palette: Some("cobalt".to_string()),
+                custom_ui_colors: Some(serde_json::json!({ "background": "#123456" })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.load_app_appearance_settings().await.unwrap(),
+            super::AppAppearanceSettings {
+                locale: Some("zh-CN".to_string()),
+                theme_mode: Some("dark".to_string()),
+                theme_palette: Some("cobalt".to_string()),
+                custom_ui_colors: Some(serde_json::json!({ "background": "#123456" })),
+                ..Default::default()
+            }
+        );
+
+        storage.save_desktop_settings(&DesktopSettings::default()).await.unwrap();
+        assert_eq!(storage.load_app_appearance_settings().await.unwrap().theme_palette.as_deref(), Some("cobalt"));
+
+        storage
+            .update_app_appearance_settings(&AppAppearanceSettingsPatch {
+                corner_style: Some("small".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let updated = storage.load_app_appearance_settings().await.unwrap();
+        assert_eq!(updated.locale.as_deref(), Some("zh-CN"));
+        assert_eq!(updated.corner_style.as_deref(), Some("small"));
     }
 
     #[tokio::test]

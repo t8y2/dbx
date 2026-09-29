@@ -610,6 +610,7 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[cfg(all(feature = "os-keyring", target_os = "linux"))]
     fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
         if let Some(value) = value {
             std::env::set_var(name, value);

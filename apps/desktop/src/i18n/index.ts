@@ -1,7 +1,7 @@
 import { createI18n } from "vue-i18n";
 import en from "./locales/en";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
-import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { safeLocalStorageGet } from "@/lib/backend/safeStorage";
+import { persistAppLocale } from "@/lib/app/appAppearance";
 
 export type Locale = "az" | "en" | "es" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "tr" | "zh-CN" | "zh-TW";
 type LocaleMessages = Record<string, unknown>;
@@ -98,19 +98,9 @@ export async function loadLocaleMessages(locale: Locale) {
   loadedLocales.add(locale);
 }
 
-async function syncLocaleToBackend(locale: Locale) {
-  if (!isTauriRuntime()) return;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("set_app_locale", { locale });
-  } catch (error) {
-    console.warn("[DBX][i18n] failed to sync locale to backend", error);
-  }
-}
-
 export async function loadSavedLocale() {
   await loadLocaleMessages(initialLocale);
-  void syncLocaleToBackend(initialLocale);
+  persistAppLocale(initialLocale);
 }
 
 async function applyTransientLocale(locale: Locale) {
@@ -138,8 +128,7 @@ export async function setLocale(locale: Locale) {
   ++localeRequestId;
   // An explicit selection is durable immediately; only the visible locale
   // waits for its lazy message bundle. Preview paths never reach this branch.
-  safeLocalStorageSet("dbx-locale", locale);
-  void syncLocaleToBackend(locale);
+  persistAppLocale(locale);
   await loadLocaleMessages(locale);
   // A later explicit selection wins; hover/restore requests must not undo it.
   if (persistedLocale !== locale) return;

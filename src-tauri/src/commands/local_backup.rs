@@ -128,9 +128,8 @@ fn write_local_backup(path: &Path, snapshot: &SyncSnapshot) -> Result<LocalBacku
         use std::os::unix::fs::OpenOptionsExt;
         open_options.mode(0o600);
     }
-    let file = open_options
-        .open(&temporary_path)
-        .map_err(|error| format!("Cannot create temporary local backup: {error}"))?;
+    let file =
+        open_options.open(&temporary_path).map_err(|error| format!("Cannot create temporary local backup: {error}"))?;
     let bytes = match write_backup_archive(file, &manifest_bytes, &snapshot_bytes) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -180,13 +179,13 @@ fn replace_backup_file(temporary_path: &Path, path: &Path) -> io::Result<()> {
     let temporary_path: Vec<u16> = temporary_path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     let path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     let result = unsafe {
-        MoveFileExW(
-            temporary_path.as_ptr(),
-            path.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
+        MoveFileExW(temporary_path.as_ptr(), path.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
     };
-    if result == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn read_local_backup(path: &Path) -> Result<SyncSnapshot, String> {

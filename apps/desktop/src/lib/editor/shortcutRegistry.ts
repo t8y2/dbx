@@ -360,7 +360,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: "focusWhere",
     labelKey: "settings.shortcutFocusWhere",
     scope: "grid",
-    defaultShortcut: "Mod+Shift+L",
+    defaultShortcut: "",
   },
   {
     id: "goToColumn",

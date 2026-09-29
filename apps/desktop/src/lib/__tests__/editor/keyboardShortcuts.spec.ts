@@ -25,6 +25,8 @@ describe("keyboard shortcut matching", () => {
     expect(isFocusWhereShortcut({ key: "L", metaKey: true, shiftKey: true }, { focusWhere: "Mod+Shift+L" }, "MacIntel")).toBe(true);
     expect(isFocusWhereShortcut({ key: "L", ctrlKey: true, shiftKey: true }, { focusWhere: "Mod+Shift+L" }, "Win32")).toBe(true);
     expect(isFocusWhereShortcut({ key: "L", ctrlKey: true, shiftKey: true }, { focusWhere: "" }, "Win32")).toBe(false);
+    expect(isFocusWhereShortcut({ key: "L", ctrlKey: true, shiftKey: true }, undefined, "Win32")).toBe(false);
+    expect(isFocusWhereShortcut({ key: "L", metaKey: true, shiftKey: true }, undefined, "MacIntel")).toBe(false);
   });
 
   it("records modifier-only mouse shortcut settings", () => {

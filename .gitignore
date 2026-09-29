@@ -3,6 +3,7 @@ openGauss-server/
 node_modules
 .claude/
 .codex/
+.codegraph/
 .cortexkit/
 .workbuddy/
 .superpowers/

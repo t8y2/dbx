@@ -143,6 +143,36 @@ BEGIN
     expect(completionItems(sql)).toEqual(expect.arrayContaining([expect.objectContaining({ label: "@customer_id", type: "variable" }), expect.objectContaining({ label: "@customer_name", type: "variable" })]));
   });
 
+  it("suggests procedure parameters in the current routine body", () => {
+    const sql = `CREATE OR ALTER PROCEDURE dbo.find_customer
+  @customer_id AS INT,
+  @customer_name NVARCHAR(100) = NULL OUTPUT
+AS
+BEGIN
+  SELECT @customer_`;
+
+    expect(completionItems(sql)).toEqual(expect.arrayContaining([expect.objectContaining({ label: "@customer_id", type: "variable" }), expect.objectContaining({ label: "@customer_name", type: "variable" })]));
+  });
+
+  it("suggests parenthesized function parameters without collecting body references", () => {
+    const sql = `ALTER FUNCTION dbo.customer_label(
+  @customer_id INT,
+  @separator NVARCHAR(10) = N'-'
+)
+RETURNS NVARCHAR(200)
+AS
+BEGIN
+  DECLARE @label NVARCHAR(200);
+  SET @phantom = 1;
+  SELECT @`;
+    const variables = completionItems(sql)
+      .filter((item) => item.type === "variable")
+      .map((item) => item.label);
+
+    expect(variables).toEqual(expect.arrayContaining(["@customer_id", "@separator", "@label"]));
+    expect(variables).not.toContain("@phantom");
+  });
+
   it("ignores later declarations and declarations inside comments or strings", () => {
     const sql = `DECLARE @visible INT;
 -- DECLARE @commented INT;

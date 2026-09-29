@@ -32,7 +32,22 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   // Second argument: the model-facing history the panel built for that request.
   runAgentStreamHistories: [] as unknown[],
   savedConversations: [] as Array<Record<string, unknown>>,
+  codeHighlighterDelayMs: 0,
 }));
+
+// `onMounted` imports the syntax highlighter lazily; this module-level delay stands in for the
+// loaded CI runner where that import resolves well after the DOM is ready.
+vi.mock("@/lib/ai/aiCodeHighlighter", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    createAiShikiCodeHighlighter: async (...args: unknown[]) => {
+      const delay = aiAssistantMountApi.codeHighlighterDelayMs;
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      return (actual.createAiShikiCodeHighlighter as (...innerArgs: unknown[]) => Promise<unknown>)(...args);
+    },
+  };
+});
 
 vi.mock("@/lib/ai/ai", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -86,8 +101,33 @@ afterEach(() => {
   aiAssistantMountApi.runAgentStreamInputs = [];
   aiAssistantMountApi.runAgentStreamHistories = [];
   aiAssistantMountApi.savedConversations = [];
+  aiAssistantMountApi.codeHighlighterDelayMs = 0;
   while (cleanups.length) cleanups.pop()?.();
 });
+
+function stubResizeObserver(): Array<{ callback: ResizeObserverCallback; targets: Element[] }> {
+  const observers: Array<{ callback: ResizeObserverCallback; targets: Element[] }> = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      callback: ResizeObserverCallback;
+      targets: Element[] = [];
+
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+        observers.push(this as unknown as { callback: ResizeObserverCallback; targets: Element[] });
+      }
+
+      observe(target: Element) {
+        this.targets.push(target);
+      }
+
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  return observers;
+}
 
 async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig, configureSettings?: (settings: ReturnType<typeof useSettingsStore>) => void, pluginRecommendations?: PluginAiRecommendationHostUpdate, extraConnections: ConnectionConfig[] = []) {
   const pinia = createPinia();
@@ -288,53 +328,64 @@ describe("AiAssistant mount", () => {
     expect(modelTrigger?.getAttribute("title")).toBe("deepseek-chat");
   });
 
-  // The compact classes settle through requestAnimationFrame plus async measurement,
-  // so a fixed sleep races on loaded CI runners; poll until the state holds.
-  async function waitForCompactState(settled: () => boolean, timeoutMs = 2000): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (!settled()) {
-      if (Date.now() > deadline) throw new Error("composer compact state did not settle in time");
+  // These states settle through requestAnimationFrame plus async measurement, and the component
+  // measures asynchronously, so they can lag the DOM. Budget by event-loop turns rather than
+  // wall-clock: a CI worker's event loop can stall for seconds behind another worker's module
+  // transforms (see `vitest.config.ts`), and a time-based budget trips in that window even though
+  // the component is still progressing.
+  async function waitForSettled(what: string, settled: () => boolean, diagnose: () => string): Promise<void> {
+    for (let turn = 0; turn < 500; turn += 1) {
+      if (settled()) return;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    if (settled()) return;
+    throw new Error(`${what} did not settle in time: ${diagnose()}`);
   }
 
-  it("progressively compacts and expands composer controls while the AI panel is dragged", async () => {
-    let resizeObserverCallback: ResizeObserverCallback | undefined;
-    let resizeObserver: ResizeObserver | undefined;
-    vi.stubGlobal(
-      "ResizeObserver",
-      class {
-        constructor(callback: ResizeObserverCallback) {
-          resizeObserverCallback = callback;
-          resizeObserver = this as unknown as ResizeObserver;
-        }
-
-        observe() {}
-        unobserve() {}
-        disconnect() {}
+  function configureDeepseekModel(settings: ReturnType<typeof useSettingsStore>): void {
+    settings.aiConfigs = [
+      {
+        id: "deepseek-default",
+        name: "DeepSeek",
+        provider: "deepseek",
+        apiKey: "test-key",
+        authMethod: "api-key",
+        endpoint: "https://api.deepseek.com",
+        model: "deepseek-chat",
+        apiStyle: "completions",
+        isDefault: true,
       },
-    );
+    ];
+    settings.activeModel = { configId: "deepseek-default", modelId: "deepseek-chat" };
+  }
 
-    const { errors, container } = await mountPanel(true, undefined, (settings) => {
-      settings.aiConfigs = [
-        {
-          id: "deepseek-default",
-          name: "DeepSeek",
-          provider: "deepseek",
-          apiKey: "test-key",
-          authMethod: "api-key",
-          endpoint: "https://api.deepseek.com",
-          model: "deepseek-chat",
-          apiStyle: "completions",
-          isDefault: true,
-        },
-      ];
-      settings.activeModel = { configId: "deepseek-default", modelId: "deepseek-chat" };
-    });
+  it("wires panel size handling before the async mount bootstrap resolves", async () => {
+    const resizeObservers = stubResizeObserver();
+    aiAssistantMountApi.codeHighlighterDelayMs = 1000;
+
+    const { errors, container } = await mountPanel(true, undefined, configureDeepseekModel);
+
+    const panel = container.querySelector<HTMLElement>(".ai-prompt-context-container");
+    expect(panel).not.toBeNull();
+    // The bootstrap is still pending here, so the panel can only be observed if the wiring runs
+    // synchronously: a drag or window resize during the bootstrap must not be dropped.
+    expect(resizeObservers.some((observer) => observer.targets.includes(panel!))).toBe(true);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("progressively compacts and expands composer controls while the AI panel is dragged", async () => {
+    const resizeObservers = stubResizeObserver();
+    const { errors, container } = await mountPanel(true, undefined, configureDeepseekModel);
 
     const panel = container.querySelector<HTMLElement>(".ai-prompt-context-container")!;
     const contextRow = container.querySelector<HTMLElement>("[data-ai-composer-context-row]")!;
     const actionRow = container.querySelector<HTMLElement>("[data-ai-composer-actions]")!;
+    // Size handling is wired synchronously, so the panel is already observed here; driving a
+    // resize must never be a no-op that leaves the compact classes unset.
+    expect(resizeObservers.some((observer) => observer.targets.includes(panel))).toBe(true);
+    // Other subtrees also build ResizeObservers; drive the one that watches this panel.
+    const panelObserver = resizeObservers.find((observer) => observer.targets.includes(panel))!;
+    const compactState = () => `context="${contextRow.className}" actions="${actionRow.className}"`;
     let panelWidth = 300;
     let contextClientWidth = 280;
     let contextScrollWidth = 320;
@@ -351,8 +402,8 @@ describe("AiAssistant mount", () => {
     });
 
     beginPanelResize();
-    resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
-    await waitForCompactState(() => contextRow.classList.contains("ai-prompt-context-row--compact") && actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
+    panelObserver.callback([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], panelObserver as unknown as ResizeObserver);
+    await waitForSettled("composer compact state", () => contextRow.classList.contains("ai-prompt-context-row--compact") && actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"), compactState);
 
     expect(contextRow.classList.contains("ai-prompt-context-row--compact")).toBe(true);
     expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(true);
@@ -361,16 +412,16 @@ describe("AiAssistant mount", () => {
     panelWidth = 240;
     actionClientWidth = 220;
     actionModelCompactScrollWidth = 250;
-    resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
-    await waitForCompactState(() => actionRow.classList.contains("ai-prompt-action-row--model-compact") && actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
+    panelObserver.callback([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], panelObserver as unknown as ResizeObserver);
+    await waitForSettled("composer compact state", () => actionRow.classList.contains("ai-prompt-action-row--model-compact") && actionRow.classList.contains("ai-prompt-action-row--mode-compact"), compactState);
     expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(true);
     expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(true);
 
     panelWidth = 300;
     actionClientWidth = 280;
     actionModelCompactScrollWidth = 280;
-    resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
-    await waitForCompactState(() => actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
+    panelObserver.callback([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], panelObserver as unknown as ResizeObserver);
+    await waitForSettled("composer compact state", () => actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"), compactState);
     expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(true);
     expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(false);
 
@@ -380,8 +431,8 @@ describe("AiAssistant mount", () => {
     actionClientWidth = 400;
     actionFullScrollWidth = 400;
     actionModelCompactScrollWidth = 400;
-    resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
-    await waitForCompactState(() => !contextRow.classList.contains("ai-prompt-context-row--compact") && !actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
+    panelObserver.callback([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], panelObserver as unknown as ResizeObserver);
+    await waitForSettled("composer compact state", () => !contextRow.classList.contains("ai-prompt-context-row--compact") && !actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"), compactState);
     expect(contextRow.classList.contains("ai-prompt-context-row--compact")).toBe(false);
     expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(false);
     expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(false);
@@ -392,7 +443,9 @@ describe("AiAssistant mount", () => {
     expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(false);
     expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(false);
     expect(errors.map(String)).toEqual([]);
-  });
+    // The turn budget above can take a while on a contended CI worker; keep the diagnostic
+    // error reachable instead of tripping the default 10s test timeout first.
+  }, 30_000);
 
   it.each(["plugin", "etcd"] as const)("hides database and schema selectors for %s connections", async (dbType) => {
     const { errors, container } = await mountPanel(true, { id: "connection", name: "Connection", db_type: dbType, plugin_id: dbType === "plugin" ? "sample.plugin" : undefined, host: "localhost", port: 22, username: "", password: "" });
@@ -775,6 +828,10 @@ describe("AiAssistant mount", () => {
     expect(replayedTurn).toBeTruthy();
     // The text itself is gone (never persisted), so it is not replayed.
     expect(replayedTurn.content).not.toContain("select * from orders");
+    // Sending after the first reload snapshots the old user turn again. Its
+    // footprint must survive that second persistence cycle as well.
+    const resaved = aiAssistantMountApi.savedConversations.at(-1) as { messages: Array<{ role: string; selectionsOmitted?: boolean }> };
+    expect(resaved.messages.find((message) => message.role === "user")?.selectionsOmitted).toBe(true);
     expect(second.errors.map(String)).toEqual([]);
   });
 });

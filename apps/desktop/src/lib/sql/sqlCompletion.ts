@@ -2651,6 +2651,15 @@ function collectSqlServerLocalVariables(sql: string, cursor: number, options: Sq
   const tokens = tokenizeSqlSemantic(batchSql, "sqlserver").filter((token) => token.kind !== "comment" && token.kind !== "string");
   const variables: string[] = [];
   const seen = new Set<string>();
+  const addVariable = (variable: string) => {
+    if (!/^@[A-Za-z_@$#][\w@$#]*$/u.test(variable) || variable.startsWith("@@")) return;
+    const key = variable.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    variables.push(variable);
+  };
+
+  collectSqlServerRoutineParameters(tokens, addVariable);
 
   for (let index = 0; index < tokens.length; index += 1) {
     const declare = tokens[index];
@@ -2668,11 +2677,7 @@ function collectSqlServerLocalVariables(sql: string, cursor: number, options: Sq
         if (token.kind === "word" && /^@[A-Za-z_@$#][\w@$#]*$/u.test(token.text) && !token.text.startsWith("@@")) {
           const next = tokens[declarationIndex + 1];
           if (next && next.text !== "," && next.text !== ";") {
-            const key = token.text.toLowerCase();
-            if (!seen.has(key)) {
-              seen.add(key);
-              variables.push(token.text);
-            }
+            addVariable(token.text);
           }
           expectVariable = false;
         }
@@ -2683,6 +2688,44 @@ function collectSqlServerLocalVariables(sql: string, cursor: number, options: Sq
   }
 
   return variables;
+}
+
+function collectSqlServerRoutineParameters(tokens: ReturnType<typeof tokenizeSqlSemantic>, addVariable: (variable: string) => void) {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const start = tokens[index];
+    if (start?.kind !== "word" || (start.normalized !== "create" && start.normalized !== "alter")) continue;
+
+    let routineIndex = index + 1;
+    if (start.normalized === "create" && tokens[routineIndex]?.kind === "word" && tokens[routineIndex]?.normalized === "or" && tokens[routineIndex + 1]?.kind === "word" && tokens[routineIndex + 1]?.normalized === "alter") {
+      routineIndex += 2;
+    }
+    const routine = tokens[routineIndex];
+    if (routine?.kind !== "word" || !["proc", "procedure", "function"].includes(routine.normalized)) continue;
+
+    if (routine.normalized === "function") {
+      const openingIndex = tokens.findIndex((token, tokenIndex) => tokenIndex > routineIndex && token.kind === "punctuation" && token.text === "(" && token.depth === routine.depth);
+      if (openingIndex < 0) continue;
+      const openingDepth = tokens[openingIndex]!.depth;
+      for (let parameterIndex = openingIndex + 1; parameterIndex < tokens.length; parameterIndex += 1) {
+        const token = tokens[parameterIndex]!;
+        if (token.kind === "punctuation" && token.text === ")" && token.depth === openingDepth) break;
+        if (token.kind === "word" && token.depth === openingDepth + 1) addVariable(token.text);
+      }
+      continue;
+    }
+
+    for (let parameterIndex = routineIndex + 1; parameterIndex < tokens.length; parameterIndex += 1) {
+      const token = tokens[parameterIndex]!;
+      if (token.depth < routine.depth) break;
+      if (token.depth !== routine.depth || token.kind !== "word") continue;
+      if (token.normalized === "as") {
+        const previous = tokens[parameterIndex - 1];
+        if (previous?.kind === "word" && previous.text.startsWith("@") && !previous.text.startsWith("@@")) continue;
+        break;
+      }
+      addVariable(token.text);
+    }
+  }
 }
 
 function sqlTokenStartsLine(sql: string, position: number): boolean {

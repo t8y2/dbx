@@ -2511,9 +2511,14 @@ export const useConnectionStore = defineStore("connection", () => {
   function invalidateConnectionMetadataLifetime(connectionId: string, database?: string) {
     invalidateMetadataCaches({ connectionId, database });
     bumpMetadataGeneration(connectionId, database);
-    void import("@/stores/queryStore").then(({ useQueryStore }) => {
-      useQueryStore().staleConnectionDataTabMetadata(connectionId, database);
-    });
+    // 该 import 是「稍后清理 freshness」的尽力而为路径：断开连接后数据标签页的
+    // tableMeta 不再算 warm cache，晚一点清也安全。因此这里必须吞掉失败，避免
+    // chunk 加载失败（或测试环境已销毁）变成未处理的拒绝。
+    void import("@/stores/queryStore")
+      .then(({ useQueryStore }) => {
+        useQueryStore().staleConnectionDataTabMetadata(connectionId, database);
+      })
+      .catch(() => undefined);
   }
 
   function invalidateMetadataCaches(match: MetadataCacheInvalidation): number {

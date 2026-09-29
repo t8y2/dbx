@@ -4626,7 +4626,10 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
       // so the record keeps just the fact that one existed — otherwise a
       // reloaded turn would look like an empty request and the follow-up would
       // silently lose the SQL the user had sent.
-      ...(m.selections?.length ? { selectionsOmitted: true } : {}),
+      // A reloaded message has no live selection payload, only this footprint.
+      // Preserve it on every subsequent snapshot or the second restart silently
+      // loses the omission warning again.
+      ...(m.selections?.length || m.selectionsOmitted ? { selectionsOmitted: true } : {}),
     })),
     // The conversation's single queued "send later" input, persisted so it
     // survives a restart (parent PRD §5).
@@ -5104,6 +5107,21 @@ function dismissAwayUpdates() {
 
 onMounted(async () => {
   assistantViewMounted = true;
+  // Register the resize/drop wiring before the first `await`: the bootstrap below
+  // can take several frames (persisted runs plus the dynamic import of the code
+  // highlighter), and a panel drag, window resize, or file/table drop during that
+  // window would otherwise be dropped, leaving the composer on a stale
+  // compact/expanded state — and the listeners of a panel closed mid-load were
+  // added after onUnmounted had already run, leaking them.
+  window.addEventListener("resize", handleWindowResize);
+  document.addEventListener("dbx:tauri-file-drop", onTauriFileDrop as EventListener);
+  window.addEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
+  if (typeof ResizeObserver !== "undefined" && assistantRootRef.value) {
+    promptPanelResizeObserver = new ResizeObserver(handleObservedPanelResize);
+    promptPanelResizeObserver.observe(assistantRootRef.value);
+    if (promptPanelRef.value) promptPanelResizeObserver.observe(promptPanelRef.value);
+  }
+  scheduleResponsiveControlMeasurement(true);
   const savedHeight = localStorage.getItem(AI_TEXTAREA_HEIGHT_STORAGE_KEY);
   if (savedHeight) {
     const height = parseInt(savedHeight, 10);
@@ -5208,16 +5226,6 @@ onMounted(async () => {
   shikiCodeHighlighter.value = await createAiShikiCodeHighlighter({
     appearance: () => aiCodeAppearance.value,
   }).catch(() => undefined);
-
-  window.addEventListener("resize", handleWindowResize);
-  document.addEventListener("dbx:tauri-file-drop", onTauriFileDrop as EventListener);
-  window.addEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
-  if (typeof ResizeObserver !== "undefined" && assistantRootRef.value) {
-    promptPanelResizeObserver = new ResizeObserver(handleObservedPanelResize);
-    promptPanelResizeObserver.observe(assistantRootRef.value);
-    if (promptPanelRef.value) promptPanelResizeObserver.observe(promptPanelRef.value);
-  }
-  scheduleResponsiveControlMeasurement(true);
 });
 
 function maxTextareaHeight() {

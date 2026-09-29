@@ -932,7 +932,7 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if database_type == DatabaseType::SqlServer {
         return true;
     }
-    if database_type == DatabaseType::Transwarp {
+    if matches!(database_type, DatabaseType::Transwarp | DatabaseType::StarRocks) {
         return object_type == DatabaseObjectType::Table;
     }
     if matches!(object_type, DatabaseObjectType::Procedure | DatabaseObjectType::Function) {
@@ -975,6 +975,14 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
             "EXEC sp_rename {}, {}, N'OBJECT';",
             sqlserver_string(&sqlserver_object_name(options.schema.as_deref(), &options.old_name)),
             sqlserver_string(&options.new_name)
+        ));
+    }
+
+    if database_type == Some(DatabaseType::StarRocks) {
+        return Ok(format!(
+            "ALTER TABLE {} RENAME {};",
+            qualified_name(database_type, options.schema.as_deref(), &options.old_name),
+            quote_rename_identifier(database_type, &options.new_name)
         ));
     }
 
@@ -3031,6 +3039,45 @@ mod tests {
             copy,
             "INSERT INTO \"APP\".orders_copy (user_id, userName) SELECT \"user_id\", \"userName\" FROM \"APP\".\"orders\";"
         );
+    }
+
+    #[test]
+    fn builds_starrocks_table_rename_sql() {
+        let database_type = Some(DatabaseType::StarRocks);
+        assert!(supports_object_rename(database_type, DatabaseObjectType::Table));
+        for (old_name, new_name, expected) in [
+            ("users", "app_users", "ALTER TABLE `users` RENAME `app_users`;"),
+            ("user`name", "new`name", "ALTER TABLE `user``name` RENAME `new``name`;"),
+        ] {
+            assert_eq!(
+                build_rename_object_sql(RenameObjectSqlOptions {
+                    database_type,
+                    object_type: DatabaseObjectType::Table,
+                    schema: None,
+                    old_name: old_name.to_string(),
+                    new_name: new_name.to_string(),
+                })
+                .unwrap(),
+                expected
+            );
+        }
+        for object_type in [
+            DatabaseObjectType::View,
+            DatabaseObjectType::MaterializedView,
+            DatabaseObjectType::Procedure,
+            DatabaseObjectType::Function,
+            DatabaseObjectType::Event,
+        ] {
+            assert!(!supports_object_rename(database_type, object_type));
+            assert!(build_rename_object_sql(RenameObjectSqlOptions {
+                database_type,
+                object_type,
+                schema: None,
+                old_name: "old_name".to_string(),
+                new_name: "new_name".to_string(),
+            })
+            .is_err());
+        }
     }
 
     #[test]

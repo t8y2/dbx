@@ -78,6 +78,16 @@ pub fn table_import_client_session_id(import_id: &str) -> String {
     task_client_session_id("table-import", import_id)
 }
 
+/// Execution id registered with `RunningQueries` for the whole duration of an import.
+///
+/// Background pool maintenance (the keepalive probe, connection health refresh, idle
+/// reclamation) consults `is_pool_active` before touching a pool. An import keeps a
+/// connection checked out for the entire run — a session-scoped pool has exactly one
+/// connection — so without this registration the pool looks idle while it is in use.
+fn table_import_execution_id(import_id: &str) -> String {
+    format!("table-import-exec:{import_id}")
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedImportFile {
     pub columns: Vec<String>,
@@ -7063,6 +7073,16 @@ where
     let mut db_write_ms = 0u128;
     let mut statement_count = 0usize;
     let batch_size = if request.batch_size == 0 { DEFAULT_BATCH_SIZE } else { request.batch_size };
+    // Mark the import's pool busy for the whole run. A session-scoped pool keeps a single
+    // connection, and the transactional batch path holds it for an entire chunk, so the
+    // keepalive probe cannot check out a connection on time. Without this registration the
+    // probe treats that healthy-but-busy pool as dead, invalidates it, and the next chunk
+    // fails with "Connection not found for transaction".
+    let import_execution_id = table_import_execution_id(&request.import_id);
+    let _import_activity = state.running_queries.register(import_execution_id.clone());
+    state.running_queries.set_pool_key(&import_execution_id, pool_key);
+    state.touch_pool_activity(pool_key).await;
+    let _activity_touch = state.pool_activity_touch(pool_key);
     let kingbase_oracle_mode = kingbase_oracle_compatibility_mode(state, pool_key, db_type).await;
     let conflict_policy = request.effective_conflict_policy();
     if let Err(error) = validate_update_existing_target(conflict_policy, db_type, request.create_table) {
@@ -13252,6 +13272,100 @@ mod tests {
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
                 vec![serde_json::json!(3), serde_json::json!("Linus")]
             ]
+        );
+    }
+
+    // A session-scoped pool keeps a single connection, and the transactional batch path holds
+    // it for a whole chunk, so the keepalive probe cannot check out a connection while the
+    // import is running. The import must therefore advertise its pool as busy for its whole
+    // run; otherwise the probe invalidates the healthy pool and the next chunk fails with
+    // "Connection not found for transaction".
+    #[tokio::test]
+    async fn truncate_import_marks_its_pool_active_until_it_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-truncate-activity";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER, name TEXT)").await.unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite truncate activity test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+        let data_path = dir.path().join("rows.txt");
+        std::fs::write(&data_path, b"id%name\n1%Ada\n2%Grace\n3%Linus\n").unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-truncate-activity".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: data_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Delimited),
+            parse_options: TableImportParseOptions {
+                delimiter: Some("%".to_string()),
+                ..TableImportParseOptions::default()
+            },
+            mappings: vec![
+                TableImportColumnMapping {
+                    source_column: "id".to_string(),
+                    target_column: "id".to_string(),
+                    target_data_type: None,
+                },
+                TableImportColumnMapping {
+                    source_column: "name".to_string(),
+                    target_column: "name".to_string(),
+                    target_data_type: None,
+                },
+            ],
+            mode: TableImportMode::Truncate,
+            create_table: false,
+            batch_size: 2,
+            date_time_format: None,
+            prepared_source: None,
+            skip_duplicate_rows: false,
+            conflict_policy: None,
+            retain_source: false,
+        };
+
+        let mut active_during_import = Vec::new();
+        let summary = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |progress| {
+                active_during_import.push((progress.status, state.running_queries.is_pool_active(&pool_key)));
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.rows_imported, 3);
+        assert!(!active_during_import.is_empty(), "the import must report progress while it owns the pool");
+        for (status, active) in &active_during_import {
+            assert!(active, "progress event {status:?} happened while the import's pool was idle to sweeps");
+        }
+        assert!(
+            !state.running_queries.is_pool_active(&pool_key),
+            "the import must release its pool registration when it finishes"
         );
     }
 

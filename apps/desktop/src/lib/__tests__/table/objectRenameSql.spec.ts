@@ -12,6 +12,16 @@ describe("Inceptor object rename", () => {
   });
 });
 
+describe("StarRocks object rename", () => {
+  it("enables table rename only", () => {
+    expect(supportsObjectRename("starrocks", "TABLE")).toBe(true);
+    for (const objectType of ["VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "EVENT"] as const) {
+      expect(supportsObjectRename("starrocks", objectType)).toBe(false);
+    }
+    expect(supportsDatabaseRename("starrocks")).toBe(false);
+  });
+});
+
 describe("database rename", () => {
   it("chooses a maintenance database outside the rename target", () => {
     expect(databaseRenameMaintenanceDatabase("admin", "application")).toBe("admin");

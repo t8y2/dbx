@@ -3,6 +3,7 @@ import {
   ACCUMULATORS,
   COMMON_OPERATORS,
   EXPRESSION_OPERATORS,
+  ENUM_VALUES,
   EXTENDED_JSON_VALUES,
   FIELD_QUERY_OPERATORS,
   PIPELINE_STAGES,
@@ -11,10 +12,10 @@ import {
   BULK_WRITE_OPERATIONS,
   KEY_MAP_VALUES,
   METHOD_OPTION_KEYS,
+  OPERATOR_SUB_KEYS,
   STAGE_OPTION_KEYS,
   TOP_LEVEL_QUERY_OPERATORS,
   UPDATE_OPERATORS,
-  UPDATE_OPERATOR_LABELS,
   VALUE_SNIPPETS,
   mongoOperatorItemType,
   type MongoOperatorSpec,
@@ -55,7 +56,9 @@ export type MongoCompletionMode =
   | "methodOption"
   | "bulkWriteOperation"
   | "bulkWriteField"
-  | "keyMapValue";
+  | "keyMapValue"
+  | "operatorField"
+  | "enumValue";
 
 export interface MongoCompletionField {
   name: string;
@@ -91,6 +94,10 @@ export interface MongoCompletionContext {
   bulkWriteOperation?: string;
   /** Which field-to-value map the cursor sits in: `sort`, `projection` or `index`. */
   keyMap?: string;
+  /** Operator whose own sub-document the cursor sits in (`$text`, `$near`, `$jsonSchema`, `collation`). */
+  operator?: string;
+  /** Which fixed value set the cursor's value position accepts (`$type`, `explain`, `caseFirst`). */
+  enumKey?: string;
 }
 
 export interface MongoCompletionInput {
@@ -177,6 +184,7 @@ const CURSOR_METHODS = [
   { label: "limit", detail: "Limit cursor results", apply: "limit(100)" },
   { label: "skip", detail: "Skip cursor results", apply: "skip(0)" },
   { label: "explain", detail: "Show the query plan instead of the results", apply: 'explain("executionStats")' },
+  { label: "collation", detail: "Locale-aware rules for matching and sorting", apply: 'collation({ locale: "${en}" })' },
 ] as const;
 
 /**
@@ -206,7 +214,7 @@ const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number
 };
 
 /** Role of each positional argument, by collection helper. Drives cursor classification. */
-type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options";
+type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options" | "collation" | "verbosity";
 
 const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   find: ["filter", "projection"],
@@ -228,6 +236,8 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   createIndex: ["keys", "options"],
   distinct: ["fieldName", "filter"],
   sort: ["sortKeys"],
+  collation: ["collation"],
+  explain: ["verbosity"],
 };
 
 /** `{ $oid: "..." }` for a bare value position, where the user has not typed the braces yet. */
@@ -318,7 +328,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const cursorChain = matchCursorMethodDot(beforeCursor);
   if (cursorChain) {
     const methodPrefix = readMethodPrefix(beforeCursor);
-    return { mode: "cursorMethod", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, database, stage: cursorChain.countable ? "countable" : undefined };
+    return { mode: "cursorMethod", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, database, stage: cursorChain.countable ? "countable" : cursorChain.find ? "find" : undefined };
   }
 
   const call = findInnermostMongoCall(beforeCursor);
@@ -333,6 +343,8 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const classified = classifyCursorInCall(call.method, scan);
   return {
     ...at(classified.mode, classified.stage, classified.method, classified.bulkWriteOperation, classified.keyMap),
+    ...(classified.operator ? { operator: classified.operator } : {}),
+    ...(classified.enumKey ? { enumKey: classified.enumKey } : {}),
     collection: classified.collection ?? collection,
   };
 }
@@ -370,7 +382,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = methodItems(prefix);
       break;
     case "cursorMethod":
-      items = cursorMethodItems(prefix, context.stage === "countable");
+      items = cursorMethodItems(prefix, context.stage === "countable", context.stage === "countable" || context.stage === "find");
       break;
     case "field":
       items = fieldItems(prefix, fields);
@@ -425,6 +437,12 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "bulkWriteField":
       items = specItems(BULK_WRITE_OPERATION_FIELDS[context.bulkWriteOperation ?? ""] ?? [], prefix, `${context.bulkWriteOperation} field`, 100);
+      break;
+    case "operatorField":
+      items = specItems(OPERATOR_SUB_KEYS[context.operator ?? ""] ?? [], prefix, `${context.operator} key`, 100);
+      break;
+    case "enumValue":
+      items = enumValueItems(prefix, ENUM_VALUES[context.enumKey ?? ""] ?? [], context.enumKey ?? "");
       break;
     default:
       items = [];
@@ -493,7 +511,7 @@ export function getMongoDocumentQueryCompletionContext(text: string, cursor: num
   const scan = scanMongoCallArguments(text, 0, safeCursor);
   if (!scan) return nothing;
 
-  const classified = kind === "filter" ? { mode: classifyFilter(scan, 0) } : classifyKeyMap(scan, 0, "sort");
+  const classified = kind === "filter" ? classifyFilter(scan, 0) : classifyKeyMap(scan, 0, "sort");
   if (classified.mode === "none") return nothing;
 
   const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
@@ -623,6 +641,8 @@ interface MongoCursorClass {
   method?: string;
   bulkWriteOperation?: string;
   keyMap?: string;
+  operator?: string;
+  enumKey?: string;
 }
 
 /**
@@ -706,9 +726,9 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
 
   switch (role) {
     case "filter":
-      return { mode: classifyFilter(scan, 0) };
+      return classifyFilter(scan, 0);
     case "update":
-      return { mode: classifyUpdate(scan, 0) };
+      return classifyUpdate(scan, 0);
     case "replacement":
     case "document":
       return { mode: classifyDocument(scan, 0) };
@@ -729,6 +749,12 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
       return classifyBulkWriteOperations(scan);
     case "options":
       return classifyMethodOptions(method, scan);
+    // `find(…).collation({ … })`, the same document as the `collation` option.
+    case "collation":
+      return classifyCollation(scan, 0);
+    // `find(…).explain("executionStats")`.
+    case "verbosity":
+      return scan.stack.length === 0 ? { mode: "enumValue", enumKey: "explain" } : { mode: "none" };
     default:
       return { mode: "none" };
   }
@@ -743,14 +769,38 @@ function innermost(scan: MongoCallScan): MongoContainer | undefined {
   return scan.stack[scan.stack.length - 1];
 }
 
-function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCompletionMode {
+/** Query operators whose value is a document with its own keys rather than a field's constraint object. */
+const SUB_DOCUMENT_QUERY_OPERATORS = new Set(["$text", "$geoWithin", "$geoIntersects", "$near", "$nearSphere", "$geometry"]);
+
+/** Value positions in a filter that take a fixed set of strings, by the key and the operator that holds it. */
+function filterValueEnum(operator: string | null, key: string | null): string | undefined {
+  if (key === "$type") return "$type";
+  if (key === "$options") return "$options";
+  if (key === "type" && operator === "$geometry") return "geometryType";
+  return undefined;
+}
+
+function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClass {
   const inner = innermost(scan);
-  if (!inner || innerDepth(scan, rootIndex) < 0) return "none";
-  // Elements of `$in: [...]` are values, so `{ _id: { $in: [ObjectId(...)] } }` completes like any value.
-  if (inner.kind === "array") return VALUE_ARRAY_OPERATORS.has(inner.key ?? "") && !scan.inString ? "value" : "none";
-  if (inner.kind !== "object") return "none";
-  if (scan.inValue) return scan.inString ? "none" : "value";
-  if (innerDepth(scan, rootIndex) === 0) return "filterField";
+  if (!inner || innerDepth(scan, rootIndex) < 0) return { mode: "none" };
+
+  // Under `$jsonSchema` the vocabulary is JSON Schema, however deep the cursor sits.
+  const schemaIndex = findContainerIndex(scan, rootIndex, "$jsonSchema");
+  if (schemaIndex >= 0) return classifyJsonSchema(scan, schemaIndex);
+
+  if (inner.kind === "array") {
+    // `$type: ["string", "null"]` lists BSON types.
+    if (inner.key === "$type") return { mode: "enumValue", enumKey: "$type" };
+    // Elements of `$in: [...]` are values, so `{ _id: { $in: [ObjectId(...)] } }` completes like any value.
+    return { mode: VALUE_ARRAY_OPERATORS.has(inner.key ?? "") && !scan.inString ? "value" : "none" };
+  }
+  if (inner.kind !== "object") return { mode: "none" };
+  if (scan.inValue) {
+    const enumKey = filterValueEnum(inner.key, scan.valueKey);
+    if (enumKey) return { mode: "enumValue", enumKey };
+    return { mode: scan.inString ? "none" : "value" };
+  }
+  if (innerDepth(scan, rootIndex) === 0) return { mode: "filterField" };
 
   // Inside a nested object: whose value is it?
   switch (inner.key) {
@@ -758,30 +808,78 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCompletion
       // An object inside an array: a sub-filter under `$and` / `$or` / `$nor`,
       // or an extended JSON wrapper such as `{ $oid: ... }` under `$in`.
       const parent = scan.stack[scan.stack.length - 2];
-      return parent?.kind === "array" && VALUE_ARRAY_OPERATORS.has(parent.key ?? "") ? "valueWrapper" : "filterField";
+      return { mode: parent?.kind === "array" && VALUE_ARRAY_OPERATORS.has(parent.key ?? "") ? "valueWrapper" : "filterField" };
     }
     case "$elemMatch":
-      return "filterField";
+      return { mode: "filterField" };
     case "$expr":
-      return "expression";
-    case "$jsonSchema":
-      return "none";
+      return { mode: "expression" };
     default:
-      return "queryOperator"; // a field's constraint object, or `$not`
+      // `$text: { … }` and the geo operators hold their own keys; anything else is a
+      // field's constraint object, or `$not`, where the field operators belong.
+      return SUB_DOCUMENT_QUERY_OPERATORS.has(inner.key) ? { mode: "operatorField", operator: inner.key } : { mode: "queryOperator" };
   }
 }
 
-function classifyUpdate(scan: MongoCallScan, rootIndex: number): MongoCompletionMode {
-  const inner = innermost(scan);
-  if (!inner || innerDepth(scan, rootIndex) < 0) return "none";
-  if (scan.inValue) return scan.inString ? "none" : "value";
-  if (inner.kind !== "object") return "none";
-  if (innerDepth(scan, rootIndex) === 0) return "updateOperator";
+/** Index of the innermost object container at or above `rootIndex` that is the value of `key`, or -1. */
+function findContainerIndex(scan: MongoCallScan, rootIndex: number, key: string): number {
+  for (let i = scan.stack.length - 1; i > rootIndex; i--) {
+    const container = scan.stack[i];
+    if (container?.kind === "object" && container.key === key) return i;
+  }
+  return -1;
+}
 
+/** Keywords whose value is itself a schema. */
+const SCHEMA_NESTING_KEYWORDS = new Set(["items", "additionalItems", "additionalProperties", "not"]);
+/** Keywords whose value is a list of schemas. */
+const SCHEMA_LIST_KEYWORDS = new Set(["allOf", "anyOf", "oneOf"]);
+
+/**
+ * Inside `$jsonSchema: { … }`: the schema object and every schema nested in it
+ * (`properties.<field>`, `items`, an `allOf` branch) take the JSON Schema keywords,
+ * `properties` itself names fields, and `bsonType` / `type` take the BSON aliases.
+ */
+function classifyJsonSchema(scan: MongoCallScan, schemaIndex: number): MongoCursorClass {
+  const inner = innermost(scan);
+  if (!inner) return { mode: "none" };
   const parent = scan.stack[scan.stack.length - 2];
-  if (parent?.key === "$push" || parent?.key === "$addToSet") return "pushModifier";
-  if (inner.key && UPDATE_OPERATOR_LABELS.has(inner.key)) return "field";
-  return "field";
+  const keywords: MongoCursorClass = { mode: "operatorField", operator: "$jsonSchema" };
+
+  if (inner.kind === "array") {
+    if (inner.key === "bsonType" || inner.key === "type") return { mode: "enumValue", enumKey: "bsonType" };
+    if (inner.key === "required" && scan.inString) return { mode: "fieldPath" };
+    return { mode: "none" };
+  }
+  if (inner.kind !== "object") return { mode: "none" };
+  if (scan.inValue) {
+    if (scan.valueKey === "bsonType" || scan.valueKey === "type") return { mode: "enumValue", enumKey: "bsonType" };
+    return { mode: "none" };
+  }
+
+  if (scan.stack.length - 1 === schemaIndex) return keywords;
+  if (inner.key === "properties") return { mode: "field" };
+  if (inner.key === null) return parent?.kind === "array" && SCHEMA_LIST_KEYWORDS.has(parent.key ?? "") ? keywords : { mode: "none" };
+  if (SCHEMA_NESTING_KEYWORDS.has(inner.key)) return keywords;
+  if (parent?.key === "properties" || parent?.key === "patternProperties") return keywords;
+  return { mode: "none" };
+}
+
+function classifyUpdate(scan: MongoCallScan, rootIndex: number): MongoCursorClass {
+  const inner = innermost(scan);
+  if (!inner || innerDepth(scan, rootIndex) < 0) return { mode: "none" };
+  const parent = scan.stack[scan.stack.length - 2];
+  if (scan.inValue) {
+    // `$currentDate: { at: { $type: "timestamp" } }`.
+    if (scan.valueKey === "$type" && parent?.key === "$currentDate") return { mode: "enumValue", enumKey: "currentDateType" };
+    return { mode: scan.inString ? "none" : "value" };
+  }
+  if (inner.kind !== "object") return { mode: "none" };
+  if (innerDepth(scan, rootIndex) === 0) return { mode: "updateOperator" };
+
+  if (parent?.key === "$push" || parent?.key === "$addToSet") return { mode: "pushModifier" };
+  if (parent?.key === "$currentDate") return { mode: "operatorField", operator: "$currentDate" };
+  return { mode: "field" };
 }
 
 function classifyDocument(scan: MongoCallScan, rootIndex: number): MongoCompletionMode {
@@ -805,18 +903,46 @@ function classifyKeyMap(scan: MongoCallScan, rootIndex: number, keyMap: string):
 /** Option keys whose value is a field-to-value map, so the cursor completes field names there. */
 const FIELD_MAP_OPTION_KEYS = new Set(["sort", "projection"]);
 
+/** Option keys whose value is a fixed set of strings. */
+const OPTION_VALUE_ENUMS: Record<string, string> = { returnDocument: "returnDocument" };
+
 function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursorClass {
   const inner = innermost(scan);
   const depth = innerDepth(scan, 0);
   if (!inner || depth < 0) return { mode: "none" };
 
-  // `{ sort: { … } }` and `{ projection: { … } }` are field maps one level in.
-  if (depth === 1 && inner.kind === "object" && FIELD_MAP_OPTION_KEYS.has(inner.key ?? "")) {
-    if (!scan.inValue) return { mode: "field", method };
-    return { mode: scan.inString ? "none" : "keyMapValue", method, keyMap: inner.key ?? "" };
+  if (depth === 0) {
+    if (scan.inValue) {
+      const enumKey = OPTION_VALUE_ENUMS[scan.valueKey ?? ""];
+      return enumKey ? { mode: "enumValue", enumKey, method } : { mode: "none" };
+    }
+    return { mode: inner.kind === "object" ? "methodOption" : "none", method };
   }
-  if (depth !== 0 || scan.inValue) return { mode: "none" };
-  return { mode: inner.kind === "object" ? "methodOption" : "none", method };
+
+  // Which option's value holds the cursor, however deep.
+  const option = scan.stack[1]?.key ?? "";
+  // `{ sort: { … } }` and `{ projection: { … } }` are field maps one level in.
+  if (depth === 1 && inner.kind === "object" && FIELD_MAP_OPTION_KEYS.has(option)) {
+    if (!scan.inValue) return { mode: "field", method };
+    return { mode: scan.inString ? "none" : "keyMapValue", method, keyMap: option };
+  }
+  if (option === "partialFilterExpression") return { ...classifyFilter(scan, 1), method };
+  if (option === "collation") return { ...classifyCollation(scan, 1), method };
+  return { mode: "none" };
+}
+
+/** Collation option values with a fixed set. */
+const COLLATION_VALUE_ENUMS: Record<string, string> = { caseFirst: "caseFirst", alternate: "alternate", maxVariable: "maxVariable", strength: "strength" };
+
+/** The collation document, as the `collation` option or the `collation()` cursor method. */
+function classifyCollation(scan: MongoCallScan, rootIndex: number): MongoCursorClass {
+  const inner = innermost(scan);
+  if (!inner || inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return { mode: "none" };
+  if (scan.inValue) {
+    const enumKey = COLLATION_VALUE_ENUMS[scan.valueKey ?? ""];
+    return enumKey ? { mode: "enumValue", enumKey } : { mode: "none" };
+  }
+  return { mode: "operatorField", operator: "collation" };
 }
 
 /**
@@ -849,11 +975,11 @@ function classifyBulkWriteOperations(scan: MongoCallScan): MongoCursorClass {
   const fieldIndex = arrayIndex + 3;
   switch (scan.stack[fieldIndex]?.key ?? "") {
     case "filter":
-      return { mode: classifyFilter(scan, fieldIndex), bulkWriteOperation: operation };
+      return { ...classifyFilter(scan, fieldIndex), bulkWriteOperation: operation };
     case "arrayFilters":
-      return { mode: classifyFilter(scan, fieldIndex + 1), bulkWriteOperation: operation };
+      return { ...classifyFilter(scan, fieldIndex + 1), bulkWriteOperation: operation };
     case "update":
-      return { mode: classifyUpdate(scan, fieldIndex), bulkWriteOperation: operation };
+      return { ...classifyUpdate(scan, fieldIndex), bulkWriteOperation: operation };
     case "document":
     case "replacement":
       return { mode: classifyDocument(scan, fieldIndex), bulkWriteOperation: operation };
@@ -904,7 +1030,7 @@ function stageStringValueMode(stage: string): MongoCompletionMode {
 }
 
 function classifyStageBody(stage: string, scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
-  if (stage === "$match") return { mode: classifyFilter(scan, bodyIndex), stage };
+  if (stage === "$match") return { ...classifyFilter(scan, bodyIndex), stage };
   if (stage === "$group") return { mode: classifyGroup(scan, bodyIndex), stage };
   if (stage === "$sort") return { ...classifyKeyMap(scan, bodyIndex, "sort"), stage };
   if (stage === "$unset") return { mode: innermost(scan)?.kind === "array" ? "fieldPath" : "none", stage };
@@ -1065,8 +1191,9 @@ function methodItems(prefix: string): MongoCompletionItem[] {
   );
 }
 
-function cursorMethodItems(prefix: string, countable: boolean): MongoCompletionItem[] {
-  const methods = countable ? [...CURSOR_METHODS, CURSOR_COUNT_METHOD] : [...CURSOR_METHODS];
+/** `collation()` is a find-cursor method only, so it is withheld after `aggregate(…)`. */
+function cursorMethodItems(prefix: string, countable: boolean, find: boolean): MongoCompletionItem[] {
+  const methods = [...CURSOR_METHODS.filter((method) => find || method.label !== "collation"), ...(countable ? [CURSOR_COUNT_METHOD] : [])];
   return dedupeAndSort(
     methods
       .filter((method) => matchesFuzzyPrefix(method.label, prefix))
@@ -1075,7 +1202,7 @@ function cursorMethodItems(prefix: string, countable: boolean): MongoCompletionI
         type: "function" as const,
         detail: method.detail,
         apply: method.apply,
-        boost: method.label === "limit" ? 150 : method.label === "sort" ? 140 : method.label === "skip" ? 130 : 120,
+        boost: method.label === "limit" ? 150 : method.label === "sort" ? 140 : method.label === "skip" ? 130 : method.label === "collation" ? 115 : 120,
       })),
   );
 }
@@ -1126,6 +1253,27 @@ function fieldRefItems(prefix: string, fields: MongoCompletionField[], baseBoost
         boost: startsWithPrefix(field.name, normalizedPrefix) ? baseBoost + 20 : baseBoost - 15,
       })),
   );
+}
+
+/**
+ * Values from a fixed set, in or out of quotes: `$type: "` and `$type: ` both offer
+ * `string`. Inside a quote the item supplies only the bare value and consumes the
+ * closing quote; outside it, the authored literal, quotes included.
+ */
+function enumValueItems(prefix: string, values: readonly MongoOperatorSpec[], category: string): MongoCompletionItem[] {
+  const quoted = prefix.startsWith('"') || prefix.startsWith("'");
+  const normalizedPrefix = normalizeMongoKeyPrefix(prefix);
+  return values
+    .filter((value) => matchesFuzzyPrefix(value.label, normalizedPrefix))
+    .filter((value) => !quoted || value.apply.startsWith('"'))
+    .map((value) => ({
+      label: value.label,
+      type: "keyword" as const,
+      detail: value.detail,
+      info: `${category} value`,
+      apply: quoted ? quoteMongoString(value.label, prefix) : value.apply,
+      boost: startsWithPrefix(value.label, normalizedPrefix) ? 120 : 90,
+    }));
 }
 
 function specItems(specs: readonly MongoOperatorSpec[], prefix: string, category: string, baseBoost: number): MongoCompletionItem[] {
@@ -1279,7 +1427,7 @@ function isAfterCollectionDot(beforeCursor: string): boolean {
  * `db.x.find(…).…` — and whether `count()` is still legal there, which it only
  * is while no other cursor method has been chained on.
  */
-function matchCursorMethodDot(beforeCursor: string): { countable: boolean } | null {
+function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable: boolean } | null {
   const collectionCall = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.(find|aggregate)\s*\(`, "g");
   let lastMatch: RegExpExecArray | null = null;
   let match: RegExpExecArray | null;
@@ -1291,8 +1439,8 @@ function matchCursorMethodDot(beforeCursor: string): { countable: boolean } | nu
   if (closeParen < 0) return null;
 
   const chain = beforeCursor.slice(closeParen + 1);
-  if (!/^(?:\s*\.\s*(?:sort|skip|limit)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) return null;
-  return { countable: lastMatch[1] === "find" && /^\s*\.\s*[\w$-]*$/.test(chain) };
+  if (!/^(?:\s*\.\s*(?:sort|skip|limit|collation)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) return null;
+  return { find: lastMatch[1] === "find", countable: lastMatch[1] === "find" && /^\s*\.\s*[\w$-]*$/.test(chain) };
 }
 
 function findMatchingParen(text: string, openIndex: number): number {

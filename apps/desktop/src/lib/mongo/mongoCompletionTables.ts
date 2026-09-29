@@ -325,6 +325,167 @@ export const KEY_MAP_VALUES: Record<string, MongoOperatorSpec[]> = {
  * Both lists are exactly what the shell parser accepts: it rejects an unknown operation key and
  * an unknown field inside one, so anything extra here would complete into a command that fails.
  */
+const GEO_NEAR_KEYS: Spec[] = [
+  ["$geometry", "GeoJSON point to measure distance from", '$geometry: { type: "Point", coordinates: [${}, ${}] }'],
+  ["$maxDistance", "Farthest match, in meters", "$maxDistance: ${}"],
+  ["$minDistance", "Nearest match, in meters", "$minDistance: ${}"],
+];
+
+const JSON_SCHEMA_KEYWORDS: Spec[] = [
+  ["bsonType", "BSON type the value must have", 'bsonType: "${string}"'],
+  ["type", "JSON Schema type the value must have", 'type: "${string}"'],
+  ["enum", "Values the field may take", "enum: [${}]"],
+  ["required", "Fields that must be present", 'required: ["${field}"]'],
+  ["properties", "Schema for each named field", "properties: { ${field}: {} }"],
+  ["additionalProperties", "Allow, forbid or constrain fields not listed in properties", "additionalProperties: false"],
+  ["patternProperties", "Schema for fields whose name matches a pattern", 'patternProperties: { "${pattern}": {} }'],
+  ["minProperties", "Minimum number of fields", "minProperties: ${}"],
+  ["maxProperties", "Maximum number of fields", "maxProperties: ${}"],
+  ["items", "Schema for array elements", "items: {}"],
+  ["additionalItems", "Allow or constrain elements beyond the listed item schemas", "additionalItems: false"],
+  ["minItems", "Minimum array length", "minItems: ${}"],
+  ["maxItems", "Maximum array length", "maxItems: ${}"],
+  ["uniqueItems", "Reject duplicate array elements", "uniqueItems: true"],
+  ["minimum", "Smallest allowed number", "minimum: ${}"],
+  ["maximum", "Largest allowed number", "maximum: ${}"],
+  ["exclusiveMinimum", "Treat minimum as exclusive", "exclusiveMinimum: true"],
+  ["exclusiveMaximum", "Treat maximum as exclusive", "exclusiveMaximum: true"],
+  ["multipleOf", "Number must be a multiple of this", "multipleOf: ${}"],
+  ["minLength", "Minimum string length", "minLength: ${}"],
+  ["maxLength", "Maximum string length", "maxLength: ${}"],
+  ["pattern", "Regular expression the string must match", 'pattern: "${}"'],
+  ["allOf", "Must match every listed schema", "allOf: [{}]"],
+  ["anyOf", "Must match at least one listed schema", "anyOf: [{}]"],
+  ["oneOf", "Must match exactly one listed schema", "oneOf: [{}]"],
+  ["not", "Must not match this schema", "not: {}"],
+  ["dependencies", "Fields or schemas required when a field is present", 'dependencies: { ${field}: ["${other}"] }'],
+  ["title", "Schema title", 'title: "${}"'],
+  ["description", "Schema description", 'description: "${}"'],
+];
+
+/**
+ * Keys of an operator's own sub-document, where the field operators `{ field: { $… } }`
+ * takes would be wrong: `$text: { $search }`, `$near: { $geometry }`. `$jsonSchema`
+ * and every schema nested in it take the JSON Schema keywords; `collation` covers
+ * the cursor method and the option key alike; `$currentDate` is the per-field
+ * object of the update operator.
+ */
+export const OPERATOR_SUB_KEYS: Record<string, MongoOperatorSpec[]> = {
+  $text: specs([
+    ["$search", "Words or phrases to search for", '$search: "${text}"'],
+    ["$language", "Language for stemming and stop words", '$language: "${en}"'],
+    ["$caseSensitive", "Match case exactly", "$caseSensitive: true"],
+    ["$diacriticSensitive", "Match diacritics exactly", "$diacriticSensitive: true"],
+  ]),
+  $geoWithin: specs([
+    ["$geometry", "GeoJSON polygon or multipolygon to fall within", '$geometry: { type: "Polygon", coordinates: [${}] }'],
+    ["$box", "Rectangle from its bottom-left and top-right corners", "$box: [[${}, ${}], [${}, ${}]]"],
+    ["$polygon", "Polygon from a list of points", "$polygon: [[${}, ${}]]"],
+    ["$center", "Circle from a center point and a radius", "$center: [[${}, ${}], ${}]"],
+    ["$centerSphere", "Spherical circle from a center point and a radius in radians", "$centerSphere: [[${}, ${}], ${}]"],
+  ]),
+  $geoIntersects: specs([["$geometry", "GeoJSON geometry to intersect", '$geometry: { type: "${Polygon}", coordinates: [${}] }']]),
+  $near: specs(GEO_NEAR_KEYS),
+  $nearSphere: specs(GEO_NEAR_KEYS),
+  $geometry: specs([
+    ["type", "GeoJSON geometry type", 'type: "${Point}"'],
+    ["coordinates", "Coordinates, longitude first", "coordinates: [${}, ${}]"],
+  ]),
+  $jsonSchema: specs(JSON_SCHEMA_KEYWORDS),
+  $currentDate: specs([["$type", "Store a Date or a Timestamp", '$type: "${date}"']]),
+  collation: specs([
+    ["locale", 'ICU locale, such as "en" or "zh"', 'locale: "${en}"'],
+    ["strength", "Comparison level, 1 (base letters) to 5 (identical)", "strength: 2"],
+    ["caseLevel", "Compare case as its own level", "caseLevel: false"],
+    ["caseFirst", "Order uppercase before or after lowercase", 'caseFirst: "${off}"'],
+    ["numericOrdering", "Compare digit sequences as numbers", "numericOrdering: true"],
+    ["alternate", "Whether spaces and punctuation are base characters", 'alternate: "${non-ignorable}"'],
+    ["maxVariable", 'Which characters "shifted" ignores', 'maxVariable: "${punct}"'],
+    ["backwards", "Compare secondary differences from the end", "backwards: false"],
+    ["normalization", "Normalize text to Unicode NFD first", "normalization: false"],
+  ]),
+};
+
+const BSON_TYPE_ALIASES: Spec[] = [
+  ["string", "UTF-8 string", '"string"'],
+  ["objectId", "ObjectId", '"objectId"'],
+  ["date", "Date", '"date"'],
+  ["bool", "Boolean", '"bool"'],
+  ["int", "32-bit integer", '"int"'],
+  ["long", "64-bit integer", '"long"'],
+  ["double", "64-bit floating point", '"double"'],
+  ["decimal", "128-bit decimal", '"decimal"'],
+  ["number", "Any numeric type", '"number"'],
+  ["object", "Embedded document", '"object"'],
+  ["array", "Array", '"array"'],
+  ["null", "Null", '"null"'],
+  ["binData", "Binary data", '"binData"'],
+  ["regex", "Regular expression", '"regex"'],
+  ["timestamp", "Timestamp", '"timestamp"'],
+  ["javascript", "JavaScript code", '"javascript"'],
+  ["minKey", "MinKey", '"minKey"'],
+  ["maxKey", "MaxKey", '"maxKey"'],
+];
+
+/**
+ * The fixed set a value position accepts, by the name the classifier gives that
+ * position. String values carry their quotes in `apply`, so an unquoted cursor
+ * gets a well-formed literal; numbers do not.
+ */
+export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
+  $type: specs(BSON_TYPE_ALIASES),
+  bsonType: specs(BSON_TYPE_ALIASES),
+  $options: specs([
+    ["i", "Case-insensitive", '"i"'],
+    ["m", "^ and $ match at line breaks", '"m"'],
+    ["x", "Ignore whitespace and # comments in the pattern", '"x"'],
+    ["s", "Dot matches newlines", '"s"'],
+    ["u", "Unicode character classes", '"u"'],
+  ]),
+  geometryType: specs([
+    ["Point", "Single position", '"Point"'],
+    ["LineString", "Sequence of positions", '"LineString"'],
+    ["Polygon", "Closed ring of positions", '"Polygon"'],
+    ["MultiPoint", "Several points", '"MultiPoint"'],
+    ["MultiLineString", "Several line strings", '"MultiLineString"'],
+    ["MultiPolygon", "Several polygons", '"MultiPolygon"'],
+    ["GeometryCollection", "Mixed geometries", '"GeometryCollection"'],
+  ]),
+  returnDocument: specs([
+    ["after", "Return the document as modified", '"after"'],
+    ["before", "Return the document as it was", '"before"'],
+  ]),
+  explain: specs([
+    ["queryPlanner", "The chosen plan, without running it", '"queryPlanner"'],
+    ["executionStats", "The chosen plan and its execution statistics", '"executionStats"'],
+    ["allPlansExecution", "Every candidate plan and its statistics", '"allPlansExecution"'],
+  ]),
+  currentDateType: specs([
+    ["date", "Store a Date", '"date"'],
+    ["timestamp", "Store a Timestamp", '"timestamp"'],
+  ]),
+  caseFirst: specs([
+    ["off", "Lowercase and uppercase in code point order", '"off"'],
+    ["upper", "Uppercase first", '"upper"'],
+    ["lower", "Lowercase first", '"lower"'],
+  ]),
+  alternate: specs([
+    ["non-ignorable", "Spaces and punctuation count as base characters", '"non-ignorable"'],
+    ["shifted", "Spaces and punctuation are ignored up to maxVariable", '"shifted"'],
+  ]),
+  maxVariable: specs([
+    ["punct", "Shift both spaces and punctuation", '"punct"'],
+    ["space", "Shift spaces only", '"space"'],
+  ]),
+  strength: specs([
+    ["1", "Base letters only", "1"],
+    ["2", "Base letters and accents", "2"],
+    ["3", "Base letters, accents and case", "3"],
+    ["4", "Also punctuation, with alternate: shifted", "4"],
+    ["5", "Identical, including code points", "5"],
+  ]),
+};
+
 export const BULK_WRITE_OPERATIONS: MongoOperatorSpec[] = specs([
   ["insertOne", "Insert one document", "insertOne: { document: { ${} } }"],
   ["updateOne", "Update the first matching document", "updateOne: { filter: { ${} }, update: { $set: { ${} } } }"],

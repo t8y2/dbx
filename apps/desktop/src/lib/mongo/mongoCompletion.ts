@@ -173,6 +173,7 @@ const DATABASE_METHODS = [
   { label: "getCollection", detail: "Reference a collection by name", apply: 'getCollection("${}")' },
   { label: "version", detail: "Show the MongoDB server version", apply: "version()" },
   { label: "getSiblingDB", detail: "Run the next command against another database", apply: 'getSiblingDB("${database}")' },
+  { label: "runCommand", detail: "Run a database command document", apply: "runCommand({ ${} })" },
   { label: "stats", detail: "Show database statistics", apply: "stats()" },
   { label: "serverStatus", detail: "Show server status", apply: "serverStatus()" },
   { label: "createCollection", detail: "Create a collection", apply: 'createCollection("${name}")' },
@@ -214,7 +215,7 @@ const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number
 };
 
 /** Role of each positional argument, by collection helper. Drives cursor classification. */
-type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options" | "collation" | "verbosity";
+type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options" | "collation" | "verbosity" | "name";
 
 const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   find: ["filter", "projection"],
@@ -238,6 +239,9 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   sort: ["sortKeys"],
   collation: ["collation"],
   explain: ["verbosity"],
+  // Database-level helpers whose argument is a document.
+  createCollection: ["name", "options"],
+  runCommand: ["options"],
 };
 
 /** `{ $oid: "..." }` for a bare value position, where the user has not typed the braces yet. */
@@ -253,6 +257,9 @@ const DOT_SCOPED_MODES = new Set<MongoCompletionMode>(["root", "collection", "co
 
 /** Stages whose body is a fixed set of option keys rather than a field map. */
 const OPTION_STAGES = new Set(Object.keys(STAGE_OPTION_KEYS));
+
+/** The stages an update pipeline accepts: those that rewrite the document without reshaping the result set. */
+const UPDATE_PIPELINE_STAGES = PIPELINE_STAGES.filter((stage) => ["$set", "$addFields", "$unset", "$project", "$replaceRoot", "$replaceWith"].includes(stage.label));
 
 /** Stages taking a bare `"$field"` string, completed as a field reference. */
 const FIELD_REF_STAGES = new Set(["$unwind", "$sortByCount", "$replaceWith"]);
@@ -421,13 +428,13 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = specItems(ACCUMULATORS, prefix, "accumulator", 100);
       break;
     case "stage":
-      items = specItems(PIPELINE_STAGES, prefix, "aggregation stage", 100);
+      items = context.stage === "update" ? specItems(UPDATE_PIPELINE_STAGES, prefix, "update stage", 100) : specItems(PIPELINE_STAGES, prefix, "aggregation stage", 100);
       break;
     case "stageOption":
       items = specItems(STAGE_OPTION_KEYS[context.stage ?? ""] ?? [], prefix, `${context.stage} option`, 100);
       break;
     case "methodOption":
-      items = specItems(METHOD_OPTION_KEYS[context.method ?? ""] ?? [], prefix, `${context.method}() option`, 100);
+      items = specItems(METHOD_OPTION_KEYS[context.method ?? ""] ?? [], prefix, context.method === "runCommand" ? "command" : `${context.method}() option`, 100);
       break;
     case "bulkWriteOperation":
       items = specItems(BULK_WRITE_OPERATIONS, prefix, "bulkWrite operation", 100);
@@ -728,7 +735,7 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
     case "filter":
       return classifyFilter(scan, 0);
     case "update":
-      return classifyUpdate(scan, 0);
+      return classifyUpdateArgument(scan, 0);
     case "replacement":
     case "document":
       return { mode: classifyDocument(scan, 0) };
@@ -865,6 +872,11 @@ function classifyJsonSchema(scan: MongoCallScan, schemaIndex: number): MongoCurs
   return { mode: "none" };
 }
 
+/** An update argument is a document of update operators, or a pipeline of the stages an update accepts. */
+function classifyUpdateArgument(scan: MongoCallScan, rootIndex: number): MongoCursorClass {
+  return scan.stack[rootIndex]?.kind === "array" ? classifyPipeline(scan, rootIndex, "update") : classifyUpdate(scan, rootIndex);
+}
+
 function classifyUpdate(scan: MongoCallScan, rootIndex: number): MongoCursorClass {
   const inner = innermost(scan);
   if (!inner || innerDepth(scan, rootIndex) < 0) return { mode: "none" };
@@ -904,7 +916,23 @@ function classifyKeyMap(scan: MongoCallScan, rootIndex: number, keyMap: string):
 const FIELD_MAP_OPTION_KEYS = new Set(["sort", "projection"]);
 
 /** Option keys whose value is a fixed set of strings. */
-const OPTION_VALUE_ENUMS: Record<string, string> = { returnDocument: "returnDocument" };
+const OPTION_VALUE_ENUMS: Record<string, string> = { returnDocument: "returnDocument", validationLevel: "validationLevel", validationAction: "validationAction" };
+
+/** Option keys, by method, whose string value names a collection. */
+const OPTION_COLLECTION_KEYS: Record<string, ReadonlySet<string>> = {
+  createCollection: new Set(["viewOn"]),
+  runCommand: new Set(["collStats", "listIndexes", "find", "count", "distinct", "aggregate", "insert", "update", "delete", "findAndModify", "create", "drop", "collMod", "convertToCapped", "createIndexes", "dropIndexes", "validate"]),
+};
+
+/** Option keys whose value is a filter document. */
+const FILTER_OPTION_KEYS = new Set(["partialFilterExpression", "validator"]);
+
+/** Option keys whose value is a document with its own fixed keys, and the value sets inside it. */
+const SUB_DOCUMENT_OPTION_KEYS: Record<string, Record<string, string>> = {
+  collation: { caseFirst: "caseFirst", alternate: "alternate", maxVariable: "maxVariable", strength: "strength" },
+  timeseries: { granularity: "granularity" },
+  clusteredIndex: {},
+};
 
 function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursorClass {
   const inner = innermost(scan);
@@ -914,7 +942,9 @@ function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursor
   if (depth === 0) {
     if (scan.inValue) {
       const enumKey = OPTION_VALUE_ENUMS[scan.valueKey ?? ""];
-      return enumKey ? { mode: "enumValue", enumKey, method } : { mode: "none" };
+      if (enumKey) return { mode: "enumValue", enumKey, method };
+      if (OPTION_COLLECTION_KEYS[method]?.has(scan.valueKey ?? "")) return { mode: "collectionRef", method };
+      return { mode: "none" };
     }
     return { mode: inner.kind === "object" ? "methodOption" : "none", method };
   }
@@ -926,23 +956,27 @@ function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursor
     if (!scan.inValue) return { mode: "field", method };
     return { mode: scan.inString ? "none" : "keyMapValue", method, keyMap: option };
   }
-  if (option === "partialFilterExpression") return { ...classifyFilter(scan, 1), method };
-  if (option === "collation") return { ...classifyCollation(scan, 1), method };
+  if (FILTER_OPTION_KEYS.has(option)) return { ...classifyFilter(scan, 1), method };
+  if (option === "pipeline" && scan.stack[1]?.kind === "array") return { ...classifyPipeline(scan, 1), method };
+  const valueEnums = SUB_DOCUMENT_OPTION_KEYS[option];
+  if (valueEnums) return { ...classifySubDocument(scan, 1, option, valueEnums), method };
   return { mode: "none" };
 }
 
-/** Collation option values with a fixed set. */
-const COLLATION_VALUE_ENUMS: Record<string, string> = { caseFirst: "caseFirst", alternate: "alternate", maxVariable: "maxVariable", strength: "strength" };
-
 /** The collation document, as the `collation` option or the `collation()` cursor method. */
 function classifyCollation(scan: MongoCallScan, rootIndex: number): MongoCursorClass {
+  return classifySubDocument(scan, rootIndex, "collation", SUB_DOCUMENT_OPTION_KEYS.collation ?? {});
+}
+
+/** A one-level document with a fixed key set (`OPERATOR_SUB_KEYS[operator]`) and, for some keys, a fixed value set. */
+function classifySubDocument(scan: MongoCallScan, rootIndex: number, operator: string, valueEnums: Record<string, string>): MongoCursorClass {
   const inner = innermost(scan);
   if (!inner || inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return { mode: "none" };
   if (scan.inValue) {
-    const enumKey = COLLATION_VALUE_ENUMS[scan.valueKey ?? ""];
+    const enumKey = valueEnums[scan.valueKey ?? ""];
     return enumKey ? { mode: "enumValue", enumKey } : { mode: "none" };
   }
-  return { mode: "operatorField", operator: "collation" };
+  return { mode: "operatorField", operator };
 }
 
 /**
@@ -979,7 +1013,7 @@ function classifyBulkWriteOperations(scan: MongoCallScan): MongoCursorClass {
     case "arrayFilters":
       return { ...classifyFilter(scan, fieldIndex + 1), bulkWriteOperation: operation };
     case "update":
-      return { ...classifyUpdate(scan, fieldIndex), bulkWriteOperation: operation };
+      return { ...classifyUpdateArgument(scan, fieldIndex), bulkWriteOperation: operation };
     case "document":
     case "replacement":
       return { mode: classifyDocument(scan, fieldIndex), bulkWriteOperation: operation };
@@ -988,8 +1022,12 @@ function classifyBulkWriteOperations(scan: MongoCallScan): MongoCursorClass {
   }
 }
 
-function classifyPipeline(scan: MongoCallScan): MongoCursorClass {
-  const pipelineIndex = findPipelineArrayIndex(scan.stack);
+/**
+ * `kind` is `update` for the pipeline form of an update, which accepts only the
+ * stages that rewrite a document; the marker rides in `stage` so the item builder
+ * can narrow the list.
+ */
+function classifyPipeline(scan: MongoCallScan, pipelineIndex = findPipelineArrayIndex(scan.stack), kind: "aggregate" | "update" = "aggregate"): MongoCursorClass {
   if (pipelineIndex < 0) return { mode: "none" };
 
   const stageHolder = scan.stack[pipelineIndex + 1];
@@ -998,7 +1036,7 @@ function classifyPipeline(scan: MongoCallScan): MongoCursorClass {
 
   // `[{ … }]` — the cursor is in the stage object itself.
   if (scan.stack.length - 1 === pipelineIndex + 1) {
-    if (!scan.inValue) return { mode: "stage" };
+    if (!scan.inValue) return { mode: "stage", stage: kind === "update" ? "update" : undefined };
     const stage = scan.valueKey ?? "";
     return { mode: stageStringValueMode(stage), stage };
   }

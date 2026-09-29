@@ -4927,6 +4927,53 @@ fn is_textual_import_target_type(data_type: &str) -> bool {
     ) || lower.starts_with("character varying")
 }
 
+/// In DBX-exported CSV/TSV files, database NULL and empty string are the same
+/// bytes (both become an empty field — `""` under `CsvQuoteMode::All`), so the
+/// delimited parser's empty→NULL conversion cannot know the cell held an empty
+/// string. When such a NULL binds to a NOT NULL textual target column the INSERT
+/// fails with a NOT NULL violation even though the source value was
+/// representable. Rewriting exactly that combination (NULL value on a NOT NULL
+/// textual mapped target) keeps nullable targets and non-textual NOT NULL
+/// targets on their existing behavior.
+fn coerce_empty_null_to_empty_text(
+    rows: &mut [Vec<serde_json::Value>],
+    plan: Option<&CompiledImportPlan>,
+    target_column_nullable: &[(String, bool)],
+) {
+    let Some(plan) = plan else { return };
+    if target_column_nullable.is_empty() || rows.is_empty() {
+        return;
+    }
+    let coerce_source_indexes: Vec<usize> = plan
+        .target_columns
+        .iter()
+        .enumerate()
+        .filter(|(target_index, target_column)| {
+            let not_null = target_column_nullable
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(target_column))
+                .is_some_and(|(_, is_nullable)| !is_nullable);
+            not_null
+                && plan
+                    .column_types
+                    .get(*target_index)
+                    .and_then(|data_type| data_type.as_deref())
+                    .is_some_and(is_textual_import_target_type)
+        })
+        .map(|(target_index, _)| plan.mapped_source_indexes[target_index])
+        .collect();
+    if coerce_source_indexes.is_empty() {
+        return;
+    }
+    for row in rows {
+        for &source_index in &coerce_source_indexes {
+            if row.get(source_index).is_some_and(|value| value.is_null()) {
+                row[source_index] = serde_json::Value::String(String::new());
+            }
+        }
+    }
+}
+
 fn textual_source_columns_for_import(
     mappings: &[TableImportColumnMapping],
     target_column_types: &[(String, String)],
@@ -7233,6 +7280,8 @@ where
     if target_column_types.is_empty() {
         target_column_types = created_column_types.clone().unwrap_or_default();
     }
+    let target_column_nullable: Vec<(String, bool)> =
+        target_columns.iter().map(|column| (column.name.clone(), column.is_nullable)).collect();
 
     if source_format.is_delimited() {
         let parsed = if let Some(parsed) = create_table_sample.clone().or_else(|| prepared_source.clone()) {
@@ -7376,8 +7425,9 @@ where
             };
             match message {
                 Ok(DelimitedStreamMessage::Header(_)) => {}
-                Ok(DelimitedStreamMessage::Rows { rows, bytes_read }) => {
+                Ok(DelimitedStreamMessage::Rows { mut rows, bytes_read }) => {
                     last_bytes_read = last_bytes_read.max(bytes_read);
+                    coerce_empty_null_to_empty_text(&mut rows, compiled_plan.as_ref(), &target_column_nullable);
                     if is_cancelled(&request.import_id).await {
                         drop(receiver);
                         let _ = producer.await;
@@ -12885,6 +12935,63 @@ mod tests {
         }
     }
 
+    fn round_trip_coercion_plan(column_types: Vec<Option<&str>>) -> CompiledImportPlan {
+        CompiledImportPlan {
+            mapped_source_indexes: (0..column_types.len()).collect(),
+            target_columns: (0..column_types.len()).map(|index| format!("column_{}", index + 1)).collect(),
+            column_types: column_types.into_iter().map(|data_type| data_type.map(str::to_string)).collect(),
+        }
+    }
+
+    /// DBX exports database NULL and empty string as the same empty CSV field, so the
+    /// delimited parser's `empty_string_as_null` default turns both into NULL. A NULL
+    /// landing on a NOT NULL textual target must bind as '' to keep the DBX CSV
+    /// round-trip working (#10505); nullable and non-textual NOT NULL targets keep NULL.
+    #[test]
+    fn empty_null_coerces_to_empty_string_only_for_not_null_textual_targets() {
+        let mut rows = vec![vec![serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null]];
+        let nullable =
+            vec![("column_1".to_string(), false), ("column_2".to_string(), true), ("column_3".to_string(), false)];
+        let plan = round_trip_coercion_plan(vec![Some("VARCHAR(50)"), Some("TEXT"), Some("INT")]);
+        coerce_empty_null_to_empty_text(&mut rows, Some(&plan), &nullable);
+        assert_eq!(rows, vec![vec![serde_json::json!(""), serde_json::Value::Null, serde_json::Value::Null]]);
+    }
+
+    #[test]
+    fn empty_null_coercion_requires_target_nullability_metadata() {
+        let mut rows = vec![vec![serde_json::Value::Null]];
+        let plan = round_trip_coercion_plan(vec![Some("VARCHAR(50)")]);
+        coerce_empty_null_to_empty_text(&mut rows, Some(&plan), &[]);
+        assert_eq!(rows, vec![vec![serde_json::Value::Null]]);
+    }
+
+    #[test]
+    fn empty_null_coercion_without_compiled_plan_is_noop() {
+        let mut rows = vec![vec![serde_json::Value::Null]];
+        coerce_empty_null_to_empty_text(&mut rows, None, &[("name".to_string(), false)]);
+        assert_eq!(rows, vec![vec![serde_json::Value::Null]]);
+    }
+
+    #[test]
+    fn empty_null_coercion_targets_mapped_source_cells_only() {
+        let mut rows = vec![vec![serde_json::json!("keep"), serde_json::Value::Null, serde_json::Value::Null]];
+        let plan = CompiledImportPlan {
+            mapped_source_indexes: vec![1],
+            target_columns: vec!["name".to_string()],
+            column_types: vec![Some("VARCHAR(50)".to_string())],
+        };
+        coerce_empty_null_to_empty_text(&mut rows, Some(&plan), &[("name".to_string(), false)]);
+        assert_eq!(rows, vec![vec![serde_json::json!("keep"), serde_json::json!(""), serde_json::Value::Null]]);
+    }
+
+    #[test]
+    fn empty_null_coercion_leaves_non_null_and_empty_string_values_untouched() {
+        let mut rows = vec![vec![serde_json::json!("value"), serde_json::json!(""), serde_json::json!(42)]];
+        let plan = round_trip_coercion_plan(vec![Some("VARCHAR(50)")]);
+        coerce_empty_null_to_empty_text(&mut rows, Some(&plan), &[("column_1".to_string(), false)]);
+        assert_eq!(rows, vec![vec![serde_json::json!("value"), serde_json::json!(""), serde_json::json!(42)]]);
+    }
+
     struct SqliteAppendTestContext {
         _dir: tempfile::TempDir,
         state: AppState,
@@ -13101,6 +13208,111 @@ mod tests {
                 vec![serde_json::json!(3), serde_json::json!("Linus")]
             ]
         );
+    }
+
+    /// DBX table export writes database NULL and empty string as the same empty
+    /// CSV field (#10505): rows go through `push_table_csv_row` with
+    /// `CsvQuoteMode::All`, where both render as `""`. Round-tripping such an
+    /// export must not fail on NOT NULL textual columns — the empty-field NULL
+    /// binds as '' there — while a NULL in a nullable column stays NULL.
+    #[tokio::test]
+    async fn sqlite_csv_round_trip_preserves_empty_string_on_not_null_text_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-csv-round-trip";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(
+            &sqlite,
+            "CREATE TABLE contacts (id INTEGER PRIMARY KEY, name VARCHAR(50) NOT NULL DEFAULT '', note VARCHAR(50))",
+        )
+        .await
+        .unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "INSERT INTO contacts (id, name, note) VALUES (1, '', NULL)")
+            .await
+            .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite csv round-trip test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+
+        // Byte-identical to the streaming table exporter: BOM + quoted header +
+        // rows written by push_table_csv_row (the exporter's row writer).
+        let mut csv = String::from("\u{FEFF}\"id\",\"name\",\"note\"\n");
+        crate::data::csv_export::push_table_csv_row(
+            &mut csv,
+            &[serde_json::json!(1), serde_json::json!(""), serde_json::Value::Null],
+        );
+        let export_path = dir.path().join("contacts.csv");
+        std::fs::write(&export_path, csv).unwrap();
+
+        crate::db::sqlite::execute_query(
+            &sqlite,
+            "CREATE TABLE contacts_restored (id INTEGER PRIMARY KEY, name VARCHAR(50) NOT NULL DEFAULT '', note VARCHAR(50))",
+        )
+        .await
+        .unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-csv-round-trip".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "contacts_restored".to_string(),
+            file_path: export_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Csv),
+            parse_options: TableImportParseOptions::default(),
+            mappings: ["id", "name", "note"]
+                .into_iter()
+                .map(|column| TableImportColumnMapping {
+                    source_column: column.to_string(),
+                    target_column: column.to_string(),
+                    target_data_type: None,
+                })
+                .collect(),
+            mode: TableImportMode::Append,
+            create_table: false,
+            batch_size: 10,
+            date_time_format: None,
+            prepared_source: None,
+            skip_duplicate_rows: false,
+            conflict_policy: None,
+            retain_source: false,
+        };
+
+        let summary = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.rows_imported, 1);
+        let rows =
+            crate::db::sqlite::execute_query(&sqlite, "SELECT id, name, note FROM contacts_restored ORDER BY id")
+                .await
+                .unwrap()
+                .rows;
+        assert_eq!(rows, vec![vec![serde_json::json!(1), serde_json::json!(""), serde_json::Value::Null]]);
     }
 
     #[tokio::test]

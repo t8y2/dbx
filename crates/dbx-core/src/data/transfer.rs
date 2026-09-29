@@ -3440,6 +3440,25 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
     // Extract basic type, `bigint unsigned` -> `bigint`
     base = base.split(' ').next().unwrap_or(base).trim();
 
+    // SQLite has no integer widths: every column whose declared type carries the
+    // `INT` substring — `INTEGER`, `INT`, `TINYINT`, `SMALLINT`, even the
+    // SQLite-only `UNSIGNED BIG INT` spelling — is stored as a full 64-bit signed
+    // integer (that is SQLite's documented INTEGER affinity rule). Routing those
+    // names through the 32-bit arms below builds a target column that cannot hold
+    // the source's own values, and the transfer then dies mid-batch instead of
+    // writing the row: SQL Server rejects the batch with code 248
+    // ("The conversion of the nvarchar value '...' overflowed an int column").
+    // rqlite, Turso and Cloudflare D1 are SQLite underneath and share the storage
+    // classes. Send integer-affinity columns down the 64-bit arm instead;
+    // Oracle-family targets keep `INTEGER`, which is already `NUMBER(38, 0)`.
+    if is_sqlite_transfer_dialect(source_db) && t.contains("int") {
+        base = if matches!(target_db, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+            "integer"
+        } else {
+            "bigint"
+        };
+    }
+
     if matches!(
         target_db,
         DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo | DatabaseType::Transwarp
@@ -3610,6 +3629,13 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
         },
         _ => target_text_type(target_db).into(),
     }
+}
+
+/// SQLite and the databases that embed it (`rqlite`, Turso, Cloudflare D1) all
+/// use SQLite's storage classes, where any column with INTEGER affinity holds a
+/// 64-bit signed integer regardless of the width its declared type suggests.
+fn is_sqlite_transfer_dialect(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
 }
 
 fn mysql_type_needs_key_prefix(mapped_type: &str) -> bool {
@@ -9787,6 +9813,14 @@ where
     // A preexisting target also needs its columns read, even for a data-only
     // transfer: the write SQL has to address the target's declared column
     // names, which can differ from the source in case (#9320).
+    //
+    // SQL Server belongs to the always-read set for its identity flags, not just
+    // for a preexisting target: a freshly created target reuses the source DDL
+    // (`can_reuse`), which carries the source's `IDENTITY` clause, so the new
+    // target is an identity target too. `writes_identity_insert_columns` decides
+    // whether the batch needs the `SET IDENTITY_INSERT` wrapper, and without the
+    // target metadata it stays false — SQL Server then rejects the explicit
+    // identity values with 544.
     let needs_target_columns = default_rows_only
         || target_table_preexisting
         || (request.mode == TransferMode::Upsert
@@ -9799,7 +9833,10 @@ where
                     | DatabaseType::Argo
                     | DatabaseType::Transwarp
             ))
-        || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2);
+        || matches!(
+            target_db_type,
+            DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2 | DatabaseType::SqlServer
+        );
     let target_columns = if needs_target_columns {
         get_columns_for_transfer(
             state,
@@ -18005,6 +18042,52 @@ SELECT 1 FROM dual"#
             map_column_type("bigint unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Postgres),
             "BIGINT"
         );
+    }
+
+    #[test]
+    fn map_column_type_keeps_mysql_and_duckdb_integer_widths() {
+        // The widening below is specific to SQLite's storage classes: MySQL's
+        // `int` really is 32-bit and DuckDB's `INTEGER` is 32-bit too, so their
+        // mappings must not change.
+        assert_eq!(map_column_type("int", &DatabaseType::Mysql, &DatabaseType::SqlServer), "INT");
+        assert_eq!(map_column_type("INTEGER", &DatabaseType::DuckDb, &DatabaseType::SqlServer), "INT");
+    }
+
+    #[test]
+    fn map_column_type_widens_sqlite_integer_affinity_columns() {
+        // User report (SQL Server data transfer): a SQLite `INTEGER` column was
+        // mapped onto SQL Server `INT`, and the first value above 2^31 killed the
+        // batch with code 248 ("... overflowed an int column"). SQLite stores every
+        // integer-affinity column — the declared name is not a width — in a 64-bit
+        // signed integer, so the mapping has to stay 64-bit wide.
+        for source in [DatabaseType::Sqlite, DatabaseType::Rqlite, DatabaseType::Turso, DatabaseType::CloudflareD1] {
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("int", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("INT(11)", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("smallint", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("tinyint", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("BIGINT", &source, &DatabaseType::SqlServer), "BIGINT");
+            // SQLite's own affinity rule matches the `INT` substring anywhere in
+            // the declared type, which is why `UNSIGNED BIG INT` is an integer.
+            assert_eq!(map_column_type("UNSIGNED BIG INT", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Mysql), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Postgres), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Kingbase), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Hive), "BIGINT");
+            // Oracle-family targets keep `INTEGER`, which is already NUMBER(38, 0)
+            // and covers the whole 64-bit range without a `BIGINT` spelling Oracle
+            // does not define.
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Oracle), "INTEGER");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::OceanbaseOracle), "INTEGER");
+            // Non-integer declared types keep their existing mapping.
+            assert_eq!(map_column_type("TEXT", &source, &DatabaseType::SqlServer), "TEXT");
+            assert_eq!(map_column_type("REAL", &source, &DatabaseType::SqlServer), "FLOAT");
+            assert_eq!(map_column_type("NUMERIC", &source, &DatabaseType::SqlServer), "NUMERIC");
+            assert_eq!(map_column_type("BLOB", &source, &DatabaseType::SqlServer), "VARBINARY(MAX)");
+        }
+        // A SQLite target is unchanged: it accepts any 64-bit value in `INTEGER`.
+        assert_eq!(map_column_type("int", &DatabaseType::Mysql, &DatabaseType::Sqlite), "INTEGER");
+        assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &DatabaseType::Sqlite), "BIGINT");
     }
 
     #[test]

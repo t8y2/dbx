@@ -3,7 +3,7 @@ import { computed, defineAsyncComponent, h, nextTick, onMounted, onUnmounted, re
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { deferUntilPanelResizeEnd } from "@/lib/app/panelResizeState";
+import { deferUntilPanelResizeEnd, isPanelResizing } from "@/lib/app/panelResizeState";
 import {
   ArrowDown,
   ArrowUp,
@@ -1228,19 +1228,27 @@ const pendingCompaction = ref<{ summary: string; compactedMessages: number } | n
 const AI_TEXTAREA_MIN_HEIGHT_PX = 64;
 const AI_TEXTAREA_MAX_PANEL_RATIO = 0.5;
 const AI_TEXTAREA_HEIGHT_STORAGE_KEY = "dbx-ai-textarea-height";
+const AI_RESPONSIVE_DRAG_MEASURE_STEP_PX = 16;
 
 const textareaHeight = ref<number>(AI_TEXTAREA_MIN_HEIGHT_PX);
 const assistantRootRef = ref<HTMLElement | null>(null);
 const promptPanelRef = ref<HTMLElement | null>(null);
 const compactContextControls = ref(false);
-const compactActionControls = ref(false);
+const compactModelControl = ref(false);
+const compactModeActionControl = ref(false);
 const isResizing = ref<boolean>(false);
 let resizeStartY = 0;
 let resizeStartHeight = 0;
 let promptPanelResizeObserver: ResizeObserver | undefined;
 let responsiveControlMeasureFrame: number | null = null;
 let responsiveControlMeasureForce = false;
+let responsiveControlObservedWidth: number | null = null;
 let lastResponsiveControlWidth: number | null = null;
+let latestResponsiveControlDragWidth: number | null = null;
+let lastResponsiveControlDragMeasureWidth: number | null = null;
+let responsiveControlDragMeasureRunning = false;
+let responsiveControlDragMeasureQueued = false;
+let responsiveControlDragEpoch = 0;
 
 interface AiTableMentionCandidate {
   kind: "table";
@@ -5130,11 +5138,11 @@ onMounted(async () => {
     appearance: () => aiCodeAppearance.value,
   }).catch(() => undefined);
 
-  window.addEventListener("resize", handlePanelResize);
+  window.addEventListener("resize", handleWindowResize);
   document.addEventListener("dbx:tauri-file-drop", onTauriFileDrop as EventListener);
   window.addEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
   if (typeof ResizeObserver !== "undefined" && assistantRootRef.value) {
-    promptPanelResizeObserver = new ResizeObserver(handlePanelResize);
+    promptPanelResizeObserver = new ResizeObserver(handleObservedPanelResize);
     promptPanelResizeObserver.observe(assistantRootRef.value);
     if (promptPanelRef.value) promptPanelResizeObserver.observe(promptPanelRef.value);
   }
@@ -5153,9 +5161,24 @@ function clampTextareaHeight(height: number) {
   return Math.max(AI_TEXTAREA_MIN_HEIGHT_PX, Math.min(maxTextareaHeight(), Math.round(height)));
 }
 
-function handlePanelResize() {
+function handleWindowResize() {
+  handlePanelResize();
+}
+
+function handleObservedPanelResize(entries: ResizeObserverEntry[]) {
+  const promptPanel = promptPanelRef.value;
+  const promptPanelEntry = promptPanel ? entries.find((entry) => entry.target === promptPanel) : undefined;
+  handlePanelResize(promptPanelEntry?.contentRect.width);
+}
+
+function handlePanelResize(observedPanelWidth?: number) {
+  if (isPanelResizing.value) {
+    deferUntilPanelResizeEnd(resyncPromptPanelAfterPanelResize);
+    if (typeof observedPanelWidth === "number") scheduleResponsiveControlDragMeasurement(observedPanelWidth);
+    return;
+  }
   textareaHeight.value = clampTextareaHeight(textareaHeight.value);
-  scheduleResponsiveControlMeasurement();
+  scheduleResponsiveControlMeasurement(false, observedPanelWidth);
 }
 
 function hasHorizontalOverflow(element: HTMLElement | null): boolean {
@@ -5167,48 +5190,99 @@ function hasOverflowingLabel(element: HTMLElement | null, selector: string): boo
   return Array.from(element.querySelectorAll<HTMLElement>(selector)).some((label) => label.scrollWidth > label.clientWidth + 1);
 }
 
-async function measureResponsiveControls(force = false) {
-  const panel = promptPanelRef.value;
-  if (!panel) return;
-  // Reading clientWidth/scrollWidth here forces a document-wide synchronous
-  // relayout, and the AI panel divider drag fires resize events every frame.
-  // Skip measurements while the drag is in flight and re-measure once at the end.
-  if (
-    deferUntilPanelResizeEnd(() => {
-      void measureResponsiveControls(force);
-    })
-  )
-    return;
-  const panelWidth = panel.clientWidth;
+function actionControlsOverflow(actionRow: HTMLElement | null): boolean {
+  return hasHorizontalOverflow(actionRow) || hasOverflowingLabel(actionRow, ".ai-mode-action-label, .ai-model-selector-label, .ai-prompt-queue-label");
+}
+
+function resyncPromptPanelAfterPanelResize() {
+  responsiveControlDragEpoch += 1;
+  latestResponsiveControlDragWidth = null;
+  lastResponsiveControlDragMeasureWidth = null;
+  responsiveControlDragMeasureQueued = false;
+  if (!assistantViewMounted) return;
+  textareaHeight.value = clampTextareaHeight(textareaHeight.value);
+  scheduleResponsiveControlMeasurement(true);
+}
+
+async function applyResponsiveControlMeasurement(panel: HTMLElement, panelWidth: number, force: boolean, panelResizeEpoch?: number) {
   if (!force && lastResponsiveControlWidth === panelWidth) return;
 
-  // Measure the full labels before deciding to compact. This lets a wide
-  // composer recover from icon mode after it grows, while the actual
-  // overflow checks decide independently for the context and action rows.
-  if (compactContextControls.value || compactActionControls.value) {
+  if (compactContextControls.value || compactModelControl.value || compactModeActionControl.value) {
     compactContextControls.value = false;
-    compactActionControls.value = false;
+    compactModelControl.value = false;
+    compactModeActionControl.value = false;
     await nextTick();
+    if (panelResizeEpoch !== undefined && (!isPanelResizing.value || panelResizeEpoch !== responsiveControlDragEpoch)) return;
   }
 
   const contextRow = panel.querySelector<HTMLElement>("[data-ai-composer-context-row]");
   const actionRow = panel.querySelector<HTMLElement>("[data-ai-composer-actions]");
   const contextOverflow = hasHorizontalOverflow(contextRow) || hasOverflowingLabel(contextRow, ".ai-template-selector-label, .ai-skills-selector-label");
-  const actionOverflow = hasHorizontalOverflow(actionRow) || hasOverflowingLabel(actionRow, ".ai-mode-action-label, .ai-model-selector-label, .ai-prompt-queue-label");
 
   compactContextControls.value = contextOverflow;
-  compactActionControls.value = actionOverflow;
-  lastResponsiveControlWidth = panelWidth;
+  if (actionControlsOverflow(actionRow)) {
+    compactModelControl.value = true;
+    await nextTick();
+    if (panelResizeEpoch !== undefined && (!isPanelResizing.value || panelResizeEpoch !== responsiveControlDragEpoch)) return;
+    compactModeActionControl.value = actionControlsOverflow(actionRow);
+  }
+  lastResponsiveControlWidth = panelResizeEpoch === undefined ? panelWidth : (latestResponsiveControlDragWidth ?? panelWidth);
 }
 
-function scheduleResponsiveControlMeasurement(force = false) {
+async function flushResponsiveControlDragMeasurements() {
+  if (responsiveControlDragMeasureRunning) return;
+  responsiveControlDragMeasureRunning = true;
+  const panelResizeEpoch = responsiveControlDragEpoch;
+  try {
+    while (responsiveControlDragMeasureQueued && isPanelResizing.value && panelResizeEpoch === responsiveControlDragEpoch) {
+      responsiveControlDragMeasureQueued = false;
+      const panelWidth = latestResponsiveControlDragWidth;
+      const panel = promptPanelRef.value;
+      if (panelWidth === null || !panel) continue;
+      if (lastResponsiveControlDragMeasureWidth !== null && Math.abs(panelWidth - lastResponsiveControlDragMeasureWidth) < AI_RESPONSIVE_DRAG_MEASURE_STEP_PX) continue;
+      lastResponsiveControlDragMeasureWidth = panelWidth;
+      await applyResponsiveControlMeasurement(panel, panelWidth, true, panelResizeEpoch);
+      const latestWidth = latestResponsiveControlDragWidth;
+      if (latestWidth !== null && Math.abs(latestWidth - panelWidth) >= AI_RESPONSIVE_DRAG_MEASURE_STEP_PX) responsiveControlDragMeasureQueued = true;
+    }
+  } finally {
+    responsiveControlDragMeasureRunning = false;
+    if (responsiveControlDragMeasureQueued && isPanelResizing.value) void flushResponsiveControlDragMeasurements();
+  }
+}
+
+function scheduleResponsiveControlDragMeasurement(observedPanelWidth: number) {
+  latestResponsiveControlDragWidth = Math.round(observedPanelWidth);
+  responsiveControlDragMeasureQueued = true;
+  void flushResponsiveControlDragMeasurements();
+}
+
+async function measureResponsiveControls(force = false, observedPanelWidth?: number) {
+  const panel = promptPanelRef.value;
+  if (!panel) return;
+
+  if (isPanelResizing.value) {
+    deferUntilPanelResizeEnd(resyncPromptPanelAfterPanelResize);
+    if (typeof observedPanelWidth === "number") scheduleResponsiveControlDragMeasurement(observedPanelWidth);
+    return;
+  }
+
+  lastResponsiveControlDragMeasureWidth = null;
+  const panelWidth = typeof observedPanelWidth === "number" ? Math.round(observedPanelWidth) : panel.clientWidth;
+  await applyResponsiveControlMeasurement(panel, panelWidth, force);
+}
+
+function scheduleResponsiveControlMeasurement(force = false, observedPanelWidth?: number) {
   responsiveControlMeasureForce ||= force;
+  if (typeof observedPanelWidth === "number") responsiveControlObservedWidth = observedPanelWidth;
   if (responsiveControlMeasureFrame !== null) return;
   const measure = () => {
     responsiveControlMeasureFrame = null;
     const forceMeasure = responsiveControlMeasureForce;
+    const measuredPanelWidth = responsiveControlObservedWidth;
     responsiveControlMeasureForce = false;
-    void measureResponsiveControls(forceMeasure);
+    responsiveControlObservedWidth = null;
+    void measureResponsiveControls(forceMeasure, measuredPanelWidth ?? undefined);
   };
   if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
     responsiveControlMeasureFrame = window.requestAnimationFrame(measure);
@@ -5296,7 +5370,7 @@ onUnmounted(() => {
   // 若卸载时仍在拖拽，复位 body 样式，避免全局残留
   document.body.style.userSelect = "";
   document.body.style.cursor = "";
-  window.removeEventListener("resize", handlePanelResize);
+  window.removeEventListener("resize", handleWindowResize);
   document.removeEventListener("dbx:tauri-file-drop", onTauriFileDrop as EventListener);
   window.removeEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
   promptPanelResizeObserver?.disconnect();
@@ -5305,6 +5379,11 @@ onUnmounted(() => {
     responsiveControlMeasureFrame = null;
   }
   responsiveControlMeasureForce = false;
+  responsiveControlObservedWidth = null;
+  latestResponsiveControlDragWidth = null;
+  lastResponsiveControlDragMeasureWidth = null;
+  responsiveControlDragMeasureQueued = false;
+  responsiveControlDragEpoch += 1;
 });
 
 function triggerAction(action: AiAction, instruction?: string) {
@@ -6354,7 +6433,7 @@ async function openExternalUrl(url: string) {
             <Clock class="h-3.5 w-3.5 shrink-0" />
             <span>{{ t("ai.status.longRunningHint") }}</span>
           </div>
-          <div data-ai-composer-actions :class="['ai-prompt-action-row flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden', compactActionControls && 'ai-prompt-action-row--compact']">
+          <div data-ai-composer-actions :class="['ai-prompt-action-row flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden', compactModelControl && 'ai-prompt-action-row--model-compact', compactModeActionControl && 'ai-prompt-action-row--mode-compact']">
             <Tooltip>
               <TooltipTrigger as-child>
                 <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isGenerating" @click="selectCsvFile">
@@ -6706,13 +6785,13 @@ async function openExternalUrl(url: string) {
   display: none;
 }
 
-.ai-prompt-action-row--compact {
+.ai-prompt-action-row--mode-compact {
   gap: 0.25rem;
 }
 
-.ai-prompt-action-row--compact .ai-mode-action-trigger,
-.ai-prompt-action-row--compact .ai-mode-static-trigger,
-.ai-prompt-action-row--compact .ai-model-selector-trigger {
+.ai-prompt-action-row--model-compact .ai-model-selector-trigger,
+.ai-prompt-action-row--mode-compact .ai-mode-action-trigger,
+.ai-prompt-action-row--mode-compact .ai-mode-static-trigger {
   flex: 0 0 1.75rem;
   width: 1.75rem;
   max-width: 1.75rem;
@@ -6721,29 +6800,29 @@ async function openExternalUrl(url: string) {
   padding: 0;
 }
 
-.ai-prompt-action-row--compact .ai-mode-action-label,
-.ai-prompt-action-row--compact .ai-mode-action-chevron,
-.ai-prompt-action-row--compact .ai-model-selector-label,
-.ai-prompt-action-row--compact .ai-model-selector-chevron {
+.ai-prompt-action-row--model-compact .ai-model-selector-label,
+.ai-prompt-action-row--model-compact .ai-model-selector-chevron,
+.ai-prompt-action-row--mode-compact .ai-mode-action-label,
+.ai-prompt-action-row--mode-compact .ai-mode-action-chevron {
   display: none;
 }
 
-.ai-prompt-action-row--compact .ai-model-selector-trigger {
+.ai-prompt-action-row--model-compact .ai-model-selector-trigger {
   min-width: 1.75rem;
 }
 
-.ai-prompt-action-row--compact .ai-prompt-send-control {
+.ai-prompt-action-row--mode-compact .ai-prompt-send-control {
   flex: 0 0 auto;
 }
 
-.ai-prompt-action-row--compact .ai-prompt-queue-control {
+.ai-prompt-action-row--mode-compact .ai-prompt-queue-control {
   width: 1.75rem;
   height: 1.75rem;
   justify-content: center;
   padding: 0;
 }
 
-.ai-prompt-action-row--compact .ai-prompt-queue-label {
+.ai-prompt-action-row--mode-compact .ai-prompt-queue-label {
   display: none;
 }
 
@@ -6904,20 +6983,5 @@ html.dbx-legacy-webview.dark .ai-markdown :deep(.ai-markdown-table-wrap:hover::-
   z-index: 1;
   height: 9px;
   cursor: ns-resize;
-}
-
-.resize-handle::before {
-  content: "";
-  position: absolute;
-  top: 3px;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background-color: var(--border);
-  transition: background-color 0.15s ease;
-}
-
-.resize-handle:hover::before {
-  background-color: color-mix(in srgb, var(--foreground) 20%, transparent);
 }
 </style>

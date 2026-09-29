@@ -110,6 +110,51 @@ export default withEnglishFallback({
     resultChanged: "결과 또는 연결이 변경되었습니다. 새로고침한 뒤 다시 시도하세요.",
     updateFailed: "속성을 업데이트하지 못했습니다.",
   },
+  plDebug: {
+    toolbar: {
+      resume: "Resume",
+      stepOver: "Step over",
+      stepIn: "Step into",
+      stepOut: "Step out",
+      abort: "Abort execution",
+    },
+    state: {
+      running: "running",
+      paused: "paused at breakpoint",
+      finished: "finished",
+    },
+    variables: {
+      filter: "Filter variables",
+      name: "Name",
+      value: "Value",
+      empty: "No variables are visible while the program is running",
+    },
+    stack: {
+      empty: "No call stack is available while the program is running",
+    },
+    output: {
+      refresh: "Refresh DBMS_OUTPUT",
+      empty: "DBMS_OUTPUT appears after the program finishes or is aborted",
+    },
+    panel: {
+      variables: "Variables",
+      stack: "Call stack",
+      output: "DBMS Output",
+    },
+    params: {
+      name: "Name",
+      mode: "Mode",
+      type: "Type",
+      value: "Value",
+      valuePlaceholder: "Parameter value",
+      empty: "This routine has no parameters",
+    },
+    start: {
+      title: "Debug PL/SQL",
+      confirm: "Start debugging",
+    },
+  },
+
   mongoDump,
   damengDump,
   cellTransform: {

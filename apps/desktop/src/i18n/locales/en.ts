@@ -110,6 +110,51 @@ export default {
     resultChanged: "The result or connection changed. Refresh and retry.",
     updateFailed: "The property could not be updated.",
   },
+  plDebug: {
+    toolbar: {
+      resume: "Resume",
+      stepOver: "Step over",
+      stepIn: "Step into",
+      stepOut: "Step out",
+      abort: "Abort execution",
+    },
+    state: {
+      running: "running",
+      paused: "paused at breakpoint",
+      finished: "finished",
+    },
+    variables: {
+      filter: "Filter variables",
+      name: "Name",
+      value: "Value",
+      empty: "No variables are visible while the program is running",
+    },
+    stack: {
+      empty: "No call stack is available while the program is running",
+    },
+    output: {
+      refresh: "Refresh DBMS_OUTPUT",
+      empty: "DBMS_OUTPUT appears after the program finishes or is aborted",
+    },
+    panel: {
+      variables: "Variables",
+      stack: "Call stack",
+      output: "DBMS Output",
+    },
+    params: {
+      name: "Name",
+      mode: "Mode",
+      type: "Type",
+      value: "Value",
+      valuePlaceholder: "Parameter value",
+      empty: "This routine has no parameters",
+    },
+    start: {
+      title: "Debug PL/SQL",
+      confirm: "Start debugging",
+    },
+  },
+
   cellTransform: {
     title: "Convert preview",
     description: "Convert the current value for viewing or copying. The source value and editor draft stay unchanged.",

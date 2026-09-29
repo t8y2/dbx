@@ -1255,3 +1255,77 @@ describe("PluginContributionsPanel settings navigation", () => {
     expect(current.activeSection).toBe("settings");
   });
 });
+
+describe("PluginContributionsPanel narrow-pane layout contracts", () => {
+  // #10582: the plugin center is mounted in the editor-content pane, whose width is independent of the
+  // window (window minWidth is 900, but the sidebar or a split group can leave the pane far narrower).
+  // A viewport breakpoint therefore keys the layout off the wrong width: the marketplace toolbar row
+  // overflowed its scroller and 批量管理 / 刷新 left the visible area (measured 155px overflow at a 650px
+  // pane). happy-dom cannot measure layout, so this guards the class contract the measurement rig
+  // validates — same style as the #10444 grid guard above.
+  it("keys the marketplace toolbar off the panel width instead of the viewport", () => {
+    const toolbar = host.querySelector<HTMLElement>("[data-plugin-marketplace-toolbar]");
+    expect(toolbar, "marketplace toolbar").not.toBeNull();
+    expect(toolbar!.classList.contains("sm:flex-row"), "row switch must not use the viewport breakpoint (#10582)").toBe(false);
+    expect(toolbar!.classList.contains("sm:items-center"), "row switch must not use the viewport breakpoint (#10582)").toBe(false);
+    expect(toolbar!.classList.contains("@min-[54rem]:flex-row"), "row switch tracks the panel width").toBe(true);
+    expect(toolbar!.classList.contains("flex-wrap"), "an overflowing control set must wrap, never leave the pane").toBe(true);
+
+    const controls = host.querySelector<HTMLElement>("[data-plugin-marketplace-controls]");
+    expect(controls, "marketplace control cluster").not.toBeNull();
+    expect(controls!.classList.contains("flex-wrap"), "control cluster wraps").toBe(true);
+    expect(controls!.classList.contains("sm:ml-auto"), "auto margin must not use the viewport breakpoint").toBe(false);
+    expect(controls!.classList.contains("@min-[54rem]:ml-auto"), "auto margin tracks the panel width").toBe(true);
+
+    // App.vue focuses this input by attribute for Mod+F, so the hook has to survive layout changes.
+    const search = host.querySelector<HTMLInputElement>("[data-plugin-marketplace-search]");
+    expect(search, "marketplace search input hook").not.toBeNull();
+    expect(search!.classList.contains("sm:w-[min(100%,28rem)]")).toBe(false);
+    expect(search!.classList.contains("@min-[54rem]:w-[min(100%,28rem)]")).toBe(true);
+
+    // The Select family shares one passthrough stub here, so the triggers are located by their own
+    // data hooks (same convention as data-plugin-marketplace-search) instead of by a layout class.
+    const triggers = ["sort", "repository"].map((role) => {
+      const trigger = toolbar!.querySelector<HTMLElement>(`[data-plugin-marketplace-${role}]`);
+      expect(trigger, `marketplace ${role} select`).not.toBeNull();
+      return trigger!;
+    });
+    for (const trigger of triggers) {
+      const viewportClasses = [...trigger.classList].filter((name) => /^(sm|md|lg|xl):/.test(name));
+      expect(viewportClasses, `viewport breakpoints left on a select trigger: ${trigger.className}`).toEqual([]);
+      expect(
+        [...trigger.classList].some((name) => name.startsWith("@min-[54rem]:w-")),
+        `select trigger tracks the panel width: ${trigger.className}`,
+      ).toBe(true);
+    }
+  });
+
+  it("keys the settings-tab repository grids off the panel width", async () => {
+    // The trusted-key grid only renders once a key exists, so remount with one (the same pattern the
+    // settings-navigation tests above use).
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    mocks.listPluginTrustedKeys.mockResolvedValue([{ keyId: "custom", publicKey: "public-key" }]);
+    app = createApp(PluginContributionsPanel);
+    const instance = app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } };
+    state = instance.$.setupState;
+    state.activeSection = "settings";
+    await flushUi();
+
+    const gridFor = (placeholderKey: string) => {
+      const input = [...host.querySelectorAll<HTMLInputElement>("input")].find((element) => element.placeholder.startsWith(`pluginPlatform.${placeholderKey}`));
+      expect(input, placeholderKey).toBeDefined();
+      return input!.parentElement!;
+    };
+
+    const addRow = gridFor("repositoryCatalogUrlPlaceholder");
+    expect(addRow.classList.contains("lg:grid-cols-[180px_220px_minmax(260px,1fr)_auto]"), "add-repository grid must not switch on the viewport").toBe(false);
+    expect(addRow.className, "add-repository grid tracks the panel width").toContain("@min-[56rem]:grid-cols-[180px_220px_minmax(260px,1fr)_auto]");
+
+    const trustRow = gridFor("repositoryPublicKeyPlaceholder");
+    expect(trustRow.classList.contains("md:grid-cols-[180px_minmax(260px,1fr)_auto]"), "trusted-key grid must not switch on the viewport").toBe(false);
+    expect(trustRow.className, "trusted-key grid tracks the panel width").toContain("@min-[42rem]:grid-cols-[180px_minmax(260px,1fr)_auto]");
+  });
+});

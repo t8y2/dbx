@@ -1124,15 +1124,19 @@ onBeforeUnmount(() => {
               <span class="mx-1.5 text-border">·</span>{{ t("pluginPlatform.marketplaceGuideDescription") }}
             </div>
           </div>
-          <!-- 吸顶：矮窗滚动时搜索/排序控件始终可达 -->
-          <div class="sticky top-0 z-20 flex w-full flex-col gap-2 rounded-xl border bg-background/95 p-3 backdrop-blur-sm sm:flex-row sm:items-center">
+          <!-- 吸顶：矮窗滚动时搜索/排序控件始终可达。
+               行/列切换按「面板宽度」(@container) 而非视口断点：窗口 minWidth=900 时 sm: 恒为真，
+               而分屏/侧栏挤压下的商店面板可远窄于窗口，视口断点会让整行溢出、批量管理/刷新被推出可视区(#10582)。
+               54rem(容器 864px) 高于实测下限(容器 781–800px：控制簇 580px + 搜索框 180–199px + 内边距)；
+               flex-wrap 则兜住比 54rem 更窄时的极端情况。 -->
+          <div data-plugin-marketplace-toolbar class="sticky top-0 z-20 flex w-full flex-col flex-wrap gap-2 rounded-xl border bg-background/95 p-3 backdrop-blur-sm @min-[54rem]:flex-row @min-[54rem]:items-center">
             <div class="relative">
               <Search class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
-              <Input data-plugin-marketplace-search v-model="marketplaceQuery" class="h-8 min-w-0 pl-8 text-xs sm:w-[min(100%,28rem)]" :placeholder="t('pluginPlatform.searchMarketplace')" />
+              <Input data-plugin-marketplace-search v-model="marketplaceQuery" class="h-8 min-w-0 pl-8 text-xs @min-[54rem]:w-[min(100%,28rem)]" :placeholder="t('pluginPlatform.searchMarketplace')" />
             </div>
-            <div class="flex min-w-0 items-center gap-2 sm:ml-auto">
+            <div data-plugin-marketplace-controls class="flex min-w-0 flex-wrap items-center gap-2 @min-[54rem]:ml-auto">
               <Select v-model="marketplaceSortMode">
-                <SelectTrigger class="h-8 min-w-0 flex-1 text-xs sm:w-40 sm:flex-none" :aria-label="t('pluginPlatform.sortBy')"><SelectValue /></SelectTrigger>
+                <SelectTrigger data-plugin-marketplace-sort class="h-8 min-w-0 flex-1 text-xs @min-[54rem]:w-40 @min-[54rem]:flex-none" :aria-label="t('pluginPlatform.sortBy')"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="name">{{ t("pluginPlatform.sortByName") }}</SelectItem>
                   <SelectItem value="recently-updated">{{ t("pluginPlatform.sortByRecentlyUpdated") }}</SelectItem>
@@ -1141,7 +1145,7 @@ onBeforeUnmount(() => {
                 </SelectContent>
               </Select>
               <Select v-model="marketplaceRepositoryId">
-                <SelectTrigger class="h-8 min-w-0 flex-1 text-xs sm:w-52 sm:flex-none"><SelectValue :placeholder="t('pluginPlatform.allRepositories')" /></SelectTrigger>
+                <SelectTrigger data-plugin-marketplace-repository class="h-8 min-w-0 flex-1 text-xs @min-[54rem]:w-52 @min-[54rem]:flex-none"><SelectValue :placeholder="t('pluginPlatform.allRepositories')" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">{{ t("pluginPlatform.allRepositories") }}</SelectItem>
                   <SelectItem v-for="repository in repositories.filter((entry) => entry.enabled)" :key="repository.id" :value="repository.id">{{ repository.name }}</SelectItem>
@@ -1640,7 +1644,7 @@ onBeforeUnmount(() => {
         </div>
       </TabsContent>
 
-      <TabsContent value="settings" class="m-0 min-h-0 flex-1 overflow-y-auto">
+      <TabsContent value="settings" class="@container m-0 min-h-0 flex-1 overflow-y-auto">
         <div class="space-y-4 pb-2">
           <PluginShortcutSettings />
           <section class="space-y-3 rounded-xl border p-4">
@@ -1693,7 +1697,9 @@ onBeforeUnmount(() => {
                 <Button v-if="!repository.managed" size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning" @click="removeRepository(repository)"><Trash2 class="size-3.5" /></Button>
               </div>
             </div>
-            <div class="grid gap-2 lg:grid-cols-[180px_220px_minmax(260px,1fr)_auto]">
+            <!-- 同样按面板宽度切换：四列固定轨道 + 最长语言按钮实测约需 855px（含 pt-BR 标签），
+                 视口断点(lg:)在窄面板下会整行溢出(#10582 同类) -->
+            <div class="grid gap-2 @min-[56rem]:grid-cols-[180px_220px_minmax(260px,1fr)_auto]">
               <Input v-model="repositoryId" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryIdPlaceholder')" />
               <Input v-model="repositoryName" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryNamePlaceholder')" />
               <Input v-model="repositoryCatalogUrl" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryCatalogUrlPlaceholder')" />
@@ -1746,7 +1752,7 @@ onBeforeUnmount(() => {
                     <Button size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning" @click="removeTrustedKey(key.keyId)"><Trash2 class="size-3.5" /></Button>
                   </div>
                 </div>
-                <div class="grid gap-2 md:grid-cols-[180px_minmax(260px,1fr)_auto]">
+                <div class="grid gap-2 @min-[42rem]:grid-cols-[180px_minmax(260px,1fr)_auto]">
                   <Input v-model="trustedKeyId" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryKeyIdPlaceholder')" />
                   <Input v-model="trustedPublicKey" class="h-8 font-mono text-xs" :placeholder="t('pluginPlatform.repositoryPublicKeyPlaceholder')" />
                   <Button size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="saveTrustedKey"><ShieldCheck class="size-3.5" />{{ t("pluginPlatform.trustRepository") }}</Button>

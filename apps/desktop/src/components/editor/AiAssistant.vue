@@ -124,6 +124,7 @@ import {
   remainingTextAttachmentChars,
   resolveTextAttachmentEncoding,
   textAttachmentBudgetError,
+  selectionContextBudgetError,
   truncateTextAttachmentContent,
 } from "@/lib/ai/aiAttachments";
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
@@ -5546,6 +5547,11 @@ function openExternalContext(request: AiExternalContextRequest) {
   applyDraftBinding(plan.binding);
   if (!plan.binding.connectionId && request.unresolvedKey) toast(t(request.unresolvedKey), 5000);
   for (const selection of request.selections ?? []) {
+    const budgetError = selectionContextBudgetError(selectedEditorSelections.value);
+    if (budgetError) {
+      toast(t(budgetError === "count" ? "ai.selectionContextLimit" : "ai.selectionContextTotalLimit"), 4000);
+      break;
+    }
     selectedEditorSelections.value.push(createSelectionContext(selection, uuid()));
   }
   for (const mention of request.tableMentions ?? []) {

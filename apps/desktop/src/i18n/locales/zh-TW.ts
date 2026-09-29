@@ -3206,6 +3206,8 @@ export default withEnglishFallback({
     attachmentImageTotalLimit: "附加圖片合計不可超過 12 MB。",
     attachmentTextLimit: "一次最多可附加 8 個文字檔案。",
     attachmentTextTotalLimit: "附加文字合計不可超過 32,000 個字元。",
+    selectionContextLimit: "一次最多可附加 8 段選取內容。",
+    selectionContextTotalLimit: "附加的選取內容合計不能超過 32,000 個字元。",
     attachmentFileTooLarge: "拖入的檔案不可超過 5 MB。",
     attachmentTruncatedStatus: "已截斷",
     attachmentEncoding: "文字編碼",

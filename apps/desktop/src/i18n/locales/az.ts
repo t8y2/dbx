@@ -3034,6 +3034,8 @@ export default withEnglishFallback({
     attachmentImageTotalLimit: "Əlavə edilmiş şəkillərin ümumi ölçüsü 12 MB-dan çox ola bilməz.",
     attachmentTextLimit: "Eyni anda ən çox 8 mətn faylı əlavə edə bilərsiniz.",
     attachmentTextTotalLimit: "Əlavə edilmiş mətn ümumilikdə 32,000 simvoldan çox ola bilməz.",
+    selectionContextLimit: "Bir dəfəyə ən çox 8 seçim əlavə edə bilərsiniz.",
+    selectionContextTotalLimit: "Əlavə edilən seçimlər ümumilikdə 32 000 simvoldan çox ola bilməz.",
     attachmentFileTooLarge: "Buraxılan fayllar 5 MB və ya daha kiçik olmalıdır.",
     attachmentTruncatedStatus: "Kəsilib",
     attachmentEncoding: "Mətn kodlaşdırması",

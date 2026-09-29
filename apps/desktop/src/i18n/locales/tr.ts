@@ -3010,6 +3010,8 @@ export default withEnglishFallback({
     attachmentImageTotalLimit: "Eklenen görseller toplamda 12 MB'ı aşamaz.",
     attachmentTextLimit: "Aynı anda en fazla 8 metin dosyası ekleyebilirsiniz.",
     attachmentTextTotalLimit: "Eklenen metin toplamda 32.000 karakteri aşamaz.",
+    selectionContextLimit: "Tek seferde en fazla 8 seçim ekleyebilirsiniz.",
+    selectionContextTotalLimit: "Eklenen seçimler toplamda 32.000 karakteri aşamaz.",
     attachmentFileTooLarge: "Bırakılan dosyalar en fazla 5 MB olmalıdır.",
     attachmentTruncatedStatus: "Kısaltıldı",
     attachmentEncoding: "Metin kodlaması",

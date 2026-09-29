@@ -688,6 +688,24 @@ describe("AiAssistant mount", () => {
     expect(errors.map(String)).toEqual([]);
   });
 
+  it("stops stacking selection chips at the aggregate budget", async () => {
+    const { errors, container, panelRef } = await mountPanel(true, POSTGRES, configureAiPanel);
+
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "postgres", database: "app" },
+      selections: Array.from({ length: 9 }, (_, i) => ({ source: "editor" as const, label: `sel-${i + 1}`, content: "select 1" })),
+      unresolvedKey: "ai.externalTargetUnavailable",
+    });
+    await settle();
+
+    const chips = container.querySelector("[data-ai-selection-chips]");
+    expect(chips?.textContent).toContain("sel-8");
+    // The 9th gesture is rejected by the count budget instead of stacking
+    // another chip into the same request.
+    expect(chips?.textContent).not.toContain("sel-9");
+    expect(errors.map(String)).toEqual([]);
+  });
+
   it("runs 'Fix with AI' against the editor tab's namespace, not the ambient connection", async () => {
     // The panel sits on ConnA while the failing query came from the postgres tab.
     const { errors, panelRef } = await mountPanel(true, CONN_A, configureAiPanel, undefined, [POSTGRES]);

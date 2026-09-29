@@ -3112,6 +3112,8 @@ export default withEnglishFallback({
     attachmentImageTotalLimit: "첨부 이미지의 총 크기는 12MB를 초과할 수 없습니다.",
     attachmentTextLimit: "한 번에 텍스트 파일을 최대 8개까지 첨부할 수 있습니다.",
     attachmentTextTotalLimit: "첨부 텍스트는 총 32,000자를 초과할 수 없습니다.",
+    selectionContextLimit: "한 번에 최대 8개의 선택 영역을 첨부할 수 있습니다.",
+    selectionContextTotalLimit: "첨부된 선택 영역은 총 32,000자를 초과할 수 없습니다.",
     attachmentFileTooLarge: "드롭한 파일은 5MB 이하여야 합니다.",
     attachmentTruncatedStatus: "잘림",
     attachmentEncoding: "텍스트 인코딩",

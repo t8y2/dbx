@@ -3257,6 +3257,8 @@ export default withEnglishFallback({
     attachmentImageTotalLimit: "Общий размер прикреплённых изображений не должен превышать 12 МБ.",
     attachmentTextLimit: "Можно прикрепить до 8 текстовых файлов одновременно.",
     attachmentTextTotalLimit: "Общий размер прикреплённого текста не должен превышать 32 000 символов.",
+    selectionContextLimit: "За один раз можно прикрепить не более 8 фрагментов.",
+    selectionContextTotalLimit: "Прикреплённые фрагменты не могут превышать 32 000 символов суммарно.",
     attachmentFileTooLarge: "Перетащенные файлы должны быть не больше 5 МБ.",
     attachmentTruncatedStatus: "Обрезано",
     attachmentEncoding: "Кодировка текста",

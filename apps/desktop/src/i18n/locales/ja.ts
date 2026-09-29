@@ -3348,6 +3348,8 @@ export default withEnglishFallback({
     attachmentImageTotalLimit: "添付画像の合計サイズは 12 MB 以下にしてください。",
     attachmentTextLimit: "一度に添付できるテキストファイルは 8 個までです。",
     attachmentTextTotalLimit: "添付テキストは合計 32,000 文字以下にしてください。",
+    selectionContextLimit: "一度に添付できる選択範囲は 8 件までです。",
+    selectionContextTotalLimit: "添付する選択範囲は合計 32,000 文字を超えられません。",
     attachmentFileTooLarge: "ドロップするファイルは 5 MB 以下にしてください。",
     attachmentTruncatedStatus: "切り詰め済み",
     attachmentEncoding: "テキストエンコーディング",

@@ -3207,6 +3207,8 @@ export default withEnglishFallback({
     attachmentImageTotalLimit: "Le immagini allegate non possono superare complessivamente 12 MB.",
     attachmentTextLimit: "Puoi allegare fino a 8 file di testo alla volta.",
     attachmentTextTotalLimit: "Il testo allegato non può superare complessivamente 32.000 caratteri.",
+    selectionContextLimit: "Puoi allegare fino a 8 selezioni per volta.",
+    selectionContextTotalLimit: "Le selezioni allegate non possono superare i 32.000 caratteri in totale.",
     attachmentFileTooLarge: "I file trascinati devono avere dimensioni massime di 5 MB.",
     attachmentTruncatedStatus: "Troncato",
     attachmentEncoding: "Codifica del testo",

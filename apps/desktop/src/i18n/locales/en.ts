@@ -3402,6 +3402,8 @@ export default {
     attachmentImageTotalLimit: "Attached images cannot exceed 12 MB in total.",
     attachmentTextLimit: "You can attach up to 8 text files at once.",
     attachmentTextTotalLimit: "Attached text cannot exceed 32,000 characters in total.",
+    selectionContextLimit: "You can attach up to 8 selections at once.",
+    selectionContextTotalLimit: "Attached selections cannot exceed 32,000 characters in total.",
     attachmentFileTooLarge: "Dropped files must be 5 MB or smaller.",
     attachmentTruncatedStatus: "Truncated",
     attachmentEncoding: "Text encoding",

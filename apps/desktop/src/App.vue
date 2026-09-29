@@ -1769,7 +1769,10 @@ function invokeWhenAiReady(invoke: (handle: AiAssistantHandle) => void) {
  * so instead of reusing whatever the current conversation was bound to (R6).
  */
 function editorAiTarget(tabId?: string): AiConversationBinding | null {
-  const tab = (tabId ? queryStore.tabs.find((candidate) => candidate.id === tabId) : undefined) ?? activeTab.value;
+  // An explicit tabId that no longer resolves must NOT fall back to the active
+  // tab: the gesture belongs to a closed editor, and binding it to whatever is
+  // open now would attribute the request to the wrong namespace.
+  const tab = tabId ? queryStore.tabs.find((candidate) => candidate.id === tabId) : activeTab.value;
   return aiTargetFromTab(tab, (connectionId) => !!connectionStore.getConfig(connectionId));
 }
 
@@ -1791,10 +1794,10 @@ function fixWithAi(tabId: string, errorMessage: string) {
  * The selected SQL becomes composer *context* — a removable chip — and the input
  * box stays empty for the user's own request. It used to be pasted into the
  * composer as prompt text, which made data look like an instruction and left it
- * unbounded (see `research/send-selection-to-ai-conventions.md`).
+ * unbounded.
  */
 function sendSelectionToAi(tabId: string, sql: string) {
-  const tab = queryStore.tabs.find((candidate) => candidate.id === tabId) ?? activeTab.value;
+  const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
   openRightSidebarPanel("ai");
   invokeWhenAiReady((handle) => {
     handle.openExternalContext({

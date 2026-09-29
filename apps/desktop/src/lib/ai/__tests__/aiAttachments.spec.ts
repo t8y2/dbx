@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AI_IMAGE_ATTACHMENT_MAX_TOTAL_BYTES,
   AI_SELECTION_CONTEXT_MAX_CHARS,
+  AI_SELECTION_CONTEXT_MAX_COUNT,
+  AI_SELECTION_CONTEXT_MAX_TOTAL_CHARS,
   AI_TEXT_ATTACHMENT_MAX_BYTES,
   AI_TEXT_ATTACHMENT_MAX_CHARS,
   AI_TEXT_ATTACHMENT_MAX_COUNT,
@@ -20,6 +22,7 @@ import {
   readTextAttachmentPrefix,
   remainingTextAttachmentChars,
   resolveTextAttachmentEncoding,
+  selectionContextBudgetError,
   textAttachmentBudgetError,
   truncateTextAttachmentContent,
 } from "@/lib/ai/aiAttachments";
@@ -175,6 +178,23 @@ describe("AI selection context budget", () => {
 
   it("drops a blank label instead of rendering an empty chip", () => {
     expect(createSelectionContext({ source: "terminal", label: "   ", content: "ls" }, "s1").label).toBeUndefined();
+  });
+
+  it("rejects stacking selections past the count budget", () => {
+    const staged = Array.from({ length: AI_SELECTION_CONTEXT_MAX_COUNT }, (_, i) => createSelectionContext({ source: "editor", content: "select 1" }, `s${i}`));
+
+    expect(selectionContextBudgetError(staged)).toBe("count");
+    expect(selectionContextBudgetError(staged.slice(0, -1))).toBeUndefined();
+  });
+
+  it("rejects stacking selections past the shared total budget", () => {
+    // Each item is capped at AI_SELECTION_CONTEXT_MAX_CHARS by the time it is
+    // staged, so the total budget needs several full-size selections to trip.
+    const full = "x".repeat(AI_SELECTION_CONTEXT_MAX_CHARS);
+    const staged = [0, 1, 2].map((i) => createSelectionContext({ source: "editor", content: full }, `s${i}`));
+
+    expect(selectionContextBudgetError(staged)).toBe("total");
+    expect(selectionContextBudgetError(staged.slice(0, -1))).toBeUndefined();
   });
 });
 

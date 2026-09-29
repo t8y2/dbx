@@ -17,6 +17,14 @@ export const AI_IMAGE_ATTACHMENT_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
  */
 export const AI_SELECTION_CONTEXT_MAX_CHARS = 12_000;
 
+/**
+ * Aggregate budget for staged selections: repeated "send to AI" gestures must
+ * not stack unbounded context chips into one request, mirroring the text
+ * attachment budgets above.
+ */
+export const AI_SELECTION_CONTEXT_MAX_COUNT = 8;
+export const AI_SELECTION_CONTEXT_MAX_TOTAL_CHARS = 32_000;
+
 export const AI_TEXT_ATTACHMENT_EXTENSIONS = new Set(["csv", "md", "markdown", "txt", "text", "json", "yaml", "yml", "xml", "log", "tsv"]);
 export const AI_IMAGE_ATTACHMENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 export const AI_IMAGE_ATTACHMENT_TYPES_BY_EXTENSION: Record<string, string> = {
@@ -211,6 +219,12 @@ export function createSelectionContext(input: AiSelectionContextInput, id: strin
 export function textAttachmentBudgetError(existing: readonly AiCsvFileContext[]): AttachmentBudgetError | undefined {
   if (existing.length >= AI_TEXT_ATTACHMENT_MAX_COUNT) return "count";
   if (existing.reduce((total, attachment) => total + attachment.content.length, 0) >= AI_TEXT_ATTACHMENT_MAX_TOTAL_CHARS) return "total";
+  return undefined;
+}
+
+export function selectionContextBudgetError(existing: readonly AiSelectionContext[]): AttachmentBudgetError | undefined {
+  if (existing.length >= AI_SELECTION_CONTEXT_MAX_COUNT) return "count";
+  if (existing.reduce((total, selection) => total + selection.content.length, 0) >= AI_SELECTION_CONTEXT_MAX_TOTAL_CHARS) return "total";
   return undefined;
 }
 

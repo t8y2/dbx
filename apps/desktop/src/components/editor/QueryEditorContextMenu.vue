@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Columns3, Download, Eye, FileCode, Highlighter, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
+import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Columns3, Download, Eye, FileCode, Highlighter, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2, WandSparkles } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import { supportsQueryEditorBlockComments } from "@/lib/database/databaseFeatureSupport";
@@ -35,6 +35,7 @@ export interface QueryEditorContextMenuActions {
   copySelectedSqlAsRichTextFromContextMenu: () => void;
   cutSelectedSqlFromContextMenu: () => void;
   pasteClipboardSqlFromContextMenu: () => void;
+  pasteClipboardSqlRestoringSource: () => void;
   convertSelectedSqlCase: (mode: "upper" | "lower") => void;
   convertSelectedNamingStyle: () => void;
   openDelimitedListDialog: () => void;
@@ -214,6 +215,13 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       disabled: state.readOnly,
       icon: ClipboardPaste,
       shortcut: "Mod+V",
+    },
+    {
+      // 显式入口：即使关闭了「粘贴时自动还原源码 SQL」设置也能使用
+      label: t("editor.contextMenu.pasteRestoringSourceSql"),
+      action: actions.pasteClipboardSqlRestoringSource,
+      disabled: state.readOnly,
+      icon: WandSparkles,
     },
     {
       label: t("editor.contextMenu.sendToAi"),

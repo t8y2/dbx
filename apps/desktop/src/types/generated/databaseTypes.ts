@@ -59,6 +59,7 @@ export const DATABASE_TYPES = [
   "db2",
   "informix",
   "neo4j",
+  "nebula",
   "cassandra",
   "bigquery",
   "spanner",

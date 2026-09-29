@@ -21,6 +21,7 @@ kingbase-go	shared-fallback	native-go	Uses sys_catalog/information_schema for co
 vastbase-go	shared-fallback	native-go	Uses pg_catalog/information_schema for Vastbase metadata, then applies stable filtering and paging in the native agent.
 kylin	intentional-fallback	java-jdbc-metadata	Uses JDBC metadata from Kylin driver; no portable server-side paging API, common constraints filter locally.
 neo4j-go	shared-fallback	native-go	Uses Neo4j schema procedures with stable local filtering and paging because label discovery does not expose portable server-side metadata pagination.
+nebula-go	shared-fallback	native-go	Uses SHOW TAGS and SHOW EDGES with stable local filtering and paging because nGQL metadata listing has no server-side pagination.
 oceanbase-oracle	native-pushdown	java-sql	Uses Oracle-compatible metadata SQL with type, filter, stable order, and ROWNUM paging.
 oracle-go	native-pushdown	native-go	Uses Oracle-compatible metadata SQL with type, filter, stable order, and ROWNUM paging, with legacy profile guard.
 snowflake	native-pushdown	java-sql	Uses INFORMATION_SCHEMA with type, filter, stable order, and literal LIMIT/OFFSET.

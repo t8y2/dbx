@@ -1,3 +1,4 @@
+import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest } from "./pluginAiCompletion";
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
@@ -153,9 +154,25 @@ export interface PluginHostBridgeApi {
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
+  listAiProviders?(): Promise<PluginAiProvider[]>;
+  discoverAiModels?(configId: string): Promise<PluginAiModel[]>;
+  listAiModels?(): Promise<PluginAiModel[]>;
+  /** Must obtain trusted host consent for every send; never return provider errors or credentials. */
+  generateAiText?(pluginName: string, input: PluginAiGenerateRequest): Promise<string>;
   openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
   setAiRecommendations?(update: PluginAiRecommendationHostUpdate): void;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
+  /**
+   * §4/§5 command execution asked from a plugin webview: the same registry
+   * path as menu execution — enablement (§5.4), §4.1 singleton reuse,
+   * host-authored context — scoped to the calling plugin's own declared
+   * commands. The optional context merges over the command-declared context
+   * (caller wins; reserved identity fields are host-owned) and feeds
+   * `instance_key` `{{path}}` placeholders, so per-connection instances are
+   * one `logs:{{connectionId}}` declaration away. Resolves `{ error }` for
+   * expected business outcomes; only bridge or permission failures reject.
+   */
+  executeCommand?(pluginId: string, commandId: string, context?: Record<string, unknown>): Promise<{ error?: string } | null | void> | { error?: string } | null | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
   reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
@@ -434,6 +451,8 @@ export class PluginHostBridge {
         [PLUGIN_DATA_CAPABILITY]: !!this.api.queryData && !!this.api.hasDataGrant && !!this.api.confirmDataAccess && !!this.api.grantDataAccess,
         storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
         ai: !!this.api.openAiConversation,
+        aiModelDiscovery: !!this.api.listAiProviders && !!this.api.discoverAiModels,
+        aiCompletion: !!this.api.listAiModels && !!this.api.generateAiText,
         aiRecommendations: !!this.api.openAiConversation && !!this.api.setAiRecommendations,
         // Additive with the same "absence means unsupported" contract: an older
         // host omits these, and a web host has neither.
@@ -557,6 +576,33 @@ export class PluginHostBridge {
       return null;
     }
     if (method === "host.getContext") return snapshotPluginWorkbenchContext(this.context);
+    if (method === "host.ai.listProviders") {
+      this.requirePermission("host.ai");
+      if (!this.api.listAiProviders) throw new Error("AI provider selection is unavailable");
+      return (await this.api.listAiProviders()).map((p) => ({ configId: p.configId, name: p.name }));
+    }
+    if (method === "host.ai.discoverModels") {
+      this.requirePermission("host.ai");
+      if (!this.api.discoverAiModels) throw new Error("AI model discovery is unavailable");
+      const input = requireRecord(params, "AI model discovery");
+      if (typeof input.configId !== "string" || !input.configId.trim() || input.configId.length > 256) throw new Error("Invalid AI configId");
+      return (await this.api.discoverAiModels(input.configId)).map((m) => ({ configId: m.configId, name: m.name, model: m.model, isDefault: !!m.isDefault }));
+    }
+    if (method === "host.ai.listModels") {
+      this.requirePermission("host.ai");
+      if (!this.api.listAiModels) throw new Error("DBX AI model selection is unavailable");
+      // Whitelist response fields even if an adapter accidentally returns config objects.
+      return (await this.api.listAiModels()).map((m) => ({ configId: m.configId, name: m.name, model: m.model, isDefault: !!m.isDefault }));
+    }
+    if (method === "host.ai.generateText") {
+      this.requirePermission("host.ai");
+      if (!this.api.generateAiText) throw new Error("DBX AI text generation is unavailable");
+      const input = requireRecord(params, "AI generation request");
+      for (const key of ["configId", "model", "prompt"] as const) {
+        if (typeof input[key] !== "string" || !input[key].trim() || input[key].length > (key === "prompt" ? 100000 : 256)) throw new Error("Invalid AI " + key);
+      }
+      return this.api.generateAiText(this.plugin.manifest.name, { configId: input.configId as string, model: input.model as string, prompt: input.prompt as string });
+    }
     if (method === "host.ai.openConversation") {
       this.requirePermission("host.ai");
       if (!this.api.openAiConversation) throw new Error("DBX AI conversation panel is unavailable");
@@ -627,6 +673,12 @@ export class PluginHostBridge {
       const input = requireRecord(params, "host.openWorkbench params");
       await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined, { forceNew: input.forceNew === true });
       return null;
+    }
+    if (method === "host.executeCommand") {
+      this.requirePermission("host.workbench");
+      if (!this.api.executeCommand) throw new Error("Host command execution is unavailable");
+      const input = requireRecord(params, "host.executeCommand params");
+      return (await this.api.executeCommand(this.plugin.manifest.id, requireProtocolName(input.commandId, "command id"), isRecord(input.context) ? input.context : undefined)) ?? {};
     }
     if (method === "host.reopenConnection") {
       if (!this.api.reopenConnection) throw new Error("Connection reopen is unavailable");
@@ -1152,6 +1204,10 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       cancelDownload: (downloadId) => request('host.cancelDownload', { downloadId }),
       request,
       ai: Object.freeze({
+        listProviders: () => request('host.ai.listProviders'),
+        discoverModels: (configId) => request('host.ai.discoverModels', {configId}),
+        listModels: () => request('host.ai.listModels'),
+        generateText: (options) => request('host.ai.generateText', options),
         openConversation: (options) => request('host.ai.openConversation', options),
         setRecommendations: (update) => request('host.ai.setRecommendations', update),
         clearRecommendations: () => request('host.ai.clearRecommendations'),
@@ -1170,6 +1226,15 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
       },
       openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew) }),
+      // §4/§5 command execution from a webview — the same registry path a menu
+      // placement takes (enablement, §4.1 reuse, host-authored context),
+      // scoped to the plugin's own declared commands. The optional context
+      // merges over the command context and scopes instance_key placeholders
+      // (e.g. one panel per connection). Resolves { error } for expected
+      // business outcomes so callers can surface a notice without try/catch.
+      // NOTE: this block is the sandbox bootstrap template source — comments
+      // here must not contain backticks or dollar-brace interpolation.
+      executeCommand: (commandId, context) => request('host.executeCommand', { commandId, context }),
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
       reopenConnection: (connectionId) => request('host.reopenConnection', { connectionId }),
       // Estimated plans only: mode must be sent explicitly so a plugin states

@@ -15,6 +15,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PostgresLikeAgentTest {
@@ -54,6 +55,80 @@ class PostgresLikeAgentTest {
         assertFalse(sql.contains(" key."), sql);
         assertTrue(sql.contains("JOIN LATERAL"), sql);
         assertFalse(agent.getProfile().mapsCatalogAttributeArraysInJava());
+    }
+
+    @Test
+    void serialMetadataQueryRequiresAnOwnedSequenceAndExactNextvalDefault() {
+        TestPostgresLikeAgent agent = new TestPostgresLikeAgent();
+        agent.connect(new ConnectParams());
+
+        agent.getColumns("app", "orders");
+
+        String sql = String.join("\n", MetadataSqlFake.statements);
+        assertTrue(sql.contains("CASE WHEN a.atttypid IN (20, 21, 23)"), sql);
+        assertTrue(sql.contains("sequence_dep.deptype = 'a'"), sql);
+        assertTrue(sql.contains("serial_default_dep.objid = ad.oid"), sql);
+        assertTrue(sql.contains("serial_default_dep.refobjid = sequence_dep.objid"), sql);
+        assertTrue(sql.contains("serial_seq.relkind = 'S'"), sql);
+        assertTrue(sql.contains("format('nextval(%L::regclass)', serial_seq.oid::regclass::text)"), sql);
+        assertTrue(sql.contains("WHEN 21 THEN 'smallserial'"), sql);
+        assertTrue(sql.contains("WHEN 23 THEN 'serial'"), sql);
+        assertTrue(sql.contains("WHEN 20 THEN 'bigserial'"), sql);
+    }
+
+    @Test
+    void readsSerialMarkersWithoutReclassifyingPlainOrIdentityLikeColumns() {
+        TestPostgresLikeAgent agent = new TestPostgresLikeAgent(preparedConnection(
+            resultSet(new String[]{"column_name"}, new Object[][]{}),
+            resultSet(
+                new String[]{
+                    "column_name", "data_type", "is_nullable", "column_default", "column_extra",
+                    "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"
+                },
+                new Object[][]{
+                    {"small_id", "smallint", false, "nextval('small_id_seq'::regclass)", "smallserial", null, null, null, null},
+                    {"id", "bigint", false, "nextval('id_seq'::regclass)", "bigserial", null, null, null, null},
+                    {"plain_id", "bigint", true, null, null, null, null, null, null},
+                    {"manual_id", "bigint", true, "nextval('shared_id_seq'::regclass)", null, null, null, null, null},
+                    {"identity_id", "bigint", false, null, null, null, null, null, null}
+                }
+            )
+        ));
+        agent.connect(new ConnectParams());
+
+        List<ColumnInfo> columns = agent.getColumns("public", "orders");
+
+        assertEquals("smallserial", columns.get(0).getExtra());
+        assertEquals("bigserial", columns.get(1).getExtra());
+        assertNull(columns.get(2).getExtra());
+        assertNull(columns.get(3).getExtra());
+        assertNull(columns.get(4).getExtra());
+        assertEquals("nextval('shared_id_seq'::regclass)", columns.get(3).getColumn_default());
+    }
+
+    @Test
+    void genericDdlBuilderDoesNotInterpretPostgresSerialMarkers() {
+        String ddl = DdlBuilder.buildTableDdl(
+            "public",
+            "orders",
+            java.util.Collections.singletonList(new ColumnInfo(
+                "id",
+                "bigint",
+                false,
+                "nextval('shared_id_seq'::regclass)",
+                true,
+                "bigserial",
+                null,
+                null,
+                null,
+                null
+            )),
+            java.util.Collections.emptyList(),
+            java.util.Collections.emptyList()
+        );
+
+        assertTrue(ddl.contains("\"id\" bigint NOT NULL DEFAULT nextval('shared_id_seq'::regclass)"), ddl);
+        assertFalse(ddl.contains("bigserial"), ddl);
     }
 
     @Test
@@ -229,6 +304,22 @@ class PostgresLikeAgentTest {
 
         assertTrue(ddl.startsWith("CREATE TABLE \"public\".\"orders\""), ddl);
         assertFalse(ddl.contains("CHECK"), ddl);
+    }
+
+    @Test
+    void tableDdlRendersLegacySerialTypesAndPreservesOtherIntegerDefaults() {
+        SerialDdlAgent agent = new SerialDdlAgent();
+
+        String ddl = agent.getTableDdl("public", "orders");
+
+        assertTrue(ddl.startsWith("CREATE TABLE \"public\".\"orders\" (\n"), ddl);
+        assertTrue(ddl.contains("  \"id\" bigserial NOT NULL"), ddl);
+        assertTrue(ddl.contains("  \"small_id\" smallserial"), ddl);
+        assertTrue(ddl.contains("  \"plain_id\" bigint"), ddl);
+        assertTrue(ddl.contains("  \"manual_id\" bigint DEFAULT nextval('shared_id_seq'::regclass)"), ddl);
+        assertTrue(ddl.contains("  \"identity_id\" bigint NOT NULL DEFAULT nextval('identity_id_seq'::regclass)"), ddl);
+        assertFalse(ddl.contains("\"id\" bigint DEFAULT nextval"), ddl);
+        assertFalse(ddl.contains("\"small_id\" smallint DEFAULT nextval"), ddl);
     }
 
     @Test
@@ -413,6 +504,36 @@ class PostgresLikeAgentTest {
                 "chk_balance_status",
                 "CHECK (status = ANY (ARRAY['PLAN'::text, 'EXECUTION'::text]))"
             ));
+        }
+    }
+
+    private static final class SerialDdlAgent extends PostgresLikeAgent {
+        private SerialDdlAgent() {
+            super(new PostgresLikeAgentProfile(
+                PostgresLikeAgentTest.class.getName(),
+                "jdbc:test://{host}:{port}/{database}"
+            ));
+        }
+
+        @Override
+        public List<ColumnInfo> getColumns(String schema, String table) {
+            return java.util.Arrays.asList(
+                new ColumnInfo("id", "bigint", false, "nextval('id_seq'::regclass)", true, "bigserial", null, null, null, null),
+                new ColumnInfo("small_id", "smallint", true, "nextval('small_id_seq'::regclass)", false, "smallserial", null, null, null, null),
+                new ColumnInfo("plain_id", "bigint", true, null, false),
+                new ColumnInfo("manual_id", "bigint", true, "nextval('shared_id_seq'::regclass)", false),
+                new ColumnInfo("identity_id", "bigint", false, "nextval('identity_id_seq'::regclass)", false, "generated by default as identity", null, null, null, null)
+            );
+        }
+
+        @Override
+        public List<IndexInfo> listIndexes(String schema, String table) {
+            return java.util.Collections.emptyList();
+        }
+
+        @Override
+        public List<ForeignKeyInfo> listForeignKeys(String schema, String table) {
+            return java.util.Collections.emptyList();
         }
     }
 

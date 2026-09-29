@@ -200,6 +200,9 @@ pub fn build_table_data_select_sql_with_database(
     if database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_table_select_sql(&options, limit);
     }
+    if database_type == Some(DatabaseType::Nebula) {
+        return build_nebula_table_select_sql(&options, limit);
+    }
     if database_type == Some(DatabaseType::Salesforce) {
         return build_salesforce_table_select_sql(&options, limit);
     }
@@ -937,6 +940,47 @@ pub(super) fn build_neo4j_table_select_sql(options: &TableDataSelectSqlOptions, 
     let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
     let skip = options.offset.filter(|offset| *offset > 0).map(|offset| format!(" SKIP {offset}")).unwrap_or_default();
     format!("MATCH (n:{label}){where_clause} RETURN {returns}{order}{skip} LIMIT {limit};")
+}
+
+fn build_nebula_table_select_sql(options: &TableDataSelectSqlOptions, limit: usize) -> String {
+    let quote = |name: &str| quote_table_identifier(Some(DatabaseType::Nebula), name);
+    let kind = quote(&options.table_name);
+    let is_edge = options.table_type.as_deref().is_some_and(|kind| kind.eq_ignore_ascii_case("VIEW"));
+    let (pattern, identity, projection) = if is_edge {
+        let projection = if options.columns.is_empty() {
+            "e AS `edge`".to_string()
+        } else {
+            options
+                .columns
+                .iter()
+                .map(|column| format!("e.{} AS {}", quote(column), quote(column)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        (format!("MATCH ()-[e:{kind}]->()"), "src(e) AS `_src`, dst(e) AS `_dst`, rank(e) AS `_rank`", projection)
+    } else {
+        let projection = if options.columns.is_empty() {
+            "v AS `vertex`".to_string()
+        } else {
+            options
+                .columns
+                .iter()
+                .map(|column| format!("v.{kind}.{} AS {}", quote(column), quote(column)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        (format!("MATCH (v:{kind})"), "id(v) AS `_vid`", projection)
+    };
+    let predicate = normalize_where_input(options.where_input.as_deref());
+    let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE {predicate}") };
+    let order = options
+        .order_by
+        .as_deref()
+        .filter(|order| !order.trim().is_empty())
+        .map(|order| format!(" ORDER BY {order}"))
+        .unwrap_or_default();
+    let skip = options.offset.filter(|offset| *offset > 0).map(|offset| format!(" SKIP {offset}")).unwrap_or_default();
+    format!("{pattern}{where_clause} RETURN {identity}, {projection}{order}{skip} LIMIT {limit};")
 }
 
 /// Salesforce's `FIELDS(ALL)` selector is only legal with a LIMIT of 200 or less.

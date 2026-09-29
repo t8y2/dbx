@@ -68,6 +68,14 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sqlVariableSubstitutionEnabled: null } as any).sqlVariableSubstitutionEnabled).toBe(true);
   });
 
+  it("enables source-code SQL restore on paste by default and only preserves booleans", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.restoreSqlFromSourcePasteEnabled).toBe(true);
+    expect(normalizeEditorSettings({}).restoreSqlFromSourcePasteEnabled).toBe(true);
+    expect(normalizeEditorSettings({ restoreSqlFromSourcePasteEnabled: false }).restoreSqlFromSourcePasteEnabled).toBe(false);
+    expect(normalizeEditorSettings({ restoreSqlFromSourcePasteEnabled: "false" } as any).restoreSqlFromSourcePasteEnabled).toBe(true);
+    expect(normalizeEditorSettings({ restoreSqlFromSourcePasteEnabled: null } as any).restoreSqlFromSourcePasteEnabled).toBe(true);
+  });
+
   it("keeps the quick filter view by default and preserves fixed filter views", () => {
     expect(normalizeEditorSettings({}).dataGridFilterEditorView).toBe("quick");
     expect(normalizeEditorSettings({ dataGridFilterEditorView: "conditions" }).dataGridFilterEditorView).toBe("conditions");

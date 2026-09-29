@@ -378,7 +378,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const occurrences: ParameterOccurrence[] = [];
   const databaseType = options?.databaseType;
   const nativeSqlServerParameters = collectNativeSqlServerParameters(sql, databaseType);
-  const supportsNamedParameters = databaseType !== "saphana" && databaseType !== "neo4j";
+  const supportsNamedParameters = databaseType !== "saphana" && databaseType !== "neo4j" && databaseType !== "nebula";
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
   const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql, databaseType) : new Set<number>();

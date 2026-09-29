@@ -72,7 +72,7 @@ export function resolveSqlVariableSyntaxToggles(overrides: SqlVariableSyntaxOver
   const partial = dbType ? overrides?.[dbType] : undefined;
   return {
     positional: partial?.positional ?? true,
-    named: dbType === "neo4j" ? false : (partial?.named ?? true),
+    named: dbType === "neo4j" || dbType === "nebula" ? false : (partial?.named ?? true),
     shell: partial?.shell ?? true,
     mybatis: partial?.mybatis ?? true,
     sqlserver: partial?.sqlserver ?? true,

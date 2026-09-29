@@ -308,7 +308,10 @@ fn platform_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, Str
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
         .map_err(|error| format!("keyring entry unavailable: {error}"))?;
     match entry.get_password() {
-        Ok(value) => return Ok(SecretCodec::from_key_material(value.trim()).ok()),
+        Ok(value) => {
+            let codec = SecretCodec::from_key_material(value.trim()).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
+            return Ok(Some(codec));
+        }
         Err(keyring::Error::NoEntry) => {}
         // Distinguish a present-but-unreadable keychain item (ACL denial,
         // locked keychain) from a missing one: callers surface this class in
@@ -344,7 +347,7 @@ where
 
 #[cfg(all(feature = "os-keyring", target_os = "linux"))]
 fn secret_service_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, String> {
-    use secret_service::{blocking::SecretService, EncryptionType};
+    use secret_service::{blocking::SecretService, EncryptionType, Error as SecretServiceError};
     use std::collections::HashMap;
 
     // A missing session bus (headless server/container) means the provider is
@@ -352,34 +355,68 @@ fn secret_service_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec
     // managed .dbx/secret.key file exactly as before.
     let service = match SecretService::connect(EncryptionType::Dh) {
         Ok(service) => service,
-        Err(_) => return Ok(None),
+        Err(error) if secret_service_provider_is_missing(&error.to_string()) => return Ok(None),
+        Err(error) => return Err(format!("KEYRING_ACCESS_FAILED: secret service connection failed: {error}")),
     };
-    let collection = match service.get_default_collection() {
-        Ok(collection) => collection,
-        Err(_) => return Ok(None),
-    };
+
     let mut attributes = HashMap::new();
     attributes.insert("target", KEYRING_TARGET);
     attributes.insert("service", KEYRING_SERVICE);
     attributes.insert("username", KEYRING_USER);
-    let mut found = collection
+    // SearchItems on the service is the Secret Service API's interoperable
+    // lookup: it searches every collection. This also lets us recover an
+    // existing DBX key when the default alias points at a stale collection.
+    let search = service
         .search_items(attributes)
         .map_err(|error| format!("KEYRING_ACCESS_FAILED: secret search failed: {error}"))?;
-    if found.is_empty() {
-        let mut legacy = HashMap::new();
-        legacy.insert("service", KEYRING_SERVICE);
-        legacy.insert("username", KEYRING_USER);
-        found = collection
-            .search_items(legacy)
-            .map_err(|error| format!("KEYRING_ACCESS_FAILED: secret search failed: {error}"))?;
+
+    let item = search.unlocked.into_iter().next().or_else(|| search.locked.into_iter().next());
+    if let Some(item) = item {
+        let secret =
+            item.get_secret().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret read failed: {error}"))?;
+        let material = String::from_utf8(secret).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
+        let codec = SecretCodec::from_key_material(material.trim()).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
+        return Ok(Some(codec));
     }
+
+    // Older DBX/keyring entries may omit `target`. Preserve that compatibility
+    // search, but only against a live default collection. Secret Service
+    // implementations can return a stale object path for the `default` alias;
+    // calling SearchItems on that path produces UnknownMethod even though the
+    // provider itself is healthy. Confirming it appears in Collections keeps
+    // that specific missing-collection case on the documented file fallback
+    // path without swallowing access or API errors.
+    let collection = match service.get_default_collection() {
+        Ok(collection) => collection,
+        Err(SecretServiceError::NoResult | SecretServiceError::Unavailable) => return Ok(None),
+        Err(error) => return Err(format!("KEYRING_ACCESS_FAILED: default collection lookup failed: {error}")),
+    };
+    let default_path = collection.collection_path.as_str().to_string();
+    let collections = service
+        .get_all_collections()
+        .map_err(|error| format!("KEYRING_ACCESS_FAILED: collection enumeration failed: {error}"))?;
+    if !collection_path_is_registered(
+        &default_path,
+        collections.iter().map(|candidate| candidate.collection_path.as_str()),
+    ) {
+        return Ok(None);
+    }
+
+    let mut legacy = HashMap::new();
+    legacy.insert("service", KEYRING_SERVICE);
+    legacy.insert("username", KEYRING_USER);
+    let found = collection
+        .search_items(legacy)
+        .map_err(|error| format!("KEYRING_ACCESS_FAILED: secret search failed: {error}"))?;
     let item = found.into_iter().next();
     match item {
         Some(item) => {
             let secret =
                 item.get_secret().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret read failed: {error}"))?;
             let material = String::from_utf8(secret).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
-            Ok(SecretCodec::from_key_material(material.trim()).ok())
+            let codec =
+                SecretCodec::from_key_material(material.trim()).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
+            Ok(Some(codec))
         }
         None if allow_create => {
             let mut key = [0u8; 32];
@@ -396,6 +433,18 @@ fn secret_service_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec
         }
         None => Ok(None),
     }
+}
+
+#[cfg(all(feature = "os-keyring", target_os = "linux"))]
+fn secret_service_provider_is_missing(error: &str) -> bool {
+    error.contains("org.freedesktop.DBus.Error.ServiceUnknown")
+        || error.contains("org.freedesktop.DBus.Error.NameHasNoOwner")
+        || error.contains("no secret service provider or dbus session found")
+}
+
+#[cfg(any(test, all(feature = "os-keyring", target_os = "linux")))]
+fn collection_path_is_registered<'a>(path: &str, collection_paths: impl IntoIterator<Item = &'a str>) -> bool {
+    collection_paths.into_iter().any(|candidate| candidate == path)
 }
 
 #[cfg(not(feature = "os-keyring"))]
@@ -561,6 +610,14 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+
     fn assert_secret_service_runtime_isolated() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("secret.key");
@@ -607,6 +664,18 @@ mod tests {
         });
         assert!(matches!(result, Err(error) if error == "KEYRING_ACCESS_FAILED: locked collection"));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn denied_or_corrupt_platform_key_never_creates_a_fallback() {
+        for provider_error in ["KEYRING_ACCESS_FAILED: permission denied", "SECRET_KEY_INVALID"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("secret.key");
+            let expected = provider_error.to_string();
+            let result = SecretCodec::resolve_platform_default(Some(path.clone()), true, move |_| Err(expected));
+            assert!(matches!(result, Err(error) if error == provider_error));
+            assert!(!path.exists());
+        }
     }
 
     #[tokio::test]
@@ -829,6 +898,9 @@ mod tests {
     fn unavailable_platform_creation_uses_a_stable_fallback_key() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("secret.key");
+        // The Linux provider reports both an absent session service and a
+        // missing default collection as `Ok(None)`. Both cases are safe to
+        // provision through the existing persistent compatibility path.
         let created = SecretCodec::resolve_platform_default(Some(path.clone()), true, |allow_create| {
             assert!(allow_create);
             Ok(None)
@@ -843,6 +915,30 @@ mod tests {
         assert_eq!(reopened.source, SecretKeySource::ManagedDataDir);
         assert_eq!(reopened.codec.decrypt("connection", "password", &envelope).unwrap(), "secret");
         assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn stale_default_collection_is_classified_by_registered_paths() {
+        let default_path = "/org/freedesktop/secrets/collection/login";
+        assert!(!super::collection_path_is_registered(default_path, ["/org/freedesktop/secrets/collection/other",]));
+        assert!(super::collection_path_is_registered(default_path, [default_path]));
+    }
+
+    #[cfg(all(feature = "os-keyring", target_os = "linux"))]
+    #[test]
+    fn only_absent_secret_service_names_use_provider_fallback() {
+        assert!(super::secret_service_provider_is_missing(
+            "zbus error: org.freedesktop.DBus.Error.ServiceUnknown: no owner"
+        ));
+        assert!(super::secret_service_provider_is_missing(
+            "zbus error: org.freedesktop.DBus.Error.NameHasNoOwner: no owner"
+        ));
+        assert!(!super::secret_service_provider_is_missing(
+            "zbus error: org.freedesktop.DBus.Error.AccessDenied: permission denied"
+        ));
+        assert!(!super::secret_service_provider_is_missing(
+            "zbus error: org.freedesktop.DBus.Error.UnknownMethod: object does not exist"
+        ));
     }
 
     #[test]

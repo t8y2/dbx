@@ -113,16 +113,29 @@ vi.mock("@/components/ui/label", async () => {
 });
 
 vi.mock("@/components/ui/select", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { defineComponent, h, inject, provide } = await import("vue");
   const passthrough = defineComponent({
     setup(_props, { slots }) {
       return () => h("div", slots.default?.());
     },
   });
   return {
-    Select: passthrough,
+    Select: defineComponent({
+      props: { modelValue: String },
+      emits: ["update:modelValue"],
+      setup(_props, { emit, slots }) {
+        provide("selectOption", (value: string) => emit("update:modelValue", value));
+        return () => h("div", slots.default?.());
+      },
+    }),
     SelectContent: passthrough,
-    SelectItem: passthrough,
+    SelectItem: defineComponent({
+      props: { value: String },
+      setup(props, { slots }) {
+        const selectOption = inject<(value: string) => void>("selectOption");
+        return () => h("span", { "data-select-option": props.value, onClick: () => selectOption?.(props.value || "") }, slots.default?.());
+      },
+    }),
     SelectTrigger: passthrough,
     SelectValue: passthrough,
   };
@@ -279,6 +292,30 @@ afterEach(() => {
 });
 
 describe("TableImportDialog batch selection", () => {
+  it("reloads a single CSV preview and passes the selected decimal separator to import", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(['amount,note\n"12,50",plain'], "rows.csv")]);
+    expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1].parseOptions.decimalSeparator).toBe(".");
+
+    document.body.querySelector<HTMLElement>('[data-select-option=","]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flushAsyncUpdates();
+    expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1].parseOptions.decimalSeparator).toBe(",");
+
+    await startImport();
+    expect(mocks.importTableFile.mock.calls[0]![0].parseOptions?.decimalSeparator).toBe(",");
+  });
+
+  it("reloads selected batch CSV previews when the decimal separator changes", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name"], "first.csv"), new File(["id,name"], "second.csv")]);
+    mocks.previewTableImportFile.mockClear();
+    document.body.querySelector<HTMLElement>('[data-select-option=","]')!.click();
+    await flushAsyncUpdates();
+    expect(mocks.previewTableImportFile).toHaveBeenCalledTimes(2);
+    expect(mocks.previewTableImportFile.mock.calls.map(([, options]) => options.parseOptions.decimalSeparator)).toEqual([",", ","]);
+  });
+
   it("uses all desktop grid columns when Parquet is unavailable", async () => {
     await mountSourceDialog();
 

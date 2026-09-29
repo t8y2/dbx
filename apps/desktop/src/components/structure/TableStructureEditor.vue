@@ -129,6 +129,7 @@ import {
   copySourceColumnDetails,
   matchesCopySourceColumnSearch,
   foldCreatedTableName,
+  draftColumnNameForSql,
 } from "@/lib/table/tableStructureEditorState";
 import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, normalizeCreateDatabaseCharsetKey, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
@@ -2240,9 +2241,16 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     driverProfile: connection.value?.driver_profile,
     schema: props.schema,
     tableName: isCreateMode.value ? newTableName.value.trim() : props.tableName || "",
-    // Do not let a draft created by an older build submit properties that the
-    // current database cannot represent (notably PostgreSQL-style identity on openGauss).
-    columns: showExtendedProperties.value ? columns.value : columns.value.map((column) => ({ ...column, extra: {} })),
+    // User-entered names are normalized here so the preview and the executed
+    // batch agree: MySQL rejects identifiers that end with a space (ERROR 1166),
+    // while a metadata name the user never touched keeps its exact spelling.
+    columns: columns.value.map((column) => ({
+      ...column,
+      name: draftColumnNameForSql(column.name, column.original?.name),
+      // Do not let a draft created by an older build submit properties that the
+      // current database cannot represent (notably PostgreSQL-style identity on openGauss).
+      ...(showExtendedProperties.value ? {} : { extra: {} }),
+    })),
     indexes: sanitizeStructureIndexesForCapabilities(indexes.value, structureCapabilities.value),
     foreignKeys: foreignKeys.value,
     triggers: triggers.value,
@@ -3955,6 +3963,13 @@ function isColumnNameDisabled(column: EditableStructureColumn): boolean {
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.renameColumn);
 }
 
+/** Mirror in the input what the DDL builder does with the name, so the field the
+ * user sees matches the statement that will run. */
+function commitColumnNameInput(column: EditableStructureColumn) {
+  const normalized = draftColumnNameForSql(column.name, column.original?.name);
+  if (normalized !== column.name) column.name = normalized;
+}
+
 function isColumnTypeDisabled(column: EditableStructureColumn): boolean {
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterType);
 }
@@ -5289,7 +5304,7 @@ watch(
                           </div>
                         </td>
                         <td :class="structureCellClass">
-                          <Input v-model="column.name" :class="[structureControlClass, columnSearchFieldClass(column, column.name)]" :disabled="isColumnNameDisabled(column)" data-column-name-input />
+                          <Input v-model="column.name" :class="[structureControlClass, columnSearchFieldClass(column, column.name)]" :disabled="isColumnNameDisabled(column)" data-column-name-input @blur="commitColumnNameInput(column)" />
                         </td>
                         <td :class="structureCellClass">
                           <SearchableSelect

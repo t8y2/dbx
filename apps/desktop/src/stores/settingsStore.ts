@@ -872,6 +872,8 @@ export interface EditorSettings {
   /** Double click inside a string literal selects the whole value ("content") or a single word ("word"). */
   doubleClickStringSelectionMode: DoubleClickStringSelectionMode;
   autoCloseBrackets: boolean;
+  /** 粘贴从 Java/JS/Python 等源码里复制的字符串拼接 SQL 时，自动还原为普通 SQL。 */
+  restoreSqlFromSourcePasteEnabled: boolean;
   sqlSemanticDiagnosticsMode: SqlSemanticDiagnosticsMode;
   sqlSemanticDiagnosticsEnabled: boolean;
   confirmDangerousSqlExecution: boolean;
@@ -1163,6 +1165,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   vimModeEnabled: false,
   doubleClickStringSelectionMode: "content",
   autoCloseBrackets: true,
+  restoreSqlFromSourcePasteEnabled: true,
   sqlSemanticDiagnosticsMode: "auto",
   sqlSemanticDiagnosticsEnabled: SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED,
   confirmDangerousSqlExecution: true,
@@ -1736,6 +1739,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
     doubleClickStringSelectionMode: normalizeDoubleClickStringSelectionMode(settings.doubleClickStringSelectionMode),
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
+    restoreSqlFromSourcePasteEnabled: typeof settings.restoreSqlFromSourcePasteEnabled === "boolean" ? settings.restoreSqlFromSourcePasteEnabled : DEFAULT_EDITOR_SETTINGS.restoreSqlFromSourcePasteEnabled,
     sqlSemanticDiagnosticsMode,
     sqlSemanticDiagnosticsEnabled: sqlSemanticDiagnosticsEnabledForMode(sqlSemanticDiagnosticsMode),
     confirmDangerousSqlExecution: settings.confirmDangerousSqlExecution ?? DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution,
@@ -2572,6 +2576,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
     if (partial.doubleClickStringSelectionMode !== undefined) editorSettings.value.doubleClickStringSelectionMode = normalizeDoubleClickStringSelectionMode(partial.doubleClickStringSelectionMode);
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
+    if (partial.restoreSqlFromSourcePasteEnabled !== undefined) editorSettings.value.restoreSqlFromSourcePasteEnabled = partial.restoreSqlFromSourcePasteEnabled === true;
     if (partial.sqlSemanticDiagnosticsMode !== undefined || partial.sqlSemanticDiagnosticsEnabled !== undefined) {
       const nextMode = normalizeSqlSemanticDiagnosticsMode(partial.sqlSemanticDiagnosticsMode, partial.sqlSemanticDiagnosticsEnabled);
       editorSettings.value.sqlSemanticDiagnosticsMode = nextMode;

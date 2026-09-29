@@ -187,8 +187,19 @@ public final class DdlBuilder {
             String unique = index.getIs_unique() ? "UNIQUE " : "";
             String using = notBlank(index.getIndex_type()) ? " USING " + index.getIndex_type() : "";
             List<String> quotedColumns = new ArrayList<>();
-            for (String column : index.getColumns()) {
-                quotedColumns.add(quoteIdent(column, useBacktick));
+            for (int columnIndex = 0; columnIndex < index.getColumns().size(); columnIndex++) {
+                String column = index.getColumns().get(columnIndex);
+                String renderedColumn = quoteIdent(column, useBacktick);
+                List<Integer> keyOptions = index.getKey_options();
+                if (!useBacktick
+                    && "btree".equalsIgnoreCase(index.getIndex_type())
+                    && keyOptions != null
+                    && columnIndex < keyOptions.size()) {
+                    int options = keyOptions.get(columnIndex);
+                    renderedColumn += (options & 1) != 0 ? " DESC" : " ASC";
+                    renderedColumn += (options & 2) != 0 ? " NULLS FIRST" : " NULLS LAST";
+                }
+                quotedColumns.add(renderedColumn);
             }
             String filter = notBlank(index.getFilter()) ? " WHERE " + index.getFilter() : "";
             ddl.append("\nCREATE ");

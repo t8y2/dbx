@@ -46,6 +46,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   ignite3: "analytics",
   mongodb: "document",
   neo4j: "graph_ai",
+  nebula: "graph_ai",
   "oceanbase-oracle": "domestic",
   oracle: "sql",
   oscar: "domestic",

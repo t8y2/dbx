@@ -425,6 +425,40 @@ describe("useSidebarDataOpenRuntime", () => {
     });
   });
 
+  it("waits for NebulaGraph properties before building the first table query", async () => {
+    mocks.databaseType = "nebula";
+    let releaseMetadata: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
+    mocks.loadTableMetadata.mockImplementation(async () => {
+      await gate;
+      return {
+        metadata: {
+          schema: "public",
+          tableName: "users",
+          tableType: "TABLE",
+          database: "app",
+          columns: [{ name: "name", data_type: "string", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
+          indexes: [],
+          primaryKeys: [],
+          cachedAt: Date.now(),
+        },
+        cacheStatus: "miss",
+        ageMs: 0,
+      };
+    });
+
+    const opening = useSidebarDataOpenRuntime().openData(tableNode);
+    await vi.waitFor(() => expect(mocks.loadTableMetadata).toHaveBeenCalled());
+    expect(mocks.buildTableSelectSql).not.toHaveBeenCalled();
+    releaseMetadata();
+    await opening;
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "nebula", columns: ["name"] }));
+    expect(mocks.callOrder).toEqual(["query"]);
+  });
+
   it("keeps Dameng metadata deferred until after the table query", async () => {
     mocks.databaseType = "dameng";
 

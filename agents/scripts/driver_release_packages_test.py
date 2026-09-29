@@ -28,6 +28,8 @@ class DriverReleasePackagesTest(unittest.TestCase):
             rocketmq_source.write_bytes(b"MZtest-rocketmq-agent")
             cassandra_source = release_dir / "dbx-agent-cassandra-linux-x64"
             cassandra_source.write_bytes(b"\x7fELFtest-cassandra-agent")
+            nebula_source = release_dir / "dbx-agent-nebula-linux-aarch64"
+            nebula_source.write_bytes(b"\x7fELFtest-nebula-agent")
             tdengine_source = release_dir / "dbx-agent-tdengine-windows-aarch64.exe"
             tdengine_source.write_bytes(b"MZtest-tdengine-agent")
             etcd_source = release_dir / "dbx-agent-etcd-linux-x64"
@@ -43,6 +45,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "kingbase": "0.1.34",
                 "iotdb": "0.1.30",
                 "neo4j": "0.1.40",
+                "nebula": "0.1.0",
                 "vastbase": "0.1.37",
                 "duckdb": "0.1.0",
                 "rabbitmq": "0.1.0",
@@ -66,6 +69,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
             versioned_rabbitmq = release_dir / "dbx-agent-rabbitmq-0.1.0-linux-x64"
             versioned_rocketmq = release_dir / "dbx-agent-rocketmq-0.1.0-windows-x64.exe"
             versioned_cassandra = release_dir / "dbx-agent-cassandra-0.1.37-linux-x64"
+            versioned_nebula = release_dir / "dbx-agent-nebula-0.1.0-linux-aarch64"
             versioned_tdengine = release_dir / "dbx-agent-tdengine-0.1.0-windows-aarch64.exe"
             versioned_etcd = release_dir / "dbx-agent-etcd-0.1.40-linux-x64"
             versioned_etcd2 = release_dir / "dbx-agent-etcd2-0.1.0-macos-aarch64"
@@ -75,6 +79,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     versioned_java,
                     versioned_cassandra,
                     versioned_native,
+                    versioned_nebula,
                     versioned_vastbase,
                     versioned_duckdb,
                     versioned_rabbitmq,
@@ -262,6 +267,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     versioned_etcd2,
                     versioned_java,
                     versioned_native,
+                    versioned_nebula,
                     versioned_rabbitmq,
                     versioned_rocketmq,
                     versioned_tdengine,
@@ -284,6 +290,20 @@ class DriverReleasePackagesTest(unittest.TestCase):
             self.assertEqual(renamed, [versioned])
             self.assertFalse(source.exists())
             self.assertEqual(versioned.read_bytes(), b"\xcf\xfa\xed\xfetest-neo4j-agent")
+
+    def test_versions_nebula_native_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            source = release_dir / "dbx-agent-nebula-linux-aarch64"
+            source.write_bytes(b"\x7fELFtest-nebula-agent")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned = release_dir / "dbx-agent-nebula-0.1.0-linux-aarch64"
+
+            self.assertEqual(renamed, [versioned])
+            self.assertFalse(source.exists())
+            self.assertEqual(versioned.read_bytes(), b"\x7fELFtest-nebula-agent")
 
     def test_versions_iotdb_native_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

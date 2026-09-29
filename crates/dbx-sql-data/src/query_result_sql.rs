@@ -559,6 +559,7 @@ fn unsupported_pagination_type(database_type: Option<DatabaseType>) -> bool {
         database_type,
         Some(
             DatabaseType::Neo4j
+                | DatabaseType::Nebula
                 | DatabaseType::MongoDb
                 | DatabaseType::Redis
                 | DatabaseType::Salesforce

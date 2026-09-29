@@ -147,10 +147,11 @@ import {
   Trash2,
 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { resolveVisibleDatabaseSaveAction } from "@/components/sidebar/visibleDatabasesDialogState";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase, supportsDataDictionary } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
-import { databaseConnectionFormKind } from "@/lib/database/databaseDriverManifest";
+import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
 import SpannerConnectionFields from "@/components/connection/SpannerConnectionFields.vue";
@@ -1183,6 +1184,8 @@ const driverProfiles: Record<string, ConnectionProfileDefinition> = {
   ...CONNECTION_PROFILES,
   ...jdbcProductDriverProfiles(),
 };
+const nebulaDriverProfiles = databaseManifestEntry("nebula")?.driverProfiles ?? [];
+const nebulaDefaultDriverProfile = nebulaDriverProfiles[0]?.profile ?? "nebula";
 
 function profileForConfig(config: ConnectionConfig) {
   if (config.db_type === "plugin" && config.plugin_id && config.plugin_connection_provider) {
@@ -2803,7 +2806,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   const previousDatabaseType = form.value.db_type;
   selectedType.value = val;
   form.value.db_type = profile.type;
-  form.value.driver_profile = val;
+  form.value.driver_profile = val === "nebula" ? nebulaDefaultDriverProfile : val;
   form.value.driver_label = isCustomCompatibleProfile() ? customDriverName.value.trim() || profile.label : profile.label;
   const preserveMeilisearchConfig = preserveConnectionFields && previousDatabaseType === "meilisearch" && profile.type === "meilisearch";
   if (profile.type !== "sqlserver" && !preserveMeilisearchConfig) {
@@ -3433,6 +3436,12 @@ function switchEtcdApiVersion(profile: "etcd" | "etcd-v2") {
   resetTestState();
 }
 
+function switchNebulaDriverProfile(profile: unknown) {
+  if (typeof profile !== "string" || !nebulaDriverProfiles.some((entry) => entry.profile === profile)) return;
+  form.value.driver_profile = profile;
+  resetTestState();
+}
+
 function switchH2DriverProfile(profile: "h2" | "h2-v1" | "h2-v2" | "h2-v3" | "h2-custom") {
   form.value.driver_profile = profile;
   if (profile === "h2-custom") {
@@ -3649,11 +3658,12 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
   "influxdb",
   "victoriametrics",
   "cassandra",
+  "nebula",
   "zookeeper",
 ]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type) || supportsMysqlTlsTab(form.value.db_type, selectedType.value));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
-const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase");
+const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase" && form.value.db_type !== "nebula");
 const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" || form.value.db_type === "doris" || form.value.db_type === "starrocks");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
@@ -4626,6 +4636,9 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.production_databases = [];
   } else {
     config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
+  }
+  if (config.db_type === "nebula" && (!config.driver_profile || config.driver_profile === "nebula")) {
+    config.driver_profile = nebulaDefaultDriverProfile;
   }
   config.database_info = undefined;
   config.database = normalizeStoredConnectionDatabase(config.db_type, config.database);
@@ -5787,7 +5800,20 @@ function saveVisibleDatabaseSelection() {
       [key]: normalizeVisibleSchemaSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value),
     };
   } else {
-    form.value.visible_databases = normalizeVisibleDatabaseSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value);
+    // "全选"等价于不筛选：存成当时的库名快照会让之后新建的库永远看不到。
+    const action = resolveVisibleDatabaseSaveAction({
+      selection: visibleDatabaseSelection.value,
+      allNames: visibleDatabaseNames.value,
+      defaultVisibleNames: defaultListedVisibleDatabaseNames.value,
+      configured: form.value.visible_databases,
+      configuredPatterns: form.value.visible_database_patterns,
+      patterns: form.value.visible_database_patterns ?? [],
+    });
+    if (action.type === "clear") {
+      form.value.visible_databases = undefined;
+    } else if (action.type === "set") {
+      form.value.visible_databases = action.databaseNames;
+    }
   }
   showVisibleDatabasesDialog.value = false;
 }
@@ -7015,6 +7041,20 @@ function openExternalUrl(url: string) {
                     <span class="min-w-0 flex-1 truncate text-sm text-left">{{ selectedProfile().label }}</span>
                     <Pencil class="h-3 w-3 text-muted-foreground" />
                   </button>
+                </div>
+
+                <div v-if="form.db_type === 'nebula'" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelClass">{{ t("connection.version") }}</Label>
+                  <div class="col-span-3">
+                    <Select :model-value="form.driver_profile === 'nebula' ? nebulaDefaultDriverProfile : form.driver_profile" @update:model-value="switchNebulaDriverProfile">
+                      <SelectTrigger class="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="profile in nebulaDriverProfiles" :key="profile.profile" :value="profile.profile">{{ profile.label }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
 
                 <!-- OceanBase mode toggle -->
@@ -9308,7 +9348,7 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
 
-                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch'">
+                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch' || form.db_type === 'nebula'">
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
@@ -9361,7 +9401,7 @@ function openExternalUrl(url: string) {
                           <TooltipContent>{{ t("connection.etcdClientKeyBrowse") }}</TooltipContent>
                         </Tooltip>
                       </div>
-                      <p class="text-[11px] leading-4 text-muted-foreground">
+                      <p v-if="form.db_type !== 'nebula'" class="text-[11px] leading-4 text-muted-foreground">
                         {{ t("connection.etcdClientCertHint") }}
                       </p>
                     </div>

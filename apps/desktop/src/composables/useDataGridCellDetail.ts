@@ -1,11 +1,12 @@
 import { nextTick, ref, watch, type Ref } from "vue";
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
+import { isSaveShortcut } from "@/lib/editor/keyboardShortcuts";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { renderWktOnCanvas } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
-export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>; editValue: Ref<string>; onCancel: () => void }) {
+export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>; editValue: Ref<string>; onCancel: () => void; onSave?: () => void }) {
   const settingsStore = useSettingsStore();
   const { isDark, themePalette } = useTheme();
   const geometryPreviewOpen = ref(false);
@@ -33,7 +34,21 @@ export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>
 
   watch(detailsEditorContainer, async (element) => {
     if (element && !detailsEditor) {
-      const editor = useCellDetailEditor({ onChange: (value) => (options.editValue.value = value), onEscape: options.onCancel, ...editorOptions() });
+      const editor = useCellDetailEditor({
+        onChange: (value) => (options.editValue.value = value),
+        onEscape: options.onCancel,
+        // 详情面板 CodeMirror 里的 Ctrl/Cmd+S：提交草稿成待保存变更并保存（#10515）。
+        // useCellDetailEditor 对每个 keydown 都会回调本钩子，必须先用 isSaveShortcut
+        // 过滤，否则普通按键也会被吞掉（preventDefault）导致无法输入。
+        onSaveShortcut: options.onSave
+          ? (event) => {
+              if (!isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) return false;
+              options.onSave?.();
+              return true;
+            }
+          : undefined,
+        ...editorOptions(),
+      });
       detailsEditor = editor;
       await editor.create(element, options.editValue.value, options.detail.value.type);
       if (detailsEditor === editor && editor.getValue() !== options.editValue.value) {

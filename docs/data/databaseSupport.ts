@@ -23,6 +23,7 @@ export const databaseSupport: DatabaseSupportItem[] = [
   { id: "elasticsearch", name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
   { id: "easysearch", name: "Easysearch", icon: "/icons/database/easysearch.svg", tone: "#836eff" },
   { id: "solr", name: "Apache Solr", icon: "/icons/database/solr.svg", tone: "#d9411e" },
+  { id: "nebula", name: "NebulaGraph", icon: "/icons/database/nebula.png", tone: "#00ca95" },
   { id: "meilisearch", name: "Meilisearch", icon: "/icons/database/meilisearch.svg", tone: "#ff5caa" },
   { id: "qdrant", name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
   { id: "milvus", name: "Milvus", icon: "/icons/database/milvus.webp", tone: "#00a1ea" },

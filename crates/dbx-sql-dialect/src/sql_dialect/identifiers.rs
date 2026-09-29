@@ -170,6 +170,7 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
         }
         Some(DatabaseType::Informix) if is_simple_informix_identifier(name) => name.to_string(),
         Some(DatabaseType::Neo4j) => format!("`{}`", name.replace('`', "``")),
+        Some(DatabaseType::Nebula) => format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`")),
         Some(DatabaseType::SqlServer) => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }

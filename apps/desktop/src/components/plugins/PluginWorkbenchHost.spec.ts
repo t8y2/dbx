@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   readPluginLocalFileChunk: vi.fn(),
   writePluginLocalFileChunk: vi.fn(),
   closePluginLocalFile: vi.fn(),
+  openPluginWorkbench: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/tauri", () => ({
@@ -41,6 +42,7 @@ vi.mock("@/stores/connectionStore", () => ({
     reopenPluginConnection: mocks.reopenPluginConnection,
   }),
 }));
+vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openPluginWorkbench: mocks.openPluginWorkbench }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ locale: ref("en"), t: (key: string) => key }) }));
 
 import PluginWorkbenchHost from "./PluginWorkbenchHost.vue";

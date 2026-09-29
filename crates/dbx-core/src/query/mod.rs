@@ -1429,7 +1429,7 @@ fn options_for_sequential_statements(
     statement_options
 }
 
-fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> bool {
+pub(crate) fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> bool {
     let Some(db_type) = db_type else {
         return false;
     };

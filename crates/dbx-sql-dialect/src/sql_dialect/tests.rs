@@ -17,6 +17,7 @@ fn transfer_identifier_policy_preserves_legacy_output() {
 
 #[test]
 fn quotes_identifiers_by_database_type() {
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Nebula), "tag`name"), "`tag\\`name`");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Mysql), "user`name"), "`user``name`");
     assert_eq!(quote_table_identifier(Some(DatabaseType::ClickHouse), "user`name"), "`user``name`");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Doris), "user`name"), "`user``name`");
@@ -48,6 +49,29 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Argo), "user`name"), "`user``name`");
     assert_eq!(quote_transfer_identifier("user`name", &DatabaseType::Argo), "`user``name`");
     assert!(is_schema_aware(DatabaseType::Argo));
+}
+
+#[test]
+fn builds_nebula_tag_and_edge_queries() {
+    let tag = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Nebula),
+        table_name: "player".into(),
+        table_type: Some("TABLE".into()),
+        columns: vec!["name".into()],
+        limit: Some(20),
+        ..Default::default()
+    });
+    assert_eq!(tag, "MATCH (v:`player`) RETURN id(v) AS `_vid`, v.`player`.`name` AS `name` LIMIT 20;");
+
+    let edge = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Nebula),
+        table_name: "serve".into(),
+        table_type: Some("VIEW".into()),
+        columns: vec!["start_year".into()],
+        limit: Some(10),
+        ..Default::default()
+    });
+    assert_eq!(edge, "MATCH ()-[e:`serve`]->() RETURN src(e) AS `_src`, dst(e) AS `_dst`, rank(e) AS `_rank`, e.`start_year` AS `start_year` LIMIT 10;");
 }
 
 /// Spanner databases are created in one of two immutable dialects. The connected

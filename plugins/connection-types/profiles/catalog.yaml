@@ -545,6 +545,13 @@ profiles:
     port: 7687
     user: neo4j
     category: graph_ai
+  - id: nebula
+    dbType: nebula
+    label: NebulaGraph
+    icon: nebula
+    port: 9669
+    user: root
+    category: graph_ai
   - id: cassandra
     dbType: cassandra
     label: Cassandra

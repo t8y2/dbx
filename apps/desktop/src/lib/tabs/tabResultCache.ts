@@ -49,6 +49,8 @@ export interface TabResultSnapshot {
   resultPageSql?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
+  resultExecutedPageLimit?: number;
+  resultExecutedPageOffset?: number;
   resultCountSql?: string;
   resultTotalRowCount?: number;
   cachedAt: number;
@@ -811,6 +813,8 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     resultPageSql: tab.resultPageSql,
     resultPageLimit: tab.resultPageLimit,
     resultPageOffset: tab.resultPageOffset,
+    resultExecutedPageLimit: tab.resultExecutedPageLimit,
+    resultExecutedPageOffset: tab.resultExecutedPageOffset,
     resultCountSql: tab.resultCountSql,
     resultTotalRowCount: tab.resultTotalRowCount,
     cachedAt: Date.now(),

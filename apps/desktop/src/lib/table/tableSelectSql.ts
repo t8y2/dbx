@@ -447,9 +447,11 @@ export function normalizeWhereInput(whereInput?: string): string {
  * * Salesforce: SOQL has no `SELECT *`. With no known fields the backend builder
  *   falls back to the `FIELDS(ALL)` selector, which the org only accepts with
  *   `LIMIT 200` or less — awaiting the describe keeps every page size working.
+ * * NebulaGraph: without tag/edge properties, the grid can only show a single
+ *   vertex/edge value instead of separate property columns.
  */
 export function requiresEagerTableMetadataForDataOpen(databaseType: DatabaseType | undefined): boolean {
-  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "salesforce";
+  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "salesforce" || databaseType === "nebula";
 }
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {

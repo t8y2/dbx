@@ -40,6 +40,7 @@ const DRIVER_STARTUP_FLOOR_TYPES = new Set<DatabaseType>([
   "db2",
   "informix",
   "neo4j",
+  "nebula",
   "cassandra",
   "bigquery",
   "spanner",

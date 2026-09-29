@@ -212,6 +212,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
     case "mongodb":
       return "mongodb://user:password@host:port/database";
 
+    case "nebula":
+      return "nebula://root:password@graphd:9669/space";
+
     case "dynamodb":
       return "https://dynamodb.us-east-1.amazonaws.com";
 

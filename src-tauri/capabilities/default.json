@@ -36,13 +36,13 @@
     "fs:default",
     {
       "identifier": "fs:allow-exists",
-      "allow": [{ "path": "$HOME/.dbx/ui-tuning.json" }]
+      "allow": [{ "path": "$HOME/.dbx/ui-tuning.json" }, { "path": "$HOME/.dbx/vimrc" }]
     },
     "fs:allow-write-file",
     "fs:allow-write-text-file",
     {
       "identifier": "fs:allow-read-text-file",
-      "allow": [{ "path": "$HOME/.dbx/ui-tuning.json" }]
+      "allow": [{ "path": "$HOME/.dbx/ui-tuning.json" }, { "path": "$HOME/.dbx/vimrc" }]
     },
     "fs:allow-stat",
     "fs:allow-read-file",

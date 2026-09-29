@@ -97,6 +97,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["tdengine", TABLE_VIEW_OBJECTS],
   ["iotdb", TABLE_VIEW_OBJECTS],
   ["neo4j", TABLE_VIEW_OBJECTS],
+  ["nebula", TABLE_VIEW_OBJECTS],
   // others
   ["influxdb", ["TABLE"]],
   ["influxdb3", ["TABLE"]],

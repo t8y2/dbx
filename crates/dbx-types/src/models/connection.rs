@@ -1185,6 +1185,7 @@ impl ConnectionConfig {
             DatabaseType::Db2 => format!("db2://{host}:{port}{db_part}"),
             DatabaseType::Informix => format!("informix://{host}:{port}{db_part}"),
             DatabaseType::Neo4j => format!("neo4j://{host}:{port}{db_part}"),
+            DatabaseType::Nebula => format!("nebula://{host}:{port}{db_part}"),
             DatabaseType::Cassandra => format!("cassandra://{host}:{port}{db_part}"),
             DatabaseType::Bigquery => format!("bigquery://{host}/{db_part}"),
             DatabaseType::Spanner => self.spanner_display_url(&host, port),
@@ -1441,6 +1442,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Neo4j => {
                 format!("neo4j://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Nebula => {
+                format!("nebula://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Cassandra => {
                 format!("cassandra://{}:{}@{host}:{port}{db_part}", username, password)

@@ -77,6 +77,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   db2: { database: "schema" },
   informix: { connection: "database" },
   neo4j: { deferred: "database creation depends on edition/admin privileges" },
+  nebula: { deferred: "space creation requires partition, replica and VID type options" },
   cassandra: { deferred: "keyspace creation requires replication options" },
   bigquery: { deferred: "dataset creation needs project/location options" },
   spanner: { deferred: "database creation requires the Cloud Spanner Admin API" },

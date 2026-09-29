@@ -125,6 +125,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "mongodb",
       // graph_ai
       "neo4j",
+      "nebula",
       // timeseries
       "influxdb",
       "iotdb",

@@ -147,7 +147,7 @@ export function supportsQueryExecution(dbType?: DatabaseType): boolean {
  * that hierarchy, so they must not be offered by sidebar "Add to AI" actions.
  */
 export function supportsAiAssistantContext(dbType?: DatabaseType): boolean {
-  return supportsQueryExecution(dbType) && !usesConnectionOnlyQueryTarget(dbType);
+  return supportsQueryExecution(dbType) && !usesConnectionOnlyQueryTarget(dbType) && dbType !== "nebula";
 }
 
 export function supportsConnectionScopedQueryExecution(dbType?: DatabaseType): boolean {
@@ -182,7 +182,7 @@ export function supportsSqlFileExecution(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "sqlFileExecution");
 }
 
-const NON_SQL_IN_LIST_PASTE_TYPES = new Set<DatabaseType>(["neo4j"]);
+const NON_SQL_IN_LIST_PASTE_TYPES = new Set<DatabaseType>(["neo4j", "nebula"]);
 
 export function supportsSqlInListPaste(dbType?: DatabaseType): boolean {
   if (!dbType) return true;
@@ -200,7 +200,7 @@ export function supportsSchemaDiagram(dbType?: DatabaseType): boolean {
 
 /** Relational engines that can list tables and columns. Independent of diagram support. */
 export function supportsDataDictionary(dbType?: DatabaseType): boolean {
-  return supportsDatabaseFeature(dbType, "metadataBrowse");
+  return dbType !== "nebula" && supportsDatabaseFeature(dbType, "metadataBrowse");
 }
 
 export function supportsDatabaseSearch(dbType?: DatabaseType): boolean {
@@ -256,7 +256,19 @@ export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, 
 
 export function supportsTableTruncate(dbType?: DatabaseType): boolean {
   return (
-    !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "influxdb3" && dbType !== "victoriametrics" && dbType !== "manticoresearch" && dbType !== "salesforce"
+    !!dbType &&
+    dbType !== "impala" &&
+    dbType !== "sqlite" &&
+    dbType !== "rqlite" &&
+    dbType !== "turso" &&
+    dbType !== "cloudflare-d1" &&
+    dbType !== "duckdb" &&
+    dbType !== "influxdb" &&
+    dbType !== "influxdb3" &&
+    dbType !== "victoriametrics" &&
+    dbType !== "manticoresearch" &&
+    dbType !== "salesforce" &&
+    dbType !== "nebula"
   );
 }
 

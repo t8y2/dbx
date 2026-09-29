@@ -268,6 +268,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
             | DatabaseType::InfluxDb3
             | DatabaseType::VictoriaMetrics
             | DatabaseType::Neo4j
+            | DatabaseType::Nebula
             | DatabaseType::Etcd
     )
 }

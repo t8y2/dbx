@@ -87,6 +87,7 @@ const assetIcons: Record<string, string> = {
   starrocks: "starrocks",
   redshift: "redshift",
   neo4j: "neo4j",
+  nebula: "nebula.png",
   informix: "informix",
   databricks: "databricks",
   saphana: "saphana",

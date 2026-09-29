@@ -45,6 +45,24 @@ describe("tableImport", () => {
     expect(legacyEmptyField.emptyStringAsNull).toBe(true);
   });
 
+  it("passes the decimal separator only for delimited sources", () => {
+    const settings = {
+      delimiter: ";",
+      decimalSeparator: ",",
+      textEncoding: "auto" as const,
+      titleRow: 1,
+      dataStartRow: 2,
+      lastDataRow: 0,
+      trimValues: false,
+      emptyStringAsNull: false,
+      jsonShape: "auto" as const,
+    };
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).decimalSeparator).toBe(",");
+    expect(buildTableImportParseOptions({ ...settings, format: "csv" }).decimalSeparator).toBe(",");
+    expect(buildTableImportParseOptions({ ...settings, format: "tsv" }).decimalSeparator).toBe(",");
+    expect(buildTableImportParseOptions({ ...settings, format: "json" }).decimalSeparator).toBeNull();
+  });
+
   it("formats import elapsed time for progress and terminal summaries", () => {
     expect(formatTableImportElapsed(0)).toBe("0 ms");
     expect(formatTableImportElapsed(999)).toBe("999 ms");

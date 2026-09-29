@@ -330,6 +330,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Db2
             | DatabaseType::Informix
             | DatabaseType::Neo4j
+            | DatabaseType::Nebula
             | DatabaseType::Cassandra
             | DatabaseType::Bigquery
             | DatabaseType::Spanner

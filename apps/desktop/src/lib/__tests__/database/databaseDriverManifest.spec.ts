@@ -37,6 +37,10 @@ describe("databaseDriverManifest", () => {
     });
   });
 
+  it("offers only the supported NebulaGraph 3.x profile", () => {
+    expect(databaseManifestEntry("nebula")?.driverProfiles).toEqual([{ profile: "nebula-v3", agentKey: "nebula", label: "NebulaGraph 3.x", storeVisible: false }]);
+  });
+
   it("routes only specialized connection forms explicitly", () => {
     expect(databaseConnectionFormKind("mysql")).toBe("standard");
     expect(databaseConnectionFormKind("jdbc")).toBe("jdbc");

@@ -78,6 +78,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   db2: { deferred: "schema properties need product-specific handling" },
   informix: { deferred: "schema properties need product-specific handling" },
   neo4j: { deferred: "database properties depend on edition/admin privileges" },
+  nebula: { deferred: "space properties require NebulaGraph-specific administration" },
   cassandra: { deferred: "keyspace properties require replication option handling" },
   bigquery: { deferred: "dataset properties need project/location-specific handling" },
   spanner: { deferred: "database/schema properties are Cloud Spanner Admin API operations" },

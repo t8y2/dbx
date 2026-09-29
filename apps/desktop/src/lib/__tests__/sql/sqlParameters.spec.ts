@@ -46,6 +46,15 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters("MATCH (p:Person {name:${name}}) RETURN p", options)).toEqual(["name"]);
   });
 
+  it("keeps NebulaGraph tags and edge types intact in nGQL", () => {
+    const ngql = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"}) RETURN p.Person.name LIMIT 10';
+    const options = { databaseType: "nebula" as const };
+    expect(extractSqlParameterDescriptors(ngql, options)).toEqual([]);
+    expect(substituteSqlParameters(ngql, {}, options)).toBe(ngql);
+    expect(extractSqlParameters("MATCH (p:Person {name:${name}}) RETURN p LIMIT 10", options)).toEqual(["name"]);
+    expect(extractSqlParameters("select :customer_id", { databaseType: "mysql" })).toEqual(["customer_id"]);
+  });
+
   it("extracts unique template parameters in order", () => {
     const sql = "select * from t where pt_dt between ${start_date} and ${end_date} or pt_dt = ${start_date}";
     expect(extractSqlParameters(sql)).toEqual(["start_date", "end_date"]);

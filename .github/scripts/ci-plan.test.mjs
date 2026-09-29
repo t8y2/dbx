@@ -93,7 +93,7 @@ for (const file of ["Cargo.toml", "Cargo.lock", ".cargo/config.toml", "rust-tool
     const result = plan([file]);
     assert.deepEqual(groups(result), ["workspace"]);
     assert.equal(result.rust_full, true);
-    assert.equal(result.agent_go.include.length, 10);
+    assert.equal(result.agent_go.include.length, goAgents.length);
     assert.equal(result.agent_rust.include.length, 2);
     assert.equal(result.agent_integration.include.length, 16);
     assert.equal(result.agent_java, true);
@@ -150,12 +150,12 @@ test("shared Agent inputs and unknown native modules never silently lose coverag
   for (const file of ["agents/common/src/main/java/Protocol.java", "agents/scripts/validate_agents.py", "agents/build.gradle",
     "agents/drivers/new-driver/main.go", "crates/dbx-driver-agent/assets/agent-protocol-v2.json", ".github/workflows/agents-release.yml"]) {
     const result = plan([file]);
-    assert.equal(result.agent_go.include.length, 10, file);
+    assert.equal(result.agent_go.include.length, goAgents.length, file);
     assert.equal(result.agent_integration.include.length, 16, file);
     assert.equal(result.agent_java, true, file);
   }
   const fallback = plan(["future-agent-filter-input"], { agentsChanged: true });
-  assert.equal(fallback.agent_go.include.length, 10);
+  assert.equal(fallback.agent_go.include.length, goAgents.length);
   assert.equal(fallback.agent_integration.include.length, 16);
   assert.equal(fallback.agent_java, true);
 });

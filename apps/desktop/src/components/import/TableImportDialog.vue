@@ -135,6 +135,7 @@ const errorMessage = ref("");
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
 const delimiter = ref(",");
+const decimalSeparator = ref<"." | ",">(".");
 const textEncoding = ref<api.TableImportTextEncoding>("auto");
 const titleRow = ref(1);
 const dataStartRow = ref(2);
@@ -397,6 +398,7 @@ function resetState() {
   activeTaskIndex.value = 0;
   sourceFormat.value = "csv";
   delimiter.value = ",";
+  decimalSeparator.value = ".";
   textEncoding.value = "auto";
   titleRow.value = 1;
   dataStartRow.value = 2;
@@ -465,6 +467,7 @@ function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): 
   return buildTableImportParseOptions({
     format,
     delimiter: delimiter.value,
+    decimalSeparator: decimalSeparator.value,
     textEncoding: textEncoding.value,
     titleRow: titleRow.value,
     dataStartRow: dataStartRow.value,
@@ -1223,7 +1226,7 @@ watch(
 onBeforeUnmount(stopDialogDrag);
 
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
-watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
+watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") closeDataTypePicker();
@@ -1434,7 +1437,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-5 gap-3 rounded-md border p-3">
+          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-2 gap-3 rounded-md border p-3 md:grid-cols-3 xl:grid-cols-6">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
               <Select :model-value="textEncoding" @update:model-value="(value: any) => (textEncoding = value)">
@@ -1454,6 +1457,18 @@ watch(rawProgressPercent, (percent) => {
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.delimiter") }}</Label>
               <Input v-model="delimiter" :disabled="sourceFormat !== 'delimited'" class="h-8 text-xs font-mono" />
+            </div>
+            <div class="space-y-1.5">
+              <Label class="text-xs">{{ t("tableImport.decimalSeparator") }}</Label>
+              <Select v-model="decimalSeparator">
+                <SelectTrigger class="h-8 text-xs font-mono" :aria-label="t('tableImport.decimalSeparator')">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value=".">.</SelectItem>
+                  <SelectItem value=",">,</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.titleRow") }}</Label>

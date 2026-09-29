@@ -86,6 +86,7 @@ export function tableImportProgressPercent(progress: TableImportProgressLike | n
 export interface TableImportParseSettings {
   format: TableImportSourceFormat;
   delimiter: string;
+  decimalSeparator?: "." | ",";
   textEncoding: TableImportTextEncoding;
   titleRow: number;
   dataStartRow: number;
@@ -114,6 +115,7 @@ export function buildTableImportParseOptions(settings: TableImportParseSettings)
   const isTextSource = isDelimited || settings.format === "sql";
   return {
     delimiter: settings.format === "tsv" ? "\\t" : settings.format === "csv" ? "," : settings.delimiter,
+    decimalSeparator: isDelimited ? (settings.decimalSeparator ?? ".") : null,
     encoding: isTextSource ? settings.textEncoding : null,
     titleRow: settings.titleRow,
     dataStartRow: settings.dataStartRow,

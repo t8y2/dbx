@@ -350,6 +350,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `sendBinary(channel, data)` / `onBinary(fn)` | Sends or receives binary data; requires framed transport and `host.binary`. |
 | `readAsset(path)` / `readAssetUrl(path)` | Reads a packaged asset within the plugin resource root. |
 | `openWorkbench(id, context)` | Opens another workbench from this plugin; requires `host.workbench`. |
+| `executeCommand(commandId, context?)` | Executes one of this plugin's own declared commands through the same path as a menu placement — re-checks `enablement`, applies singleton reuse, and follows the declared `presentation` (panel commands dock, tab commands open tabs). `context` merges over the command context and scopes `instance_key` `{{path}}` placeholders, so `instance_key: "logs:{{connectionId}}"` yields one panel instance per connection. Resolves `{ error }` for expected outcomes; requires `host.workbench`. |
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |

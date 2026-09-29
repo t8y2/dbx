@@ -626,6 +626,33 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void buildsPostgresIndexDdlWithPerKeyOrderingOptions() {
+        IndexInfo index = new IndexInfo(
+            "orders_id_order_idx",
+            Arrays.asList("id", "created_at"),
+            false,
+            false,
+            null,
+            "btree",
+            null,
+            null
+        );
+        index.setKey_options(Arrays.asList(0, 3));
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "public",
+            "orders",
+            Collections.singletonList(new ColumnInfo("id", "bigint", false, null, false)),
+            Collections.singletonList(index),
+            Collections.emptyList()
+        );
+
+        assertTrue(ddl.contains(
+            "USING btree (\"id\" ASC NULLS LAST, \"created_at\" DESC NULLS FIRST)"
+        ));
+    }
+
+    @Test
     void databaseAgentDefaultConstraintsFilterLegacyMetadataOverrides() {
         DatabaseAgent agent = new LegacyObjectTypeAgent();
 

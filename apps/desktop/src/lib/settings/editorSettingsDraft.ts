@@ -38,6 +38,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "vimModeEnabled",
   "doubleClickStringSelectionMode",
   "autoCloseBrackets",
+  "restoreSqlFromSourcePasteEnabled",
   "sqlSemanticDiagnosticsMode",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",

@@ -1671,6 +1671,7 @@ export const useConnectionStore = defineStore("connection", () => {
       informix: "Informix",
       phoenix: "Apache Phoenix",
       neo4j: "Neo4j",
+      nebula: "NebulaGraph",
       cassandra: "Cassandra",
       bigquery: "BigQuery",
       spanner: "Cloud Spanner",
@@ -4050,6 +4051,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx < 0) return;
     const previousConfig = normalizeConnection(connections.value[idx]);
+    const previousDatabase = previousConfig.database ?? "";
     const runtimeConfigChanged = connectionConfigFingerprint(previousConfig) !== connectionConfigFingerprint(config);
     const shouldReconnectPlugin = runtimeConfigChanged && previousConfig.db_type === "plugin" && config.db_type === "plugin" && connectedIds.value.has(config.id);
     const nextConnections = [...connections.value];
@@ -4061,6 +4063,11 @@ export const useConnectionStore = defineStore("connection", () => {
     rebuildTreeNodes();
     if (!runtimeConfigChanged) return;
     clearEtcdAccessCapabilities(config.id);
+    // Tabs opened before this edit keep whatever database they were created
+    // with (queryStore snapshots it onto the tab); re-point the ones still on
+    // the old default so their query executor stops running against it (#7905).
+    const { useQueryStore } = await import("@/stores/queryStore");
+    useQueryStore().syncTabsDatabaseForConnectionEdit(config.id, previousDatabase, config.database ?? "");
     clearPrimaryVisibleObjectNames(config.id);
     connectedIds.value.delete(config.id);
     clearSidebarStorageCaches(config.id);
@@ -4278,7 +4285,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   // 显式勾选 + 通配符模式一并保存（#7164）：模式对之后新建的库持续生效
-  async function setVisibleDatabaseFilter(connectionId: string, databaseNames: string[], patterns: string[]) {
+  async function setVisibleDatabaseFilter(connectionId: string, databaseNames: string[] | undefined, patterns: string[]) {
     const config = getConfig(connectionId);
     if (!config) return;
     const normalizedPatterns = patterns.map((pattern) => pattern.trim()).filter((pattern) => pattern !== "");
@@ -4287,7 +4294,8 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnections = [...connections.value];
     nextConnections[idx] = {
       ...nextConnections[idx],
-      visible_databases: normalizeVisibleDatabaseSelection(databaseNames, databaseNames),
+      // 空名单等于"一个库都不显示"，只可能是误写；弹窗层的"全选"已折算成 undefined。
+      visible_databases: databaseNames && databaseNames.length > 0 ? normalizeVisibleDatabaseSelection(databaseNames, databaseNames) : undefined,
       visible_database_patterns: normalizedPatterns.length > 0 ? normalizedPatterns : undefined,
     };
     await persistConnections(nextConnections);

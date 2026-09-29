@@ -3833,6 +3833,56 @@ fn table_infos_from_show_rows(rows: &[mysql_async::Row]) -> Vec<TableInfo> {
     tables
 }
 
+fn logical_table_comments_sql(database: &str, table_names: &[String]) -> Option<String> {
+    let names =
+        table_names.iter().map(|name| name.trim()).filter(|name| !name.is_empty()).map(quote_value).collect::<Vec<_>>();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME IN ({}) AND TABLE_TYPE <> 'VIEW'",
+        quote_value(database),
+        names.join(", "),
+    ))
+}
+
+async fn list_logical_table_comments(
+    pool: &MySqlPool,
+    database: &str,
+    table_names: &[String],
+) -> Result<HashMap<String, String>, String> {
+    let Some(sql) = logical_table_comments_sql(database, table_names) else {
+        return Ok(HashMap::new());
+    };
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(&sql).await.map_err(|error| error.to_string())?;
+    let rows = result.collect_and_drop::<mysql_async::Row>().await.map_err(|error| error.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let comment = get_opt_str(row, "TABLE_COMMENT")
+                .map(|value| fix_potential_double_encoding(&value))
+                .filter(|value| !value.is_empty())?;
+            Some((name, comment))
+        })
+        .collect())
+}
+
+fn apply_logical_table_comments(objects: &mut [ObjectInfo], comments: &HashMap<String, String>) {
+    for object in objects {
+        if object.object_type.eq_ignore_ascii_case("TABLE") {
+            if let Some(comment) = comments.get(&object.name) {
+                object.comment = Some(comment.clone());
+            }
+        }
+    }
+}
+
 pub async fn list_logical_tables_show(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
     // Proxy logical names are authoritative here. Do not add SHOW TABLE STATUS: this hot
     // path must replace the information_schema lookup with one metadata request.
@@ -3851,12 +3901,26 @@ async fn list_logical_table_objects_show_filtered(
     offset: Option<usize>,
 ) -> Result<Vec<ObjectInfo>, String> {
     let tables = list_logical_tables_show(pool, database).await?;
-    Ok(filter_table_objects_fallback(
+    let mut objects = filter_table_objects_fallback(
         table_infos_to_objects(tables, &HashMap::new(), database),
         object_types,
         limit,
         offset,
-    ))
+    );
+    let table_names = objects
+        .iter()
+        .filter(|object| object.object_type.eq_ignore_ascii_case("TABLE"))
+        .map(|object| object.name.clone())
+        .collect::<Vec<_>>();
+    // Keep SHOW FULL TABLES authoritative so proxy physical partitions cannot leak back in;
+    // only enrich the logical table names that survived filtering and pagination.
+    match list_logical_table_comments(pool, database, &table_names).await {
+        Ok(comments) => apply_logical_table_comments(&mut objects, &comments),
+        Err(error) => {
+            log::warn!("Skipping logical table comments for database `{database}` in object browser: {error}");
+        }
+    }
+    Ok(objects)
 }
 
 async fn list_table_names_show_filtered(
@@ -7980,6 +8044,42 @@ mod tests {
     fn logical_show_full_tables_is_one_exact_statement() {
         assert_eq!(logical_show_full_tables_sql("app"), "SHOW FULL TABLES FROM `app`");
         assert_eq!(logical_show_full_tables_sql(""), "SHOW FULL TABLES");
+    }
+
+    #[test]
+    fn logical_table_comments_sql_is_bounded_to_known_logical_tables() {
+        let table_names = vec!["orders".to_string(), "order's".to_string(), " ".to_string()];
+
+        assert_eq!(
+            logical_table_comments_sql("sales'archive", &table_names).as_deref(),
+            Some(
+                "SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = \
+                 'sales\\'archive' AND TABLE_NAME IN ('orders', 'order\\'s') AND TABLE_TYPE <> 'VIEW'"
+            )
+        );
+        assert_eq!(logical_table_comments_sql("app", &[]), None);
+    }
+
+    #[test]
+    fn logical_table_comments_only_enrich_matching_tables() {
+        let mut objects = vec![
+            mysql_test_object("orders", "TABLE"),
+            mysql_test_object("active_users", "VIEW"),
+            mysql_test_object("missing", "TABLE"),
+        ];
+        objects[2].comment = Some("existing".to_string());
+        let comments = HashMap::from([
+            ("orders".to_string(), "Order records".to_string()),
+            ("active_users".to_string(), "Must not be applied to views".to_string()),
+            ("physical_partition".to_string(), "Must not create an object".to_string()),
+        ]);
+
+        apply_logical_table_comments(&mut objects, &comments);
+
+        assert_eq!(objects.len(), 3);
+        assert_eq!(objects[0].comment.as_deref(), Some("Order records"));
+        assert_eq!(objects[1].comment, None);
+        assert_eq!(objects[2].comment.as_deref(), Some("existing"));
     }
 
     #[test]

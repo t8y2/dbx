@@ -94,6 +94,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "vimModeEnabled",
     "doubleClickStringSelectionMode",
     "autoCloseBrackets",
+    "restoreSqlFromSourcePasteEnabled",
     "sqlSemanticDiagnosticsMode",
     "confirmDangerousSqlExecution",
     "continueOnErrorOnBatch",

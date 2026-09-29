@@ -54,6 +54,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   dynamodb: { type: "dynamodb", profile: "dynamodb", label: "Amazon DynamoDB", defaultPort: 443 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },
+  nebula: { type: "nebula", profile: "nebula", label: "NebulaGraph", defaultPort: 9669 },
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   oracle: { type: "oracle", profile: "oracle", label: "Oracle", defaultPort: 1521 },

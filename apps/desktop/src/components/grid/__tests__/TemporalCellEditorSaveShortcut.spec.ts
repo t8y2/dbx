@@ -2,7 +2,7 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { createApp, defineComponent, h, ref, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -98,5 +98,34 @@ describe("TemporalCellEditor save shortcut", () => {
     }
     expect(cellDetailPanelSource).toContain("@save=\"emit('save')\"");
     expect(dataGridSource).toMatch(/onTemporalCellEditorSave\(\)[\s\S]*?saveGridChangesFromShortcut\(\)/);
+  });
+
+  it("re-arms a persistent instance so a value-editor temporal cell can save repeatedly (#10515)", async () => {
+    // 值编辑器面板用 commitValueEditorEdit 保持 isEditingDetail=true，同一个
+    // TemporalCellEditor 实例一直挂着；每次 ctrl+s 都必须重新提交，不能被首次提交
+    // 后闩锁住的 isCommitting 挡住（修复前第二次提交被短路）。
+    const { input, onCommit, onSave, modelValue } = mountEditor();
+
+    input.value = "2026-03-04 05:06:07";
+    input.dispatchEvent(new Event("input"));
+    keydown(input, { key: "s", ctrlKey: true });
+    await nextTick();
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onSave).toHaveBeenCalledTimes(1);
+
+    input.value = "2027-07-08 09:10:11";
+    input.dispatchEvent(new Event("input"));
+    keydown(input, { key: "s", ctrlKey: true });
+    await nextTick();
+    expect(onCommit).toHaveBeenCalledTimes(2);
+    expect(onSave).toHaveBeenCalledTimes(2);
+    expect(modelValue.value).toBe("2027-07-08 09:10:11");
+  });
+
+  it("wires onSaveShortcut so the non-temporal value editor can commit + save via Ctrl+S (#10515)", () => {
+    // useCellDetailEditor（CodeMirror）只认 onSaveShortcut；DataGrid 没传时 varchar 等
+    // 非 temporal 值编辑器里 ctrl+s 无人消费（必须点「执行」）。这里做结构校验。
+    expect(dataGridSource).toContain("onSaveShortcut:");
+    expect(dataGridSource).toMatch(/useCellDetailEditor\(\{[\s\S]{0,2000}?onSaveShortcut[\s\S]{0,1200}?commitValueEditorEdit\(\)/);
   });
 });

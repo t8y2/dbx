@@ -211,6 +211,12 @@ function finishCommit() {
   closeHandled = true;
   isCommitting = true;
   emit("commit");
+  // 值编辑器面板用 commitValueEditorEdit 保持同一实例不卸载（以便连续编辑），
+  // isCommitting 若一直闩锁，第二次 ctrl+s/Enter 会在上面的短路处被吞掉（#10515）。
+  // 本 tick 内仍防重入；下一个微任务复位，让持续挂载的实例可再次提交。
+  nextTick(() => {
+    isCommitting = false;
+  });
 }
 
 function finishCancel() {
@@ -218,6 +224,9 @@ function finishCancel() {
   closeHandled = true;
   isCommitting = true;
   emit("cancel");
+  nextTick(() => {
+    isCommitting = false;
+  });
 }
 
 function onKeydown(event: KeyboardEvent) {

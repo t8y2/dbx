@@ -6300,6 +6300,17 @@ watch(valueEditorContainer, async (el) => {
       onBlur: () => {
         if (!detailValueDiffOpen.value && !detailTransformOpen.value) commitValueEditorEdit();
       },
+      // 非 temporal 值编辑器（CodeMirror）里按 Ctrl/Cmd+S：仅靠网格全局快捷键不会把
+      // 草稿提交成待保存变更，必须在这里认领保存键——先 commitValueEditorEdit 落脏，
+      // 再触发保存（#10515；temporal 走 @save→onTemporalCellEditorSave）。返回 true
+      // 由 CodeMirror 消费该键（preventDefault + stopPropagation），避免网格再处理。
+      onSaveShortcut: () => {
+        commitValueEditorEdit();
+        void nextTick().then(() => {
+          void saveGridChangesFromShortcut();
+        });
+        return true;
+      },
       editorTheme: editorThemeAccessor,
       appAppearance: editorAppAppearance,
       appPalette: editorAppPalette,

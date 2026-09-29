@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent_manager::AGENT_JAVA_TOO_OLD_MESSAGE;
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
 use crate::models::connection::DatabaseConnectionInfo;
 
@@ -874,8 +875,6 @@ const AGENT_EXIT_DIAGNOSTIC_WAIT_MS: u64 = 1_000;
 const AGENT_EXIT_DIAGNOSTIC_POLL_MS: u64 = 10;
 const SHARED_RUNTIME_IDLE_GRACE_SECS: u64 = 30;
 const AGENT_JAVA_OPTS_ENV: &str = "DBX_AGENT_JAVA_OPTS";
-const AGENT_JAVA_TOO_OLD_MESSAGE: &str =
-    "Agent requires Java 21, but DBX started it with an older Java runtime. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.";
 
 pub struct AgentDriverClient {
     child: Option<Child>,
@@ -3182,7 +3181,14 @@ fn agent_java_args_with_extra_opts(
     extra_opts: Option<&str>,
     extra_java_args: &[String],
 ) -> Vec<String> {
+    // Java 8 and older reject the module flags below while starting up
+    // ("Unrecognized option: --add-opens=..."), so the agent dies before it can
+    // load a class and the real diagnosis (agent bytecode needs Java 21) is
+    // replaced by a cryptic JVM error. Ignoring unrecognized VM options keeps
+    // the start attempt going everywhere: pre-9 runtimes ignore the module
+    // flags, Java 9+ still receives them.
     let mut args = vec![
+        "-XX:+IgnoreUnrecognizedVMOptions",
         "-Dfile.encoding=UTF-8",
         "-Dsun.stdout.encoding=UTF-8",
         "-Dsun.stderr.encoding=UTF-8",
@@ -3512,8 +3518,13 @@ fn is_agent_rpc_response_error(message: &str) -> bool {
 
 fn agent_process_error_hint(stderr: &str) -> Option<&'static str> {
     let lower = stderr.to_ascii_lowercase();
+    // Any class-version mismatch means the selected runtime is older than the
+    // agent bytecode (Java 21 / class file 65). Match the JVM wording variants
+    // independently because the stderr tail keeps only the last lines, and a
+    // long stack trace can push the exception header out of the sample.
     if lower.contains("unsupportedclassversionerror")
-        && (lower.contains("class file version 65.0") || lower.contains("only recognizes class file versions up to"))
+        || lower.contains("only recognizes class file versions up to")
+        || lower.contains("class file version 65.0")
     {
         return Some(AGENT_JAVA_TOO_OLD_MESSAGE);
     }
@@ -3568,17 +3579,17 @@ mod tests {
     use super::{
         agent_close_query_session_params, agent_error_from_legacy, agent_handshake_params, agent_java_args,
         agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params,
-        agent_object_source_params_with_relation, agent_proxy_env_vars, agent_schema_params, agent_schema_table_params,
-        agent_supports_capability, agent_transaction_params, append_legacy_error_context, decode_agent_response,
-        format_agent_process_error, format_agent_startup_error, is_agent_rpc_response_error,
+        agent_object_source_params_with_relation, agent_process_error_hint, agent_proxy_env_vars, agent_schema_params,
+        agent_schema_table_params, agent_supports_capability, agent_transaction_params, append_legacy_error_context,
+        decode_agent_response, format_agent_process_error, format_agent_startup_error, is_agent_rpc_response_error,
         is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params, mongo_database_params,
         mongo_document_id_params, parse_agent_java_opts, read_agent_json_response, read_agent_line,
         read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties, AgentCallError,
         AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake,
         AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
         AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams,
-        MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION, AGENT_STDOUT_NOISE_SAMPLE_CHARS,
-        MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
+        MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE, AGENT_PROTOCOL_VERSION,
+        AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
     };
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
@@ -4020,6 +4031,60 @@ mod tests {
         let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
 
         assert!(!args.iter().any(|arg| arg == "--add-opens=java.base/java.net=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn agent_java_args_tolerate_runtimes_without_module_support() {
+        // Regression: a Java 8 runtime rejects "--add-opens=..." while starting
+        // up, so connecting with a driver that adds module flags failed with
+        // "Unrecognized option: --add-opens=..." instead of the actionable
+        // "this driver needs Java 21" message.
+        for jar in [
+            "/tmp/dbx/drivers/dameng/agent.jar",
+            "/tmp/dbx/drivers/ignite/agent.jar",
+            "/tmp/dbx/drivers/highgo/agent.jar",
+        ] {
+            let args = agent_java_args(jar);
+            let ignore_unrecognized = args
+                .iter()
+                .position(|arg| arg == "-XX:+IgnoreUnrecognizedVMOptions")
+                .unwrap_or_else(|| panic!("{jar} should tolerate runtimes without module support"));
+            let first_module_flag = args
+                .iter()
+                .position(|arg| arg.starts_with("--add-opens="))
+                .unwrap_or_else(|| panic!("{jar} should still open the JDK modules it needs"));
+
+            assert!(
+                ignore_unrecognized < first_module_flag,
+                "module flags must be preceded by the ignore flag: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_process_error_hint_matches_java_8_startup_failure() {
+        // Captured from a real Java 8 runtime that was handed the module flags.
+        let module_rejection = "Unrecognized option: --add-opens=java.base/java.net=ALL-UNNAMED\n\
+                                Error: Could not create the Java Virtual Machine.\n\
+                                Error: A fatal exception has occurred. Program will exit.";
+        assert_eq!(agent_process_error_hint(module_rejection), None);
+
+        let full_class_version = "Error: A JNI error has occurred, please check your installation and try again\n\
+                                  Exception in thread \"main\" java.lang.UnsupportedClassVersionError: com/dbx/agent/dameng/DamengAgent has been compiled by a more recent version of the Java Runtime (class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 52.0\n\
+                                  \tat sun.launcher.LauncherHelper.checkAndLoadMain(LauncherHelper.java:634)";
+        assert_eq!(agent_process_error_hint(full_class_version), Some(AGENT_JAVA_TOO_OLD_MESSAGE));
+
+        // Only the last stderr lines survive in the tail, so anything from the
+        // class-version failure is enough on its own.
+        assert_eq!(
+            agent_process_error_hint("java.lang.UnsupportedClassVersionError"),
+            Some(AGENT_JAVA_TOO_OLD_MESSAGE)
+        );
+        assert_eq!(
+            agent_process_error_hint("this version of the Java Runtime only recognizes class file versions up to 52.0"),
+            Some(AGENT_JAVA_TOO_OLD_MESSAGE)
+        );
+        assert_eq!(agent_process_error_hint("java.net.ConnectException: Connection refused"), None);
     }
 
     #[test]

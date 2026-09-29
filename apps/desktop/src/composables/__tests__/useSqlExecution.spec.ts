@@ -140,6 +140,30 @@ describe("useSqlExecution", () => {
     vi.mocked(objectMetadataCache.invalidateObjectMetadataCache).mockClear();
   });
 
+  it("executes Neo4j graph patterns without a SQL parameter dialog", async () => {
+    const sql = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"})\nRETURN p.name, p.job, c.name';
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("neo4j"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("neo4j"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["p.name"], rows: [["Ada"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+  });
+
   it("invalidates object metadata after successful connection-level DDL", async () => {
     const sql = "CREATE DATABASE app_db";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab(), sql });

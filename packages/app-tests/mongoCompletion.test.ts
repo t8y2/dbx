@@ -641,10 +641,6 @@ test("offers nothing rather than top-level snippets inside an unmodelled argumen
     "db.users.estimatedDocumentCount(",
     "db.runCommand({ ",
     'db.createCollection("x", { ',
-    "use ",
-    "use ord",
-    // A modelled call followed by `use` takes the scan-failure path, not the unmodelled-call one.
-    "db.users.find({}); use ",
   ]) {
     assert.deepEqual(labels(text, { fields, collections }), [], text);
   }
@@ -756,6 +752,44 @@ test("completes both arguments of distinct", () => {
   assert.deepEqual(filterArg.slice(0, 4), ["_id", "createdAt", "name", "profile.email"]);
   assert.ok(filterArg.includes("$or"), "a filter argument offers whole-filter operators after the fields");
   assert.ok(labels('db.users.distinct("name", { age: { $g', { fields }).includes("$gte"));
+});
+
+test("completes database names after use and inside getSiblingDB", () => {
+  const databases = ["orders", "order_archive", "admin", "local"];
+
+  // `use ` takes a bare name, inserted as typed.
+  assert.deepEqual(labels("use ", { databases }), ["orders", "order_archive", "admin", "local"]);
+  assert.deepEqual(labels("use ord", { databases }), ["orders", "order_archive"]);
+  assert.deepEqual(getMongoCompletionContext("use ord", 7), { mode: "database", prefix: "ord", from: 4 });
+  assert.equal(buildMongoCompletionItems("use ord", 7, { databases })[0]?.apply, "orders");
+  // Whitespace and earlier commands do not get in the way.
+  assert.deepEqual(labels("db.users.find({}); use ord", { databases }), ["orders", "order_archive"]);
+  assert.deepEqual(labels("use   ord", { databases }), ["orders", "order_archive"]);
+  assert.deepEqual(labels("use\tord", { databases }), ["orders", "order_archive"]);
+  // The list opens as soon as the space after `use` is typed, and stays open while the name is typed.
+  assert.equal(shouldAutoOpenMongoCompletion("use ", 4), true);
+  assert.equal(shouldAutoOpenMongoCompletion("use ord", 7), true);
+  // Without a database list the position is still quiet rather than showing root snippets.
+  assert.deepEqual(labels("use ", { fields, collections }), []);
+  assert.deepEqual(labels("use ord", { fields, collections }), []);
+
+  // `getSiblingDB("…")` takes a quoted name, and the completion keeps the quotes.
+  assert.deepEqual(labels('db.getSiblingDB("', { databases }), ["orders", "order_archive", "admin", "local"]);
+  assert.deepEqual(labels('db.getSiblingDB("ord', { databases }), ["orders", "order_archive"]);
+  assert.equal(buildMongoCompletionItems('db.getSiblingDB("ord', 20, { databases })[0]?.apply, '"orders"');
+  assert.equal(buildMongoCompletionItems("db.getSiblingDB('ord", 20, { databases })[0]?.apply, "'orders'");
+  assert.deepEqual(getMongoCompletionContext('db.getSiblingDB("ord")', 20), { mode: "database", prefix: '"ord', from: 16, replaceClosingQuote: '"' });
+  assert.deepEqual(labels("db . getSiblingDB( 'ord", { databases }), ["orders", "order_archive"]);
+  // Root snippets do not leak into the argument when nothing matches.
+  assert.deepEqual(labels('db.getSiblingDB("zzz', { databases }), []);
+
+  // A field that happens to be called `use` is a key, not the command: the filter keeps its own suggestions.
+  const insideFilter = labels("db.users.find({ use ", { databases, fields });
+  assert.notEqual(getMongoCompletionContext("db.users.find({ use ", 20).mode, "database");
+  assert.ok(insideFilter.every((label) => !databases.includes(label)), insideFilter.join(", "));
+  // Neither is `use` inside a string or a comment.
+  assert.deepEqual(labels('db.users.find({ name: "use ', { databases, fields }), []);
+  assert.deepEqual(labels("// use ", { databases }), []);
 });
 
 test("suggests the use and db.version commands", () => {

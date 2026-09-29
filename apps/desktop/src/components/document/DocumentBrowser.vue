@@ -716,7 +716,9 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
     }
   }
 
-  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
+  // Exports consume source text (CSV/SQL), not the live grid's BSON-faithful
+  // cell encoding, so every document store keeps plain JSON cells here.
+  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null, { documentGridValues: false });
   if (result.columns.length === 0) result.columns = gridResult.value.columns;
   result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : kind === "solr" ? solrGridColumnTypesFor(result.columns) : undefined;
   result.affected_rows = exportedDocuments.length;

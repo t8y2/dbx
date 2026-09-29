@@ -20,7 +20,7 @@ import {
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { buildElasticsearchCompletionItemsFromContext, elasticsearchCompletionNeedsFields, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionField } from "@/lib/elasticsearch/elasticsearchCompletion";
-import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion } from "@/lib/mongo/mongoCompletion";
+import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsDatabases, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion } from "@/lib/mongo/mongoCompletion";
 import { buildSoqlCompletionItems, getSoqlCompletionContext, getSoqlCompletionResultValidFor, resolveSoqlFieldCandidates, resolveSoqlValueField, shouldAutoOpenSoqlCompletion, soqlCompletionNeedsObjects, type SoqlCompletionField, type SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
 import {
   buildSqlServerUseDatabaseCompletionItems,
@@ -565,8 +565,18 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (!explicit && !shouldAutoOpenMongoCompletion(fullDoc, position)) return null;
 
     const completionContext = getMongoCompletionContext(fullDoc, position);
+    let databases: string[] = [];
     let collections: string[] = [];
     let fields: Awaited<ReturnType<typeof connectionStore.listMongoCompletionFields>> = [];
+
+    // `use` and `getSiblingDB` name a database, which does not depend on the tab having one selected.
+    if (mongoCompletionNeedsDatabases(completionContext.mode)) {
+      try {
+        databases = await connectionStore.listCompletionDatabases(props.connectionId);
+      } catch {
+        databases = [];
+      }
+    }
 
     if (props.database && mongoCompletionNeedsCollections(completionContext.mode)) {
       try {
@@ -587,6 +597,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (epoch !== completionEpoch) return null;
 
     const items = buildMongoCompletionItemsFromContext(completionContext, {
+      databases,
       collections,
       fields,
     });

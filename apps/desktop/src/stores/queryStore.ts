@@ -9118,7 +9118,9 @@ export const useQueryStore = defineStore("query", () => {
         if (pageDocuments.length === 0 || pageDocuments.length < plan.requestLimit || reachedLogicalLimit || reachedExactTotal) break;
       }
 
-      const result = mongoDocumentsToQueryResult(documents, performance.now() - exportStartedAt, totalRows ?? documents.length, copyDocuments, totalRows !== null);
+      // Full exports return source rows (CSV/SQL text), not the live grid's
+      // BSON-faithful cell encoding.
+      const result = mongoDocumentsToQueryResult(documents, performance.now() - exportStartedAt, totalRows ?? documents.length, copyDocuments, totalRows !== null, { documentGridValues: false });
       if (result.columns.length === 0) {
         result.columns = tab.result.columns;
         result.column_types = tab.result.column_types;

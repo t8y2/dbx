@@ -172,7 +172,12 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
 test("the planner uses the exact event base and preserves a single workflow cancellation scope", () => {
   const changes = job("changes");
   assert.ok(changes.includes("github.event.pull_request.base.sha || github.event.before"));
+  assert.ok(changes.includes('git fetch --no-tags --depth=1 origin "$BASE_SHA"'));
+  assert.ok(changes.includes("base: ${{ steps.change-base.outputs.sha }}"));
+  assert.ok(changes.includes("BASE_SHA: ${{ steps.change-base.outputs.sha }}"));
   assert.ok(changes.includes("node .github/scripts/ci-plan.mjs"));
+  assert.doesNotMatch(changes, /fetch-depth:\s*0/);
+  assert.doesNotMatch(changes, /dtolnay\/rust-toolchain/);
   for (const flag of ["rust", "rust_full", "rust_matrix", "agents", "agent_go", "agent_rust", "agent_integration", "plan"]) {
     assert.ok(changes.includes(`steps.plan.outputs.${flag}`));
   }

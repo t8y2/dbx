@@ -1,5 +1,5 @@
 import type { QueryResult } from "@/types/database";
-import { mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
+import { isMongoExtendedJsonId, mongoDocumentGridValue, mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
 import {
   chainedMethodCallPattern,
   describeMongoCommandParseFailure as describeMongoCommandParseFailureBasic,
@@ -1136,7 +1136,17 @@ export function evaluateMongoAggregateSafety(command: MongoAggregateCommand, opt
   return { allowed: true };
 }
 
-export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeMs: number, total: number, copyDocuments?: unknown[], totalIsExact = true): QueryResult {
+export interface MongoDocumentsToQueryResultOptions {
+  /**
+   * Encode arrays/subdocuments with the collection grid's BSON-faithful values so
+   * display, editing and clipboard share one representation. Export paths that
+   * need source text pass `false` and keep plain JSON cells.
+   */
+  documentGridValues?: boolean;
+}
+
+export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeMs: number, total: number, copyDocuments?: unknown[], totalIsExact = true, options: MongoDocumentsToQueryResultOptions = {}): QueryResult {
+  const documentGridValues = options.documentGridValues !== false;
   const columns: string[] = [];
 
   for (const doc of documents) {
@@ -1150,8 +1160,8 @@ export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeM
   }
 
   const rows = documents.map((doc) => {
-    if (isRecord(doc)) return columns.map((column) => toCellValue(doc[column]));
-    return columns.map((column) => (column === "value" ? toCellValue(doc) : null));
+    if (isRecord(doc)) return columns.map((column) => toCellValue(doc[column], documentGridValues));
+    return columns.map((column) => (column === "value" ? toCellValue(doc, documentGridValues) : null));
   });
 
   return {
@@ -2030,8 +2040,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function toCellValue(value: unknown): string | number | boolean | null {
+function toCellValue(value: unknown, documentGridValues = false): string | number | boolean | null {
   if (value === undefined || value === null) return null;
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
-  return mongoDocumentIdForGrid(value);
+  // Typed scalar ids keep their compact grid display; arrays and subdocuments take the
+  // document-grid encoding so display, editing and clipboard share the collection grid's
+  // representation instead of dumping the internal JSON encoding into the cell.
+  if (isMongoExtendedJsonId(value)) return mongoDocumentIdForGrid(value);
+  return documentGridValues ? (mongoDocumentGridValue(value) as string) : mongoDocumentIdForGrid(value);
 }

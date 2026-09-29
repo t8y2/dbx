@@ -350,6 +350,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `sendBinary(channel, data)` / `onBinary(fn)` | 发送或接收二进制数据；需要 `stdio-framed` 和 `host.binary`。 |
 | `readAsset(path)` / `readAssetUrl(path)` | 读取包内资源；路径不能越出插件资源根目录。 |
 | `openWorkbench(id, context)` | 打开本插件的另一个工作台；需要 `host.workbench`。 |
+| `executeCommand(commandId, context?)` | 执行本插件自己声明的命令，与菜单执行完全同径——重新检查 `enablement`、按单例复用，并遵循声明的 `presentation`（panel 停靠底部面板，tab 打开工作台标签页）。`context` 合并到命令上下文之上，并解析 `instance_key` 的 `{{path}}` 占位符（如 `instance_key: "logs:{{connectionId}}"` 即每个连接一个面板实例）。预期结果通过 `{ error }` 返回；需要 `host.workbench`。 |
 | `openFilesystem(id, context)` | 打开本插件的文件系统入口；需要 `host.filesystem`。 |
 | `getPlanCapabilities(connectionId)` | 读取宿主与该连接能提供什么计划能力；需要 `host.plans:read`。 |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | 返回 `sql` 的估算执行计划；需要 `host.plans:read`。 |

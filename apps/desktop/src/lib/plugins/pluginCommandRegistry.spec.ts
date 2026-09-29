@@ -225,4 +225,51 @@ describe("plugin command registry (PR-A4)", () => {
     expect(registry.findCommandTargetingWorkbench("io.dbx.ssh", "other.workbench")).toBeUndefined();
     expect(registry.findCommandTargetingWorkbench("other.plugin", "io.dbx.ssh.workbench")).toBeUndefined();
   });
+
+  // §4.1 instance_key placeholder scoping: one panel instance per resolved
+  // connection, re-activation per key, literal fallback when unresolvable.
+  it("scopes panel instances by instance_key placeholders from the execution context", () => {
+    const registry = createFrontendPluginRegistry([
+      installedPlugin("io.dbx.ldap", [
+        { type: "workbench", id: "io.dbx.ldap.logpanel", label: "Logs" },
+        { type: "command", id: "open-conn-logs", label: "Connection logs", action: { type: "open-workbench", workbench: "io.dbx.ldap.logpanel", presentation: "panel", reuse: "singleton", instance_key: "logs:{{connectionId}}" } },
+      ] as unknown as InstalledPlugin["manifest"]["contributions"]),
+    ]);
+    const openPluginWorkbench = vi.fn();
+    const { entries, activeEntryId } = usePluginBottomDock();
+
+    executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ldap", "open-conn-logs", { connectionId: "conn-a" });
+    executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ldap", "open-conn-logs", { connectionId: "conn-b" });
+    expect(entries.value.map((entry) => entry.instanceKey)).toEqual(["logs:conn-a", "logs:conn-b"]);
+
+    // the same connection re-activates its own instance; caller-only extras do not fork it
+    executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ldap", "open-conn-logs", { connectionId: "conn-a", caller: "only" });
+    expect(entries.value).toHaveLength(2);
+    expect(activeEntryId.value).toBe(entries.value[0]!.id);
+
+    // unresolvable template (no context) falls back to the literal key
+    executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ldap", "open-conn-logs");
+    expect(entries.value).toHaveLength(3);
+    expect(entries.value[2]!.instanceKey).toBe("logs:{{connectionId}}");
+    expect(openPluginWorkbench).not.toHaveBeenCalled();
+  });
+
+  it("merges caller context over the command context and keeps reserved fields host-owned", () => {
+    const registry = createFrontendPluginRegistry([
+      installedPlugin("io.dbx.ldap", [
+        { type: "workbench", id: "io.dbx.ldap.logpanel", label: "Logs" },
+        { type: "command", id: "open-logs", label: "Logs", action: { type: "open-workbench", workbench: "io.dbx.ldap.logpanel", presentation: "panel", context: { plugin: { mode: "logs" }, from: "command" } } },
+      ] as unknown as InstalledPlugin["manifest"]["contributions"]),
+    ]);
+    const { entries } = usePluginBottomDock();
+    executePluginCommand(registry, { openPluginWorkbench: vi.fn() } as never, "io.dbx.ldap", "open-logs", { plugin: { mode: "override" }, connectionId: "c1", workbenchId: "plugin-forged", restored: true, surface: "tab" });
+    const entry = entries.value[0]!;
+    expect(entry.context.plugin).toEqual({ mode: "override" });
+    expect(entry.context.from).toBe("command");
+    expect(entry.context.connectionId).toBe("c1");
+    // §11: reserved identity fields are host-authored — forged values never pass.
+    expect(entry.context.workbenchId).toBe(entry.id);
+    expect(entry.context.restored).toBe(false);
+    expect(entry.context.surface).toBe("panel");
+  });
 });

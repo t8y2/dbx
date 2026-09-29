@@ -20,6 +20,8 @@ import {
 } from "@/lib/plugins/pluginHostBridge";
 import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
+import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
+import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
 import { downloadPluginFile, cancelPluginDownload } from "@/lib/plugins/pluginFileDownload";
 import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
@@ -27,6 +29,7 @@ import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { createPluginAiCompletion } from "@/lib/plugins/pluginAiCompletion";
+import { useQueryStore } from "@/stores/queryStore";
 import { OPEN_PLUGIN_AI_CONVERSATION } from "@/lib/ai/aiPluginConversation";
 
 const props = withDefaults(
@@ -400,6 +403,12 @@ function createBridge() {
       ...(isTauriRuntime() ? aiCompletion : {}),
       setAiRecommendations: (update) => emit("recommendations", update),
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
+      // §4/§5 bridge command execution, scoped to this plugin's own manifest:
+      // the single-plugin registry is equivalent here because findCommand /
+      // findWorkbench / enablement never cross plugins. Panel commands dock,
+      // tab commands open tabs, §4.1 reuse with `instance_key` placeholder
+      // scoping — identical to menu execution.
+      executeCommand: (pluginId, commandId, context) => executePluginCommand(createFrontendPluginRegistry([props.plugin], appLocale.value), useQueryStore(), pluginId, commandId, context),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
       // PR-A4 generic extension point: a read-only, secret-free, plugin-scoped connection list (for in-panel connection switching).

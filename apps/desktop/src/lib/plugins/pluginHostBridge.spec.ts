@@ -437,6 +437,68 @@ describe("PluginHostBridge", () => {
     expect(openWorkbench).toHaveBeenNthCalledWith(2, "sample", "sample.other", undefined, { forceNew: false });
   });
 
+  it("routes host.executeCommand to the surface handler scoped to the calling plugin", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const executeCommand = vi.fn(() => ({ error: "Command 'sample.open-panel' is disabled by enablement" }));
+    const bridge = new PluginHostBridge(plugin(["host.workbench"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      executeCommand,
+    });
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "3", method: "host.executeCommand", params: { commandId: "open-panel", context: { connectionId: "c1" } } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(executeCommand).toHaveBeenCalledWith("sample", "open-panel", { connectionId: "c1" });
+    // Expected business outcomes resolve as a result (no rejection) so webviews
+    // can surface a notice instead of catching.
+    expect(messages[0]).toMatchObject({ id: "3", result: { error: "Command 'sample.open-panel' is disabled by enablement" } });
+  });
+
+  it("normalizes a void executeCommand handler to an empty result object", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const executeCommand = vi.fn();
+    const bridge = new PluginHostBridge(plugin(["host.workbench"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      executeCommand,
+    });
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "4", method: "host.executeCommand", params: { commandId: "open-panel" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(executeCommand).toHaveBeenCalledWith("sample", "open-panel", undefined);
+    expect(messages[0]).toMatchObject({ id: "4", result: {} });
+  });
+
+  it("host.executeCommand requires the host.workbench permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const executeCommand = vi.fn();
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      executeCommand,
+    });
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "5", method: "host.executeCommand", params: { commandId: "open-panel" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "5", error: "Plugin has not declared permission 'host.workbench'" });
+    expect(executeCommand).not.toHaveBeenCalled();
+  });
+
   it("reopens a plugin connection through host.reopenConnection", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

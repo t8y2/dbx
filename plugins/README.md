@@ -369,6 +369,7 @@ A workbench opens in a normal persistent DBX tab. The iframe is loaded with `san
 - `sendBinary(channel, data)` — requires `host.binary`
 - `readAsset(path)` / `readAssetUrl(path)`
 - `openWorkbench(contributionId, context)` — requires `host.workbench`
+- `executeCommand(commandId, context?)` — executes one of this plugin's own declared commands through the same path a menu placement takes: `enablement` is re-checked, `presentation: "panel"` commands dock in the bottom panel and `presentation: "tab"` (default) commands open a workbench tab, with §4.1 singleton reuse. `context` merges over the command-declared context (reserved identity fields stay host-owned) and scopes `instance_key` `{{path}}` placeholders — declare `instance_key: "logs:{{connectionId}}"` to get one panel instance per connection; a template that cannot resolve falls back to its literal. Resolves `{ error }` for expected outcomes (unknown command, enablement-blocked); requires `host.workbench`
 - `openFilesystem(providerId, context)` — requires `host.filesystem`
 - `getPlanCapabilities(connectionId)` / `explainPlan(request)` — reads an estimated execution plan for one connection; requires `host.plans:read`, see [Estimated execution plans](#estimated-execution-plans)
 - `getTableMetadata({ connectionId, database?, schema?, table })` — reads narrow schema metadata for one table on an already-open connection; requires `host.schema:read`, see [Table Schema Metadata](#table-schema-metadata)

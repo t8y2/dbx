@@ -266,12 +266,32 @@ function checked(key: "connections" | "connectionSecrets" | "tunnelProfiles" | "
   return ids(key).includes(id);
 }
 
+function copySelection(): SyncSelection {
+  const current = selection.value;
+  return {
+    connections: current.connections ? [...current.connections] : undefined,
+    connectionSecrets: current.connectionSecrets ? [...current.connectionSecrets] : undefined,
+    tunnelProfiles: current.tunnelProfiles ? [...current.tunnelProfiles] : undefined,
+    tunnelSecrets: current.tunnelSecrets ? [...current.tunnelSecrets] : undefined,
+    savedSqlFolders: current.savedSqlFolders ? [...current.savedSqlFolders] : undefined,
+    savedSqlFiles: current.savedSqlFiles ? [...current.savedSqlFiles] : undefined,
+    desktopSettings: current.desktopSettings ? [...current.desktopSettings] : undefined,
+    editorSettings: current.editorSettings ? [...current.editorSettings] : undefined,
+    aiConfigs: current.aiConfigs ? [...current.aiConfigs] : undefined,
+    pluginUiStorage: current.pluginUiStorage?.map(({ pluginId, key, pluginName }) => ({ pluginId, key, pluginName })),
+    sidebarLayout: current.sidebarLayout,
+    pinnedTreeNodeIds: current.pinnedTreeNodeIds,
+    includeSecrets: current.includeSecrets,
+    syncCredentials: current.syncCredentials,
+  };
+}
+
 function confirmSelection() {
   if (props.catalog) {
     selection.value.desktopSettings = selectedSettings(selection.value.desktopSettings, selectableDesktopSettings(props.catalog));
     selection.value.editorSettings = selectedSettings(selection.value.editorSettings, selectableEditorSettings(props.catalog));
   }
-  emit("confirm", structuredClone(selection.value));
+  emit("confirm", copySelection());
   emit("update:open", false);
 }
 </script>

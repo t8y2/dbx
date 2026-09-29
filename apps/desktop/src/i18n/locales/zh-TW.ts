@@ -6349,6 +6349,10 @@ export default withEnglishFallback({
     noComparableTables: "沒有可比較的資料表。請檢查目標端是否存在同名資料表。",
     noDifferences: "資料完全一致，不需要產生同步 SQL",
     syncSuccess: "資料同步執行成功",
+    truncatedTitle: "部分表未完整比較",
+    truncatedHint: "資料筆數超過單次比較上限的表只比較了前幾筆，超出部分的新增、修改與刪除不會被發現。建議加上篩選條件縮小範圍後分批比較。",
+    truncatedTable: "{table}：來源 {source} 筆、目標 {target} 筆，僅比較前 {budget} 筆",
+    truncatedBadge: "僅比較前 {budget} 筆",
   },
   settings: {
     historyRetentionLimit: "查詢歷史保留筆數",

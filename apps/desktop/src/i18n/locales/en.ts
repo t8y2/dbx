@@ -7835,6 +7835,10 @@ export default {
     noComparableTables: "No comparable tables found. Check whether same-name target tables exist.",
     noDifferences: "Data is identical, no sync SQL needed",
     syncSuccess: "Data sync executed successfully",
+    truncatedTitle: "Some tables were not compared in full",
+    truncatedHint: "Tables with more rows than a single compare can read were compared only over their first rows, so added, modified, or deleted rows beyond that point are not reported. Narrow the range with a filter and compare in batches.",
+    truncatedTable: "{table}: {source} source rows, {target} target rows, compared the first {budget} rows only",
+    truncatedBadge: "Compared the first {budget} rows only",
   },
   settings: {
     historyRetentionLimit: "Query history retention",

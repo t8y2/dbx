@@ -7026,6 +7026,10 @@ export default withEnglishFallback({
     noComparableTables: "Nenhuma tabela comparável encontrada. Verifique se existem tabelas de destino de mesmo nome.",
     noDifferences: "Os dados são idênticos, nenhum SQL de sincronização é necessário",
     syncSuccess: "Sincronização de dados executada com sucesso",
+    truncatedTitle: "Algumas tabelas não foram comparadas por completo",
+    truncatedHint: "Tabelas com mais linhas do que uma única comparação consegue ler foram comparadas apenas nas primeiras linhas, então linhas adicionadas, modificadas ou excluídas depois disso não são detectadas. Restrinja o intervalo com um filtro e compare em lotes.",
+    truncatedTable: "{table}: {source} linhas na origem, {target} no destino; apenas as primeiras {budget} linhas foram comparadas",
+    truncatedBadge: "Apenas as primeiras {budget} linhas comparadas",
   },
   settings: {
     historyRetentionLimit: "Limite do histórico de consultas",

@@ -7024,6 +7024,10 @@ export default withEnglishFallback({
     noComparableTables: "Nessuna tabella confrontabile trovata. Verifica se esistono tabelle di destinazione con lo stesso nome.",
     noDifferences: "I dati sono identici, nessun SQL di sincronizzazione necessario",
     syncSuccess: "Sincronizzazione dei dati eseguita con successo",
+    truncatedTitle: "Alcune tabelle non sono state confrontate per intero",
+    truncatedHint: "Le tabelle con più righe di quante ne possa leggere un singolo confronto sono state confrontate solo sulle prime righe, quindi le righe aggiunte, modificate o eliminate oltre quel punto non vengono rilevate. Restringi l'intervallo con un filtro e confronta a blocchi.",
+    truncatedTable: "{table}: {source} righe nell'origine, {target} nella destinazione; confrontate solo le prime {budget} righe",
+    truncatedBadge: "Confrontate solo le prime {budget} righe",
   },
   settings: {
     historyRetentionLimit: "Limite della cronologia query",

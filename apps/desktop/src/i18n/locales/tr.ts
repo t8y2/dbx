@@ -6940,6 +6940,10 @@ export default withEnglishFallback({
     noComparableTables: "Karşılaştırılabilir tablo bulunamadı. Aynı adlı hedef tabloların var olup olmadığını denetleyin.",
     noDifferences: "Veriler aynı, eşitleme SQL'i gerekmiyor",
     syncSuccess: "Veri eşitlemesi başarıyla çalıştırıldı",
+    truncatedTitle: "Bazı tablolar tam olarak karşılaştırılmadı",
+    truncatedHint: "Tek bir karşılaştırmanın okuyabileceğinden fazla satıra sahip tablolar yalnızca ilk satırları üzerinden karşılaştırıldı; bu noktadan sonraki eklenen, değişen veya silinen satırlar bildirilmez. Aralığı bir filtreyle daraltıp toplu olarak karşılaştırın.",
+    truncatedTable: "{table}: kaynak {source} satır, hedef {target} satır; yalnızca ilk {budget} satır karşılaştırıldı",
+    truncatedBadge: "Yalnızca ilk {budget} satır karşılaştırıldı",
   },
   settings: {
     historyRetentionLimit: "Sorgu geçmişi saklama sınırı",

@@ -7058,6 +7058,10 @@ export default withEnglishFallback({
     noComparableTables: "Müqayisə edilə bilən cədvəl tapılmadı. Eyni adlı hədəf cədvəllərin mövcudluğunu yoxlayın.",
     noDifferences: "Verilənlər eynidir, sinxronlaşdırma SQL-inə ehtiyac yoxdur",
     syncSuccess: "Verilənlərin sinxronlaşdırılması uğurla icra edildi",
+    truncatedTitle: "Bəzi cədvəllər tam müqayisə edilmədi",
+    truncatedHint: "Bir müqayisənin oxuya biləcəyindən çox sətri olan cədvəllər yalnız ilk sətirlər üzrə müqayisə edildi, ona görə də bu nöqtədən sonrakı əlavə, dəyişdirilmiş və ya silinmiş sətirlər aşkarlanmır. Aralığı filtr ilə daraldıb hissə-hissə müqayisə edin.",
+    truncatedTable: "{table}: mənbə {source} sətir, hədəf {target} sətir; yalnız ilk {budget} sətir müqayisə edildi",
+    truncatedBadge: "Yalnız ilk {budget} sətir müqayisə edildi",
   },
   settings: {
     historyRetentionLimit: "Sorğu tarixçəsinin saxlanma həddi",

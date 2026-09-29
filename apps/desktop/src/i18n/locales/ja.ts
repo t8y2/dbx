@@ -7055,6 +7055,10 @@ export default withEnglishFallback({
     noComparableTables: "比較可能なテーブルが見つかりません。同名のターゲットテーブルが存在するか確認してください。",
     noDifferences: "データは同一です。同期SQLは不要です",
     syncSuccess: "データ同期が正常に実行されました",
+    truncatedTitle: "一部のテーブルは全体を比較していません",
+    truncatedHint: "1 回の比較で読み込める行数を超えたテーブルは先頭の行だけを比較しているため、それ以降の追加・変更・削除は検出されません。フィルターで範囲を絞り、分割して比較してください。",
+    truncatedTable: "{table}：ソース {source} 行、ターゲット {target} 行、先頭 {budget} 行のみ比較",
+    truncatedBadge: "先頭 {budget} 行のみ比較",
   },
   settings: {
     historyRetentionLimit: "クエリ履歴の保持件数",

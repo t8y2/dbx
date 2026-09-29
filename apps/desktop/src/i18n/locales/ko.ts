@@ -6790,6 +6790,10 @@ export default withEnglishFallback({
     noComparableTables: "비교 가능한 테이블이 없습니다. 같은 이름의 대상 테이블이 있는지 확인하세요.",
     noDifferences: "데이터가 동일하여 동기화 SQL이 필요하지 않습니다",
     syncSuccess: "데이터 동기화를 성공적으로 실행했습니다",
+    truncatedTitle: "일부 테이블은 전체를 비교하지 않았습니다",
+    truncatedHint: "한 번의 비교로 읽을 수 있는 행 수를 초과한 테이블은 앞부분만 비교했기 때문에 그 이후의 추가·수정·삭제는 감지되지 않습니다. 필터로 범위를 좁혀 나누어 비교하세요.",
+    truncatedTable: "{table}: 원본 {source}행, 대상 {target}행, 앞 {budget}행만 비교",
+    truncatedBadge: "앞 {budget}행만 비교",
   },
   settings: {
     historyRetentionLimit: "쿼리 기록 보관 개수",

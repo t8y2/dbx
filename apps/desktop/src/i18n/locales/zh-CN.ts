@@ -7801,6 +7801,10 @@ export default withEnglishFallback({
     noComparableTables: "没有可比较的表，请检查目标端是否存在同名表",
     noDifferences: "数据完全一致，无需生成同步 SQL",
     syncSuccess: "数据同步执行成功",
+    truncatedTitle: "部分表未完整比较",
+    truncatedHint: "行数超过单次比较上限的表只比较了前若干行，超出部分的新增、修改和删除不会被发现。建议加上过滤条件缩小范围后分批比较。",
+    truncatedTable: "{table}：源 {source} 行、目标 {target} 行，仅比较前 {budget} 行",
+    truncatedBadge: "仅比较前 {budget} 行",
   },
   settings: {
     historyRetentionLimit: "查询历史保留条数",

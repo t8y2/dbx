@@ -13,6 +13,7 @@ import {
   dataTypeLengthUnitValue,
   DATA_TYPE_OPTIONS,
   defaultNewColumnDataType,
+  draftColumnNameForSql,
   getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
   hasExistingColumnTypeChange,
@@ -1037,5 +1038,27 @@ describe("structureColumnCommentsForCopy", () => {
       { name: "  ", comment: "没有字段名", markedForDrop: false },
     ]);
     expect(comments.size).toBe(0);
+  });
+});
+
+describe("draftColumnNameForSql", () => {
+  // MySQL rejects identifiers that end with a space (ERROR 1166), so a name the
+  // user pasted with a trailing space must not reach the DDL builder as typed.
+  it("drops the trailing whitespace of a name the user typed", () => {
+    expect(draftColumnNameForSql("device_app_face_status ", "app_auth_status")).toBe("device_app_face_status");
+    expect(draftColumnNameForSql("display_name\t", "name")).toBe("display_name");
+    expect(draftColumnNameForSql("new_column\n  ")).toBe("new_column");
+  });
+
+  // #9654: leading spaces are legal inside a backtick-quoted identifier, so the
+  // user's spelling is kept for a new column and for a metadata name alike.
+  it("keeps leading spaces of a name the user typed", () => {
+    expect(draftColumnNameForSql("  content1")).toBe("  content1");
+  });
+
+  it("keeps an untouched metadata name byte-exact so whitespace is never read as a rename", () => {
+    expect(draftColumnNameForSql("  content1", "  content1")).toBe("  content1");
+    expect(draftColumnNameForSql("content1 ", "content1 ")).toBe("content1 ");
+    expect(draftColumnNameForSql("plain", "plain")).toBe("plain");
   });
 });

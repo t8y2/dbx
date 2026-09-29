@@ -52,6 +52,21 @@ export function structureColumnCommentsForCopy(columns: readonly Pick<EditableSt
   return comments;
 }
 
+/**
+ * Column name handed to the DDL builder for a draft column.
+ *
+ * MySQL rejects identifiers that end with a space (ERROR 1166 "Incorrect column
+ * name"), so a pasted name carrying a stray trailing space produced an
+ * unexecutable `ALTER TABLE ... CHANGE COLUMN ...` statement that the editor
+ * still previewed as executable. Only the trailing whitespace is dropped:
+ * leading spaces are legal in a backtick-quoted identifier and are kept, both
+ * for a name the user typed (`#9654`) and for a metadata name, which is passed
+ * through byte-exact so that an unrelated edit never turns into a bogus rename.
+ */
+export function draftColumnNameForSql(name: string, originalName?: string | null): string {
+  return originalName === name ? name : name.trimEnd();
+}
+
 export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }

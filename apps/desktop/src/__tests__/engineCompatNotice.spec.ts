@@ -40,7 +40,12 @@ describe("engine compatibility notice", () => {
   it("separates a blocking failure from a degraded one", () => {
     expect(script).toContain("FATAL_PROBES");
     expect(script).toContain("DEGRADED_PROBES");
-    expect(script).toContain('missingFatal.length ? "fatal" : missingDegraded.length ? "degraded" : "ok"');
+    // Only a missing @layer discards the stylesheet wholesale; engines that keep
+    // @layer but lack the color functions still render and get the banner tier.
+    // This keeps fixed Chromium-109-based webview builds below the blocking gate.
+    expect(script).toContain('missingFatal.includes("layer")');
+    expect(script).toContain('const missingColors = missingFatal.filter((name) => name !== "layer");');
+    expect(script).toContain("missingColors.length || missingDegraded.length");
   });
 
   it("fails open when the probe itself throws", () => {

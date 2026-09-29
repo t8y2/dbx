@@ -133,9 +133,10 @@
       //
       // The probe cluster is exactly Tailwind v4's browser baseline, which is also the oldest
       // engine the shell is styled for:
-      //   @layer / oklch() / :has() / :focus-visible -> Safari 15.4, Chrome 105
-      //   color-mix()                                -> Safari 16.2, Chrome 111
-      //   media query range syntax                   -> Safari 16.4, Chrome 104
+      //   @layer                      -> Safari 15.4, Chrome 99
+      //   oklch()                     -> Safari 15.4, Chrome 111
+      //   color-mix()                 -> Safari 16.2, Chrome 111
+      //   media query range syntax    -> Safari 16.4, Chrome 104
       // Every probe fails open: a detection bug must never hide a working app behind a notice.
       (() => {
         const BYPASS_KEY = "dbx-compat-bypass";
@@ -474,7 +475,17 @@
           const missingFatal = FATAL_PROBES.filter((probe) => !probe[1]()).map((probe) => probe[0]);
           const missingDegraded = DEGRADED_PROBES.filter((probe) => !probe[1]()).map((probe) => probe[0]);
           report.missing = missingFatal.concat(missingDegraded);
-          report.tier = missingFatal.length ? "fatal" : missingDegraded.length ? "degraded" : "ok";
+          // Only a missing @layer discards the stylesheet wholesale. Without @layer's
+          // fallback engine the shell cannot render at all (fatal); with @layer working,
+          // missing color functions only drop color declarations, so the shell still
+          // renders and the notice degrades to the dismissible banner. This also keeps
+          // builds that ship a fixed Chromium-109-based webview out of the blocking tier.
+          const missingColors = missingFatal.filter((name) => name !== "layer");
+          report.tier = missingFatal.includes("layer")
+            ? "fatal"
+            : missingColors.length || missingDegraded.length
+              ? "degraded"
+              : "ok";
 
           let override = null;
           try {

@@ -28,6 +28,8 @@ type Capabilities = {
 // Capability sets of the engines this notice exists for.
 const SAFARI_15_2: Capabilities = { layer: false, oklch: false, colorMix: false, mediaRange: false, has: false, focusVisible: false };
 const SAFARI_16_2: Capabilities = { layer: true, oklch: true, colorMix: true, mediaRange: false, has: true, focusVisible: true };
+// Chromium 109: the last engine some fixed-runtime desktop builds can ever ship.
+const CHROMIUM_109: Capabilities = { layer: true, oklch: false, colorMix: false, mediaRange: true, has: true, focusVisible: true };
 const CHROME_120: Capabilities = { layer: true, oklch: true, colorMix: true, mediaRange: true, has: true, focusVisible: true };
 
 class FakeElement {
@@ -199,6 +201,16 @@ describe("engine compatibility notice rendering", () => {
     expect(result.tier).toBe("degraded");
     expect(result.notice).toBe("banner");
     expect(result.missing).toEqual(["media-query-range"]);
+  });
+
+  it("banners instead of gating a fixed Chromium-109 webview that lacks the color functions", () => {
+    // @layer works, so the stylesheet is not dropped wholesale — only color
+    // declarations are. Blocking every launch of such a build would be
+    // un-actionable: the runtime is fixed and can never be updated.
+    const result = runProbe({ capabilities: CHROMIUM_109, userAgent: WINDOWS_UA, desktop: true });
+    expect(result.tier).toBe("degraded");
+    expect(result.notice).toBe("banner");
+    expect(result.missing).toEqual(["oklch", "color-mix"]);
   });
 
   it("names exactly what to upgrade instead of a bare 'update it'", () => {

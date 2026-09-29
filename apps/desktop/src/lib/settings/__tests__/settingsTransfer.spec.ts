@@ -413,4 +413,9 @@ describe("settingsTransfer", () => {
     expect(transferCategoryForKey("csvQuoteMode")).toBe("data");
     expect(collectTransferCategories(["csvQuoteMode", "pageSize"])).toEqual(["data"]);
   });
+
+  it("maps csvNullMode into the data category", () => {
+    expect(transferCategoryForKey("csvNullMode")).toBe("data");
+    expect(collectTransferCategories(["csvNullMode", "csvQuoteMode"])).toEqual(["data"]);
+  });
 });

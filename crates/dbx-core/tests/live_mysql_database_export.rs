@@ -74,7 +74,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
             assert_eq!(tables.len(), 2);
             let request = SqlFileRequest {
                 txn_session_id: None,
-                execution_id: format!("restore-{suffix}-{compressed}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: false,
+                execution_id: format!("restore-{suffix}-{compressed}"), connection_id: connection_id.clone(), database: database.clone(), schema: None, file_path: path.display().to_string(), continue_on_error: false,
                 selected_tables: Some(vec![SqlFileTable { database: Some(database.clone()), name: "chosen".into() }]),
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
@@ -91,7 +91,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
         std::fs::write(&path, "DROP TABLE chosen; INSERT INTO chosen VALUES (1, 'bad'); CALL unexpected();").map_err(|e| e.to_string())?;
         let request = SqlFileRequest {
             txn_session_id: None,
-            execution_id: format!("invalid-{suffix}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: true,
+            execution_id: format!("invalid-{suffix}"), connection_id: connection_id.clone(), database: database.clone(), schema: None, file_path: path.display().to_string(), continue_on_error: true,
             selected_tables: Some(vec![SqlFileTable { database: None, name: "chosen".into() }]),
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
@@ -175,6 +175,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
             execution_id: format!("live-mysql-import-{suffix}"),
             connection_id: connection_id.clone(),
             database: String::new(),
+            schema: None,
             file_path: file_path.to_string_lossy().to_string(),
             continue_on_error: false,
             selected_tables: None,

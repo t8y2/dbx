@@ -265,6 +265,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
     case "iris":
       return driverProfile === "cache" ? "cache://user:password@host:port/namespace" : "iris://user:password@host:port/namespace";
 
+    case "transwarp":
+      return "jdbc:inceptor2://host:10000/default";
+
     case "influxdb":
       return "influxdb://user:password@host:port/database";
 

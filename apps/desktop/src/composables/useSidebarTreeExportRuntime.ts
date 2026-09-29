@@ -32,6 +32,7 @@ import {
   structurePreviewDdlStorageType,
 } from "@/components/sidebar/sidebarTreeDialogState";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
 import { uuid } from "@/lib/common/utils";
 
@@ -59,6 +60,8 @@ interface SidebarTableExportTarget {
   batchSize: number;
   rowLimit: number | null;
   csvQuoteMode: CsvQuoteMode;
+  /** 导出 CSV 时 NULL 的字面量；空串表示关闭（旧行为）。 */
+  nullLiteral: string;
   fileNameBase?: string;
 }
 
@@ -437,6 +440,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       batchSize: editorSettings.exportBatchSize,
       rowLimit: editorSettings.exportRowLimitEnabled ? editorSettings.exportRowLimit : null,
       csvQuoteMode: editorSettings.csvQuoteMode,
+      nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
     };
   }
 
@@ -472,7 +476,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           executePage: (sql) => api.executeQuery(connectionId, database, sql),
         });
         if (format === "csv") {
-          await api.exportQueryResultCsv(outputPath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), target.csvQuoteMode);
+          await api.exportQueryResultCsv(outputPath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), target.csvQuoteMode, target.nullLiteral);
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -503,6 +507,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         format,
         ...(format === "sql" ? { insertDialect } : {}),
         csvQuoteMode: target.csvQuoteMode,
+        nullLiteral: target.nullLiteral,
         columns: queryColumns,
         columnComments,
         autoFilter: format === "xlsx" ? autoFilter : undefined,

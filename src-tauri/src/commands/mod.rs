@@ -51,7 +51,6 @@ pub mod redis_cmd;
 pub mod redis_pubsub_server;
 pub mod salesforce_oauth;
 pub mod saved_sql;
-pub mod schema;
 pub mod schema_cache;
 pub mod schema_diff;
 pub mod sql_file;

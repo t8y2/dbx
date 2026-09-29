@@ -15,12 +15,34 @@ import {
 } from "@/lib/table/tableImport";
 
 describe("tableImport", () => {
-  it("preserves explicit empty strings by default for Excel only", () => {
+  it("keeps empty fields as empty strings for every source format by default", () => {
+    // 导出端默认用 `\N` 表示 NULL，空字段代表空字符串；导入端默认必须与之一致，
+    // 否则 DBX 导出的 CSV 再导回时会把 '' 变成 NULL。
     expect(defaultTableImportEmptyStringAsNull("excel")).toBe(false);
-    expect(defaultTableImportEmptyStringAsNull("csv")).toBe(true);
-    expect(defaultTableImportEmptyStringAsNull("tsv")).toBe(true);
-    expect(defaultTableImportEmptyStringAsNull("delimited")).toBe(true);
-    expect(defaultTableImportEmptyStringAsNull("json")).toBe(true);
+    expect(defaultTableImportEmptyStringAsNull("csv")).toBe(false);
+    expect(defaultTableImportEmptyStringAsNull("tsv")).toBe(false);
+    expect(defaultTableImportEmptyStringAsNull("delimited")).toBe(false);
+    expect(defaultTableImportEmptyStringAsNull("json")).toBe(false);
+  });
+
+  it("only disables the shared NULL literal when empty fields are treated as NULL", () => {
+    const baseSettings = {
+      delimiter: ",",
+      textEncoding: "auto" as const,
+      titleRow: 1,
+      dataStartRow: 2,
+      lastDataRow: 0,
+      trimValues: false,
+      jsonShape: "auto" as const,
+    };
+
+    const sharedLiteral = buildTableImportParseOptions({ ...baseSettings, format: "csv", emptyStringAsNull: false });
+    expect(sharedLiteral.nullLiteral).toBeUndefined();
+    expect(sharedLiteral.emptyStringAsNull).toBe(false);
+
+    const legacyEmptyField = buildTableImportParseOptions({ ...baseSettings, format: "csv", emptyStringAsNull: true });
+    expect(legacyEmptyField.nullLiteral).toBe("");
+    expect(legacyEmptyField.emptyStringAsNull).toBe(true);
   });
 
   it("formats import elapsed time for progress and terminal summaries", () => {

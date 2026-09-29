@@ -76,6 +76,16 @@ async function setup() {
   };
 }
 describe("shortcut sidebar height", () => {
+  it("reserves the title row as well as 120px for the connection tree", async () => {
+    const { sizing, savedHeight, setTotal } = await setup();
+    const header = document.createElement("div");
+    header.setAttribute("data-shortcut-header", "");
+    Object.defineProperty(header, "offsetHeight", { get: () => 32 });
+    root.querySelector("nav")!.append(header);
+    savedHeight.value = 500;
+    setTotal(300);
+    expect(sizing.height.value).toBe(142);
+  });
   it("does not attach a resize observer after disposal during a pending measurement", async () => {
     const observe = vi.fn();
     vi.stubGlobal(

@@ -477,6 +477,14 @@ profiles:
     user: ""
     urlParams: auth=NONE
     category: analytics
+  - id: transwarp-inceptor
+    dbType: transwarp
+    label: 星环Inceptor
+    icon: transwarp-inceptor
+    port: 10000
+    user: ""
+    category: domestic
+    pickerLabel: 星环Inceptor
   - id: argo
     dbType: argo
     label: ArgoDB (Transwarp)

@@ -188,6 +188,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-corners", category: "appearance", titleKey: "settings.cornerStyle", targetId: "appearance" },
   { id: "appearance-layout", category: "appearance", titleKey: "settings.appLayout", targetId: "appearance" },
   { id: "appearance-tab-layout", category: "appearance", titleKey: "settings.tabLayout", targetId: "appearance" },
+  { id: "appearance-connection-tab-colors", category: "appearance", titleKey: "settings.colorizeConnectionTabs", descriptionKey: "settings.colorizeConnectionTabsDescription", targetId: "appearance" },
   { id: "appearance-icons", category: "appearance", titleKey: "settings.iconTheme", targetId: "appearance", visible: desktopOnly },
   { id: "appearance-tray", category: "appearance", titleKey: "settings.showTrayIcon", descriptionKey: "settings.showTrayIconDescription", targetId: "appearance", visible: desktopOnly },
   { id: "appearance-quit", category: "appearance", titleKey: "settings.quitOnClose", descriptionKey: "settings.quitOnCloseDescription", targetId: "appearance", visible: desktopOnly },

@@ -293,7 +293,7 @@ const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 // in sync. ArgoDB (Transwarp Hive/Inceptor fork) ships a PL/SQL-compatible procedure
 // language (`CREATE [OR REPLACE] PROCEDURE ... IS BEGIN ... END;`), so its statement
 // ranges must stay whole instead of splitting at every body semicolon.
-const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo"]);
+const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo", "transwarp"]);
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
 // PostgreSQL/openGauss are also the connection types users pick for GaussDB/openGauss instances
 // running in Oracle (A) compatibility mode, where a routine body is written in Oracle style
@@ -305,7 +305,7 @@ const POSTGRES_FAMILY_DATABASES: ReadonlySet<DatabaseType> = new Set(["postgres"
 // escape unconditionally makes ESCAPE '\' swallow its closing quote and the following statement
 // boundary, so the next statement loses its run button (#8189). Gate it by dialect, matching the
 // tokenizer/completion side.
-export const BACKSLASH_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "hive", "argo", "impala", "spark", "databend"]);
+export const BACKSLASH_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "hive", "argo", "transwarp", "impala", "spark", "databend"]);
 function allowsBackslashStringEscape(databaseType?: DatabaseType): boolean {
   return !!databaseType && BACKSLASH_ESCAPE_STRING_DIALECTS.has(databaseType);
 }

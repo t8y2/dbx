@@ -149,6 +149,7 @@ async fn live_postgres_all_schema_export_restores_one_sql_file() {
             execution_id: format!("postgres-all-schema-import-{suffix}"),
             connection_id: target_connection_id.clone(),
             database: target_database.clone(),
+            schema: None,
             file_path: export_path.display().to_string(),
             continue_on_error: false,
             selected_tables: None,

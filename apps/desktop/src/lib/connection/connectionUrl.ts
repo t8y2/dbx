@@ -424,8 +424,8 @@ export function connectionProfileForScheme(scheme: string, preferredProfile?: st
   return SCHEME_PROFILES[normalizedScheme];
 }
 
-function parseJdbcHiveUrl(source: string): ParsedConnectionUrl | null {
-  const match = /^jdbc:hive2:\/\/(?<hosts>[^/?#;]+)(?:\/(?<path>[^?#]*))?(?<query>\?[^#]*)?(?<fragment>#.*)?$/i.exec(source);
+function parseJdbcHiveUrl(source: string, preferredProfile?: string): ParsedConnectionUrl | null {
+  const match = /^jdbc:(?<subprotocol>hive2|inceptor2|transwarp2):\/\/(?<hosts>[^/?#;]+)(?:\/(?<path>[^?#]*))?(?<query>\?[^#]*)?(?<fragment>#.*)?$/i.exec(source);
   if (!match?.groups) return null;
 
   const firstHost = match.groups.hosts.split(",")[0]?.trim();
@@ -442,11 +442,13 @@ function parseJdbcHiveUrl(source: string): ParsedConnectionUrl | null {
   const [rawDatabase = "", ...paramParts] = (match.groups.path || "").split(";");
   const structured = extractHiveStructuredParams(paramParts.join(";"));
   const urlParams = `${structured.urlParams}${match.groups.query || ""}${match.groups.fragment || ""}`;
+  const profile = preferredProfile === "transwarp-inceptor" ? preferredProfile : match.groups.subprotocol.toLowerCase() === "hive2" ? "hive" : "transwarp-inceptor";
+  const transwarp = profile !== "hive";
 
   return {
-    dbType: "hive",
-    driverProfile: "hive",
-    driverLabel: "Apache Hive",
+    dbType: transwarp ? "transwarp" : "hive",
+    driverProfile: profile,
+    driverLabel: profile === "transwarp-inceptor" ? "星环Inceptor" : "Apache Hive",
     host: endpoint.hostname.replace(/^\[(.*)]$/, "$1"),
     port: endpoint.port ? Number(endpoint.port) : 10000,
     username: structured.username ?? decodeUrlPart(endpoint.username),
@@ -698,7 +700,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   if (/^jdbc:oceanbase:(?:oracle:)?loadbalance:\/\//i.test(input)) {
     throw new Error("Unsupported OceanBase JDBC URL variant: loadbalance");
   }
-  const jdbcHive = parseJdbcHiveUrl(input);
+  const jdbcHive = parseJdbcHiveUrl(input, preferredProfile);
   if (jdbcHive) return jdbcHive;
   const jdbcH2 = parseH2JdbcUrl(input);
   if (jdbcH2) return jdbcH2;

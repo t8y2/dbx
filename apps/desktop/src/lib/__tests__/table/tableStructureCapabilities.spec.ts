@@ -110,6 +110,21 @@ describe("tableStructureCapabilities", () => {
     }
   });
 
+  it("enables only the verified Inceptor column structure operations", () => {
+    expect(getTableStructureCapabilities("transwarp", "transwarp")).toMatchObject({
+      dialect: "mysql",
+      alterStrategy: "direct",
+      createTable: true,
+      addColumn: true,
+      dropColumn: false,
+      renameColumn: true,
+      alterExistingColumn: true,
+      comment: true,
+      createIndex: false,
+      foreignKey: false,
+    });
+  });
+
   it("uses local-only column reordering for editable databases without physical reorder support", () => {
     for (const databaseType of ["sqlserver", "postgres", "sqlite", "oracle", "dameng", "duckdb", "informix"] as const) {
       expect(supportsLocalTableColumnReorder(databaseType, databaseType)).toBe(true);

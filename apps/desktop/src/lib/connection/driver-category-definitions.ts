@@ -61,6 +61,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   sundb: "domestic",
   tdengine: "timeseries",
   teradata: "analytics",
+  transwarp: "domestic",
   trino: "analytics",
   uxdb: "domestic",
   vastbase: "domestic",

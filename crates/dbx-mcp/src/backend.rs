@@ -424,6 +424,29 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, options);
         Err("Documentation snapshots are not supported by this backend.".to_string())
     }
+    /// Tool-capable plugins for the external `dbx` MCP surface, with their
+    /// discovered `mcp/tools` listings. Author opt-in: installed +
+    /// compatible + backend entrypoint + a manifest `external_tools: true`
+    /// declaration. An error means "no plugin tools on this backend" (e.g.
+    /// the web backend); the server degrades to the static tools.
+    async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
+        let _ = self;
+        Err("Plugin tools are not supported by this backend.".to_string())
+    }
+    /// Calls one plugin MCP tool. `connection_id` (already policy-checked by
+    /// the server) selects the saved connection whose host-generated
+    /// lifecycle payload is sent to the plugin; `None` targets
+    /// connection-less tools.
+    async fn call_plugin_mcp_tool(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        connection_id: Option<&str>,
+        arguments: &Value,
+    ) -> Result<Value, String> {
+        let _ = (self, plugin_id, tool, connection_id, arguments);
+        Err("Plugin tools are not supported by this backend.".to_string())
+    }
 }
 
 pub struct LocalBackend {
@@ -653,7 +676,22 @@ fn plugin_lacks_mcp_surface(err: &str) -> bool {
     lower.contains("unknown method") || lower.contains("method not found") || lower.contains("-32601")
 }
 
+/// Probe budget for one plugin's `mcp/tools` during external discovery —
+/// aligned with the AI surface's discovery timeout so one hung sidecar
+/// cannot stall `tools/list` beyond a few seconds.
+const PLUGIN_TOOLS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 impl LocalBackend {
+    async fn notify_connections_changed(&self) {
+        // Persistence has already succeeded. A closed or unresponsive desktop
+        // must not turn the mutation into an error (or block headless MCP).
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.bridge_request("/reload-connections", json!({})),
+        )
+        .await;
+    }
+
     fn spawn_connection_lifecycle_watcher(
         &self,
         lifecycle: ConnectionLifecycleSnapshot,
@@ -812,7 +850,9 @@ impl LocalBackend {
 
     /// Call one plugin MCP tool through the host-managed sidecar session.
     /// When a saved connection is supplied, only its host-generated lifecycle
-    /// payload is sent to the plugin; credentials remain host-managed.
+    /// payload is sent to the plugin; credentials remain host-managed. The
+    /// saved config must still belong to the target plugin, so a connection
+    /// re-bound to another plugin can never leak its lifecycle here.
     pub async fn call_plugin_tool(
         &self,
         plugin_id: &str,
@@ -830,6 +870,9 @@ impl LocalBackend {
                 .get(connection_id)
                 .cloned()
                 .ok_or_else(|| format!("Connection not found: {connection_id}"))?;
+            if config.plugin_id.as_deref() != Some(plugin_id) {
+                return Err(format!("Connection \"{connection_id}\" is not bound to plugin \"{plugin_id}\""));
+            }
             let lifecycle = self.state.plugin_host.connection_params_standalone(&config)?;
             params["lifecycle"] = lifecycle;
         }
@@ -837,6 +880,55 @@ impl LocalBackend {
             .plugin_host
             .invoke(plugin_id, "mcp/call", params, None, Some(std::time::Duration::from_secs(300)))
             .await
+    }
+
+    /// Opt-in, parallel `mcp/tools` discovery for the external surface:
+    /// installed + compatible + backend plugins whose manifest declares
+    /// `external_tools: true`. A plugin that fails to list skips itself
+    /// (with a warning) instead of failing the whole `tools/list`.
+    pub async fn detect_plugin_tool_providers(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
+        let plugins = self.state.plugins.list_installed()?;
+        let candidates: Vec<(String, String)> = plugins
+            .into_iter()
+            .filter(|plugin| {
+                plugin.compatibility.compatible
+                    && plugin.manifest.backend_entrypoint().is_some()
+                    && !plugin.manifest.external_tools_excluded()
+            })
+            .map(|plugin| (plugin.manifest.id.clone(), plugin.manifest.name.clone()))
+            .collect();
+        // Probe every candidate's sidecar concurrently; the probes share the
+        // plugin sidecar sessions, so repeated listings are cheap.
+        let probes = candidates.into_iter().map(|(plugin_id, plugin_name)| {
+            let state = Arc::clone(&self.state);
+            async move {
+                let listing = state
+                    .plugin_host
+                    .invoke::<Value>(&plugin_id, "mcp/tools", json!({}), None, Some(PLUGIN_TOOLS_PROBE_TIMEOUT))
+                    .await;
+                (plugin_id, plugin_name, listing)
+            }
+        });
+        let mut providers = Vec::new();
+        for (plugin_id, plugin_name, listing) in futures::future::join_all(probes).await {
+            match listing {
+                Ok(value) => {
+                    let tools = dbx_core::ai::plugin_tools::parse_tool_list(&value);
+                    if tools.is_empty() {
+                        log::debug!("[mcp] plugin {plugin_id} exposes no MCP tools");
+                    } else {
+                        providers.push(crate::plugin_tools::PluginToolProvider { plugin_id, plugin_name, tools });
+                    }
+                }
+                Err(err) if plugin_lacks_mcp_surface(&err) => {
+                    log::debug!("[mcp] plugin {plugin_id} exposes no MCP tool surface: {err}");
+                }
+                Err(err) => {
+                    log::warn!("[mcp] plugin {plugin_id} tool discovery failed: {err}");
+                }
+            }
+        }
+        Ok(providers)
     }
 
     /// Sync the latest connection list from storage into the `AppState.configs` in-memory cache:
@@ -926,6 +1018,20 @@ fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
 impl DbxBackend for LocalBackend {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
         self.state.storage.load_mcp_global_policy().await.map(effective_mcp_policy)
+    }
+
+    async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
+        self.detect_plugin_tool_providers().await
+    }
+
+    async fn call_plugin_mcp_tool(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        connection_id: Option<&str>,
+        arguments: &Value,
+    ) -> Result<Value, String> {
+        self.call_plugin_tool(plugin_id, tool, connection_id, arguments).await
     }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
@@ -1146,6 +1252,7 @@ impl DbxBackend for LocalBackend {
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.add_connection_for_mcp(config).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
         Ok(config)
     }
 
@@ -1157,6 +1264,7 @@ impl DbxBackend for LocalBackend {
     ) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.duplicate_connection_for_mcp(source_id, copy_id, copy_name).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
         Ok(config)
     }
 
@@ -1166,6 +1274,7 @@ impl DbxBackend for LocalBackend {
             self.state.configs.write().await.remove(connection_id);
             self.transaction_owners.invalidate_connection(connection_id);
             self.state.remove_connection_pools_detached(connection_id).await;
+            self.notify_connections_changed().await;
         }
         Ok(removed)
     }
@@ -2712,6 +2821,123 @@ mod tests {
         },
         time::Duration,
     };
+
+    async fn connection_mutation_backend(data_dir: &Path) -> LocalBackend {
+        let storage = Storage::open(&data_dir.join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir);
+        storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
+        LocalBackend::from_app_state(Arc::new(AppState::new(storage)), data_dir.to_path_buf())
+    }
+
+    fn mutation_test_connection() -> ConnectionConfig {
+        new_connection_config(
+            "source".into(),
+            "Source".into(),
+            DatabaseType::Postgres,
+            "127.0.0.1".into(),
+            5432,
+            "postgres".into(),
+            "test-password".into(),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_notify_desktop_only_after_success() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backend = connection_mutation_backend(data_dir.path()).await;
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let storage = backend.state.storage.clone();
+        let app = axum::Router::new().route(
+            "/reload-connections",
+            axum::routing::post(move || {
+                let sent = sent.clone();
+                let storage = storage.clone();
+                async move {
+                    // The desktop must observe the committed state, not the old list.
+                    let ids: Vec<_> = storage.load_connections().await.unwrap().into_iter().map(|c| c.id).collect();
+                    sent.send(ids).unwrap();
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        tokio::fs::write(data_dir.path().join("mcp-bridge-port"), listener.local_addr().unwrap().port().to_string())
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+        backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
+        let mut ids = received.try_recv().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["copy", "source"]);
+        assert!(backend.remove_connection_for_mcp("copy").await.unwrap());
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+
+        assert!(!backend.remove_connection_for_mcp("missing").await.unwrap());
+        assert!(backend.duplicate_connection_for_mcp("missing", "other", "Other").await.is_err());
+        backend
+            .state
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy { read_only: true, ..Default::default() })
+            .await
+            .unwrap();
+        assert!(backend.add_connection_for_mcp(mutation_test_connection()).await.is_err());
+        assert!(backend.remove_connection_for_mcp("source").await.is_err());
+        assert!(received.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_succeed_without_desktop() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backend = connection_mutation_backend(data_dir.path()).await;
+        backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
+        backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
+        assert!(backend.remove_connection_for_mcp("source").await.unwrap());
+        let connections = backend.load_connections().await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, "copy");
+        assert_eq!(connections[0].password, "test-password");
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_succeed_when_desktop_fails_or_stalls() {
+        for stall in [false, true] {
+            let data_dir = tempfile::tempdir().unwrap();
+            let backend = connection_mutation_backend(data_dir.path()).await;
+            let app = axum::Router::new().route(
+                "/reload-connections",
+                axum::routing::post(move || async move {
+                    if stall {
+                        std::future::pending::<()>().await;
+                    }
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            tokio::fs::write(
+                data_dir.path().join("mcp-bridge-port"),
+                listener.local_addr().unwrap().port().to_string(),
+            )
+            .await
+            .unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            tokio::time::timeout(Duration::from_secs(5), backend.add_connection_for_mcp(mutation_test_connection()))
+                .await
+                .expect("desktop notification must be bounded")
+                .unwrap();
+            assert_eq!(backend.load_connections().await.unwrap().len(), 1);
+            server.abort();
+        }
+    }
 
     fn policy_state(configured: bool, read_only: bool) -> McpGlobalPolicyState {
         McpGlobalPolicyState {

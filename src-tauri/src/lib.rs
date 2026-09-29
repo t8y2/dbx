@@ -1454,6 +1454,12 @@ mod tests {
     }
 }
 
+fn route_external_commands(
+    main_handler: impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    dbx_tauri_consul::route(dbx_tauri_schema::route(main_handler))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Metadata/completion command chains nest very large async futures and can
@@ -1804,7 +1810,7 @@ pub fn run() {
                 request_app_close(app, "settings");
             }
         })
-        .invoke_handler(migration_gate::guard_handler(dbx_tauri_consul::route(tauri::generate_handler![
+        .invoke_handler(migration_gate::guard_handler(route_external_commands(tauri::generate_handler![
             commands::ai::ai_complete,
             commands::ai::ai_stream,
             commands::ai::ai_agent_stream,
@@ -1902,6 +1908,8 @@ pub fn run() {
             commands::cloud_sync::forget_webdav_sync_secrets_passphrase,
             commands::cloud_sync::webdav_sync_upload,
             commands::cloud_sync::webdav_sync_download,
+            commands::cloud_sync::webdav_sync_inspect,
+            commands::cloud_sync::cloud_sync_local_catalog,
             commands::cloud_sync::snippet_sync_test,
             commands::cloud_sync::snippet_token_status,
             commands::cloud_sync::save_snippet_saved_token,
@@ -1911,6 +1919,7 @@ pub fn run() {
             commands::cloud_sync::retry_snippet_legacy_cleanup,
             commands::cloud_sync::snippet_sync_upload,
             commands::cloud_sync::snippet_sync_download,
+            commands::cloud_sync::snippet_sync_inspect,
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
             commands::connection::test_ssh_tunnel,
@@ -1997,54 +2006,6 @@ pub fn run() {
             commands::plugins::install_jdbc_plugin,
             commands::plugins::install_jdbc_plugin_local,
             commands::plugins::uninstall_jdbc_plugin,
-            commands::schema::list_databases,
-            commands::schema::list_database_metadata,
-            commands::schema::list_database_storage,
-            commands::schema::list_xugu_tablespaces,
-            commands::schema::get_sqlserver_completion_context,
-            commands::schema::list_doris_catalogs,
-            commands::schema::list_doris_catalog_databases,
-            commands::schema::list_sqlserver_linked_servers,
-            commands::schema::list_sqlserver_linked_server_catalogs,
-            commands::schema::list_sqlserver_linked_server_schemas,
-            commands::schema::list_sqlserver_linked_server_tables,
-            commands::schema::list_tables,
-            commands::schema::get_table_comment,
-            commands::schema::get_mysql_table_auto_increment,
-            commands::schema::list_objects,
-            commands::schema::list_object_statistics,
-            commands::schema::list_completion_objects,
-            commands::schema::completion_assistant_search,
-            commands::schema::get_object_source,
-            commands::schema::get_event_info,
-            commands::schema::get_custom_type_details,
-            commands::schema::list_schemas,
-            commands::schema::list_schema_infos,
-            commands::schema::list_data_types,
-            commands::schema::get_columns,
-            commands::schema::get_plugin_table_metadata,
-            commands::schema::get_all_columns,
-            commands::schema::get_sqlserver_column_metadata,
-            commands::schema::list_indexes,
-            commands::schema::list_reference_key_columns,
-            commands::schema::list_reference_keys,
-            commands::schema::list_foreign_keys,
-            commands::schema::list_triggers,
-            commands::schema::list_constraints,
-            commands::schema::list_partitions,
-            commands::schema::get_table_partition_status,
-            commands::schema::get_table_partitioning,
-            commands::schema::list_invalid_indexes,
-            commands::schema::list_subpartitions,
-            commands::schema::get_table_ddl,
-            commands::schema::list_functions,
-            commands::schema::list_sequences,
-            commands::schema::list_rules,
-            commands::schema::list_owners,
-            commands::schema::get_table_owner,
-            commands::schema::list_extensions,
-            commands::schema::list_available_extensions,
-            commands::schema::list_event_triggers,
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_diff::generate_schema_sync_plan,

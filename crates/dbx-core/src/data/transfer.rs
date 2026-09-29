@@ -120,7 +120,8 @@ impl SqlBatchLimits {
     pub(crate) fn for_database(db_type: &DatabaseType, requested_max_rows: usize) -> Self {
         let max_rows = requested_max_rows.max(1).min(match db_type {
             DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-            DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Transwarp => 100,
             _ => usize::MAX,
         });
         let target_sql_bytes = match db_type {
@@ -3439,7 +3440,29 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
     // Extract basic type, `bigint unsigned` -> `bigint`
     base = base.split(' ').next().unwrap_or(base).trim();
 
-    if matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
+    // SQLite has no integer widths: every column whose declared type carries the
+    // `INT` substring — `INTEGER`, `INT`, `TINYINT`, `SMALLINT`, even the
+    // SQLite-only `UNSIGNED BIG INT` spelling — is stored as a full 64-bit signed
+    // integer (that is SQLite's documented INTEGER affinity rule). Routing those
+    // names through the 32-bit arms below builds a target column that cannot hold
+    // the source's own values, and the transfer then dies mid-batch instead of
+    // writing the row: SQL Server rejects the batch with code 248
+    // ("The conversion of the nvarchar value '...' overflowed an int column").
+    // rqlite, Turso and Cloudflare D1 are SQLite underneath and share the storage
+    // classes. Send integer-affinity columns down the 64-bit arm instead;
+    // Oracle-family targets keep `INTEGER`, which is already `NUMBER(38, 0)`.
+    if is_sqlite_transfer_dialect(source_db) && t.contains("int") {
+        base = if matches!(target_db, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+            "integer"
+        } else {
+            "bigint"
+        };
+    }
+
+    if matches!(
+        target_db,
+        DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo | DatabaseType::Transwarp
+    ) {
         return match base {
             "tinyint" => "TINYINT".into(),
             "smallint" | "int2" => "SMALLINT".into(),
@@ -3608,6 +3631,13 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
     }
 }
 
+/// SQLite and the databases that embed it (`rqlite`, Turso, Cloudflare D1) all
+/// use SQLite's storage classes, where any column with INTEGER affinity holds a
+/// 64-bit signed integer regardless of the width its declared type suggests.
+fn is_sqlite_transfer_dialect(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+}
+
 fn mysql_type_needs_key_prefix(mapped_type: &str) -> bool {
     let base = mapped_type.split('(').next().unwrap_or(mapped_type).trim().to_ascii_lowercase();
     matches!(
@@ -3684,7 +3714,11 @@ fn generate_create_table_ddl_with_column_quoting(
             if !c.is_nullable
                 && !matches!(
                     target_db,
-                    DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo
+                    DatabaseType::Hive
+                        | DatabaseType::Kyuubi
+                        | DatabaseType::Impala
+                        | DatabaseType::Argo
+                        | DatabaseType::Transwarp
                 )
             {
                 line.push_str(" NOT NULL");
@@ -3709,7 +3743,10 @@ fn generate_create_table_ddl_with_column_quoting(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
+    if !matches!(
+        target_db,
+        DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo | DatabaseType::Transwarp
+    ) {
         for c in columns {
             if c.is_primary_key {
                 let qname = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
@@ -3881,6 +3918,7 @@ pub(crate) fn generate_insert_typed_from_value_rows(
 struct InsertSqlTemplate {
     standard_prefix: String,
     oracle_into_prefix: Option<String>,
+    inceptor_select_prefix: Option<String>,
     xugu_multirow_values: bool,
 }
 
@@ -3920,8 +3958,15 @@ impl InsertSqlTemplate {
             };
         Self {
             standard_prefix: format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n"),
-            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle)
+            // OceanBase's Oracle mode rejects the comma-separated multi-row VALUES form
+            // just like Oracle itself, but it does implement Oracle's multi-table
+            // `INSERT ALL ... SELECT 1 FROM dual` syntax, so it shares this template.
+            // Without it the importer falls back to single-row INSERTs (one network
+            // round trip per row), which makes CSV imports orders of magnitude slower.
+            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
                 .then(|| format!("INTO {full_table} ({col_list}) VALUES ")),
+            inceptor_select_prefix: (matches!(db_type, DatabaseType::Transwarp) && !columns.is_empty())
+                .then(|| format!("INSERT INTO {full_table} ({col_list})\n")),
             // Xugu accepts consecutive row constructors (`VALUES (...) (...)`) but rejects
             // the comma-separated multi-row form emitted by the generic template.
             xugu_multirow_values: matches!(db_type, DatabaseType::Xugu),
@@ -3931,6 +3976,22 @@ impl InsertSqlTemplate {
     fn build(&self, value_rows: &[String]) -> String {
         if value_rows.is_empty() {
             return String::new();
+        }
+        if let Some(prefix) = self.inceptor_select_prefix.as_deref() {
+            let mut sql = String::with_capacity(self.statement_bytes(
+                value_rows.iter().map(String::len).sum(),
+                value_rows.len(),
+                &DatabaseType::Transwarp,
+            ));
+            sql.push_str(prefix);
+            for (index, values) in value_rows.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str("\nUNION ALL\n");
+                }
+                sql.push_str("SELECT ");
+                sql.push_str(values.strip_prefix('(').and_then(|row| row.strip_suffix(')')).unwrap_or(values));
+            }
+            return sql;
         }
         if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| value_rows.len() > 1) {
             let capacity = "INSERT ALL\n".len()
@@ -3970,6 +4031,12 @@ impl InsertSqlTemplate {
     }
 
     fn statement_bytes(&self, value_rows_bytes: usize, row_count: usize, db_type: &DatabaseType) -> usize {
+        if let Some(prefix) = self.inceptor_select_prefix.as_deref() {
+            return sql_text_bytes(prefix, db_type)
+                .saturating_add(value_rows_bytes.saturating_sub(2usize.saturating_mul(row_count)))
+                .saturating_add("SELECT ".len().saturating_mul(row_count))
+                .saturating_add("\nUNION ALL\n".len().saturating_mul(row_count.saturating_sub(1)));
+        }
         if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| row_count > 1) {
             return sql_text_bytes("INSERT ALL\n", db_type)
                 .saturating_add(sql_text_bytes(into_prefix, db_type).saturating_mul(row_count))
@@ -4394,8 +4461,18 @@ fn generate_upsert_typed_for_transfer(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
-        (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo, _) => 500,
+        (
+            DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Impala
+            | DatabaseType::Argo
+            | DatabaseType::Transwarp,
+            _,
+        ) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
+        // The INSERT ALL template is shared with OceanBase's Oracle mode, so its
+        // append/overwrite batches must clamp to the same per-statement row count.
+        (DatabaseType::OceanbaseOracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
@@ -4814,7 +4891,7 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
 
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -4995,7 +5072,7 @@ fn generate_insert_sql_batches_from_value_rows(
 
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -8790,6 +8867,45 @@ struct HiveServerTransferCursor {
     session_id: Option<String>,
 }
 
+fn is_transwarp_complex_type(data_type: &str) -> bool {
+    matches!(
+        data_type.trim().split('<').next().unwrap_or("").trim().to_ascii_lowercase().as_str(),
+        "array" | "map" | "struct" | "uniontype"
+    )
+}
+
+fn should_use_transwarp_server_side_copy(
+    source_db_type: &DatabaseType,
+    content: &TransferContent,
+    columns: &[db::ColumnInfo],
+) -> bool {
+    *source_db_type == DatabaseType::Transwarp
+        && should_copy_data(content)
+        && columns.iter().any(|column| is_transwarp_complex_type(&column.data_type))
+}
+
+fn transwarp_server_side_copy_sql(
+    source_columns: &[String],
+    target_columns: &[String],
+    source_table: &str,
+    source_schema: &str,
+    target_table: &str,
+    target_schema: &str,
+    quote_target_columns: bool,
+) -> String {
+    let db_type = DatabaseType::Transwarp;
+    let source = qualified_table(source_table, source_schema, &db_type, None);
+    let target = qualified_table(target_table, target_schema, &db_type, None);
+    let source_columns =
+        source_columns.iter().map(|name| quote_identifier(name, &db_type)).collect::<Vec<_>>().join(", ");
+    let target_columns = target_columns
+        .iter()
+        .map(|name| transfer_column_identifier(name, &db_type, quote_target_columns))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("INSERT INTO {target} ({target_columns}) SELECT {source_columns} FROM {source}")
+}
+
 fn transfer_cursor_sql(
     columns: &[String],
     table: &str,
@@ -8818,7 +8934,7 @@ async fn fetch_hive_server_transfer_batch(
     };
     let pool_handle = state.pool_handle(pool_key).await;
     let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
-        return Err("Impala transfer requires an Agent connection".to_string());
+        return Err("Agent cursor transfer requires an Agent connection".to_string());
     };
     let client = client.clone();
 
@@ -9608,6 +9724,26 @@ where
     };
     log::info!("[transfer] {} total_rows={:?}", table, total_rows);
 
+    let server_side_complex_copy =
+        should_use_transwarp_server_side_copy(source_db_type, &request.content, &writable_columns);
+    if server_side_complex_copy {
+        if *target_db_type != DatabaseType::Transwarp || request.source_connection_id != request.target_connection_id {
+            return Err(format!(
+                "Native Inceptor complex columns in '{table}' require source and target on the same Transwarp connection"
+            ));
+        }
+        let source_table =
+            qualified_table(table, &request.source_schema, source_db_type, request.source_catalog.as_deref());
+        let destination_table =
+            qualified_table(&target_table, &request.target_schema, target_db_type, request.target_catalog.as_deref());
+        if source_table.eq_ignore_ascii_case(&destination_table) {
+            return Err(format!("Cannot transfer native complex columns in '{table}' onto the same table"));
+        }
+        if total_rows.is_none() {
+            return Err(format!("Cannot count native complex rows in '{table}' before transfer"));
+        }
+    }
+
     // Create table on target if requested
     if request.create_table {
         create_transfer_target_table(
@@ -9677,6 +9813,14 @@ where
     // A preexisting target also needs its columns read, even for a data-only
     // transfer: the write SQL has to address the target's declared column
     // names, which can differ from the source in case (#9320).
+    //
+    // SQL Server belongs to the always-read set for its identity flags, not just
+    // for a preexisting target: a freshly created target reuses the source DDL
+    // (`can_reuse`), which carries the source's `IDENTITY` clause, so the new
+    // target is an identity target too. `writes_identity_insert_columns` decides
+    // whether the batch needs the `SET IDENTITY_INSERT` wrapper, and without the
+    // target metadata it stays false — SQL Server then rejects the explicit
+    // identity values with 544.
     let needs_target_columns = default_rows_only
         || target_table_preexisting
         || (request.mode == TransferMode::Upsert
@@ -9687,8 +9831,12 @@ where
                     | DatabaseType::Kyuubi
                     | DatabaseType::Impala
                     | DatabaseType::Argo
+                    | DatabaseType::Transwarp
             ))
-        || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2);
+        || matches!(
+            target_db_type,
+            DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2 | DatabaseType::SqlServer
+        );
     let target_columns = if needs_target_columns {
         get_columns_for_transfer(
             state,
@@ -9753,6 +9901,27 @@ where
         col_names.clone()
     };
 
+    if server_side_complex_copy {
+        for (source_column, target_name) in writable_columns.iter().zip(&write_col_names) {
+            let Some(target_column) =
+                target_columns.iter().find(|column| column.name.eq_ignore_ascii_case(target_name))
+            else {
+                if target_table_preexisting {
+                    return Err(format!("Target table '{target_table}' is missing column '{target_name}'"));
+                }
+                continue;
+            };
+            if is_transwarp_complex_type(&source_column.data_type)
+                && !source_column.data_type.trim().eq_ignore_ascii_case(target_column.data_type.trim())
+            {
+                return Err(format!(
+                    "Native Inceptor column '{}' needs matching source and target types ({} vs {})",
+                    source_column.name, source_column.data_type, target_column.data_type
+                ));
+            }
+        }
+    }
+
     // Truncate target if overwrite mode (only when not rebuilding the table).
     // When drop_target_before_create is true, the target table was just created
     // and is already empty, so TRUNCATE is unnecessary.
@@ -9777,6 +9946,7 @@ where
                 | DatabaseType::Kyuubi
                 | DatabaseType::Impala
                 | DatabaseType::Argo
+                | DatabaseType::Transwarp
         ) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
@@ -9804,6 +9974,37 @@ where
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
+
+    if server_side_complex_copy {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
+        let sql = transwarp_server_side_copy_sql(
+            &col_names,
+            &write_col_names,
+            table,
+            &request.source_schema,
+            &target_table,
+            &request.target_schema,
+            request.quote_target_column_names,
+        );
+        execute_on_pool(state, target_pool_key, &sql)
+            .await
+            .map_err(|error| format!("Native Inceptor transfer failed for '{table}': {error}"))?;
+        let copied = total_rows.expect("complex transfer count validated");
+        progress_callback(TransferProgress {
+            transfer_id: request.transfer_id.clone(),
+            table: table.to_string(),
+            table_index,
+            total_tables,
+            rows_transferred: copied,
+            total_rows,
+            status: TransferStatus::Running,
+            error: None,
+            terminal: false,
+        });
+        return Ok(copied);
+    }
 
     // COPY fast path: PG-family append/overwrite transfers stream the whole
     // table through the COPY protocol instead of paged SELECT + multi-row
@@ -9887,9 +10088,11 @@ where
     // does not hold up mid-table.
     let mut keyset_indexes = transfer_keyset_column_indexes(&writable_columns, &primary_key_columns, source_db_type);
     let mut keyset_cursor: Vec<serde_json::Value> = Vec::new();
-    // A single Agent cursor keeps Kyuubi/Impala rows in one query execution.
+    // A single Agent cursor keeps Hive-family rows in one query execution. Inceptor
+    // rejects the generic LIMIT/OFFSET form, just like the other Agent cursor paths.
     // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
-    let use_hive_server_cursor = matches!(source_db_type, DatabaseType::Kyuubi | DatabaseType::Impala);
+    let use_hive_server_cursor =
+        matches!(source_db_type, DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp);
     let hive_server_transfer_sql = use_hive_server_cursor.then(|| {
         transfer_cursor_sql(
             &col_names,
@@ -16748,6 +16951,74 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn oceanbase_oracle_multi_row_insert_uses_insert_all() {
+        // OceanBase's Oracle mode rejects multi-row VALUES but implements Oracle's
+        // INSERT ALL, so the import/transfer generators must batch through it instead
+        // of degrading to one INSERT per row.
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Brien")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT ALL
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (1, 'Ada')
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (2, 'O''Brien')
+SELECT 1 FROM dual"#
+        );
+        assert!(!sql.contains("),\n("));
+    }
+
+    #[test]
+    fn oceanbase_oracle_single_row_insert_keeps_values_shape() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES
+(1, 'Ada')"#
+        );
+    }
+
+    #[test]
+    fn oceanbase_oracle_transfer_write_batches_limit_insert_all_rows() {
+        let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("id")],
+            &[Some(String::from("number"))],
+            &rows,
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            &[],
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].matches("\nINTO ").count(), MAX_ORACLE_INSERT_ALL_ROWS);
+        assert!(statements[0].starts_with("INSERT ALL\nINTO "));
+        assert!(statements[0].ends_with("SELECT 1 FROM dual"));
+    }
+
+    #[test]
     fn oracle_transfer_write_batches_limit_insert_all_rows() {
         let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
         let statements = generate_transfer_write_sql_batches(
@@ -17217,6 +17488,73 @@ SELECT 1 FROM dual"#
         );
 
         assert_eq!(sql, "INSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES\n(42, 'Ada')");
+    }
+
+    #[test]
+    fn inceptor_insert_uses_select_for_ordinary_tables() {
+        assert_eq!(SqlBatchLimits::for_database(&DatabaseType::Transwarp, 500).max_rows, 100);
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("label")],
+            &[Some(String::from("int")), Some(String::from("string"))],
+            &[vec![json!(1), json!("first")], vec![json!(2), json!("second")]],
+            "events",
+            "analytics",
+            &DatabaseType::Transwarp,
+            None,
+        );
+        assert_eq!(
+            sql,
+            "INSERT INTO `analytics`.`events` (`id`, `label`)\nSELECT 1, 'first'\nUNION ALL\nSELECT 2, 'second'"
+        );
+
+        let batches = generate_insert_typed_sql_batches(
+            &[String::from("id"), String::from("label")],
+            &[Some(String::from("int")), Some(String::from("string"))],
+            &[vec![json!(1), json!("first")], vec![json!(2), json!("second")]],
+            "events",
+            "analytics",
+            &DatabaseType::Transwarp,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 76, hard_sql_bytes: Some(76) },
+        )
+        .unwrap();
+        assert_eq!(batches.iter().map(|(_, rows)| *rows).sum::<usize>(), 2);
+        assert!(batches.iter().all(|(sql, _)| sql.len() <= 76 && sql.contains("\nSELECT ")));
+    }
+
+    #[test]
+    fn inceptor_native_complex_copy_uses_server_side_projection() {
+        assert!(is_transwarp_complex_type("ARRAY<INT>"));
+        assert!(is_transwarp_complex_type("map<string,int>"));
+        assert!(is_transwarp_complex_type("struct<a:int>"));
+        assert!(!is_transwarp_complex_type("STRING"));
+        let columns = vec![db::ColumnInfo { data_type: "ARRAY<INT>".into(), ..Default::default() }];
+        assert!(!should_use_transwarp_server_side_copy(
+            &DatabaseType::Transwarp,
+            &TransferContent::StructureOnly,
+            &columns,
+        ));
+        assert!(should_use_transwarp_server_side_copy(
+            &DatabaseType::Transwarp,
+            &TransferContent::StructureAndData,
+            &columns,
+        ));
+        assert!(should_use_transwarp_server_side_copy(&DatabaseType::Transwarp, &TransferContent::DataOnly, &columns,));
+        assert!(!should_use_transwarp_server_side_copy(
+            &DatabaseType::Hive,
+            &TransferContent::StructureAndData,
+            &columns,
+        ));
+        let sql = transwarp_server_side_copy_sql(
+            &["id".into(), "numbers".into(), "tags".into()],
+            &["id".into(), "numbers".into(), "tags".into()],
+            "events",
+            "source_db",
+            "events",
+            "target_db",
+            true,
+        );
+        assert_eq!(sql, "INSERT INTO `target_db`.`events` (`id`, `numbers`, `tags`) SELECT `id`, `numbers`, `tags` FROM `source_db`.`events`");
     }
 
     #[test]
@@ -17704,6 +18042,52 @@ SELECT 1 FROM dual"#
             map_column_type("bigint unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Postgres),
             "BIGINT"
         );
+    }
+
+    #[test]
+    fn map_column_type_keeps_mysql_and_duckdb_integer_widths() {
+        // The widening below is specific to SQLite's storage classes: MySQL's
+        // `int` really is 32-bit and DuckDB's `INTEGER` is 32-bit too, so their
+        // mappings must not change.
+        assert_eq!(map_column_type("int", &DatabaseType::Mysql, &DatabaseType::SqlServer), "INT");
+        assert_eq!(map_column_type("INTEGER", &DatabaseType::DuckDb, &DatabaseType::SqlServer), "INT");
+    }
+
+    #[test]
+    fn map_column_type_widens_sqlite_integer_affinity_columns() {
+        // User report (SQL Server data transfer): a SQLite `INTEGER` column was
+        // mapped onto SQL Server `INT`, and the first value above 2^31 killed the
+        // batch with code 248 ("... overflowed an int column"). SQLite stores every
+        // integer-affinity column — the declared name is not a width — in a 64-bit
+        // signed integer, so the mapping has to stay 64-bit wide.
+        for source in [DatabaseType::Sqlite, DatabaseType::Rqlite, DatabaseType::Turso, DatabaseType::CloudflareD1] {
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("int", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("INT(11)", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("smallint", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("tinyint", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("BIGINT", &source, &DatabaseType::SqlServer), "BIGINT");
+            // SQLite's own affinity rule matches the `INT` substring anywhere in
+            // the declared type, which is why `UNSIGNED BIG INT` is an integer.
+            assert_eq!(map_column_type("UNSIGNED BIG INT", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Mysql), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Postgres), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Kingbase), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Hive), "BIGINT");
+            // Oracle-family targets keep `INTEGER`, which is already NUMBER(38, 0)
+            // and covers the whole 64-bit range without a `BIGINT` spelling Oracle
+            // does not define.
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Oracle), "INTEGER");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::OceanbaseOracle), "INTEGER");
+            // Non-integer declared types keep their existing mapping.
+            assert_eq!(map_column_type("TEXT", &source, &DatabaseType::SqlServer), "TEXT");
+            assert_eq!(map_column_type("REAL", &source, &DatabaseType::SqlServer), "FLOAT");
+            assert_eq!(map_column_type("NUMERIC", &source, &DatabaseType::SqlServer), "NUMERIC");
+            assert_eq!(map_column_type("BLOB", &source, &DatabaseType::SqlServer), "VARBINARY(MAX)");
+        }
+        // A SQLite target is unchanged: it accepts any 64-bit value in `INTEGER`.
+        assert_eq!(map_column_type("int", &DatabaseType::Mysql, &DatabaseType::Sqlite), "INTEGER");
+        assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &DatabaseType::Sqlite), "BIGINT");
     }
 
     #[test]

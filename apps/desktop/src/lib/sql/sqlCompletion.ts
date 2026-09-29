@@ -1439,7 +1439,7 @@ type SqlCompletionApplyDialect = "mysql" | "postgres" | "sqlserver" | "oracle" |
 // QueryEditor may use another dialect as a CodeMirror syntax fallback.
 // Completion apply text must still follow the connected database's identifier
 // folding and quoting rules.
-const MYSQL_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "argo", "kyuubi", "impala", "spark", "databend", "tdengine", "access", "doris", "starrocks"]);
+const MYSQL_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "argo", "transwarp", "kyuubi", "impala", "spark", "databend", "tdengine", "access", "doris", "starrocks"]);
 const POSTGRES_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kingbase", "highgo", "uxdb", "vastbase", "kwdb", "opengauss"]);
 export const ORACLE_COMPAT_IDENTIFIER_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "yashandb", "oscar", "xugu"]);
 const UPPER_FOLDING_IDENTIFIER_DATABASES = new Set<DatabaseType>(["dameng", "db2"]);
@@ -2558,8 +2558,9 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   }
 
   // Check if we're in a context where columns are expected
-  const selectListColumnContext = isInSelectListContext(beforeCursor);
-  const inColumnContext = selectListColumnContext || isInColumnContext(beforeCursor, options.databaseType) || !!insertInfo;
+  const selectListScan = scanSelectListContext(beforeCursor);
+  const selectListColumnContext = selectListScan.inSelectList;
+  const inColumnContext = selectListColumnContext || selectListScan.inSelectListParens || isInColumnContext(beforeCursor, options.databaseType) || !!insertInfo;
   const inJoinConditionContext = isInJoinConditionContext(beforeCursor);
   const prioritizeSelectAliases = isInOrderOrGroupByContext(beforeCursor, options.databaseType);
   const inCallRoutineContext = isCallRoutineContext(beforeCursor);
@@ -2884,11 +2885,21 @@ function isInColumnContext(beforeCursor: string, databaseType?: DatabaseType): b
 }
 
 function isInSelectListContext(beforeCursor: string): boolean {
+  return scanSelectListContext(beforeCursor).inSelectList;
+}
+
+/**
+ * `inSelectList` is true when the cursor sits directly in an open SELECT list.
+ * `inSelectListParens` is true when it sits inside parentheses nested in one,
+ * such as a function argument: `SELECT a, SUM(|`.
+ */
+function scanSelectListContext(beforeCursor: string): { inSelectList: boolean; inSelectListParens: boolean } {
   let depth = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let inBacktick = false;
   const selectOpenByDepth = new Map<number, boolean>();
+  const nestedInSelectByDepth = new Map<number, boolean>();
 
   for (let i = 0; i < beforeCursor.length; i++) {
     const ch = beforeCursor[i] ?? "";
@@ -2930,11 +2941,14 @@ function isInSelectListContext(beforeCursor: string): boolean {
       continue;
     }
     if (ch === "(") {
+      const inheritsSelectList = selectOpenByDepth.get(depth) === true || nestedInSelectByDepth.get(depth) === true;
       depth++;
+      nestedInSelectByDepth.set(depth, inheritsSelectList);
       continue;
     }
     if (ch === ")") {
       selectOpenByDepth.delete(depth);
+      nestedInSelectByDepth.delete(depth);
       depth = Math.max(0, depth - 1);
       continue;
     }
@@ -2945,13 +2959,15 @@ function isInSelectListContext(beforeCursor: string): boolean {
     const word = beforeCursor.slice(i, end).toLowerCase();
     if (word === "select") {
       selectOpenByDepth.set(depth, true);
+      nestedInSelectByDepth.delete(depth);
     } else if (word === "from") {
       selectOpenByDepth.set(depth, false);
+      nestedInSelectByDepth.delete(depth);
     }
     i = end - 1;
   }
 
-  return selectOpenByDepth.get(depth) === true;
+  return { inSelectList: selectOpenByDepth.get(depth) === true, inSelectListParens: nestedInSelectByDepth.get(depth) === true };
 }
 
 function isInJoinConditionContext(beforeCursor: string): boolean {
@@ -3240,7 +3256,7 @@ function lastTopLevelKeywordIndex(sql: string, keyword: string): number {
 // unquoted token as a table reference there is a false-positive risk. Everything else defaults
 // to Unicode support (MySQL/Postgres/SQL Server/SQLite/DuckDB and the many Chinese-vendor
 // engines this product supports legitimately use non-ASCII unquoted identifiers).
-const ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES = new Set<DatabaseType>(["clickhouse", "snowflake", "bigquery", "hive", "argo", "spark", "trino", "prestosql", "impala", "db2", "teradata"]);
+const ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES = new Set<DatabaseType>(["clickhouse", "snowflake", "bigquery", "hive", "argo", "transwarp", "spark", "trino", "prestosql", "impala", "db2", "teradata"]);
 
 // Dialects where a bare "--" needs trailing whitespace/EOL to start a comment, since MySQL
 // reserves unspaced "--" for double-negation (e.g. `SELECT 1--1`). Scoped to mysql itself plus

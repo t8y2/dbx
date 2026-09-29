@@ -42,6 +42,36 @@ export function connectionColor(connectionId: string): string {
   return connectionStore.getConfig(connectionId)?.color || "";
 }
 
+function tabConnectionGeneratedColor(connectionId: string): string {
+  let hash = 2166136261;
+  for (const character of connectionId) {
+    hash ^= character.codePointAt(0)!;
+    hash = Math.imul(hash, 16777619);
+  }
+  const hue = (hash >>> 0) % 360;
+  const saturation = 68;
+  const lightness = 52;
+  const chroma = (1 - Math.abs((2 * lightness) / 100 - 1)) * (saturation / 100);
+  const hueSector = hue / 60;
+  const x = chroma * (1 - Math.abs((hueSector % 2) - 1));
+  const match = lightness / 100 - chroma / 2;
+  const [red, green, blue] = hueSector < 1 ? [chroma, x, 0] : hueSector < 2 ? [x, chroma, 0] : hueSector < 3 ? [0, chroma, x] : hueSector < 4 ? [0, x, chroma] : hueSector < 5 ? [x, 0, chroma] : [chroma, 0, x];
+  return `#${[red, green, blue]
+    .map((channel) =>
+      Math.round((channel + match) * 255)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
+}
+
+/** Returns a stable visual identity for a tab's connection when no custom color is set. */
+export function tabConnectionColor(connectionId: string): string {
+  const configured = connectionColor(connectionId);
+  if (configured) return configured;
+  return tabConnectionGeneratedColor(connectionId);
+}
+
 export function isConnectionReadonly(connectionId: string): boolean {
   const connectionStore = useConnectionStore();
   return connectionStore.getConfig(connectionId)?.read_only ?? false;
@@ -710,15 +740,14 @@ export function appTabActiveIndicator(): string {
 }
 
 export function tabColorStyle(tab: QueryTab, active: boolean, isClassic: boolean): CSSProperties | undefined {
-  const activeIndicator = appTabActiveIndicator();
-  const color = connectionColor(tab.connectionId);
-  if (!color) {
+  if (!useSettingsStore().editorSettings.colorizeConnectionTabs) {
+    const activeIndicator = appTabActiveIndicator();
     const background = appTabActiveBackground();
-    if (isClassic) {
-      return active ? { "--app-tab-background": background, boxShadow: activeIndicator } : undefined;
-    }
+    if (isClassic) return active ? { "--app-tab-background": background, boxShadow: activeIndicator } : undefined;
     return active ? { "--app-tab-background": background, borderColor: "var(--ring)" } : undefined;
   }
+  const activeIndicator = appTabActiveIndicator();
+  const color = tabConnectionColor(tab.connectionId);
   if (isClassic) {
     return {
       "--app-tab-background": hexToRgba(color, active ? 0.24 : 0.07),

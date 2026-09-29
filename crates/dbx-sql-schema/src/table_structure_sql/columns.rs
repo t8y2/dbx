@@ -1,3 +1,4 @@
+use super::column_alter::build_transwarp_existing_column_clause;
 use super::column_alter::{
     build_clickhouse_existing_column_sql, build_dameng_existing_column_sql, build_doris_existing_column_sql,
     build_duckdb_existing_column_sql, build_h2_existing_column_sql, build_informix_existing_column_sql,
@@ -115,7 +116,8 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         }
 
         let active_index = active_columns.iter().position(|active| active.id == column.id).unwrap_or(0);
-        let position_clause = if has_original_column_positions {
+        let position_clause = if has_original_column_positions && options.database_type != Some(DatabaseType::Transwarp)
+        {
             column_position_clause(dialect, &active_columns, active_index)
         } else {
             String::new()
@@ -248,10 +250,12 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 } else {
                     column
                 };
-                let clause = build_mysql_existing_column_clause(
-                    effective_column,
-                    if has_position_change { &position_clause } else { "" },
-                );
+                let position = if has_position_change { &position_clause } else { "" };
+                let clause = if options.database_type == Some(DatabaseType::Transwarp) {
+                    build_transwarp_existing_column_clause(effective_column)
+                } else {
+                    build_mysql_existing_column_clause(effective_column, position)
+                };
                 if mysql_coalesced_primary_key_change
                     .is_some_and(|change| mysql_auto_increment_touches_primary_key(column, change))
                 {
@@ -592,7 +596,9 @@ pub(super) fn build_add_column_sql(
     driver_profile: Option<&str>,
 ) -> Vec<String> {
     let definition = column_definition(dialect, column);
-    let mut statements = if is_oracle_like(dialect) || dialect == StructureDialect::Informix {
+    let mut statements = if database_type == Some(DatabaseType::Transwarp) {
+        vec![format!("ALTER TABLE {table} ADD COLUMNS ({definition});")]
+    } else if is_oracle_like(dialect) || dialect == StructureDialect::Informix {
         vec![format!("ALTER TABLE {table} ADD ({definition});")]
     } else {
         let add_keyword = if dialect == StructureDialect::SqlServer

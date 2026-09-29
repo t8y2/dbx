@@ -62,6 +62,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     connectionStore.sqlFileSource = {
       connectionId: activeNode.value.connectionId,
       database: activeNode.value.database ?? "",
+      ...(activeNode.value.schema ? { schema: activeNode.value.schema } : {}),
     };
   }
 

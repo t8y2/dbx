@@ -589,7 +589,7 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName?: string;
   } | null>(null);
-  const sqlFileSource = ref<{ connectionId: string; database: string; filePath?: string; preview?: SqlFilePreview } | null>(null);
+  const sqlFileSource = ref<{ connectionId: string; database: string; schema?: string; filePath?: string; preview?: SqlFilePreview } | null>(null);
   const diagramSource = ref<{
     connectionId: string;
     database: string;
@@ -9995,6 +9995,13 @@ export const useConnectionStore = defineStore("connection", () => {
     updateLayoutAndRebuild(reconciledLayout);
   }
 
+  async function reloadFromDisk() {
+    // An external change may arrive after an in-flight reload read its snapshot.
+    // Wait for it, then read again instead of joining that stale snapshot.
+    await initFromDiskPromise;
+    await initFromDisk();
+  }
+
   async function initFromDisk() {
     // Connection normalization and timeout migration depend on persisted global
     // settings. Startup helpers may initialize connections before App.initApp().
@@ -10067,6 +10074,7 @@ export const useConnectionStore = defineStore("connection", () => {
     replacePinnedTreeNode,
     removeTreeNode,
     refreshAllTree,
+    reloadFromDisk,
     collapseAllTreeNodes,
     refreshSidebarObjectPagination,
     refreshTreeNode,

@@ -29,4 +29,5 @@ spark	intentional-fallback	java-show-metadata	Uses SHOW TABLES/SHOW DATABASES; s
 sundb	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
 tdengine	shared-fallback	native-rust	Uses SHOW STABLES/TABLES with information_schema parent enrichment, then applies stable filtering and paging in the native agent.
 trino	native-pushdown	java-sql	Uses information_schema.tables with type, filter, stable order, and literal LIMIT/OFFSET.
+transwarp	shared-fallback	java-sql	Uses system catalog views with stable ordering and shared filtering/paging; the vendor SDK has no verified portable server-side paging contract.
 xugu	native-pushdown	native-go	Uses ALL_TABLES/ALL_VIEWS metadata with type, filter, stable order, and ROWNUM paging.

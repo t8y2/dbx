@@ -92,6 +92,12 @@ export function canDeleteExistingTdengineRows(databaseType: DatabaseType | undef
 
 export function hiveTablePropertiesIndicateTransactional(result: { rows: readonly (readonly unknown[])[] }): boolean {
   return result.rows.some((row) => {
+    if (row.length === 1)
+      return (
+        String(row[0] ?? "")
+          .trim()
+          .toLowerCase() === "true"
+      );
     const name = String(row[0] ?? "")
       .trim()
       .toLowerCase();

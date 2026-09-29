@@ -10,6 +10,7 @@ import {
   editablePrimaryKeys,
   editableRowIdentifierColumns,
   hasCompleteTdengineRowIdentity,
+  hiveTablePropertiesIndicateTransactional,
   isClickHouseExistingRowReadonlyColumn,
   isHiddenGridColumn,
   isSalesforceExistingRowReadonlyColumn,
@@ -45,6 +46,17 @@ function index(columns: string[], isUnique = true, filter: string | null = null)
 }
 
 describe("tableEditing", () => {
+  it("allows Inceptor inserts but only edits existing rows in transactional tables", () => {
+    expect(isTableDataEditable("transwarp", [], "TABLE")).toBe(true);
+    expect(isTableDataEditable("transwarp", [], "VIEW")).toBe(false);
+    expect(canInsertTableRows("transwarp")).toBe(true);
+    expect(canEditExistingTableRows("transwarp", false)).toBe(false);
+    expect(canEditExistingTableRows("transwarp", true)).toBe(true);
+    expect(supportsDataGridTransaction("transwarp")).toBe(true);
+    expect(hiveTablePropertiesIndicateTransactional({ rows: [["transactional", "true"]] })).toBe(true);
+    expect(hiveTablePropertiesIndicateTransactional({ rows: [["true"]] })).toBe(true);
+    expect(hiveTablePropertiesIndicateTransactional({ rows: [["false"]] })).toBe(false);
+  });
   it("synthesizes ROWID only for Oracle-compatible base tables", () => {
     expect(editablePrimaryKeys("oracle", [column("ID"), column("NAME")])).toEqual([]);
     expect(editablePrimaryKeys("oracle", [column("ID"), column("NAME")], "VIEW")).toEqual([]);

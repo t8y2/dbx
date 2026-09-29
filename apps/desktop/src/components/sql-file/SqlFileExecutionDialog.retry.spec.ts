@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   connections: [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }] as Array<{ id: string; name: string; db_type: string; driver_profile: string; database: string }>,
   getConfig: vi.fn(),
   refreshDatabaseTreeNode: vi.fn(),
+  refreshObjectListTreeNode: vi.fn(),
   requestConfirmation: vi.fn(),
   toast: vi.fn(),
   trackerTask: undefined as any,
@@ -33,7 +34,7 @@ const mocks = vi.hoisted(() => ({
   updateSqlFileTask: vi.fn(),
   uuid: vi.fn(),
   queryStore: {
-    tabs: [{ id: "mysql-tab", connectionId: "mysql-1", database: "" }],
+    tabs: [{ id: "mysql-tab", connectionId: "mysql-1", database: "" }] as Array<{ id: string; connectionId: string; database: string; schema?: string; catalog?: string }>,
     activeTabId: "mysql-tab" as string | null,
   },
 }));
@@ -63,7 +64,10 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast
 vi.mock("@/composables/useExportTracker", () => ({
   useExportTracker: () => ({ addSqlFileTask: mocks.addSqlFileTask, updateSqlFileTask: mocks.updateSqlFileTask }),
 }));
-vi.mock("@/composables/useDatabaseOptions", () => ({ fetchSqlFileTargetOptions: mocks.fetchSqlFileTargetOptions }));
+vi.mock("@/composables/useDatabaseOptions", () => ({
+  fetchSqlFileTargetOptions: mocks.fetchSqlFileTargetOptions,
+  namespaceOptionsAreSchemas: (connection: { db_type?: string } | undefined) => ["oracle", "dameng", "oceanbase-oracle"].includes(connection?.db_type ?? ""),
+}));
 vi.mock("@/lib/connection/connectionLevelDatabaseBootstrap", () => ({ requiresSqlFileTargetDatabaseSelection: () => false, supportsConnectionLevelDatabaseBootstrap: (connection: any) => connection?.db_type === "mysql" }));
 vi.mock("@/lib/database/productionSafety", () => ({ productionContextForDatabase: () => ({ active: false, databases: [] }) }));
 vi.mock("@/stores/productionSafetyStore", () => ({
@@ -77,6 +81,7 @@ vi.mock("@/stores/connectionStore", () => ({
     ensureConnected: mocks.ensureConnected,
     getConfig: mocks.getConfig,
     refreshDatabaseTreeNode: mocks.refreshDatabaseTreeNode,
+    refreshObjectListTreeNode: mocks.refreshObjectListTreeNode,
   }),
 }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => mocks.queryStore }));
@@ -257,6 +262,7 @@ beforeEach(() => {
   });
   mocks.cancelSqlFileExecution.mockResolvedValue(true);
   mocks.refreshDatabaseTreeNode.mockResolvedValue(undefined);
+  mocks.refreshObjectListTreeNode.mockResolvedValue(undefined);
   mocks.requestConfirmation.mockResolvedValue(true);
   mocks.uuid.mockReset().mockReturnValueOnce("run-1").mockReturnValueOnce("run-2");
   mocks.queryStore.tabs = [{ id: "mysql-tab", connectionId: "mysql-1", database: "" }];
@@ -634,6 +640,93 @@ describe("SqlFileExecutionDialog retries", () => {
 
     await vi.waitFor(() => expect(mocks.ensureConnected).toHaveBeenCalledWith("postgres-1"));
     expect(mocks.ensureConnected).not.toHaveBeenCalledWith("mysql-1");
+  });
+
+  it.each([
+    ["MySQL", "mysql"],
+    ["PostgreSQL", "postgres"],
+  ])("keeps the selected %s namespace in the database field", async (name, dbType) => {
+    mocks.connections = [{ id: "database-1", name, db_type: dbType, driver_profile: dbType, database: "configured_db" }];
+    mocks.queryStore.tabs = [{ id: "database-tab", connectionId: "database-1", database: "selected_db", schema: "remembered_schema" }];
+    mocks.queryStore.activeTabId = "database-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["configured_db", "selected_db"]);
+
+    await mountReadyDialog();
+    await completeFirstExecution();
+
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({ connectionId: "database-1", database: "selected_db" });
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).not.toHaveProperty("schema");
+  });
+
+  it("restores and executes a remembered OceanBase Oracle schema without replacing the connection database", async () => {
+    mocks.connections = [
+      { id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "first" },
+      { id: "ob-oracle-1", name: "OceanBase Oracle", db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", database: "tenant_service" },
+    ];
+    rememberExternalSqlFileTarget("/tmp/first.sql", { connectionId: "ob-oracle-1", database: "APP", schema: "APP" });
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["SYS", "APP"]);
+
+    await mountReadyDialog();
+    await completeFirstExecution();
+
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({
+      connectionId: "ob-oracle-1",
+      database: "tenant_service",
+      schema: "APP",
+    });
+    expect(mocks.refreshObjectListTreeNode).toHaveBeenCalledWith("ob-oracle-1", "tenant_service", "APP");
+  });
+
+  it("restores a legacy root-schema target that stored the schema in database", async () => {
+    mocks.connections = [{ id: "ob-oracle-1", name: "OceanBase Oracle", db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", database: "tenant_service" }];
+    mocks.queryStore.tabs = [{ id: "ob-tab", connectionId: "ob-oracle-1", database: "tenant_service" }];
+    mocks.queryStore.activeTabId = "ob-tab";
+    rememberExternalSqlFileTarget("/tmp/first.sql", { connectionId: "ob-oracle-1", database: "APP" });
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["SYS", "APP"]);
+
+    await mountReadyDialog();
+    await completeFirstExecution();
+
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({
+      connectionId: "ob-oracle-1",
+      database: "tenant_service",
+      schema: "APP",
+    });
+  });
+
+  it("keeps an empty configured Oracle-family database empty when restoring a legacy schema target", async () => {
+    mocks.connections = [{ id: "ob-oracle-1", name: "OceanBase Oracle", db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", database: "" }];
+    mocks.queryStore.tabs = [{ id: "ob-tab", connectionId: "ob-oracle-1", database: "" }];
+    mocks.queryStore.activeTabId = "ob-tab";
+    rememberExternalSqlFileTarget("/tmp/first.sql", { connectionId: "ob-oracle-1", database: "APP" });
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["SYS", "APP"]);
+
+    await mountReadyDialog();
+    await completeFirstExecution();
+
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({
+      connectionId: "ob-oracle-1",
+      database: "",
+      schema: "APP",
+    });
+  });
+
+  it("uses the same OceanBase Oracle database and schema for manual SQL-file execution", async () => {
+    mocks.connections = [{ id: "ob-oracle-1", name: "OceanBase Oracle", db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", database: "tenant_service" }];
+    mocks.queryStore.tabs = [{ id: "ob-tab", connectionId: "ob-oracle-1", database: "APP", schema: "APP" }];
+    mocks.queryStore.activeTabId = "ob-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["SYS", "APP"]);
+
+    await enableManualTransaction();
+    await completeFirstExecution();
+
+    expect(mocks.beginManualTransaction).toHaveBeenCalledWith("ob-oracle-1", "tenant_service", "APP");
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({
+      connectionId: "ob-oracle-1",
+      database: "tenant_service",
+      schema: "APP",
+      txnSessionId: "txn-1",
+    });
   });
 
   it("does not select a connection when the active tab is non-SQL", async () => {

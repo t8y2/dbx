@@ -64,6 +64,7 @@ const dataComparePrefillTable = ref("");
 const dataCompareSessionId = ref<string | null>(null);
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
+const sqlFilePrefillSchema = ref<string>();
 const sqlFilePrefillFilePath = ref("");
 const sqlFilePrefillPreview = ref<SqlFilePreview>();
 const diagramPrefillConnectionId = ref("");
@@ -221,6 +222,7 @@ export function useDialogSources() {
         if (v) {
           sqlFilePrefillConnectionId.value = v.connectionId;
           sqlFilePrefillDatabase.value = v.database;
+          sqlFilePrefillSchema.value = v.schema;
           sqlFilePrefillFilePath.value = v.filePath ?? "";
           sqlFilePrefillPreview.value = v.preview;
           showSqlFileDialog.value = true;
@@ -236,6 +238,7 @@ export function useDialogSources() {
       if (!open) {
         sqlFilePrefillConnectionId.value = "";
         sqlFilePrefillDatabase.value = "";
+        sqlFilePrefillSchema.value = undefined;
         sqlFilePrefillFilePath.value = "";
         sqlFilePrefillPreview.value = undefined;
       }
@@ -629,6 +632,7 @@ export function useDialogSources() {
     dataCompareSessionId,
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
+    sqlFilePrefillSchema,
     sqlFilePrefillFilePath,
     sqlFilePrefillPreview,
     diagramPrefillConnectionId,

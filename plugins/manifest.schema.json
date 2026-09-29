@@ -46,7 +46,7 @@
     "contributions": {
       "type": "array",
       "items": {
-        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }, { "$ref": "#/$defs/commandContribution" }, { "$ref": "#/$defs/menusContribution" }]
+        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }, { "$ref": "#/$defs/commandContribution" }, { "$ref": "#/$defs/menusContribution" }, { "$ref": "#/$defs/mcpContribution" }]
       }
     },
     "localizations": {
@@ -427,6 +427,18 @@
         "type": { "const": "menus" },
         "id": { "$ref": "#/$defs/identifier" },
         "items": { "type": "array", "items": { "$ref": "#/$defs/menuItem" } }
+      }
+    },
+    "mcpContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "mcp" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "description": { "type": "string" },
+        "ai_tools": { "type": "boolean", "default": true, "description": "Set false to keep the tools off the built-in AI agent." },
+        "external_tools": { "type": "boolean", "default": false, "description": "Set true to expose the tools on the external dbx MCP server." }
       }
     },
     "menuItem": {

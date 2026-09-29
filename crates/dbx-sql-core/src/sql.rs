@@ -57,6 +57,10 @@ pub struct SqlFileRequest {
     pub execution_id: String,
     pub connection_id: String,
     pub database: String,
+    /// Optional schema/session namespace for databases where it is distinct
+    /// from the database used to establish the connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
     pub file_path: String,
     pub continue_on_error: bool,
     /// Reuse a held manual transaction instead of committing through ordinary query execution.
@@ -274,6 +278,7 @@ impl SqlDialectProfile {
                 // Oracle for statement splitting so semicolons inside the procedure body are not
                 // misinterpreted as client-side statement terminators.
                 | DatabaseType::Argo
+                | DatabaseType::Transwarp
         )
     }
 }
@@ -3008,8 +3013,35 @@ mod tests {
         fuzzy_subsequence_match, optimize_sql_file_import_statements, prepare_sql_file_statement, split_sql_script,
         split_sql_statement_ranges_with_options, split_sql_statements_for_database, starts_with_executable_sql_keyword,
         starts_with_executable_sql_keyword_for_database, starts_with_oracle_style_routine_body, SqlDialectProfile,
-        SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
+        SqlFileRequest, SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
     };
+
+    #[test]
+    fn sql_file_request_schema_is_optional_and_round_trips_when_present() {
+        let legacy = serde_json::json!({
+            "executionId": "legacy",
+            "connectionId": "mysql-1",
+            "database": "app",
+            "filePath": "backup.sql",
+            "continueOnError": false
+        });
+        let legacy_request: SqlFileRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy_request.schema, None);
+        assert!(serde_json::to_value(&legacy_request).unwrap().get("schema").is_none());
+
+        let with_schema = serde_json::json!({
+            "executionId": "oracle-schema",
+            "connectionId": "oceanbase-oracle-1",
+            "database": "tenant_service",
+            "schema": "APP",
+            "filePath": "restore.sql",
+            "continueOnError": false
+        });
+        let request: SqlFileRequest = serde_json::from_value(with_schema).unwrap();
+        assert_eq!(request.database, "tenant_service");
+        assert_eq!(request.schema.as_deref(), Some("APP"));
+        assert_eq!(serde_json::to_value(request).unwrap()["schema"], "APP");
+    }
 
     #[test]
     fn fuzzy_subsequence_match_matches_ordered_characters() {
@@ -4066,6 +4098,7 @@ BEGIN
 END;";
 
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Argo), vec![sql.to_string()]);
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Transwarp), vec![sql.to_string()]);
     }
 
     #[test]

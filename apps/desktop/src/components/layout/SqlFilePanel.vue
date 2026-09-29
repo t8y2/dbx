@@ -275,6 +275,7 @@ function executeFile(path: string) {
   connectionStore.sqlFileSource = {
     connectionId: target.connectionId,
     database: target.database,
+    ...(target.schema ? { schema: target.schema } : {}),
     filePath: path,
   };
 }

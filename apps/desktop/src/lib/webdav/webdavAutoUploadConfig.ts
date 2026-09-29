@@ -1,7 +1,8 @@
-import type { WebDavConfig } from "@/lib/backend/api";
+import type { SyncSelection, WebDavConfig } from "@/lib/backend/api";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
-export const WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS = ["dbx-webdav-endpoint", "dbx-webdav-username", "dbx-webdav-remote-path", "dbx-webdav-auto-upload-enabled", "dbx-webdav-auto-upload-interval-minutes"] as const;
+export const WEB_DAV_BACKUP_SELECTION_STORAGE_KEY = "dbx-webdav-backup-selection";
+export const WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS = ["dbx-webdav-endpoint", "dbx-webdav-username", "dbx-webdav-remote-path", "dbx-webdav-auto-upload-enabled", "dbx-webdav-auto-upload-interval-minutes", WEB_DAV_BACKUP_SELECTION_STORAGE_KEY] as const;
 
 export const DEFAULT_WEB_DAV_REMOTE_PATH = "DBX/sync/snapshot.json";
 export const DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES = 30;
@@ -42,4 +43,21 @@ export function writeWebDavAutoUploadFields(config: WebDavConfig, autoUpload: { 
   safeLocalStorageSet("dbx-webdav-remote-path", config.remotePath?.trim() || DEFAULT_WEB_DAV_REMOTE_PATH);
   safeLocalStorageSet("dbx-webdav-auto-upload-enabled", String(autoUpload.enabled));
   safeLocalStorageSet("dbx-webdav-auto-upload-interval-minutes", String(normalizedWebDavAutoUploadInterval(autoUpload.intervalMinutes)));
+}
+
+export function readWebDavBackupSelection(): SyncSelection | undefined {
+  const serialized = safeLocalStorageGet(WEB_DAV_BACKUP_SELECTION_STORAGE_KEY);
+  if (!serialized) return undefined;
+  try {
+    const selection = JSON.parse(serialized) as SyncSelection;
+    if (typeof selection !== "object" || selection === null || typeof selection.includeSecrets !== "boolean") return undefined;
+    return selection;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeWebDavBackupSelection(selection: SyncSelection) {
+  safeLocalStorageSet(WEB_DAV_BACKUP_SELECTION_STORAGE_KEY, JSON.stringify(selection));
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("dbx:webdav-auto-upload-config-changed"));
 }

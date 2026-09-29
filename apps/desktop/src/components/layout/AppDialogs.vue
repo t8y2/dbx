@@ -268,6 +268,7 @@ watch(
     v-model:open="dialogs.showSqlFileDialog.value"
     :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value"
     :prefill-database="dialogs.sqlFilePrefillDatabase.value"
+    :prefill-schema="dialogs.sqlFilePrefillSchema.value"
     :prefill-file-path="dialogs.sqlFilePrefillFilePath.value"
     :prefill-preview="dialogs.sqlFilePrefillPreview.value"
   />

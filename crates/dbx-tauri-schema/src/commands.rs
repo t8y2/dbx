@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tauri::State;
 
-use crate::commands::connection::AppState;
+use dbx_core::connection::AppState;
 use dbx_core::db;
 
 /// Resolve a non-internal catalog for dispatch to the Doris multi-catalog path.

@@ -1,0 +1,9 @@
+[package]
+name = "dbx-tauri-schema"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88.0"
+
+[dependencies]
+dbx-core = { path = "../dbx-core", default-features = false }
+tauri = "2.10.3"

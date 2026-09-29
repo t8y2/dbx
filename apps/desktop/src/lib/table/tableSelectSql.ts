@@ -13,6 +13,10 @@ import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;
   driverProfile?: string;
+  /** Server version reported by the connection (for example `Neo4j/4.4.44`). Engines that
+   * renamed a built-in function across releases (Neo4j below 5 uses `id()` where 5+ uses
+   * `elementId()`) need it to generate SQL the connected server understands. */
+  serverVersion?: string;
   identifierQuote?: string;
   schema?: string;
   tableName: string;
@@ -105,6 +109,7 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
     databaseType === "clickhouse" ||
     databaseType === "hive" ||
     databaseType === "argo" ||
+    databaseType === "transwarp" ||
     databaseType === "kyuubi" ||
     databaseType === "impala" ||
     databaseType === "spark" ||
@@ -148,6 +153,7 @@ function requiresIdentifierQuote(databaseType: DatabaseType | undefined, name: s
     case "clickhouse":
     case "hive":
     case "argo":
+    case "transwarp":
     case "kyuubi":
     case "impala":
     case "spark":

@@ -379,6 +379,15 @@ pub(super) fn capabilities_for(
             rebuild_index: true,
             ..base
         },
+        // Inceptor accepts ADD COLUMNS and CHANGE, but not DROP COLUMN.
+        Some(DatabaseType::Transwarp) => TableStructureCapabilities {
+            dialect: StructureDialect::Mysql,
+            add_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            ..base
+        },
         _ => base,
     }
 }

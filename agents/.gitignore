@@ -1,6 +1,7 @@
 **/libs/*.jar
 !drivers/cache/libs/CacheDB.jar
 !drivers/oscar/libs/oscarJDBC8.jar
+!drivers/transwarp/libs/inceptor-sdk-transwarp-6.1.0-SNAPSHOT.jar
 !drivers/uxdb/libs/uxdbjdbc-2.1.2.3p.jre8.jar
 gradle.properties
 build/

@@ -268,6 +268,20 @@ const informixCapabilities = capabilities({
   rebuildIndex: true,
 });
 
+// Inceptor accepts ADD COLUMNS and CHANGE. DROP COLUMN and index/constraint DDL
+// remain disabled until a safe server-supported form is verified.
+const transwarpCapabilities = capabilities({
+  dialect: "mysql",
+  createTable: true,
+  addColumn: true,
+  renameColumn: true,
+  alterExistingColumn: true,
+  alterType: true,
+  alterNullability: true,
+  alterDefault: true,
+  comment: true,
+});
+
 const accessCapabilities = capabilities({
   dialect: "h2",
   createTable: true,
@@ -359,6 +373,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   access: accessCapabilities,
   clickhouse: clickhouseCapabilities,
   informix: informixCapabilities,
+  transwarp: transwarpCapabilities,
   influxdb: influxdbCapabilities,
   manticoresearch: manticoreSearchCapabilities,
 };

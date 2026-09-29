@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
@@ -78,6 +81,132 @@ func TestConfiguredDatabaseUsesConnectionString(t *testing.T) {
 	}
 }
 
+func TestEffectiveNeo4jSchemeMatchesBuiltURI(t *testing.T) {
+	for _, params := range []connectParams{
+		{Host: "127.0.0.1", Port: 7687},
+		{Host: "db.example.com", Port: 7687, SSL: true},
+		{Host: "db.example.com", Port: 7687, URLParams: "encrypted=true"},
+		{Host: "db", Port: 7687, URLParams: "scheme=bolt"},
+		{Host: "db", Port: 7687, URLParams: "scheme=neo4j+ssc"},
+		{ConnectionString: "jdbc:neo4j://user:secret@db:7687?database=movies"},
+		{ConnectionString: "bolt://db:7687"},
+	} {
+		uri, err := buildNeo4jURI(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := url.Parse(uri)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := effectiveNeo4jScheme(params); got != parsed.Scheme {
+			t.Fatalf("effectiveNeo4jScheme(%#v) = %q, want %q", params, got, parsed.Scheme)
+		}
+	}
+}
+
+func TestDirectConnectionParamsRewritesRoutingSchemes(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		params      connectParams
+		want        connectParams
+		wantChanged bool
+	}{
+		{
+			name:        "default routing scheme becomes direct",
+			params:      connectParams{Host: "db", Port: 7687},
+			want:        connectParams{Host: "db", Port: 7687, URLParams: "scheme=bolt"},
+			wantChanged: true,
+		},
+		{
+			name:        "tls keeps encryption",
+			params:      connectParams{Host: "db", Port: 7687, SSL: true, URLParams: "connection_timeout=5s"},
+			want:        connectParams{Host: "db", Port: 7687, SSL: true, URLParams: "connection_timeout=5s&scheme=bolt+s"},
+			wantChanged: true,
+		},
+		{
+			name:        "explicit routing scheme is rewritten in place",
+			params:      connectParams{Host: "db", Port: 7687, URLParams: "scheme=neo4j&database=movies"},
+			want:        connectParams{Host: "db", Port: 7687, URLParams: "database=movies&scheme=bolt"},
+			wantChanged: true,
+		},
+		{
+			name:        "direct connection is kept",
+			params:      connectParams{Host: "db", Port: 7687, URLParams: "scheme=bolt"},
+			want:        connectParams{Host: "db", Port: 7687, URLParams: "scheme=bolt"},
+			wantChanged: false,
+		},
+		{
+			name:        "routing connection string becomes direct",
+			params:      connectParams{ConnectionString: "jdbc:neo4j://user:secret@db:7687?database=movies"},
+			want:        connectParams{ConnectionString: "bolt://db:7687"},
+			wantChanged: true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, changed := directConnectionParams(testCase.params)
+			if changed != testCase.wantChanged {
+				t.Fatalf("directConnectionParams() changed = %t, want %t", changed, testCase.wantChanged)
+			}
+			if !changed {
+				return
+			}
+			uri, err := buildNeo4jURI(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantURI, err := buildNeo4jURI(testCase.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if uri != wantURI {
+				t.Fatalf("directConnectionParams() built %q, want %q", uri, wantURI)
+			}
+		})
+	}
+}
+
+func TestIsRoutingUnsupported(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "driver usage error wording",
+			err:  errors.New("feature not supported: Server 127.0.0.1:17690 does not support: routing (requires cluster setup)"),
+			want: true,
+		},
+		{name: "typed feature error", err: &neo4jdb.FeatureNotSupportedError{Server: "db:7687", Feature: "routing", Reason: "requires cluster setup"}, want: true},
+		{name: "typed route-to-database error", err: &neo4jdb.FeatureNotSupportedError{Server: "db:7687", Feature: "route to database", Reason: "requires at least server v4"}, want: false},
+		{name: "unrelated error", err: errors.New("connection refused"), want: false},
+		{name: "nil error", err: nil, want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := isRoutingUnsupported(testCase.err); got != testCase.want {
+				t.Fatalf("isRoutingUnsupported(%v) = %t, want %t", testCase.err, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestWithURLParamKeepsOtherEntries(t *testing.T) {
+	cases := []struct {
+		urlParams string
+		want      string
+	}{
+		{urlParams: "", want: "scheme=bolt+s"},
+		{urlParams: "scheme=neo4j", want: "scheme=bolt+s"},
+		{urlParams: "max_connection_pool_size=10;scheme=neo4j", want: "max_connection_pool_size=10&scheme=bolt+s"},
+		{urlParams: "a=1&b=2", want: "a=1&b=2&scheme=bolt+s"},
+	}
+	for _, testCase := range cases {
+		if got := withURLParam(testCase.urlParams, "scheme", "bolt+s"); got != testCase.want {
+			t.Fatalf("withURLParam(%q) = %q, want %q", testCase.urlParams, got, testCase.want)
+		}
+	}
+}
+
 func TestMetadataWindowAndFiltering(t *testing.T) {
 	values := []string{"alpha", "beta", "gamma"}
 	if got := applyMetadataWindow(values, 1, 1); !reflect.DeepEqual(got, []string{"beta"}) {
@@ -102,8 +231,20 @@ func TestClassifyNeo4jErrors(t *testing.T) {
 	syntax := classifyRPCError("execute_query", "session-1", &neo4jdb.Neo4jError{
 		Code: "Neo.ClientError.Statement.SyntaxError", Msg: "invalid input",
 	})
-	if syntax.Data.Category != "sql" || syntax.Data.SQLState == "" {
+	if syntax.Data.Category != "sql" || syntax.Data.SQLState != "" || syntax.Data.AgentSessionID != "session-1" {
 		t.Fatalf("unexpected syntax classification: %#v", syntax)
+	}
+	if syntax.Data.ContractVersion != 1 || syntax.Data.Stage != "execute" || syntax.Data.OperationOutcome != "unknown" {
+		t.Fatalf("invalid structured error contract: %#v", syntax.Data)
+	}
+	if syntax.Message == "" || !strings.Contains(syntax.Message, "Neo.ClientError.Statement.SyntaxError") {
+		t.Fatalf("Neo4j error code was lost: %q", syntax.Message)
+	}
+	resource := classifyRPCError("execute_query", "session-1", &neo4jdb.Neo4jError{
+		Code: "Neo.TransientError.General.DatabaseUnavailable", Msg: "database unavailable",
+	})
+	if resource.Data.Category != "resource" || resource.Data.SessionDisposition != "replace_runtime" {
+		t.Fatalf("invalid resource error contract: %#v", resource.Data)
 	}
 	canceled := classifyRPCError("execute_query", "session-1", context.Canceled)
 	if canceled.Data.Category != "canceled" || canceled.Data.SessionDisposition != "quarantine" {

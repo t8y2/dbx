@@ -1,10 +1,11 @@
 // @vitest-environment happy-dom
 import { createApp, h, nextTick, reactive, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { OPEN_PLUGIN_SETTINGS } from "@/lib/plugins/pluginCenterNavigation";
 import PluginShortcutBar from "./PluginShortcutBar.vue";
 import { normalizePluginShortcutSettings, type PluginShortcutPosition } from "@/lib/plugins/pluginShortcuts";
 
-const mocks = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn(), toast: vi.fn(), state: null as any, entries: null as any }));
+const mocks = vi.hoisted(() => ({ openSettings: vi.fn(), open: vi.fn(), save: vi.fn(), toast: vi.fn(), state: null as any, entries: null as any }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => mocks.state }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
@@ -27,6 +28,7 @@ function mount(position: PluginShortcutPosition) {
   container = document.createElement("div");
   document.body.append(container);
   app = createApp({ render: () => h(PluginShortcutBar, { position }) });
+  app.provide(OPEN_PLUGIN_SETTINGS, mocks.openSettings);
   app.mount(container);
   const scroll = container.querySelector("[data-shortcut-scroll]") as HTMLElement;
   scroll.getBoundingClientRect = () => box(0, 0, 100, 200);
@@ -41,16 +43,62 @@ function pointer(element: EventTarget, type: string, x: number, y: number) {
 }
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.state = reactive({ isEditorSettingsLoaded: true, editorSettings: { pluginShortcuts: normalizePluginShortcutSettings({}) }, updateEditorSettingsAndPersist: mocks.save });
+  mocks.state = reactive({ isEditorSettingsLoaded: true, editorSettings: { pluginShortcuts: normalizePluginShortcutSettings({ showSettingsEntry: false }) }, updateEditorSettingsAndPersist: mocks.save });
   mocks.entries = ref(["a", "b", "c"].map((id) => ({ id, pluginId: id, label: `Function ${id}`, pluginName: `Plugin ${id}`, kind: "workbench", targetId: id, disabled: false })));
   mocks.save.mockResolvedValue(undefined);
 });
 afterEach(() => {
   app?.unmount();
   container?.remove();
+  vi.restoreAllMocks();
 });
 
 describe("plugin shortcut bar", () => {
+  it.each(["left-top", "right-top", "sidebar-bottom"] as const)("keeps the measured preview inside both edges at %s", async (position) => {
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-shortcut-drag-preview") ? box(0, 0, 180, 32) : original.call(this);
+    });
+    const items = mount(position);
+    pointer(items[0], "pointerdown", 16, 16);
+    pointer(window, "pointermove", window.innerWidth - 2, window.innerHeight - 2);
+    await flush();
+    const preview = document.querySelector<HTMLElement>("[data-shortcut-drag-preview]")!;
+    expect(preview.style.left).toBe(`${window.innerWidth - 194}px`);
+    expect(preview.style.top).toBe(`${window.innerHeight - 46}px`);
+    pointer(window, "pointermove", 2, 2);
+    await flush();
+    expect(preview.style.left).toBe("14px");
+    expect(preview.style.top).toBe("14px");
+    expect(preview.style.visibility).not.toBe("hidden");
+  });
+
+  it.each(["left-top", "left-bottom", "right-top", "right-bottom", "sidebar-bottom"] as const)("keeps settings last and outside sorting at %s", async (position) => {
+    mocks.state.editorSettings.pluginShortcuts.showSettingsEntry = true;
+    mount(position);
+    const button = container.querySelector<HTMLElement>("[data-plugin-shortcut-settings]")!;
+    const buttons = container.querySelectorAll("button");
+    if (position === "sidebar-bottom") {
+      expect(container.querySelector("[data-shortcut-header]")?.contains(button)).toBe(true);
+      expect(container.querySelector("[data-shortcut-scroll] [data-plugin-shortcut-settings]")).toBeNull();
+    } else expect(buttons[buttons.length - 1]).toBe(button);
+    expect(button.closest("[data-shortcut-id]")).toBeNull();
+    pointer(button, "pointerdown", 16, 120);
+    pointer(window, "pointermove", 1, 1);
+    pointer(window, "pointerup", 1, 1);
+    await flush();
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(document.querySelector(".shortcut-drag-preview")).toBeNull();
+    button.click();
+    expect(mocks.openSettings).toHaveBeenCalledOnce();
+    mocks.entries.value = [];
+    await flush();
+    expect(container.querySelector("[data-plugin-shortcut-settings]")).toBeNull();
+    expect(container.querySelector("nav")).toBeNull();
+    mocks.state.editorSettings.pluginShortcuts.showSettingsEntry = false;
+    await flush();
+    expect(container.querySelector("nav")).toBeNull();
+  });
   it.each(["left-top", "left-bottom", "right-top", "right-bottom", "sidebar-bottom"] as const)("sorts with pointer events at %s without launching on release", async (position) => {
     const items = mount(position);
     await nextTick();
@@ -62,7 +110,7 @@ describe("plugin shortcut bar", () => {
     expect(document.querySelector(".shortcut-drag-preview")).not.toBeNull();
     pointer(window, "pointerup", 1, 1);
     await flush();
-    expect(mocks.save).toHaveBeenCalledWith({ pluginShortcuts: { ...normalizePluginShortcutSettings({}), order: ["c", "a", "b"] } });
+    expect(mocks.save).toHaveBeenCalledWith({ pluginShortcuts: { ...normalizePluginShortcutSettings({ showSettingsEntry: false }), order: ["c", "a", "b"] } });
     (items[2].querySelector("button") as HTMLElement).click();
     expect(mocks.open).not.toHaveBeenCalled();
     expect(document.querySelector(".shortcut-drag-preview")).toBeNull();

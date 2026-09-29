@@ -295,6 +295,31 @@ export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
 ]);
 
 /**
+ * Values a field-to-value map accepts, by the kind of map it is.
+ *
+ * `1`/`-1` and the index types are what the server understands in these positions; the driver
+ * passes the document straight through, so the server has the final say on anything exotic.
+ */
+export const KEY_MAP_VALUES: Record<string, MongoOperatorSpec[]> = {
+  sort: specs([
+    ["1", "Ascending", "1"],
+    ["-1", "Descending", "-1"],
+  ]),
+  projection: specs([
+    ["1", "Include the field", "1"],
+    ["0", "Exclude the field", "0"],
+  ]),
+  index: specs([
+    ["1", "Ascending index", "1"],
+    ["-1", "Descending index", "-1"],
+    ['"text"', "Text index for $text search", '"text"'],
+    ['"hashed"', "Hashed index for hashed sharding", '"hashed"'],
+    ['"2dsphere"', "Geospatial index for GeoJSON data", '"2dsphere"'],
+    ['"2d"', "Geospatial index for legacy coordinate pairs", '"2d"'],
+  ]),
+};
+
+/**
  * The operations a `bulkWrite()` array accepts, and the fields each one allows.
  *
  * Both lists are exactly what the shell parser accepts: it rejects an unknown operation key and

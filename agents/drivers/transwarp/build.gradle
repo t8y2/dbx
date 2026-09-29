@@ -1,0 +1,25 @@
+dependencies {
+    implementation files('libs/inceptor-sdk-transwarp-6.1.0-SNAPSHOT.jar')
+    testImplementation 'com.h2database:h2:2.4.240'
+}
+
+tasks.named('shadowJar') {
+    doFirst {
+        if (!file('libs/inceptor-sdk-transwarp-6.1.0-SNAPSHOT.jar').isFile()) {
+            throw new GradleException('Missing bundled Transwarp SDK in libs/inceptor-sdk-transwarp-6.1.0-SNAPSHOT.jar')
+        }
+    }
+    manifest {
+        attributes(
+            'Agent-Label': 'Transwarp Inceptor',
+            'Main-Class': 'com.dbx.agent.transwarp.TranswarpAgent'
+        )
+    }
+}
+
+tasks.named('test') {
+    dependsOn tasks.named('shadowJar')
+    doFirst {
+        systemProperty 'dbx.transwarp.agent.jar', tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath
+    }
+}

@@ -37,6 +37,7 @@ export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverPr
   if (dbType === "kyuubi" || dbType === "impala") return "hive";
   if (dbType === "oracle") return "oracle";
   if (dbType === "h2") return "h2";
+  if (dbType === "transwarp") return "transwarp";
   if (dbType === "mongodb") return "mongodb";
   if (dbType === "dameng") return "dameng";
   if (dbType === "gbase") return driverProfile === "gbase8s" ? "gbase8s" : "gbase8a";

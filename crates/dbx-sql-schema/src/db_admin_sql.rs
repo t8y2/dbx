@@ -279,6 +279,12 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
     if !supports_create_database_target(options.database_type, options.driver_profile.as_deref()) {
         return Err(format!("Creating databases is not supported for {}.", database_label(options.database_type)));
     }
+    if options.database_type == Some(DatabaseType::Transwarp) {
+        return Ok(format!(
+            "CREATE DATABASE IF NOT EXISTS {};",
+            quote_table_identifier(options.database_type, &options.name)
+        ));
+    }
     if is_informix_family(options.database_type, options.driver_profile.as_deref()) {
         // Informix / GBase 8s accept only a bare `CREATE DATABASE <name>`. The new database
         // inherits the instance default locale, and the MySQL `CHARACTER SET`/`COLLATE`
@@ -347,6 +353,7 @@ pub fn supports_create_database_target(database_type: Option<DatabaseType>, driv
                 | DatabaseType::Highgo
                 | DatabaseType::Kingbase
                 | DatabaseType::Yashandb
+                | DatabaseType::Transwarp
         )
     )
 }
@@ -691,7 +698,11 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
 }
 
 pub fn build_drop_database_sql(options: DatabaseNameSqlOptions) -> String {
-    format!("DROP DATABASE {};", quote_table_identifier(options.database_type, &options.name))
+    let name = quote_table_identifier(options.database_type, &options.name);
+    if options.database_type == Some(DatabaseType::Transwarp) {
+        return format!("DROP DATABASE IF EXISTS {name};");
+    }
+    format!("DROP DATABASE {name};")
 }
 
 pub fn build_update_database_properties_sql(options: DatabasePropertyEditSqlOptions) -> Result<String, String> {
@@ -921,6 +932,9 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if database_type == DatabaseType::SqlServer {
         return true;
     }
+    if database_type == DatabaseType::Transwarp {
+        return object_type == DatabaseObjectType::Table;
+    }
     if matches!(object_type, DatabaseObjectType::Procedure | DatabaseObjectType::Function) {
         return false;
     }
@@ -961,6 +975,14 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
             "EXEC sp_rename {}, {}, N'OBJECT';",
             sqlserver_string(&sqlserver_object_name(options.schema.as_deref(), &options.old_name)),
             sqlserver_string(&options.new_name)
+        ));
+    }
+
+    if database_type == Some(DatabaseType::Transwarp) {
+        return Ok(format!(
+            "ALTER TABLE {} RENAME TO {};",
+            qualified_name(database_type, options.schema.as_deref(), &options.old_name),
+            qualified_name(database_type, options.schema.as_deref(), &options.new_name)
         ));
     }
 
@@ -1539,6 +1561,50 @@ mod tests {
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8a")));
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), None));
         assert!(supports_create_database_target(Some(DatabaseType::Informix), None));
+        assert!(supports_create_database_target(Some(DatabaseType::Transwarp), Some("transwarp-inceptor")));
+    }
+
+    #[test]
+    fn transwarp_database_actions_match_waterdrop_ddl() {
+        assert!(!supports_create_schema_target(Some(DatabaseType::Transwarp)));
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Transwarp),
+                driver_profile: Some("transwarp-inceptor".to_string()),
+                target: None,
+                parent: None,
+                name: "analytics db".to_string(),
+                charset: None,
+                collation: None,
+            })
+            .unwrap(),
+            "CREATE DATABASE IF NOT EXISTS `analytics db`;"
+        );
+        assert_eq!(
+            build_drop_database_sql(DatabaseNameSqlOptions {
+                database_type: Some(DatabaseType::Transwarp),
+                name: "analytics db".to_string(),
+            }),
+            "DROP DATABASE IF EXISTS `analytics db`;"
+        );
+    }
+
+    #[test]
+    fn transwarp_table_rename_matches_waterdrop_ddl() {
+        assert!(supports_object_rename(Some(DatabaseType::Transwarp), DatabaseObjectType::Table));
+        assert!(!supports_object_rename(Some(DatabaseType::Transwarp), DatabaseObjectType::View));
+        assert!(!supports_database_rename(Some(DatabaseType::Transwarp)));
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::Transwarp),
+                object_type: DatabaseObjectType::Table,
+                schema: Some("analytics".to_string()),
+                old_name: "old table".to_string(),
+                new_name: "new table".to_string(),
+            })
+            .unwrap(),
+            "ALTER TABLE `analytics`.`old table` RENAME TO `analytics`.`new table`;"
+        );
     }
 
     #[test]
@@ -2938,6 +3004,7 @@ mod tests {
                 table_comment: None,
                 original_table_comment: None,
                 mysql_engine: None,
+                transwarp_create: None,
                 partitioned: false,
                 is_gaussdb_m_mode: false,
                 table_collation: None,

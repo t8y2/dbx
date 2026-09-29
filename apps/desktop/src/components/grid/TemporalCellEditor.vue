@@ -3,8 +3,12 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import type { FocusOutsideEvent, PointerDownOutsideEvent } from "reka-ui";
 import { CalendarClock, ChevronDown, ChevronUp, CircleSlash } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { isSaveShortcut } from "@/lib/editor/keyboardShortcuts";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { formatTemporalInputValue, hostTimezoneOffsetSuffix, parseTemporalInputValue, stepTemporalInputValue, temporalOffsetSuffix, type TemporalCellEditorKind } from "@/lib/dataGrid/dataGridTemporalEditor";
+
+const settingsStore = useSettingsStore();
 
 const props = withDefaults(
   defineProps<{
@@ -28,6 +32,7 @@ const emit = defineEmits<{
   "update:modelValue": [value: string];
   commit: [];
   cancel: [];
+  save: [];
 }>();
 
 const open = ref(false);
@@ -216,6 +221,15 @@ function finishCancel() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  // 编辑器的 keydown 一律 stop 掉，因此网格上的保存快捷键不会冒泡过去；
+  // 这里必须自己识别并转发，否则 datetime/date/time 单元格编辑期间按 Ctrl/Cmd+S 会被静默丢弃。
+  if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    event.preventDefault();
+    flushInputValue(event.target);
+    finishCommit();
+    emit("save");
+    return;
+  }
   if (event.key === "Enter") {
     event.preventDefault();
     flushInputValue(event.target);

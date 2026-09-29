@@ -9,7 +9,7 @@ export interface JoinedSaveTarget {
 /** Feed per-source changes through the existing SQL builder, including undo SQL. */
 export function joinedSaveOptions(
   targets: JoinedSaveTarget[],
-  options: Pick<DataGridSaveStatementOptions, "databaseType" | "identifierQuote" | "columns" | "includeDatabaseName"> & {
+  options: Pick<DataGridSaveStatementOptions, "databaseType" | "serverVersion" | "identifierQuote" | "columns" | "includeDatabaseName"> & {
     rows: CellValue[][];
     dirtyRows: Map<number, Map<number, CellValue>>;
     newRows: CellValue[][];
@@ -24,6 +24,7 @@ export function joinedSaveOptions(
   }));
   return joinedRowChanges(sources, options.rows, options.dirtyRows).map((update) => ({
     databaseType: options.databaseType,
+    serverVersion: options.serverVersion,
     identifierQuote: options.identifierQuote,
     columns: options.columns,
     tableMeta: targets[update.sourceIndex]!.tableMeta,

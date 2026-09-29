@@ -21,6 +21,7 @@ import { summarizeExportRows } from "@/lib/export/exportDiagnostics";
 import { appendDebugLog, appendNativeProcessMemoryLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
 import { buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, buildMongoCopyUpdateDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
@@ -912,7 +913,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           }
           outputPath = path as string;
         }
-        await api.exportQueryResultCsv(outputPath, result.columns, rows, useSettingsStore().editorSettings.csvQuoteMode);
+        await api.exportQueryResultCsv(outputPath, result.columns, rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode));
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -952,7 +953,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         }
         const result = await resultToExport(undefined, undefined, false);
         const rows = forceCsvTextForTemporalColumns(result.rows, result.columnTypes);
-        await api.exportQueryResultCsv(outputPath, result.columns, rows, useSettingsStore().editorSettings.csvQuoteMode);
+        await api.exportQueryResultCsv(outputPath, result.columns, rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode));
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -1389,6 +1390,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           format,
           ...(format === "sql" && sqlExportOptions ? { insertMode: sqlExportOptions.insertMode, splitMaxMb: sqlExportOptions.splitMaxMb, selectedColumns: sqlExportOptions.selectedColumns } : {}),
           csvQuoteMode: editorSettings.csvQuoteMode,
+          nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
           columns: format === "sql" ? effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!) : columns.value,
           columnTypes: columnTypes.value,
           ...(format === "sql" ? { columnExtras: sqlExportColumnExtras(effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!)) } : {}),
@@ -1470,6 +1472,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           ...baseRequest,
           ...(format === "sql" ? { selectedColumns: sqlExportOptions?.selectedColumns } : {}),
           csvQuoteMode: useSettingsStore().editorSettings.csvQuoteMode,
+          nullLiteral: csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode),
           ...sqlExportPrimaryKeyOptions(),
           dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined,
           numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true,

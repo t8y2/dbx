@@ -128,6 +128,14 @@ pub fn agent_connect_params_with_role(
         sap_hana_jdbc_connection_string(config, host, port, database)
     } else if matches!(config.db_type, DatabaseType::Trino | DatabaseType::PrestoSql) {
         trino_like_jdbc_connection_string(config, host, port, database)?
+    } else if config.db_type == DatabaseType::Transwarp {
+        match config.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
+            Some(url) if host != config.host || port != config.port => {
+                crate::models::connection::rewrite_jdbc_url_host(url, host, port)?
+            }
+            Some(url) => url.to_string(),
+            None => String::new(),
+        }
     } else if config.db_type == DatabaseType::H2 {
         h2_agent_jdbc_connection_string(config)
     } else {
@@ -1407,6 +1415,22 @@ mod tests {
         let params = agent_connect_params(&cfg, "jdbc.example.com", 1234, "test").unwrap();
 
         assert_eq!(params["jdbc_driver_class"], "com.example.CustomDriver");
+    }
+
+    #[test]
+    fn transwarp_jdbc_url_follows_resolved_tunnel_endpoint() {
+        let mut cfg = config(DatabaseType::Transwarp, Some("analytics"));
+        cfg.host = "quark.example.com".to_string();
+        cfg.port = 10000;
+        cfg.connection_string = Some("jdbc:inceptor2://quark.example.com:10000/analytics;fetchSize=500".to_string());
+        cfg.jdbc_driver_class = Some("org.apache.hive.jdbc.HiveDriver".to_string());
+        cfg.jdbc_driver_paths = vec!["C:/drivers/inceptor-sdk.jar".to_string()];
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 18431, "analytics").unwrap();
+
+        assert_eq!(params["connection_string"], "jdbc:inceptor2://127.0.0.1:18431/analytics;fetchSize=500");
+        assert_eq!(params["jdbc_driver_class"], "org.apache.hive.jdbc.HiveDriver");
+        assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["C:/drivers/inceptor-sdk.jar"]));
     }
 
     #[test]

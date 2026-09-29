@@ -894,8 +894,8 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
             profile
         }
 
-        DuckDb | Questdb | Snowflake | Trino | PrestoSql | Hive | Kyuubi | Impala | Argo | Spark | Bigquery
-        | Spanner | Kylin | Ignite | Ignite3 | Oscar | Tdengine | Iotdb | Databricks | Jdbc => {
+        DuckDb | Questdb | Snowflake | Trino | PrestoSql | Hive | Kyuubi | Impala | Argo | Transwarp | Spark
+        | Bigquery | Spanner | Kylin | Ignite | Ignite3 | Oscar | Tdengine | Iotdb | Databricks | Jdbc => {
             conservative_ansi(db_type)
         }
 

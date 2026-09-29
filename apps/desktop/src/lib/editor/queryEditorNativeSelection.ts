@@ -14,9 +14,16 @@ import { appendDebugLog } from "@/lib/backend/debugLog";
  * The browser selection does not have to cover the selection for the editor to
  * behave: CodeMirror paints the selection itself (`drawSelection` keeps the
  * native one transparent), it copies from its own state, and it ignores a
- * selection parked outside its content element. So while an overlay menu is
- * shown on top of the editor the browser selection is parked on the editor
- * chrome and restored as soon as the menu closes.
+ * selection parked outside its content element. So the browser selection is
+ * parked on the editor chrome while an overlay menu covers the editor, and for
+ * as long as a pointer gesture is dragging a long selection out, and restored
+ * as soon as the menu closes or the pointer is released.
+ *
+ * The drag is the case that is easiest to misread from a bug report: sweeping
+ * the pointer to the edge of the editor autoscrolls and never leaves the
+ * pointer on the text, so it stays smooth, while moving back up into the
+ * already selected lines pays the serialization cost on every mouse move
+ * (smooth in Chrome/Blink, which does not make that request at all).
  *
  * Parking outside `contentDOM` is what makes CodeMirror leave the editor state
  * alone (it maps a foreign selection back to the selection it already has), so
@@ -27,13 +34,36 @@ import { appendDebugLog } from "@/lib/backend/debugLog";
 
 /**
  * Selections shorter than this are serialized cheaply enough that parking them
- * would only trade a measurable cost for an invisible one.
+ * would only trade a measurable cost for an invisible one. Dragging a selection
+ * out keeps the browser selection live until it crosses this length, so a drag
+ * over a few lines behaves exactly as it did before.
  */
 export const NATIVE_SELECTION_PARK_MIN_CHARS = 1000;
+
+/** Whether the editor's primary selection is long enough to be worth parking. */
+export function isLargeEditorSelection(currentView: EditorView): boolean {
+  const main = currentView.state.selection.main;
+  return !main.empty && main.to - main.from >= NATIVE_SELECTION_PARK_MIN_CHARS;
+}
 
 export interface EditorNativeSelectionPark {
   /** Put the browser selection back where the editor state has it. */
   release(): void;
+}
+
+export interface EditorNativeSelectionDragParkOptions extends EditorNativeSelectionParkOptions {
+  /**
+   * Parking is suspended while this returns false, which lets a caller keep one
+   * handle for a whole gesture and still let a short selection behave normally.
+   */
+  shouldKeepParked?: () => boolean;
+  /**
+   * Whether CodeMirror's own browser-selection writes are suspended while the
+   * park holds. Only the drag park wants this, because only the drag park is
+   * re-collapsed in a frame loop that CodeMirror then writes against. See
+   * `suppressEditorSelectionWrites`.
+   */
+  suppressEditorSelectionWrites?: boolean;
 }
 
 export interface EditorNativeSelectionParkOptions {
@@ -61,6 +91,48 @@ export function editorRootSelection(currentView: EditorView): Selection | null {
 function isParkedOutsideContent(currentView: EditorView, selection: Selection): boolean {
   const anchor = selection.anchorNode;
   return !!anchor && !currentView.contentDOM.contains(anchor);
+}
+
+interface EditorViewSelectionInternals {
+  docView?: { updateSelection?: (mustRead?: boolean, fromPointer?: boolean) => void };
+  observer?: { selectionRange: { focusNode: Node | null }; readSelectionRange: () => boolean };
+}
+
+const UPDATE_SELECTION = "updateSelection";
+
+/**
+ * Stops CodeMirror from writing its selection into the browser while parked.
+ *
+ * Parking alone is not enough for a drag. CodeMirror rewrites the browser
+ * selection whenever it differs from the editor state, and a parked selection
+ * always differs, so every pointer move issues a fresh `collapse` inside the
+ * editable — which is exactly the operation that costs tens of milliseconds on
+ * macOS 26/27. Measured on a 2500 line document: 21 writes over a 300 line
+ * drag, 23–167 ms each, all of the web process main thread. Those writes buy
+ * nothing while parked: CodeMirror draws and copies the selection from its own
+ * state, a parked selection is by definition not what the user sees.
+ *
+ * The suppression is narrow on purpose — it shadows the single method that
+ * performs the write and keeps its read half, so CodeMirror still notices a
+ * selection the browser moved on its own. It is restored by the park's
+ * `release()`, and it refuses to touch a view whose internals do not look like
+ * the ones it was written against.
+ */
+function suppressEditorSelectionWrites(currentView: EditorView): (() => void) | null {
+  const internals = currentView as unknown as EditorViewSelectionInternals;
+  const docView = internals.docView;
+  const observer = internals.observer;
+  if (!docView || typeof docView[UPDATE_SELECTION] !== "function" || !observer) return null;
+  // Never clobber a patch somebody else owns; without our shadow the prototype
+  // method is what CodeMirror calls, and that is exactly what we restore.
+  if (Object.prototype.hasOwnProperty.call(docView, UPDATE_SELECTION)) return null;
+  const suppressed = (mustRead?: boolean) => {
+    if (mustRead || !observer.selectionRange.focusNode) observer.readSelectionRange();
+  };
+  docView[UPDATE_SELECTION] = suppressed;
+  return () => {
+    if (docView[UPDATE_SELECTION] === suppressed) delete docView[UPDATE_SELECTION];
+  };
 }
 
 function parkSelection(currentView: EditorView, selection: Selection): void {
@@ -138,38 +210,89 @@ function handleParkedClipboardEvent(currentView: EditorView, finalizeClipboardTe
 }
 
 /**
- * Parks the browser selection while an overlay menu covers the editor.
+ * The machinery both parking windows share.
  *
- * @returns a handle that restores the browser selection, or `null` when there
- * was nothing worth parking.
+ * Parking is idempotent and self-healing: the browser can put a selection back
+ * into the editor on its own (focus, a redraw, the platform moving a caret), so
+ * the collapse is repeated for as long as the window lasts. Reading `anchorNode`
+ * costs no layout, so the frame loop is cheap enough to run for the length of a
+ * gesture. A drag park additionally stops CodeMirror from writing the browser
+ * selection at all while it holds — see `suppressEditorSelectionWrites` — which
+ * is what removes the per-pointer-move cost of re-collapsing a large selection.
  */
-export function parkEditorNativeSelection(currentView: EditorView, options: EditorNativeSelectionParkOptions = {}): EditorNativeSelectionPark | null {
-  const main = currentView.state.selection.main;
-  if (main.empty || main.to - main.from < NATIVE_SELECTION_PARK_MIN_CHARS) return null;
-  const selection = editorRootSelection(currentView);
-  if (!selection || !selection.anchorNode || !currentView.dom.contains(selection.anchorNode)) return null;
-  // Kept for field diagnosis: it only writes while debug logging is switched
-  // on, and it is the one line that shows whether the parked window was even
-  // entered when somebody reports the editor still stuttering.
-  appendDebugLog("info", "[DBX][QueryEditor:native-selection:park]", { chars: main.to - main.from });
+interface NativeSelectionParkConfig {
+  /** Whether the window should still hold. Re-read on every frame. */
+  shouldKeepParked: () => boolean;
+  finalizeClipboardText: (text: string) => string;
+  /** See `suppressEditorSelectionWrites`. */
+  suppressWrites?: boolean;
+  /**
+   * Restore the browser selection on the next frame instead of inside
+   * `release()`, and skip the restore when the browser selection is no longer
+   * parked by then.
+   *
+   * A gesture ends by dispatching: CodeMirror collapses the selection for a
+   * click and rewrites the browser selection for a drag. Either way its own
+   * write lands first, after which there is nothing left to restore — and
+   * restoring first would put the whole long selection back into the browser
+   * only to have CodeMirror write over it. On macOS 26/27 each of those writes
+   * is the expensive text-services operation this module exists to avoid, so a
+   * click that clears a long drag paid for three of them. The frame is the
+   * safety net for the gestures that end without any dispatch — a release
+   * outside the window, a focus change — where the parked selection would
+   * otherwise stay parked. The restore re-reads the editor state when it runs.
+   */
+  deferReleaseRestore?: boolean;
+}
 
-  parkSelection(currentView, selection);
-  let released = false;
-  let frame = 0;
-  const finalizeClipboardText = options.finalizeClipboardText ?? ((text: string) => text);
-  // `copy`/`cut` bubble through the document, so listening there catches the
-  // event no matter which editor chrome inside the view holds focus.
+/**
+ * Which park most recently took the browser selection. A deferred restore only
+ * acts while its own park is still the newest one: a park that starts before the
+ * microtask runs owns the browser selection, and restoring under it would hand
+ * the selection back to the text services for a frame.
+ */
+let latestParkSequence = 0;
+
+function createNativeSelectionPark(currentView: EditorView, config: NativeSelectionParkConfig): EditorNativeSelectionPark {
+  const { shouldKeepParked, finalizeClipboardText, suppressWrites = false, deferReleaseRestore = false } = config;
+  const sequence = ++latestParkSequence;
   const doc = currentView.dom.ownerDocument;
   const win = doc.defaultView ?? window;
+  let released = false;
+  let frame = 0;
+  let parkedOnce = false;
+  let parkedSince = 0;
+  let restoreWrites: (() => void) | null = null;
+
+  const park = () => {
+    if (released || !shouldKeepParked()) return;
+    const selection = editorRootSelection(currentView);
+    if (!selection || isParkedOutsideContent(currentView, selection)) return;
+    parkSelection(currentView, selection);
+    if (!parkedOnce) {
+      parkedOnce = true;
+      parkedSince = performance.now();
+      if (suppressWrites) restoreWrites = suppressEditorSelectionWrites(currentView);
+      // Kept for field diagnosis: it only writes while debug logging is
+      // switched on, and it is the one line that shows whether the parking
+      // window was even entered when somebody reports the editor stuttering.
+      appendDebugLog("info", "[DBX][QueryEditor:native-selection:park]", {
+        chars: currentView.state.selection.main.to - currentView.state.selection.main.from,
+        suppressesEditorWrites: !!restoreWrites,
+      });
+    }
+  };
+  park();
+
   const onCopy = (event: ClipboardEvent) => handleParkedClipboardEvent(currentView, finalizeClipboardText, () => released, event);
+  // `copy`/`cut` bubble through the document, so listening there catches the
+  // event no matter which editor chrome inside the view holds focus.
   doc.addEventListener("copy", onCopy);
   doc.addEventListener("cut", onCopy);
-  // CodeMirror rewrites the browser selection from its own state on every
-  // selection update (menu actions, diagnostics re-anchoring, typing), so a
-  // single collapse does not stick. Reading `anchorNode` costs no layout.
+
   const keepParked = () => {
     if (released) return;
-    if (!isParkedOutsideContent(currentView, selection)) parkSelection(currentView, selection);
+    park();
     frame = win.requestAnimationFrame(keepParked);
   };
   frame = win.requestAnimationFrame(keepParked);
@@ -181,8 +304,60 @@ export function parkEditorNativeSelection(currentView: EditorView, options: Edit
       doc.removeEventListener("copy", onCopy);
       doc.removeEventListener("cut", onCopy);
       win.cancelAnimationFrame(frame);
-      const live = editorRootSelection(currentView);
-      if (live && isParkedOutsideContent(currentView, live)) restoreSelectionFromState(currentView, live);
+      restoreWrites?.();
+      restoreWrites = null;
+      const restore = () => {
+        if (sequence !== latestParkSequence) return;
+        const live = editorRootSelection(currentView);
+        if (live && isParkedOutsideContent(currentView, live)) restoreSelectionFromState(currentView, live);
+      };
+      if (deferReleaseRestore) win.requestAnimationFrame(restore);
+      else restore();
+      if (parkedOnce) {
+        // Field diagnosis for "the selection took seconds to clear": how long a
+        // park lived says whether a gesture was still parked while the user
+        // thought it had ended, and how many frame-collapses it took.
+        appendDebugLog("info", "[DBX][QueryEditor:native-selection:release]", {
+          ms: Math.round(performance.now() - parkedSince),
+          chars: currentView.state.selection.main.to - currentView.state.selection.main.from,
+          suppressedEditorWrites: suppressWrites,
+        });
+      }
     },
   };
+}
+
+/**
+ * Parks the browser selection while an overlay menu covers the editor.
+ *
+ * @returns a handle that restores the browser selection, or `null` when there
+ * was nothing worth parking.
+ */
+export function parkEditorNativeSelection(currentView: EditorView, options: EditorNativeSelectionParkOptions = {}): EditorNativeSelectionPark | null {
+  if (!isLargeEditorSelection(currentView)) return null;
+  const selection = editorRootSelection(currentView);
+  if (!selection || !selection.anchorNode || !currentView.dom.contains(selection.anchorNode)) return null;
+  return createNativeSelectionPark(currentView, { shouldKeepParked: () => true, finalizeClipboardText: options.finalizeClipboardText ?? ((text: string) => text) });
+}
+
+/**
+ * Parks the browser selection for the length of a pointer gesture.
+ *
+ * Call this on pointer down and `release()` on pointer up: the browser
+ * selection stays parked only while the editor's own selection is long enough
+ * to be worth it (`isLargeEditorSelection`), so a gesture that never grows past
+ * a few lines — or one that starts by shrinking a selection back down — keeps
+ * behaving exactly as it did before. The editor keeps its own selection while
+ * this runs, so the highlight, the selection that survives the release and the
+ * text on the clipboard are unchanged.
+ */
+export function keepNativeSelectionParkedDuringDrag(currentView: EditorView, options: EditorNativeSelectionDragParkOptions = {}): EditorNativeSelectionPark {
+  return createNativeSelectionPark(currentView, {
+    shouldKeepParked: () => isLargeEditorSelection(currentView) && (options.shouldKeepParked?.() ?? true),
+    finalizeClipboardText: options.finalizeClipboardText ?? ((text: string) => text),
+    suppressWrites: options.suppressEditorSelectionWrites ?? true,
+    // A gesture ends by dispatching a selection change, and that write is both
+    // the correct one and the cheap one to land first. See `deferReleaseRestore`.
+    deferReleaseRestore: true,
+  });
 }

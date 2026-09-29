@@ -236,6 +236,11 @@ describe("editorSettingsDraftFromSettings", () => {
     expect(draft.completionTriggerMode).toBe("positional");
   });
 
+  it("maps csvNullMode and normalizes an unknown value back to the marker", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ csvNullMode: "empty" })).csvNullMode).toBe("empty");
+    expect(editorSettingsDraftFromSettings(makeSettings({ csvNullMode: "bogus" as unknown } as Partial<EditorSettings>)).csvNullMode).toBe("marker");
+  });
+
   it("maps and normalizes tableCompletionSchemaQualification", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ tableCompletionSchemaQualification: "always" })).tableCompletionSchemaQualification).toBe("always");
     expect(editorSettingsDraftFromSettings(makeSettings({ tableCompletionSchemaQualification: "invalid" } as any)).tableCompletionSchemaQualification).toBe("collision");

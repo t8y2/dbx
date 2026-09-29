@@ -11,6 +11,7 @@ import { createPinia } from "pinia";
 import i18n from "@/i18n";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import AiAssistant from "@/components/editor/AiAssistant.vue";
+import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { ConnectionConfig } from "@/types/database";
@@ -53,6 +54,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
 const cleanups: Array<() => void> = [];
 
 afterEach(() => {
+  endPanelResize();
+  vi.unstubAllGlobals();
   aiAssistantMountApi.conversations = [];
   aiAssistantMountApi.runAgentStream = undefined;
   while (cleanups.length) cleanups.pop()?.();
@@ -256,6 +259,112 @@ describe("AiAssistant mount", () => {
     expect(modelTrigger?.getAttribute("title")).toBe("deepseek-chat");
   });
 
+  // The compact classes settle through requestAnimationFrame plus async measurement,
+  // so a fixed sleep races on loaded CI runners; poll until the state holds.
+  async function waitForCompactState(settled: () => boolean, timeoutMs = 2000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!settled()) {
+      if (Date.now() > deadline) throw new Error("composer compact state did not settle in time");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it("progressively compacts and expands composer controls while the AI panel is dragged", async () => {
+    let resizeObserverCallback: ResizeObserverCallback | undefined;
+    let resizeObserver: ResizeObserver | undefined;
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          resizeObserverCallback = callback;
+          resizeObserver = this as unknown as ResizeObserver;
+        }
+
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+
+    const { errors, container } = await mountPanel(true, undefined, (settings) => {
+      settings.aiConfigs = [
+        {
+          id: "deepseek-default",
+          name: "DeepSeek",
+          provider: "deepseek",
+          apiKey: "test-key",
+          authMethod: "api-key",
+          endpoint: "https://api.deepseek.com",
+          model: "deepseek-chat",
+          apiStyle: "completions",
+          isDefault: true,
+        },
+      ];
+      settings.activeModel = { configId: "deepseek-default", modelId: "deepseek-chat" };
+    });
+
+    const panel = container.querySelector<HTMLElement>(".ai-prompt-context-container")!;
+    const contextRow = container.querySelector<HTMLElement>("[data-ai-composer-context-row]")!;
+    const actionRow = container.querySelector<HTMLElement>("[data-ai-composer-actions]")!;
+    let panelWidth = 300;
+    let contextClientWidth = 280;
+    let contextScrollWidth = 320;
+    let actionClientWidth = 280;
+    let actionFullScrollWidth = 320;
+    let actionModelCompactScrollWidth = 280;
+    Object.defineProperty(panel, "clientWidth", { configurable: true, get: () => panelWidth });
+    Object.defineProperty(contextRow, "clientWidth", { configurable: true, get: () => contextClientWidth });
+    Object.defineProperty(contextRow, "scrollWidth", { configurable: true, get: () => contextScrollWidth });
+    Object.defineProperty(actionRow, "clientWidth", { configurable: true, get: () => actionClientWidth });
+    Object.defineProperty(actionRow, "scrollWidth", {
+      configurable: true,
+      get: () => (actionRow.classList.contains("ai-prompt-action-row--model-compact") ? actionModelCompactScrollWidth : actionFullScrollWidth),
+    });
+
+    beginPanelResize();
+    resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
+    await waitForCompactState(() => contextRow.classList.contains("ai-prompt-context-row--compact") && actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
+
+    expect(contextRow.classList.contains("ai-prompt-context-row--compact")).toBe(true);
+    expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(true);
+    expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(false);
+
+    panelWidth = 240;
+    actionClientWidth = 220;
+    actionModelCompactScrollWidth = 250;
+    resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
+    await waitForCompactState(() => actionRow.classList.contains("ai-prompt-action-row--model-compact") && actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
+    expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(true);
+    expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(true);
+
+    panelWidth = 300;
+    actionClientWidth = 280;
+    actionModelCompactScrollWidth = 280;
+    resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
+    await waitForCompactState(() => actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
+    expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(true);
+    expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(false);
+
+    panelWidth = 420;
+    contextClientWidth = 400;
+    contextScrollWidth = 400;
+    actionClientWidth = 400;
+    actionFullScrollWidth = 400;
+    actionModelCompactScrollWidth = 400;
+    resizeObserverCallback?.([{ target: panel, contentRect: { width: panelWidth } } as ResizeObserverEntry], resizeObserver!);
+    await waitForCompactState(() => !contextRow.classList.contains("ai-prompt-context-row--compact") && !actionRow.classList.contains("ai-prompt-action-row--model-compact") && !actionRow.classList.contains("ai-prompt-action-row--mode-compact"));
+    expect(contextRow.classList.contains("ai-prompt-context-row--compact")).toBe(false);
+    expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(false);
+    expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(false);
+
+    endPanelResize();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(contextRow.classList.contains("ai-prompt-context-row--compact")).toBe(false);
+    expect(actionRow.classList.contains("ai-prompt-action-row--model-compact")).toBe(false);
+    expect(actionRow.classList.contains("ai-prompt-action-row--mode-compact")).toBe(false);
+    expect(errors.map(String)).toEqual([]);
+  });
+
   it.each(["plugin", "etcd"] as const)("hides database and schema selectors for %s connections", async (dbType) => {
     const { errors, container } = await mountPanel(true, { id: "connection", name: "Connection", db_type: dbType, plugin_id: dbType === "plugin" ? "sample.plugin" : undefined, host: "localhost", port: 22, username: "", password: "" });
     expect(errors.map(String)).toEqual([]);
@@ -271,5 +380,8 @@ describe("AiAssistant mount", () => {
     const row = container.querySelector("[data-ai-composer-context-row]");
     expect(row?.textContent).toContain(i18n.global.t("editor.selectDatabase"));
     expect(row?.classList.contains("ai-prompt-context-row--schema")).toBe(true);
+    const databaseTrigger = container.querySelector<HTMLButtonElement>(".ai-database-selector-trigger");
+    expect(databaseTrigger?.getAttribute("aria-label")).toBeTruthy();
+    expect(databaseTrigger?.querySelector(".ai-database-selector-icon")).not.toBeNull();
   });
 });

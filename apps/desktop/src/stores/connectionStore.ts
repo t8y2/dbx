@@ -9870,14 +9870,18 @@ export const useConnectionStore = defineStore("connection", () => {
 
     if (isTauriRuntime()) {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const { readTextFile } = await import("@tauri-apps/plugin-fs");
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const { decodeImportFileText } = await import("@/lib/common/decodeText");
       const path = await open({
         filters: source === "navicat" ? [{ name: "Navicat Connection Export", extensions: ["ncx", "xml"] }] : [{ name: "DBX JSON", extensions: ["json"] }],
         multiple: false,
       });
       if (!path) return null;
-      content = await readTextFile(path as string);
+      // Raw bytes: Navicat 17 macOS exports can be UTF-16 (#10666), which
+      // readTextFile would reject as invalid UTF-8.
+      content = decodeImportFileText(await readFile(path as string));
     } else {
+      const { decodeImportFileText } = await import("@/lib/common/decodeText");
       content = await new Promise<string>((resolve, reject) => {
         const input = document.createElement("input");
         input.type = "file";
@@ -9888,10 +9892,10 @@ export const useConnectionStore = defineStore("connection", () => {
             reject(new Error("No file selected"));
             return;
           }
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = () => reject(reader.error);
-          reader.readAsText(file);
+          file
+            .arrayBuffer()
+            .then((buffer) => resolve(decodeImportFileText(buffer)))
+            .catch(reject);
         };
         input.click();
       });

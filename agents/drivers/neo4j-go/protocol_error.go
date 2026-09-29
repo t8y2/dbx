@@ -50,7 +50,7 @@ func classifyRPCError(method, agentSessionID string, err error) *rpcError {
 
 	var databaseError *neo4jdb.Neo4jError
 	if errors.As(err, &databaseError) {
-		data.SQLState = safeRPCDiagnostic(databaseError.Code, 160)
+		// Neo4j error codes are not SQLSTATE values; the code remains in err.Error().
 		data.Retryable = neo4j.IsRetryable(err)
 		code := strings.ToLower(databaseError.Code)
 		switch {
@@ -60,6 +60,9 @@ func classifyRPCError(method, agentSessionID string, err error) *rpcError {
 		case strings.Contains(code, ".transienterror."), strings.Contains(code, "databaseunavailable"):
 			data.Category = "resource"
 			data.Retryable = true
+			if data.OperationOutcome == "unknown" {
+				data.SessionDisposition = "replace_runtime"
+			}
 		case strings.Contains(code, ".statement."), strings.Contains(code, ".schema."), strings.Contains(code, ".procedure."):
 			data.Category = "sql"
 		default:

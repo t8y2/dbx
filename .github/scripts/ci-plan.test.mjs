@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { goAgents, integrationCases, rustGroups } from "./ci-config.mjs";
-import { changedPaths, planCi } from "./ci-plan.mjs";
+import { cargoMetadata, changedPaths, planCi } from "./ci-plan.mjs";
 import { rustCommand } from "./ci-rust.mjs";
 import { gateFailures } from "./ci-gate.mjs";
 import { assertCoverage, parseCoverage } from "./ci-rust-coverage.mjs";
@@ -40,6 +40,18 @@ const metadata = {
 };
 const plan = (files, options = {}) => planCi({ files, metadata, root, ...options });
 const groups = (result) => result.rust_matrix.include.map((entry) => entry.group);
+
+test("the planner uses the runner stable Cargo only for metadata", () => {
+  let invocation;
+  const result = cargoMetadata("/workspace", (command, args, options) => {
+    invocation = { command, args, options };
+    return '{"packages":[],"workspace_members":[]}';
+  });
+  assert.deepEqual(result, { packages: [], workspace_members: [] });
+  assert.equal(invocation.command, "cargo");
+  assert.deepEqual(invocation.args, ["+stable", "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"]);
+  assert.equal(invocation.options.cwd, "/workspace");
+});
 // Keep the gate fixtures in sync with ci-gate.mjs routedJobs. Both Windows jobs
 // share the windows_win7_bundle routing output.
 const routedJobs = { frontend: "frontend", packages: "packages", "github-scripts": "github_scripts",

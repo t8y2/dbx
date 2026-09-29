@@ -2470,11 +2470,13 @@ function isSqlServerGoLine(sql: string, pos: number): boolean {
 
 function startsDelimiterCommand(sql: string, pos: number): boolean {
   const prefix = sql.slice(pos, pos + 9);
-  return prefix.toLowerCase() === "delimiter" && (sql[pos + 9] === " " || sql[pos + 9] === "\t");
+  return prefix.toLowerCase() === "delimiter" && (sql[pos + 9] === " " || sql[pos + 9] === "\t" || sql[pos + 9] === ";");
 }
 
 function parseDelimiterCommand(line: string): string | null {
-  const match = /^delimiter[ \t]+(.+)$/i.exec(line.trim());
+  const trimmed = line.trim();
+  if (/^delimiter;$/i.test(trimmed)) return ";";
+  const match = /^delimiter[ \t]+(.+)$/i.exec(trimmed);
   const delimiter = match?.[1]?.trim();
   return delimiter ? delimiter : null;
 }

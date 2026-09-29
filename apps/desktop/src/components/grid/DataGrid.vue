@@ -108,7 +108,7 @@ import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructur
 import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
-import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridClipboardText, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridExternalValue, mongoDocumentGridInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridClipboardText, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridExternalValue, mongoDocumentGridInputValue, mongoDocumentRelaxedExtendedJson } from "@/lib/mongo/mongoDocumentValues";
 import { compactHeaderColumnType, formatMetadataColumnTypeLabel, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import { dataGridCellTextClass, dataGridTypeVisualClass } from "@/lib/dataGrid/dataGridCellTextVisual";
 import { DATA_GRID_TYPE_COLOR_KEYS, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
@@ -745,6 +745,10 @@ const columnTypeMap = computed(() => {
 });
 const resolvedConnectionConfig = computed(() => connectionStore.getConfig(props.connectionId ?? ""));
 const resolvedDatabaseType = computed(() => props.databaseType ?? effectiveDatabaseTypeForConnection(resolvedConnectionConfig.value));
+// The collection grid and Mongo query-result grids share the document-grid value
+// encoding (BSON null sentinel + JSON-prefixed containers), so every display,
+// editor and clipboard path must decode it whenever MongoDB values are on screen.
+const usesMongoDocumentGridValues = computed(() => props.mongoCollectionGrid === true || resolvedDatabaseType.value === "mongodb");
 const isResultsContext = computed(() => props.context === "results");
 const canShowWhereSearch = computed(() => !!props.onExecuteSql && !isResultsContext.value && resolvedDatabaseType.value !== "victoriametrics");
 const canUseWhereSearch = computed(() => !!props.tableMeta && canShowWhereSearch.value);
@@ -2210,7 +2214,7 @@ const columnAligns = computed<("left" | "right")[]>(() => {
 
 function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {
   const value = item.data[actualColIdx];
-  const isGridNull = value === null || (props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL);
+  const isGridNull = value === null || (usesMongoDocumentGridValues.value && value === MONGO_DOCUMENT_GRID_NULL);
   if (isGridNull) return "text-muted-foreground italic";
   if (!colorizeDataGridCellTypes.value) return "text-foreground";
   const checkbox = booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && value !== null;
@@ -2233,7 +2237,7 @@ function transposeCellTextColorClass(recordIndex: number, actualColIdx: number):
   const item = displayItems.value[recordIndex];
   if (!item) return "text-foreground";
   const value = item.data[actualColIdx];
-  const isGridNull = value === null || (props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL);
+  const isGridNull = value === null || (usesMongoDocumentGridValues.value && value === MONGO_DOCUMENT_GRID_NULL);
   if (isGridNull) return "text-muted-foreground italic";
   if (!colorizeDataGridCellTypes.value) return "text-foreground";
   return dataGridCellTextClass({
@@ -4019,7 +4023,7 @@ const editor = useDataGridEditor({
   includeDatabaseNameInSaveSql: computed(() => settingsStore.editorSettings.generateSqlIncludeDatabaseName),
   initialEditColumn: firstVisibleColumnIndex,
   cellEditorText: cellEditorTextForValue,
-  normalizeEditorInput: (value) => (props.mongoCollectionGrid ? mongoDocumentGridInputValue(value) : value),
+  normalizeEditorInput: (value) => (usesMongoDocumentGridValues.value ? mongoDocumentGridInputValue(value) : value),
   getRowItem,
   pageSize,
   currentPage,
@@ -4303,7 +4307,7 @@ function cellEditContentNeedsExpandedEditor(options: { displayText: string; edit
 }
 
 function cellEditorTextForValue(value: CellValue | undefined, columnIndex: number): string {
-  if (props.mongoCollectionGrid) {
+  if (usesMongoDocumentGridValues.value) {
     const documentGridText = mongoDocumentGridEditorText(value);
     if (documentGridText !== undefined) return documentGridText;
   }
@@ -4374,7 +4378,7 @@ function isIoTDBTimestampColumn(columnIndex: number): boolean {
 }
 
 function inlineCellEditorText(value: CellValue, columnIndex: number): string {
-  if (props.mongoCollectionGrid) {
+  if (usesMongoDocumentGridValues.value) {
     const documentGridText = mongoDocumentGridEditorText(value);
     if (documentGridText !== undefined) return documentGridText;
   }
@@ -5981,11 +5985,11 @@ const contextCellDetail = computed(() => {
 // The MongoDB collection grid stores an internal sentinel for explicit BSON
 // null; detail panes must render display text instead of leaking that marker.
 function gridDetailRawValue(value: CellValue): string {
-  return props.mongoCollectionGrid ? (mongoDocumentGridDisplayText(value) ?? displayCellValue(value)) : displayCellValue(value);
+  return usesMongoDocumentGridValues.value ? (mongoDocumentGridDisplayText(value) ?? displayCellValue(value)) : displayCellValue(value);
 }
 
 function gridDetailIsNullValue(value: CellValue): boolean {
-  return value === null || (props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL);
+  return value === null || (usesMongoDocumentGridValues.value && value === MONGO_DOCUMENT_GRID_NULL);
 }
 
 function cellDetailFor(rowIndex: number, columnIndex: number): DataGridCellDetail | null {
@@ -6030,7 +6034,9 @@ const mongoJsonPreviewFullText = computed(() => {
   const document = activeMongoJsonDocument.value;
   if (document === undefined) return "";
   try {
-    return JSON.stringify(document, null, 2) ?? "";
+    // Relaxed Extended JSON (`{"$date": "…"}`) like Compass's JSON view, instead
+    // of the browser form's escaped `ISODate("…")` strings.
+    return JSON.stringify(mongoDocumentRelaxedExtendedJson(document), null, 2) ?? "";
   } catch {
     return "";
   }
@@ -6324,7 +6330,7 @@ const detailEdit = useDataGridCellDetailEdit({
   resultRows: computed(() => props.result.rows),
   getColumnInfo: (columnIndex) => tableColumnForGridColumn(columnIndex) ?? resultColumnInfoForGridColumn(columnIndex),
   cellEditorText: cellEditorTextForValue,
-  normalizeEditorInput: (value) => (props.mongoCollectionGrid ? mongoDocumentGridInputValue(value) : value),
+  normalizeEditorInput: (value) => (usesMongoDocumentGridValues.value ? mongoDocumentGridInputValue(value) : value),
   nullValue: () => (props.mongoCollectionGrid ? MONGO_DOCUMENT_GRID_NULL : null),
   getRowItem,
   hydrateLargeValueCell,
@@ -6656,7 +6662,7 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
 
 function formatCell(value: CellValue, columnIndex?: number, originalBytes?: number, limitDisplay = true): string {
   const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
-  if (props.mongoCollectionGrid) {
+  if (usesMongoDocumentGridValues.value) {
     const documentGridText = mongoDocumentGridDisplayText(value, formatter);
     if (documentGridText !== undefined) return documentGridText;
   }
@@ -7603,7 +7609,7 @@ function drawCanvasGrid() {
     searchMatchKeys: searchMatchSet.value,
     currentSearchMatch: currentSearchMatch.value,
     formatCell: (value, columnIndex, row) => formatCellCached(visibleLargeValuePreviewValue(row, columnIndex, value), columnIndex, largeValueOriginalBytes(row, columnIndex)),
-    isNullValue: (value) => value === null || (props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL),
+    isNullValue: (value) => value === null || (usesMongoDocumentGridValues.value && value === MONGO_DOCUMENT_GRID_NULL),
     newRowCellPlaceholder,
     isRowActive,
     rowCellsUseSelectionVisual,
@@ -7935,8 +7941,8 @@ const {
   columnComments: visibleColumnComments,
   allColumnComments,
   displayValue: formatCellCached,
-  cellClipboardText: (value) => (props.mongoCollectionGrid ? mongoDocumentGridClipboardText(value) : undefined),
-  externalCellValue: (value) => (props.mongoCollectionGrid ? mongoDocumentGridExternalValue(value) : value),
+  cellClipboardText: (value) => (usesMongoDocumentGridValues.value ? mongoDocumentGridClipboardText(value) : undefined),
+  externalCellValue: (value) => (usesMongoDocumentGridValues.value ? mongoDocumentGridExternalValue(value) : value),
   mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
   spatialColumns: computed(() => props.result.spatial_columns),
   spatialValues: computed(() => props.result.spatial_values),
@@ -9588,7 +9594,7 @@ async function onGridKeydown(event: KeyboardEvent) {
 }
 
 function detailClipboardText(detail: DataGridCellDetail): string {
-  if (props.mongoCollectionGrid) {
+  if (usesMongoDocumentGridValues.value) {
     const documentGridText = mongoDocumentGridClipboardText(detail.value);
     if (documentGridText !== undefined) return documentGridText;
   }
@@ -9603,7 +9609,7 @@ function detailClipboardText(detail: DataGridCellDetail): string {
 // grid's BSON null marker is restored to a real null instead of leaking the
 // internal sentinel into clipboard JSON/TSV.
 function gridDetailExternalValue(value: CellValue): CellValue {
-  return props.mongoCollectionGrid ? mongoDocumentGridExternalValue(value) : value;
+  return usesMongoDocumentGridValues.value ? mongoDocumentGridExternalValue(value) : value;
 }
 
 async function copyDetailValue() {

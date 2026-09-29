@@ -4477,6 +4477,117 @@ final class DbxJdbcPluginTest {
         );
     }
 
+    private static final class SybaseMetadataDriver implements Driver {
+        private final List<String> calls;
+
+        private SybaseMetadataDriver(List<String> calls) {
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? sybaseMetadataConnection(calls) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:sybase:Tds:sybase-ddl-test:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection sybaseMetadataConnection(List<String> calls) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getColumns".equals(method.getName())) {
+                    calls.add("columns:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1]) + ":" + metadataArgument(args[2]));
+                    boolean nullSchema = args[1] == null;
+                    return nullSchema
+                        ? rowsResultSet(
+                            new String[] {
+                                "TABLE_CAT",
+                                "TABLE_SCHEM",
+                                "TABLE_NAME",
+                                "COLUMN_NAME",
+                                "TYPE_NAME",
+                                "IS_NULLABLE",
+                                "NULLABLE",
+                                "COLUMN_DEF",
+                                "REMARKS",
+                                "COLUMN_SIZE",
+                                "DECIMAL_DIGITS"
+                            },
+                            new Object[][] {
+                                { "appdb", "dbo", "orders", "id", "int", "NO", DatabaseMetaData.columnNoNulls, null, null, 10, 0 }
+                            }
+                        )
+                        : rowsResultSet(new String[] { "COLUMN_NAME" }, new Object[0][]);
+                }
+                if ("getPrimaryKeys".equals(method.getName())) {
+                    calls.add("primaryKeys:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1]) + ":" + metadataArgument(args[2]));
+                    return args[1] == null
+                        ? rowsResultSet(
+                            new String[] { "PK_NAME", "COLUMN_NAME", "KEY_SEQ" },
+                            new Object[][] { { "pk_orders", "id", (short) 1 } }
+                        )
+                        : rowsResultSet(new String[] { "PK_NAME", "COLUMN_NAME", "KEY_SEQ" }, new Object[0][]);
+                }
+                if ("getIndexInfo".equals(method.getName())) {
+                    calls.add("indexInfo:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1]) + ":" + metadataArgument(args[2]));
+                    return rowsResultSet(
+                        new String[] { "INDEX_NAME", "COLUMN_NAME", "NON_UNIQUE", "TYPE" },
+                        new Object[0][]
+                    );
+                }
+                if ("getImportedKeys".equals(method.getName())) {
+                    calls.add("importedKeys:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1]) + ":" + metadataArgument(args[2]));
+                    return rowsResultSet(
+                        new String[] { "FK_NAME", "FKCOLUMN_NAME", "PKTABLE_NAME", "PKCOLUMN_NAME" },
+                        new Object[0][]
+                    );
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
     private static String metadataArgument(Object value) {
         return value == null ? "<null>" : String.valueOf(value);
     }
@@ -5301,6 +5412,41 @@ final class DbxJdbcPluginTest {
             .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
         String once = DbxJdbcPlugin.enrichDriverHint(connection, "Unsupported charset: ZHS16GBK");
         assertEquals(once, DbxJdbcPlugin.enrichDriverHint(connection, once));
+    }
+
+    @Test
+    void getObjectSourceBuildsSybaseTableDdlWhenMetadataRequiresNullSchema() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new SybaseMetadataDriver(calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:sybase:Tds:sybase-ddl-test:5000",
+              "connect_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "dbo",
+                  "name": "orders",
+                  "object_type": "TABLE"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            String source = response.path("result").path("source").asText();
+            assertTrue(source.startsWith("CREATE TABLE \"dbo\".\"orders\""), source);
+            assertTrue(source.contains("\"id\" int NOT NULL"), source);
+            assertTrue(source.contains("PRIMARY KEY (\"id\")"), source);
+            assertTrue(calls.contains("columns:appdb:dbo:orders"), calls.toString());
+            assertTrue(calls.contains("columns:appdb:<null>:orders"), calls.toString());
+            assertTrue(calls.contains("primaryKeys:appdb:<null>:orders"), calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
     }
 
     @Test

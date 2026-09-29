@@ -607,6 +607,11 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["select COUNT(1) FROM your_table", "select COUNT(1) FROM your_table;"]);
   });
 
+  it("accepts a MySQL delimiter reset without whitespace", () => {
+    const sql = "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; END //\nDELIMITER;\nCALL p();";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["CREATE PROCEDURE p() BEGIN SELECT 1; END", "CALL p()"]);
+  });
+
   it("keeps MySQL routine blocks together without delimiter commands", () => {
     const ranges = splitSqlStatementRanges(mysqlRoutineFixture, "mysql");
     expect(rangeSqlTexts(ranges)).toEqual([mysqlRoutineFixture.slice(0, mysqlRoutineFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);

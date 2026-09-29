@@ -33,6 +33,7 @@ import {
 export type MongoCompletionMode =
   | "none"
   | "root"
+  | "database"
   | "collection"
   | "collectionOrMethod"
   | "collectionRef"
@@ -93,6 +94,7 @@ export interface MongoCompletionContext {
 }
 
 export interface MongoCompletionInput {
+  databases?: string[];
   collections?: string[];
   fields?: MongoCompletionField[];
 }
@@ -270,7 +272,20 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 
   if (isInsideMongoComment(text, safeCursor)) return { mode: "none", prefix: "", from: safeCursor };
 
+  const usePrefix = matchUseDatabasePrefix(beforeCursor);
+  if (usePrefix) return { mode: "database", prefix: usePrefix.prefix, from: usePrefix.from };
+
   if (endsAtDbRootDot(beforeCursor)) return { mode: "collection", prefix: "", from: safeCursor, collection, database };
+
+  const getSiblingDbPrefix = matchGetSiblingDbPrefix(beforeCursor);
+  if (getSiblingDbPrefix) {
+    return {
+      mode: "database",
+      prefix: getSiblingDbPrefix.prefix,
+      from: getSiblingDbPrefix.from,
+      replaceClosingQuote: closingQuoteAtCursor(getSiblingDbPrefix.prefix, text, safeCursor),
+    };
+  }
 
   const getCollectionPrefix = matchGetCollectionPrefix(beforeCursor);
   if (getCollectionPrefix) {
@@ -338,6 +353,9 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "root":
       items = rootItems(prefix);
+      break;
+    case "database":
+      items = databaseItems(prefix, input.databases ?? []);
       break;
     case "collection":
       items = collectionItems(prefix, collections, context.database !== undefined);
@@ -424,10 +442,17 @@ export function mongoCompletionNeedsCollections(mode: MongoCompletionMode): bool
   return mode === "collection" || mode === "collectionOrMethod" || mode === "collectionRef";
 }
 
+/** Modes whose items are built from the connection's database names. */
+export function mongoCompletionNeedsDatabases(mode: MongoCompletionMode): boolean {
+  return mode === "database";
+}
+
 export function shouldAutoOpenMongoCompletion(text: string, cursor: number): boolean {
   const previousChar = text[cursor - 1];
   if (!previousChar) return false;
   if (text.slice(0, cursor).endsWith("db.")) return true;
+  // `use ` names a database next; open the list as soon as the space is typed.
+  if (previousChar === " " && matchUseDatabasePrefix(text.slice(0, cursor))) return true;
   if (previousChar === "$" || previousChar === "." || previousChar === '"' || previousChar === "'") return true;
   if (/[{,[:]/.test(previousChar) || /[{,[:]\s+$/.test(text.slice(0, cursor))) {
     return getMongoCompletionContext(text, cursor).mode !== "none";
@@ -983,6 +1008,24 @@ function collectionOrMethodItems(prefix: string, collections: string[]): MongoCo
   return dedupeAndSort([...collectionNameItems(prefix, collections, 150), ...methods]);
 }
 
+/**
+ * Database names for `use <name>` and `db.getSiblingDB("<name>")`. The bare form
+ * after `use` inserts the name as typed; the argument form keeps its quotes.
+ */
+function databaseItems(prefix: string, databases: string[]): MongoCompletionItem[] {
+  const quoted = prefix.startsWith('"') || prefix.startsWith("'");
+  return databases
+    .filter((database) => matchesFuzzyPrefix(database, prefix))
+    .slice(0, 100)
+    .map((database) => ({
+      label: database,
+      type: "table" as const,
+      detail: "database",
+      apply: quoted ? quoteMongoString(database, prefix) : database,
+      boost: startsWithPrefix(database, prefix) ? 120 : 90,
+    }));
+}
+
 function collectionRefItems(prefix: string, collections: string[]): MongoCompletionItem[] {
   return collections
     .filter((collection) => matchesFuzzyPrefix(collection, prefix))
@@ -1190,6 +1233,26 @@ function matchDbCollectionPrefix(beforeCursor: string): { prefix: string; from: 
   return { prefix, from: beforeCursor.length - prefix.length };
 }
 
+/** Cursor inside the string argument of `db.getSiblingDB(`, with the opening quote as part of the prefix. */
+function matchGetSiblingDbPrefix(beforeCursor: string): { prefix: string; from: number } | null {
+  const match = /(?:^|[\s;(])db\s*\.\s*getSiblingDB\s*\(\s*(["'][^"'\\]*)$/.exec(beforeCursor);
+  if (!match) return null;
+  const prefix = match[1] ?? "";
+  return { prefix, from: beforeCursor.length - prefix.length };
+}
+
+/**
+ * Cursor in the bare database name after a `use` command. A quoted name is not
+ * valid there, so it stays unmatched, and a field called `use` inside an argument
+ * list is a key, not the command.
+ */
+function matchUseDatabasePrefix(beforeCursor: string): { prefix: string; from: number } | null {
+  const match = /(?:^|[\s;])use\s+([^\s;"'()]*)$/.exec(maskMongoLiterals(beforeCursor));
+  if (!match || isInsideCallArguments(beforeCursor)) return null;
+  const prefix = match[1] ?? "";
+  return { prefix: beforeCursor.slice(beforeCursor.length - prefix.length), from: beforeCursor.length - prefix.length };
+}
+
 function matchGetCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
   const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.getCollection\(\s*(["'][^"'\\]*)$`).exec(beforeCursor);
   if (!match) return null;
@@ -1287,7 +1350,7 @@ function isInsideCallArguments(beforeCursor: string): boolean {
   return depth > 0;
 }
 
-/** `use <database>` takes a database name, which this engine has no list of, so it stays quiet. */
+/** After `use` with something `matchUseDatabasePrefix` rejects (a quoted or parenthesised name), so no snippets belong there. */
 function isAfterUseKeyword(beforeCursor: string): boolean {
   return /(?:^|[\s;])use\s+[\w$-]*$/.test(maskMongoLiterals(beforeCursor));
 }

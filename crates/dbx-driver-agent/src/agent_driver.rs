@@ -1243,6 +1243,24 @@ pub enum AgentMethod {
     BeginManualTransaction,
     CommitManualTransaction,
     RollbackManualTransaction,
+    // PL/SQL debugging (OceanBase Oracle only). These stay out of `ALL`
+    // (the commonMethods contract) exactly like other driver-specific
+    // methods: the oceanbase-oracle agent serves them, other agents reject
+    // them with the unsupported default.
+    PlDebugProbe,
+    PlDebugStart,
+    PlDebugSetBreakpoints,
+    PlDebugDeleteBreakpoints,
+    PlDebugListBreakpoints,
+    PlDebugResume,
+    PlDebugStepOver,
+    PlDebugStepIn,
+    PlDebugStepOut,
+    PlDebugAbort,
+    PlDebugGetVariables,
+    PlDebugGetStack,
+    PlDebugGetLog,
+    PlDebugClose,
     Disconnect,
     Shutdown,
 }
@@ -1339,6 +1357,20 @@ impl AgentMethod {
             Self::BeginManualTransaction => "begin_manual_transaction",
             Self::CommitManualTransaction => "commit_manual_transaction",
             Self::RollbackManualTransaction => "rollback_manual_transaction",
+            Self::PlDebugProbe => "pl_debug_probe",
+            Self::PlDebugStart => "pl_debug_start",
+            Self::PlDebugSetBreakpoints => "pl_debug_set_breakpoints",
+            Self::PlDebugDeleteBreakpoints => "pl_debug_delete_breakpoints",
+            Self::PlDebugListBreakpoints => "pl_debug_list_breakpoints",
+            Self::PlDebugResume => "pl_debug_resume",
+            Self::PlDebugStepOver => "pl_debug_step_over",
+            Self::PlDebugStepIn => "pl_debug_step_in",
+            Self::PlDebugStepOut => "pl_debug_step_out",
+            Self::PlDebugAbort => "pl_debug_abort",
+            Self::PlDebugGetVariables => "pl_debug_get_variables",
+            Self::PlDebugGetStack => "pl_debug_get_stack",
+            Self::PlDebugGetLog => "pl_debug_get_log",
+            Self::PlDebugClose => "pl_debug_close",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",
         }
@@ -2575,6 +2607,135 @@ impl AgentDriverClient {
         self.call_method_with_timeout(AgentMethod::GetTableDdl, params, timeout_duration).await
     }
 
+    // ------------------------------------------------------------------
+    // PL/SQL debugging (served by the oceanbase-oracle agent).
+    // Continuation calls (resume / step / abort / variables) block on the
+    // server until the debuggee reaches the next stop or finishes, so callers
+    // pass the debug session timeout rather than the metadata timeout.
+    // ------------------------------------------------------------------
+
+    pub async fn pl_debug_probe<T: DeserializeOwned + Send + 'static>(&mut self) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugProbe, serde_json::json!({}), None).await
+    }
+
+    pub async fn pl_debug_start<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        request: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugStart, request, timeout_duration).await
+    }
+
+    pub async fn pl_debug_set_breakpoints<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        breakpoints: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::PlDebugSetBreakpoints,
+            pl_debug_params(debug_id, Some(("breakpoints", breakpoints))),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn pl_debug_delete_breakpoints<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        breakpoints: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::PlDebugDeleteBreakpoints,
+            pl_debug_params(debug_id, Some(("breakpoints", breakpoints))),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn pl_debug_list_breakpoints<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugListBreakpoints, pl_debug_params(debug_id, None), timeout_duration)
+            .await
+    }
+
+    pub async fn pl_debug_resume<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugResume, pl_debug_params(debug_id, None), timeout_duration).await
+    }
+
+    pub async fn pl_debug_step_over<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugStepOver, pl_debug_params(debug_id, None), timeout_duration).await
+    }
+
+    pub async fn pl_debug_step_in<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugStepIn, pl_debug_params(debug_id, None), timeout_duration).await
+    }
+
+    pub async fn pl_debug_step_out<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugStepOut, pl_debug_params(debug_id, None), timeout_duration).await
+    }
+
+    pub async fn pl_debug_abort<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugAbort, pl_debug_params(debug_id, None), timeout_duration).await
+    }
+
+    pub async fn pl_debug_get_variables<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugGetVariables, pl_debug_params(debug_id, None), timeout_duration)
+            .await
+    }
+
+    pub async fn pl_debug_get_stack<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugGetStack, pl_debug_params(debug_id, None), timeout_duration).await
+    }
+
+    pub async fn pl_debug_get_log<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugGetLog, pl_debug_params(debug_id, None), timeout_duration).await
+    }
+
+    pub async fn pl_debug_close<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        debug_id: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::PlDebugClose, pl_debug_params(debug_id, None), timeout_duration).await
+    }
+
     pub async fn execute_query<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
         self.invalidate_cached_query();
         self.call_method(AgentMethod::ExecuteQuery, params).await
@@ -3302,6 +3463,16 @@ pub fn agent_schema_params(database: &str, schema: &str) -> Value {
 
 pub fn agent_schema_table_params(database: &str, schema: &str, table: &str) -> Value {
     serde_json::json!({ "database": database, "schema": schema, "table": table })
+}
+
+/// Parameters of every PL debug method that is addressed by debug id, plus
+/// the optional extra field (breakpoint list for the set/delete calls).
+pub fn pl_debug_params(debug_id: &str, extra: Option<(&str, Value)>) -> Value {
+    let mut params = serde_json::json!({ "debugId": debug_id });
+    if let Some((key, value)) = extra {
+        params[key] = value;
+    }
+    params
 }
 
 pub fn agent_object_source_params<K: Serialize>(database: &str, schema: &str, name: &str, object_type: &K) -> Value {

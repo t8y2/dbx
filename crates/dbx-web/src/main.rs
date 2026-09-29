@@ -8,7 +8,7 @@ mod state;
 mod web_mcp;
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use argon2::password_hash::rand_core::OsRng;
@@ -1400,13 +1400,17 @@ async fn serve() {
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
     // Defaults to all interfaces for container deployments; operators who
     // expose the service through a local reverse proxy can pin the listener
-    // (DBX_BIND_ADDR=127.0.0.1) without a firewall change.
-    let addr = match std::env::var("DBX_BIND_ADDR").ok().as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    // (DBX_BIND_ADDR=127.0.0.1) without a firewall change. The value is an
+    // IP only — the port always comes from DBX_PORT so the HTTP listener and
+    // the Redis PubSub server (which reads DBX_PORT independently) stay in
+    // sync.
+    let ip = match std::env::var("DBX_BIND_ADDR").ok().as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => {
-            value.parse::<SocketAddr>().unwrap_or_else(|error| panic!("invalid DBX_BIND_ADDR \"{value}\": {error}"))
+            value.parse::<IpAddr>().unwrap_or_else(|error| panic!("invalid DBX_BIND_ADDR \"{value}\": {error}"))
         }
-        None => SocketAddr::from(([0, 0, 0, 0], port)),
+        None => IpAddr::from([0, 0, 0, 0]),
     };
+    let addr = SocketAddr::new(ip, port);
 
     tracing::info!("DBX Web server starting on http://{}", addr);
     if public_base_path != "/" {

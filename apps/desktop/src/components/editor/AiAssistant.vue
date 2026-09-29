@@ -5573,17 +5573,6 @@ async function bindConversation(binding: AiConversationBinding) {
   await rebindConversation(connection, binding.database, binding.schema);
 }
 
-function addTableMention(target: { schema?: string; table: string }, binding?: AiConversationBinding) {
-  if (pluginContext.value) startNewChat();
-  const table = target.table.trim();
-  if (!table) return;
-  // Clearing the old references happens synchronously inside
-  // bindConversation(), before this call adds the new mention.
-  if (binding) void bindConversation(binding);
-  addSelectedMention({ kind: "table", schema: target.schema, name: table, tableType: "TABLE" });
-  nextTick(() => promptTextareaRef.value?.focus());
-}
-
 function clearContextReferences() {
   selectedMentions.value = [];
   selectedSqlFileMentions.value = [];
@@ -5616,7 +5605,7 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ openPluginConversation, openExternalContext, triggerAction, setPrompt, addTableMention, bindConversation, clearContextReferences, selectConversationById, focusSearch });
+defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;

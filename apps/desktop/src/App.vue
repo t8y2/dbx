@@ -210,10 +210,6 @@ type AiAssistantHandle = {
   /** Single entry point for AI triggers outside the panel (#10058 R1/R3). */
   openExternalContext: (request: AiExternalContextRequest) => void;
   triggerAction: (action: AiAction, instruction?: string) => void;
-  setPrompt: (text: string) => void;
-  addTableMention: (target: { schema?: string; table: string }, binding?: AiConversationBinding) => void;
-  /** Retarget the conversation on its own, for entries that add no mention. */
-  bindConversation: (binding: AiConversationBinding) => Promise<void>;
   clearContextReferences: () => void;
   focusSearch: () => boolean;
   /** Opens a conversation by id (used by the background-run toast, §9). */

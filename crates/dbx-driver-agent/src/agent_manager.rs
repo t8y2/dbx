@@ -1123,13 +1123,32 @@ impl AgentManager {
         jre_key: &str,
         extra_java_args: &[String],
     ) -> Result<AgentLaunchSpec, String> {
+        self.resolve_agent_launch_spec_with_launch_env(state, driver_key, jre_key, extra_java_args, &[])
+    }
+
+    /// Same as [`Self::resolve_agent_launch_spec_with_extra_args`] but also
+    /// attaches `env` to the resolved spec.
+    ///
+    /// The entries become part of the launch fingerprint, so two connections
+    /// requesting different environments never share an agent process.
+    pub fn resolve_agent_launch_spec_with_launch_env(
+        &self,
+        state: &AgentState,
+        driver_key: &str,
+        jre_key: &str,
+        extra_java_args: &[String],
+        env: &[(String, String)],
+    ) -> Result<AgentLaunchSpec, String> {
         if driver_key == "dameng" {
             validate_dameng_java_system_properties(extra_java_args)?;
         }
         let driver_dir = self.driver_dir(driver_key);
         let config_path = self.driver_launch_config_path(driver_key);
         if config_path.exists() {
-            return self.resolve_configured_agent_launch_spec(driver_key, &driver_dir, &config_path);
+            return Ok(
+                self.resolve_configured_agent_launch_spec(driver_key, &driver_dir, &config_path)?
+                    .with_env(env.iter().cloned()),
+            );
         }
 
         let native_path = self.driver_native_path(driver_key);
@@ -1145,7 +1164,7 @@ impl AgentManager {
             } else {
                 (native_path, driver_dir)
             };
-            return Ok(AgentLaunchSpec::new(native_path).with_working_dir(driver_dir));
+            return Ok(AgentLaunchSpec::new(native_path).with_working_dir(driver_dir).with_env(env.iter().cloned()));
         }
 
         let jar_path = self.driver_jar_path(driver_key);
@@ -1156,7 +1175,8 @@ impl AgentManager {
                     "{driver_key} driver jar is invalid or corrupt. Please reinstall it from the Driver Manager."
                 ));
             }
-            return Ok(AgentLaunchSpec::java_jar_with_extra_args(java, jar_path, extra_java_args));
+            return Ok(AgentLaunchSpec::java_jar_with_extra_args(java, jar_path, extra_java_args)
+                .with_env(env.iter().cloned()));
         }
 
         Err(format!("{driver_key} driver is not installed. Please install it from the Driver Manager."))
@@ -1369,6 +1389,7 @@ impl AgentManager {
         db_type: &DatabaseType,
         driver_profile: Option<&str>,
         extra_java_args: &[String],
+        agent_env: &[(String, String)],
         agent_session_id: String,
         connect_params: serde_json::Value,
         connect_timeout: std::time::Duration,
@@ -1378,6 +1399,7 @@ impl AgentManager {
             db_type,
             driver_profile,
             extra_java_args,
+            agent_env,
             agent_session_id,
             connect_params,
             connect_timeout,

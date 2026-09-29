@@ -73,6 +73,7 @@ pub async fn spawn_shared_connection_client(
     db_type: &DatabaseType,
     driver_profile: Option<&str>,
     extra_java_args: &[String],
+    agent_env: &[(String, String)],
     agent_session_id: String,
     connect_params: serde_json::Value,
     connect_timeout: Duration,
@@ -82,7 +83,8 @@ pub async fn spawn_shared_connection_client(
     let key = first_installed_agent_key(manager, &keys).unwrap_or(keys[0]);
     let state = manager.load_state();
     let jre_key = state.installed_drivers.get(key).map(|driver| driver.jre.as_str()).unwrap_or(DEFAULT_JRE_KEY);
-    let launch = manager.resolve_agent_launch_spec_with_extra_args(&state, key, jre_key, extra_java_args)?;
+    let launch =
+        manager.resolve_agent_launch_spec_with_launch_env(&state, key, jre_key, extra_java_args, agent_env)?;
     let runtime_key = shared_runtime_key(key, &launch);
     let mut session_params = connect_params;
     session_params
@@ -178,12 +180,17 @@ fn reserve_runtime_locked(
 }
 
 fn shared_runtime_key(agent_key: &str, launch: &crate::db::agent_driver::AgentLaunchSpec) -> String {
+    // `env` is part of the fingerprint on purpose: Oracle Client settings such
+    // as `NLS_LANG` are process-scoped, so a connection that declares one must
+    // not reuse a process started without it (or with a different value).
+    let env = launch.env.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("\u{1f}");
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         agent_key,
         launch.program.display(),
         launch.args.join("\u{1f}"),
-        launch.working_dir.as_ref().map(|path| path.display().to_string()).unwrap_or_default()
+        launch.working_dir.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
+        env
     )
 }
 
@@ -373,6 +380,23 @@ for line in sys.stdin:
 
         assert_eq!(shared_runtime_key("oracle", &base), shared_runtime_key("oracle", &base));
         assert_ne!(shared_runtime_key("oracle", &base), shared_runtime_key("oracle", &different_args));
+    }
+
+    #[test]
+    fn shared_runtime_key_isolates_process_scoped_env() {
+        let base = crate::db::agent_driver::AgentLaunchSpec::new(PathBuf::from("oracle-agent"));
+        let with_nls = base
+            .clone()
+            .with_env([("NLS_LANG".to_string(), "SIMPLIFIED CHINESE_CHINA.AL32UTF8".to_string())]);
+        let with_other_nls =
+            base.clone().with_env([("NLS_LANG".to_string(), "AMERICAN_AMERICA.AL32UTF8".to_string())]);
+
+        // Setting a process-scoped variable must route to a dedicated process …
+        assert_ne!(shared_runtime_key("oracle", &base), shared_runtime_key("oracle", &with_nls));
+        // … and two different values must never share one process either.
+        assert_ne!(shared_runtime_key("oracle", &with_nls), shared_runtime_key("oracle", &with_other_nls));
+        // Identical env still reuses the same process.
+        assert_eq!(shared_runtime_key("oracle", &with_nls), shared_runtime_key("oracle", &with_nls.clone()));
     }
 
     #[tokio::test]

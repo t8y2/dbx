@@ -366,6 +366,7 @@ mod tests {
 
     fn connection_with_external(value: serde_json::Value) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
             docs_notes_path: None,
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),

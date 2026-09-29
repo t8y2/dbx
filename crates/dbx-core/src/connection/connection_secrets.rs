@@ -1030,6 +1030,7 @@ mod tests {
 
     fn connection(id: &str, password: &str, _ssh_password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: format!("{id} connection"),

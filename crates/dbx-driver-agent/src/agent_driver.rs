@@ -962,16 +962,24 @@ impl PooledAgentClient {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentLaunchSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub working_dir: Option<PathBuf>,
+    /// Extra environment variables handed to the agent process.
+    ///
+    /// This is part of the launch *identity*, not just the launch mechanics:
+    /// [`crate::agent_runtime::shared_runtime_key`] hashes it, so two launches
+    /// that differ only in `env` get separate agent processes. That is what
+    /// makes process-scoped Oracle Client settings (`NLS_LANG`) safe to set per
+    /// connection instead of leaking across connections that share a process.
+    pub env: Vec<(String, String)>,
 }
 
 impl AgentLaunchSpec {
     pub fn new(program: impl Into<PathBuf>) -> Self {
-        Self { program: program.into(), args: Vec::new(), working_dir: None }
+        Self { program: program.into(), args: Vec::new(), working_dir: None, env: Vec::new() }
     }
 
     pub fn java_jar(java_path: impl Into<PathBuf>, jar_path: impl AsRef<Path>) -> Self {
@@ -988,6 +996,7 @@ impl AgentLaunchSpec {
             program: java_path.into(),
             args: agent_java_args_with_extra_args(&jar_path.to_string_lossy(), extra_java_args),
             working_dir: jar_path.parent().map(Path::to_path_buf),
+            env: Vec::new(),
         }
     }
 
@@ -998,6 +1007,15 @@ impl AgentLaunchSpec {
 
     pub fn with_working_dir(mut self, working_dir: impl Into<PathBuf>) -> Self {
         self.working_dir = Some(working_dir.into());
+        self
+    }
+
+    /// Appends `env` after any entries already present.
+    ///
+    /// Later entries win when [`Self::env`] is applied to the child process,
+    /// so callers can layer connection-level overrides on top of defaults.
+    pub fn with_env(mut self, env: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.env.extend(env);
         self
     }
 }
@@ -3320,6 +3338,9 @@ fn agent_command(launch: &AgentLaunchSpec) -> Command {
         command.current_dir(working_dir);
     }
     remove_agent_proxy_env(&mut command);
+    // Applied after the proxy scrub so an explicitly configured variable (for
+    // example an Oracle Client path) is never silently dropped.
+    command.envs(launch.env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
     command
 }
 

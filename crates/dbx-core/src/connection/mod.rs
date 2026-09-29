@@ -1314,6 +1314,24 @@ fn mysql_metadata_fallback_url(
     Some(connection_url_for_endpoint(config, host, port))
 }
 
+/// Global Oracle OCI defaults pulled from editor settings.
+#[derive(Default)]
+struct OracleOciDefaults {
+    nls_lang: Option<String>,
+    client_path: Option<String>,
+}
+
+/// Trims an optional setting, treating whitespace-only input as unset.
+fn oracle_oci_trimmed(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Reads a trimmed non-empty string out of the editor settings blob.
+fn json_trimmed_string(settings: &serde_json::Value, key: &str) -> Option<String> {
+    let text = settings.get(key)?.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 impl AppState {
     pub fn shared_resource_budget(&self, name: &str, capacity: usize) -> Result<Arc<Semaphore>, String> {
         if capacity == 0 {
@@ -1542,11 +1560,46 @@ impl AppState {
         error.message
     }
 
+    /// Resolves the agent-process environment a connection needs.
+    ///
+    /// Only Oracle OCI ("thick") connections declare one today. The Oracle
+    /// Client is a process-scoped C library: `NLS_LANG` is read once when the
+    /// client initialises and the Instant Client is located through the platform
+    /// loader path, so neither can travel as a connection parameter — they have
+    /// to be baked into the agent process. Because the environment is part of
+    /// the launch fingerprint, a non-empty result also gives the connection its
+    /// own process instead of sharing one with other Oracle connections.
+    async fn agent_launch_env(&self, config: &ConnectionConfig) -> Vec<(String, String)> {
+        if config.driver_profile.as_deref() != Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE) {
+            return Vec::new();
+        }
+        let defaults = self.oracle_oci_defaults().await;
+        let nls_lang = oracle_oci_trimmed(config.oracle_oci_nls_lang.as_deref())
+            .or_else(|| oracle_oci_trimmed(defaults.nls_lang.as_deref()));
+        crate::oracle_oci::oracle_oci_launch_env(nls_lang, defaults.client_path.as_deref(), None)
+    }
+
+    /// Reads the global Oracle OCI defaults from editor settings.
+    ///
+    /// Editor settings are one opaque JSON blob owned by the frontend, so a
+    /// missing or malformed value degrades to "unset" rather than failing the
+    /// connection.
+    async fn oracle_oci_defaults(&self) -> OracleOciDefaults {
+        let Ok(Some(settings)) = self.storage.load_editor_settings().await else {
+            return OracleOciDefaults::default();
+        };
+        OracleOciDefaults {
+            nls_lang: json_trimmed_string(&settings, "oracleOciNlsLang"),
+            client_path: json_trimmed_string(&settings, "oracleOciClientPath"),
+        }
+    }
+
     async fn spawn_routed_shared_agent_client(
         &self,
         db_type: &DatabaseType,
         driver_profile: Option<&str>,
         extra_java_args: &[String],
+        agent_env: &[(String, String)],
         agent_session_id: String,
         connect_params: serde_json::Value,
         connect_timeout: Duration,
@@ -1557,6 +1610,7 @@ impl AppState {
                 db_type,
                 driver_profile,
                 extra_java_args,
+                agent_env,
                 agent_session_id,
                 connect_params,
                 connect_timeout,
@@ -2981,11 +3035,13 @@ impl AppState {
                 )?;
                 if db_config.db_type != DatabaseType::ZooKeeper {
                     let agent_session_id = uuid::Uuid::new_v4().simple().to_string();
+                    let agent_env = self.agent_launch_env(&db_config).await;
                     let mut initial_result = self
                         .spawn_routed_shared_agent_client(
                             &db_config.db_type,
                             db_config.driver_profile.as_deref(),
                             &db_config.agent_java_options,
+                            &agent_env,
                             agent_session_id.clone(),
                             connect_params,
                             agent_connect_timeout(&db_config),
@@ -3006,6 +3062,7 @@ impl AppState {
                                     &db_config.db_type,
                                     db_config.driver_profile.as_deref(),
                                     &db_config.agent_java_options,
+                                    &agent_env,
                                     agent_session_id.clone(),
                                     agent_connect_params_with_role(
                                         &db_config,
@@ -3069,11 +3126,13 @@ impl AppState {
                                         alternate_config.effective_database().unwrap_or(""),
                                         session_role,
                                     )?;
+                                    let alternate_env = self.agent_launch_env(&alternate_config).await;
                                     match self
                                         .spawn_routed_shared_agent_client(
                                             &alternate_config.db_type,
                                             alternate_config.driver_profile.as_deref(),
                                             &alternate_config.agent_java_options,
+                                            &alternate_env,
                                             agent_session_id.clone(),
                                             alternate_params,
                                             agent_connect_timeout(&alternate_config),
@@ -6969,6 +7028,7 @@ mod tests {
 
     fn mysql_config(database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
             docs_notes_path: None,
             id: "conn".to_string(),
             name: "MySQL".to_string(),

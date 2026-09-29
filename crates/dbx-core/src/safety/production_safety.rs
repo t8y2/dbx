@@ -758,6 +758,7 @@ mod tests {
 
     fn config() -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
             docs_notes_path: None,
             id: "conn".to_string(),
             name: "test".to_string(),

@@ -18,6 +18,13 @@ driverProfiles:
     agentKey: oracle
     label: Oracle
     storeVisible: false
+  # OCI thick-driver mode: user selects it per connection; the oci.dll /
+  # Instant Client location is a global setting shared by every OCI connection.
+  - profile: oci
+    agentKey: oracle-oci
+    label: Oracle (OCI)
+    storeVisible: true
+    storeOrder: 52
 singleConnectionPool: true
 metadataConnectionScoped: false
 skipTcpProbe: true

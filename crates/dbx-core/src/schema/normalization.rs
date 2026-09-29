@@ -145,6 +145,7 @@ mod tests {
 
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
             id: "test".to_string(),
             name: "test".to_string(),
             db_type,

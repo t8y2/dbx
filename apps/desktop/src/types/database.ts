@@ -129,6 +129,8 @@ export interface ConnectionConfig {
   client_key_path?: string;
   sysdba?: boolean;
   oracle_connection_type?: "service_name" | "sid" | "tns";
+  /** Connection-level NLS_LANG override; empty follows the global default. */
+  oracle_oci_nls_lang?: string;
   connection_string?: string;
   jdbc_driver_class?: string;
   jdbc_driver_paths?: string[];

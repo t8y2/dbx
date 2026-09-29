@@ -991,6 +991,7 @@ mod tests {
 
     fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "SQLite".to_string(),

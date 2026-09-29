@@ -10,6 +10,7 @@ use std::time::Duration;
 
 fn live_sqlserver_config(id: &str, database: &str) -> ConnectionConfig {
     ConnectionConfig {
+        oracle_oci_nls_lang: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),

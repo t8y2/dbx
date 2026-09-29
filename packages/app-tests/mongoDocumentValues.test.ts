@@ -62,6 +62,10 @@ test("parses Mongo shell ISODate literals as extended JSON dates", () => {
 });
 
 test("preserves date-shaped Mongo strings instead of guessing Date", () => {
+  // A shell date literal written the way a grid cell shows it is read as local time and sent as UTC.
+  assert.deepEqual(parseMongoDocumentInputValue('ISODate("2025-04-01 19:46:03")'), { $date: new Date(2025, 3, 1, 19, 46, 3).toISOString() });
+  assert.deepEqual(parseMongoDocumentInputValue('new Date("2025-04-01")'), { $date: new Date(2025, 3, 1).toISOString() });
+  // Bare text stays text: only the literal marks a date.
   assert.equal(parseMongoDocumentInputValue("2025-08-14 02:25:43.718"), "2025-08-14 02:25:43.718");
   assert.equal(parseMongoDocumentInputValue("2025-04-01 19:46:03"), "2025-04-01 19:46:03");
   assert.equal(parseMongoDocumentInputValue('"2025-08-14 02:25:43.718"'), "2025-08-14 02:25:43.718");

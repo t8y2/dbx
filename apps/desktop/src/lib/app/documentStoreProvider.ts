@@ -2,7 +2,7 @@ import type { ComposerTranslation } from "vue-i18n";
 import { normalizeJsonArgument } from "@dbx-app/mongo-shell";
 import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 import { quoteUnquotedObjectKeys } from "@/lib/mongo/mongoShellCommand";
-import { formatMongoShellLiteral } from "@/lib/mongo/mongoDocumentValues";
+import { formatMongoShellLiteral, normalizeMongoDateInput } from "@/lib/mongo/mongoDocumentValues";
 
 export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch" | "solr";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "begins-with" | "ends-with" | "greater-than" | "greater-than-or-equal" | "less-than" | "less-than-or-equal" | "in" | "not-in" | "between" | "not-between" | "is-null" | "is-not-null";
@@ -910,10 +910,12 @@ function parseMongoFilterValueAs(raw: string, valueType: Exclude<DocumentFilterV
     case "object-id":
       if (!/^[0-9a-f]{24}$/i.test(text)) throw invalidMongoFilterValue(valueType, raw);
       return { $oid: text };
-    case "date":
+    case "date": {
       if (/^-?\d+$/.test(text)) return { $date: { $numberLong: text } };
-      if (Number.isNaN(Date.parse(text))) throw invalidMongoFilterValue(valueType, raw);
-      return { $date: text };
+      const normalized = normalizeMongoDateInput(text);
+      if (!normalized) throw invalidMongoFilterValue(valueType, raw);
+      return { $date: normalized };
+    }
     case "int32": {
       if (!/^-?\d+$/.test(text)) throw invalidMongoFilterValue(valueType, raw);
       const value = BigInt(text);

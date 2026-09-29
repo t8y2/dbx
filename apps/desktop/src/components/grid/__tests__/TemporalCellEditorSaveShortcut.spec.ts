@@ -127,5 +127,14 @@ describe("TemporalCellEditor save shortcut", () => {
     // 非 temporal 值编辑器里 ctrl+s 无人消费（必须点「执行」）。这里做结构校验。
     expect(dataGridSource).toContain("onSaveShortcut:");
     expect(dataGridSource).toMatch(/useCellDetailEditor\(\{[\s\S]{0,2000}?onSaveShortcut[\s\S]{0,1200}?commitValueEditorEdit\(\)/);
+    // 回归防护：useCellDetailEditor 对每个 keydown 都会回调 onSaveShortcut，处理器
+    // 必须先用 isSaveShortcut 过滤，否则普通按键也被吞掉，值编辑器完全无法输入。
+    expect(dataGridSource).toMatch(/onSaveShortcut: \(event\) => \{[\s\S]{0,200}?isSaveShortcut\(event, settingsStore\.editorSettings\.shortcuts\)[\s\S]{0,600}?commitValueEditorEdit\(\)/);
+  });
+
+  it("wires Ctrl+S in the cell details panel editor to commit + save (#10515)", () => {
+    // 单元格详情 tab 的 CodeMirror 是另一个编辑器实例；ctrl+s 必须与 temporal 详情
+    // 编辑器的路径一致——先 emit commit（落成待保存变更）再 emit save（触发保存）。
+    expect(cellDetailPanelSource).toMatch(/onSave: \(\) => \{[\s\S]{0,160}?emit\("commit"\);[\s\S]{0,80}?emit\("save"\);/);
   });
 });

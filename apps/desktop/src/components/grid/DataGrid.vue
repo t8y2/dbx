@@ -6302,9 +6302,11 @@ watch(valueEditorContainer, async (el) => {
       },
       // 非 temporal 值编辑器（CodeMirror）里按 Ctrl/Cmd+S：仅靠网格全局快捷键不会把
       // 草稿提交成待保存变更，必须在这里认领保存键——先 commitValueEditorEdit 落脏，
-      // 再触发保存（#10515；temporal 走 @save→onTemporalCellEditorSave）。返回 true
-      // 由 CodeMirror 消费该键（preventDefault + stopPropagation），避免网格再处理。
-      onSaveShortcut: () => {
+      // 再触发保存（#10515；temporal 走 @save→onTemporalCellEditorSave）。
+      // useCellDetailEditor 对每个 keydown 都会回调本钩子，必须先用 isSaveShortcut
+      // 过滤：否则普通按键也被吞掉（preventDefault），编辑器将完全无法输入。
+      onSaveShortcut: (event) => {
+        if (!isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) return false;
         commitValueEditorEdit();
         void nextTick().then(() => {
           void saveGridChangesFromShortcut();

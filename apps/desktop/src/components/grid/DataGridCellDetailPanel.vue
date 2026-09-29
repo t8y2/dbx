@@ -60,7 +60,17 @@ const emit = defineEmits<{
   copySqlCondition: [];
 }>();
 
-const { geometryPreviewOpen, geometryCanvas, detailsEditorContainer, sideJsonPreviewContainer, openSearch } = useDataGridCellDetail({ detail: toRef(props, "detail"), editValue: detailEditValue, onCancel: () => emit("cancel") });
+const { geometryPreviewOpen, geometryCanvas, detailsEditorContainer, sideJsonPreviewContainer, openSearch } = useDataGridCellDetail({
+  detail: toRef(props, "detail"),
+  editValue: detailEditValue,
+  onCancel: () => emit("cancel"),
+  // 详情编辑器里按 Ctrl/Cmd+S 与 temporal 编辑器的 ctrl+s 路径保持一致：
+  // 先 emit commit（把草稿落成待保存变更），再 emit save（触发网格保存）。
+  onSave: () => {
+    emit("commit");
+    emit("save");
+  },
+});
 void geometryCanvas;
 void detailsEditorContainer;
 void sideJsonPreviewContainer;

@@ -45,7 +45,7 @@ export interface SettingsSearchEntry {
 }
 
 export interface SettingsSearchRoute {
-  syncMethodTab?: "webdav" | "snippet";
+  syncMethodTab?: "webdav" | "snippet" | "local";
 }
 
 export type Translate = (key: string) => string;
@@ -276,6 +276,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "sync-snippet-provider", category: "sync", titleKey: "settings.syncSnippetProvider", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },
   { id: "sync-snippet-id", category: "sync", titleKey: "settings.syncSnippetId", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },
   { id: "sync-snippet-token", category: "sync", titleKey: "settings.syncSnippetToken", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },
+  { id: "sync-local-backup", category: "sync", titleKey: "settings.localBackupTitle", descriptionKey: "settings.localBackupDescription", targetId: "sync-local", route: { syncMethodTab: "local" }, visible: desktopOnly },
   { id: "sync-secrets", category: "sync", titleKey: "settings.syncSecrets", targetId: "sync" },
   { id: "sync-secrets-passphrase", category: "sync", titleKey: "settings.syncSecretsPassphrase", targetId: "sync" },
   { id: "ai-config", category: "ai", titleKey: "ai.configList", targetId: "ai" },

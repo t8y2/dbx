@@ -2535,6 +2535,18 @@ export async function cloudSyncLocalCatalog(editorSettings?: unknown): Promise<S
   return post("/api/cloud-sync/catalog/local", { editorSettings });
 }
 
+export async function localBackupExport(): Promise<never> {
+  throw new Error("Local backup is available only in DBX Desktop.");
+}
+
+export async function localBackupInspect(): Promise<never> {
+  throw new Error("Local backup is available only in DBX Desktop.");
+}
+
+export async function localBackupImport(): Promise<never> {
+  throw new Error("Local backup is available only in DBX Desktop.");
+}
+
 export async function webdavSyncInspect(config: WebDavConfig, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
   return post("/api/cloud-sync/webdav/inspect", { config, secretsPassphrase });
 }

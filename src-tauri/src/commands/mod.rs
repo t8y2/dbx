@@ -26,6 +26,7 @@ pub mod history;
 pub mod keychain;
 pub mod launch_args;
 pub mod list_sql_files;
+pub mod local_backup;
 pub mod mcp;
 pub mod mcp_bridge;
 pub mod mcp_http_server;

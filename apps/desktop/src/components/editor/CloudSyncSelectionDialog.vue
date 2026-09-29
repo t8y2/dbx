@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { FolderOpen } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/api";
@@ -14,15 +15,21 @@ const props = defineProps<{
   mode: "upload" | "restore";
   catalog: SyncSnapshotCatalog | null;
   defaultIncludeSecrets?: boolean;
+  secretsPassphraseAvailable?: boolean;
+  showLocalExportPath?: boolean;
+  localExportPath?: string;
 }>();
 const { t } = useI18n();
 
 const emit = defineEmits<{
   "update:open": [value: boolean];
   confirm: [selection: SyncSelection];
+  "choose-local-export-path": [];
 }>();
 
 const selection = ref<SyncSelection>(emptySelection());
+const secretsPassphraseRequired = ref(false);
+const localExportPathRequired = ref(false);
 const isRestore = computed(() => props.mode === "restore");
 
 const backupSettingsCategoryOrder: readonly BackupSettingsCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "ai"];
@@ -184,7 +191,7 @@ function resetFromCatalog() {
     pluginUiStorage: saved?.pluginUiStorage ?? (catalog.pluginUiStorageLocked ? undefined : catalog.pluginUiStorage),
     sidebarLayout: saved?.sidebarLayout ?? catalog.hasSidebarLayout,
     pinnedTreeNodeIds: saved?.pinnedTreeNodeIds ?? catalog.hasPinnedTreeNodeIds,
-    includeSecrets: saved?.includeSecrets ?? (isRestore.value ? catalog.hasEncryptedSecrets : !!props.defaultIncludeSecrets),
+    includeSecrets: props.secretsPassphraseAvailable === false ? false : (saved?.includeSecrets ?? (isRestore.value ? catalog.hasEncryptedSecrets : !!props.defaultIncludeSecrets)),
     syncCredentials: saved?.syncCredentials ?? (isRestore.value ? catalog.hasEncryptedSecrets : !!props.defaultIncludeSecrets),
   };
   if (selection.value.includeSecrets && !saved) onSecretsChanged();
@@ -193,13 +200,21 @@ function resetFromCatalog() {
 watch(
   () => [props.open, props.catalog] as const,
   ([open]) => {
-    if (open) resetFromCatalog();
+    if (open) {
+      secretsPassphraseRequired.value = false;
+      localExportPathRequired.value = false;
+      resetFromCatalog();
+    }
   },
   { immediate: true },
 );
 
 function ids(key: "connections" | "connectionSecrets" | "tunnelProfiles" | "tunnelSecrets" | "savedSqlFolders" | "savedSqlFiles" | "desktopSettings" | "editorSettings" | "aiConfigs") {
   return selection.value[key] ?? [];
+}
+
+function allSelected(key: "connections" | "tunnelProfiles", items: SyncCatalogItem[]) {
+  return items.length > 0 && items.every((item) => ids(key).includes(item.id));
 }
 
 function toggleId(key: "connections" | "connectionSecrets" | "tunnelProfiles" | "tunnelSecrets" | "savedSqlFolders" | "savedSqlFiles" | "desktopSettings" | "editorSettings" | "aiConfigs", id: string) {
@@ -209,7 +224,8 @@ function toggleId(key: "connections" | "connectionSecrets" | "tunnelProfiles" | 
 
 function toggleAll(key: "connections" | "tunnelProfiles" | "savedSqlFolders" | "savedSqlFiles" | "desktopSettings" | "editorSettings" | "aiConfigs", items: SyncCatalogItem[]) {
   const current = ids(key);
-  selection.value[key] = current.length === items.length ? [] : items.map((item) => item.id);
+  const isAllSelected = items.length > 0 && items.every((item) => current.includes(item.id));
+  selection.value[key] = isAllSelected ? [] : items.map((item) => item.id);
 }
 
 function toggleSettingsCategory(category: BackupSettingsCategoryId) {
@@ -254,7 +270,17 @@ function toggleAllAiConfigs() {
   toggleAll("aiConfigs", props.catalog?.aiConfigs ?? []);
 }
 
-function onSecretsChanged() {
+function onSecretsChanged(event?: Event) {
+  if (event) {
+    const includeSecrets = (event.target as HTMLInputElement).checked;
+    if (includeSecrets && props.secretsPassphraseAvailable === false) {
+      selection.value.includeSecrets = false;
+      secretsPassphraseRequired.value = true;
+      return;
+    }
+    selection.value.includeSecrets = includeSecrets;
+    secretsPassphraseRequired.value = false;
+  }
   if (!selection.value.includeSecrets || !props.catalog) return;
   if (!selection.value.connectionSecrets?.length) selection.value.connectionSecrets = [...props.catalog.connectionSecrets];
   if (!selection.value.tunnelSecrets?.length) selection.value.tunnelSecrets = [...props.catalog.tunnelSecrets];
@@ -267,12 +293,37 @@ function checked(key: "connections" | "connectionSecrets" | "tunnelProfiles" | "
   return ids(key).includes(id);
 }
 
+function copySelection(): SyncSelection {
+  const current = selection.value;
+  return {
+    connections: current.connections ? [...current.connections] : undefined,
+    connectionSecrets: current.connectionSecrets ? [...current.connectionSecrets] : undefined,
+    tunnelProfiles: current.tunnelProfiles ? [...current.tunnelProfiles] : undefined,
+    tunnelSecrets: current.tunnelSecrets ? [...current.tunnelSecrets] : undefined,
+    savedSqlFolders: current.savedSqlFolders ? [...current.savedSqlFolders] : undefined,
+    savedSqlFiles: current.savedSqlFiles ? [...current.savedSqlFiles] : undefined,
+    desktopSettings: current.desktopSettings ? [...current.desktopSettings] : undefined,
+    editorSettings: current.editorSettings ? [...current.editorSettings] : undefined,
+    aiConfigs: current.aiConfigs ? [...current.aiConfigs] : undefined,
+    pluginUiStorage: current.pluginUiStorage?.map(({ pluginId, key, pluginName }) => ({ pluginId, key, pluginName })),
+    sidebarLayout: current.sidebarLayout,
+    pinnedTreeNodeIds: current.pinnedTreeNodeIds,
+    includeSecrets: current.includeSecrets,
+    syncCredentials: current.syncCredentials,
+  };
+}
+
 function confirmSelection() {
+  if (props.showLocalExportPath && !props.localExportPath?.trim()) {
+    localExportPathRequired.value = true;
+    return;
+  }
+  localExportPathRequired.value = false;
   if (props.catalog) {
     selection.value.desktopSettings = selectedSettings(selection.value.desktopSettings, selectableDesktopSettings(props.catalog));
     selection.value.editorSettings = selectedSettings(selection.value.editorSettings, selectableEditorSettings(props.catalog));
   }
-  emit("confirm", clonePluginData(selection.value));
+  emit("confirm", clonePluginData(copySelection()));
   emit("update:open", false);
 }
 </script>
@@ -290,7 +341,7 @@ function confirmSelection() {
       <div v-if="catalog" class="min-h-0 flex-1 space-y-2 overflow-y-auto px-5 py-4">
         <details open class="border-b pb-2">
           <summary class="flex cursor-pointer list-none items-center gap-2 py-2 text-sm font-medium">
-            <input :checked="selection.connections?.length === catalog.connections.length" type="checkbox" class="size-4 accent-primary" @click.stop.prevent="toggleAll('connections', catalog.connections)" />
+            <input :checked="allSelected('connections', catalog.connections)" type="checkbox" class="size-4 accent-primary" @click.stop @change="toggleAll('connections', catalog.connections)" />
             <span>{{ t("settings.syncSelectionConnections") }}</span>
             <span class="ml-auto text-xs text-muted-foreground">{{ selection.connections?.length ?? 0 }}/{{ catalog.connections.length }}</span>
           </summary>
@@ -311,7 +362,7 @@ function confirmSelection() {
 
         <details open class="border-b pb-2">
           <summary class="flex cursor-pointer list-none items-center gap-2 py-2 text-sm font-medium">
-            <input :checked="selection.tunnelProfiles?.length === catalog.tunnelProfiles.length" type="checkbox" class="size-4 accent-primary" @click.stop.prevent="toggleAll('tunnelProfiles', catalog.tunnelProfiles)" />
+            <input :checked="allSelected('tunnelProfiles', catalog.tunnelProfiles)" type="checkbox" class="size-4 accent-primary" @click.stop @change="toggleAll('tunnelProfiles', catalog.tunnelProfiles)" />
             <span>{{ t("settings.syncSelectionTunnels") }}</span>
             <span class="ml-auto text-xs text-muted-foreground">{{ selection.tunnelProfiles?.length ?? 0 }}/{{ catalog.tunnelProfiles.length }}</span>
           </summary>
@@ -365,10 +416,13 @@ function confirmSelection() {
 
         <details open class="border-b pb-2">
           <summary class="flex cursor-pointer list-none items-center gap-2 py-2 text-sm font-medium">
-            <input v-model="selection.includeSecrets" type="checkbox" class="size-4 accent-primary" @click.stop @change="onSecretsChanged" />
+            <input :checked="selection.includeSecrets" type="checkbox" class="size-4 accent-primary" @click.stop @change="onSecretsChanged" />
             <span>{{ t("settings.syncSelectionEncrypted") }}</span>
           </summary>
           <div class="ml-6 space-y-2 pb-2">
+            <p v-if="secretsPassphraseRequired" role="alert" class="text-xs text-destructive">
+              {{ t("settings.localBackupSecretsPassphraseRequiredHint") }}
+            </p>
             <label class="flex min-h-7 items-center gap-2 text-sm">
               <input v-model="selection.syncCredentials" :disabled="!selection.includeSecrets" type="checkbox" class="size-4 accent-primary" />
               <span>{{ t("settings.syncSelectionSyncCredentials") }}</span>
@@ -412,15 +466,33 @@ function confirmSelection() {
           <summary class="flex cursor-pointer list-none items-center gap-2 py-2 text-sm font-medium">{{ t("settings.syncSelectionWorkspace") }}</summary>
           <div class="ml-6 space-y-1 pb-2">
             <label class="flex min-h-7 items-center gap-2 text-sm">
-              <input v-model="selection.sidebarLayout" :disabled="!catalog.hasSidebarLayout" type="checkbox" class="size-4 accent-primary" />
+              <input v-model="selection.sidebarLayout" type="checkbox" class="size-4 accent-primary" />
               <span>{{ t("settings.syncSelectionSidebar") }}</span>
             </label>
             <label class="flex min-h-7 items-center gap-2 text-sm">
-              <input v-model="selection.pinnedTreeNodeIds" :disabled="!catalog.hasPinnedTreeNodeIds" type="checkbox" class="size-4 accent-primary" />
+              <input v-model="selection.pinnedTreeNodeIds" type="checkbox" class="size-4 accent-primary" />
               <span>{{ t("settings.syncSelectionPinned") }}</span>
             </label>
           </div>
         </details>
+      </div>
+
+      <div v-if="showLocalExportPath" class="shrink-0 border-t px-5 py-3">
+        <div class="flex flex-wrap items-center gap-3">
+          <div class="min-w-0 flex-1">
+            <p class="text-xs font-medium">{{ t("settings.localBackupPathLabel") }}</p>
+            <p class="truncate text-xs text-muted-foreground">
+              {{ localExportPath || t("settings.localBackupPathUnset") }}
+            </p>
+          </div>
+          <Button type="button" variant="outline" size="sm" @click="emit('choose-local-export-path')">
+            <FolderOpen class="mr-1 h-3.5 w-3.5" />
+            {{ t("settings.localBackupChoosePath") }}
+          </Button>
+        </div>
+        <p v-if="localExportPathRequired" role="alert" class="mt-2 text-xs text-destructive">
+          {{ t("settings.localBackupPathRequired") }}
+        </p>
       </div>
 
       <DialogFooter class="mx-0 mb-0 shrink-0 border-t px-5 pb-4 pt-3">

@@ -37,6 +37,15 @@ describe("getSiblingDB completion targeting", () => {
     expect(labels("db.")).toContain("getSiblingDB");
   });
 
+  it("completes the database name inside the getSiblingDB argument", () => {
+    const databases = ["archive", "analytics", "admin"];
+    const items = (text: string) => buildMongoCompletionItems(text, text.length, { databases }).map((item) => item.label);
+    expect(getMongoCompletionContext('db.getSiblingDB("ar', 19)).toMatchObject({ mode: "database", prefix: '"ar', from: 16 });
+    expect(items('db.getSiblingDB("ar')).toEqual(["archive"]);
+    expect(items('db.getSiblingDB("')).toEqual(databases);
+    expect(buildMongoCompletionItems('db.getSiblingDB("ar', 19, { databases })[0]?.apply).toBe('"archive"');
+  });
+
   it("does not treat a variable argument as a resolved sibling database", () => {
     const text = "db.getSiblingDB(name).";
     expect(getMongoCompletionContext(text, text.length).database).toBeUndefined();

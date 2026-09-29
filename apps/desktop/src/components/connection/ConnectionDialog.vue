@@ -147,7 +147,8 @@ import {
   Trash2,
 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { resolveVisibleDatabaseSaveAction } from "@/components/sidebar/visibleDatabasesDialogState";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase, supportsDataDictionary } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind } from "@/lib/database/databaseDriverManifest";
@@ -5787,7 +5788,20 @@ function saveVisibleDatabaseSelection() {
       [key]: normalizeVisibleSchemaSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value),
     };
   } else {
-    form.value.visible_databases = normalizeVisibleDatabaseSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value);
+    // "全选"等价于不筛选：存成当时的库名快照会让之后新建的库永远看不到。
+    const action = resolveVisibleDatabaseSaveAction({
+      selection: visibleDatabaseSelection.value,
+      allNames: visibleDatabaseNames.value,
+      defaultVisibleNames: defaultListedVisibleDatabaseNames.value,
+      configured: form.value.visible_databases,
+      configuredPatterns: form.value.visible_database_patterns,
+      patterns: form.value.visible_database_patterns ?? [],
+    });
+    if (action.type === "clear") {
+      form.value.visible_databases = undefined;
+    } else if (action.type === "set") {
+      form.value.visible_databases = action.databaseNames;
+    }
   }
   showVisibleDatabasesDialog.value = false;
 }

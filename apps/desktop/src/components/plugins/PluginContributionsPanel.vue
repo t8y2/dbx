@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineComponent, h, onBeforeUnmount, onMounted, ref, watch, TransitionGroup } from "vue";
-import { ArrowUp, BadgeCheck, Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, Info, LayoutGrid, Link2, List, Loader2, PackageCheck, Pencil, Pin, PinOff, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
+import { ArrowUp, BadgeCheck, Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, Info, LayoutGrid, Link2, List, Loader2, PackageCheck, Pencil, Pin, PinOff, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { isSensitivePluginPermission } from "@/lib/plugins/pluginPermissions";
 import { Button } from "@/components/ui/button";
@@ -37,7 +37,7 @@ import {
   type MarketplacePluginSortMode,
   type PluginSourceChange,
 } from "@/lib/plugins/pluginMarketplace";
-import { isBatchSelectableListing, runBatch } from "@/lib/plugins/pluginBatch";
+import { isBatchSelectableListing, runBatch, type BatchOutcome } from "@/lib/plugins/pluginBatch";
 import { COMPONENT_PLUGINS_UPDATED_EVENT, notifyComponentPluginsUpdated, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
@@ -97,7 +97,24 @@ const marketplaceInstallingKey = ref("");
 const marketplaceUnavailable = ref(false);
 const installedUpdateProgress = ref<{ current: number; total: number } | null>(null);
 const operating = ref(false);
-const error = ref("");
+// Page-level failure banner, split by lifetime. `batchFailures` is keyed by plugin: a later
+// success retires exactly its own line instead of leaving a stale banner behind, and each line
+// records what the failed attempt was trying to do (`kind`), because "no longer pending" means
+// opposite things for an install (never retire a not-installed plugin) and an update.
+type PluginBatchFailureKind = "install" | "update" | "uninstall";
+interface PluginBatchFailure {
+  pluginId: string;
+  name: string;
+  message: string;
+  kind: PluginBatchFailureKind;
+  // Marketplace repository the attempt came from; an update failure may only be reconciled while
+  // that repository's catalog actually loaded (not applicable to uninstall).
+  repositoryId?: string;
+}
+const batchFailures = ref<PluginBatchFailure[]>([]);
+// Load / refresh failures only: their lifecycle is "the next successful state re-read clears them".
+const loadError = ref("");
+const errorBannerText = computed(() => [...batchFailures.value.map((failure) => `${failure.name}: ${failure.message}`), loadError.value].filter(Boolean).join("\n"));
 const selectedPluginId = ref("");
 const selectedContributionId = ref("");
 const selectedConnectionId = ref("");
@@ -233,6 +250,70 @@ function markRecentlyCompleted(key: string) {
   }, 900);
 }
 
+// --- Batch failure banner lifecycle -------------------------------------------------------------
+// A batch failure is retired from two directions, and both are needed: precisely when this
+// component sees the plugin change successfully, and by reconciliation when the state was changed
+// elsewhere (the update center, another window) so no callback ever reaches this panel.
+
+function retireBatchFailures(pluginIds: Iterable<string>): void {
+  const retired = new Set(pluginIds);
+  if (!retired.size) return;
+  if (!batchFailures.value.some((failure) => retired.has(failure.pluginId))) return;
+  batchFailures.value = batchFailures.value.filter((failure) => !retired.has(failure.pluginId));
+}
+
+function retireBatchFailure(pluginId: string): void {
+  retireBatchFailures([pluginId]);
+}
+
+function dismissErrorBanner(): void {
+  // Explicit escape hatch: the banner has no auto-expiry, and dismissing is purely cosmetic —
+  // no plugin state is touched.
+  batchFailures.value = [];
+  loadError.value = "";
+}
+
+// An update failure may only be reconciled against a catalog check that is actually trustworthy.
+// The panel already refuses to read an incomplete check as "up to date" (catalogChecked /
+// catalogPartialFailure); the same rule applies here, otherwise "we could not check" would silently
+// erase a failure the user still needs to act on.
+function updateCheckTrustworthy(failure: PluginBatchFailure): boolean {
+  if (marketplaceLoading.value) return false;
+  if (marketplaceUnavailable.value) return false;
+  if (!repositoriesEnabled.value) return false;
+  // A repository that errored cannot prove its plugin is up to date. Only the failure's own
+  // repository matters: another repository's error says nothing about this plugin's source.
+  if (failure.repositoryId && catalogErrors.value.some((result) => result.repository.id === failure.repositoryId)) return false;
+  return true;
+}
+
+function reconcileBatchFailures(): void {
+  if (!batchFailures.value.length) return;
+  const installedIds = new Set(installedPlugins.value.map((plugin) => plugin.manifest.id));
+  batchFailures.value = batchFailures.value.filter((failure) => {
+    // A failed uninstall stays until the plugin is actually gone.
+    if (failure.kind === "uninstall") return installedIds.has(failure.pluginId);
+    // A failed install stays while the plugin is not installed: absence from the pending-update
+    // index is the normal state of a not-yet-installed plugin, not evidence the failure is stale.
+    if (failure.kind === "install") return !installedIds.has(failure.pluginId);
+    if (!updateCheckTrustworthy(failure)) return true;
+    // Kept only while the fresh state still asks for the update: installed AND still not latest.
+    return installedIds.has(failure.pluginId) && installedUpdateIndex.value.has(failure.pluginId);
+  });
+}
+
+// Single choke point for assigning a freshly read installed list: every successful re-read clears a
+// stale load failure and reconciles the per-plugin banner, so a new call site cannot forget either.
+function applyInstalledPlugins(plugins: InstalledPlugin[]): void {
+  installedPlugins.value = plugins;
+  loadError.value = "";
+  reconcileBatchFailures();
+}
+
+async function reloadInstalledPlugins(): Promise<void> {
+  applyInstalledPlugins(await api.listPlugins());
+}
+
 function openExternal(url?: string) {
   const target = url?.trim();
   if (!target) return;
@@ -248,16 +329,19 @@ function openExternal(url?: string) {
 
 async function refresh(preferredPluginId = props.focusTarget?.pluginId || selectedPluginId.value) {
   loading.value = true;
-  error.value = "";
+  loadError.value = "";
   try {
-    [installedPlugins.value, trustedKeys.value, repositories.value] = await Promise.all([api.listPlugins(), api.listPluginTrustedKeys(), api.listPluginRepositories()]);
+    const [plugins, keys, repositoryList] = await Promise.all([api.listPlugins(), api.listPluginTrustedKeys(), api.listPluginRepositories()]);
+    trustedKeys.value = keys;
+    repositories.value = repositoryList;
+    applyInstalledPlugins(plugins);
     await refreshMarketplace();
     // Settings navigation is handled immediately by the watcher; replaying it
     // after loading would overwrite any subsequent navigation by the user.
     if (props.focusTarget && props.focusTarget.section !== "settings") applyFocusTarget(props.focusTarget);
     else selectFirstProvider(preferredPluginId);
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    loadError.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
     loading.value = false;
   }
@@ -265,9 +349,11 @@ async function refresh(preferredPluginId = props.focusTarget?.pluginId || select
 
 async function refreshMarketplace() {
   marketplaceLoading.value = true;
+  let loaded = false;
   try {
     catalogResults.value = await api.fetchPluginMarketplaceCatalogs();
     marketplaceUnavailable.value = false;
+    loaded = true;
   } catch (cause) {
     catalogResults.value = [];
     // Track total failure separately: catalogErrors is derived from catalogResults, which is
@@ -277,6 +363,9 @@ async function refreshMarketplace() {
   } finally {
     marketplaceLoading.value = false;
   }
+  // Only a catalog that actually loaded may re-check update failures — and only once the loading
+  // flag is down, so the trust gate does not read this very fetch as still in flight.
+  if (loaded) reconcileBatchFailures();
 }
 
 function applyFocusTarget(focus: PluginCenterFocus) {
@@ -336,6 +425,9 @@ async function installMarketplaceListing(listing: MarketplacePluginListing, opti
   marketplaceInstallingKey.value = listing.key;
   try {
     const result = await installListing(listing, options.allowSourceChange === true);
+    // Precise retirement: this plugin just changed successfully, so its own failure line (if any)
+    // is stale. Other plugins' lines are untouched.
+    retireBatchFailure(result.plugin.manifest.id);
     markRecentlyCompleted(listing.key);
     toast(t(listing.status === "update" ? "pluginPlatform.updateSuccess" : "pluginPlatform.installSuccess", { name: result.plugin.manifest.name, version: result.plugin.manifest.version }));
     // The COMPONENT_PLUGINS_UPDATED_EVENT handler does the panel-side refresh (icon cache +
@@ -348,8 +440,8 @@ async function installMarketplaceListing(listing: MarketplacePluginListing, opti
     toast(translateBackendError(t, cause), 8000);
     // A failed install can still have mutated the store (a partially replaced version directory, for
     // instance), so re-read the installed list instead of leaving the card on state it may no longer
-    // describe.
-    installedPlugins.value = await api.listPlugins().catch(() => installedPlugins.value);
+    // describe. The fallback keeps the previous list when the re-read itself fails.
+    applyInstalledPlugins(await api.listPlugins().catch(() => installedPlugins.value));
     notifyComponentUpdatesChanged();
   } finally {
     marketplaceInstallingKey.value = "";
@@ -360,18 +452,47 @@ function batchSummaryKey(outcome: { succeeded: unknown[]; failed: { name: string
   return outcome.failed.length ? "pluginPlatform.batchSummaryWithFailures" : "pluginPlatform.batchSummary";
 }
 
-function reportBatchSummary(outcome: { succeeded: unknown[]; failed: { name: string; error: string }[] }) {
+/** What a failed batch item was trying to do, and where its update came from. */
+interface BatchFailureDescriptor {
+  pluginId: string;
+  kind: PluginBatchFailureKind;
+  repositoryId?: string;
+}
+
+function reportBatchSummary(outcome: BatchOutcome, descriptors: readonly BatchFailureDescriptor[]) {
   const failedNames = outcome.failed.map((failure) => failure.name).join("、");
-  error.value = outcome.failed.map((failure) => `${failure.name}: ${translateBackendError(t, failure.error)}`).join("\n");
+  const descriptorById = new Map<string, BatchFailureDescriptor>();
+  for (const descriptor of descriptors) descriptorById.set(descriptor.pluginId, descriptor);
+  const reported: PluginBatchFailure[] = outcome.failed.map((failure) => {
+    const descriptor = descriptorById.get(failure.id);
+    return {
+      pluginId: failure.id,
+      name: failure.name,
+      message: translateBackendError(t, failure.error),
+      // Every failed item came from a batch target, so a descriptor is always present; a missing one
+      // (a future call site) falls back to the conservative kind that is never retired by absence.
+      kind: descriptor?.kind ?? "install",
+      repositoryId: descriptor?.repositoryId,
+    };
+  });
+  // One line per plugin: re-running a batch replaces that plugin's previous line instead of stacking.
+  const reportedIds = new Set(reported.map((failure) => failure.pluginId));
+  batchFailures.value = [...batchFailures.value.filter((failure) => !reportedIds.has(failure.pluginId)), ...reported];
   toast(t(batchSummaryKey(outcome), { success: outcome.succeeded.length, failed: outcome.failed.length, names: failedNames }), outcome.failed.length ? 8000 : 4000);
+}
+
+function succeededIds(outcome: BatchOutcome): string[] {
+  return outcome.results.filter((result) => result.ok).map((result) => result.id);
 }
 
 async function refreshAfterBatch() {
   try {
-    installedPlugins.value = await api.listPlugins();
+    await reloadInstalledPlugins();
     window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
   } catch (cause) {
-    error.value = [error.value, t("pluginPlatform.batchRefreshFailed", { error: cause instanceof Error ? cause.message : String(cause) })].filter(Boolean).join("\n");
+    // A refresh failure is its own lifetime (cleared by the next successful re-read), no longer
+    // appended to the batch summary it would otherwise be indistinguishable from.
+    loadError.value = t("pluginPlatform.batchRefreshFailed", { error: cause instanceof Error ? cause.message : String(cause) });
   }
 }
 
@@ -387,7 +508,10 @@ async function runUpdateAllInstalled() {
   if (sourceChanged.length) toast(t("pluginPlatform.batchSourceChangeSkipped", { names: sourceChanged.map((entry) => entry.listing.name).join("、") }), 8000);
   if (!entries.length || mutationRunning.value) return;
   batchRunning.value = true;
-  error.value = "";
+  // A new run retries the state read; its own outcome owns the banner from here (per-plugin
+  // failures are retired individually, never wholesale).
+  loadError.value = "";
+  const descriptors: BatchFailureDescriptor[] = entries.map((entry) => ({ pluginId: entry.listing.plugin.id, kind: "update", repositoryId: entry.listing.repository.id }));
   installedUpdateProgress.value = { current: 0, total: entries.length };
   try {
     const outcome = await runBatch(
@@ -396,6 +520,7 @@ async function runUpdateAllInstalled() {
       async (entry) => {
         await installListing(entry.listing);
       },
+      (entry) => entry.listing.plugin.id,
       (current, total) => {
         installedUpdateProgress.value = { current, total };
       },
@@ -405,7 +530,8 @@ async function runUpdateAllInstalled() {
       notifyComponentPluginsUpdated();
       notifyComponentUpdatesChanged();
     }
-    reportBatchSummary(outcome);
+    reportBatchSummary(outcome, descriptors);
+    retireBatchFailures(succeededIds(outcome));
     await refreshAfterBatch();
   } finally {
     batchRunning.value = false;
@@ -416,9 +542,9 @@ async function runUpdateAllInstalled() {
 async function refreshAfterExternalPluginUpdate() {
   clearPluginIconCache();
   try {
-    installedPlugins.value = await api.listPlugins();
+    await reloadInstalledPlugins();
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    loadError.value = cause instanceof Error ? cause.message : String(cause);
   }
 }
 
@@ -482,7 +608,10 @@ async function runBatchInstallUpdate() {
   const sourceChangedListings = targets.filter((listing) => pluginSourceChange(listing));
   if (sourceChangedListings.length) return toast(t("pluginPlatform.batchSourceChangeSkipped", { names: sourceChangedListings.map((listing) => listing.name).join("、") }), 8000);
   batchRunning.value = true;
-  error.value = "";
+  loadError.value = "";
+  // `status` records which attempt this is: an install of a not-yet-installed plugin must stay
+  // visible while it is absent, while a failed update retires once the plugin is up to date.
+  const descriptors: BatchFailureDescriptor[] = targets.map((listing) => ({ pluginId: listing.plugin.id, kind: listing.status === "update" ? "update" : "install", repositoryId: listing.repository.id }));
   try {
     const outcome = await runBatch(
       targets,
@@ -490,9 +619,11 @@ async function runBatchInstallUpdate() {
       async (listing) => {
         await installListing(listing);
       },
+      (listing) => listing.plugin.id,
     );
     clearBatchSelection();
-    reportBatchSummary(outcome);
+    reportBatchSummary(outcome, descriptors);
+    retireBatchFailures(succeededIds(outcome));
     await refreshAfterBatch();
     notifyComponentUpdatesChanged();
   } finally {
@@ -506,7 +637,8 @@ async function runBatchUninstall() {
   const names = targets.map((definition) => definition.plugin.manifest.name).join("、");
   if (!window.confirm(t("pluginPlatform.batchUninstallConfirm", { count: targets.length, names }))) return;
   batchRunning.value = true;
-  error.value = "";
+  loadError.value = "";
+  const descriptors: BatchFailureDescriptor[] = targets.map((definition) => ({ pluginId: definition.plugin.manifest.id, kind: "uninstall" }));
   try {
     const outcome = await runBatch(
       targets,
@@ -514,9 +646,11 @@ async function runBatchUninstall() {
       async (definition) => {
         await api.uninstallPlugin(definition.plugin.manifest.id);
       },
+      (definition) => definition.plugin.manifest.id,
     );
     clearBatchSelection();
-    reportBatchSummary(outcome);
+    reportBatchSummary(outcome, descriptors);
+    retireBatchFailures(succeededIds(outcome));
     await refreshAfterBatch();
     notifyComponentUpdatesChanged();
   } finally {
@@ -722,7 +856,10 @@ async function finishInstall(result: PluginInstallResult) {
   toast(t("pluginPlatform.installSuccess", { name: result.plugin.manifest.name, version: result.plugin.manifest.version }));
   clearPluginIconCache();
   notifyComponentPluginsUpdated();
-  installedPlugins.value = await api.listPlugins();
+  // Retire first: this plugin's install already succeeded, so its failure line is stale even if the
+  // re-read below fails (the read only refreshes the panel, it cannot uninstall the plugin).
+  retireBatchFailure(result.plugin.manifest.id);
+  await reloadInstalledPlugins();
   notifyComponentUpdatesChanged();
   window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
   selectPlugin(result.plugin.manifest.id);
@@ -870,7 +1007,9 @@ async function rollbackSelectedPlugin() {
     notifyPluginRuntimeReplaced(result.plugin.manifest.id);
     toast(t("pluginPlatform.rollbackSuccess", { version: result.plugin.manifest.version }));
     clearPluginIconCache();
-    installedPlugins.value = await api.listPlugins();
+    // Retire before the re-read for the same reason as finishInstall: the rollback already happened.
+    retireBatchFailure(result.plugin.manifest.id);
+    await reloadInstalledPlugins();
     notifyComponentUpdatesChanged();
     window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
     selectPlugin(result.plugin.manifest.id);
@@ -886,7 +1025,8 @@ async function uninstallSelectedPlugin() {
   if (mutationRunning.value || !definition || !window.confirm(t("pluginPlatform.uninstallConfirm", { name: definition.plugin.manifest.name }))) return;
   operating.value = true;
   try {
-    installedPlugins.value = await api.uninstallPlugin(definition.plugin.manifest.id);
+    applyInstalledPlugins(await api.uninstallPlugin(definition.plugin.manifest.id));
+    retireBatchFailure(definition.plugin.manifest.id);
     notifyComponentUpdatesChanged();
     window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
     clearPluginIconCache();
@@ -956,7 +1096,14 @@ onBeforeUnmount(() => {
 <template>
   <div ref="panelRootRef" class="plugin-center-view relative mx-auto flex h-full w-full max-w-6xl flex-col gap-4 overflow-hidden px-6 py-6" @dragenter="onWebDragEnter" @dragover="onWebDragOver" @dragleave="onWebDragLeave" @drop="onWebDrop">
     <input ref="webFileInput" type="file" accept=".dbxp" class="hidden" @change="handleWebPackage" />
-    <div v-if="error" class="shrink-0 whitespace-pre-wrap rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">{{ error }}</div>
+    <div v-if="errorBannerText" class="flex shrink-0 items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+      <div class="min-w-0 flex-1 whitespace-pre-wrap">{{ errorBannerText }}</div>
+      <!-- The banner has no auto-expiry, so the user needs an explicit way out; dismissing only
+           clears the notice, no plugin state is touched. -->
+      <button type="button" data-plugin-error-dismiss class="shrink-0 rounded p-0.5 transition-colors hover:bg-destructive/10" :title="t('common.close')" :aria-label="t('common.close')" @click="dismissErrorBanner">
+        <X class="size-3.5" />
+      </button>
+    </div>
 
     <Tabs v-model="activeSection" class="min-h-0 flex-1 gap-3">
       <TabsList class="grid h-9 w-full grid-cols-3">

@@ -224,7 +224,18 @@ import {
 } from "@/lib/mcp/mcpConfigTemplates";
 import { beginMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
-import { addMcpAllowedToolName, customMcpAllowedToolNames, isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, MCP_TOOL_OPTIONS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, toggleMcpAllowedToolName, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
+import {
+  addMcpAllowedToolName,
+  customMcpAllowedToolNames,
+  isMcpPolicyMutationBlocked,
+  MCP_CAPABILITY_ROWS,
+  MCP_EXECUTION_MODE_COLUMNS,
+  MCP_TOOL_OPTIONS,
+  mcpExecutionModeFromPolicy,
+  mcpPolicyFieldsForExecutionMode,
+  toggleMcpAllowedToolName,
+  type McpExecutionMode,
+} from "@/lib/mcp/mcpPolicySelection";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";

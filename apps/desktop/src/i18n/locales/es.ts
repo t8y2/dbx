@@ -8290,7 +8290,8 @@ export default withEnglishFallback({
     mcpToolCustomPlaceholder: "Añade un nombre de herramienta o comodín, p. ej. dbx_ssh__*",
     mcpToolCustomAdd: "Añadir",
     mcpToolCustomRemove: "Eliminar entrada",
-    mcpToolCustomHint: "Las herramientas de plugins se descubren en tiempo de ejecución, por lo que no se pueden listar aquí: permite un plugin con dbx_<prefijo>__* o todas las herramientas de plugins con dbx_*__*. Las entradas guardadas fuera de las casillas anteriores se muestran aquí y pueden eliminarse.",
+    mcpToolCustomHint:
+      "Las herramientas de plugins se descubren en tiempo de ejecución, por lo que no se pueden listar aquí: permite un plugin con dbx_<prefijo>__* o todas las herramientas de plugins con dbx_*__*. Las entradas guardadas fuera de las casillas anteriores se muestran aquí y pueden eliminarse.",
     mcpToolListConnections: "Listar conexiones",
     mcpToolListDatabases: "Listar bases de datos",
     mcpToolListTables: "Listar tablas",

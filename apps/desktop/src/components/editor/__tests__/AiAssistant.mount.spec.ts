@@ -20,7 +20,22 @@ import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostB
 const aiAssistantMountApi = vi.hoisted(() => ({
   conversations: [] as Array<Record<string, unknown>>,
   runAgentStream: undefined as undefined | ((onEvent: (event: { type: string; delta?: string }) => void) => Promise<string>),
+  codeHighlighterDelayMs: 0,
 }));
+
+// `onMounted` imports the syntax highlighter lazily; this module-level delay stands in for the
+// loaded CI runner where that import resolves well after the DOM is ready.
+vi.mock("@/lib/ai/aiCodeHighlighter", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    createAiShikiCodeHighlighter: async (...args: unknown[]) => {
+      const delay = aiAssistantMountApi.codeHighlighterDelayMs;
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      return (actual.createAiShikiCodeHighlighter as (...innerArgs: unknown[]) => Promise<unknown>)(...args);
+    },
+  };
+});
 
 vi.mock("@/lib/ai/ai", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -58,8 +73,33 @@ afterEach(() => {
   vi.unstubAllGlobals();
   aiAssistantMountApi.conversations = [];
   aiAssistantMountApi.runAgentStream = undefined;
+  aiAssistantMountApi.codeHighlighterDelayMs = 0;
   while (cleanups.length) cleanups.pop()?.();
 });
+
+function stubResizeObserver(): Array<{ callback: ResizeObserverCallback; targets: Element[] }> {
+  const observers: Array<{ callback: ResizeObserverCallback; targets: Element[] }> = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      callback: ResizeObserverCallback;
+      targets: Element[] = [];
+
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+        observers.push(this as unknown as { callback: ResizeObserverCallback; targets: Element[] });
+      }
+
+      observe(target: Element) {
+        this.targets.push(target);
+      }
+
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  return observers;
+}
 
 async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig, configureSettings?: (settings: ReturnType<typeof useSettingsStore>) => void, pluginRecommendations?: PluginAiRecommendationHostUpdate) {
   const pinia = createPinia();
@@ -260,10 +300,10 @@ describe("AiAssistant mount", () => {
   });
 
   // These states settle through requestAnimationFrame plus async measurement, and the component
-  // wires its ResizeObserver from an async `onMounted`, so both can lag the DOM by a lot. Budget
-  // by event-loop turns rather than wall-clock: a CI worker's event loop can stall for seconds
-  // behind another worker's module transforms (see `vitest.config.ts`), and a time-based budget
-  // trips in that window even though the component is still progressing.
+  // measures asynchronously, so they can lag the DOM. Budget by event-loop turns rather than
+  // wall-clock: a CI worker's event loop can stall for seconds behind another worker's module
+  // transforms (see `vitest.config.ts`), and a time-based budget trips in that window even though
+  // the component is still progressing.
   async function waitForSettled(what: string, settled: () => boolean, diagnose: () => string): Promise<void> {
     for (let turn = 0; turn < 500; turn += 1) {
       if (settled()) return;
@@ -273,57 +313,47 @@ describe("AiAssistant mount", () => {
     throw new Error(`${what} did not settle in time: ${diagnose()}`);
   }
 
-  it("progressively compacts and expands composer controls while the AI panel is dragged", async () => {
-    const resizeObservers: Array<{ callback: ResizeObserverCallback; targets: Element[] }> = [];
-    vi.stubGlobal(
-      "ResizeObserver",
-      class {
-        callback: ResizeObserverCallback;
-        targets: Element[] = [];
-
-        constructor(callback: ResizeObserverCallback) {
-          this.callback = callback;
-          resizeObservers.push(this as unknown as { callback: ResizeObserverCallback; targets: Element[] });
-        }
-
-        observe(target: Element) {
-          this.targets.push(target);
-        }
-
-        unobserve() {}
-        disconnect() {}
+  function configureDeepseekModel(settings: ReturnType<typeof useSettingsStore>): void {
+    settings.aiConfigs = [
+      {
+        id: "deepseek-default",
+        name: "DeepSeek",
+        provider: "deepseek",
+        apiKey: "test-key",
+        authMethod: "api-key",
+        endpoint: "https://api.deepseek.com",
+        model: "deepseek-chat",
+        apiStyle: "completions",
+        isDefault: true,
       },
-    );
+    ];
+    settings.activeModel = { configId: "deepseek-default", modelId: "deepseek-chat" };
+  }
 
-    const { errors, container } = await mountPanel(true, undefined, (settings) => {
-      settings.aiConfigs = [
-        {
-          id: "deepseek-default",
-          name: "DeepSeek",
-          provider: "deepseek",
-          apiKey: "test-key",
-          authMethod: "api-key",
-          endpoint: "https://api.deepseek.com",
-          model: "deepseek-chat",
-          apiStyle: "completions",
-          isDefault: true,
-        },
-      ];
-      settings.activeModel = { configId: "deepseek-default", modelId: "deepseek-chat" };
-    });
+  it("wires panel size handling before the async mount bootstrap resolves", async () => {
+    const resizeObservers = stubResizeObserver();
+    aiAssistantMountApi.codeHighlighterDelayMs = 1000;
+
+    const { errors, container } = await mountPanel(true, undefined, configureDeepseekModel);
+
+    const panel = container.querySelector<HTMLElement>(".ai-prompt-context-container");
+    expect(panel).not.toBeNull();
+    // The bootstrap is still pending here, so the panel can only be observed if the wiring runs
+    // synchronously: a drag or window resize during the bootstrap must not be dropped.
+    expect(resizeObservers.some((observer) => observer.targets.includes(panel!))).toBe(true);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("progressively compacts and expands composer controls while the AI panel is dragged", async () => {
+    const resizeObservers = stubResizeObserver();
+    const { errors, container } = await mountPanel(true, undefined, configureDeepseekModel);
 
     const panel = container.querySelector<HTMLElement>(".ai-prompt-context-container")!;
     const contextRow = container.querySelector<HTMLElement>("[data-ai-composer-context-row]")!;
     const actionRow = container.querySelector<HTMLElement>("[data-ai-composer-actions]")!;
-    // The component wires its ResizeObserver from an async `onMounted`, so the panel is not
-    // necessarily observed yet once the DOM is ready. Driving a resize before that is a no-op
-    // and the compact classes never appear.
-    const observedTargets = () => JSON.stringify(resizeObservers.map((observer) => observer.targets.map((target) => (target === panel ? "panel" : `${target.tagName}.${String(target.className).slice(0, 28)}`))));
-    await waitForSettled(
-      "composer panel observation",
-      () => resizeObservers.some((observer) => observer.targets.includes(panel)),
-      () => `observers=${resizeObservers.length} targets=${observedTargets()}`,
-    );
+    // Size handling is wired synchronously, so the panel is already observed here; driving a
+    // resize must never be a no-op that leaves the compact classes unset.
+    expect(resizeObservers.some((observer) => observer.targets.includes(panel))).toBe(true);
     // Other subtrees also build ResizeObservers; drive the one that watches this panel.
     const panelObserver = resizeObservers.find((observer) => observer.targets.includes(panel))!;
     const compactState = () => `context="${contextRow.className}" actions="${actionRow.className}"`;

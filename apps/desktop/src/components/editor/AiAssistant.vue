@@ -5033,6 +5033,16 @@ function dismissAwayUpdates() {
 
 onMounted(async () => {
   assistantViewMounted = true;
+  // Size handling has to be live before the first `await`: the bootstrap below
+  // can take several frames (persisted runs plus the dynamic import of the code
+  // highlighter), and a panel drag or window resize during that window would
+  // otherwise be dropped, leaving the composer on a stale compact/expanded state.
+  window.addEventListener("resize", handleWindowResize);
+  if (typeof ResizeObserver !== "undefined" && assistantRootRef.value) {
+    promptPanelResizeObserver = new ResizeObserver(handleObservedPanelResize);
+    promptPanelResizeObserver.observe(assistantRootRef.value);
+    if (promptPanelRef.value) promptPanelResizeObserver.observe(promptPanelRef.value);
+  }
   const savedHeight = localStorage.getItem(AI_TEXTAREA_HEIGHT_STORAGE_KEY);
   if (savedHeight) {
     const height = parseInt(savedHeight, 10);
@@ -5138,14 +5148,8 @@ onMounted(async () => {
     appearance: () => aiCodeAppearance.value,
   }).catch(() => undefined);
 
-  window.addEventListener("resize", handleWindowResize);
   document.addEventListener("dbx:tauri-file-drop", onTauriFileDrop as EventListener);
   window.addEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
-  if (typeof ResizeObserver !== "undefined" && assistantRootRef.value) {
-    promptPanelResizeObserver = new ResizeObserver(handleObservedPanelResize);
-    promptPanelResizeObserver.observe(assistantRootRef.value);
-    if (promptPanelRef.value) promptPanelResizeObserver.observe(promptPanelRef.value);
-  }
   scheduleResponsiveControlMeasurement(true);
 });
 

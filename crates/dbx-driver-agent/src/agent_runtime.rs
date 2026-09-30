@@ -99,8 +99,7 @@ pub async fn spawn_shared_connection_client(
     let key = first_installed_agent_key(manager, &keys).unwrap_or(keys[0]);
     let state = manager.load_state();
     let jre_key = state.installed_drivers.get(key).map(|driver| driver.jre.as_str()).unwrap_or(DEFAULT_JRE_KEY);
-    let launch =
-        manager.resolve_agent_launch_spec_with_launch_env(&state, key, jre_key, extra_java_args, agent_env)?;
+    let launch = manager.resolve_agent_launch_spec_with_launch_env(&state, key, jre_key, extra_java_args, agent_env)?;
     let runtime_key = shared_runtime_key(key, &launch);
     let mut session_params = connect_params;
     session_params
@@ -431,11 +430,9 @@ for line in sys.stdin:
     #[test]
     fn shared_runtime_key_isolates_process_scoped_env() {
         let base = crate::db::agent_driver::AgentLaunchSpec::new(PathBuf::from("oracle-agent"));
-        let with_nls = base
-            .clone()
-            .with_env([("NLS_LANG".to_string(), "SIMPLIFIED CHINESE_CHINA.AL32UTF8".to_string())]);
-        let with_other_nls =
-            base.clone().with_env([("NLS_LANG".to_string(), "AMERICAN_AMERICA.AL32UTF8".to_string())]);
+        let with_nls =
+            base.clone().with_env([("NLS_LANG".to_string(), "SIMPLIFIED CHINESE_CHINA.AL32UTF8".to_string())]);
+        let with_other_nls = base.clone().with_env([("NLS_LANG".to_string(), "AMERICAN_AMERICA.AL32UTF8".to_string())]);
 
         // Setting a process-scoped variable must route to a dedicated process …
         assert_ne!(shared_runtime_key("oracle", &base), shared_runtime_key("oracle", &with_nls));

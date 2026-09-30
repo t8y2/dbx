@@ -946,10 +946,7 @@ mod tests {
 
         let params = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCLPDB1").unwrap();
 
-        assert_eq!(
-            params["connection_string"],
-            "jdbc:oracle:thin:@//oracle.example.com:1521/ORCLPDB1"
-        );
+        assert_eq!(params["connection_string"], "jdbc:oracle:thin:@//oracle.example.com:1521/ORCLPDB1");
     }
 
     #[test]
@@ -958,15 +955,13 @@ mod tests {
         cfg.driver_profile = Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE.to_string());
         cfg.oracle_connection_type = Some("service_name".to_string());
 
-        let alternates = oracle_alternate_connect_configs(&cfg, "ORA-12514: listener does not currently know of service");
+        let alternates =
+            oracle_alternate_connect_configs(&cfg, "ORA-12514: listener does not currently know of service");
 
         assert!(!alternates.is_empty());
         for alternate in &alternates {
             let url = alternate.connection_string.as_deref().expect("alternate url");
-            assert!(
-                url.starts_with("jdbc:oracle:oci8:@"),
-                "alternate url must keep the oci8 protocol: {url}"
-            );
+            assert!(url.starts_with("jdbc:oracle:oci8:@"), "alternate url must keep the oci8 protocol: {url}");
         }
     }
 

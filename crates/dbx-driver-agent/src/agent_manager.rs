@@ -1146,10 +1146,9 @@ impl AgentManager {
         let driver_dir = self.driver_dir(driver_key);
         let config_path = self.driver_launch_config_path(driver_key);
         if config_path.exists() {
-            return Ok(
-                self.resolve_configured_agent_launch_spec(driver_key, &driver_dir, &config_path)?
-                    .with_env(env.iter().cloned()),
-            );
+            return Ok(self
+                .resolve_configured_agent_launch_spec(driver_key, &driver_dir, &config_path)?
+                .with_env(env.iter().cloned()));
         }
 
         let native_path = self.driver_native_path(driver_key);

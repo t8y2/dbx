@@ -230,7 +230,10 @@ mod tests {
     #[test]
     fn prepend_uses_the_platform_separator() {
         let separator = path_separator();
-        assert_eq!(prepend_oracle_client_dir(Some("/usr/lib"), "/opt/oracle"), format!("/opt/oracle{separator}/usr/lib"));
+        assert_eq!(
+            prepend_oracle_client_dir(Some("/usr/lib"), "/opt/oracle"),
+            format!("/opt/oracle{separator}/usr/lib")
+        );
     }
 
     #[test]
@@ -261,7 +264,10 @@ mod tests {
             "jdbc:oracle:oci8:@db.example.com:1521:ORCL"
         );
         assert_eq!(
-            rewrite_oracle_url_protocol("jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1521)))", true),
+            rewrite_oracle_url_protocol(
+                "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1521)))",
+                true
+            ),
             "jdbc:oracle:oci8:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1521)))"
         );
     }
@@ -296,12 +302,8 @@ mod tests {
     #[test]
     fn tns_admin_falls_back_to_the_url_then_the_global_default() {
         assert_eq!(
-            resolve_oci_tns_admin(
-                None,
-                Some("jdbc:oracle:oci8:@ALIAS?TNS_ADMIN=C:/from-url"),
-                Some("C:/global"),
-            )
-            .as_deref(),
+            resolve_oci_tns_admin(None, Some("jdbc:oracle:oci8:@ALIAS?TNS_ADMIN=C:/from-url"), Some("C:/global"),)
+                .as_deref(),
             Some("C:/from-url")
         );
         assert_eq!(
@@ -309,16 +311,15 @@ mod tests {
             Some("C:/global")
         );
         assert_eq!(resolve_oci_tns_admin(None, None, None), None);
-        assert_eq!(
-            resolve_oci_tns_admin(Some("   "), None, Some("C:/global")).as_deref(),
-            Some("C:/global")
-        );
+        assert_eq!(resolve_oci_tns_admin(Some("   "), None, Some("C:/global")).as_deref(), Some("C:/global"));
     }
 
     #[test]
     fn tns_admin_query_is_read_and_decoded() {
         assert_eq!(
-            oracle_tns_admin_from_connection_string("jdbc:oracle:thin:@ORCLPDB1?TNS_ADMIN=C%3A%5Coracle%5Cnetwork%5Cadmin"),
+            oracle_tns_admin_from_connection_string(
+                "jdbc:oracle:thin:@ORCLPDB1?TNS_ADMIN=C%3A%5Coracle%5Cnetwork%5Cadmin"
+            ),
             Some("C:\\oracle\\network\\admin".to_string())
         );
         assert_eq!(

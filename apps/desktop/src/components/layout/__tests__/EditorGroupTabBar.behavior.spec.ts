@@ -167,6 +167,20 @@ describe("EditorGroupTabBar behavior", () => {
     setActivePinia(pinia);
   });
 
+  it("offers duplicate without rename on a data tab", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia);
+    await settle();
+
+    const menu = JSON.parse(host.querySelector<HTMLElement>("[data-menu-items]")!.dataset.menuItems!);
+    expect(menu).toContainEqual(expect.objectContaining({ label: "Duplicate", visible: true }));
+    expect(menu).not.toContainEqual(expect.objectContaining({ label: "Rename" }));
+
+    app.unmount();
+    host.remove();
+  });
+
   it("activates a tab on plain click", async () => {
     const store = useQueryStore();
     const firstId = store.createTab("pg-1", "app", "Query 1", "query");

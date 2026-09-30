@@ -17,7 +17,7 @@ export function createRenameDuplicateTabItems(options: { tab: QueryTab; t: (key:
       label: options.t("contextMenu.duplicateTab"),
       action: options.onDuplicate,
       icon: Copy,
-      visible: options.canRename,
+      visible: options.canRename || options.tab.mode === "data",
     },
   ];
 }

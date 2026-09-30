@@ -5,6 +5,7 @@ use serde_json::json;
 use serde_json::Value;
 
 use crate::agent_events::{ToolCall, ToolDefinition, ToolResult};
+use crate::ai::skill_tools;
 use crate::connection::AppState;
 use crate::db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety};
 use crate::db::vector_driver;
@@ -833,6 +834,11 @@ pub async fn execute_tool_scoped(
             execute_redis_command(tool_call, state, connection_id, database, database_scope).await
         }
         "get_current_time" => execute_get_current_time(tool_call),
+        // Skill tools are filesystem-only: `tool_uses_database` must keep
+        // returning false for them, or they would serialize on a connection lock
+        // they have no reason to hold (see the test below).
+        skill_tools::USE_SKILL_TOOL => skill_tools::execute_use_skill(tool_call, state).await,
+        skill_tools::READ_SKILL_FILE_TOOL => skill_tools::execute_read_skill_file(tool_call, state).await,
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
 
@@ -3076,6 +3082,17 @@ for line in sys.stdin:
         let tool = get_current_time_tool();
         assert!(tool.read_only, "get_current_time must be read_only");
         assert!(tool.parallel_ok, "get_current_time must be parallel_ok");
+    }
+
+    /// `tool_uses_database` is a closed whitelist, so this pins the whole
+    /// classification: the skill tools read the filesystem, and taking a
+    /// per-connection lock for them would serialize unrelated runs for nothing.
+    #[test]
+    fn skill_tools_do_not_take_the_connection_lock() {
+        for name in [skill_tools::USE_SKILL_TOOL, skill_tools::READ_SKILL_FILE_TOOL] {
+            assert!(!tool_uses_database(name), "{name} must not be classified as a database tool");
+        }
+        assert!(tool_uses_database("execute_query"), "the whitelist must still contain real database tools");
     }
 
     #[test]

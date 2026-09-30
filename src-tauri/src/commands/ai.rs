@@ -372,6 +372,9 @@ pub async fn ai_agent_stream(
     confirmed_database: Option<String>,
     confirmed_schema: Option<String>,
     selected_databases: Option<Vec<String>>,
+    // Set by the frontend exactly when this send carries a skill listing; the
+    // agent loop appends the skill tools only then (ADR Decision 10).
+    allow_skills: Option<bool>,
 ) -> Result<String, String> {
     let mut request = resolve_cli_provider_request(request);
     merge_global_max_retries(
@@ -435,6 +438,7 @@ pub async fn ai_agent_stream(
         prompt_cache_key: request.prompt_cache_key.clone(),
         session_id: Some(session_id.clone()),
         host_runtime: Some(tokio::runtime::Handle::current()),
+        allow_skills: allow_skills.unwrap_or(false),
     };
     let is_agent_mode = mode.as_deref() == Some("agent");
 

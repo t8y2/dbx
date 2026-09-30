@@ -9624,6 +9624,8 @@ sleep 30
             client_key_path: String::new(),
             sysdba: false,
             oracle_connection_type: None,
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             connection_string: None,
             redis_connection_mode: None,
             redis_sentinel_master: String::new(),

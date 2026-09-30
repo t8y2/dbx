@@ -219,6 +219,7 @@ import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid
 import {
   canFetchNextDataGridSegment,
   canGoNextDataGridPage,
+  dataGridLoadAllNextSegment,
   dataGridLoadAllSegment,
   dataGridTotalRowCountLabelKey,
   dataGridUserFacingPage,
@@ -3193,6 +3194,10 @@ let infiniteScrollAllLoaded = false;
 let infiniteScrollRequestedOffset: number | undefined;
 let infiniteScrollRequestedLimit: number | undefined;
 let infiniteScrollLoadAllPending = false;
+// True while an explicit "load all" run is still appending chunks. The per-request
+// row cap bounds each request, not the run — the run only stops when the server
+// runs out of rows, so a table larger than the cap does not silently stop halfway (#10752).
+let loadAllRowsLoopActive = false;
 const loadAllRowsActive = ref(false);
 // Tracks whether the current loading cycle was triggered by a refresh/rollback
 // (as opposed to a normal paginate). Used to decide whether to auto-redirect
@@ -3251,9 +3256,14 @@ watch(
         currentPage.value = Math.max(1, currentPage.value - 1);
         lastInfiniteScrollPage = Math.max(0, currentPage.value - 1);
         loadAllRowsActive.value = false;
+        loadAllRowsLoopActive = false;
         return;
       }
       const appendedRows = props.result.rows.length - requestedOffset;
+      if (loadAllRowsLoopActive) {
+        finishOrContinueLoadAllRun(requestedOffset, requestedLimit);
+        return;
+      }
       if (props.result.rows.length >= infiniteScrollMaxRows.value || appendedRows < (requestedLimit ?? pageSize.value)) {
         infiniteScrollAllLoaded = true;
       }
@@ -3653,6 +3663,7 @@ function loadAllRowsAndGoToLast() {
 
 function startLoadAllRows(segment: { offset: number; limit: number }) {
   loadAllRowsActive.value = true;
+  loadAllRowsLoopActive = true;
   infiniteScrollLoadAllPending = true;
   infiniteScrollLoading.value = true;
   isInfiniteScrollPaginating.value = true;
@@ -3660,6 +3671,30 @@ function startLoadAllRows(segment: { offset: number; limit: number }) {
   infiniteScrollRequestedLimit = segment.limit;
   currentPage.value++;
   emit("paginate", segment.offset, segment.limit, currentWhereInput(), currentOrderBy(), true);
+}
+
+// Continues an explicit "load all" run chunk by chunk until the server runs
+// out of rows (a chunk returns fewer rows than requested) or an exact known
+// total has been reached. Returns true when another chunk was dispatched.
+// The per-request result-row cap bounds each chunk, never the run (#10752).
+function finishOrContinueLoadAllRun(requestedOffset: number | undefined, requestedLimit: number | undefined): boolean {
+  if (!loadAllRowsLoopActive) return false;
+  const nextSegment = canFetchNextInfiniteScrollSegment.value
+    ? dataGridLoadAllNextSegment({
+        loadedRowCount: props.result.rows.length,
+        requestedOffset: requestedOffset ?? props.result.rows.length,
+        requestedLimit: requestedLimit ?? pageSize.value,
+        totalRowCount: totalRowCountIsExact.value ? displayedTotalRowCount.value : undefined,
+      })
+    : null;
+  if (!nextSegment) {
+    loadAllRowsLoopActive = false;
+    infiniteScrollAllLoaded = true;
+    selectAndRevealLastLoadedRow();
+    return false;
+  }
+  startLoadAllRows(nextSegment);
+  return true;
 }
 
 function confirmLoadAllRows() {
@@ -3692,6 +3727,7 @@ function changePageSize(size: number) {
   lastInfiniteScrollPage = 0;
   infiniteScrollAllLoaded = false;
   loadAllRowsActive.value = false;
+  loadAllRowsLoopActive = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
   emit("paginate", 0, normalizedSize, currentWhereInput(), currentOrderBy());
@@ -4536,6 +4572,7 @@ function resetInfiniteScrollState() {
   infiniteScrollLoading.value = false;
   infiniteScrollLoadAllPending = false;
   loadAllRowsActive.value = false;
+  loadAllRowsLoopActive = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
 }
@@ -10401,9 +10438,15 @@ watch(
     preservedDetailsOnNextResult = null;
     const shouldPreserveTranspose = preserveTransposeOnNextResult.value;
     preserveTransposeOnNextResult.value = false;
+    const appendRequestedOffset = infiniteScrollRequestedOffset;
+    const appendRequestedLimit = infiniteScrollRequestedLimit;
     const appendCompletion = dataGridInfiniteScrollAppendCompletion(previousResult, result, {
       pageSize: pageSize.value,
       maxRows: infiniteScrollMaxRows.value,
+      // While a "load all" run is active the per-request row cap must not be
+      // read as the end of data — only the requested-vs-appended count and an
+      // exact known total end the run (#10752).
+      ...(loadAllRowsLoopActive && appendRequestedLimit ? { loadAll: { requestedLimit: appendRequestedLimit, totalRowCount: totalRowCountIsExact.value ? displayedTotalRowCount.value : undefined } } : {}),
     });
     if (appendCompletion) {
       if (infiniteScrollEnabled.value) {
@@ -10417,10 +10460,12 @@ watch(
       }
       // The append completion above already reset `infiniteScrollLoading`, so the
       // post-flush loading watcher cannot observe this append; a "load all" run
-      // must still reveal its last row from here.
+      // must still continue or reveal its last row from here.
       if (infiniteScrollLoadAllPending) {
         infiniteScrollLoadAllPending = false;
-        selectAndRevealLastLoadedRow();
+        if (!finishOrContinueLoadAllRun(appendRequestedOffset, appendRequestedLimit)) {
+          selectAndRevealLastLoadedRow();
+        }
       }
       return;
     }
@@ -10428,6 +10473,7 @@ watch(
     filterValueSuggestionLoader.reset({ clearCache: true });
     // A non-append result replaces the whole data set, so a running "load all" is over.
     loadAllRowsActive.value = false;
+    loadAllRowsLoopActive = false;
     // The replacement also invalidates the all-loaded marker: a filter change or
     // page jump swaps in a fresh first page whose remaining segments must be
     // re-derived instead of being silently skipped.

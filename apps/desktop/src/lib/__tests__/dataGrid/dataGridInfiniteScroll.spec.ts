@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dataGridBottomScrollTop, dataGridInfiniteScrollAppendCompletion, didDataGridInfiniteScrollContextChange, isDataGridAtScrollBottom, restoredDataGridScrollLeft } from "@/lib/dataGrid/dataGridInfiniteScroll";
+import { dataGridLoadAllNextSegment } from "@/lib/dataGrid/dataGridPagination";
 
 describe("data grid bottom anchoring", () => {
   it("keeps DOM rows anchored when scrollbar padding increases the scroll height", () => {
@@ -79,5 +80,68 @@ describe("data grid infinite-scroll append completion", () => {
 
     expect(didDataGridInfiniteScrollContextChange([...context], context)).toBe(false);
     expect(didDataGridInfiniteScrollContextChange([...context.slice(0, 2), "audit", ...context.slice(3)], context)).toBe(true);
+  });
+});
+
+describe("data grid load-all loop completion", () => {
+  // #10752: an explicit "load all" run must not stop at the per-request row
+  // cap. A 260k-row table with the default 100k cap appends 99,900 rows in the
+  // first chunk; the cap-hit must not be reported as "all loaded".
+  it("keeps a cap-sized load-all chunk going when rows remain", () => {
+    const previousRows = Array.from({ length: 100 }, (_, index) => [index + 1]);
+    const rows = [...previousRows, ...Array.from({ length: 99_900 }, (_, index) => [index + 101])];
+
+    const completion = dataGridInfiniteScrollAppendCompletion({ rows: previousRows }, { rows, appended_from_row_count: 100, has_more: undefined }, { pageSize: 100, maxRows: 100_000, loadAll: { requestedLimit: 99_900 } });
+
+    expect(completion).toEqual({ loadedPage: 1000, allLoaded: false });
+  });
+
+  it("ends the load-all run when a chunk returns fewer rows than requested", () => {
+    const previousRows = Array.from({ length: 200_000 }, (_, index) => [index + 1]);
+    const rows = [...previousRows, ...Array.from({ length: 60_000 }, (_, index) => [index + 200_001])];
+
+    const completion = dataGridInfiniteScrollAppendCompletion({ rows: previousRows }, { rows, appended_from_row_count: 200_000, has_more: undefined }, { pageSize: 100, maxRows: 100_000, loadAll: { requestedLimit: 100_000 } });
+
+    expect(completion?.allLoaded).toBe(true);
+  });
+
+  it("ends the load-all run when an exact known total has been reached", () => {
+    const previousRows = Array.from({ length: 250_000 }, (_, index) => [index + 1]);
+    const rows = [...previousRows, ...Array.from({ length: 10_000 }, (_, index) => [index + 250_001])];
+
+    const completion = dataGridInfiniteScrollAppendCompletion({ rows: previousRows }, { rows, appended_from_row_count: 250_000, has_more: undefined }, { pageSize: 100, maxRows: 100_000, loadAll: { requestedLimit: 100_000, totalRowCount: 260_000 } });
+
+    expect(completion?.allLoaded).toBe(true);
+  });
+
+  it("keeps the cap-based completion for ordinary infinite scrolls", () => {
+    const previousRows = Array.from({ length: 100 }, (_, index) => [index + 1]);
+    const rows = [...previousRows, ...Array.from({ length: 99_900 }, (_, index) => [index + 101])];
+
+    const completion = dataGridInfiniteScrollAppendCompletion({ rows: previousRows }, { rows, appended_from_row_count: 100, has_more: undefined }, { pageSize: 100, maxRows: 100_000 });
+
+    expect(completion?.allLoaded).toBe(true);
+  });
+});
+
+describe("dataGridLoadAllNextSegment", () => {
+  it("issues the next uncapped chunk after a full chunk", () => {
+    expect(dataGridLoadAllNextSegment({ loadedRowCount: 100_000, requestedOffset: 100, requestedLimit: 99_900 })).toEqual({ offset: 100_000, limit: 99_900 });
+  });
+
+  it("trims the final chunk to an exact known total", () => {
+    expect(dataGridLoadAllNextSegment({ loadedRowCount: 200_000, requestedOffset: 100_000, requestedLimit: 100_000, totalRowCount: 260_000 })).toEqual({ offset: 200_000, limit: 60_000 });
+  });
+
+  it("returns null when the exact known total has been reached", () => {
+    expect(dataGridLoadAllNextSegment({ loadedRowCount: 260_000, requestedOffset: 200_000, requestedLimit: 100_000, totalRowCount: 260_000 })).toBeNull();
+  });
+
+  it("returns null when the server returned fewer rows than requested", () => {
+    expect(dataGridLoadAllNextSegment({ loadedRowCount: 205_000, requestedOffset: 200_000, requestedLimit: 100_000 })).toBeNull();
+  });
+
+  it("returns null when a chunk appended nothing (loop guard)", () => {
+    expect(dataGridLoadAllNextSegment({ loadedRowCount: 200_000, requestedOffset: 200_000, requestedLimit: 100_000 })).toBeNull();
   });
 });

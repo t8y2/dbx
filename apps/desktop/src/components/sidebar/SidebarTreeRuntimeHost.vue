@@ -6969,6 +6969,30 @@ function resolveContextMenu(node: TreeNode, staticItems: ContextMenuItem[]): Pro
   });
 }
 
+// Dialog-hosted workbenches navigate away from the modal surface the same way
+// the tab path does (PluginWorkbenchTab): open-workbench swaps the dialog for a
+// workbench tab via queryStore.openPluginWorkbench; open-filesystem opens the
+// declared provider tab. The bridge already scopes both to the owner plugin.
+function openWorkbench(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }) {
+  const target = sidebarPluginRegistry.value.findWorkbench(pluginId, contributionId);
+  const contextConnectionId = typeof context?.connectionId === "string" ? context.connectionId : "";
+  const connectionName = contextConnectionId ? connectionStore.getConfig(contextConnectionId)?.name : undefined;
+  pluginDialog.value = null;
+  queryStore.openPluginWorkbench(pluginId, contributionId, { title: connectionName || target?.contribution.label || contributionId, context, forceNew: options?.forceNew === true });
+}
+
+function openFilesystem(pluginId: string, providerId: string, context?: PluginWorkbenchContext) {
+  const target = sidebarPluginRegistry.value.listFilesystemProviders().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === providerId);
+  if (!target) throw new Error(t("pluginPlatform.filesystemUnavailable", { pluginId, providerId }));
+  pluginDialog.value = null;
+  queryStore.openPluginFilesystem(pluginId, providerId, {
+    title: target.contribution.label,
+    connectionId: typeof context?.connectionId === "string" ? context.connectionId : undefined,
+    rootUri: target.contribution.root_uri,
+    currentUri: typeof context?.uri === "string" ? context.uri : undefined,
+  });
+}
+
 function activateRuntimeNode(node: TreeNode) {
   activeNode.value = node;
 }
@@ -7117,7 +7141,16 @@ defineExpose({
   >
     <DialogContent class="h-[min(82vh,780px)] max-w-[min(1080px,calc(100vw-2rem))] gap-0 p-0">
       <DialogTitle class="sr-only">{{ pluginDialog?.title }}</DialogTitle>
-      <PluginWorkbenchHost v-if="pluginDialog" class="min-h-0 size-full overflow-hidden rounded-lg" :plugin="pluginDialog.plugin" :contribution="pluginDialog.contribution" :context="pluginDialog.context" @close-tab="pluginDialog = null" />
+      <PluginWorkbenchHost
+        v-if="pluginDialog"
+        class="min-h-0 size-full overflow-hidden rounded-lg"
+        :plugin="pluginDialog.plugin"
+        :contribution="pluginDialog.contribution"
+        :context="pluginDialog.context"
+        @open-workbench="openWorkbench"
+        @open-filesystem="openFilesystem"
+        @close-tab="pluginDialog = null"
+      />
     </DialogContent>
   </Dialog>
 </template>

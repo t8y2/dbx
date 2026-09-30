@@ -5929,8 +5929,10 @@ fn postgres_ctid_window_blocks(page_rows: usize, rows_per_block: f64) -> u64 {
 /// Only plain heap tables qualify. A partitioned parent spreads `ctid`s over
 /// children that number their own blocks from zero, and a view or foreign table
 /// has no tuple identifiers at all; paging either one would silently drop rows,
-/// so both keep OFFSET paging. PostgreSQL rejects a user column named `ctid`,
-/// so the system column is always the one the pager reads.
+/// so both keep OFFSET paging. A traditional-inheritance parent has the same
+/// hazard: queries against it also return descendant rows, and every child
+/// numbers its `ctid`s from its own block zero. PostgreSQL rejects a user
+/// column named `ctid`, so the system column is always the one the pager reads.
 async fn postgres_ctid_pager(
     state: &Arc<AppState>,
     pool_key: &str,
@@ -5939,16 +5941,7 @@ async fn postgres_ctid_pager(
     page_rows: usize,
     row_count: u64,
 ) -> Result<Option<PostgresCtidPager>, String> {
-    let scope = if schema.is_empty() {
-        format!("c.relname = {} AND pg_catalog.pg_table_is_visible(c.oid)", quote_string_literal(table))
-    } else {
-        format!("n.nspname = {} AND c.relname = {}", quote_string_literal(schema), quote_string_literal(table))
-    };
-    let sql = format!(
-        "SELECT pg_relation_size(c.oid) / 8192, c.reltuples, c.relpages, \
-         (c.relkind = 'r' AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)) \
-         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE {scope}"
-    );
+    let sql = postgres_ctid_eligibility_sql(schema, table);
     let result = execute_on_pool_with_max_rows(state, pool_key, &sql, Some(1)).await?;
     let Some(row) = result.rows.first() else {
         return Ok(None);
@@ -5972,6 +5965,27 @@ async fn postgres_ctid_pager(
         1.0
     };
     Ok(Some(PostgresCtidPager::new(PostgresCtidLayout { total_blocks, rows_per_block }, page_rows)))
+}
+
+/// Catalog probe for `postgres_ctid_pager`: heap size in 8K blocks, planner
+/// row/page estimates, and whether the relation is a plain heap table that is
+/// neither an inheritance child nor a traditional-inheritance parent (a parent
+/// also returns descendant rows whose `ctid`s restart from each child's block
+/// zero, so window bounds anchored on the parent's size would drop rows;
+/// partitioned parents are already excluded by `relkind = 'r'`).
+fn postgres_ctid_eligibility_sql(schema: &str, table: &str) -> String {
+    let scope = if schema.is_empty() {
+        format!("c.relname = {} AND pg_catalog.pg_table_is_visible(c.oid)", quote_string_literal(table))
+    } else {
+        format!("n.nspname = {} AND c.relname = {}", quote_string_literal(schema), quote_string_literal(table))
+    };
+    format!(
+        "SELECT pg_relation_size(c.oid) / 8192, c.reltuples, c.relpages, \
+         (c.relkind = 'r' \
+         AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid) \
+         AND NOT EXISTS (SELECT 1 FROM pg_inherits p WHERE p.inhparent = c.oid)) \
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE {scope}"
+    )
 }
 
 fn json_value_bool(value: &serde_json::Value) -> Option<bool> {
@@ -15971,6 +15985,18 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         ));
         // Empty pages leave the cursor untouched.
         assert!(matches!(advance_keyset_cursor(&mut cursor, &Vec::new(), &[0], "t"), Ok(KeysetAdvance::Advanced)));
+    }
+
+    #[test]
+    fn postgres_ctid_eligibility_excludes_inheritance_children_and_parents() {
+        for sql in [postgres_ctid_eligibility_sql("", "events"), postgres_ctid_eligibility_sql("public", "events")] {
+            assert!(sql.contains("c.relkind = 'r'"), "only plain heap tables may page by ctid: {sql}");
+            assert!(sql.contains("i.inhrelid = c.oid"), "inheritance children restart ctid numbering per child: {sql}");
+            assert!(
+                sql.contains("p.inhparent = c.oid"),
+                "inheritance parents also return descendant rows and must keep OFFSET paging: {sql}"
+            );
+        }
     }
 
     #[test]

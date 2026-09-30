@@ -2685,6 +2685,7 @@ export default withEnglishFallback({
     batchAppendPasteTargetNotEmpty: "選択した新規行には既にデータが含まれています。",
     batchAppendPasteEmpty: "クリップボードに追加可能な行がありません。",
     batchAppendPasteReadonlyColumn: "貼り付けたデータに編集不可能な列が含まれています。",
+    batchAppendPasteNoMatchingColumns: "INSERT 文の列名がこの結果の列と一致しません。",
     replaceText: "置換後の文字列",
     replaceCurrentCell: "現在のセル内の一致するテキストをすべて置換",
     replaceScope: "置換範囲",

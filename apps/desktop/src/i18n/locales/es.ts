@@ -2746,6 +2746,7 @@ export default withEnglishFallback({
     batchAppendPasteTargetNotEmpty: "La nueva fila seleccionada ya contiene datos.",
     batchAppendPasteEmpty: "No hay filas nuevas en el portapapeles.",
     batchAppendPasteReadonlyColumn: "Los datos pegados contienen columnas no editables.",
+    batchAppendPasteNoMatchingColumns: "Ninguno de los nombres de columna de la instrucción INSERT coincide con las columnas de este resultado.",
     replaceText: "Reemplazar por",
     replaceCurrentCell: "Reemplazar todo el texto coincidente en la celda actual",
     replaceScope: "Ámbito de reemplazo",

@@ -2174,6 +2174,7 @@ export default withEnglishFallback({
     batchAppendPasteTargetNotEmpty: "Seçilmiş yeni sətirdə artıq verilənlər var.",
     batchAppendPasteEmpty: "Mübadilə buferində əlavə ediləcək sətir yoxdur.",
     batchAppendPasteReadonlyColumn: "Yerləşdirilən verilənlərdə redaktə edilə bilməyən sütun var.",
+    batchAppendPasteNoMatchingColumns: "INSERT ifadəsindəki sütun adlarının heç biri bu nəticənin sütunları ilə uyğun gəlmir.",
     search: "Axtarış...",
     searchTruncatedValuesHint: "Bəzi uzun mətn/JSON dəyərləri göstərilərkən qısaldılır; axtarış yalnız yüklənmiş xana mətnini əhatə edir və bəzi uyğunluqları tapmaya bilər.",
     searchOrWhere: "Axtarın və ya WHERE ifadəsi daxil edin...",

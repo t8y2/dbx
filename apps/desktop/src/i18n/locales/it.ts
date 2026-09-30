@@ -2668,6 +2668,7 @@ export default withEnglishFallback({
     batchAppendPasteTargetNotEmpty: "La riga nuova selezionata contiene già dati.",
     batchAppendPasteEmpty: "Negli appunti non ci sono righe da aggiungere.",
     batchAppendPasteReadonlyColumn: "I dati incollati contengono colonne non modificabili.",
+    batchAppendPasteNoMatchingColumns: "Nessuno dei nomi di colonna dell'istruzione INSERT corrisponde alle colonne di questo risultato.",
     replaceText: "Sostituisci con",
     replaceCurrentCell: "Sostituisci tutto il testo corrispondente nella cella corrente",
     replaceScope: "Ambito di sostituzione",

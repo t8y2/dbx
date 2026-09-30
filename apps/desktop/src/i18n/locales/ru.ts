@@ -2387,6 +2387,7 @@ export default withEnglishFallback({
     batchAppendPasteTargetNotEmpty: "Выбранная новая строка уже содержит данные.",
     batchAppendPasteEmpty: "В буфере обмена нет строк для добавления.",
     batchAppendPasteReadonlyColumn: "Вставленные данные содержат столбец, который нельзя редактировать.",
+    batchAppendPasteNoMatchingColumns: "Ни одно имя столбца из инструкции INSERT не совпадает со столбцами этого результата.",
     replaceText: "Заменить на",
     replaceCurrentCell: "Заменить весь подходящий текст в текущей ячейке",
     replaceScope: "Область замены",

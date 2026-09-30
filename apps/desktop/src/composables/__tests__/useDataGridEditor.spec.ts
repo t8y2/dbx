@@ -713,6 +713,36 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     expect(editor.hasPendingChanges.value).toBe(true);
   });
 
+  it("aligns pasted INSERT values by column name regardless of visible order", () => {
+    const editor = createEditor(["first", "hidden", "last"]);
+
+    // Visible columns are [2, 0]: "last" first, "first" second. The INSERT
+    // column names must map values to the real grid columns, not positions.
+    const result = editor.appendPastedRowsToNewRow(-1, [["Lovelace", "Ada"]], [2, 0], ["last", "first"]);
+
+    expect(result).toEqual({ ok: true, rowCount: 1 });
+    expect(editor.newRows.value).toEqual([["Ada", null, "Lovelace"]]);
+  });
+
+  it("matches INSERT column names case-insensitively and ignores unknown names", () => {
+    const editor = createEditor(["first", "hidden", "last"]);
+
+    const result = editor.appendPastedRowsToNewRow(-1, [["Ada", "extra", "Lovelace"]], [0, 1, 2], ["FIRST", "not_here", "Last"]);
+
+    expect(result).toEqual({ ok: true, rowCount: 1 });
+    expect(editor.newRows.value).toEqual([["Ada", null, "Lovelace"]]);
+  });
+
+  it("rejects an INSERT paste when no column names match", () => {
+    const editor = createEditor(["first", "hidden", "last"]);
+
+    const result = editor.appendPastedRowsToNewRow(-1, [["x"]], [0, 1, 2], ["nope"]);
+
+    expect(result).toEqual({ ok: false, reason: "no-matching-columns" });
+    // The pre-seeded blank new row stays untouched.
+    expect(editor.newRows.value).toEqual([[null, null, null]]);
+  });
+
   it("clears generated key columns instead of pasting the copied value", () => {
     const editor = createEditor(undefined, true, undefined, undefined, [], undefined, [
       { name: "first", data_type: "integer", extra: "autoincrement" },

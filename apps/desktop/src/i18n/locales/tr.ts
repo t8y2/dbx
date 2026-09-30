@@ -2169,6 +2169,7 @@ export default withEnglishFallback({
     batchAppendPasteTargetNotEmpty: "Seçili yeni satır zaten veri içeriyor.",
     batchAppendPasteEmpty: "Pano, eklenecek satır içermiyor.",
     batchAppendPasteReadonlyColumn: "Yapıştırılan veri, düzenlenemeyen bir sütun içeriyor.",
+    batchAppendPasteNoMatchingColumns: "INSERT ifadesindeki sütun adlarının hiçbiri bu sonucun sütunlarıyla eşleşmiyor.",
     search: "Ara...",
     searchTruncatedValuesHint: "Bazı uzun metin/JSON değerleri görüntülenirken kısaltılır; arama yalnızca yüklenmiş hücre metnini kapsar ve bazı eşleşmeleri kaçırabilir.",
     searchOrWhere: "Arayın veya bir WHERE yan tümcesi girin...",

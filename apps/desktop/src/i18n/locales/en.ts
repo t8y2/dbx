@@ -2513,6 +2513,7 @@ export default {
     batchAppendPasteTargetNotEmpty: "The selected new row already contains data.",
     batchAppendPasteEmpty: "The clipboard does not contain rows to add.",
     batchAppendPasteReadonlyColumn: "The pasted data includes a column that cannot be edited.",
+    batchAppendPasteNoMatchingColumns: "None of the INSERT statement's column names match this result's columns.",
     replaceText: "Replace with",
     replaceCurrentCell: "Replace all matching text in the current cell",
     replaceScope: "Replacement scope",

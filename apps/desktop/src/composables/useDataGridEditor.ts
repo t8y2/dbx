@@ -51,7 +51,7 @@ interface ConditionalUpdateExecution {
   outcome: ConditionalUpdateOutcome;
 }
 
-export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" };
+export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" | "no-matching-columns" };
 
 type CommitEditResult =
   | {
@@ -1240,7 +1240,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return row.every((value) => value === null || (typeof value === "string" && value.trim() === ""));
   }
 
-  function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[]): DataGridAppendPastedRowsResult {
+  function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
     if (!editable.value) return { ok: false, reason: "not-editable" };
     if (pastedRows.every((row) => row.every((value) => value === ""))) {
       return { ok: false, reason: "empty-paste" };
@@ -1260,8 +1260,26 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const pastedColumnCount = Math.max(...pastedRows.map((row) => row.length));
     if (pastedColumnCount <= 0) return { ok: false, reason: "empty-paste" };
 
-    const targetColumns = columnIndexes.slice(0, pastedColumnCount);
-    if (targetColumns.some((columnIndex) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
+    // With explicit column names (SQL INSERT), align pasted values by column
+    // name instead of visible position. Unknown names are ignored together
+    // with their values; if none of the pasted names matches this result's
+    // columns, reject the paste.
+    const valueTargets: Array<{ columnIndex: number; valueIndex: number }> = [];
+    if (columnNames?.length) {
+      const nameToColumnIndex = new Map<string, number>();
+      columnIndexes.forEach((columnIndex) => {
+        const name = sourceColumns.value?.[columnIndex] ?? result.value.columns[columnIndex];
+        if (name !== undefined && !nameToColumnIndex.has(name.toLowerCase())) nameToColumnIndex.set(name.toLowerCase(), columnIndex);
+      });
+      columnNames.forEach((name, valueIndex) => {
+        const columnIndex = nameToColumnIndex.get(name.toLowerCase());
+        if (columnIndex !== undefined) valueTargets.push({ columnIndex, valueIndex });
+      });
+      if (valueTargets.length === 0) return { ok: false, reason: "no-matching-columns" };
+    } else {
+      columnIndexes.slice(0, pastedColumnCount).forEach((columnIndex, valueIndex) => valueTargets.push({ columnIndex, valueIndex }));
+    }
+    if (valueTargets.some(({ columnIndex }) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
 
     const nextRows = newRows.value.map((row) => [...row]);
     const nextMeta = cloneNewRowMeta(newRowMeta.value);
@@ -1275,14 +1293,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const shouldClearColumn = clonedColumnClearPredicate();
     const mappedRows = pastedRows.map((pastedRow, rowIndex) => {
       const nextRow = rowIndex < reusableNewRowCount ? nextRows[targetNewIndex! + rowIndex]! : emptyDraftRow();
-      for (let columnOffset = 0; columnOffset < Math.min(pastedRow.length, targetColumns.length); columnOffset++) {
-        const columnIndex = targetColumns[columnOffset]!;
+      for (const { columnIndex, valueIndex } of valueTargets) {
+        if (valueIndex >= pastedRow.length) continue;
         // Pasting a copied row into a new row must not reuse its generated key.
         if (shouldClearColumn(columnIndex)) {
           nextRow[columnIndex] = null;
           continue;
         }
-        const value = pastedRow[columnOffset];
+        const value = pastedRow[valueIndex];
         nextRow[columnIndex] = value === null ? null : coerceCellValue(value, nextRow[columnIndex], columnIndex);
       }
       return nextRow;

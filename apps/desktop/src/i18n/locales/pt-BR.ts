@@ -2670,6 +2670,7 @@ export default withEnglishFallback({
     batchAppendPasteTargetNotEmpty: "A nova linha selecionada já contém dados.",
     batchAppendPasteEmpty: "Não há linhas para adicionar na área de transferência.",
     batchAppendPasteReadonlyColumn: "Os dados colados contêm colunas não editáveis.",
+    batchAppendPasteNoMatchingColumns: "Nenhum dos nomes de coluna da instrução INSERT corresponde às colunas deste resultado.",
     replaceText: "Substituir por",
     replaceCurrentCell: "Substituir todo o texto correspondente na célula atual",
     replaceScope: "Escopo da substituição",

@@ -2426,6 +2426,7 @@ export default withEnglishFallback({
     batchAppendPasteTargetNotEmpty: "选中的新增行已包含数据。",
     batchAppendPasteEmpty: "剪贴板中没有可新增的行。",
     batchAppendPasteReadonlyColumn: "粘贴的数据包含不可编辑的列。",
+    batchAppendPasteNoMatchingColumns: "INSERT 语句中的列名与当前结果集的列均不匹配。",
     replaceText: "替换为",
     replaceCurrentCell: "替换当前命中单元格中的全部匹配文字",
     replaceScope: "替换范围",

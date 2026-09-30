@@ -737,6 +737,27 @@ describe("useDataGridExport prepared row statements", () => {
     ]);
   });
 
+  it("copies a selected row as whole-row TSV across all visible columns on smart copy", async () => {
+    // Row selection only (no cell matrix): the Cmd+C smart path must copy the
+    // full row (#10573), not just a single cell.
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "1\tAda", mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 1, columnCount: 2 });
+    const state = createExportState(editableTable, ["id", "name"], undefined, undefined, undefined, [[1, "Ada"]], [1]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "tsv",
+        selectionKind: "rows",
+        rows: [[1, "Ada"]],
+        selectedColumnIndexes: [0, 1],
+      }),
+    );
+    expect(copyToClipboard).toHaveBeenCalledWith("1\tAda");
+    // The internal clipboard matrix keeps the row paste-able back into a new row.
+    expect(parseDataGridClipboard("1\tAda")).toEqual([["1", "Ada"]]);
+  });
+
   it("uses TSV (quotes only for separator/newline) for a multi-cell smart copy without relying on clipboard metadata", async () => {
     const rows = [
       [1, '{"msg":"success"}'],

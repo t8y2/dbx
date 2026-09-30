@@ -1,7 +1,7 @@
 import type { ConnectionConfig, SidebarLayout, TunnelProfile } from "@/types/database";
 import { filterSidebarLayoutByConnectionIds as filterLayoutByConnectionIds, remapSidebarLayoutConnectionIds } from "@/lib/sidebar/sidebarLayout";
 
-export type ConnectionExportProtection = { mode: "encrypted"; passphrase: string } | { mode: "plaintext" };
+export type ConnectionExportProtection = { mode: "encrypted"; passphrase: string } | { mode: "plaintext"; includeCredentials?: boolean };
 
 export interface ConnectionConfigBundle {
   connections: ConnectionConfig[];
@@ -96,6 +96,19 @@ export function scrubTunnelProfileForPlaintextExport(profile: TunnelProfile): Tu
     scrubbed.token = "";
   }
   return scrubbed;
+}
+
+/** Credentials are excluded unless the caller explicitly opts in for this export. */
+export function serializePlaintextConnectionConfigBundle(bundle: ConnectionConfigBundle, includeCredentials = false): string {
+  const exportData =
+    includeCredentials === true
+      ? bundle
+      : {
+          ...bundle,
+          connections: bundle.connections.map(scrubConnectionForPlaintextExport),
+          tunnelProfiles: bundle.tunnelProfiles?.map(scrubTunnelProfileForPlaintextExport),
+        };
+  return JSON.stringify(exportData, null, 2);
 }
 
 function scrubExternalConfig(value: unknown): unknown {

@@ -18,6 +18,7 @@ const TableImportDialog = defineAsyncComponent(() => import("@/components/import
 const MongoImportDialog = defineAsyncComponent(() => import("@/components/document/MongoImportDialog.vue"));
 const MongoDatabaseDumpDialog = defineAsyncComponent(() => import("@/components/document/MongoDatabaseDumpDialog.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
+const ConfigUnencryptedExportDialog = defineAsyncComponent(() => import("@/components/config/ConfigUnencryptedExportDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/components/config/ConfigConnectionSelectDialog.vue"));
 const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
@@ -364,18 +365,15 @@ watch(
     @request-unencrypted="dialogs.onRequestUnencryptedExport"
     @confirm="dialogs.configPassphraseMode.value === 'export' ? dialogs.onExportConfirm($event) : dialogs.onImportConfirm($event)"
   />
-  <Dialog v-if="dialogs.showConfigUnencryptedExportConfirm.value" :open="dialogs.showConfigUnencryptedExportConfirm.value" @update:open="dialogs.onConfigUnencryptedExportOpenChange">
-    <DialogContent class="sm:max-w-[440px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("configExport.unencryptedWarningTitle") }}</DialogTitle>
-      </DialogHeader>
-      <p class="text-sm text-muted-foreground">{{ t("configExport.unencryptedWarningDescription") }}</p>
-      <DialogFooter>
-        <Button type="button" variant="outline" :disabled="dialogs.configExportBusy.value" @click="dialogs.onConfigUnencryptedExportCancel()">{{ t("dangerDialog.cancel") }}</Button>
-        <Button type="button" variant="destructive" :disabled="dialogs.configExportBusy.value" @click="dialogs.onConfigUnencryptedExportConfirm()">{{ t("configExport.confirmUnencryptedExport") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+  <ConfigUnencryptedExportDialog
+    v-if="dialogs.showConfigUnencryptedExportConfirm.value"
+    :open="dialogs.showConfigUnencryptedExportConfirm.value"
+    v-model:include-credentials="dialogs.configExportIncludeCredentials.value"
+    :busy="dialogs.configExportBusy.value"
+    @update:open="dialogs.onConfigUnencryptedExportOpenChange"
+    @cancel="dialogs.onConfigUnencryptedExportCancel"
+    @confirm="dialogs.onConfigUnencryptedExportConfirm"
+  />
   <Dialog v-model:open="dialogs.showImportLayoutConfirm.value">
     <DialogContent class="sm:max-w-[400px]">
       <DialogHeader>

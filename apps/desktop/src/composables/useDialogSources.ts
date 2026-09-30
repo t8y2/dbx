@@ -34,6 +34,7 @@ const configPassphraseMode = ref<"export" | "import">("export");
 const configPassphraseError = ref("");
 const showConfigUnencryptedExportConfirm = ref(false);
 const configExportBusy = ref(false);
+const configExportIncludeCredentials = ref(false);
 const pendingImportContent = ref("");
 const showConfigConnectionSelectDialog = ref(false);
 const configConnectionSelectMode = ref<"export" | "import">("export");
@@ -400,6 +401,7 @@ export function useDialogSources() {
   }
 
   function clearPendingExportState() {
+    configExportIncludeCredentials.value = false;
     pendingExportConnectionIds.value = [];
     configConnectionSelectList.value = [];
     configPassphraseError.value = "";
@@ -434,6 +436,7 @@ export function useDialogSources() {
 
   // Config export/import helpers
   function onExportClick() {
+    if (configExportBusy.value) return;
     clearPendingExportState();
     openConnectionSelect("export", connectionStore.connections);
   }
@@ -448,6 +451,7 @@ export function useDialogSources() {
 
   async function onExportConfirm(passphrase: string) {
     if (configExportBusy.value) return;
+    configExportIncludeCredentials.value = false;
     configExportBusy.value = true;
     try {
       const result = await connectionStore.exportConnectionsToFile({ mode: "encrypted", passphrase }, pendingExportConnectionIds.value);
@@ -466,6 +470,7 @@ export function useDialogSources() {
 
   function onRequestUnencryptedExport() {
     if (configExportBusy.value) return;
+    configExportIncludeCredentials.value = false;
     showConfigPassphraseDialog.value = false;
     showConfigUnencryptedExportConfirm.value = true;
   }
@@ -474,12 +479,13 @@ export function useDialogSources() {
     if (configExportBusy.value) return;
     configExportBusy.value = true;
     try {
-      const result = await connectionStore.exportConnectionsToFile({ mode: "plaintext" }, pendingExportConnectionIds.value);
+      const result = await connectionStore.exportConnectionsToFile({ mode: "plaintext", includeCredentials: configExportIncludeCredentials.value }, pendingExportConnectionIds.value);
       if (result === "cancelled") return;
       showConfigUnencryptedExportConfirm.value = false;
       clearPendingExportState();
       toast(t("configExport.exportSuccess"), 2000);
     } catch {
+      configExportIncludeCredentials.value = false;
       showConfigUnencryptedExportConfirm.value = false;
       configPassphraseError.value = t("configExport.exportFailed");
       showConfigPassphraseDialog.value = true;
@@ -490,6 +496,7 @@ export function useDialogSources() {
 
   function onConfigUnencryptedExportCancel() {
     if (configExportBusy.value) return;
+    configExportIncludeCredentials.value = false;
     showConfigUnencryptedExportConfirm.value = false;
     showConfigPassphraseDialog.value = true;
   }
@@ -497,7 +504,10 @@ export function useDialogSources() {
   function onConfigUnencryptedExportOpenChange(open: boolean) {
     if (configExportBusy.value) return;
     showConfigUnencryptedExportConfirm.value = open;
-    if (!open) showConfigPassphraseDialog.value = true;
+    if (!open) {
+      configExportIncludeCredentials.value = false;
+      showConfigPassphraseDialog.value = true;
+    }
   }
 
   async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" = "dbx") {
@@ -606,6 +616,7 @@ export function useDialogSources() {
     configPassphraseError,
     showConfigUnencryptedExportConfirm,
     configExportBusy,
+    configExportIncludeCredentials,
     pendingImportContent,
     showConfigConnectionSelectDialog,
     applyingImportSelection,

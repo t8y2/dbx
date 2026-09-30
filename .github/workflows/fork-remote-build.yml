@@ -49,10 +49,13 @@ jobs:
       - name: Install locked frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build desktop without updater signing
+        id: desktop_build
+        continue-on-error: true
         env:
           CXXFLAGS: ${{ runner.os == 'Windows' && '/std:c++17 /EHsc' || '' }}
-        run: pnpm tauri build --no-bundle --ci --no-default-features --features custom-protocol,duckdb-sidecar,sqlite-bundled
+        run: pnpm tauri build --no-bundle --ci --features custom-protocol,duckdb-sidecar,sqlite-bundled -- --no-default-features
       - name: Stage desktop executable separately
+        if: steps.desktop_build.outcome == 'success'
         shell: bash
         run: |
           mkdir -p staging/desktop
@@ -70,6 +73,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p staging/service/bin
+          printf '%s\n' '${{ steps.desktop_build.outcome }}' > staging/DESKTOP_BUILD_STATUS
           ext=''
           if [ "$RUNNER_OS" = Windows ]; then ext='.exe'; fi
           "target/release/dbx${ext}" --version

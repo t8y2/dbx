@@ -116,7 +116,9 @@ limited to 1 MiB and must finish within 5 seconds. There are at most 40 concurre
 body readers and 32 concurrent streams/operations, with eight reserved control
 slots for cancellation notifications and DELETE. Bearer headers are removed
 before SDK dispatch. Every operation and response stream ends by token expiry
-or five minutes, whichever comes first. SDK idle cleanup and graceful
+or five minutes, whichever comes first. Completed POST-result replay/resumption
+is disabled to prevent aggregate result-cache growth; live GET/SSE is supported.
+Session closure explicitly cancels its in-flight operations. SDK idle cleanup and graceful
 shutdown dispose connection/transaction state. These transport limits do not
 replace database statement timeouts or proxy-level connection/rate limits.
 

@@ -36,10 +36,15 @@ impl rmcp::Service<rmcp::RoleServer> for BoundedHttpService {
             .cloned()
             .ok_or_else(|| rmcp::ErrorData::internal_error("Missing authenticated HTTP request context", None))?;
         let cancellation = context.ct.clone();
+        if lease.deadline <= tokio::time::Instant::now() || lease.session_cancellation.is_cancelled() {
+            return Err(rmcp::ErrorData::internal_error("Authenticated HTTP session expired", None));
+        }
         tokio::select! {
-            result = rmcp::Service::handle_request(&self.0, request, context) => result,
+            biased;
+            _ = lease.session_cancellation.cancelled() => Err(rmcp::ErrorData::internal_error("Authenticated HTTP session closed", None)),
             _ = cancellation.cancelled() => Err(rmcp::ErrorData::internal_error("MCP request cancelled", None)),
             _ = tokio::time::sleep_until(lease.deadline) => Err(rmcp::ErrorData::internal_error("Authenticated HTTP request deadline expired", None)),
+            result = rmcp::Service::handle_request(&self.0, request, context) => result,
         }
     }
 
@@ -66,7 +71,16 @@ pub fn streamable_http_router(
     allowed_hosts: Vec<String>,
     web_mode: bool,
 ) -> Result<Router, String> {
-    build_streamable_http_router(backend, path, auth, allowed_hosts, web_mode, None, Default::default())
+    build_streamable_http_router(backend, path, auth, allowed_hosts, web_mode, None, Arc::new(http_session_manager()))
+}
+
+fn http_session_manager() -> LocalSessionManager {
+    let mut manager = LocalSessionManager::default();
+    // Avoid an unbounded aggregate of recently completed large query results.
+    // Late POST-response replay is deliberately unsupported; live SSE remains.
+    manager.session_config.completed_cache_ttl = std::time::Duration::ZERO;
+    manager.session_config.init_timeout = Some(std::time::Duration::from_secs(5));
+    manager
 }
 
 fn build_streamable_http_router(
@@ -178,7 +192,7 @@ pub async fn serve_streamable_http_on_listener(
     cancellation: CancellationToken,
     listener: tokio::net::TcpListener,
 ) -> io::Result<()> {
-    let session_manager = Arc::new(LocalSessionManager::default());
+    let session_manager = Arc::new(http_session_manager());
     let mcp_router = build_streamable_http_router(
         backend,
         &config.path,
@@ -404,7 +418,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let mut session_config = SessionConfig::default();
         session_config.keep_alive = Some(keep_alive);
-        let mut local_manager = LocalSessionManager::default();
+        session_config.completed_cache_ttl = std::time::Duration::ZERO;
+        let mut local_manager = http_session_manager();
         local_manager.session_config = session_config;
         let manager = Arc::new(local_manager);
         let cancellation = CancellationToken::new();
@@ -621,7 +636,7 @@ mod tests {
         let mut backend = HttpTestBackend::new();
         backend.read_only = true;
         let backend = Arc::new(backend);
-        let manager = Arc::new(LocalSessionManager::default());
+        let manager = Arc::new(http_session_manager());
         let cancellation = CancellationToken::new();
         let auth = HttpAuth::new_oauth(issuer.verifier(), vec![address.to_string()], vec![]).unwrap();
         let router = build_streamable_http_router(
@@ -787,10 +802,37 @@ mod tests {
         let (orphan, _transport) = manager.create_session().await.unwrap();
         auth.reap_sessions(&manager).await;
         assert!(!manager.has_session(&orphan).await.unwrap());
+        backend.slow_load.store(true, Ordering::SeqCst);
+        let abandoned = http
+            .post(&url)
+            .bearer_auth(&token)
+            .header("mcp-session-id", &id)
+            .header("accept", "application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0","id":82,"method":"tools/call","params":{"name":"dbx_list_connections"}}))
+            .send()
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while backend.running_load.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(abandoned);
         assert_eq!(
             http.delete(&url).bearer_auth(&token).header("mcp-session-id", &id).send().await.unwrap().status(),
             202
         );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while backend.running_load.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("DELETE must cancel a disconnected in-flight operation");
+        backend.slow_load.store(false, Ordering::SeqCst);
+
         assert_eq!(
             http.post(&url)
                 .bearer_auth(&token)

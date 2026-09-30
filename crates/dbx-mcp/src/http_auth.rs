@@ -26,6 +26,13 @@ struct SessionBinding {
     created: Instant,
     _slot: OwnedSemaphorePermit,
     invalidated: bool,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+impl Drop for SessionBinding {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
 }
 
 /// Authentication and browser-origin policy for the Streamable HTTP endpoint.
@@ -128,6 +135,7 @@ impl HttpAuth {
         *self.config.write().unwrap_or_else(|error| error.into_inner()) = next;
         for binding in self.sessions.lock().unwrap_or_else(|e| e.into_inner()).values_mut() {
             binding.invalidated = true;
+            binding.cancellation.cancel();
         }
         Ok(())
     }
@@ -331,7 +339,6 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
     // Never forward a bearer secret into SDK request Parts/handler extensions.
     request.headers_mut().remove(header::AUTHORIZATION);
     let request_permit = Arc::new(request_permit);
-    request.extensions_mut().insert(HttpRequestDeadline { deadline, _permit: request_permit.clone() });
     let _initialization = if session_id.is_none() {
         match tokio::time::timeout_at(deadline, auth.initialize.lock()).await {
             Ok(guard) => Some(guard),
@@ -346,21 +353,32 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
             auth.reap_sessions_locked(&manager).await;
         }
     }
-    let slot = {
+    let (slot, session_cancellation, session_remaining) = {
         let sessions = auth.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(id) = &session_id {
             match sessions.get(id) {
                 Some(binding) if binding.principal != principal => return forbidden(),
-                Some(binding) if !binding.invalidated && binding.created.elapsed() < SESSION_TTL => None,
+                Some(binding) if !binding.invalidated && binding.created.elapsed() < SESSION_TTL => {
+                    (None, binding.cancellation.clone(), SESSION_TTL.saturating_sub(binding.created.elapsed()))
+                }
                 _ => return not_found(),
             }
         } else {
             match auth.slots.clone().try_acquire_owned() {
-                Ok(slot) => Some(slot),
+                Ok(slot) => (Some(slot), tokio_util::sync::CancellationToken::new(), SESSION_TTL),
                 Err(_) => return (StatusCode::TOO_MANY_REQUESTS, "MCP session limit reached").into_response(),
             }
         }
     };
+    let deadline = deadline.min(tokio::time::Instant::now() + session_remaining);
+    request.extensions_mut().insert(HttpRequestDeadline {
+        deadline,
+        _permit: request_permit.clone(),
+        session_cancellation: session_cancellation.clone(),
+    });
+    if deadline <= tokio::time::Instant::now() || session_cancellation.is_cancelled() {
+        return (StatusCode::REQUEST_TIMEOUT, "MCP authenticated request expired").into_response();
+    }
     let response = match tokio::time::timeout_at(deadline, next.run(request)).await {
         Ok(response) => response,
         Err(_) => return (StatusCode::REQUEST_TIMEOUT, "MCP request deadline exceeded").into_response(),
@@ -375,7 +393,13 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
             if let Ok(id) = id.to_str() {
                 sessions.insert(
                     id.to_owned(),
-                    SessionBinding { principal, created: Instant::now(), _slot: slot, invalidated: false },
+                    SessionBinding {
+                        principal,
+                        created: Instant::now(),
+                        _slot: slot,
+                        invalidated: false,
+                        cancellation: session_cancellation.clone(),
+                    },
                 );
             }
         }
@@ -385,13 +409,17 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
     let (parts, body) = response.into_parts();
     // The owned permit lives through the response stream, not just header
     // production. Deadline also bounds SSE connections after token expiry.
-    let stream =
-        futures::stream::unfold((body.into_data_stream(), request_permit), move |(mut stream, permit)| async move {
+    let stream = futures::stream::unfold((body.into_data_stream(), request_permit), move |(mut stream, permit)| {
+        let cancellation = session_cancellation.clone();
+        async move {
             tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => None,
                 _ = tokio::time::sleep_until(deadline) => None,
                 item = stream.next() => item.map(|item| (item, (stream, permit))),
             }
-        });
+        }
+    });
     Response::from_parts(parts, axum::body::Body::from_stream(stream))
 }
 
@@ -399,6 +427,7 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
 pub(crate) struct HttpRequestDeadline {
     pub deadline: tokio::time::Instant,
     pub _permit: Arc<OwnedSemaphorePermit>,
+    pub session_cancellation: tokio_util::sync::CancellationToken,
 }
 
 fn bearer_token(value: Option<&HeaderValue>) -> Option<&str> {

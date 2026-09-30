@@ -1,0 +1,9 @@
+# Configure real DNS and valid HTTPS before exposing this service.
+# Keep the upstream on loopback; never publish port 5225 directly.
+dbx.example.com {
+    @mcp path /mcp /mcp/* /.well-known/oauth-protected-resource/mcp
+    reverse_proxy @mcp 127.0.0.1:5225 {
+        flush_interval -1
+    }
+    respond 404
+}

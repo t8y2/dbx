@@ -1,0 +1,29 @@
+[Unit]
+Description=DBX authenticated MCP resource server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dbx
+Group=dbx
+UMask=0077
+StateDirectory=dbx
+StateDirectoryMode=0700
+Environment=DBX_DATA_DIR=/var/lib/dbx
+Environment=DBX_MCP_OAUTH_CONFIG_FILE=/etc/dbx/oauth.json
+Environment=DBX_MCP_HTTP_ALLOWED_HOSTS=dbx.example.com
+# Set only exact trusted browser origins when needed. Server-to-server clients
+# without Origin do not require this. Never use a wildcard.
+# Environment=DBX_MCP_HTTP_ALLOWED_ORIGINS=https://chatgpt.com
+ExecStart=/opt/dbx/bin/dbx-mcp --http
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/dbx
+
+[Install]
+WantedBy=multi-user.target

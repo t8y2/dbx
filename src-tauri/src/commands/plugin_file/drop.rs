@@ -10,6 +10,10 @@ use super::{
     MAX_DROPPED_FILES, MAX_DROP_FOLDER_DEPTH, MAX_DROP_FOLDER_FILES,
 };
 
+/// One regular file collected from a drop: absolute path, '/'-separated path
+/// relative to the dropped root, size in bytes, and platform file identity.
+type CollectedDropFile = (std::path::PathBuf, String, u64, Option<(u64, u64)>);
+
 /// The command-level gate for `plugin_file_open_dropped`: after the dialog flows moved
 /// to Rust, the only renderer path into this registry is the OS drop flow, so
 /// a path alone is never consent — the native drag-drop pipeline must have
@@ -52,9 +56,7 @@ pub(super) fn open_dropped_plugin_files(
             path.file_name().and_then(|value| value.to_str()).map(|name| name.to_string()).unwrap_or_default();
         // symlink_metadata first: what the OS delivered decides policy, not
         // whatever the path happens to resolve to.
-        let contained: Vec<(std::path::PathBuf, String, u64, Option<(u64, u64)>)> = match std::fs::symlink_metadata(
-            path,
-        ) {
+        let contained: Vec<CollectedDropFile> = match std::fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_symlink() => {
                 // A dropped alias must not widen the grant to an unintended
                 // subtree: a symlinked folder is never expanded, a symlinked
@@ -166,7 +168,7 @@ fn collect_folder_files(
     root: &Path,
     dir: &Path,
     depth: usize,
-    out: &mut Vec<(std::path::PathBuf, String, u64, Option<(u64, u64)>)>,
+    out: &mut Vec<CollectedDropFile>,
     count_truncated: &mut bool,
     depth_truncated: &mut bool,
 ) {

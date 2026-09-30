@@ -609,12 +609,12 @@ mod tests {
         // Streaming: chunks read across separate calls land exactly where the
         // offsets say, with eof only on the tail.
         let target = handles.iter().find(|handle| handle.name == "part042.bin").expect("entry");
-        let payload = format!("payload-42");
+        let payload = "payload-42".to_string();
         let head = read_plugin_file_chunk(&state, OWNER, &target.handle_id, 0, Some(4)).expect("read head");
         assert_eq!(BASE64.decode(head.data_base64).unwrap(), b"payl");
         assert!(!head.eof);
         let tail = read_plugin_file_chunk(&state, OWNER, &target.handle_id, 4, Some(64)).expect("read tail");
-        assert_eq!(BASE64.decode(tail.data_base64).unwrap(), payload[4..].as_bytes());
+        assert_eq!(BASE64.decode(tail.data_base64).unwrap(), &payload.as_bytes()[4..]);
         assert!(tail.eof, "a lazily-opened file reports eof at its true end");
         assert_eq!(state.handles.lock().unwrap().len(), 0, "the fd is released between reads");
 
@@ -893,11 +893,15 @@ mod tests {
         let handles = open_dropped_plugin_files(&state, "main", OWNER, &[path.to_string_lossy().into_owned()]).files;
         assert_eq!(handles.len(), 1);
 
-        // Replace the file at the same path with a NEW file (delete + create
-        // → new inode): the grant pinned the ORIGINAL file. (An in-place
-        // rewrite keeps the inode and is correctly still readable.)
-        std::fs::remove_file(&path).expect("remove");
-        std::fs::write(&path, b"swapped").expect("recreate");
+        // Replace the file at the same path with a NEW file: the grant pinned
+        // the ORIGINAL file. The successor is created as a sibling while the
+        // original still exists and renamed over it, which pins a different
+        // inode — a delete-then-recreate can silently reuse the just-freed
+        // inode number and read as the same file. (An in-place rewrite keeps
+        // the inode and is correctly still readable.)
+        let swapped = path.with_extension("swapped");
+        std::fs::write(&swapped, b"swapped").expect("write successor");
+        std::fs::rename(&swapped, &path).expect("swap");
         let error = read_plugin_file_chunk(&state, OWNER, &handles[0].handle_id, 0, None).unwrap_err();
         #[cfg(unix)]
         assert_eq!(error, "file changed since the drop was granted", "{error}");

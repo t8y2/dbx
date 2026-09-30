@@ -1063,22 +1063,26 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  async function exportHtml(rowIds?: number[]) {
+  async function exportHtml(rowIds?: number[], openAfterExport = false) {
     await runExclusiveExport(async () => {
       try {
         let outputPath = exportFileName("export", "html");
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
-            filters: [{ name: "HTML", extensions: ["html"] }],
-          });
-          if (!path) return;
-          outputPath = path as string;
+          if (openAfterExport) outputPath = await api.createQueryResultTempFile("html");
+          else {
+            const { save } = await import("@tauri-apps/plugin-dialog");
+            const path = await save({
+              defaultPath: outputPath,
+              filters: [{ name: "HTML", extensions: ["html"] }],
+            });
+            if (!path) return;
+            outputPath = path as string;
+          }
         }
         const result = await resultToExport(rowIds);
         await api.exportQueryResultHtml(outputPath, currentExportTitle(), result.columns, result.rows);
         toast(t("grid.exported"));
+        if (openAfterExport && isTauriRuntime()) await api.openQueryResultTempFile(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
       }
@@ -1120,24 +1124,24 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  async function exportXlsxResult(rowIds: number[] | undefined, includeSqlSheet: boolean) {
+  async function exportXlsxResult(rowIds: number[] | undefined, includeSqlSheet: boolean, openAfterExport = false) {
     const exportOptions = await showXlsxHeaderDialog();
     if (exportOptions === null) return;
 
     await runExclusiveExport(async () => {
       try {
-        if (await exportQueryResultViaBackend("xlsx", rowIds, includeSqlSheet, exportOptions.headerMode, exportOptions.autoFilter)) return;
-        if (await exportFullTableDataViaBackend("xlsx", rowIds, exportOptions.headerMode, exportOptions.autoFilter)) return;
+        if (await exportQueryResultViaBackend("xlsx", rowIds, includeSqlSheet, exportOptions.headerMode, exportOptions.autoFilter, undefined, openAfterExport)) return;
+        if (await exportFullTableDataViaBackend("xlsx", rowIds, exportOptions.headerMode, exportOptions.autoFilter, undefined, openAfterExport)) return;
 
         let outputPath = exportFileName("export", "xlsx");
         if (isTauriRuntime()) {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const path = await save({
-            defaultPath: outputPath,
-            filters: [{ name: "Excel", extensions: ["xlsx"] }],
-          });
-          if (!path) return;
-          outputPath = path as string;
+          if (openAfterExport) outputPath = await api.createQueryResultTempFile("xlsx");
+          else {
+            const { save } = await import("@tauri-apps/plugin-dialog");
+            const path = await save({ defaultPath: outputPath, filters: [{ name: "Excel", extensions: ["xlsx"] }] });
+            if (!path) return;
+            outputPath = path as string;
+          }
         }
         const needsFullExport = rowIds === undefined && !!fullExportResult && !hasCompleteLocalResult?.value;
         if (needsFullExport && exportProgressDialog && exportProgressState) {
@@ -1190,6 +1194,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           };
         }
         toast(t("grid.exported"));
+        if (openAfterExport && isTauriRuntime()) {
+          await api.openQueryResultTempFile(outputPath);
+        }
       } catch (e: any) {
         if (exportProgressState) {
           exportProgressState.value = {
@@ -1205,6 +1212,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function exportXlsx(rowIds?: number[]) {
     await exportXlsxResult(rowIds, false);
+  }
+
+  async function openXlsx(rowIds?: number[]) {
+    await exportXlsxResult(rowIds, false, true);
+  }
+
+  async function openBrowser(rowIds?: number[]) {
+    await exportHtml(rowIds, true);
   }
 
   async function exportXlsxWithSql(rowIds?: number[]) {
@@ -1322,7 +1337,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return excludeColumns ? { excludePrimaryKeys: true, primaryKeys: excludeColumns } : {};
   }
 
-  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[], headerMode: XlsxHeaderMode = "name", autoFilter = true, sqlExportOptions?: SqlExportOptions): Promise<boolean> {
+  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[], headerMode: XlsxHeaderMode = "name", autoFilter = true, sqlExportOptions?: SqlExportOptions, openAfterExport = false): Promise<boolean> {
     const meta = tableMeta.value;
     // The backend table exporter currently builds two-part table names. External
     // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
@@ -1335,7 +1350,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const extension = splitSqlOutput ? "zip" : (fmt?.ext ?? format);
     const filterName = splitSqlOutput ? "ZIP" : (fmt?.label ?? format.toUpperCase());
     let outputPath = exportFileName(meta.tableName || "export", extension, { preferFallback: true });
-    if (isTauriRuntime()) {
+    if (openAfterExport && isTauriRuntime()) {
+      outputPath = await api.createQueryResultTempFile(extension);
+    } else if (isTauriRuntime()) {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const path = await save({
         defaultPath: outputPath,
@@ -1424,6 +1441,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       );
       if (progress.status === "Done") {
         toast(t("grid.exported"));
+        if (openAfterExport && isTauriRuntime()) await api.openQueryResultTempFile(outputPath);
       }
     } finally {
       if (exportCancelHandler) exportCancelHandler.value = null;
@@ -1433,7 +1451,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "json" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, headerMode: XlsxHeaderMode = "name", autoFilter = true, sqlExportOptions?: SqlExportOptions): Promise<boolean> {
+  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "json" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, headerMode: XlsxHeaderMode = "name", autoFilter = true, sqlExportOptions?: SqlExportOptions, openAfterExport = false): Promise<boolean> {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
@@ -1447,13 +1465,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const filterName = fmt?.label ?? format.toUpperCase();
     let outputPath = exportFileName("query-result", extension);
     if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({
-        defaultPath: outputPath,
-        filters: [{ name: filterName, extensions: [extension] }],
-      });
-      if (!path) return true;
-      outputPath = path as string;
+      if (openAfterExport) outputPath = await api.createQueryResultTempFile(extension);
+      else {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        const path = await save({ defaultPath: outputPath, filters: [{ name: filterName, extensions: [extension] }] });
+        if (!path) return true;
+        outputPath = path as string;
+      }
     }
 
     const exportId = uuid();
@@ -1523,6 +1541,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       });
       if (terminalProgress.status === "Done") {
         toast(t("grid.exported"));
+        if (openAfterExport && isTauriRuntime()) {
+          await api.openQueryResultTempFile(outputPath);
+        }
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1778,6 +1799,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportTxt,
     exportCurrentPageTxt,
     exportXlsx,
+    openXlsx,
+    openBrowser,
     exportXlsxWithSql,
     exportCurrentPageXlsx,
     exportCurrentPageXlsxWithSql,

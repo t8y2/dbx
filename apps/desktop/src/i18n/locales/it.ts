@@ -6581,6 +6581,11 @@ export default withEnglishFallback({
     cancelledLabel: "Annullato; le righe già scritte restano nella tabella",
   },
   tableToolbox: {
+    browser: "Anteprima web",
+    browserFiltered: "Anteprima web (risultato corrente)",
+    browserSelected: "Anteprima web (righe selezionate)",
+    openWith: "Apri con",
+    openXlsx: "Apri come XLSX",
     title: "Strumenti dati",
     generateData: "Genera dati",
     importData: "Importa dati",

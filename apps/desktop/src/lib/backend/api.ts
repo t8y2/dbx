@@ -578,6 +578,8 @@ export const startTableExport = forward("startTableExport");
 export const cancelTableExport = forward("cancelTableExport");
 export const startQueryResultExport = forward("startQueryResultExport");
 export const cancelQueryResultExport = forward("cancelQueryResultExport");
+export const openQueryResultTempFile = forward("openQueryResultTempFile");
+export const createQueryResultTempFile = forward("createQueryResultTempFile");
 
 // Redis
 export const redisListDatabases = forward("redisListDatabases");

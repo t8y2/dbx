@@ -71,6 +71,7 @@ import {
 } from "@/lib/plugins/frontendPlugin";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { isWindows } from "@/lib/backend/platform";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { hasXuguConnectionDatabase } from "@/lib/connection/xuguDatabase";
 import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
@@ -141,6 +142,7 @@ import {
   Pipette,
   Plus,
   RefreshCw,
+  Save,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -422,6 +424,8 @@ const defaultForm = (): ConnectionForm => ({
   client_cert_path: "",
   client_key_path: "",
   sysdba: false,
+  oracle_oci_nls_lang: "",
+  oracle_oci_tns_admin: "",
   oracle_connection_type: "service_name",
   connection_string: undefined,
   jdbc_driver_class: undefined,
@@ -807,6 +811,8 @@ const appliedConnectionUrlInput = ref("");
 const meilisearchHostInput = ref("");
 const appliedMeilisearchHostInput = ref("");
 const oracleTnsAdminPath = ref("");
+/** 每次进入 OCI 模式只提醒一次 Instant Client 目录，避免反复点“测试”时刷屏。 */
+const oracleOciClientPathReminded = ref(false);
 const oceanbaseSubMode = ref<"mysql" | "oracle">("mysql");
 const h2ConnectionMode = ref<H2ConnectionMode>("file");
 const dremioConnectionMode = ref<DremioConnectionMode>("legacy");
@@ -3105,6 +3111,8 @@ watch(
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
         keepalive_interval_secs: config.keepalive_interval_secs ?? 30,
         sysdba: config.sysdba || isOracleSysUser(config),
+        oracle_oci_nls_lang: config.oracle_oci_nls_lang || "",
+        oracle_oci_tns_admin: config.oracle_oci_tns_admin || "",
         oracle_connection_type: config.oracle_connection_type || "service_name",
         connection_string: config.connection_string,
         jdbc_driver_class: config.db_type === "sundb" ? sundbJdbcDriverClass(config) : config.jdbc_driver_class,
@@ -3465,6 +3473,156 @@ function switchH2DriverProfile(profile: "h2" | "h2-v1" | "h2-v2" | "h2-v3" | "h2
     jdbcManualClasspathOpen.value = false;
   }
   resetTestState();
+}
+
+/**
+ * Oracle driver mode: thin (go-ora agent, default) or OCI (thick driver,
+ * requires a globally configured Oracle Instant Client). The oci.dll path
+ * lives in the global settings on purpose — one configuration is shared by
+ * every OCI connection, and new OCI connections backfill it automatically.
+ */
+// OCI（thick）驱动目前只发布 Windows x64 产物：非 Windows 平台不显示模式切换，
+// 避免用户选到无法安装的驱动。已保存的 OCI 连接仍按原样打开（连接时会得到
+// 明确的“驱动未安装”错误），并把 Thin 按钮留在原地便于切回。
+const oracleOciDriverSelectable = isWindows();
+
+function switchOracleDriverMode(mode: "thin" | "oci") {
+  form.value.driver_profile = mode === "oci" ? "oci" : "oracle";
+  oracleOciClientPathReminded.value = false;
+  resetTestState();
+}
+
+function persistOracleOciClientPath() {
+  void settingsStore.updateEditorSettings({
+    oracleOciClientPath: settingsStore.editorSettings.oracleOciClientPath,
+  });
+}
+
+/**
+ * NLS_LANG is a per-connection override: an empty value follows the global
+ * default, a filled value makes this connection own a dedicated agent process
+ * (the variable is process-scoped for OCI). The dropdown lists the common
+ * client character sets; the save button promotes the current value to the
+ * global default for reuse.
+ */
+const OCI_NLS_LANG_FOLLOW_GLOBAL = "__follow_global__";
+const ORACLE_NLS_LANG_OPTIONS = [
+  "AMERICAN_AMERICA.AL32UTF8",
+  "AMERICAN_AMERICA.UTF8",
+  "AMERICAN_AMERICA.WE8ISO8859P1",
+  "AMERICAN_AMERICA.ZHS16GBK",
+  "SIMPLIFIED CHINESE_CHINA.AL32UTF8",
+  "SIMPLIFIED CHINESE_CHINA.ZHS16GBK",
+  "TRADITIONAL CHINESE_TAIWAN.AL32UTF8",
+  "TRADITIONAL CHINESE_TAIWAN.ZHT16MSWIN950",
+  "JAPANESE_JAPAN.AL32UTF8",
+  "JAPANESE_JAPAN.JA16SJIS",
+  "KOREAN_KOREA.AL32UTF8",
+  "KOREAN_KOREA.KO16MSWIN949",
+] as const;
+
+const oracleOciNlsLangSelection = computed(() => (form.value.oracle_oci_nls_lang?.trim() ? form.value.oracle_oci_nls_lang.trim() : OCI_NLS_LANG_FOLLOW_GLOBAL));
+
+/** A stored value that predates the preset list must stay selectable. */
+const oracleOciNlsLangCustomValue = computed(() => {
+  const value = form.value.oracle_oci_nls_lang?.trim();
+  if (!value) return null;
+  return (ORACLE_NLS_LANG_OPTIONS as readonly string[]).includes(value) ? null : value;
+});
+
+const oracleOciNlsLangPlaceholder = computed(() => {
+  const globalValue = settingsStore.editorSettings.oracleOciNlsLang?.trim();
+  return globalValue ? t("connection.oracleOciNlsLangPlaceholderGlobal", { value: globalValue }) : t("connection.oracleOciNlsLangPlaceholder");
+});
+
+/** Names the global default in effect, so promoting a value becomes visible in place. */
+const oracleOciNlsLangFollowGlobalLabel = computed(() => {
+  const globalValue = settingsStore.editorSettings.oracleOciNlsLang?.trim();
+  return globalValue ? t("connection.oracleOciNlsLangFollowGlobalValue", { value: globalValue }) : t("connection.oracleOciNlsLangFollowGlobal");
+});
+
+function onOciNlsLangSelected(value: unknown) {
+  const selected = typeof value === "string" ? value : "";
+  form.value.oracle_oci_nls_lang = selected === OCI_NLS_LANG_FOLLOW_GLOBAL ? "" : selected;
+  resetTestState();
+}
+
+async function saveOciNlsLangAsGlobalDefault() {
+  const value = form.value.oracle_oci_nls_lang?.trim();
+  if (!value) {
+    toast(t("connection.oracleOciNlsLangSaveGlobalEmpty"), 3000);
+    return;
+  }
+  try {
+    await settingsStore.updateEditorSettingsAndPersist({ oracleOciNlsLang: value });
+    toast(t("connection.oracleOciNlsLangSavedGlobal", { value }), 3000);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
+}
+
+/**
+ * 连接级 TNS_ADMIN（tnsnames.ora / sqlnet.ora / 钱包目录）：留空跟随全局默认，
+ * 填写后本连接使用自己的目录——ADB 钱包、sqlnet.ora 网络选项因此不依赖
+ * TNS 连接方式。目录同样是进程级的，随 agent 启动注入。
+ */
+const oracleOciTnsAdminPlaceholder = computed(() => {
+  const globalValue = settingsStore.editorSettings.oracleOciTnsAdmin?.trim();
+  return globalValue ? t("connection.oracleOciTnsAdminPlaceholderGlobal", { value: globalValue }) : t("connection.oracleTnsAdminPlaceholder");
+});
+
+async function saveOciTnsAdminAsGlobalDefault() {
+  const value = form.value.oracle_oci_tns_admin?.trim();
+  if (!value) {
+    toast(t("connection.oracleOciTnsAdminSaveGlobalEmpty"), 3000);
+    return;
+  }
+  try {
+    await settingsStore.updateEditorSettingsAndPersist({ oracleOciTnsAdmin: value });
+    toast(t("connection.oracleOciTnsAdminSavedGlobal", { value }), 3000);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
+}
+
+async function browseOciTnsAdminDirectory() {
+  if (!isTauriRuntime()) {
+    toast(t("connection.oraclePathPickerDesktopOnly"));
+    return;
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    title: t("connection.oracleTnsAdminBrowse"),
+    directory: true,
+    multiple: false,
+  });
+  if (typeof selected === "string") {
+    form.value.oracle_oci_tns_admin = selected;
+    resetTestState();
+  }
+}
+
+/**
+ * Prompts for the Oracle Instant Client directory. The desktop shell is the
+ * only runtime that can resolve a local path, so the picker explains itself
+ * on the web build instead of silently doing nothing.
+ */
+async function browseOciClientDirectory() {
+  if (!isTauriRuntime()) {
+    toast(t("connection.oraclePathPickerDesktopOnly"));
+    return;
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    title: t("connection.oracleOciPathBrowse"),
+    directory: true,
+    multiple: false,
+  });
+  if (typeof selected === "string") {
+    settingsStore.editorSettings.oracleOciClientPath = selected;
+    persistOracleOciClientPath();
+    resetTestState();
+  }
 }
 
 const damengDriverMode = computed(() => damengDriverModeForConfig(form.value));
@@ -4718,6 +4876,11 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     // service, SID, and descriptor JDBC strings exactly as before.
     config.connection_string = undefined;
   }
+  if (config.db_type === "oracle" && config.driver_profile === "oci" && !settingsStore.editorSettings.oracleOciClientPath?.trim() && !oracleOciClientPathReminded.value) {
+    // 非阻断提醒：没有配置 Instant Client 目录时，agent 进程只能依赖系统 PATH 里已有的 oci.dll。
+    oracleOciClientPathReminded.value = true;
+    toast(t("connection.oracleOciClientPathMissing"), 5000);
+  }
   normalizeConnectionTimeouts(config, editGlobalConnectTimeoutSecs.value, editGlobalQueryTimeoutSecs.value);
   if (config.db_type === "manticoresearch") {
     config.url_params = "";
@@ -4947,9 +5110,25 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   if (config.db_type !== "oracle") {
     config.sysdba = undefined;
     config.oracle_connection_type = undefined;
+    config.oracle_oci_nls_lang = undefined;
+    config.oracle_oci_tns_admin = undefined;
   } else {
     config.sysdba = !!config.sysdba || isOracleSysUser(config);
     config.oracle_connection_type = config.oracle_connection_type || "service_name";
+    // Driver mode is encoded as the driver profile so the agent router picks
+    // the OCI (thick) agent; everything else stays on the thin agent.
+    if (config.driver_profile === "oci") {
+      config.driver_label = "Oracle (OCI)";
+      config.oracle_oci_nls_lang = config.oracle_oci_nls_lang?.trim() || undefined;
+      config.oracle_oci_tns_admin = config.oracle_oci_tns_admin?.trim() || undefined;
+    } else {
+      // Only default when empty: saved legacy profiles (oracle-legacy,
+      // oracle-10g) must survive edits untouched.
+      if (!config.driver_profile) config.driver_profile = "oracle";
+      config.driver_label = "Oracle";
+      config.oracle_oci_nls_lang = undefined;
+      config.oracle_oci_tns_admin = undefined;
+    }
   }
   if (config.db_type !== "redis") {
     config.redis_connection_mode = undefined;
@@ -6639,12 +6818,17 @@ async function browseHiveKerberosFile(target: "krb5" | "jaas") {
 }
 
 async function browseOracleTnsNamesFile() {
-  if (!isTauriRuntime()) return;
+  // TNS_ADMIN is a directory; accept a folder pick. Desktop-only, so the web
+  // build gets an explanation instead of a silent no-op.
+  if (!isTauriRuntime()) {
+    toast(t("connection.oraclePathPickerDesktopOnly"));
+    return;
+  }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({
     title: t("connection.oracleTnsAdminBrowse"),
+    directory: true,
     multiple: false,
-    filters: [{ name: "Oracle TNS names", extensions: ["ora"] }],
   });
   if (typeof selected === "string") {
     oracleTnsAdminPath.value = normalizeOracleTnsAdminPath(selected);
@@ -8938,11 +9122,99 @@ function openExternalUrl(url: string) {
                       <SpannerConnectionFields v-model:database="form.database" @change="resetTestState" />
                     </template>
 
+                    <div v-if="form.db_type === 'oracle' && (oracleOciDriverSelectable || form.driver_profile === 'oci')" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.oracleDriverMode") }}</Label>
+                      <div class="col-span-3 flex gap-2">
+                        <Button size="sm" :variant="form.driver_profile !== 'oci' ? 'default' : 'outline'" @click="switchOracleDriverMode('thin')"> Thin </Button>
+                        <Button v-if="oracleOciDriverSelectable" size="sm" :variant="form.driver_profile === 'oci' ? 'default' : 'outline'" @click="switchOracleDriverMode('oci')"> OCI </Button>
+                      </div>
+                    </div>
+
+                    <template v-if="form.db_type === 'oracle' && form.driver_profile === 'oci'">
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">oci.dll</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="settingsStore.editorSettings.oracleOciClientPath" class="flex-1 font-mono" :placeholder="t('connection.oracleOciPathPlaceholder')" @change="persistOracleOciClientPath" />
+                          <Tooltip>
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseOciClientDirectory">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.oracleOciPathBrowse") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <span />
+                        <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleOciPathHint") }}</p>
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">NLS_LANG</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Select :model-value="oracleOciNlsLangSelection" @update:model-value="onOciNlsLangSelected">
+                            <SelectTrigger class="flex-1 font-mono" aria-label="NLS_LANG">
+                              <SelectValue :placeholder="oracleOciNlsLangPlaceholder" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem :value="OCI_NLS_LANG_FOLLOW_GLOBAL">
+                                {{ oracleOciNlsLangFollowGlobalLabel }}
+                              </SelectItem>
+                              <SelectItem v-for="option in ORACLE_NLS_LANG_OPTIONS" :key="option" :value="option">
+                                {{ option }}
+                              </SelectItem>
+                              <SelectItem v-if="oracleOciNlsLangCustomValue" :value="oracleOciNlsLangCustomValue">
+                                {{ oracleOciNlsLangCustomValue }}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <Tooltip>
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :aria-label="t('connection.oracleOciNlsLangSaveGlobal')" @click="saveOciNlsLangAsGlobalDefault">
+                                <Save class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.oracleOciNlsLangSaveGlobal") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <span />
+                        <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleOciNlsLangHint") }}</p>
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">TNS_ADMIN</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="form.oracle_oci_tns_admin" class="flex-1 font-mono" :placeholder="oracleOciTnsAdminPlaceholder" @change="resetTestState" />
+                          <Tooltip>
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :aria-label="t('connection.oracleTnsAdminBrowse')" @click="browseOciTnsAdminDirectory">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.oracleTnsAdminBrowse") }}</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :aria-label="t('connection.oracleOciTnsAdminSaveGlobal')" @click="saveOciTnsAdminAsGlobalDefault">
+                                <Save class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.oracleOciTnsAdminSaveGlobal") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <span />
+                        <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleOciTnsAdminHint") }}</p>
+                      </div>
+                    </template>
+
                     <div v-if="form.db_type === 'oracle' && form.oracle_connection_type === 'tns'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">TNS_ADMIN</Label>
                       <div class="col-span-3 flex items-center gap-1">
                         <Input v-model="oracleTnsAdminPath" class="flex-1" :placeholder="t('connection.oracleTnsAdminPlaceholder')" />
-                        <Tooltip v-if="isDesktop">
+                        <Tooltip>
                           <TooltipTrigger as-child>
                             <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseOracleTnsNamesFile">
                               <FolderOpen class="h-4 w-4" />

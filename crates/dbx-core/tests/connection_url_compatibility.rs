@@ -6,6 +6,8 @@ use std::str::FromStr;
 
 fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
     ConnectionConfig {
+        oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: "id".to_string(),
         name: "name".to_string(),

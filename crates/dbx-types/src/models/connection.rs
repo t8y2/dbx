@@ -189,6 +189,21 @@ pub struct ConnectionConfig {
     pub sysdba: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_connection_type: Option<String>,
+    /// Connection-level NLS_LANG override for OCI connections. Empty keeps the
+    /// global default; a value makes this connection own a dedicated agent
+    /// process so its client charset cannot bleed into other sessions (the
+    /// variable is process-scoped for OCI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_oci_nls_lang: Option<String>,
+    /// Connection-level `TNS_ADMIN` override for OCI (thick) connections.
+    ///
+    /// Points at the directory holding `tnsnames.ora` / `sqlnet.ora` / the
+    /// wallet, so any OCI connection can use an ADB wallet or network options
+    /// without switching to the TNS connection form. Resolved against the
+    /// global default and the TNS connection string in
+    /// `dbx_core::connection::AppState::agent_launch_env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_oci_tns_admin: Option<String>,
     #[serde(default)]
     pub connection_string: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -645,6 +660,10 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub oracle_connection_type: Option<String>,
     #[serde(default)]
+    pub oracle_oci_nls_lang: Option<String>,
+    #[serde(default)]
+    pub oracle_oci_tns_admin: Option<String>,
+    #[serde(default)]
     pub connection_string: Option<String>,
     #[serde(default)]
     pub redis_connection_mode: Option<String>,
@@ -741,6 +760,8 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             client_key_path: data.client_key_path,
             sysdba: data.sysdba,
             oracle_connection_type: data.oracle_connection_type,
+            oracle_oci_nls_lang: data.oracle_oci_nls_lang,
+            oracle_oci_tns_admin: data.oracle_oci_tns_admin,
             connection_string: data.connection_string,
             redis_connection_mode: data.redis_connection_mode,
             redis_sentinel_master: data.redis_sentinel_master,
@@ -2823,6 +2844,8 @@ mod tests {
 
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "id".to_string(),
             name: "name".to_string(),

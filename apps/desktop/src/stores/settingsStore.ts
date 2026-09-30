@@ -911,6 +911,27 @@ export interface EditorSettings {
   showColumnHeaderTooltips: boolean;
   /** 结果集页签/结果列表的名称是否带上库名（关闭后只显示表名，完整名称仍在悬浮提示中）。 */
   showResultSourceDatabase: boolean;
+  /**
+   * Global Oracle Instant Client location (the directory that contains
+   * oci.dll / libclnts). Shared by every Oracle connection whose driver mode
+   * is OCI; the connection dialog backfills it and edits write it back here.
+   */
+  oracleOciClientPath: string;
+  /**
+   * Client character set for OCI connections, injected as the NLS_LANG
+   * environment variable when the OCI agent starts. Empty keeps the OCI
+   * default; Chinese environments usually want AL32UTF8 (matching the
+   * database charset) to avoid mojibake.
+   */
+  oracleOciNlsLang: string;
+  /**
+   * Global TNS_ADMIN directory for OCI connections (tnsnames.ora / sqlnet.ora
+   * / wallet), injected as the TNS_ADMIN environment variable when the OCI
+   * agent starts. A connection-level override wins over this default; this is
+   * what makes ADB wallets and sqlnet.ora network options work without
+   * switching the connection to the TNS form.
+   */
+  oracleOciTnsAdmin: string;
   /** Naming strategy for query result execution and result-set tabs. */
   resultTabNamingMode: ResultTabNamingMode;
   /** Prefer SQL preamble comments in source naming mode, preserving the original naming behavior. */
@@ -1205,6 +1226,9 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showColumnTypesInHeader: true,
   showColumnHeaderTooltips: true,
   showResultSourceDatabase: true,
+  oracleOciClientPath: "",
+  oracleOciNlsLang: "",
+  oracleOciTnsAdmin: "",
   resultTabNamingMode: "source",
   resultTabPreferComments: true,
   dataGridShowTransposeFieldMetadata: false,
@@ -1785,6 +1809,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showColumnTypesInHeader: settings.showColumnTypesInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader,
     showColumnHeaderTooltips: settings.showColumnHeaderTooltips ?? DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips,
     showResultSourceDatabase: settings.showResultSourceDatabase ?? DEFAULT_EDITOR_SETTINGS.showResultSourceDatabase,
+    oracleOciNlsLang: typeof settings.oracleOciNlsLang === "string" ? settings.oracleOciNlsLang.trim() : "",
+    oracleOciTnsAdmin: typeof settings.oracleOciTnsAdmin === "string" ? settings.oracleOciTnsAdmin.trim() : "",
+    oracleOciClientPath: typeof settings.oracleOciClientPath === "string" ? settings.oracleOciClientPath.trim() : "",
     resultTabNamingMode: normalizeResultTabNamingMode(settings.resultTabNamingMode),
     resultTabPreferComments: settings.resultTabPreferComments !== false,
     dataGridShowTransposeFieldMetadata: settings.dataGridShowTransposeFieldMetadata === true,
@@ -2628,6 +2655,9 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
     if (partial.showColumnHeaderTooltips !== undefined) editorSettings.value.showColumnHeaderTooltips = partial.showColumnHeaderTooltips;
     if (partial.showResultSourceDatabase !== undefined) editorSettings.value.showResultSourceDatabase = partial.showResultSourceDatabase;
+    if (partial.oracleOciNlsLang !== undefined) editorSettings.value.oracleOciNlsLang = partial.oracleOciNlsLang.trim();
+    if (partial.oracleOciTnsAdmin !== undefined) editorSettings.value.oracleOciTnsAdmin = partial.oracleOciTnsAdmin.trim();
+    if (partial.oracleOciClientPath !== undefined) editorSettings.value.oracleOciClientPath = partial.oracleOciClientPath.trim();
     if (partial.resultTabNamingMode !== undefined) editorSettings.value.resultTabNamingMode = normalizeResultTabNamingMode(partial.resultTabNamingMode);
     if (partial.resultTabPreferComments !== undefined) editorSettings.value.resultTabPreferComments = partial.resultTabPreferComments !== false;
     if (partial.dataGridShowTransposeFieldMetadata !== undefined) editorSettings.value.dataGridShowTransposeFieldMetadata = partial.dataGridShowTransposeFieldMetadata === true;

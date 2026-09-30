@@ -111,14 +111,18 @@ async fn test_agent_connection(
     port: u16,
 ) -> Result<ConnectionTestResult, String> {
     let connect_params = agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""))?;
+    // Oracle OCI connections carry process-scoped client settings (`NLS_LANG`,
+    // Instant Client loader path): they have to reach the agent process itself.
+    let agent_env = state.agent_launch_env(config).await;
     let result = state
         .agent_manager
-        .call_daemon_method_with_timeout::<serde_json::Value>(
+        .call_daemon_method_with_timeout_and_env::<serde_json::Value>(
             &config.db_type,
             config.driver_profile.as_deref(),
             AgentMethod::TestConnection,
             connect_params,
             Some(agent_connect_timeout(config)),
+            &agent_env,
         )
         .await;
 
@@ -126,9 +130,10 @@ async fn test_agent_connection(
         Ok(response) => response,
         Err(err) => {
             if let Some(alternate_config) = oracle_alternate_connect_config(config, &err) {
+                let alternate_env = state.agent_launch_env(&alternate_config).await;
                 state
                     .agent_manager
-                    .call_daemon_method_with_timeout::<serde_json::Value>(
+                    .call_daemon_method_with_timeout_and_env::<serde_json::Value>(
                         &alternate_config.db_type,
                         alternate_config.driver_profile.as_deref(),
                         AgentMethod::TestConnection,
@@ -139,6 +144,7 @@ async fn test_agent_connection(
                             alternate_config.database.as_deref().unwrap_or(""),
                         )?,
                         Some(agent_connect_timeout(&alternate_config)),
+                        &alternate_env,
                     )
                     .await
                     .map_err(|alternate_err| {
@@ -174,7 +180,9 @@ async fn connect_agent_pool(
     port: u16,
 ) -> Result<PoolKind, String> {
     let connect_params = agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))?;
-    let mut client = state.agent_manager.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
+    let agent_env = state.agent_launch_env(config).await;
+    let mut client =
+        state.agent_manager.spawn_with_env(&config.db_type, config.driver_profile.as_deref(), &agent_env).await?;
     let connect_result = client
         .call_method_with_timeout::<serde_json::Value>(
             AgentMethod::Connect,
@@ -223,6 +231,8 @@ mod tests {
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "mongo".to_string(),
             name: "MongoDB".to_string(),

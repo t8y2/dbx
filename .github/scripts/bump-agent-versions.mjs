@@ -54,6 +54,7 @@ const nativeDriverDirectories = {
   hive: "hive-go",
   argo: "argo-go",
   oracle: "oracle-go",
+  "oracle-oci": "oracle-go",
   kingbase: "kingbase-go",
   iotdb: "iotdb",
   neo4j: "neo4j-go",
@@ -69,7 +70,7 @@ const nativeDriverDirectories = {
 const crateNativeDriverDirectories = {
   "sqlite-worker": "crates/dbx-sqlite-worker",
 };
-const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "argo", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2", "sqlite-worker"]);
+const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "argo", "oracle", "oracle-oci", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2", "sqlite-worker"]);
 const nativeDriverSharedPaths = {
   hive: [
     "agents/go-common/go-gssapi",

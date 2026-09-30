@@ -9,7 +9,72 @@ import zipfile
 from pathlib import Path
 
 from build_driver_zips import build_driver_zips, remove_raw_driver_artifacts
+from validate_agents import CRATE_NATIVE_AGENT_MODULES, NATIVE_ONLY_AGENT_MODULES
 from version_agent_artifacts import NATIVE_DRIVERS, version_agent_artifacts
+
+
+AGENTS_ROOT = Path(__file__).resolve().parent.parent
+
+
+def native_only_modules() -> set[str]:
+    declared = {
+        name
+        for name, relative in {**NATIVE_ONLY_AGENT_MODULES, **CRATE_NATIVE_AGENT_MODULES}.items()
+        if (AGENTS_ROOT / relative).exists()
+    }
+    return declared
+
+
+class NativeReleaseCoverageTest(unittest.TestCase):
+    """Guards the hand-maintained native module list in the release packaging.
+
+    `version_agent_artifacts` renames `dbx-agent-<module>-<platform>` into the
+    versioned name the registry generator looks for. A native module missing from
+    its list is not a loud failure: the raw artifact is dropped, the module never
+    reaches `agent-registry.json`, and the driver simply disappears from the app.
+    `oracle-oci` was lost exactly that way, so cross-check the list against the
+    modules `validate_agents` treats as native-only rather than trusting it to be
+    maintained by hand.
+    """
+
+    def test_lists_every_native_only_module(self) -> None:
+        declared = native_only_modules()
+        listed = set(NATIVE_DRIVERS)
+
+        self.assertEqual(
+            sorted(listed - declared),
+            [],
+            "NATIVE_DRIVERS lists entries validate_agents no longer declares native-only",
+        )
+        self.assertEqual(
+            sorted(declared - listed),
+            [],
+            "native-only modules missing from version_agent_artifacts.NATIVE_DRIVERS",
+        )
+
+    def test_every_listed_module_has_a_version(self) -> None:
+        versions = json.loads((AGENTS_ROOT / "versions.json").read_text(encoding="utf-8"))
+
+        missing = sorted(name for name in NATIVE_DRIVERS if not versions.get(name))
+
+        self.assertEqual(missing, [], "native modules without a versions.json entry")
+
+    def test_versions_platform_limited_native_artifacts(self) -> None:
+        # A module published for one platform only (Oracle OCI is Windows x64)
+        # must still be versioned; platforms it does not publish are skipped.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            source = release_dir / "dbx-agent-oracle-oci-windows-x64.exe"
+            source.write_bytes(b"MZtest-oracle-oci-agent")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+            versions["oracle-oci"] = "0.1.7"
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned = release_dir / "dbx-agent-oracle-oci-0.1.7-windows-x64.exe"
+
+            self.assertEqual(renamed, [versioned])
+            self.assertFalse(source.exists())
+            self.assertEqual(versioned.read_bytes(), b"MZtest-oracle-oci-agent")
 
 
 class DriverReleasePackagesTest(unittest.TestCase):
@@ -41,6 +106,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
             versions = {
                 "h2": "0.2.5",
                 "oracle": "0.1.10",
+                "oracle-oci": "0.1.0",
                 "xugu": "0.1.20",
                 "kingbase": "0.1.34",
                 "iotdb": "0.1.30",

@@ -152,6 +152,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
     let database_name = env_required("DBX_BENCH_DATABASE")?;
     Ok(ConnectionConfig {
         oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),

@@ -1319,6 +1319,7 @@ fn mysql_metadata_fallback_url(
 struct OracleOciDefaults {
     nls_lang: Option<String>,
     client_path: Option<String>,
+    tns_admin: Option<String>,
 }
 
 /// Trims an optional setting, treating whitespace-only input as unset.
@@ -1569,14 +1570,22 @@ impl AppState {
     /// to be baked into the agent process. Because the environment is part of
     /// the launch fingerprint, a non-empty result also gives the connection its
     /// own process instead of sharing one with other Oracle connections.
-    async fn agent_launch_env(&self, config: &ConnectionConfig) -> Vec<(String, String)> {
+    pub async fn agent_launch_env(&self, config: &ConnectionConfig) -> Vec<(String, String)> {
         if config.driver_profile.as_deref() != Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE) {
             return Vec::new();
         }
         let defaults = self.oracle_oci_defaults().await;
         let nls_lang = oracle_oci_trimmed(config.oracle_oci_nls_lang.as_deref())
             .or_else(|| oracle_oci_trimmed(defaults.nls_lang.as_deref()));
-        crate::oracle_oci::oracle_oci_launch_env(nls_lang, defaults.client_path.as_deref(), None)
+        // TNS_ADMIN 的解析顺序：连接级字段 > TNS 连接串里打包的目录 > 全局默认。
+        // 钱包（ADB）与 sqlnet.ora 都依赖这个目录，任何 OCI 连接都可以不经过
+        // TNS 连接方式直接使用它们；目录同样无法在连接建立后更改。
+        let tns_admin = crate::oracle_oci::resolve_oci_tns_admin(
+            config.oracle_oci_tns_admin.as_deref(),
+            config.connection_string.as_deref(),
+            defaults.tns_admin.as_deref(),
+        );
+        crate::oracle_oci::oracle_oci_launch_env(nls_lang, defaults.client_path.as_deref(), tns_admin.as_deref())
     }
 
     /// Reads the global Oracle OCI defaults from editor settings.
@@ -1591,6 +1600,7 @@ impl AppState {
         OracleOciDefaults {
             nls_lang: json_trimmed_string(&settings, "oracleOciNlsLang"),
             client_path: json_trimmed_string(&settings, "oracleOciClientPath"),
+            tns_admin: json_trimmed_string(&settings, "oracleOciTnsAdmin"),
         }
     }
 
@@ -7029,6 +7039,7 @@ mod tests {
     fn mysql_config(database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "conn".to_string(),
             name: "MySQL".to_string(),

@@ -131,6 +131,11 @@ export interface ConnectionConfig {
   oracle_connection_type?: "service_name" | "sid" | "tns";
   /** Connection-level NLS_LANG override; empty follows the global default. */
   oracle_oci_nls_lang?: string;
+  /**
+   * Connection-level TNS_ADMIN override for OCI (tnsnames.ora / sqlnet.ora /
+   * wallet directory); empty follows the global default.
+   */
+  oracle_oci_tns_admin?: string;
   connection_string?: string;
   jdbc_driver_class?: string;
   jdbc_driver_paths?: string[];

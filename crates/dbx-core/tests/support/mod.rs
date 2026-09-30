@@ -133,6 +133,7 @@ pub fn psql_allow_failure(container: &DockerPostgres, sql: &str) -> bool {
 pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
     ConnectionConfig {
         oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),

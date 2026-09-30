@@ -607,10 +607,11 @@ mod tests {
             .expect("manifest launch should resolve");
 
         assert_eq!(launch.program, driver_dir.join("bin").join("dameng-agent"));
-        assert_eq!(
-            launch.args,
-            vec!["--config".to_string(), driver_dir.join("config.json").to_string_lossy().to_string()]
-        );
+        // 比较 Path：模板里写的是正斜杠，而 Path::join 在 Windows 上产出反斜杠，
+        // 直接比字符串会在 Windows 上误报。
+        assert_eq!(launch.args.len(), 2);
+        assert_eq!(launch.args[0], "--config");
+        assert_eq!(std::path::PathBuf::from(&launch.args[1]), driver_dir.join("config.json"));
         assert_eq!(launch.working_dir.as_deref(), Some(driver_dir.as_path()));
     }
 
@@ -1382,6 +1383,38 @@ impl AgentManager {
         extra_java_args: &[String],
     ) -> Result<AgentDriverClient, String> {
         crate::agent_runtime::spawn_connection_client(self, db_type, driver_profile, extra_java_args).await
+    }
+
+    /// Spawns a dedicated agent process carrying `env` (Oracle OCI connections).
+    pub async fn spawn_with_env(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        env: &[(String, String)],
+    ) -> Result<AgentDriverClient, String> {
+        crate::agent_runtime::spawn_connection_client_with_env(self, db_type, driver_profile, &[], env).await
+    }
+
+    /// One-shot daemon call variant that hands `env` to the agent process.
+    pub async fn call_daemon_method_with_timeout_and_env<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        method: AgentMethod,
+        params: serde_json::Value,
+        timeout_duration: Option<Duration>,
+        env: &[(String, String)],
+    ) -> Result<T, String> {
+        crate::agent_runtime::call_daemon_method_with_timeout_and_env(
+            self,
+            db_type,
+            driver_profile,
+            method,
+            params,
+            timeout_duration,
+            env,
+        )
+        .await
     }
 
     pub async fn spawn_shared_connection_client(

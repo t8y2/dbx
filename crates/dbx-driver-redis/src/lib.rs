@@ -7537,6 +7537,7 @@ mod tests {
     fn redis_test_connection_config() -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "redis".to_string(),
             name: "Redis".to_string(),

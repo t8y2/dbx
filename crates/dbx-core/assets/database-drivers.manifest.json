@@ -453,7 +453,7 @@
           "agentKey": "oracle-oci",
           "label": "Oracle (OCI)",
           "storeVisible": true,
-          "storeOrder": 52
+          "storeOrder": 54
         }
       ],
       "singleConnectionPool": true,

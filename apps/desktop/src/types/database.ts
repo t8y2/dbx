@@ -506,6 +506,7 @@ export interface PluginContextMenuContribution {
   description?: string;
   icon?: string;
   menu: PluginContextMenuTarget;
+  dynamic?: boolean;
   action?: PluginOpenWorkbenchTarget;
 }
 

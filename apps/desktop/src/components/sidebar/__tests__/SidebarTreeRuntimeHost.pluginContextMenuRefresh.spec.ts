@@ -6,15 +6,17 @@ import i18n from "@/i18n";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import type { InstalledPlugin, TreeNode } from "@/types/database";
 
-const { listPlugins } = vi.hoisted(() => ({ listPlugins: vi.fn() }));
+const { listPlugins, invokePlugin } = vi.hoisted(() => ({ listPlugins: vi.fn(), invokePlugin: vi.fn() }));
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/backend/api")>();
-  return { ...actual, listPlugins };
+  return { ...actual, listPlugins, invokePlugin };
 });
+vi.mock("@/components/plugins/PluginWorkbenchHost.vue", () => ({ default: { props: ["plugin", "contribution", "context"], template: '<div data-test="plugin-dialog-workbench">{{ contribution.id }}:{{ context.id }}</div>' } }));
 
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 
 const connection = {
   id: "conn-1",
@@ -73,7 +75,7 @@ async function mountHost() {
   mountedApps.push(app);
   await flush();
   expect(host.value).not.toBeNull();
-  return { host: host as unknown as { value: { buildContextMenu(node: TreeNode): ContextMenuItem[] } }, container };
+  return { host: host as unknown as { value: { buildContextMenu(node: TreeNode): ContextMenuItem[]; resolveContextMenu(node: TreeNode, items: ContextMenuItem[]): Promise<ContextMenuItem[]> | ContextMenuItem[] } }, container };
 }
 
 function menuLabels(items: ContextMenuItem[]): string[] {
@@ -84,6 +86,127 @@ describe("SidebarTreeRuntimeHost plugin context-menu refresh", () => {
   beforeEach(() => {
     listPlugins.mockReset();
     listPlugins.mockResolvedValue([]);
+    invokePlugin.mockReset();
+  });
+
+  it("resolves connection-specific second-level items on each open and dispatches the selected id", async () => {
+    listPlugins.mockResolvedValue([
+      {
+        compatibility: { compatible: true },
+        manifest: {
+          id: "com.example.tunnels",
+          name: "Tunnels",
+          version: "1.0.0",
+          drivers: [],
+          contributions: [{ type: "context-menu", id: "tunnels", label: "Tunnels", menu: "connection", dynamic: true }],
+        },
+      },
+    ]);
+    invokePlugin.mockResolvedValue({});
+    invokePlugin.mockResolvedValueOnce({ items: [{ label: "Tunnels", children: [{ label: "Start saved", action: { type: "invoke", id: "start-all" } }] }] });
+    const { host } = await mountHost();
+    const first = await host.value.resolveContextMenu(connectionNode(), host.value.buildContextMenu(connectionNode()));
+    expect(menuLabels(first)).toContain("Start saved");
+    expect(invokePlugin).toHaveBeenCalledWith("com.example.tunnels", "contextMenu/resolve/tunnels", { connection: { id: "conn-1", dbType: "mysql", name: "Test MySQL", database: "" }, locale: expect.any(String) }, 500);
+    first.find((item) => item.label === "Tunnels")?.children?.[0].action?.();
+    await flush();
+    expect(invokePlugin).toHaveBeenCalledWith("com.example.tunnels", "contextMenu/tunnels", expect.objectContaining({ itemId: "start-all" }));
+
+    invokePlugin.mockResolvedValueOnce({ items: [{ label: "Tunnels", children: [{ label: "Stop all", action: { type: "invoke", id: "stop-all" } }] }] });
+    const second = await host.value.resolveContextMenu(connectionNode(), host.value.buildContextMenu(connectionNode()));
+    expect(menuLabels(second)).toContain("Stop all");
+    expect(menuLabels(second)).not.toContain("Start saved");
+  });
+
+  it("opens a declared plugin workbench in a dialog without creating a tab", async () => {
+    listPlugins.mockResolvedValue([
+      {
+        compatibility: { compatible: true },
+        manifest: {
+          id: "com.example.forwards",
+          name: "Port forwards",
+          version: "1.0.0",
+          drivers: [],
+          contributions: [
+            { type: "context-menu", id: "forwards", label: "Port forwards", menu: "connection", dynamic: true },
+            { type: "workbench", id: "com.example.forwards.manager", label: "Port forwards" },
+          ],
+        },
+      },
+    ]);
+    invokePlugin.mockResolvedValue({ items: [{ label: "Port forwards", children: [{ label: "Manage port forwards", action: { type: "open-workbench", workbench: "com.example.forwards.manager", presentation: "dialog" } }] }] });
+    const { host } = await mountHost();
+    const openTab = vi.spyOn(useQueryStore(), "openPluginWorkbench");
+    const items = await host.value.resolveContextMenu(connectionNode(), host.value.buildContextMenu(connectionNode()));
+    items.find((item) => item.label === "Port forwards")?.children?.[0].action?.();
+    await flush();
+    expect(document.querySelector('[data-test="plugin-dialog-workbench"]')?.textContent).toContain("com.example.forwards.manager:conn-1");
+    expect(openTab).not.toHaveBeenCalled();
+  });
+
+  it("passes canonical table context to dynamic menu resolvers", async () => {
+    listPlugins.mockResolvedValue([
+      {
+        compatibility: { compatible: true },
+        manifest: {
+          id: "com.example.table",
+          name: "Table",
+          version: "1.0.0",
+          drivers: [],
+          contributions: [{ type: "context-menu", id: "table.actions", label: "Actions", menu: "table", dynamic: true }],
+        },
+      },
+    ]);
+    invokePlugin.mockResolvedValue({ items: [{ label: "Inspect" }] });
+    const { host } = await mountHost();
+    const items = await host.value.resolveContextMenu(tableNode(), host.value.buildContextMenu(tableNode()));
+    expect(menuLabels(items)).toContain("Inspect");
+    expect(invokePlugin).toHaveBeenCalledWith("com.example.table", "contextMenu/resolve/table.actions", { table: { connectionId: "conn-1", database: "app", table: "users" }, locale: expect.any(String) }, 500);
+  });
+
+  it("restores an inactive plugin connection before retrying an opted-in menu action", async () => {
+    listPlugins.mockResolvedValue([
+      {
+        compatibility: { compatible: true },
+        manifest: {
+          id: "com.example.tunnels",
+          name: "Tunnels",
+          version: "1.0.0",
+          drivers: [],
+          contributions: [{ type: "context-menu", id: "tunnels", label: "Tunnels", menu: "connection", dynamic: true }],
+        },
+      },
+    ]);
+    invokePlugin.mockResolvedValueOnce({ items: [{ label: "Tunnels", children: [{ label: "Start saved", action: { type: "invoke", id: "start-all", reopenConnectionOnMissing: true } }] }] });
+    invokePlugin.mockRejectedValueOnce(new Error("Connection is not active; reopen it from DBX"));
+    invokePlugin.mockResolvedValueOnce({ message: "Started 1 tunnel" });
+    const { host } = await mountHost();
+    const reconnect = vi.spyOn(useConnectionStore(), "reopenPluginConnection").mockResolvedValue(undefined);
+    const items = await host.value.resolveContextMenu(connectionNode(), host.value.buildContextMenu(connectionNode()));
+    items.find((item) => item.label === "Tunnels")?.children?.[0].action?.();
+    await flush();
+    expect(reconnect).toHaveBeenCalledWith("conn-1", "com.example.tunnels");
+    expect(invokePlugin.mock.calls.filter((call) => call[1] === "contextMenu/tunnels")).toHaveLength(2);
+  });
+
+  it("passes plugin ownership to a dynamic connection resolver", async () => {
+    listPlugins.mockResolvedValue([
+      {
+        compatibility: { compatible: true },
+        manifest: {
+          id: "com.example.tunnels",
+          name: "Tunnels",
+          version: "1.0.0",
+          drivers: [],
+          contributions: [{ type: "context-menu", id: "tunnels", label: "Tunnels", menu: "connection", dynamic: true }],
+        },
+      },
+    ]);
+    invokePlugin.mockResolvedValue({ items: [] });
+    const { host } = await mountHost();
+    useConnectionStore().connections = [{ ...connection, db_type: "plugin", plugin_id: "com.example.tunnels" }];
+    await host.value.resolveContextMenu(connectionNode(), host.value.buildContextMenu(connectionNode()));
+    expect(invokePlugin).toHaveBeenCalledWith("com.example.tunnels", "contextMenu/resolve/tunnels", expect.objectContaining({ ownerPluginId: "com.example.tunnels" }), 500);
   });
 
   afterEach(() => {

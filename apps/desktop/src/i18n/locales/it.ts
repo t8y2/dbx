@@ -6407,6 +6407,7 @@ export default withEnglishFallback({
     cancelledLabel: "Annullato; le righe già scritte restano nella tabella",
   },
   tableToolbox: {
+    browser: "Anteprima web",
     browserFiltered: "Anteprima web (risultato corrente)",
     browserSelected: "Anteprima web (righe selezionate)",
     openWith: "Apri con",

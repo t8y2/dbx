@@ -6167,6 +6167,7 @@ export default withEnglishFallback({
     cancelledLabel: "취소되었습니다. 이미 삽입된 행은 테이블에 남습니다",
   },
   tableToolbox: {
+    browser: "웹 미리보기",
     browserFiltered: "웹 미리보기 (현재 결과)",
     browserSelected: "웹 미리보기 (선택한 행)",
     openWith: "다음으로 열기",

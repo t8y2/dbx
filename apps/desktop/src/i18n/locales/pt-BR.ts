@@ -6409,6 +6409,7 @@ export default withEnglishFallback({
     cancelledLabel: "Cancelado; as linhas já gravadas permanecem na tabela",
   },
   tableToolbox: {
+    browser: "Visualização web",
     browserFiltered: "Visualização web (resultado atual)",
     browserSelected: "Visualização web (linhas selecionadas)",
     openWith: "Abrir com",

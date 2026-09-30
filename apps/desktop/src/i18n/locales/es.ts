@@ -6615,6 +6615,7 @@ export default withEnglishFallback({
     cancelledLabel: "Cancelado; las filas ya insertadas permanecen en la tabla",
   },
   tableToolbox: {
+    browser: "Vista previa web",
     browserFiltered: "Vista previa web (resultado actual)",
     browserSelected: "Vista previa web (filas seleccionadas)",
     openWith: "Abrir con",

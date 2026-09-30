@@ -6438,6 +6438,7 @@ export default withEnglishFallback({
     cancelledLabel: "キャンセルしました。書き込み済みの行はテーブルに残ります",
   },
   tableToolbox: {
+    browser: "ウェブプレビュー",
     browserFiltered: "ウェブプレビュー（現在の結果）",
     browserSelected: "ウェブプレビュー（選択した行）",
     openWith: "アプリで開く",

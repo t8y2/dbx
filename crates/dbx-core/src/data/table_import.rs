@@ -2209,7 +2209,7 @@ impl SqlImportRowStream {
         .await?;
         Ok(Self {
             decoder,
-            splitter: Some(StreamingSqlFileSplitter::new(options.sql_dialect, parsing_options)),
+            splitter: Some(StreamingSqlFileSplitter::new(options.sql_dialect, parsing_options, false)),
             family,
             target: None,
             rows: Vec::new(),

@@ -1391,6 +1391,7 @@ export default {
     searchDatabasePlaceholder: "Search database types",
     searchResults: "Search results",
     databaseCategories: "Categories",
+    databaseCategoryAll: "All",
     databaseCategorySql: "Relational",
     databaseCategoryAnalytics: "Analytics",
     databaseCategoryDomestic: "Chinese DBs",

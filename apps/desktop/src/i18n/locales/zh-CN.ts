@@ -1305,6 +1305,7 @@ export default withEnglishFallback({
     searchDatabasePlaceholder: "搜索数据库类型",
     searchResults: "搜索结果",
     databaseCategories: "分类",
+    databaseCategoryAll: "全部",
     databaseCategorySql: "关系型数据库",
     databaseCategoryAnalytics: "数仓分析",
     databaseCategoryDomestic: "国产数据库",

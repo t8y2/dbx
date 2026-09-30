@@ -1123,6 +1123,7 @@ export default withEnglishFallback({
     searchDatabasePlaceholder: "搜尋資料庫類型",
     searchResults: "搜尋結果",
     databaseCategories: "分類",
+    databaseCategoryAll: "全部",
     databaseCategorySql: "關聯式資料庫",
     databaseCategoryAnalytics: "數倉分析",
     databaseCategoryDomestic: "國產資料庫",

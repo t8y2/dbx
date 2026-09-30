@@ -1243,12 +1243,14 @@ async function buildStructuredFilterCondition(rule: StructuredFilterRule): Promi
 
 const filterBuilder = useDataGridFilterBuilder({
   columns: filterBuilderColumnOptions,
+  commentByColumn: columnCommentMap,
   createId: uuid,
   isComplete: isStructuredFilterRuleComplete,
   buildCondition: buildStructuredFilterCondition,
 });
 const conditionalBulkEditFilterBuilder = useDataGridFilterBuilder({
   columns: filterBuilderColumnOptions,
+  commentByColumn: columnCommentMap,
   createId: uuid,
   isComplete: isStructuredFilterRuleComplete,
   buildCondition: buildStructuredFilterCondition,

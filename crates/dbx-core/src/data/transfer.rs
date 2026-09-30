@@ -5787,6 +5787,231 @@ fn advance_keyset_cursor(
     }
 }
 
+/// Column alias of the trailing `ctid` the windowed PostgreSQL read appends to
+/// the selected columns. It must not be spelled `ctid`: an output column with
+/// that name shadows the system column inside `ORDER BY`, which would sort each
+/// page as text instead of by physical position.
+const POSTGRES_CTID_ALIAS: &str = "dbx_row_ctid";
+
+/// Upper bound on the block window the PostgreSQL `ctid` fallback pages over.
+/// A larger window is estimated as a bigger slice of the table, and the planner
+/// stops choosing a Tid Range Scan for it.
+const POSTGRES_CTID_WINDOW_MAX_BLOCKS: u64 = 65_536;
+
+/// Pages a table must hold before a key-less PostgreSQL read switches from
+/// OFFSET paging to `ctid` windows. Below it the quadratic OFFSET scan is cheap
+/// enough that the extra catalog probe is not worth the behaviour change.
+const POSTGRES_CTID_PAGING_MIN_PAGES: u64 = 20;
+
+/// Physical layout of a source heap, used to size the first `ctid` window.
+struct PostgresCtidLayout {
+    total_blocks: u64,
+    rows_per_block: f64,
+}
+
+/// Paging state for the key-less PostgreSQL `ctid` fallback.
+///
+/// A `WHERE ctid > <last row>` cursor alone does not avoid the quadratic scan:
+/// PostgreSQL only turns that predicate into a Tid Range Scan when it expects a
+/// small range, and a bound anywhere inside a heap is estimated as a large part
+/// of it, so every page falls back to a sequential scan plus sort. Bounding the
+/// page with an upper `ctid` as well — a *window* of blocks — keeps the estimate
+/// proportional to the window, so each page reads only the blocks it needs.
+///
+/// Only plain heap tables qualify (see [`postgres_ctid_pager`]): a partitioned
+/// parent fans out to children whose `ctid`s overlap, so paging it by physical
+/// position could silently skip rows. Those keep OFFSET paging.
+struct PostgresCtidPager {
+    /// Cursor of the next page: the previous page's last `ctid`, or `None`
+    /// right after a window was consumed, when the next page restarts at the
+    /// current window's first block.
+    lower_bound: Option<String>,
+    /// First block covered by the window the next page reads.
+    window_start_block: u64,
+    /// Blocks each window covers, re-sized from the density actually observed.
+    window_blocks: u64,
+    /// Live block count of the relation when the transfer started.
+    total_blocks: u64,
+    /// Rows the pages of the window being read have returned so far.
+    rows_in_window: u64,
+}
+
+impl PostgresCtidPager {
+    fn new(layout: PostgresCtidLayout, page_rows: usize) -> Self {
+        Self {
+            lower_bound: None,
+            window_start_block: 0,
+            window_blocks: postgres_ctid_window_blocks(page_rows, layout.rows_per_block),
+            total_blocks: layout.total_blocks,
+            rows_in_window: 0,
+        }
+    }
+
+    fn window_end_block(&self) -> u64 {
+        self.window_start_block.saturating_add(self.window_blocks)
+    }
+
+    /// SQL for the next page: the selected columns plus the trailing `ctid` the
+    /// caller turns into the next cursor.
+    fn page_sql(&self, columns: &[String], table: &str, schema: &str, limit: usize) -> String {
+        let full_table = qualified_table(table, schema, &DatabaseType::Postgres, None);
+        let mut col_list = columns
+            .iter()
+            .map(|column| quote_identifier(column, &DatabaseType::Postgres))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !col_list.is_empty() {
+            col_list.push_str(", ");
+        }
+        let lower_bound = match self.lower_bound.as_deref() {
+            Some(bound) => format!("ctid > '{bound}'::tid"),
+            None => format!("ctid >= '({},0)'::tid", self.window_start_block),
+        };
+        format!(
+            "SELECT {col_list}ctid::text AS {POSTGRES_CTID_ALIAS} FROM {full_table} \
+             WHERE {lower_bound} AND ctid < '({},0)'::tid ORDER BY ctid LIMIT {limit}",
+            self.window_end_block()
+        )
+    }
+
+    /// Folds the page just read into the pager — dropping the trailing `ctid`
+    /// column from every row — and reports whether the heap was scanned to its
+    /// end. A full page stays inside the current window; a short one consumes
+    /// it and re-sizes the next window from the row density actually observed.
+    fn advance(&mut self, rows: &mut [Vec<serde_json::Value>], limit: usize) -> Result<bool, String> {
+        let page_rows = rows.len();
+        let mut last_ctid: Option<String> = None;
+        for row in rows.iter_mut() {
+            last_ctid = match row.pop() {
+                Some(serde_json::Value::String(cursor)) => Some(cursor),
+                _ => None,
+            };
+        }
+        self.rows_in_window = self.rows_in_window.saturating_add(page_rows as u64);
+
+        if limit > 0 && page_rows >= limit {
+            let Some(next) = last_ctid else {
+                return Err("ctid paging lost the row cursor".to_string());
+            };
+            if self.lower_bound.as_deref() == Some(next.as_str()) {
+                return Err("ctid paging did not advance past the last row".to_string());
+            }
+            self.lower_bound = Some(next);
+            return Ok(false);
+        }
+
+        self.window_start_block = self.window_end_block();
+        self.lower_bound = None;
+        if self.rows_in_window > 0 {
+            let rows_per_block = self.rows_in_window as f64 / self.window_blocks.max(1) as f64;
+            self.window_blocks = postgres_ctid_window_blocks(limit, rows_per_block);
+        }
+        self.rows_in_window = 0;
+        Ok(self.window_start_block >= self.total_blocks)
+    }
+}
+
+/// Blocks that hold roughly one page of rows at the given density. A window
+/// that runs short is re-sized from the density the transfer observes, so a
+/// stale `reltuples` only costs the first window.
+fn postgres_ctid_window_blocks(page_rows: usize, rows_per_block: f64) -> u64 {
+    let rows_per_block = if rows_per_block > 0.0 && rows_per_block.is_finite() { rows_per_block } else { 1.0 };
+    let blocks = (page_rows.max(1) as f64 / rows_per_block).ceil();
+    if !blocks.is_finite() || blocks < 1.0 {
+        return 1;
+    }
+    (blocks as u64).clamp(1, POSTGRES_CTID_WINDOW_MAX_BLOCKS)
+}
+
+/// Builds the `ctid` pager for a key-less PostgreSQL source table, or `None`
+/// when the relation cannot be paged by physical position.
+///
+/// Only plain heap tables qualify. A partitioned parent spreads `ctid`s over
+/// children that number their own blocks from zero, and a view or foreign table
+/// has no tuple identifiers at all; paging either one would silently drop rows,
+/// so both keep OFFSET paging. A traditional-inheritance parent has the same
+/// hazard: queries against it also return descendant rows, and every child
+/// numbers its `ctid`s from its own block zero. PostgreSQL rejects a user
+/// column named `ctid`, so the system column is always the one the pager reads.
+async fn postgres_ctid_pager(
+    state: &Arc<AppState>,
+    pool_key: &str,
+    schema: &str,
+    table: &str,
+    page_rows: usize,
+    row_count: u64,
+) -> Result<Option<PostgresCtidPager>, String> {
+    let sql = postgres_ctid_eligibility_sql(schema, table);
+    let result = execute_on_pool_with_max_rows(state, pool_key, &sql, Some(1)).await?;
+    let Some(row) = result.rows.first() else {
+        return Ok(None);
+    };
+    if row.get(3).and_then(json_value_bool) != Some(true) {
+        return Ok(None);
+    }
+    let total_blocks = row.first().and_then(json_value_u64).unwrap_or(0);
+    if total_blocks == 0 {
+        return Ok(None);
+    }
+    let reltuples = row.get(1).and_then(json_value_f64).unwrap_or(0.0);
+    let relpages = row.get(2).and_then(json_value_f64).unwrap_or(0.0);
+    // The exact row count sizes the first window even when the relation was
+    // never analyzed; `reltuples` only covers a count that failed.
+    let rows_per_block = if row_count > 0 {
+        row_count as f64 / total_blocks as f64
+    } else if reltuples > 0.0 && relpages > 0.0 {
+        reltuples / relpages
+    } else {
+        1.0
+    };
+    Ok(Some(PostgresCtidPager::new(PostgresCtidLayout { total_blocks, rows_per_block }, page_rows)))
+}
+
+/// Catalog probe for `postgres_ctid_pager`: heap size in 8K blocks, planner
+/// row/page estimates, and whether the relation is a plain heap table that is
+/// neither an inheritance child nor a traditional-inheritance parent (a parent
+/// also returns descendant rows whose `ctid`s restart from each child's block
+/// zero, so window bounds anchored on the parent's size would drop rows;
+/// partitioned parents are already excluded by `relkind = 'r'`).
+fn postgres_ctid_eligibility_sql(schema: &str, table: &str) -> String {
+    let scope = if schema.is_empty() {
+        format!("c.relname = {} AND pg_catalog.pg_table_is_visible(c.oid)", quote_string_literal(table))
+    } else {
+        format!("n.nspname = {} AND c.relname = {}", quote_string_literal(schema), quote_string_literal(table))
+    };
+    format!(
+        "SELECT pg_relation_size(c.oid) / 8192, c.reltuples, c.relpages, \
+         (c.relkind = 'r' \
+         AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid) \
+         AND NOT EXISTS (SELECT 1 FROM pg_inherits p WHERE p.inhparent = c.oid)) \
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE {scope}"
+    )
+}
+
+fn json_value_bool(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn json_value_u64(value: &serde_json::Value) -> Option<u64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_u64(),
+        serde_json::Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn json_value_f64(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
 /// Whether a table copy may stream through the PostgreSQL COPY protocol
 /// (`COPY ... TO STDOUT` on the source piped into `COPY ... FROM STDIN` on the
 /// target) instead of the paged SELECT + multi-row INSERT loop.
@@ -10156,6 +10381,36 @@ where
         )
     });
     let mut hive_server_cursor = HiveServerTransferCursor::default();
+    // Key-less PostgreSQL heaps page by `ctid` windows instead of OFFSET: an
+    // OFFSET page re-reads every row before it, so a ten-million-row table gets
+    // slower as it runs and never finishes. Tables with a usable key keep the
+    // keyset cursor above, and the COPY fast path already covers the
+    // PostgreSQL-to-PostgreSQL case.
+    let mut ctid_pager = if copy_rows.is_none()
+        && keyset_indexes.is_none()
+        && !default_rows_only
+        && *source_db_type == DatabaseType::Postgres
+        && total_rows.is_some_and(|total| total > batch_size as u64 * POSTGRES_CTID_PAGING_MIN_PAGES)
+    {
+        match postgres_ctid_pager(
+            state,
+            source_pool_key,
+            &request.source_schema,
+            table,
+            batch_size,
+            total_rows.unwrap_or(0),
+        )
+        .await
+        {
+            Ok(pager) => pager,
+            Err(error) => {
+                log::warn!("[transfer] {table}: ctid paging unavailable ({error}); using OFFSET paging");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let transfer_result: Result<(), String> = async {
         if copy_rows.is_some() {
@@ -10180,6 +10435,9 @@ where
                     .await?,
                     false,
                 )
+            } else if let Some(pager) = ctid_pager.as_ref() {
+                let sql = pager.page_sql(&col_names, table, &request.source_schema, batch_size);
+                (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, false)
             } else {
                 let sql = if default_rows_only {
                     // Preserve row multiplicity without reading generated values
@@ -10226,8 +10484,27 @@ where
             let row_count = result.rows.len();
 
             if row_count == 0 {
+                // A `ctid` window can be empty — its rows were deleted, or the
+                // previous page ended exactly on the window boundary — while
+                // the windows after it still hold rows, so only stop once the
+                // heap has been walked to its end.
+                let continue_windows = match ctid_pager.as_mut() {
+                    Some(pager) => !pager.advance(&mut result.rows, batch_size)?,
+                    None => false,
+                };
+                if continue_windows {
+                    continue;
+                }
                 break;
             }
+
+            // Drops the trailing `ctid` cursor column from every row before the
+            // rows reach the INSERT builder, and reports whether this page
+            // consumed the last window of the heap.
+            let ctid_scan_finished = match ctid_pager.as_mut() {
+                Some(pager) => Some(pager.advance(&mut result.rows, batch_size)?),
+                None => None,
+            };
 
             if let Some(indexes) = keyset_indexes.as_deref() {
                 match advance_keyset_cursor(&mut keyset_cursor, &result.rows, indexes, table)? {
@@ -10308,7 +10585,12 @@ where
                 terminal: false,
             });
 
-            if (use_hive_server_cursor && !has_more) || (!use_hive_server_cursor && row_count < batch_size) {
+            if ctid_pager.is_some() {
+                // A short `ctid` page only means the current window ran out.
+                if ctid_scan_finished == Some(true) {
+                    break;
+                }
+            } else if (use_hive_server_cursor && !has_more) || (!use_hive_server_cursor && row_count < batch_size) {
                 break;
             }
         }
@@ -15703,6 +15985,114 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         ));
         // Empty pages leave the cursor untouched.
         assert!(matches!(advance_keyset_cursor(&mut cursor, &Vec::new(), &[0], "t"), Ok(KeysetAdvance::Advanced)));
+    }
+
+    #[test]
+    fn postgres_ctid_eligibility_excludes_inheritance_children_and_parents() {
+        for sql in [postgres_ctid_eligibility_sql("", "events"), postgres_ctid_eligibility_sql("public", "events")] {
+            assert!(sql.contains("c.relkind = 'r'"), "only plain heap tables may page by ctid: {sql}");
+            assert!(sql.contains("i.inhrelid = c.oid"), "inheritance children restart ctid numbering per child: {sql}");
+            assert!(
+                sql.contains("p.inhparent = c.oid"),
+                "inheritance parents also return descendant rows and must keep OFFSET paging: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_ctid_page_sql_bounds_each_page_to_a_block_window() {
+        let cols = vec!["id".to_string(), "userName".to_string()];
+        let pager = PostgresCtidPager::new(PostgresCtidLayout { total_blocks: 5_000, rows_per_block: 100.0 }, 1000);
+
+        let first = pager.page_sql(&cols, "events", "public", 1000);
+        assert_eq!(
+            first,
+            "SELECT \"id\", \"userName\", ctid::text AS dbx_row_ctid FROM \"public\".\"events\" \
+             WHERE ctid >= '(0,0)'::tid AND ctid < '(10,0)'::tid ORDER BY ctid LIMIT 1000"
+        );
+        // The cursor column is aliased, so `ORDER BY ctid` still resolves to the
+        // system column instead of the text projection.
+        assert!(!first.contains("AS ctid"));
+
+        let mut pager = pager;
+        let mut rows = vec![vec![json!("(7,3)"), json!("(9,5)")]; 1000];
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        let second = pager.page_sql(&cols, "events", "public", 1000);
+        assert!(second.contains("WHERE ctid > '(9,5)'::tid AND ctid < '(10,0)'::tid"), "{second}");
+    }
+
+    #[test]
+    fn postgres_ctid_page_sql_handles_row_count_only_transfers() {
+        let pager = PostgresCtidPager::new(PostgresCtidLayout { total_blocks: 10, rows_per_block: 1.0 }, 1000);
+        let sql = pager.page_sql(&[], "events", "public", 1000);
+        assert!(sql.starts_with("SELECT ctid::text AS dbx_row_ctid FROM"), "{sql}");
+    }
+
+    #[test]
+    fn postgres_ctid_window_sizing_follows_row_density() {
+        // 1000 rows per page at 100 rows per block needs ten blocks.
+        assert_eq!(postgres_ctid_window_blocks(1000, 100.0), 10);
+        // A single row per block needs one block per row.
+        assert_eq!(postgres_ctid_window_blocks(1000, 1.0), 1000);
+        // Dense heaps never shrink below one block, and unknown density assumes
+        // the sparsest layout so the first window still fits one page.
+        assert_eq!(postgres_ctid_window_blocks(1000, 1_000_000.0), 1);
+        assert_eq!(postgres_ctid_window_blocks(1000, 0.0), 1000);
+        assert_eq!(postgres_ctid_window_blocks(1000, f64::NAN), 1000);
+        assert_eq!(postgres_ctid_window_blocks(0, 1.0), 1);
+    }
+
+    #[test]
+    fn postgres_ctid_pager_walks_windows_and_resizes_from_density() {
+        let mut pager = PostgresCtidPager::new(PostgresCtidLayout { total_blocks: 40, rows_per_block: 100.0 }, 1000);
+        assert_eq!(pager.window_end_block(), 10);
+
+        // A full page stays inside the window; the cursor column is dropped from
+        // every row before the INSERT builder sees it.
+        let mut rows = vec![vec![json!("(9,5)"), json!("(9,5)")]; 1000];
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        assert_eq!(pager.lower_bound.as_deref(), Some("(9,5)"));
+        assert!(rows.iter().all(|row| row.len() == 1));
+
+        // A short page consumes the window: the next page restarts at the next
+        // block, and the window is re-sized from the observed 150 rows/block.
+        let mut rows = vec![vec![json!("(9,9)")]; 500];
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        assert_eq!(pager.window_start_block, 10);
+        assert_eq!(pager.window_end_block(), 17);
+        assert_eq!(pager.lower_bound, None);
+
+        // Empty windows advance the scan instead of ending it.
+        let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        assert_eq!(pager.window_start_block, 17);
+
+        // The heap is finished only once a window past its last block was read.
+        let mut window_start = 17;
+        while window_start < 40 {
+            let mut rows = vec![vec![json!("(1,1)")]; 1];
+            let finished = pager.advance(&mut rows, 1000).expect("window advance");
+            window_start = pager.window_start_block;
+            if finished {
+                break;
+            }
+            assert!(window_start < 1_000_000, "ctid paging did not terminate");
+        }
+        assert!(pager.window_start_block >= 40);
+        assert_eq!(pager.advance(&mut Vec::new(), 1000), Ok(true));
+    }
+
+    #[test]
+    fn postgres_ctid_pager_rejects_a_stalled_cursor() {
+        let mut pager = PostgresCtidPager::new(PostgresCtidLayout { total_blocks: 100, rows_per_block: 1.0 }, 1000);
+        let mut rows = vec![vec![json!("(1,1)")]; 1000];
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        // Re-reading the same last row would loop forever.
+        let mut rows = vec![vec![json!("(1,1)")]; 1000];
+        assert!(pager.advance(&mut rows, 1000).is_err());
+        // A page that lost its cursor column cannot be resumed either.
+        let mut rows = vec![vec![serde_json::Value::Null]; 1000];
+        assert!(pager.advance(&mut rows, 1000).is_err());
     }
 
     #[test]

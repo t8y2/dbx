@@ -98,8 +98,7 @@ import {
   parseConnectionConfigObject,
   prepareConnectionConfigImport,
   selectConnectionConfigBundle,
-  scrubConnectionForPlaintextExport,
-  scrubTunnelProfileForPlaintextExport,
+  serializePlaintextConnectionConfigBundle,
   snapshotConnectionsForExport,
   type ConnectionConfigBundle,
   type ConnectionExportProtection,
@@ -9743,19 +9742,13 @@ export const useConnectionStore = defineStore("connection", () => {
       queryTimeoutSecs: () => settingsStore.editorSettings.globalQueryTimeoutSecs,
     });
     const exportData = buildConnectionConfigBundle(exportedConnections, sidebarLayout.value, tunnelProfileStore.profiles, selectedConnectionIds);
-    const json = JSON.stringify(exportData);
     let content: string;
     if (protection.mode === "encrypted") {
       const { encryptConfig } = await import("@/lib/backend/configCrypto");
-      const payload = await encryptConfig(json, protection.passphrase);
+      const payload = await encryptConfig(JSON.stringify(exportData), protection.passphrase);
       content = JSON.stringify(payload, null, 2);
     } else {
-      const scrubbedData = {
-        ...exportData,
-        connections: exportData.connections.map(scrubConnectionForPlaintextExport),
-        tunnelProfiles: exportData.tunnelProfiles?.map(scrubTunnelProfileForPlaintextExport),
-      };
-      content = JSON.stringify(scrubbedData, null, 2);
+      content = serializePlaintextConnectionConfigBundle(exportData, protection.includeCredentials);
     }
 
     if (isTauriRuntime()) {

@@ -29,6 +29,8 @@ const errorAdviceKey = computed(() => {
     case "SECRET_KEY_MISMATCH":
     case "KEY_FILE_UNAVAILABLE":
     case "KEY_PROVIDER_UNAVAILABLE":
+    case "KEYRING_ACCESS_FAILED":
+    case "KEYRING_WRITE_FAILED":
       return "migration.errors.keyProviderAdvice";
     case "BACKUP_FAILED":
       return "migration.errors.backupAdvice";

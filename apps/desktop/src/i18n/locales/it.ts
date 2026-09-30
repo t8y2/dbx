@@ -10787,7 +10787,7 @@ export default withEnglishFallback({
       persistentKeyAdvice: "Configura una chiave persistente e ricontrolla lo stato.",
       cleanupAdvice: "Controlla i permessi della directory e riprova.",
       genericAdvice: "Risolvi il problema e riprova.",
-      keyProviderAdvice: "Consenti l'accesso al portachiavi o configura un file chiave persistente.",
+      keyProviderAdvice: "Verifica che DBX possa accedere al proprio archivio delle credenziali. Se l'errore persiste, configura DBX_SECRET_KEY_FILE. Non eliminare la chiave DBX esistente.",
       backupAdvice: "Controlla i permessi di scrittura e lo spazio disponibile.",
       jsonAdvice: "Ripara il file indicato e riprova.",
       verifyAdvice: "Conserva il backup finché la verifica non riesce.",

@@ -207,6 +207,7 @@ pub struct Storage {
     /// round-trips to the OS credential store, so hydrating N stored secrets
     /// used to mean N credential-store accesses on the startup path.
     secret_codec_cache: Arc<Mutex<Option<CachedSecretCodec>>>,
+    migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
 }
 
 /// Key material plus the digest of every key file it was resolved from.
@@ -214,6 +215,14 @@ struct CachedSecretCodec {
     codec: SecretCodec,
     key_files: Vec<(PathBuf, Option<[u8; 32]>)>,
 }
+
+#[derive(Clone)]
+struct MigrationFailure {
+    code: String,
+    backup_path: Option<String>,
+}
+
+const MIGRATION_LOCK_FILE: &str = ".dbx-secret-migration.lock";
 
 pub const SECRET_STORE_MIGRATION_ID: &str = "secret-store-v1";
 
@@ -1182,7 +1191,15 @@ fn migration_backup_paths(counts: &serde_json::Value) -> Result<Vec<String>, Str
 }
 
 fn migration_error_code(error: &str) -> &'static str {
-    if error.contains("MISSING_MANAGED_KEY") {
+    if error.contains("MIGRATION_STATE_WRITE_FAILED") {
+        "MIGRATION_STATE_WRITE_FAILED"
+    } else if error.contains("MIGRATION_RESTORE_FAILED") {
+        "MIGRATION_RESTORE_FAILED"
+    } else if error.contains("MIGRATION_INTERRUPTED") {
+        "MIGRATION_INTERRUPTED"
+    } else if error.contains("BACKUP_FAILED") {
+        "BACKUP_FAILED"
+    } else if error.contains("MISSING_MANAGED_KEY") {
         "MISSING_MANAGED_KEY"
     } else if error.contains("ENCRYPTED_DATA_KEY_MISSING") {
         "ENCRYPTED_DATA_KEY_MISSING"
@@ -1192,6 +1209,10 @@ fn migration_error_code(error: &str) -> &'static str {
         "SECRET_KEY_INVALID"
     } else if error.contains("KEY_FILE_UNAVAILABLE") {
         "KEY_FILE_UNAVAILABLE"
+    } else if error.contains("KEYRING_ACCESS_FAILED") {
+        "KEYRING_ACCESS_FAILED"
+    } else if error.contains("KEYRING_WRITE_FAILED") {
+        "KEYRING_WRITE_FAILED"
     } else if error.contains("MISSING_EXTERNAL_KEY") || error.contains("MISSING_PERSISTENT_KEY") {
         "MISSING_EXTERNAL_KEY"
     } else if error.contains("KEY_PROVIDER_UNAVAILABLE") {
@@ -1209,11 +1230,22 @@ fn migration_error_code(error: &str) -> &'static str {
 
 fn migration_safe_message(code: &str, _error: &str) -> String {
     match code {
+        "MIGRATION_STATE_WRITE_FAILED" => {
+            "Could not save the migration failure status; keep the backup and retry".to_string()
+        }
+        "MIGRATION_RESTORE_FAILED" => "Could not restore the database backup; keep the backup for recovery".to_string(),
+        "MIGRATION_INTERRUPTED" => "The previous migration was interrupted; keep the backup and retry".to_string(),
         "MISSING_MANAGED_KEY" => "A managed data-directory secret key is required".to_string(),
         "ENCRYPTED_DATA_KEY_MISSING" => "The key for existing encrypted data is missing".to_string(),
         "SECRET_KEY_MISMATCH" => "The configured secret key cannot decrypt existing data".to_string(),
         "SECRET_KEY_INVALID" => "The configured secret key is invalid".to_string(),
         "KEY_FILE_UNAVAILABLE" => "The configured secret key file is unavailable".to_string(),
+        "KEYRING_ACCESS_FAILED" => {
+            "The platform credential store refused access to the DBX secret-store key".to_string()
+        }
+        "KEYRING_WRITE_FAILED" => {
+            "DBX could not save the secret-store key in the platform credential store".to_string()
+        }
         "MISSING_EXTERNAL_KEY" => "An external secret key is required".to_string(),
         "BACKUP_FAILED" => "Could not create a migration backup".to_string(),
         "LEGACY_JSON_INVALID" => "A legacy configuration file could not be read".to_string(),
@@ -1269,6 +1301,7 @@ impl Storage {
             secret_key_policy: SecretKeyPolicy::PlatformDefault,
             secret_key_creation_allowed: true,
             secret_codec_cache: Arc::new(Mutex::new(None)),
+            migration_failure: Arc::new(Mutex::new(None)),
         };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
@@ -1324,9 +1357,7 @@ impl Storage {
         // files are unchanged across the resolve. A pair taken after resolving
         // could combine a stale codec with fresh digests, which the use-time
         // digest check would then never reject.
-        if self.key_file_digests() == key_files {
-            self.cache_secret_codec(codec, key_files);
-        }
+        self.cache_secret_codec_if_unchanged(codec, key_files);
         Ok(codec)
     }
 
@@ -1346,6 +1377,14 @@ impl Storage {
     fn cache_secret_codec(&self, codec: SecretCodec, key_files: Vec<(PathBuf, Option<[u8; 32]>)>) {
         let entry = CachedSecretCodec { codec, key_files };
         *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entry);
+    }
+
+    fn cache_secret_codec_if_unchanged(&self, codec: SecretCodec, before: Vec<(PathBuf, Option<[u8; 32]>)>) {
+        if self.key_file_digests() == before {
+            self.cache_secret_codec(codec, before);
+        } else {
+            self.invalidate_secret_codec();
+        }
     }
 
     fn invalidate_secret_codec(&self) {
@@ -1489,7 +1528,20 @@ impl Storage {
 
     pub async fn inspect_data_migration(&self) -> Result<MigrationPreflight, String> {
         let files = self.legacy_json_files().await?;
-        let stored = self.load_migration_state().await?;
+        let mut stored = self.load_migration_state().await?;
+        let failure = self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(failure) = failure {
+            stored.state = MigrationState::Failed;
+            stored.error_message = Some(migration_safe_message(&failure.code, ""));
+            stored.error_code = Some(failure.code);
+            stored.backup_path = failure.backup_path.or(stored.backup_path);
+        } else if stored.state == MigrationState::Running && !self.migration_is_active()? {
+            // A process exit releases the lock. Report interruption without
+            // modifying the database during a status request.
+            stored.state = MigrationState::Failed;
+            stored.error_code = Some("MIGRATION_INTERRUPTED".to_string());
+            stored.error_message = Some(migration_safe_message("MIGRATION_INTERRUPTED", ""));
+        }
         let current_fingerprint = self.migration_source_fingerprint().await?;
         let cached_scan: Option<(i64, i64, i64, i64, i64, i64, i64)> =
             if stored.source_fingerprint.as_deref() == Some(current_fingerprint.as_str()) {
@@ -1581,6 +1633,7 @@ impl Storage {
         };
         // This probe is deliberately read-only. It must not create a keyring
         // entry, key file, or change permissions while displaying status.
+        let key_files_before = self.key_file_digests();
         let key_probe = self.resolve_secret_key(false);
         let mut key_provider_available = key_probe.is_ok();
         let database_plaintext_count = (plaintext + ai + tunnels).max(0) as usize;
@@ -1593,7 +1646,7 @@ impl Storage {
             && !matches!(self.secret_key_policy, SecretKeyPolicy::ExternalOnly)
             && encrypted == 0
             && (database_plaintext_count > 0 || sync_credentials > 0 || files.iter().any(|file| file.exists));
-        let mut key_error_code = key_probe.as_ref().err().cloned();
+        let mut key_error_code = key_probe.as_ref().err().map(|error| migration_error_code(error).to_string());
         if let Ok(resolved) = key_probe.as_ref() {
             if encrypted > 0 && self.validate_existing_encrypted_data(resolved.codec).await.is_err() {
                 key_provider_available = false;
@@ -1619,6 +1672,8 @@ impl Storage {
                 "SECRET_KEY_INVALID"
                     | "SECRET_KEY_MISMATCH"
                     | "KEY_FILE_UNAVAILABLE"
+                    | "KEYRING_ACCESS_FAILED"
+                    | "KEYRING_WRITE_FAILED"
                     | "MISSING_EXTERNAL_KEY"
                     | "ENCRYPTED_DATA_KEY_MISSING"
             )
@@ -1635,7 +1690,9 @@ impl Storage {
             None => MigrationKeyStatus::Unavailable,
         };
         let source_changed = stored.source_fingerprint.as_deref().is_some_and(|value| value != current_fingerprint);
-        let state = if fatal_key_error
+        let state = if matches!(stored.state, MigrationState::Failed | MigrationState::Running) {
+            stored.state.clone()
+        } else if fatal_key_error
             || missing_required_key
             || missing_existing_key
             || (has_legacy_data
@@ -1661,10 +1718,16 @@ impl Storage {
                 "SECRET_KEY_INVALID" => "The configured secret key is invalid",
                 "SECRET_KEY_MISMATCH" => "The configured secret key cannot decrypt existing data",
                 "KEY_FILE_UNAVAILABLE" => "The configured secret key file is unavailable",
+                "KEYRING_ACCESS_FAILED" => "The platform credential store refused access to the DBX secret-store key",
+                "KEYRING_WRITE_FAILED" => "DBX could not save the secret-store key in the platform credential store",
                 "MISSING_EXTERNAL_KEY" => "An external secret key is required",
                 _ => "The local secret provider is unavailable",
             };
             (Some(code), Some(message.to_string()))
+        } else if stored.state == MigrationState::Failed && stored.error_code.is_some() {
+            let code = migration_error_code(stored.error_code.as_deref().unwrap()).to_string();
+            let message = migration_safe_message(&code, "");
+            (Some(code), Some(message))
         } else if missing_required_key {
             (Some("MISSING_EXTERNAL_KEY".to_string()), Some("An external secret key is required".to_string()))
         } else if missing_existing_key {
@@ -1680,6 +1743,14 @@ impl Storage {
             .map(|resolved| resolved.source.as_str())
             .unwrap_or(SecretKeySource::Unavailable.as_str())
             .to_string();
+        // Reuse a successful read during the subsequent migration start. This
+        // keeps the read-only preflight and the first migration write from
+        // prompting the platform credential store twice in one action.
+        if key_provider_available {
+            if let Ok(resolved) = key_probe.as_ref() {
+                self.cache_secret_codec_if_unchanged(resolved.codec, key_files_before);
+            }
+        }
         let preflight = MigrationPreflight {
             migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
             state,
@@ -1730,43 +1801,77 @@ impl Storage {
         .await
     }
 
-    pub async fn start_data_migration(&self) -> Result<MigrationReport, String> {
-        let lock = DATA_MIGRATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
-        // Migration may create or replace key material, so the codec resolved
-        // for earlier reads must not be reused here.
-        self.invalidate_secret_codec();
-        let preflight = self.inspect_data_migration().await?;
-        if preflight.is_ready() {
-            return Ok(MigrationReport {
-                migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
-                state: preflight.state,
-                backup_path: preflight.backup_path,
-                database_plaintext_count: 0,
-                legacy_json_files: Vec::new(),
-                verified_secret_count: 0,
-                error_code: None,
-                error_message: None,
-            });
+    fn migration_is_active(&self) -> Result<bool, String> {
+        let file =
+            match std::fs::OpenOptions::new().read(true).write(true).open(self.data_dir().join(MIGRATION_LOCK_FILE)) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(_) => return Err("MIGRATION_LOCK_UNAVAILABLE".to_string()),
+            };
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(false), // Closing the handle releases the probe lock.
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+            Err(_) => Err("MIGRATION_LOCK_UNAVAILABLE".to_string()),
         }
-        if !preflight.key_provider_available && !preflight.key_creation_allowed {
-            let code = preflight.error_code.as_deref().unwrap_or("KEY_PROVIDER_UNAVAILABLE");
-            let error = code.to_string();
-            self.set_migration_state(MigrationState::Failed, None, Some(code), Some(&error), None).await?;
-            return Err(error);
+    }
+
+    fn lock_data_migration(&self) -> Result<std::fs::File, String> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        self.set_migration_state(MigrationState::Running, None, None, None, Some(&migration_counts_json(&preflight)))
-            .await?;
-        let backup_path = match self.create_migration_backup().await {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = self
-                    .set_migration_state(MigrationState::Failed, None, Some("BACKUP_FAILED"), Some(&error), None)
-                    .await;
-                return Err(error);
+        let file = options
+            .open(self.data_dir().join(MIGRATION_LOCK_FILE))
+            .map_err(|_| "MIGRATION_LOCK_UNAVAILABLE".to_string())?;
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                "MIGRATION_IN_PROGRESS".to_string()
+            } else {
+                "MIGRATION_LOCK_UNAVAILABLE".to_string()
             }
-        };
-        self.set_migration_state(MigrationState::Running, Some(&backup_path), None, None, None).await?;
+        })?;
+        Ok(file)
+    }
+
+    pub async fn start_data_migration(&self) -> Result<MigrationReport, String> {
+        let _lock = DATA_MIGRATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+        let _file_lock = self.lock_data_migration()?;
+        *self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        self.invalidate_secret_codec();
+        let mut backup_path: Option<String> = None;
+        let mut data_started = false;
         let result = async {
+            let preflight = self.inspect_data_migration().await?;
+            if preflight.is_ready() {
+                return Ok(MigrationReport {
+                    migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
+                    state: preflight.state,
+                    backup_path: preflight.backup_path,
+                    database_plaintext_count: 0,
+                    legacy_json_files: Vec::new(),
+                    verified_secret_count: 0,
+                    error_code: None,
+                    error_message: None,
+                });
+            }
+            if !preflight.key_provider_available && !preflight.key_creation_allowed {
+                return Err(preflight.error_code.unwrap_or_else(|| "KEY_PROVIDER_UNAVAILABLE".to_string()));
+            }
+            self.set_migration_state(
+                MigrationState::Running,
+                None,
+                None,
+                None,
+                Some(&migration_counts_json(&preflight)),
+            )
+            .await?;
+            backup_path = Some(self.create_migration_backup().await.map_err(|_| "BACKUP_FAILED".to_string())?);
+            let backup_path = backup_path.as_deref().unwrap();
+            self.set_migration_state(MigrationState::Running, Some(backup_path), None, None, None).await?;
+            data_started = true;
             let codec = self.secret_codec(preflight.key_creation_allowed)?;
             self.run_database_legacy_migrations(&codec).await?;
             self.migrate_from_json_staged(self.data_dir()).await?;
@@ -1774,7 +1879,7 @@ impl Storage {
             let renamed = self.finalize_legacy_json_files().await?;
             self.set_migration_state(
                 MigrationState::Succeeded,
-                Some(&backup_path),
+                Some(backup_path),
                 None,
                 None,
                 Some(&{
@@ -1796,7 +1901,7 @@ impl Storage {
             Ok::<MigrationReport, String>(MigrationReport {
                 migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
                 state: MigrationState::Succeeded,
-                backup_path: Some(backup_path.clone()),
+                backup_path: Some(backup_path.to_string()),
                 database_plaintext_count: preflight.database_plaintext_count,
                 legacy_json_files: renamed,
                 verified_secret_count: verified,
@@ -1805,24 +1910,37 @@ impl Storage {
             })
         }
         .await;
-        if let Err(error) = &result {
-            // Every database migration helper uses its own transaction. Restore
-            // the pre-migration SQLite snapshot if a later JSON parse, write,
-            // or verification step fails, so the live database is never left
-            // half-upgraded.
-            let _ = self.restore_database_backup(&backup_path).await;
-            let _ = self
-                .set_migration_state(
-                    MigrationState::Failed,
-                    Some(&backup_path),
-                    Some(migration_error_code(error)),
-                    Some(error),
-                    None,
-                )
-                .await;
+        match result {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                self.invalidate_secret_codec();
+                let mut code = migration_error_code(&error).to_string();
+                if data_started {
+                    if let Some(path) = backup_path.as_deref() {
+                        if self.restore_database_backup(path).await.is_err() {
+                            code = "MIGRATION_RESTORE_FAILED".to_string();
+                        }
+                    }
+                }
+                if self
+                    .set_migration_state(MigrationState::Failed, backup_path.as_deref(), Some(&code), Some(&code), None)
+                    .await
+                    .is_err()
+                {
+                    code = "MIGRATION_STATE_WRITE_FAILED".to_string();
+                    // A read-only status request must still report the failed
+                    // action if SQLite cannot persist it. After process exit,
+                    // a retained running record is detected via the file lock.
+                    *self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some(MigrationFailure { code: code.clone(), backup_path });
+                }
+                if code == "MIGRATION_STATE_WRITE_FAILED" || code == "MIGRATION_RESTORE_FAILED" {
+                    Err(code)
+                } else {
+                    Err(error)
+                }
+            }
         }
-        drop(lock);
-        result
     }
 
     pub async fn retry_data_migration(&self) -> Result<MigrationReport, String> {
@@ -1994,7 +2112,8 @@ impl Storage {
         }
         let counts_json = counts.to_string();
         let backup_path = backup_path.or(previous.backup_path);
-        let source_fingerprint = Some(self.migration_source_fingerprint().await?);
+        let source_fingerprint =
+            if state == "failed" { None } else { Some(self.migration_source_fingerprint().await?) };
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO data_migrations (migration_id,state,source_fingerprint,counts_json,backup_path,error_code,error_message,started_at,completed_at)
@@ -9176,7 +9295,8 @@ mod tests {
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
         let status = reopened.inspect_data_migration().await.unwrap();
-        assert_eq!(status.state, super::MigrationState::Running);
+        assert_eq!(status.state, super::MigrationState::Failed);
+        assert_eq!(status.error_code.as_deref(), Some("MIGRATION_INTERRUPTED"));
         assert!(!status.is_ready());
         reopened.retry_data_migration().await.unwrap();
         assert!(reopened.inspect_data_migration().await.unwrap().is_ready());
@@ -13834,6 +13954,16 @@ mod tests {
         assert!(super::migration_backup_paths(&invalid).is_err());
         let valid = serde_json::json!({"backupPaths": ["/tmp/dbx-secret-migration-a"]});
         assert_eq!(super::migration_backup_paths(&valid).unwrap(), vec!["/tmp/dbx-secret-migration-a"]);
+    }
+
+    #[test]
+    fn migration_errors_preserve_keyring_failure_classification() {
+        assert_eq!(super::migration_error_code("KEYRING_ACCESS_FAILED: item denied"), "KEYRING_ACCESS_FAILED");
+        assert_eq!(super::migration_error_code("KEYRING_WRITE_FAILED: item denied"), "KEYRING_WRITE_FAILED");
+        assert_eq!(
+            super::migration_safe_message("KEYRING_ACCESS_FAILED", "ignored"),
+            "The platform credential store refused access to the DBX secret-store key"
+        );
     }
 
     #[tokio::test]

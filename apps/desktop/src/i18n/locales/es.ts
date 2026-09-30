@@ -10862,7 +10862,7 @@ export default withEnglishFallback({
       persistentKeyAdvice: "Configura una clave persistente y vuelve a comprobar el estado.",
       cleanupAdvice: "Comprueba los permisos del directorio y vuelve a intentarlo.",
       genericAdvice: "Soluciona el problema y vuelve a intentarlo.",
-      keyProviderAdvice: "Permite el acceso al llavero o configura un archivo de clave persistente.",
+      keyProviderAdvice: "Comprueba que DBX pueda acceder a su almacén de credenciales. Si sigue fallando, configura DBX_SECRET_KEY_FILE. No elimines la clave existente de DBX.",
       backupAdvice: "Comprueba que el directorio permite escribir y tiene espacio suficiente.",
       jsonAdvice: "Repara el archivo indicado y vuelve a intentarlo.",
       verifyAdvice: "Conserva la copia hasta que la verificación sea correcta.",

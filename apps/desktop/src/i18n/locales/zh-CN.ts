@@ -11475,7 +11475,7 @@ export default withEnglishFallback({
       persistentKeyAdvice: "请配置持久化的 DBX_SECRET_KEY_FILE 或 DBX_SECRET_KEY，然后重新检查状态。",
       cleanupAdvice: "请检查备份目录权限后重试删除备份，迁移后的数据可正常使用。",
       genericAdvice: "请修复上述问题后重试，原始数据仍然保留。",
-      keyProviderAdvice: "请允许 DBX 访问钥匙串，或配置持久化的 DBX_SECRET_KEY_FILE。",
+      keyProviderAdvice: "请检查 DBX 是否能够访问其密钥存储；如果仍然失败，请配置持久化的 DBX_SECRET_KEY_FILE。不要删除已有的 DBX 密钥项。",
       backupAdvice: "请确认数据目录可写且有足够的剩余空间。",
       jsonAdvice: "请修复提示的历史 JSON 文件后重试迁移。",
       verifyAdvice: "请保留备份并重试，验证成功前不要删除迁移备份。",

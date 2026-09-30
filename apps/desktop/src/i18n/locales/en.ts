@@ -11515,7 +11515,7 @@ export default {
       persistentKeyAdvice: "Configure DBX_SECRET_KEY_FILE or DBX_SECRET_KEY with a persistent key, then retry the status check.",
       cleanupAdvice: "Check backup directory permissions and retry deleting the backup. Your migrated data is ready to use.",
       genericAdvice: "Fix the issue above and retry. Your original data is still available.",
-      keyProviderAdvice: "Allow DBX to access the keychain or provide a persistent DBX_SECRET_KEY_FILE.",
+      keyProviderAdvice: "Check that DBX can access its credential store. If access still fails, configure a persistent DBX_SECRET_KEY_FILE. Do not delete the existing DBX key item.",
       backupAdvice: "Check that the data directory is writable and has enough free space.",
       jsonAdvice: "Repair the reported legacy JSON file, then retry the migration.",
       verifyAdvice: "Keep the backup and retry. Do not delete migration backups until verification succeeds.",

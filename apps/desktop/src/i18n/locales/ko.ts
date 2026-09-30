@@ -10234,7 +10234,7 @@ export default withEnglishFallback({
       persistentKeyAdvice: "영구 키를 설정한 후 상태 확인을 다시 시도하세요.",
       cleanupAdvice: "백업 디렉터리 권한을 확인한 후 다시 시도하세요.",
       genericAdvice: "문제를 해결한 후 다시 시도하세요.",
-      keyProviderAdvice: "키체인 접근을 허용하거나 영구 키 파일을 설정하세요.",
+      keyProviderAdvice: "DBX가 자격 증명 저장소에 접근할 수 있는지 확인하세요. 계속 실패하면 DBX_SECRET_KEY_FILE을 설정하세요. 기존 DBX 키 항목을 삭제하지 마세요.",
       backupAdvice: "데이터 디렉터리의 쓰기 권한과 여유 공간을 확인하세요.",
       jsonAdvice: "표시된 파일을 수정한 후 다시 시도하세요.",
       verifyAdvice: "확인이 성공할 때까지 백업을 보관하세요.",

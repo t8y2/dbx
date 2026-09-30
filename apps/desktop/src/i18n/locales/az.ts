@@ -10598,7 +10598,7 @@ export default withEnglishFallback({
       persistentKeyAdvice: "Davamlı açar qurun və vəziyyəti yenidən yoxlayın.",
       cleanupAdvice: "Ehtiyat qovluğunun icazələrini yoxlayın və yenidən cəhd edin.",
       genericAdvice: "Problemi həll edib yenidən cəhd edin.",
-      keyProviderAdvice: "Açar zəncirinə girişə icazə verin və ya davamlı açar faylı qurun.",
+      keyProviderAdvice: "DBX-in etimadnamə yaddaşına daxil ola bildiyini yoxlayın. Problem davam edərsə DBX_SECRET_KEY_FILE qurun. Mövcud DBX açarını silməyin.",
       backupAdvice: "Məlumat qovluğunun yazıla bildiyini və boş yer olduğunu yoxlayın.",
       jsonAdvice: "Göstərilən faylı düzəldib yenidən cəhd edin.",
       verifyAdvice: "Yoxlama uğurlu olana qədər ehtiyat nüsxəni saxlayın.",

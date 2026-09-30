@@ -10825,7 +10825,7 @@ export default withEnglishFallback({
       persistentKeyAdvice: "永続鍵を設定してから状態確認を再試行してください。",
       cleanupAdvice: "バックアップディレクトリの権限を確認して削除を再試行してください。移行済みデータは使用できます。",
       genericAdvice: "問題を解決してから再試行してください。元のデータは保持されています。",
-      keyProviderAdvice: "キーチェーンへのアクセスを許可するか、永続鍵ファイルを設定してください。",
+      keyProviderAdvice: "DBX が資格情報ストアにアクセスできることを確認してください。それでも失敗する場合は DBX_SECRET_KEY_FILE を設定してください。既存の DBX 鍵を削除しないでください。",
       backupAdvice: "データディレクトリの書き込み権限と空き容量を確認してください。",
       jsonAdvice: "表示されたファイルを修復してから移行を再試行してください。",
       verifyAdvice: "バックアップを保持したまま再試行してください。検証が成功するまで削除しないでください。",

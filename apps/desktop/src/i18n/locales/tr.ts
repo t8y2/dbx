@@ -10479,7 +10479,7 @@ export default withEnglishFallback({
       persistentKeyAdvice: "Kalıcı anahtar yapılandırın ve durumu yeniden denetleyin.",
       cleanupAdvice: "Yedek dizini izinlerini kontrol edip yeniden deneyin.",
       genericAdvice: "Sorunu düzeltip yeniden deneyin.",
-      keyProviderAdvice: "Anahtarlık erişimine izin verin veya kalıcı anahtar dosyası yapılandırın.",
+      keyProviderAdvice: "DBX'in kimlik bilgileri deposuna erişebildiğini kontrol edin. Sorun sürerse DBX_SECRET_KEY_FILE yapılandırın. Mevcut DBX anahtarını silmeyin.",
       backupAdvice: "Veri dizininin yazılabilir olduğunu ve yeterli alan bulunduğunu kontrol edin.",
       jsonAdvice: "Belirtilen dosyayı düzeltip yeniden deneyin.",
       verifyAdvice: "Doğrulama başarılı olana kadar yedeği saklayın.",

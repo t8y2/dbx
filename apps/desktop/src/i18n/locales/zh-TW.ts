@@ -10793,7 +10793,7 @@ export default withEnglishFallback({
       persistentKeyAdvice: "請設定持久化金鑰後重新檢查狀態。",
       cleanupAdvice: "請檢查備份目錄權限後重試。",
       genericAdvice: "請修正問題後重試。",
-      keyProviderAdvice: "請允許存取鑰匙圈或設定持久化金鑰檔案。",
+      keyProviderAdvice: "請檢查 DBX 是否能夠存取其憑證儲存；如果仍然失敗，請設定持久化的 DBX_SECRET_KEY_FILE。請勿刪除現有的 DBX 金鑰項目。",
       backupAdvice: "請確認資料目錄可寫入且有足夠空間。",
       jsonAdvice: "請修復提示的檔案後重試。",
       verifyAdvice: "驗證成功前請保留備份。",

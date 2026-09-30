@@ -1,8 +1,9 @@
 // Parser for pasting SQL INSERT statements into blank new rows (#10573).
 // Accepts single or multiple statements and converts each VALUES tuple into a
-// grid row. String literals keep their unescaped text, NULL becomes null, and
-// every other token (numbers, functions, hex literals) is kept verbatim so the
-// regular cell coercion handles it.
+// grid row. String literals keep their unescaped text (doubled quotes and
+// MySQL backslash escapes), NULL becomes null, and every other token (numbers,
+// functions, hex literals) is kept verbatim so the regular cell coercion
+// handles it.
 
 export interface ParsedInsertStatementPaste {
   rows: Array<Array<string | null>>;
@@ -60,6 +61,13 @@ function splitTopLevelStatements(text: string): string[] {
         continue;
       }
       appendRaw(state, char);
+      continue;
+    }
+    if (char === "\\" && (state.class === "single-quote" || state.class === "double-quote")) {
+      // MySQL string escapes: \' must not end the literal (backticks keep
+      // backslashes literal).
+      appendRaw(state, char);
+      if (index + 1 < text.length) appendRaw(state, text[++index]!);
       continue;
     }
     appendRaw(state, char);
@@ -138,6 +146,10 @@ function readBracketedGroup(lexer: Lexer): string[] | null {
         current = "";
         continue;
       }
+    } else if (char === "\\" && (classState === "single-quote" || classState === "double-quote")) {
+      current += char;
+      if (lexer.pos < lexer.source.length) current += lexer.source[lexer.pos++]!;
+      continue;
     } else if (char === (classState === "bracket-ident" ? "]" : classState === "single-quote" ? "'" : classState === "double-quote" ? '"' : "`")) {
       classState = "code";
     }
@@ -159,6 +171,8 @@ function readValueToken(lexer: Lexer): string | null {
       if (inner === closing) {
         if (lexer.source[lexer.pos] === closing) lexer.pos++;
         else break;
+      } else if (inner === "\\" && closing !== "`") {
+        if (lexer.pos < lexer.source.length) lexer.pos++;
       }
     }
     return lexer.source.slice(start, lexer.pos);
@@ -173,12 +187,38 @@ function readValueToken(lexer: Lexer): string | null {
   return lexer.source.slice(start, lexer.pos).trim() || null;
 }
 
+function unescapeSqlString(text: string): string {
+  return text.replace(/\\(.)/gs, (_match, char: string) => {
+    switch (char) {
+      case "n":
+        return "\n";
+      case "r":
+        return "\r";
+      case "t":
+        return "\t";
+      case "0":
+        return "\0";
+      default:
+        // \\ \' \" and unrecognized escapes keep the escaped character itself,
+        // matching MySQL string-literal semantics.
+        return char;
+    }
+  });
+}
+
 function convertValue(raw: string | null): string | null {
   if (raw === null) return null;
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
   if (trimmed.toUpperCase() === "NULL") return null;
+  // Typed literals keep only the quoted payload: TIMESTAMP '...', DATE '...',
+  // or a national-character prefix N'...'.
+  const typed = trimmed.match(/^(?:N|DATE|TIME|TIMESTAMP|DATETIME)(?=\s*['"])/i);
+  if (typed) trimmed = trimmed.slice(typed[0].length).trimStart();
   if (trimmed.length >= 2 && trimmed[0] === "'" && trimmed[trimmed.length - 1] === "'") {
-    return trimmed.slice(1, -1).replaceAll("''", "'");
+    return unescapeSqlString(trimmed.slice(1, -1).replaceAll("''", "'"));
+  }
+  if (trimmed.length >= 2 && trimmed[0] === '"' && trimmed[trimmed.length - 1] === '"') {
+    return unescapeSqlString(trimmed.slice(1, -1).replaceAll('""', '"'));
   }
   return trimmed;
 }

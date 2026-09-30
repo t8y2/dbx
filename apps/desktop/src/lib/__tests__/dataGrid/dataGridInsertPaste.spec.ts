@@ -36,6 +36,26 @@ describe("parseInsertStatementPaste", () => {
     expect(parsed?.rows).toEqual([["it's ok"]]);
   });
 
+  it("unescapes MySQL backslash escapes inside string literals", () => {
+    const parsed = parseInsertStatementPaste("INSERT INTO t (a, b, c, d) VALUES ('It\\'s', 'line1\\nline2', 'back\\\\slash', 'tab\\there')");
+    expect(parsed?.rows).toEqual([["It's", "line1\nline2", "back\\slash", "tab\there"]]);
+  });
+
+  it("keeps an escaped quote from merging two values", () => {
+    const parsed = parseInsertStatementPaste("INSERT INTO t (a, b) VALUES ('It\\'s', 'ok')");
+    expect(parsed?.rows).toEqual([["It's", "ok"]]);
+  });
+
+  it("reads double-quoted strings as string values", () => {
+    const parsed = parseInsertStatementPaste("INSERT INTO t (a) VALUES (\"plain 'text'\")");
+    expect(parsed?.rows).toEqual([["plain 'text'"]]);
+  });
+
+  it("strips typed-literal keywords and national prefixes from quoted values", () => {
+    const parsed = parseInsertStatementPaste("INSERT INTO t (a, b, c) VALUES (TIMESTAMP '2024-01-01 10:00:00', DATE '2024-01-01', N'nebula')");
+    expect(parsed?.rows).toEqual([["2024-01-01 10:00:00", "2024-01-01", "nebula"]]);
+  });
+
   it("supports multiple statements separated by semicolons", () => {
     const parsed = parseInsertStatementPaste("INSERT INTO t (a) VALUES (1); INSERT INTO t (a) VALUES (2);");
     expect(parsed?.rows).toEqual([["1"], ["2"]]);

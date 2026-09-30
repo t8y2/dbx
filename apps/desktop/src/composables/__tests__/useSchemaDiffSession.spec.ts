@@ -22,6 +22,41 @@ vi.mock("@/lib/schema/schemaDiffMetadataLoad", () => ({ loadSchemaDetails: vi.fn
 
 const { startSchemaDiffSession } = await import("../useSchemaDiffSession.ts");
 
+test("applies every exclude rule before loading source and target details", async () => {
+  const { loadSchemaDetails } = await import("@/lib/schema/schemaDiffMetadataLoad");
+  vi.mocked(loadSchemaDetails).mockClear();
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], renameCandidates: [], syncSql: "", rollbackSyncSql: "" });
+  const tableListLoader = {
+    load: vi.fn().mockResolvedValue(["im_users", "ib_orders", "audit_log", "users"].map((name) => ({ name, table_type: "BASE TABLE" }))),
+  };
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "source",
+      sourceDatabase: "app",
+      sourceSchema: "public",
+      targetConnectionId: "target",
+      targetDatabase: "warehouse",
+      targetSchema: "public",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: { functions: false, tableExcludePattern: "^im_,^ib_,log$" },
+      ignoreComments: false,
+      label: "app → warehouse",
+    },
+    { tableListLoader },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "completed");
+  assert.equal(vi.mocked(loadSchemaDetails).mock.calls.length, 2);
+  for (const [tables] of vi.mocked(loadSchemaDetails).mock.calls) {
+    assert.deepEqual(
+      tables.map((table) => table.name),
+      ["users"],
+    );
+  }
+  vi.clearAllMocks();
+});
+
 async function waitForSession(session: { status: string }) {
   for (let attempt = 0; attempt < 40 && session.status === "running"; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
